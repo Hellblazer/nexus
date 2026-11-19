@@ -2368,6 +2368,39 @@ def session_tasks(s: dict) -> list[str] | None:
             if sf.SNAPSHOT_MARK in p.command and p.pid not in mine and not sf.standing(p.command)]
 
 
+def session_work(s: dict) -> list[str] | None:
+    """The background work the session's identity has registered and is still running (RDR-253 Step 6), one line each,
+    or None when it cannot be read. Read through ``nx identity work list --running``: a running row of an identity whose
+    holder is gone is stale there and never listed, so a crashed session's work does not read as busy. A session with no
+    identity has none. The session's own standing mail wait (kind wait, ref its session id) is meant to run, as with
+    ``session_tasks``, and is left out. Report only: the restart's refusal criteria do not read this."""
+    sid = s.get("sessionId") or ""
+    if not sid:
+        return None
+    try:
+        done = _nx_identity("work", "list", "--session", sid, "--running", "--json")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return [] if "unknown_session" in done.stdout + done.stderr else None
+    try:
+        rows = json.loads(done.stdout)["work"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return [f"{r['kind']} {r['ref']}" for r in rows if not (r.get("kind") == "wait" and r.get("ref") == sid)]
+
+
+def work_note(work: list[str] | None) -> str:
+    if work is None:
+        return "This script could not read the work your identity has registered. "
+    if not work:
+        return "Your identity has no running work registered. "
+    shown = "; ".join(work[:5]) + (f"; and {len(work) - 5} more" if len(work) > 5 else "")
+    return (f"Your identity has {len(work)} running work row(s) registered (a worktree, tmux server, wait, watcher or "
+            f"lab run you own): {shown}. A restart does not end them; finish or forget what is done "
+            f"(`nx identity work done|forget`). ")
+
+
 def tasks_note(tasks: list[str] | None) -> str:
     crons = "A session-only cron or reminder you set may be lost in a restart; count it as work in flight. "
     if tasks is None:
@@ -2382,7 +2415,7 @@ def tasks_note(tasks: list[str] | None) -> str:
 def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
     origin = origin_note(s, path) if mailed else ""
     return (origin + f"Restart readiness check for {label(s)}: the operator is about to restart every Claude session. "
-            + tasks_note(session_tasks(s)) +
+            + tasks_note(session_tasks(s)) + work_note(session_work(s)) +
             f"Answer by writing the file {path} (create it; do not edit any other file) holding one JSON object: "
             f'{{"ready": true or false, "reason": "one short sentence", "eta_min": minutes until you could be ready, '
             f"or null}}. ready is true only when a restart now loses nothing: no turn or background job in flight "
@@ -2609,6 +2642,11 @@ def print_table(manifest: dict, rows: list[dict], max_age: int, now: float) -> N
         detail = r["blocker"] if r["blocker"] else ("" if r["state"] != "ready" else r["reason"])
         print(f"{r['name'][:24]:<24} {r['state']:<13} {_ago(r['age']) if r['age'] is not None else '-':>6}  "
               f"{r['live']:<6} {detail}")
+        work = r.get("work")
+        if work is None and "work" in r:
+            print(f"{'':<24} work: could not be read")
+        for line in work or []:
+            print(f"{'':<24} work: {line}")
     for e in manifest["excluded"]:
         print(f"{e['name'][:24]:<24} {'excluded':<13} {'-':>6}  {'-':<6} {e['why']}")
 
@@ -2696,6 +2734,8 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
             return 2
         now = time.time()
         rows = readiness(found, manifest, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
+        for r, sess in zip(rows, found):  # report only (RDR-253 Step 6): no blocker reads it
+            r["work"] = session_work(sess)
         print_table(manifest, rows, a.ready_max_age, now)
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
         withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]
