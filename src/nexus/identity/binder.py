@@ -25,8 +25,9 @@ only for a holder on this host that the check finds gone, never for one it finds
 Credentials. The hook runs this with the tenant credential (every event). The MCP server's pending bind runs it
 with the data credential, which may send ``start``, ``resume``, ``fork``, ``refresh`` and ``end`` and create an
 ephemeral identity but not ``clear``, ``release``, ``takeover`` or ``gone``: ``allow_privileged=False`` keeps this
-module off those events, so a pending bind never needs them (a process with no binding has no identity to
-``clear`` or ``release``).
+module off those events. A pending bind of a process with no binding needs none of them; a ``clear`` that reaches it
+for a process that does hold one is sent as ``fork`` with that process's own token, and restarts the same identity
+only when the engine refuses the fork for want of a live token.
 """
 from __future__ import annotations
 
@@ -233,14 +234,13 @@ class SessionBinder:
     def _keep(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome | None:
         """``clear`` and ``fork``: same generation, new session id. None when the engine will not (the seat was
         taken or ended meanwhile): the caller then binds the process as a new start. A fork refused for want of a live token
-        (an expired one) starts the same identity again instead (:meth:`_restart_own`). A binder that may not send ``clear``
-        at all (``allow_privileged=False``, the MCP server's pending bind) restarts the identity the process holds the same
-        way, before any 403: it never falls through to a new ephemeral beside the live binding. A credential that may send
-        only some events (the data credential of a mint-only install) sends a refused ``clear`` as ``fork``."""
-        if not self._privileged and facts.source == "clear":
-            return self._restart_own(facts, own, row="clear_restart_own")   # never a second identity beside the held one
+        (an expired one, or none in the file) starts the same identity again instead (:meth:`_restart_own`). A binder that may
+        not send ``clear`` at all (``allow_privileged=False``, the MCP server's pending bind) sends the same change as
+        ``fork`` with the process's own token, as the RDR's clear row says, and reaches :meth:`_restart_own` only through that
+        token-gone refusal: it never falls through to a new ephemeral beside the live binding. A credential that may send only
+        some events (the data credential of a mint-only install) sends a refused ``clear`` as ``fork``."""
         prior = (own.get("holder") or {}).get("session_id")
-        event = facts.source
+        event = "fork" if not self._privileged and facts.source == "clear" else facts.source
         token = self._own_token(facts, own)   # a fork carries it; a clear never does
         try:
             try:
@@ -254,6 +254,9 @@ class SessionBinder:
                                          token=token)
         except IdentityApiError as exc:
             if _token_gone(exc):
+                # A 409 out of the restart itself (the seat was taken or ended since) is not caught here: it leaves the hook
+                # unbound with the engine's words and the next start tries again, because a held identity is never abandoned
+                # for a new ephemeral beside it.
                 return self._restart_own(facts, own, row=f"{facts.source}_restart_own")
             if exc.status == 409:
                 return None
@@ -261,8 +264,8 @@ class SessionBinder:
         return self._finish(facts, view, event, row=f"{facts.source}_in_process", action="bound")
 
     def _restart_own(self, facts: LaunchFacts, own: Mapping[str, Any], *, row: str) -> BindOutcome:
-        """The engine refused this process's ``fork`` for want of a live token (its token expired while the laptop slept):
-        start the SAME identity again, from the same process. A ``start`` needs no token, and the engine's acquire reads
+        """The engine refused this process's ``fork`` for want of a live token (its token expired while the laptop slept, or
+        the process's file holds none for it): start the SAME identity again, from the same process. A ``start`` needs no token, and the engine's acquire reads
         the same host, pid and ``startedAt`` as the same process: no generation change, a fresh token in the answer. Not
         :meth:`_startup`, which binds whatever the launch names or mints a new ephemeral and would orphan the held identity.
 

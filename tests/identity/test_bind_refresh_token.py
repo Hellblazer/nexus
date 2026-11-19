@@ -682,18 +682,21 @@ def _events(engine: FakeEngine) -> list[str]:
     return [args[1] for name, args in engine.calls if name == "bind"] + [name for name, _ in engine.calls if name == "create_ephemeral"]
 
 
-def _assert_same_identity_one_binding(engine: FakeEngine, out: Any, own: str, generation: int = 1) -> None:
-    """The session ends bound to the identity it held, at the same generation, with ONE live binding for its pid."""
+def _assert_same_identity_one_binding(engine: FakeEngine, out: Any, own: str, generation: int = 1, *, event: str = "start") -> None:
+    """The session ends bound to the identity it held, at the same generation, with ONE live binding for its pid. *event* is
+    the one that bound it: ``start`` after a refused fork (the token is gone), ``fork`` when the engine took the process's
+    own token."""
     assert out.action == "bound" and out.identity == own, f"not the held identity: {out.row} {out.identity} {out.notices}"
     assert out.generation == generation and out.token_file is not None and out.token_file.exists()
+    assert out.event == event, f"bound by {out.event}, expected {event}"
     assert "create_ephemeral" not in _events(engine), "no second identity"
     live = engine.bindings_by_host(HOST, 100)
     assert [v["id"] for v in live] == [own], f"exactly one live binding for the pid: {[v['id'] for v in live]}"
-    starts = [args for name, args in engine.calls if name == "bind" and args[1] == "start"]
-    assert len(starts) == 1 and starts[0][0] == own and starts[0][2] == generation
-    assert starts[0][3]["session_id"] == "s2", "the start carries the NEW session id: the fork it replaces indexed it"
-    assert starts[0][3].get("pid") == 100 and starts[0][3].get("started_at") == 100_000, "the same process evidence"
-    assert "holder_gone" not in starts[0][3]
+    bound = [args for name, args in engine.calls if name == "bind" and args[1] == event and args[3].get("session_id") == "s2"]
+    assert len(bound) == 1 and bound[0][0] == own and bound[0][2] == generation
+    assert bound[0][3]["session_id"] == "s2", "the bind carries the NEW session id: the fork it replaces indexed it"
+    assert bound[0][3].get("pid") == 100 and bound[0][3].get("started_at") == 100_000, "the same process evidence"
+    assert "holder_gone" not in bound[0][3]
     assert engine.sessions["s2"][0] == own, "the session index knows the new session id"
 
 
@@ -733,16 +736,32 @@ def test_the_privileged_cloud_clear_falls_through_clear_403_then_fork_403_to_the
 
 
 @pytest.mark.parametrize("kind", ["ephemeral", "seat"])
-def test_an_unprivileged_clear_restarts_the_same_identity_not_a_new_ephemeral(tmp_path: Path, kind: str) -> None:
-    """The pre-existing hole the 0.1.198 review named: a binder that may not send ``clear`` (``allow_privileged=False``)
-    returned None from ``_keep`` and ``_startup`` then made a NEW ephemeral beside the live binding, before any 403. It
-    restarts the identity the process holds, as the token-lapse fall-through does: one live binding for the pid."""
-    engine = FakeEngine()
+def test_an_unprivileged_clear_sends_fork_with_the_process_own_token_and_keeps_its_identity(tmp_path: Path, kind: str) -> None:
+    """RDR-253's clear row: a binder that may not send ``clear`` (``allow_privileged=False``) sends the same change as ``fork``
+    with the process's own token, in place of falling through to a NEW ephemeral beside the live binding (the hole the 0.1.198
+    review named) and without a data-credential ``start`` of a held identity (the gap Phase 2 open item 1 closes)."""
+    engine = _NoClearEngine()
+    own = _own(engine, kind=kind, name="alpha" if kind == "seat" else None)
+    _own_file(tmp_path, own)
+    binder, facts = _binder_facts(tmp_path, engine, "clear", privileged=False)
+    out = binder.bind(facts)
+    _assert_same_identity_one_binding(engine, out, own, event="fork")
+    assert out.row == "clear_in_process"
+    assert [e for e in _events(engine) if e in ("clear", "fork", "start")] == ["fork"], "no clear, and no start of a held identity"
+    assert engine.bind_tokens == [("fork", "tok-own")]
+
+
+@pytest.mark.parametrize("kind", ["ephemeral", "seat"])
+def test_an_unprivileged_clear_with_no_live_token_restarts_the_same_identity_after_the_refused_fork(tmp_path: Path, kind: str) -> None:
+    """The token file is gone (or expired): the fork goes without a token, the engine's 403 ``identity_token_required``
+    reaches :meth:`SessionBinder._restart_own`, and ``start`` is the only event that binds."""
+    engine = _ExpiredTokenEngine()
     own = _own(engine, kind=kind, name="alpha" if kind == "seat" else None)
     binder, facts = _binder_facts(tmp_path, engine, "clear", privileged=False)
     out = binder.bind(facts)
-    _assert_same_identity_one_binding(engine, out, own)
+    _assert_same_identity_one_binding(engine, out, own, event="start")
     assert out.row == "clear_restart_own"
+    assert [e for e in _events(engine) if e in ("clear", "fork", "start")] == ["fork", "start"]
 
 
 def test_a_fork_refused_for_another_reason_still_ends_unbound_with_the_engines_words(tmp_path: Path) -> None:
