@@ -85,7 +85,7 @@ def configured_route() -> dict[str, Any] | None:
     The route is an optional, off-by-default setting, so a config that cannot be read for it (a malformed ``entity``
     section, which raises :class:`~nexus.entity_keys.EntityConfigError`; a YAML, file or encoding error) means no route
     and one warning carrying the error, never the end of the plan run (develop red, nexus-7fku2.2.1). The user is told
-    of the broken config elsewhere: every search or query step re-reads it and fails with the file and key named, and
+    of the broken config elsewhere: every search or query step re-reads it and fails with the same error, and
     RDR-147's resolution boundary reports ``entity_config_error`` when a repair runs. A plan with no search step leaves
     this warning as the only trace."""
     import yaml  # noqa: PLC0415 — keeps this module leaf (stdlib, structlog, document_confinement)
