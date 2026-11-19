@@ -564,7 +564,31 @@ tag <name>`` or ``--prune-tags|-P`` (``_sx_fetch_refspec``; a plain ``git fetch
 unchanged). ``_DASH_C_FLAGS`` is NOT widened: ``branch`` stays create-only, and
 ``tag``, ``pull`` and ``fetch`` stay unlisted (``revert --continue`` was already
 there, ``--abort`` / ``--skip`` / ``--quit`` are not). The ``# routing-allow:``
-escape passes all seven, in a worktree too, as for every verb.
+escape passes all seven, in a worktree too, as for every verb. The review round
+after it added: ``fetch --refmap`` and ``--stdin`` (unique prefixes too) and a
+fetch word that holds an expansion; ``-c remote.<n>.fetch|push=`` and its
+``--config-env`` / ``GIT_CONFIG_*`` spellings (shared tree, those two keys only);
+``git submodule--helper`` (``foreach`` everywhere, and ``submodule``'s write set);
+``git grep`` and the value word of ``-S``/``-G``/``--grep``-style options exempt from
+the ``--output`` rule. The block comment above ``_Sidefx`` has the full list.
+
+KNOWN LIMITS of this change, each beaded separately and only NAMED here (do not
+patch them with more spellings, see the frozen note above): (a) arguments fed by
+``xargs`` or standard input (``echo v1 | xargs git tag``, ``xargs -a f git branch``)
+never appear in the text; (b) in a linked worktree an expansion glued to a word
+(``${IFS}``, ``git con${X}fig``) is judged only by the side-effect walk, not the
+adjacency rule; (c) the general ``-c`` config injection (``-c core.fsmonitor=``,
+``-c core.hooksPath=``, ``-c core.sshCommand=``, an alias): only
+``remote.<n>.fetch|push`` is read, as above; (d) ``git archive -o`` and ``git
+format-patch -o|--output-directory`` write files and are not read (only the exact
+``--output`` is); (e) the pull/revert WORD false denials: ``git fetch origin
+pull/12/head``, ``git log --grep=revert`` and every path glued to those words deny
+like the existing ``--grep=commit`` class, by design of the verb scan; (f) ``git
+bisect`` (``start``, ``run``, ``good``) moves HEAD in the shared tree and is not a
+verb of the scan; (g) a whole-word variable that holds a verb or an option (``V=tag;
+git $V v1``) is not read (the fetch refspec word is the one exception, because the
+fetch walk can say so); (h) ``--output`` held in a variable or built by a
+substitution.
 
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
@@ -2202,8 +2226,9 @@ def _config_hit(
 #:   subagent commands in the transcripts), and neither does this rule. NOT covered:
 #:   ``git branch <name> <remote-ref>``, which tracks by default
 #:   (``branch.autoSetupMerge``) as ``git checkout -b`` and ``git switch -c`` do from
-#:   a worktree; a rule for it denied ``git branch -f <name> <sha>``, a real
-#:   subagent command that writes no config.
+#:   a worktree. (An earlier cut of that rule also denied ``git branch -f <name>
+#:   <sha>``, which writes no config; ``-f|--force`` is covered now for another
+#:   reason, as a ref MOVE, in the last bullet below.)
 #: - ``git push -u|--set-upstream``, ``git fetch|pull --set-upstream``, ``git
 #:   checkout|switch -t|--track``, ``git worktree add --track``: an upstream is
 #:   written (``pull -u`` is no upstream form, and ``fetch -u`` is
@@ -2274,10 +2299,37 @@ def _config_hit(
 #:   HEAD~{1,2}`` and ``git diff {a,b}.txt`` pass. A brace after two unknown words
 #:   is not seen. Read on the normalized text only: the zero-expansion form drops a
 #:   ``-C "$R"`` value and would mistake the next word for the subcommand.
+#: - Writes to refs, files and commands the verb scan missed (8.4.1 review, 2026-11;
+#:   each measured on git 2.53 by the tests running it for real). DENIED EVERYWHERE,
+#:   worktree included: ``git submodule foreach '<cmd>'`` and ``git
+#:   submodule--helper foreach`` (they run ``<cmd>`` in every submodule; the helper
+#:   also gets ``submodule``'s write set and ``clone``: ``_sx_submodule_helper``), and
+#:   ``--output=<path>`` / ``--output <path>`` on any git command (``_sx_output_flag``;
+#:   git takes only the exact name, ``--output-indicator-*`` is another option;
+#:   ``git grep`` is never read, and the word after a value-taking option such as
+#:   ``-S``, ``-G`` or ``--grep`` is its value; ``--output`` after ``--`` still
+#:   denies). The rule blocks git's own file writer; shell redirection is out of its
+#:   scope. SHARED TREE ONLY, a linked worktree passes them as it passes ``branch
+#:   -d`` and every verb on the verb scan's list: ``git branch -f|--force`` (a ref
+#:   move); ``git tag`` that creates, signs, forces or deletes (``_sx_tag``; the
+#:   listing forms pass); ``git fetch`` with a refspec that has a local destination,
+#:   ``tag <name>``, ``--prune-tags|-P``, ``--refmap`` or ``--stdin`` (unique
+#:   prefixes too), or a word after the repository that holds an expansion
+#:   (``_sx_fetch_refspec``); and ``-c remote.<n>.fetch|push=``, ``--config-env=``,
+#:   ``GIT_CONFIG_KEY_<n>=`` and ``GIT_CONFIG_PARAMETERS`` naming one of those two keys
+#:   in a command with a ``fetch``, ``pull``, ``push`` or ``update`` word
+#:   (``_sx_remote_config``; the general ``-c`` class is not read). ``revert`` and
+#:   ``pull`` are verb-scan words. WHY ``git tag <name>`` denies in the shared tree
+#:   while ``git branch <name>`` (create) passes: a judgement, not a measurement. A
+#:   tag is shared, publishable state that nothing moves on its own and ``git push
+#:   --tags`` publishes, while a new local branch is the ordinary working state of an
+#:   agent (``_DASH_C_FLAGS`` lists it as "create only"); ``branch -f`` is denied
+#:   because it moves a name that may already be someone's.
 #:
 #: Every verb above denies in a linked worktree too (the config it writes is the
-#: common one the primary reads), except the shared-only branch forms and the
-#: upstream forms of ``push|fetch|pull`` named above. The scan is
+#: common one the primary reads), except the shared-only branch forms, the
+#: shared-only ref writers of the last bullet and the upstream forms of
+#: ``push|fetch|pull`` named above. The scan is
 #: the structure-agnostic one the verb scan is, one level finer: the text is cut
 #: into simple commands at ``; & | newline``, and in each, the words after the first
 #: git (or hub) command are read left to right. A verb word anywhere among them
@@ -2494,15 +2546,34 @@ def _sx_remote(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> 
     return _sx_action("remote", words, k, _SX_REMOTE_WRITES)
 
 
-def _sx_submodule(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
+#: ``git submodule--helper`` is the program ``git submodule`` calls: measured on git
+#: 2.53, ``submodule--helper foreach 'touch x'`` runs the command and ``init`` writes
+#: the config, so it gets the same write set, plus its own ``clone``. ``status`` and
+#: ``summary`` read.
+_SX_HELPER_WRITES = _SX_SUBMODULE_WRITES | {"clone"}
+
+
+def _sx_submodule_walk(
+    label: str, writes: frozenset[str], words: list[str], k: int,
+) -> _Sidefx | None:
     for j in range(k, len(words)):
         w = words[j]
         if w.startswith("-"):
             continue
         if w == "update":
-            return _sx_flag_scan("submodule update", words, j + 1, "", ("init",))
-        return _sx_action("submodule", words, j, _SX_SUBMODULE_WRITES)
+            return _sx_flag_scan(f"{label} update", words, j + 1, "", ("init",))
+        return _sx_action(label, words, j, writes)
     return None
+
+
+def _sx_submodule(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
+    return _sx_submodule_walk("submodule", _SX_SUBMODULE_WRITES, words, k)
+
+
+def _sx_submodule_helper(
+    words: list[str], k: int, worktree: int, branch_of: BranchOf,
+) -> _Sidefx | None:
+    return _sx_submodule_walk("submodule--helper", _SX_HELPER_WRITES, words, k)
 
 
 def _sx_branch(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Sidefx | None:
@@ -2660,9 +2731,15 @@ def _sx_fetch_refspec(words: list[str], k: int) -> _Sidefx | None:
     """A ``git fetch`` that writes a LOCAL ref: a refspec with a destination
     (``main:topic``, ``+refs/heads/*:refs/heads/*``; any word with a colon after the
     repository), the ``tag <name>`` shorthand (``refs/tags/<name>:refs/tags/<name>``),
-    or ``--prune-tags`` / ``-P`` (they delete the local tags the remote lacks). The
-    repository is the first word that is no option (and no known option's value); a
-    colon there is a URL (``git@host:o/r.git``) or a path. A plain ``git fetch
+    or ``--prune-tags`` / ``-P`` (they delete the local tags the remote lacks).
+    ``--refmap=<refspec>`` and ``--stdin`` (refspecs on standard input) hand fetch a
+    refspec the text does not show; both write a local branch (measured), and git
+    takes a unique prefix of each (``--refm``, ``--st``), so a prefix of at least
+    three and two letters denies. A word after the repository that holds an
+    expansion (``$R``, ``"$R"``, ``${R}``, ``$(...)``) is a refspec the text does
+    not show either, and denies. The repository is the first word that is no option
+    (and no known option's value); a colon there is a URL (``git@host:o/r.git``) or
+    a path, and an expansion there is just the remote. A plain ``git fetch
     [<remote>]`` is not here: it writes only ``refs/remotes/<remote>/*`` and the tags
     git auto-follows, and stays allowed. An option the walk does not know may take a
     value, which then reads as the repository and leaves the real repository to be
@@ -2688,20 +2765,24 @@ def _sx_fetch_refspec(words: list[str], k: int) -> _Sidefx | None:
             name, eq, _ = w[2:].partition("=")
             if name != "prune" and len(name) > 5 and "prune-tags".startswith(name):
                 return _sx_label("fetch", w)
+            if (len(name) >= 3 and "refmap".startswith(name)) or (
+                len(name) >= 2 and "stdin".startswith(name)
+            ):
+                return _sx_label("fetch", w)
             if name in _SX_UP_VALUED_LONG and not eq:
                 i += 1
         elif w.startswith("-") and len(w) > 1:
             for pos, ch in enumerate(w[1:], 1):
                 if ch == "P":
                     return _sx_label("fetch", w)
-                if ch in _SX_UP_VALUED_SHORT:
+                if ch in "oj":  # fetch's own value-taking shorts; `-s`, `-X` are merge's
                     if pos == len(w) - 1:
                         i += 1
                     break
         else:
             positional.append(w)
     for spec in positional[1:]:
-        if ":" in spec or spec == "tag" or _MASK_OPAQUE in spec:
+        if ":" in spec or spec == "tag" or _MASK_OPAQUE in spec or "$" in spec or "`" in spec:
             return _sx_label("fetch", spec)
     return None
 
@@ -2809,44 +2890,122 @@ def _sx_tag(words: list[str], k: int, worktree: int, branch_of: BranchOf) -> _Si
     return None
 
 
+#: Options of ``git log|diff|show`` that take the NEXT word as their value, measured
+#: on git 2.53 (``git log <opt> --output=<f>`` wrote no file and ran on, or failed
+#: reading the word as the value). ``--format`` and ``--pretty`` are not here: they
+#: take an attached value only, and ``git log --format --output=<f>`` writes the file.
+_SX_OUTPUT_VALUED_LONG = frozenset({
+    "grep", "author", "committer", "since", "until", "after", "before", "grep-reflog",
+    "word-diff-regex", "ignore-matching-lines", "find-object", "date", "skip", "max-count",
+    "diff-filter", "src-prefix", "dst-prefix", "line-prefix", "encoding", "rotate-to",
+    "skip-to", "anchored", "decorate-refs", "glob", "exclude", "since-as-filter", "default",
+    "inter-hunk-context", "stat-width", "stat-name-width", "stat-count",
+    "ws-error-highlight", "diff-algorithm", "color-moved-ws",
+})
+_SX_OUTPUT_VALUED_SHORT = "SGIOLn"
+
+
 def _sx_output_flag(words: list[str]) -> _Sidefx | None:
     """``--output=<path>`` or ``--output <path>``: ``git diff``, ``log``, ``show`` and
-    the other commands that take diff options write the file wherever the path says,
-    so this denies at every worktree level. git takes ``--output`` only exactly (a
-    prefix is an error; measured), and ``--output-indicator-new`` and its siblings are
-    other options, so only the whole name ``output`` matches. Read at any position
-    after ``git``, past ``--`` too (a pathspec spelled ``--output`` is not worth the
-    exemption)."""
-    for w in words:
+    the other commands that take diff options write the file wherever the path says.
+    The rule blocks git's own file writer; shell redirection is out of its scope.
+    It denies at every worktree level. git takes ``--output`` only exactly (a prefix
+    is an error; measured), and ``--output-indicator-new`` and its siblings are other
+    options, so only the whole name ``output`` matches. Read at any position after
+    ``git``, past ``--`` too (a reviewer counted a ``--output`` there as a hold).
+
+    Two exemptions, each measured: ``git grep`` has no ``--output`` option (its words
+    are never read), and the word after a value-taking option (``-S``, ``-G``,
+    ``--grep``, ``--author``, ...: ``_SX_OUTPUT_VALUED_LONG``) is that option's
+    value, so ``git log -S '--output'`` passes. Values are skipped only before
+    ``--``, and only for the exact option; no substitution is parsed, so
+    ``git log -S $(x) --output=f`` still reads ``--output=f``."""
+    sub = _sx_subcommand_index(words)
+    if sub < len(words) and words[sub] == "grep":
+        return None
+    i, n = 0, len(words)
+    options_ended = False
+    while i < n:
+        w = words[i]
+        i += 1
         # `--outputQ` is `--output"=/tmp/x"` as the tokenizer masks it: the name, then
         # a quoted rest it could not read
         if w.startswith("--output") and (w[8:9] in ("", "=", _MASK_OPAQUE)):
             return _Sidefx("--output")
+        if options_ended:
+            continue
+        if w == "--":
+            options_ended = True
+        elif w.startswith("--"):
+            name, eq, _ = w[2:].partition("=")
+            if name in _SX_OUTPUT_VALUED_LONG and not eq:
+                i += 1
+        elif w.startswith("-") and len(w) > 1:
+            for pos, ch in enumerate(w[1:], 1):
+                if ch in _SX_OUTPUT_VALUED_SHORT:
+                    if pos == len(w) - 1:
+                        i += 1
+                    break
     return None
 
 
-#: ``--output`` at the start of a word (after a blank or a shell break, so
-#: ``--grep=--output`` is not one), read from the normalized text, where the quotes
-#: are gone. Used only when the tokenizer met a whole quoted word that starts with a
-#: dash and could not read it (``git diff "--output=/tmp/x"`` masks to ``-Q``).
-_SX_OUTPUT_TEXT_RE = re.compile(r"(?<![^\s;&|(])--output(?=[=\s;&|()<>]|\Z)")
-
-
 def _sx_output_quoted(normalized_text: str) -> _Sidefx | None:
+    """``_sx_output_flag`` over the normalized text, where a whole quoted word the
+    tokenizer could not read (``git diff "--output=/tmp/x"`` masks to ``-Q``) is
+    spelled out. Used only when the masked text holds such a word."""
     for seg in _SIDEFX_SEG_SPLIT_RE.split(normalized_text):
-        start = _first_git_command(seg)
-        if start is not None and _SX_OUTPUT_TEXT_RE.search(seg, start) is not None:
-            return _Sidefx("--output")
+        words = _sx_segment_words(seg)
+        if words:
+            hit = _sx_output_flag(words)
+            if hit is not None:
+                return hit
     return None
 
 
 _SX_CHECKERS = {
     "remote": _sx_remote, "submodule": _sx_submodule, "branch": _sx_branch,
-    "tag": _sx_tag,
+    "submodule--helper": _sx_submodule_helper, "tag": _sx_tag,
     "push": _sx_push, "fetch": _sx_fetch, "pull": _sx_pull, "checkout": _sx_checkout,
     "switch": _sx_switch, "worktree": _sx_worktree, "maintenance": _sx_maintenance,
     "lfs": _sx_lfs,
 }
+
+
+#: A remote's own refspec set on the command line or in the environment: ``-c
+#: remote.<name>.fetch=<refspec>``, ``--config-env=remote.<name>.fetch=<VAR>``,
+#: ``GIT_CONFIG_KEY_<n>=remote.<name>.fetch`` and a ``GIT_CONFIG_PARAMETERS`` entry.
+#: A plain ``git fetch <remote>`` then writes the refs that refspec names (measured:
+#: ``-c 'remote.origin.fetch=+refs/heads/*:refs/heads/*' fetch origin`` creates local
+#: branches), as ``push`` does with ``remote.<name>.push``. Only these two keys are
+#: read (``remote.<n>.url``, ``tagopt``, ``prune`` and the rest of the general ``-c``
+#: class are not: that is a separate decision). Whole-text, in the shared tree only (a
+#: linked worktree passes the fetch refspec forms like the rest), and only in a
+#: command that also has a ``fetch``, ``pull``, ``push`` or ``update`` word.
+#: ``pull`` and ``push`` are the verb scan's already, so in effect this is the
+#: ``fetch`` and ``remote update`` rule.
+_REMOTE_CFG_C_RE = re.compile(
+    r"(?i)(?<![\w-])(?:-c\s+|--config-env(?:=|\s+))remote\.[^\s=]*\.(?:fetch|push)"
+    r"(?=[=\s;&|()<>]|\Z)"
+)
+_REMOTE_CFG_ENV_RE = re.compile(
+    r"(?i)GIT_CONFIG_KEY_\d+\s*=\s*remote\.[^\s=]*\.(?:fetch|push)(?![\w-])"
+)
+_REMOTE_CFG_PARAM_RE = re.compile(r"(?i)remote\.[^\s='\"]*\.(?:fetch|push)(?=[=\s'\"]|\Z)")
+_REMOTE_CFG_RUNNER_RE = re.compile(r"(?<![\w./-])(?:fetch|pull|push|update)(?![\w-])")
+
+
+def _sx_remote_config(text: str) -> _Sidefx | None:
+    lowered = text.lower()
+    if "remote." not in lowered or _first_git_command(text) is None:
+        return None
+    named = (
+        _REMOTE_CFG_C_RE.search(text) is not None
+        or _REMOTE_CFG_ENV_RE.search(text) is not None
+        or ("git_config_parameters" in lowered and _REMOTE_CFG_PARAM_RE.search(text) is not None)
+    )
+    if named and _REMOTE_CFG_RUNNER_RE.search(text) is not None:
+        return _Sidefx("remote.<name>.fetch|push set on the command line")
+    return None
 
 
 def _sx_autocorrect(text: str) -> _Sidefx | None:
@@ -3035,6 +3194,10 @@ def _sidefx_match(
     hit = _sx_autocorrect(normalized_text)
     if hit is not None:
         return hit
+    if not worktree:
+        hit = _sx_remote_config(normalized_text)
+        if hit is not None:
+            return hit
     level = _SX_SHARED
     if worktree:
         own = not _repo_env_named(view.raw) and not _cd_quoted(view.raw)
@@ -3938,16 +4101,18 @@ def _deny_message(agent_type: str, verb_names: str, *,
             "(`git ch{e..e}ckout`), which builds the verb at run time. Need the "
             "change? Hand it back to the orchestrator."
         )
-        runs_or_writes = any(w in verb_names for w in ("submodule foreach", "--output"))
+        runs_or_writes = any(w in verb_names for w in ("foreach", "--output"))
         if runs_or_writes:
             head += (
-                "\n`git submodule foreach '<cmd>'` runs an arbitrary command in "
-                "every submodule, and `--output=<path>` (also `--output <path>`) of "
-                "`git diff|log|show` writes a file wherever the path says; both "
-                "deny in a linked worktree too, and only an orchestrator "
-                "`# routing-allow:` passes them. Plain `git diff|log|show` and "
-                "`--output-indicator-*` stay allowed; redirect the output with "
-                "`>` into your scratch directory instead."
+                "\n`git submodule foreach '<cmd>'` (and `git submodule--helper "
+                "foreach`) runs an arbitrary command in every submodule, and "
+                "`--output=<path>` (also `--output <path>`) of `git diff|log|show` "
+                "is git's own file writer: it writes a file wherever the path says. "
+                "This rule blocks both, in a linked worktree too, and only an "
+                "orchestrator `# routing-allow:` passes them. Plain "
+                "`git diff|log|show`, `git grep` and `--output-indicator-*` stay "
+                "allowed. Shell redirection (`>`) is out of this rule's scope: "
+                "the rule neither blocks nor endorses it."
             )
         elif in_worktree:
             head += (

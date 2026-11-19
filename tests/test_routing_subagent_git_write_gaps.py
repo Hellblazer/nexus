@@ -100,7 +100,7 @@ class Sandbox:
         (peer / "f.txt").write_text("v3\n")
         g(peer, "commit", "-q", "-am", "c3")
         g(peer, "tag", "peer-tag", "HEAD")
-        g(peer, "push", "-q", "origin", "main", "peer-tag")
+        g(peer, "push", "-q", "origin", "main", "peer-tag", "main:other")
         (self.main / "dirty.txt").write_text("d\n")
         self.wt = box / "wt"
         g(self.main, "worktree", "add", "-q", "-b", "wtb", str(self.wt))
@@ -233,6 +233,31 @@ _FOREACH = [
     "git submodule foreach \"touch {out}\"",
     "git submodule foreach 'touch {out}' && git status",
     "cd sub && git submodule foreach 'echo hi'",
+    # the internal helper runs the same command (measured: `git submodule--helper
+    # foreach 'touch x'` runs it), and the dashed spelling is the same program
+    "git submodule--helper foreach true",
+    "git submodule--helper foreach --quiet true",
+    "git submodule--helper foreach --recursive 'touch {out}'",
+    "git -C sub submodule--helper foreach 'make'",
+    "git -c core.pager=cat submodule--helper foreach true",
+    "git-submodule--helper foreach true",
+]
+#: The helper gets the write set `git submodule` has (init, sync, add, deinit,
+#: set-url, set-branch, absorbgitdirs, update --init) plus its own `clone`. Denied
+#: in a linked worktree too, like `git submodule init`: they write the common config.
+_SUBMODULE_HELPER = [
+    "git submodule--helper init",
+    "git submodule--helper sync",
+    "git submodule--helper deinit --all",
+    "git submodule--helper add u p",
+    "git submodule--helper set-url p u",
+    "git submodule--helper set-branch -b x p",
+    "git submodule--helper absorbgitdirs",
+    "git submodule--helper update --init",
+    "git submodule--helper clone --url u --path p",
+    "git -C sub submodule--helper init",
+    "git submodule--helper --quiet init",
+    "git-submodule--helper init",
 ]
 #: Gap 5.
 _PULL = [
@@ -272,6 +297,52 @@ _FETCH_REFSPEC = [
     "git -c core.pager=cat fetch origin main:fetched",
     "git -C . fetch origin main:fetched",
     "git fetch . main:fetched",
+    # a short option fetch does not have (merge's `-s`, `-X`) takes no value here
+    "git fetch -s origin main:fetched",
+    "git fetch -X origin main:fetched",
+    "git fetch -o x origin main:fetched",
+    "git fetch -j4 origin main:fetched",
+    # --refmap and --stdin hand fetch a refspec (measured: both write a local branch);
+    # git takes a unique prefix of each (`--refm`, `--st`)
+    "git fetch --refmap='+refs/heads/*:refs/heads/*' origin other",
+    "git fetch --refmap '+refs/heads/*:refs/heads/*' origin other",
+    "git fetch --refma=+refs/heads/*:refs/heads/* origin other",
+    "git fetch --refm=+refs/heads/*:refs/heads/* origin other",
+    "git fetch origin other --refmap=+a:b",
+    "git fetch --refmap= origin other",
+    "git fetch --stdin origin",
+    "git fetch --stdi origin",
+    "git fetch --std origin",
+    "git fetch --st origin",
+    "echo other:viastdin | git fetch --stdin origin",
+    "git fetch --stdin origin < refs.txt",
+    # a refspec held in a variable or substitution is unreadable text
+    'git fetch origin "$R"',
+    "git fetch origin $R",
+    "git fetch origin ${R}",
+    'git fetch "$REMOTE" "$BRANCH"',
+    "git fetch origin $(git rev-parse --abbrev-ref HEAD)",
+    'git fetch origin "$(git rev-parse --abbrev-ref HEAD)"',
+    "git fetch -q origin $B",
+    "git fetch --depth 1 origin $B",
+    "R=main:fetched; git fetch origin $R",
+    # a remote's own fetch/push refspec set on the command line or in the environment
+    "git -c remote.origin.fetch=+refs/heads/*:refs/heads/* fetch origin",
+    "git -c 'remote.origin.fetch=+refs/heads/other:refs/heads/zz' fetch origin",
+    'git -c "remote.origin.fetch=+refs/heads/other:refs/heads/zz" fetch origin',
+    "git -c remote.origin.FETCH=+refs/heads/o:refs/heads/z fetch origin",
+    "git -c remote.a.b.fetch=+refs/heads/o:refs/heads/z fetch a.b",
+    "git -c remote.origin.push=HEAD:refs/heads/x push origin",
+    "git -c remote.origin.push=HEAD:refs/heads/x fetch origin",
+    "git -c core.pager=cat -c remote.origin.fetch=+a:b fetch origin",
+    "git --config-env=remote.origin.fetch=V fetch origin",
+    "git --config-env remote.origin.fetch=V fetch origin",
+    "git --config-env=remote.origin.push=V push origin",
+    "git -c remote.origin.fetch=+refs/heads/*:refs/heads/* pull",
+    "git -c remote.origin.fetch=+refs/heads/*:refs/heads/* remote update",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0=+refs/heads/o:refs/heads/z git fetch origin",
+    "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.push; git push origin",
+    "GIT_CONFIG_PARAMETERS=\"'remote.origin.fetch=+refs/heads/o:refs/heads/z'\" git fetch origin",
 ]
 #: Gap 7. Denied in a linked worktree too.
 _OUTPUT = [
@@ -299,6 +370,21 @@ _OUTPUT = [
     "git diff --'output'={out}",
     "git log -p '--output={out}'",
     "git show \"--output\" {out} HEAD",
+    # `--` ends the options, but a reviewer counted a `--output` after it as a hold:
+    # it stays denied for diff, log and show
+    "git log -- --output={out}",
+    "git diff -- --output {out}",
+    # a value-taking option hides only the word after it
+    "git log -S x --output={out}",
+    "git log --grep x --output {out}",
+    "git log -S 'a b' --output={out}",
+    'git log --grep "a b" --output={out}',
+    "git log --author x --format=%h --output={out}",
+    "git log -pS x --output={out}",
+    # `--format` and `--pretty` take an attached value only: the next word is an option
+    "git log --format --output={out}",
+    "git log --pretty --output {out}",
+    "git log --format '--output'",
 ]
 
 #: Pass in the shared tree and in a worktree: nothing here writes a ref, a
@@ -346,6 +432,22 @@ _STAYS_ALLOWED = [
     "git log -p --output-indicator-new=+",
     "git show --output-indicator-context=' ' HEAD",
     "git log -- docs/output.md",
+    # `git grep` has no --output option, and a value-taking option's value is data
+    "git grep -n '--output'",
+    "git grep -n -e '--output' -- docs",
+    "git grep -- --output",
+    "git grep --output",
+    "git grep \"--output=x y\"",
+    "git -C . grep -e --output",
+    "git log -S '--output'",
+    "git log -S--output",
+    "git log -pS '--output'",
+    "git log --grep '--output' --oneline",
+    "git log -G '--output' --oneline",
+    "git log --author '--output'",
+    "git log --grep \"--output x\" --oneline",
+    "git show -S '--output' HEAD",
+    "git diff -G '--output'",
     'git log "--format=%h %s" -3',
     "git log --grep=--output --oneline",
     "git log --format='%h %s' --output-indicator-new=+",
@@ -360,6 +462,18 @@ _STAYS_ALLOWED = [
     "git fetch --depth=1 origin main",
     "git fetch --filter=blob:none origin",
     "git fetch --filter blob:none origin",
+    "git fetch $REMOTE",
+    'git fetch "$REMOTE"',
+    "git fetch --refetch origin",  # not a prefix of --refmap
+    "git fetch --shallow-since=2020-01-01 origin",
+    # only remote.<name>.fetch|push keys are read; the general `-c` class is not
+    "git -c remote.origin.tagopt=--tags fetch origin",
+    "git -c remote.origin.url=x fetch origin",
+    "git -c remote.origin.pushurl=x fetch origin",
+    "git -c core.pager=cat fetch origin",
+    "git -c core.pager=cat log --oneline",
+    "git submodule--helper status",
+    "git submodule--helper summary",
     "git fetch git@github.com:Hellblazer/nexus.git",
     "git fetch https://example.invalid/r.git main",
     "git submodule status",
@@ -382,11 +496,17 @@ _FAMILIES = {
     "6_fetch_refspec": _FETCH_REFSPEC,
     "7_output": _OUTPUT,
 }
+#: Denied in a linked worktree too.
+_EVERYWHERE = {
+    "4_submodule_foreach": _FOREACH,
+    "7_output": _OUTPUT,
+    "8_submodule_helper": _SUBMODULE_HELPER,
+}
 
 
-@pytest.mark.parametrize("family", sorted(_FAMILIES))
+@pytest.mark.parametrize("family", sorted({**_FAMILIES, **_EVERYWHERE}))
 def test_each_gap_denies_in_the_shared_tree(family, sandbox):
-    cmds = [c.replace("{out}", "/tmp/out.txt") for c in _FAMILIES[family]]
+    cmds = [c.replace("{out}", "/tmp/out.txt") for c in {**_FAMILIES, **_EVERYWHERE}[family]]
     leaked = _not_denied(cmds, sandbox.main)
     assert not leaked, f"{family}: not denied in the shared tree: {leaked!r}"
 
@@ -406,9 +526,9 @@ def test_gaps_that_are_the_worktrees_own_pass_in_a_linked_worktree(family, sandb
     assert not blocked, f"{family}: wrongly denied in a linked worktree: {blocked!r}"
 
 
-@pytest.mark.parametrize("family", ["4_submodule_foreach", "7_output"])
-def test_foreach_and_output_deny_in_a_linked_worktree_too(family, sandbox):
-    cmds = [c.replace("{out}", "/tmp/out.txt") for c in _FAMILIES[family]]
+@pytest.mark.parametrize("family", sorted(_EVERYWHERE))
+def test_foreach_output_and_the_submodule_helper_deny_in_a_linked_worktree_too(family, sandbox):
+    cmds = [c.replace("{out}", "/tmp/out.txt") for c in _EVERYWHERE[family]]
     leaked = _not_denied(cmds, sandbox.wt)
     assert not leaked, f"{family}: not denied in a linked worktree: {leaked!r}"
 
@@ -478,6 +598,11 @@ def test_the_dash_c_carve_out_admits_revert_continue_only_and_none_of_the_new_fo
         f"git -C {wt} pull",
         f"git -C {wt} fetch origin main:fetched",
         f"git -C {wt} submodule foreach 'echo hi'",
+        f"git -C {wt} submodule--helper foreach true",
+        f"git -C {wt} submodule--helper init",
+        f"git -C {wt} fetch --refmap=+a:b origin other",
+        f"git -C {wt} fetch --stdin origin",
+        f"git -C {wt} -c remote.origin.fetch=+a:b fetch origin",
         f"git -C {wt} diff --output=/tmp/out.txt",
         f"git -C {wt} log --output=/tmp/out.txt",
     ]
@@ -501,12 +626,25 @@ _REAL_WRITES = [
     "git fetch origin +main:topic",
     "git fetch origin tag peer-tag",
     "git fetch --prune-tags origin",  # fetches every tag; with --prune it deletes local ones
+    # fetch handed a refspec by an option, the environment or a variable
+    "git fetch --refmap='+refs/heads/*:refs/heads/*' origin other",
+    "git fetch --refmap '+refs/heads/*:refs/heads/*' origin other",
+    "git fetch --refm='+refs/heads/*:refs/heads/*' origin other",
+    "printf 'other:viastdin\\n' | git fetch --stdin origin",
+    "printf 'other:viastdin\\n' | git fetch --st origin",
+    "git -c 'remote.origin.fetch=+refs/heads/other:refs/heads/zz' fetch origin",
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.fetch GIT_CONFIG_VALUE_0='+refs/heads/other:refs/heads/yy' git fetch origin",
+    "V='+refs/heads/other:refs/heads/ww' git --config-env=remote.origin.fetch=V fetch origin",
+    "git -c remote.origin.fetch=+refs/heads/other:refs/heads/zz remote update",
+    'R=main:fetched; git fetch origin "$R"',
     "git diff --output={out}",
     "git diff --output {out}",
     'git diff "--output={out}"',
     'git diff --output"={out}"',
     "git log -p --output={out}",
     "git log --output {out}",
+    "git log --format --output={out}",
+    "git log --pretty --output {out}",
     "git show --output={out} HEAD",
     "git show HEAD --output {out}",
 ]
@@ -531,12 +669,21 @@ def test_foreach_really_runs_a_command_in_a_submodule_and_denies(sandbox):
     sandbox.g(
         sandbox.main, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "sm",
     )
-    marker = sandbox.box / "ran.txt"
-    cmd = f"git submodule foreach 'touch {marker}'"
-    sandbox.run(cmd)
-    assert marker.exists(), "foreach did not run the command"
+    for i, verb in enumerate(("submodule foreach", "submodule--helper foreach")):
+        marker = sandbox.box / f"ran{i}.txt"
+        cmd = f"git {verb} 'touch {marker}'"
+        sandbox.run(cmd)
+        assert marker.exists(), f"{verb} did not run the command"
+        for cwd in (sandbox.main, sandbox.wt):
+            assert _denied(cmd, cwd), f"{verb} was not denied in {cwd.name}"
+    # and the helper's `init` really writes the common config, as `submodule init` does
+    cfg = sandbox.main / ".git" / "config"
+    sandbox.g(sandbox.main, "config", "--remove-section", "submodule.sm")
+    before = cfg.read_text()
+    sandbox.run("git submodule--helper init")
+    assert cfg.read_text() != before, "submodule--helper init wrote nothing"
     for cwd in (sandbox.main, sandbox.wt):
-        assert _denied(cmd, cwd), f"foreach was not denied in {cwd.name}"
+        assert _denied("git submodule--helper init", cwd), f"helper init was not denied in {cwd.name}"
 
 
 def test_plain_fetch_writes_only_remote_tracking_refs_and_followed_tags_and_passes(sandbox):
@@ -569,11 +716,22 @@ _REAL_CONTROLS = [
     "git show HEAD",
     "git diff --output-indicator-new=+ --output-indicator-old=-",
     "git log -p --output-indicator-new=+",
+    # `git grep` has no --output; a value-taking option eats the word after it, so
+    # a `--output` there is data, not the file writer (measured, not assumed)
+    "git grep -n -e '--output'",
+    "git grep -n -- '--output'",
+    "git log -S '--output' --oneline",
+    "git log -S --output={out}",
+    "git log --grep '--output' --oneline",
+    "git log --grep --output={out}",
+    "git log --author --output={out}",
+    "git log -G '--output' --oneline",
 ]
 
 
 @pytest.mark.parametrize("cmd", _REAL_CONTROLS, ids=[c.replace(" ", "_")[:48] for c in _REAL_CONTROLS])
 def test_each_control_changes_nothing_and_passes(cmd, sandbox):
+    cmd = cmd.replace("{out}", str(sandbox.box / "out.txt"))
     before = sandbox.state()
     sandbox.run(cmd)
     assert sandbox.state() == before, f"control {cmd!r} changed the sandbox"
@@ -592,6 +750,15 @@ def test_git_really_takes_only_the_exact_output_spelling(sandbox):
     assert target.exists()
 
 
+def test_a_command_word_held_in_a_variable_is_a_documented_limit(sandbox):
+    """Known limit, pinned so closing it is deliberate: a whole-word variable that
+    holds the verb or an option (`V=tag; git $V v1`) is not read, as for every verb
+    of this guard. Only a fetch refspec word is read as opaque (above)."""
+    cmds = ["V=tag; git $V v1", 'V=tag; git "$V" v1', "F=-f; git branch $F topic HEAD~1"]
+    assert _denied_among(cmds, sandbox.main) == []
+    assert _denied_among(cmds, sandbox.wt) == []
+
+
 def test_the_deny_message_names_foreach_and_output_and_no_longer_lists_foreach_as_a_read(sandbox):
     foreach = _verdict("git submodule foreach 'echo hi'", sandbox.main)["permissionDecisionReason"]
     assert "submodule foreach" in foreach, foreach
@@ -602,3 +769,5 @@ def test_the_deny_message_names_foreach_and_output_and_no_longer_lists_foreach_a
     out = _verdict("git diff --output=/tmp/o", sandbox.wt)["permissionDecisionReason"]
     assert "--output" in out and "writes a file" in out, out
     assert "shares this config" not in out, out
+    assert "git's own file writer" in out and "redirection" in out, out
+    assert "redirect the output" not in out and "`>` into your scratch" not in out, out

@@ -880,8 +880,8 @@ _DENY_FAMILIES: dict[str, list[str]] = {
     "config_quoted_data_a_consumer_runs": [
         "ssh localhost 'git config user.name x'",
         'ssh localhost "git config user.name x"',
-        "git submodule foreach 'git config user.name x'",
-        "git submodule foreach --recursive \"git config core.hooksPath /tmp/x\"",
+        "ssh -T builder 'git config user.name x'",
+        "ssh builder \"git config core.hooksPath /tmp/x\"",
         "git rebase -x 'git config user.name x' HEAD~1",
         "tmux send-keys 'git config user.name x' Enter",
         "ssh localhost 'git con\"\"fig user.name x'",
@@ -941,9 +941,9 @@ _DENY_FAMILIES: dict[str, list[str]] = {
     "config_split_spelling_in_data_a_consumer_runs": [
         "git rebase -x 'g''it config user.name x' HEAD~1",
         "git filter-branch --tree-filter 'gi\"\"t config user.name x' HEAD~1..HEAD",
-        "git submodule foreach 'g''it config user.name x'",
-        "git submodule foreach 'gi\"\"t config user.name x'",
-        "git submodule foreach \"gi''t config user.name x\"",
+        "ssh builder 'g''it config user.name x'",
+        "ssh builder 'gi\"\"t config user.name x'",
+        "ssh builder \"gi''t config user.name x\"",
         "ssh localhost 'gi\"\"t config user.name x'",
         "ssh localhost <<'EOF'\ngi\"\"t config user.name x\nEOF",
         "ssh localhost \"" + D + "(cat <<'EOF'\ngi''t config user.name x\nEOF\n)\"",
@@ -981,7 +981,7 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         "ssh localhost 'git-config user.name x'",
         "ssh localhost <<'EOF'\ngit-config user.name x\nEOF",
         "bash <<'EOF'\ngit-config user.name x\nEOF",
-        "git submodule foreach 'git-config user.name x'",
+        "tmux send-keys 'git-config user.name x' Enter",
         "git rebase -x 'git-config user.name x' HEAD~1",
     ],
     # nexus-gvg6t confirm pass D1: `env -S` splits its argument into words and
@@ -1013,7 +1013,7 @@ _DENY_FAMILIES: dict[str, list[str]] = {
     # backslash both deny.
     "config_backslash_in_double_quoted_consumer_text": [
         'git rebase -x "git -' + BS + BS + 'C . config user.name x" HEAD~1',
-        'git submodule foreach "git -' + BS + BS + 'C . config user.name x"',
+        'ssh builder "git -' + BS + BS + 'C . config user.name x"',
         'ssh h "git -' + BS + BS + 'C . config user.name x"',
         'watch "git -' + BS + BS + 'C . config user.name x"',
         'git rebase -x "git -' + BS + 'C . config user.name x" HEAD~1',
@@ -1047,7 +1047,7 @@ _DENY_FAMILIES: dict[str, list[str]] = {
         'ssh h "gi' + BS + 't config user.name x"',
         'ssh h "g' + BS + BS + 'it config --global user.name x"',
         'tmux send-keys "gi' + BS + BS + 't config user.name x" Enter',
-        'git submodule foreach "gi' + BS + BS + 't config user.name x"',
+        'ssh builder "gi' + BS + BS + 't config user.name x"',
         'git rebase -x "gi' + BS + BS + 't config user.name x" HEAD~1',
         'watch "gi' + BS + BS + 't config user.name x"',
     ],
@@ -1811,7 +1811,7 @@ _SHARED_CONFIG_WRITES = [
     # A data string a consumer runs is held to the same rule.
     "git rebase -x 'g''it config user.name x' HEAD~1",
     "ssh localhost 'git config user.name x'",
-    "git submodule foreach 'git config --worktree core.hooksPath /tmp/x'",
+    "git rebase -x 'git config --worktree core.hooksPath /tmp/x' HEAD~1",
     # nexus-gvg6t confirm pass D1: `env -S` runs the words it splits.
     "env -S 'git config' user.name x",
     'env -S "git config" --local core.hooksPath /x',
@@ -1820,7 +1820,7 @@ _SHARED_CONFIG_WRITES = [
     # nexus-gvg6t confirm pass D2: a backslash in a double-quoted string a consumer
     # runs. The consumer's shell drops it, so the option letter after it counts.
     'git rebase -x "git -' + BS + BS + 'C . config user.name x" HEAD~1',
-    'git submodule foreach "git -' + BS + BS + 'C . config user.name x"',
+    'tmux send-keys "git -' + BS + BS + 'C . config user.name x" Enter',
     'ssh h "git -' + BS + BS + 'C . config user.name x"',
     'watch "git -' + BS + BS + 'C . config user.name x"',
     'git rebase -x "git -' + BS + 'C . config user.name x" HEAD~1',
@@ -2181,12 +2181,20 @@ def test_the_config_alias_through_a_variable_really_writes_and_denies(tmp_path):
 
 def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
     """nexus-gvg6t: quoted text is data to the shell that reads it, not to a
-    consumer that runs its argument. `git submodule foreach '<cmd>'` runs <cmd>
-    in each submodule, so a quoted `git config` writes the submodule's config for
-    real. The control, the same quoted text as an `echo` argument, writes nothing
-    and passes."""
+    consumer that runs its argument. `ssh host '<cmd>'` runs <cmd> (the stub below
+    hands it to `sh -c`, as the real one does on the far side), here in a
+    submodule's checkout, so a quoted `git config` writes that submodule's config
+    for real. The control, the same quoted text as an `echo` argument, writes
+    nothing and passes. The vehicle is ssh, not `git submodule foreach`: foreach
+    denies on its own now, so these rows would pass with the quoted-data config
+    rule switched off (the mutation check in the bead notes)."""
     box = tmp_path / "box"
     env = _sandbox_env(box)
+    stubs = box / "stubs"
+    stubs.mkdir(parents=True)
+    (stubs / "ssh").write_text('#!/bin/sh\nshift\nexec sh -c "$*"\n')
+    (stubs / "ssh").chmod(0o755)
+    env["PATH"] = f"{stubs}{os.pathsep}{env['PATH']}"
     sub = box / "sub"
     main = box / "main"
     for repo in (sub, main):
@@ -2200,23 +2208,20 @@ def test_a_quoted_command_a_consumer_runs_really_writes_and_denies(tmp_path):
         cwd=main, check=True, env=env, capture_output=True,
     )
     watched = [main / ".git" / "modules" / "s" / "config", main / ".git" / "config"]
-    control = "git submodule foreach 'echo git config user.name via-foreach'"
+    control = "ssh builder 'echo git config user.name via-ssh'"
     before = _config_snapshot(watched)
-    subprocess.run(["bash", "-c", control], cwd=main, env=env, check=True, capture_output=True)
+    subprocess.run(["bash", "-c", control], cwd=main / "s", env=env, check=True, capture_output=True)
     assert _config_snapshot(watched) == before, "the control wrote"
-    # `foreach` itself denies now (it runs any command), so the control's verdict
-    # is no longer a statement about the quoted text; what it proves is that the
-    # quoted text, run for real, wrote nothing
-    assert _denied(control.replace("echo git config user.name via-foreach", "echo ok"), main)
+    assert not _denied(control.replace("echo git config user.name via-ssh", "echo ok"), main)
     for cmd in (
-        "git submodule foreach 'git config user.name via-foreach'",
-        'git submodule foreach "git config core.hooksPath /tmp/hk"',
-        "git submodule foreach 'g''it config user.name via-split'",
-        "git submodule foreach 'gi\"\"t config user.name via-split2'",
-        "git submodule foreach \"gi''t config user.name via-split3\"",
+        "ssh builder 'git config user.name via-ssh'",
+        'ssh builder "git config core.hooksPath /tmp/hk"',
+        "ssh builder 'g''it config user.name via-split'",
+        "ssh builder 'gi\"\"t config user.name via-split2'",
+        "ssh builder \"gi''t config user.name via-split3\"",
     ):
         before = _config_snapshot(watched)
-        subprocess.run(["bash", "-c", cmd], cwd=main, env=env, check=True, capture_output=True)
+        subprocess.run(["bash", "-c", cmd], cwd=main / "s", env=env, check=True, capture_output=True)
         assert _config_snapshot(watched) != before, f"{cmd!r} did not write"
         assert _denied(cmd, main), cmd
 
@@ -2269,8 +2274,9 @@ def test_a_backslash_in_a_double_quoted_consumer_string_really_writes_and_denies
         ("watch " + dq.format(v="watch"), wt, common),
         ("git rebase -x " + one.format(v="rb1") + " HEAD~1", wt, common),
         ("ssh h " + one.format(v="ssh1"), wt, common),
-        ("git submodule foreach " + dq.format(v="sub"), main, sm_config),
-        ("git submodule foreach " + one.format(v="sub1"), main, sm_config),
+        # run in the submodule's checkout, they write the submodule's own config
+        ("ssh h " + dq.format(v="sub"), main / "s", sm_config),
+        ("ssh h " + one.format(v="sub1"), main / "s", sm_config),
     ]
     for cmd, where, watched in cases:
         before = _config_snapshot([watched])
@@ -2865,7 +2871,6 @@ _SIDEFX_PLAIN_WRAPPERS = [
 _SIDEFX_DATA_WRAPPERS = [
     "ssh h '{c}'",
     'ssh h "{c}"',
-    "git submodule foreach '{c}'",
     "git rebase -x '{c}' HEAD~1",
     "tmux send-keys '{c}' Enter",
     "env -S'{c}'",
