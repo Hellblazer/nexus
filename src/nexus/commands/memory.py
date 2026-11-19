@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import contextlib
+import os
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,7 +50,22 @@ def _mine(project: str | None, mine: bool, *, required: bool = False) -> str | N
         record = token_header.current()
         if record is None:
             raise click.ClickException("--mine needs an identity, and no identity is bound to this process")
-        return identity_project(record.identity)
+        owner = record.identity
+        if os.environ.get("NX_IDENTITY_TOKEN", "").strip():
+            # A delegated child (``claude -p``) keeps its notes where identity scratch keeps them: under its parent, so
+            # they do not orphan when the child ends.
+            from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415
+            from nexus.identity.scratch_scope import scope_owner  # noqa: PLC0415
+
+            try:
+                client = IdentityClient.from_config()
+                try:
+                    owner = scope_owner(client, identity=owner)
+                finally:
+                    client.close()
+            except (IdentityApiError, IdentityUnavailableError) as exc:
+                raise click.ClickException(f"--mine could not find this delegated identity's parent: {exc}") from exc
+        return identity_project(owner)
     if required and not project:
         raise click.UsageError("provide --project or --mine")
     return project

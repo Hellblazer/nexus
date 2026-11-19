@@ -11,6 +11,11 @@ from nexus.db.t1 import T1ServerNotFoundError, get_t1_database
 _SCOPE_META = "nx.scratch.scope"
 
 
+def _identity_scope() -> bool:
+    ctx = click.get_current_context(silent=True)
+    return ctx is not None and ctx.meta.get(_SCOPE_META) == "identity"
+
+
 def _clean_service_errors(fn):
     """Convert CALL-time T1 service errors into clean ClickExceptions.
 
@@ -81,7 +86,7 @@ def _t1():
     try:
         base = get_t1_database()
         ctx = click.get_current_context(silent=True)
-        if ctx is not None and ctx.meta.get(_SCOPE_META) == "identity":
+        if _identity_scope():
             from nexus.identity.scratch_scope import IdentityScopeError, identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
             try:
@@ -133,7 +138,7 @@ def put_cmd(content: str, tags: str, persist: bool, project: str, title: str) ->
 
     Use '-' as CONTENT to read from stdin.
     """
-    if persist and click.get_current_context().meta.get(_SCOPE_META) == "identity":
+    if persist and _identity_scope():
         raise click.UsageError("--persist flags an entry for the session-end flush, and identity scratch never ends with "
                                "a session; promote an entry with `nx scratch --scope identity promote ID -p PROJECT -t TITLE`")
     if content == "-":
@@ -223,6 +228,9 @@ def flag_cmd(entry_id: str, project: str, title: str) -> None:
     via ``_resolve_entry_id``, the same helper ``get`` uses, before reaching
     the backend — neither backend's ``flag`` does prefix fallback itself.
     """
+    if _identity_scope():
+        raise click.UsageError("flag marks an entry for the session-end flush, and identity scratch never ends with a session; "
+                               "copy it to T2 with `nx scratch --scope identity promote ID -p PROJECT -t TITLE`")
     t1 = _t1()
     full_id = _resolve_entry_id(t1, entry_id)
     try:
@@ -309,6 +317,10 @@ def clear_cmd(yes: bool) -> None:
     family): a preview naming the count (and how many are flagged) then
     ``click.confirm(..., abort=True)``, skippable with ``--yes``/``-y``.
     """
+    if _identity_scope():
+        raise click.UsageError("clear closes a session's scope, and the engine never closes the identity scope, so it would "
+                               "report success and delete nothing; delete identity scratch entries one by one with "
+                               "`nx scratch --scope identity delete ID`")
     t1 = _t1()
     if not yes:
         entries = t1.list_entries()

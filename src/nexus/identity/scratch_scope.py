@@ -57,16 +57,19 @@ def identity_scratch(base: Any = None, *, client: Any = None, identity: str | No
     token and endpoint, so the engine's token gate admits the call. *client* is the identity client that finds the
     delegated parent (built from the config when None, and closed afterwards)."""
     from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred: http store must not load on every CLI start
+    from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415
 
     owned = client is None
-    if owned:
-        from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415
-
-        client = IdentityClient.from_config()
     try:
-        owner = scope_owner(client, identity=identity)
-    finally:
         if owned:
+            client = IdentityClient.from_config()
+        owner = scope_owner(client, identity=identity)
+    except IdentityUnavailableError as exc:
+        raise IdentityScopeError(f"the identity engine is not answering, so the identity scratch cannot be reached ({exc})") from exc
+    except IdentityApiError as exc:
+        raise IdentityScopeError(f"the engine refused the identity lookup for identity scratch: {exc.code or exc.status}: {exc.message}") from exc
+    finally:
+        if owned and client is not None:
             client.close()
     if base is None:
         from nexus.db.t1 import get_t1_database  # noqa: PLC0415
@@ -74,4 +77,6 @@ def identity_scratch(base: Any = None, *, client: Any = None, identity: str | No
         base = get_t1_database()
     inner = getattr(base, "_store", base)               # the CLI-dedicated wrapper holds the real store
     token = getattr(inner, "_session_token", None)
-    return HttpScratchStore(session_id=scope_id(owner), _session_token=token or None)
+    # export_adopted_token=False: this store is not the process's own scope, so a token it adopts after a 401 must never
+    # replace the NX_T1_SESSION of the scope the process holds.
+    return HttpScratchStore(session_id=scope_id(owner), _session_token=token or None, export_adopted_token=False)
