@@ -70,10 +70,14 @@ RDR-204 moved `collection_content_type`, `collection_owner` and
 `src/nexus/corpus.py` was not moved: `embedding_model_for_collection` and its
 alias `index_model_for_collection`, `voyage_model_for_collection`,
 `embedding_model_for_collection_calibrated`, `default_projection_threshold`
-and `_legacy_content_type_for_collection` still parse the name. They are
-called from the paths that stamp `embedding_model` into every chunk's
-metadata on write, from the score calibration in `scoring.py`, and from the
-taxonomy projection thresholds. The owner segment is worse than stale: for
+and `_legacy_content_type_for_collection` still parse the name. `nx index
+repo` takes its code and docs target model from the name
+(`indexer.py:5408-5409`, `:5496-5498`), and the taxonomy projection
+thresholds take their content type from it. Since the draft, note writes,
+`nx index md`/`pdf` and score calibration read the row first, but each
+falls back to a name parse when the row read answers nothing
+(`embedding_model_row_preferred`, `doc_indexer.py:1600-1612`,
+`scoring.py:176-182`; T2 `229-research-20`). The owner segment is worse than stale: for
 repo collections the engine deliberately overwrites the row's `owner_id`
 with a tumbler-derived value that differs from the name (nexus-6pbwx), so a
 reader that takes the owner from the name reads a value the row has
@@ -85,14 +89,15 @@ RDR-204 Gap 4 replaced the `quarantine-` prefix with a `lifecycle_state`
 column for corpus resolution. The engine still infers `lifecycle_state` from
 the prefix when it registers a row, still guards quarantine operations by the
 prefix (`QuarantineOrigin.isQuarantineName`), routes reaper work by it, and
-two live SQL functions refuse or select by it. The client skips quarantine
-collections by a prefix tuple in five places. A collection's lifecycle is a
+two live SQL functions refuse or select by it (the Java reads it in 12
+places; T2 `229-research-22`, `-23`). The client skips quarantine collections by a
+prefix tuple in twelve places (T2 `229-research-21`). A collection's lifecycle is a
 column; the prefix is a second source of truth for it.
 
 #### Gap 3: New writes still have to have the conformant shape
 
 `get_or_create_collection` refuses a new non-conformant name
-(`src/nexus/db/t3.py:733-742`); `nx catalog rename-collection` refuses a
+(`src/nexus/db/t3.py:671-684`, T2 `229-research-18`); `nx catalog rename-collection` refuses a
 non-conformant target without `--allow-legacy`; the indexer reroutes any
 non-conformant collection to a rendered one; the client derives
 `legacy_grandfathered` and, when attributes are missing, all four attributes
@@ -110,7 +115,8 @@ and `CollectionParseGateTest` on the engine. The client gate matches four raw
 call shapes plus callers of three named primitives outside `corpus.py`; it
 does not see callers of the second-ring helpers, f-string prefix tests,
 substring owner matches, or `startswith` on a tuple variable. The engine gate
-counts Java string literals that contain `__`; it cannot see the
+counts Java string literals that contain `__` (it pins three, RDR-231's
+`NoteUri.FILE_ROUTED_PREFIXES`; T2 `229-research-17`); it cannot see the
 `quarantine-` prefix and does not scan SQL at all. Both gates are green while
 most of the surface in the census is unguarded.
 
@@ -131,8 +137,9 @@ point at that key or at the RDR-225 composite `(tenant_id, name,
 embedding_model)`. The name also sits inside two primary keys, the chunks
 table's `(tenant_id, collection, chash, embedding_model)` and
 `taxonomy_centroids`', and three more foreign keys reach the name through the
-chunks key (the manifest, `topic_assignments`, `chunk_orphaned_at`). Fifteen
-further columns in twelve tables hold a name with no foreign key at all. The
+chunks key (the manifest, `topic_assignments`, `chunk_orphaned_at`). Sixteen
+further columns in thirteen tables hold a name with no foreign key at all
+(T2 `229-research-27`). The
 RDR-227 per-collection index is built with the predicate `WHERE collection =
 '<name>'` and named from a hash that includes the name. So changing what a
 collection is called means rewriting every one of those rows and rebuilding
@@ -163,8 +170,8 @@ name, so these paths have to find the row by its attributes first.
 | RDR-176 (survivable managed migration) | Precedent, closed | Shipped nexus-zvcou (one config-first service URL and token chain for every storage command) as nexus-t9rmg.8. The bead asked to fold zvcou in or hard-depend on it; it is satisfied and carries no work here. |
 | RDR-204 (embedding profile; `catalog_collections` as the authority) | Origin, closed | Shipped most of nexus-j4gl6 steps 1 and 2. Rejected step 3 (opaque names) on 2026-09-09 with a reopen trigger. This RDR takes over its two census gates, repairs their blind spots, and finishes the reader move. It does not restate RDR-204's schema; it builds on it. |
 | RDR-210 (one local engine serves both embedders) | Adjacent, closed 2026-10-26 | Finds model siblings and its re-embed target by the row tuple `(content_type, owner_id)`, never by a name (its Gap 4 fix and its RDR-229 row). One name-based sibling matcher is left, `repo_identity.list_sibling_collections`, with no caller in `src`; P2.7 retires it. |
-| RDR-225 (one vector table per embedding model) | Adjacent, accepted and deployed | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`; the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
-| RDR-227 (per-collection HNSW above the router threshold) | Adjacent, deployed | Builds each per-collection index as a partial index `WHERE collection = '<name>'` and names it from a hash of model, tenant and name. Phase 3 rebuilds every such index on `collection_id`. |
+| RDR-225 (one vector table per embedding model) | Adjacent, closed 2026-10-22 (T2 `229-research-25`) | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`; the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
+| RDR-227 (per-collection HNSW above the router threshold) | Adjacent, closed 2026-10-12 (T2 `229-research-25`) | Builds each per-collection index as a partial index `WHERE collection = '<name>'` and names it from a hash of model, tenant and name. Phase 3 rebuilds every such index on `collection_id`. |
 
 Searched `docs/rdr/README.md` and the RDR tree for "collection name",
 "naming", "conformant", "opaque", "quarantine", "segment" and "sibling". No
@@ -177,13 +184,16 @@ sibling is found by the row tuple `(content_type, owner_id)` through the
 catalog list route's filters, never by rendering or matching a name. The old
 Open Question 6 (which lands first) is moot.
 
-**Sequencing with RDR-225.** No blocking dependency. RDR-225 is deployed
-(nexus-3wh8d, 29 of 31 beads closed; open are the 14-day drop of
-`chunks_retired_225` and its phase-review gate). Two ordering rules apply:
+**Sequencing with RDR-225.** No blocking dependency. RDR-225 is closed
+(2026-10-22; nexus-3wh8d and every bead under it are closed, including the
+14-day drop of `chunks_retired_225` and its phase-review gate; T2
+`229-research-25`). Two ordering rules apply:
 every changeset this RDR adds is ordered after `vectors-030` (and, for the
 Phase 3 key work, after the latest `vectors-` changeset on develop at the
-time), and a function
-`vectors-030` defines (for example `quarantine_restore_chunks`) is redefined
+time, `vectors-062` on 2026-11-19), and a function
+`vectors-030` or a later changeset defines (for example
+`quarantine_restore_chunks`, last defined in `vectors-053`; T2
+`229-research-23`) is redefined
 with its four-column write sites intact and stays under
 `PlpgsqlCheckGateTest`. The manifest's new `embedding_model` column
 (`vectors-030-model-tenant-partition-functions.xml` lines 786-791) lets Phase 2 rewrite `chash_conformance_report` without
@@ -231,12 +241,25 @@ order, with `<rollback>` blocks stripped, and then searched those bodies for
 `split_part(...'__'...)`, `string_to_array(...'__')` and the `quarantine-`
 prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 
+Every census was re-run on develop `020118bf7` (2026-11-19) as a script,
+each first calibrated on the tree its old record was measured on. The
+client second-ring walk and the SQL census reproduce their old counts
+exactly there. The raw-shape census is now a scripted AST walk over
+`src/nexus` and `scripts/` (f-string and constant prefix tests, substring
+owner matches, the legacy hash suffix, and the existing scanner's shapes
+over `scripts/`); on `2ad1f90c9` it finds 31 sites where the hand list had
+nine. The surrogate-key census was re-run as a static walk of the included
+changelogs on `1fcfaf57b` and `020118bf7` and diffed. Findings are
+registered in T2 `nexus_rdr/229-research-17` to `-31`; the records that
+still hold (`-9`, `-12`, `-13`) are noted in T2
+`nexus_rdr/229-refresh-2026-11-19`.
+
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| nexus engine (`service/src/main`) | Yes | No `__` literal remains; the `quarantine-` prefix is read in 11 places; three live SQL functions parse names. |
-| nexus client (`src/nexus`) | Yes | 46 sites under the existing census, 75 second-ring helper calls outside it, 9 raw shapes it cannot match. |
+| nexus engine (`service/src/main`) | Yes | Three `__` literals remain, RDR-231's `NoteUri.FILE_ROUTED_PREFIXES`, read as a content-type prefix test in two places; the `quarantine-` prefix is read in 12 places; three live SQL functions parse names (T2 `229-research-22`, `-23`). |
+| nexus client (`src/nexus`, `scripts/`) | Yes | 46 sites under the existing census, 89 second-ring helper calls outside it, 43 raw shapes it cannot match, 33 of them in `src/nexus` (T2 `229-research-19` to `-21`). |
 | Liquibase / PostgreSQL | N/A | No new library behaviour is relied on. |
 
 ### Key Discoveries
@@ -245,63 +268,82 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
   and 2, and Sam rejected its opaque-name phase on 2026-09-09 (commit
   `6d9e7d124`), with the reopen trigger "a field report of a mint-time name
   whose segments disagree with the row it registered". *Source: RDR-204 lines
-  754-763; T2 `229-research-1`.*
+  754-763; T2 `229-research-1`, re-verified in `229-research-17`.*
 - **✅ Verified** (source search) — Of the three essential sites the bead
   named, `_is_same_model_passthrough` is deleted (`3ccf25a48`), engine dim
   dispatch reads the registry, and the 4-segment guard is still live at
-  `src/nexus/db/t3.py:733-742`, with the rename gate at
-  `src/nexus/commands/catalog_cmds/collections.py:279`. *Source: T2
-  `229-research-2`.*
-- **✅ Verified** (source search) — **The parse-site census: 152 sites on five
-  surfaces.** This is the count the rest of this RDR cites.
-  1. *Client, inside the existing census* (46 sites, 19 files):
-     `collection_shape.py:190/193/197`; `commands/catalog.py:1249/1286/1465/
-     1628/1634/1662/1876/1877`; `commands/collection.py:704/860/861/947/
-     1199(x2)/1206/1235`; `db/http_vector_client.py:1109/1153/3212/5717`;
-     `db/t3.py:413/920/1405/1843`; `commands/index.py:115/1141/1150/2345`;
-     `catalog/chunk_quarantine.py:139/144`;
-     `commands/catalog_cmds/reconcile_stale.py:313/385`; and one each at
-     `catalog/orphan_backfill.py:371`, `catalog/owner_scope.py:39`,
-     `commands/catalog_cmds/doctor.py:1053`,
-     `commands/catalog_cmds/integrity.py:651`, `commands/doctor.py:1558`,
-     `commands/enrich.py:1207`, `commands/store.py:761`, `exporter.py:1450`,
-     `health.py:8916`, `mcp/core.py:3731`, `search_engine.py:660`.
-     *T2 `229-research-3`.*
-  2. *Client, second ring outside the census* (75 calls): see T2
-     `229-research-4` for the full list by helper. The decisive ones are
-     chunk metadata `embedding_model` taken from the name
-     (`db/http_vector_client.py:3211-3214`, `db/t3.py:919-921`,
-     `catalog/note_write.py:260`), the indexers' target model
-     (`doc_indexer.py:1753/2710`, `indexer.py:5288/5289/5513`), score
-     calibration (`scoring.py:124`, `catalog/store_hook.py:193`), taxonomy
-     thresholds by prefix (`commands/taxonomy_cmd.py:2715/2724/2935`,
-     `db/t2/http_taxonomy_store.py:2625`), and the next version computed by
-     parsing a name (`catalog/http_catalog_client.py:3299`).
-  3. *Client, raw shapes the census cannot match* (9 sites):
-     `corpus.py:1306` and `corpus.py:2489-2490` (f-string prefix tests),
-     `repo_identity.py:451-452` and `:455` (substring and hash-suffix sibling
-     match), `_BYPASS_SCHEMA_PREFIXES` prefix tests at `db/t3.py:151`,
-     `exporter.py:1393`, `commands/collection.py:697`,
+  `src/nexus/db/t3.py:671-684`, with the rename gate at
+  `src/nexus/commands/catalog_cmds/collections.py:287`. *Source: T2
+  `229-research-2`, lines updated in `229-research-18`.*
+- **✅ Verified** (source search, develop `020118bf7`, 2026-11-19) — **The
+  parse-site census: 203 sites on five surfaces** (152 on `2ad1f90c9`).
+  This is the count the rest of this RDR cites. *T2 `229-research-31`.*
+  1. *Client, inside the existing census* (46 sites, 20 files):
+     `collection_shape.py:190/193/197`; `commands/catalog.py:1481/1518/1721/
+     1925/1931/1960/2174/2175`; `commands/collection.py:790/970/971/1111/
+     1426(x2)/1433/1469`; `db/http_vector_client.py:1316/1360/7499`;
+     `db/t3.py:351/858/1347/1791`; `commands/index.py:134/1201/1210/2451`;
+     `catalog/chunk_quarantine.py:148/153`;
+     `commands/catalog_cmds/reconcile_stale.py:314/386`; and one each at
+     `catalog/http_catalog_client.py:4065`,
+     `catalog/orphan_backfill.py:390`, `catalog/owner_scope.py:39`,
+     `commands/catalog_cmds/doctor.py:1145`,
+     `commands/catalog_cmds/integrity.py:651`, `commands/doctor.py:1646`,
+     `commands/enrich.py:1768`, `commands/store.py:1045`, `exporter.py:1904`,
+     `health.py:11236`, `mcp/core.py:4300`, `search_engine.py:916`.
+     *T2 `229-research-19`.*
+  2. *Client, second ring outside the census* (89 calls): see T2
+     `229-research-20` for the count by helper. Since the draft, note
+     writes, the md/pdf indexer and score calibration read the row first and
+     parse the name only as a fallback (`catalog/note_write.py:281`,
+     `catalog/store_hook.py:197`, `doc_indexer.py:1600-1612`,
+     `scoring.py:176-182`). The decisive name-only reads left are
+     `T3Database.put`'s chunk metadata `embedding_model`
+     (`db/t3.py:857-860`, with no production caller found), `nx index
+     repo`'s target model (`indexer.py:5408-5409/5496-5498`) and registration
+     model (`indexer.py:5649-5650`), taxonomy thresholds by prefix
+     (`commands/taxonomy_cmd.py:2862/2871/3142`,
+     `db/t2/http_taxonomy_store.py:2667`), and the next version computed by
+     parsing a name (`catalog/http_catalog_client.py:3875`).
+  3. *Client, raw shapes the census cannot match* (43 sites: 33 in
+     `src/nexus`, 10 in `scripts/`). In `src/nexus`: `corpus.py:1429` and
+     `corpus.py:2736-2737` (f-string prefix tests), `repo_identity.py:471-472`
+     and `:475` (substring and hash-suffix sibling match), 12
+     `_BYPASS_SCHEMA_PREFIXES` prefix tests (`db/t3.py:91`,
+     `exporter.py:1847`, `commands/collection.py:783`,
      `commands/catalog_cmds/t3_orphans.py:89`,
-     `commands/catalog_cmds/integrity.py:550`, and one script,
-     `scripts/rdr-108-je0b-backfill.py:92`. *T2 `229-research-5`.*
-  4. *Engine Java, quarantine prefix* (11 sites):
-     `CatalogRepository.java:7983-7984` (new-row lifecycle in
-     `upsertCollection`), `:8375`, `:11261-11262`
-     (`lifecycleStateForImport`); `QuarantineOrigin.java:85/162` (the
-     predicate itself at `:73`); `VectorHandler.java:1854`;
-     `PgVectorRepository.java:5756/5772`; `ChunkReaper.java:278/828/830`.
-     Names are rendered with the prefix at `ChunkReaper.java:986` and
-     `PgVectorRepository.java:5817`. *T2 `229-research-6`.*
+     `commands/catalog_cmds/integrity.py:550`,
+     `commands/catalog_cmds/collections.py:70/591`,
+     `commands/catalog_cmds/doctor.py:438/651/768/911/1096`), 11
+     `FILE_ROUTED_PREFIXES` tests (`aspect_readers.py`, `aspect_worker.py`,
+     `catalog/recovery_bundle.py`, `commands/catalog_cmds/backfill.py`,
+     `exporter.py`), and six tests on other content-type prefix constants
+     (`aspect_extractor.py:1024/1039`, `scoring.py:532`, `health.py:12516`,
+     `commands/catalog_cmds/doctor.py:1570`,
+     `upgrade_ladder/rungs/note_tags_array.py:131`). In `scripts/`:
+     `rdr-108-je0b-backfill.py:92`, `upgrade_boot_seed.py:67/86`, and seven
+     in `bench/`, `experiments/` and `spikes/`. *T2 `229-research-21`.*
+  4. *Engine Java* (14 sites). The `quarantine-` prefix (12):
+     `CatalogRepository.java:9829-9830` (new-row lifecycle in
+     `upsertCollection`), `:10241`, `:13528-13529`
+     (`lifecycleStateForImport`); `QuarantineOrigin.java:85/162/171` (the
+     predicate itself at `:73`); `VectorHandler.java:2592`;
+     `PgVectorRepository.java:7419/7438`; `ChunkReaper.java:280/877/879`.
+     Names are rendered with the prefix at `ChunkReaper.java:1035` and
+     `PgVectorRepository.java:7549`. A content-type prefix (2):
+     `NoteUri.java:178` (`isFileRoutedCollection`, called at
+     `CatalogRepository.java:4399`) and `:194`, over
+     `FILE_ROUTED_PREFIXES` (`NoteUri.java:22`, RDR-231).
+     *T2 `229-research-22`.*
   5. *Live SQL* (11 expressions in three functions):
      `nexus.chash_conformance_report(dim)`,
-     `vectors-005-repoint-functions-views.xml:1193-1295`, nine
+     `vectors-005-repoint-functions-views.xml:1081-1183`, nine
      `split_part(collection, '__', 3)` model IN-lists;
      `nexus.quarantine_restore_chunks`,
-     `vectors-030-model-tenant-partition-functions.xml:2198`;
+     `vectors-053-quarantine-restore-chunk-keys-only.xml:122`;
      `nexus.reaper_expire_client_quarantine`,
-     `vectors-028-reaper-expire-client-quarantine.xml:107`. *T2
-     `229-research-7`.*
+     `vectors-056-gc-quarantine-expires-at.xml:404`. *T2
+     `229-research-23`.*
 
   The parsers these sites call are defined in `corpus.py`:
   `_CONFORMANT_COLLECTION_RE` (:153), `is_conformant_collection_name` (:161),
@@ -314,7 +356,8 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 - **✅ Verified** (source search) — `validate_collection_name`
   (`corpus.py:30-95`) still enforces ChromaDB's 63-character, charset and
   128-byte limits. No Postgres object is named from a collection name:
-  RDR-225 leaf names and PCI index names are hashes. *T2 `229-research-8`.*
+  RDR-225 leaf names and PCI index names are hashes. *T2 `229-research-8`,
+  re-verified in `229-research-24`.*
 - **✅ Verified** (source search) — For repo collections the row's
   `owner_id` is set from the documents' tumbler and differs from the name's
   owner segment by design (`catalog-044`, nexus-6pbwx). *T2
@@ -322,47 +365,74 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 - **✅ Verified** (source search) — RDR-225 writes each chunk's
   `embedding_model` from the registry row and keys the chunk foreign key on
   `(tenant_id, name, embedding_model)`; a rename stays inside its partition
-  when the model is unchanged. *T2 `229-research-10`.*
-- **✅ Verified** (source search) — RDR-210 finds siblings and its re-embed
-  target by name. *T2 `229-research-11`.*
+  when the model is unchanged. *T2 `229-research-10`, re-verified in
+  `229-research-25`.*
+- **✅ Verified** (source search) — RDR-210 (closed 2026-10-26) finds
+  siblings and its re-embed target by the row tuple `(content_type,
+  owner_id)`, never by a name. The name matcher
+  `repo_identity.list_sibling_collections` has no caller in `src/nexus`.
+  *T2 `229-research-26`, superseding `229-research-11`.*
 - **✅ Verified** (source search) — nexus-zvcou is closed, shipped under
   RDR-176 as nexus-t9rmg.8, label `verification:passed`. *T2
   `229-research-12`.*
 - **✅ Verified** (source search) — The recovery bundle format carries a
   collection's recorded name and no registry row, so its import must read the
-  name (`catalog/recovery_bundle.py:403-414`). `db/embed_migrate.py`, which
-  RDR-204's census listed as a holdout, no longer exists.
+  name (`catalog/recovery_bundle.py:582-593`; T2 `229-research-29`).
+  `db/embed_migrate.py`, which RDR-204's census listed as a holdout, no
+  longer exists.
 - **❓ Assumed** (needs a spike) — On every production tenant, every live
   row's `content_type` and `embedding_model` equal what its name parses to.
   RDR-204 measured zero disagreements for the model on 2026-09-06; nobody
   has measured since RDR-225's walk. *T2 `229-research-13`.*
-- **✅ Verified** (source search, develop `1fcfaf57b`, 2026-11-08) — **The
-  surrogate-key census.** Eight live foreign keys target the registry
+- **✅ Verified** (source search, develop `1fcfaf57b`, 2026-11-08;
+  re-run on `020118bf7`, 2026-11-19) — **The surrogate-key census.** Eight live foreign keys target the registry
   (`topic_assignments` fk-002:241 with an ON UPDATE CASCADE that never
   fires, `document_aspects`, `topics`, `taxonomy_meta`, `document_highlights`
   in fk-003, `chunks` vectors-030:1063 with no ON UPDATE, `canary_query_ring`
   vectors-054:90, and the conditional `aspect_extraction_queue`). The name is
   inside the chunks and centroid primary keys (vectors-030:677, :690), and
   three ON UPDATE CASCADE foreign keys reach it through the chunks key
-  (vectors-030:1018/1033/1048). Fifteen name columns in twelve tables have no
-  foreign key; four more carriers are not columns (quarantine
-  `origin_collection` metadata, quarantine sibling names, `nx-note://` source
-  URIs, aspect tasks in the tuple space). No partition key or leaf name holds
-  the name. *T2 `229-research-14`.*
+  (vectors-030:1018/1033/1048). Sixteen name columns in thirteen tables have
+  no foreign key (the one added since 2026-11-08 is
+  `catalog_reconcile_rows.physical_collection`, `catalog-048-reconcile.xml:103`,
+  a staging table reaped after 24 hours); four more carriers are not columns
+  (quarantine `origin_collection` metadata, quarantine sibling names,
+  `nx-note://` source URIs, aspect tasks in the tuple space). No partition
+  key or leaf name holds the name. *T2 `229-research-14`, re-run in
+  `229-research-27`.*
 - **✅ Verified** (source search) — `renameCollectionTxn`
-  (`CatalogRepository.java:11160-11492`) never updates a registry name in
+  (`CatalogRepository.java:11134-11484`) never updates a registry name in
   place; it inserts, rewrites fourteen tables, retags and tombstones. The
   RDR-227 per-collection index is keyed by name in its predicate
-  (`PciBuilderSession.java:103-105`) and its name hash
-  (`PciCatalog.java:415-439`). At least 123 of 345 engine routes carry a
-  collection name, always in the query string or body, never in the path.
-  *T2 `229-research-15`.*
+  (`PciBuilderSession.java:116-118`) and its name hash
+  (`PciCatalog.java:644-669`). At least 123 of 361 engine routes carry a
+  collection name, always in the query string or body, never in the path;
+  none of the routes added since 2026-11-08 carries one. *T2
+  `229-research-15`, re-run in `229-research-28`.*
 - **✅ Verified** (source search) — A knowledge subject resolves by name
-  rendering and probing (`corpus.py:1318-1527`); `nx index repo` parses the
-  version from a returned name (`http_catalog_client.py:3646`);
+  rendering and probing (`corpus.py:1336-1545`); `nx index repo` parses the
+  version from a returned name (`http_catalog_client.py:3875`);
   `collectionForTuple` breaks ties by name and filters on
-  `legacy_grandfathered`. Fifteen MCP tools, 48 CLI options and 30 positional
-  CLI arguments address collections by name. *T2 `229-research-16`.*
+  `legacy_grandfathered`. Fifteen MCP tools, 49 CLI options and 30 positional
+  CLI arguments address collections by name (the option added since
+  2026-11-08 is `nx catalog resolve --corpus`). *T2 `229-research-16`,
+  re-run in `229-research-29`.*
+- **✅ Verified** (measured on a local engine, chas, 2026-11-12) — Stamping
+  a new nullable bigint column (the stand-in for `collection_id`) on every
+  chunk row costs about 52 min and 24.6 GB of WAL per 1M rows; only 14.5%
+  of the updates are HOT, the HNSW graphs do not grow, and fill factor 90
+  does not pay for itself. Rewriting one collection's rows just before its
+  per-collection index is built costs about the same per row. One
+  per-collection index build costs 32-40 min and 52-63 GB of device writes
+  per 1M rows. No schema change since the run touches `nexus.chunks`, its
+  leaves or `taxonomy_centroids`. The run does not time the per-leaf
+  primary-key swap on a production tenant. *T2 `229-research-30`, citing
+  T2 `nexus/rdr247-measurement-backfill` and `nexus/rdr247-measurement-M4`.*
+- **✅ Verified** (source search) — Bead nexus-j4gl6 is closed (2026-11-10,
+  Sam's grooming walk: "folded into RDR-247 ... so index layout and
+  collection identity ... are designed together"); RDR-247 is deferred, and
+  RDR-246's data-move registry (`nexus.data_moves`) is on develop. *T2
+  `229-research-31`.*
 - **✅ Verified** (measured) — conexus shipped 36 releases between 2026-10-08
   and 2026-11-07 (`git tag`), so "a stated number of releases" (D4) is weeks,
   not months, at the current rate.
@@ -395,7 +465,9 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
   per-collection index fits in a maintenance window per tenant on the larger
   production tenant. — **Status**: Unverified — **Method**: Spike (P3.2, a
   timed run on a PITR fork of that tenant, before the changeset is written
-  in its final form).
+  in its final form). A local measurement bounds the backfill and the index
+  rebuild per 1M rows (T2 `229-research-30`); it does not time the key swap
+  on that tenant.
 - [ ] No two live rows of one tenant share a label once renames stop
   tombstoning, so the partial UNIQUE on live labels (Design item 6) can be
   created without data repair. — **Status**: Unverified, expected true (the
@@ -545,7 +617,8 @@ should say.
 
 **7. The label and what uniqueness it keeps.** The `name` column becomes
 the label: the string a person types and reads, and what the 15 MCP tools,
-the 48 CLI options and the 30 positional CLI arguments accept. It is no
+the 49 CLI options and the 30 positional CLI arguments accept (T2
+`229-research-29`). It is no
 longer a key. No foreign key targets it, no index is named from it, and no
 partition holds it. It keeps one uniqueness rule, for addressing only: **a
 label is unique among a tenant's live collections**, enforced by a partial
@@ -631,7 +704,8 @@ rename rewrites the schema's largest tables. Once those reference an id, a
 rename is one row and the label can be whatever a person finds useful,
 which is what Sam's opaque-id ruling needs. The census-first order follows
 RDR-204's method, which worked; the widened gates exist because RDR-204's
-gates reported done while 106 of the census's sites were outside them. The
+gates reported done while most of the census's sites were outside them (157
+of 203 on develop `020118bf7`; T2 `229-research-31`). The
 strangler order is Sam's own condition for reopening the phase ("with good
 planning/execution (strangler pattern, etc), this should not be an issue",
 2026-10-18).
@@ -815,7 +889,9 @@ its acceptance is that test green plus the census pin it lowers.
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
   `PgVectorRepository`; client `_BYPASS_SCHEMA_PREFIXES` reads the row.
-- P2.6 Changeset after `vectors-030`: `chash_conformance_report`,
+- P2.6 Changeset after `vectors-030` and after each function's last
+  definer (`vectors-005`, `vectors-053`, `vectors-056`; T2
+  `229-research-23`): `chash_conformance_report`,
   `quarantine_restore_chunks`, `reaper_expire_client_quarantine` read
   columns. Under `PlpgsqlCheckGateTest`.
 - P2.7 Retire `repo_identity.list_sibling_collections`' name matcher (no
@@ -861,7 +937,7 @@ its acceptance is that test green plus the census pin it lowers.
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
   indexer reroute are removed. Registration requires explicit attributes
-  (`http_catalog_client.py:3145-3151`). Stop writing
+  (`http_catalog_client.py:3709-3716`; T2 `229-research-29`). Stop writing
   `legacy_grandfathered`; drop the `for_tuple` filter on it.
 - P3.9 Recovery bundle format carries the registry row and `collection_id`;
   import re-maps ids and checks label clashes. The release that ships it
@@ -1005,7 +1081,7 @@ for 5).
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `GET /v1/catalog/collections/list` with `content_type` and `lifecycle_state` filters | nexus engine | Source Search (RDR-204 Phase 2) |
-| `GET /v1/catalog/collections/for_tuple` | nexus engine | Source Search (`CatalogRepository.java:10529`, `http_catalog_client.py:3612-3657`) |
+| `GET /v1/catalog/collections/for_tuple` | nexus engine | Source Search (`CatalogRepository.java:10500-10553`, `http_catalog_client.py:3845-3891`; T2 `229-research-29`) |
 | `catalog_document_chunks.embedding_model` | nexus schema | Source Search (`vectors-030` lines 786-791) |
 | `ALTER TABLE ... ADD CONSTRAINT ... NOT VALID` then `VALIDATE CONSTRAINT` on a partitioned referencing table | PostgreSQL 17 | Source Search (fk-002 and vectors-030 already use it on `nexus.chunks`) |
 
@@ -1050,7 +1126,10 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md`.
 - `docs/rdr/rdr-210-dual-mode-local-engine.md`, Gap 4.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-16`.
+- T2 `nexus_rdr/229-research-1` to `-31`, and
+  `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
+  superseded).
+- T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
 
 ## Revision History
 
@@ -1064,3 +1143,10 @@ large, and moved under a ratchet.
   Item O1 (proposed 20 minor releases);
   `legacy_grandfathered` dropped; the open questions became Decisions; new
   surrogate-key census (T2 `229-research-14` to `-16`).
+- 2026-11-19: Research refreshed on develop `020118bf7` (no design change):
+  every census re-run as a script; counts, site lists, file:line citations
+  and RDR statuses brought current (the census is 203 sites, was 152); the
+  local `collection_id` backfill measurement cited. T2 `229-research-17` to
+  `-31` added (`-17` to `-29` supersede `-1` to `-8`, `-10`, `-11` and `-14`
+  to `-16`; `-30` measurement; `-31` census total and bead state), with
+  `229-refresh-2026-11-19` recording that `-9`, `-12` and `-13` still hold.
