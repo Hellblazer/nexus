@@ -2338,6 +2338,31 @@ DISCOVER-AT-IMPLEMENTATION ones as beads at accept (ask
   P4.0, behind a boot floor (Contract, P4.0, Phase dependencies,
   Cross-Cutting; T2 `229-research-59`).
 
+The accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL)
+found these in those fixes, now resolved in the text:
+
+- P4.1's registry primary key swap and UNIQUE drop were not ordered after
+  the name keys that depend on them: the name-key drop move also drops
+  the queue's key, and the registry changeset drops before it swaps and
+  waits on the `catalog_collections` stamp move, the name-key drop move,
+  its own drop move and a check that no key references the name (item 6,
+  Contract, P4.1, Phase dependencies; T2 `229-research-61`).
+- `catalog_reconcile_commit` is a fifth URI-move path: P2.10 redefines it
+  (item 7, item 12, P2.10; T2 `229-research-62`).
+- Readers on the id from gate 3 while a rename still minted a new id: the
+  engine refuses a rename until the name-key drop move completes (item
+  6, P3.5a, P3.7, Versioning; T2 `229-research-63`).
+- P4.0's floor waited on restarts with no trigger: the check is re-read
+  in process, and the one restart the chain needs is asked for (item 6,
+  P3.7, P4.0, Test Plan; T2 `229-research-64`).
+- `backfill-source-uri` refused moved and repaired residue: P2.10 relaxes
+  its check to the residue's own segment (P2.10; T2 `229-research-65`).
+- P2.10's repair moves had no sizing owner: P2.10 sizes them (T2
+  `229-research-66`).
+- The repair's order across its three tables, its meeting with P3.1's
+  CHECK, `NoteUriMoveTest`, and seven wording rows (P2.10, P3.1, item 8,
+  item 12, P1.2, CA5, Prerequisites, Approach; T2 `229-research-67`).
+
 To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
 `nexus_rdr/229-gate-critique-2026-11-19-r3`), not resolved here:
 
@@ -2349,7 +2374,8 @@ To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
   contradicts gate 1; the text still reads so.
 - S-6, the downgrade boundary, which P3.1's CHECK places at P3.1, not
   after P3.3 as "Still open" below says.
-- S-7, the client's trust in an id from gate 3, with no engine signal.
+- S-7, the client's trust in an id, which now starts at the name-key
+  drop move's `completed_at`, with no engine signal.
 - S-8, a tombstone whose successor was deleted, which the stamp cannot
   give an id.
 
@@ -2409,8 +2435,13 @@ Items the round 3 residuals found now have one: the residue rule on every
 of residue on a prefix-free segment on every install (P1.2) and its repair
 (P2.10's moves), the drop of the name keys that refuse the one-row rename
 (P3.7's name-key drop move), and the retirement of the Java name path
-behind a boot floor (P4.0). The seven DISCOVER residuals, S-2 to S-8, go
-to beads at accept (Contradiction Check).
+behind a boot floor (P4.0). Items the accept-time fix check found now
+have one: the order of P4.1's registry drops (P4.1), the reconcile path
+(P2.10), the rename refused in the gate 3 window (P3.7), the in-process
+re-read of the check and P4.0's one restart (item 6, P4.0), the
+backfill verb (P2.10), the repair moves' sizing and order (P2.10), and
+the repair against P3.1's CHECK (P3.1). The seven DISCOVER residuals,
+S-2 to S-8, go to beads at accept (Contradiction Check).
 Still without one: P3.5b's plan measurement of each both-shapes reader
 has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
@@ -2509,7 +2540,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-60`, and
+- T2 `nexus_rdr/229-research-1` to `-68`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -2586,3 +2617,4 @@ large, and moved under a ratchet.
   `-54` added.
 - 2026-11-19: Gate round 3 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `2e06cb126e67`; critique `nexus_rdr/229-gate-critique-2026-11-19-r3`.
 - 2026-11-19: Round 3 residuals dispositioned (Sam, ask `baton/rdr229-accept-route`, option 1). Fixed: residual 1 `f0d64bc6a`, residual 2 `a59ef5325`, residual 3 `4ce3d0def` and `e9684ddca`, residual 4 `1d2e07f8d`, S-1 `bed7b07a7`, sweep `0947955d2`; S-2 to S-8 to beads at accept. Contradiction Check and Scope Verification regenerated. T2 `229-research-55` to `-60` added.
+- 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
