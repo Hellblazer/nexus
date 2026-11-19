@@ -112,6 +112,8 @@ accepts a `where` metadata filter (`src/nexus/mcp/core.py:3995`).
 
 #### Gap 2: A weak library match is never re-examined
 
+> **Under review (research finding 11).** A read-only probe of `plan_match` on HERB company questions, on both develop and the stock run's code, scores `entity-resolution` (plan 8) 0.50-0.54 and `hybrid-factual-lookup` (plan 10) 0.14-0.17, below the floor. The stock run still executed plan 10 on 51 of 55 declines, so a step between matching and execution chose it. The gap stands as "the routed plan was the wrong shape", but the mechanism below is not yet confirmed.
+
 Plan matching accepts any match at cosine confidence 0.40 or above
 (`_PLAN_MATCH_MIN_CONFIDENCE`, `src/nexus/mcp/core.py:10947`; hit test at
 `11154`). Above the floor the matched plan runs as is, whatever the question's
@@ -135,11 +137,26 @@ generated plan cannot use them.
 #### Gap 4: Outcomes do not feed back by question shape
 
 A non-answer is recorded as a failure against the matched plan
-(`src/nexus/mcp/core.py:16164`). The matcher skips a plan only when it has at
+(`src/nexus/mcp/core.py:16228`, `_nx_answer_record_complete(..., success=False)`; whether it increments the plan's failure counter is not yet read). The matcher skips a plan only when it has at
 least 3 failures and no successes (`_ALWAYS_FAILING_MIN_FAILURES`,
 `src/nexus/plans/matcher.py:142`; test at `173`). Plan 10 succeeds on most of
 its traffic, so a run of failures on one question shape never changes routing,
 and nothing proposes a different plan for that shape.
+
+#### Gap 5: The corpus has no filterable scope, and no plan step can scan
+
+Two facts found in research (findings 12 and 13). First, a note stored through
+`store_put` carries only `chunk_text_hash` and `embedding_model` as chunk
+metadata (`src/nexus/metadata_schema.py:270-291`). HERB's product lives only in
+the catalog `tags` array (`src/nexus/store_hook.py:836-866`), which neither
+`search(where=...)` nor catalog meta equality can match
+(`src/nexus/catalog/meta_filter.py:48-61` compares the list as a string). So a
+scope a profile could name is not something a filter can use until it is
+written as real metadata at ingest. Second, no plan step enumerates records
+without ranking. Operators take at most 100 items (`_OPERATOR_MAX_INPUTS`,
+`src/nexus/plans/runner.py:2159`), retrieval returns at most 300, and the one
+unranked, paged enumerator (catalog `GET /v1/catalog/docs/by-meta`, exact count,
+pages of 1000) is not dispatchable by the plan runner.
 
 ## Relationship to Prior RDRs
 
@@ -244,7 +261,7 @@ widens reading within the retrieved set, not retrieval itself.
 
 **Outcome recording and growth.** `_nx_answer_record_outcome`
 (`core.py:12664`) increments success or failure on the matched plan. A
-non-answer is a failure (`core.py:16164`). A successful inline plan is saved as
+non-answer is recorded with `success=False` (`core.py:16228`). A successful inline plan is saved as
 a grown plan with a TTL (`core.py:16291-16300`). `plan_save`
 (`core.py:8659`) requires a verb and an answer kind and strips the `grown`
 provenance tag from callers, so only the grow path can mark a plan grown.
@@ -274,6 +291,38 @@ provenance tag from callers, so only the grow path can mark a plan grown.
 - **Assumed**: a planner told the fields and the extra tools would write a
   filter-and-scan or filter-and-count plan. The pre-registered experiment
   (below) tests this.
+
+Research records (T2 `nexus_rdr/255-research-1` to `-14`, 2026-11-19):
+
+- **✅ Verified** (spike) — All 55 HERB declines are aggregate (max-bugs, 46 of 60) or prev-release (9 of 20) questions; the 50 "affected" questions never declined and score mean F1 58.7.
+  *Source: T2 `nexus_rdr/herb-full-pool-decline-shapes-2026-11-19` (255-research-1)*
+- **✅ Verified** (spike) — The declines are retrieval misses: depth-80 reach of gold keys is 0.21 declined against 0.86 answered, zero for 37 of 55; the top 10 are 94% own-product.
+  *Source: T2 `nexus_rdr/herb-full-pool-decline-recheck-2026-11-19` (255-research-2)*
+- **✅ Verified** (source search) — The stock run executed plan 10 on 51 of 55 declines; no inline plan was composed.
+  *Source: plan ids in the run's non-answer texts (255-research-3)*
+- **⚠️ Documented** (docs only) — AgenticScholar pairs a predefined plan library with dynamic DAG generation and a validator; per-dataset adaptation and aggregation handling are not described in what was read.
+  *Source: arXiv 2603.13774, abstract and secondary sources (255-research-4)*
+- **⚠️ Documented** (docs only) — LangChain's SelfQueryRetriever gives the model per-field descriptions and has it write the metadata filter: shipped precedent for Gap 1.
+  *Source: LangChain docs (255-research-5)*
+- **⚠️ Documented** (docs only) — Aggregation questions defeat top-k RAG (GlobalQA, best baseline 1.51 F1) and are answered by filter-then-aggregate pipelines (AGGBench, S-RAG).
+  *Source: arXiv 2510.26205, 2602.01355, 2511.08505, abstracts (255-research-6)*
+- **⚠️ Documented** (docs only) — Schema induction is automated in AutoSchemaKG (no cost figures, no approval step); Agent Workflow Memory learns workflows from successes; no precedent found for shape-keyed routing or feedback (Options B, D).
+  *Source: arXiv 2505.23628, 2409.07429 (255-research-7)*
+- **✅ Verified** (source search) — The tuple space already carries this kind of work: the aspect queue does idempotent posting, leased claims with renew, ack/nack, dead-letter after 6 attempts, durable tenant-isolated state and per-queue counts.
+  *Source: `aspects.yaml`, `http_aspect_queue.py`, `aspect_worker_tuples.py` (255-research-8)*
+- **✅ Verified** (source search) — Tuple-space limits for a profile job: 4,096-byte bodies, no fan-in, no job-level status, no claim-time spend cap, oldest-first claims, 10,000 live rows per template.
+  *Source: `TupleLimits.java`, `TupleRepository.java`, templates (255-research-9)*
+- **✅ Verified** (source search) — Taxonomy clustering cannot be tuple work (it fits the whole vector set); RDR-251 plans it on the memory-only `EngineJobs` registry.
+  *Source: `taxonomy_cmd.py`, `taxonomy_compute.py`, `EngineJobs.java` (255-research-10)*
+- **✅ Verified** (spike) — `plan_match` scores plan 8 at 0.50-0.54 and plan 10 at 0.14-0.17 on HERB questions on both code versions; why the run executed plan 10 is not yet identified (see the Gap 2 note).
+  *Source: scratchpad `rdr255-match-probe*.py` (255-research-11)*
+- **✅ Verified** (source search) — No plan step can scan: operators cap at 100 items, retrieval at 300, and the unranked catalog by-meta route is not dispatchable.
+  *Source: `runner.py:2159`, `db/limits.py:53`, `aspect_sql.py:72-80` (255-research-12)*
+- **✅ Verified** (source search) — HERB's product is not filterable metadata: note chunks carry only hash and model; tags live in the catalog and no filter matches them.
+  *Source: `metadata_schema.py:270-291`, `store_hook.py:836-866`, `meta_filter.py:48-61` (255-research-13)*
+- **✅ Verified** (source search) — The inline planner reads no per-collection context; a profile block fits at `_nx_answer_plan_miss` (core.py:13178, prompt 13241-13250), and `force_dynamic` is already a public argument.
+  *Source: `src/nexus/mcp/core.py` (255-research-14)*
+
 
 ### Critical Assumptions
 
@@ -565,6 +614,11 @@ Not run; this RDR is a draft.
    with the gate as its own RDR once a shape label exists?
 6. **The held Voyage arm.** Run it before this design is decided, since it
    separates the ranking question from the planning question?
+7. **Where the discovery job lives.** RDR-251 (draft) plans taxonomy discover
+   on the engine's in-memory job registry (`EngineJobs`, lost on restart);
+   Option E puts discovery on the tuple space. Research finding 10 suggests a
+   split: engine compute for clustering, tuples for stage fan-out and
+   lifecycle status. Choose, or split.
 
 ## References
 
@@ -584,4 +638,5 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: research findings 1-14 added; Gap 2 flagged under review; Gap 5 added; open question 7 (RDR-251 split).
 - 2026-11-19: Option E added (tuple space for discovery and lifecycle state; execution path excluded unless measured value justifies it, per Sam).
