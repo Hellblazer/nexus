@@ -567,8 +567,9 @@ the cause if any of these fail:
    0 when there is none, because `gate_record` writes no round field. Dates are
    day-granular and the round is optional, so when more than one record shares
    the newest date and round the worse verdict decides (`not-justified` over
-   `partial` over `justified`); the row's timestamp is not used, because a
-   re-put re-stamps a row and would let an edited older record pass. A terminal
+   `partial` over `justified`); the row's timestamp is not used to order records
+   within a day and round, because a re-put re-stamps a row and would let an
+   edited older record pass. A terminal
    `partial` is not a pass: it stops the run like `not-justified`, and a bead
    whose newest record is `partial` rolls up only with Sam's per-bead stamp,
    given with `--accept-open` (Sam 2026-11-19, T2
