@@ -88,14 +88,17 @@ reader that takes the owner from the name reads a value the row has
 overridden.
 
 Other sites read no attribute out of the name. They route behaviour by its
-content-type prefix: 17 client tests over six prefix constants
-(`FILE_ROUTED_PREFIXES`, `_DOCS_PREFIX`, `_QUALITY_ELIGIBLE_PREFIXES`,
-`_PDF_STUB_SCAN_PREFIXES`, `_VISIBLE_CHECK_PREFIX`,
-`_NOTE_COLLECTION_PREFIX`), the string-only `aspect_readers.is_note_uri`
-with four callers, and the engine's `NoteUri.isNote` and
-`isFileRoutedCollection` with four call sites (T2 `229-research-34`). A
-minted label carries no prefix, so a minted docs collection would lose its
-aspect extractor, its quality boost and its file-routed identity.
+content-type prefix. There are 23 client sites: tests against prefix
+constants, loops over prefix-keyed tables (`_REGISTRY`, `_PREFIX_TO_KEY`,
+`_PREFIX_CONTENT_TYPES`, `CHROMA_IDENTITY_FIELD`), a literal prefix tuple,
+and the shipped default taxonomy exclude pattern `"code__*"`. The
+`taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES` adds 12 more sites. The
+string-only `aspect_readers.is_note_uri` has four callers, and the engine's
+`NoteUri.isNote` and `isFileRoutedCollection` have four call sites (T2
+`229-research-34`, `229-research-39`). A minted label carries no prefix. A
+minted collection would therefore lose its aspect extractor, its quality
+boost, its search threshold and over-fetch, its chunk content type and its
+file-routed identity.
 
 #### Gap 2: Lifecycle state is still read from the `quarantine-` name prefix
 
@@ -371,8 +374,13 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      `exporter.py`), and six tests on other content-type prefix constants
      (`aspect_extractor.py:1024/1039`, `scoring.py:532`, `health.py:12516`,
      `commands/catalog_cmds/doctor.py:1570`,
-     `upgrade_ladder/rungs/note_tags_array.py:131`). These 17 route by
-     content type, the fourth caller class (item 1; T2 `229-research-34`).
+     `upgrade_ladder/rungs/note_tags_array.py:131`). The routing class
+     (item 1) is wider than these shapes. The routing census (T2
+     `229-research-39`) also scans loops over prefix tables, literal prefix
+     tuples, default glob patterns and client SQL. It finds 23 routing sites
+     plus the `taxonomy__` half of the 12 `_BYPASS_SCHEMA_PREFIXES` tests.
+     The three `FILE_ROUTED_PREFIXES` tests in `catalog/recovery_bundle.py`
+     are migration sources.
      In `scripts/`:
      `rdr-108-je0b-backfill.py:92`, `upgrade_boot_seed.py:67/86`, and seven
      in `bench/`, `experiments/` and `spikes/`. *T2 `229-research-21`.*
@@ -515,7 +523,7 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   **Method**: Source Search (the parse-site census: every extracted value is
   content type, owner, model, version or the quarantine prefix, each a
   column). The census also holds sites that extract nothing and route by the
-  content-type prefix (T2 `229-research-34`); the row carries what they
+  content-type prefix (T2 `229-research-34`, widened in `229-research-39`); the row carries what they
   need too (`content_type`), but they are not repointed by moving a parse,
   and the string-only ones need the collection's row looked up (item 12,
   P2.9).
@@ -589,9 +597,15 @@ source** (the name comes from another install or an older era: recovery
 bundle import, migrate-fallback, legacy-collection migration), or
 **diagnostic** (doctor, reconcile and shape checks whose purpose is to
 report a name that disagrees with its row). The fourth is **routing by
-content type**: a site that picks behaviour by the name's content-type
-prefix (T2 `229-research-34`). It never calls `legacy_names`. It reads the
-row's `content_type` instead (item 12), and the class is empty from P2.9 on.
+content type**: a site on this install that picks behaviour by the name's
+content-type prefix (T2 `229-research-39`). A site that classifies a name
+from another install, such as a recovery-bundle entry, is a migration
+source, not this class. So this class never calls `legacy_names`. It reads
+the row's `content_type` instead (item 12), and the class is empty from
+P2.9 on. A user-configured name pattern (`fnmatch` over
+`aspects.docs_collections` or the taxonomy exclude list) names labels. It
+is not prefix routing and keeps matching the label. Only a shipped default
+that is itself a prefix pattern (`"code__*"`) is routing.
 Any other site is a defect the census refuses. RDR-204's
 four dispositions (a) to (d) map onto the first three; its class (b),
 write-model resolution, becomes a row read and leaves the list.
@@ -623,7 +637,14 @@ gates are widened and re-pinned at the measured count:
   parser definitions, not typed as a list. New shapes: f-string `startswith`
   / `endswith` whose literal part ends in `__`, `startswith` on a module
   constant that holds a collection prefix, and `"__<x>__" in name`
-  substring tests. Calls inside `legacy_names` are the floor.
+  substring tests. Calls inside `legacy_names` are the floor. For the
+  routing class it also matches every shape the routing census scans (T2
+  `229-research-39`): `startswith` on a literal prefix tuple, and on a name
+  bound by a loop or comprehension over a prefix constant, a prefix-keyed
+  dict or its `.items()`/`.keys()`. It also matches a default glob string
+  `<type>__*`, client SQL text with `starts_with(..., '<type>__')`, `LIKE
+  '<type>...'` or `split_part(..., '__', ...)`, and every `fnmatch` call,
+  each labelled as a label pattern, a file path or routing.
 - Engine: the Java gate also counts the `quarantine-` literal outside the
   one constant that renders it. A new SQL gate resolves each live plpgsql
   function to its last definer, as the research census did, and pins the
@@ -769,8 +790,9 @@ The label rule replaces ChromaDB's limits in `validate_collection_name`:
 non-empty, valid UTF-8 without control characters, at most 255 bytes, and
 not of the minted form (item 8) unless the engine minted it, so a user
 cannot claim a label that a later mint would produce. The rule may drop the
-conformant shape only because no reader routes by the label's prefix after
-P2.9 (item 12); P3.6 waits for it.
+conformant shape only because, after P2.9, no site in the widened routing
+census (item 4, P1.1) routes by the label's prefix (item 12). P3.6 waits
+for it.
 
 A rename becomes `UPDATE catalog_collections SET name = <new>` on one row.
 `renameCollectionTxn` stops inserting, rewriting fourteen tables and
@@ -797,8 +819,10 @@ path that renders a conformant name for a new collection
 (`CollectionName.render`, `t3_collection_name`'s write branch, the
 indexer's reroute, `collection_for_repo`'s client-side render) stops doing
 so and registers by attributes. Existing collections keep their names as
-labels. Minting waits for P2.9, so no reader routes a minted collection by
-a prefix it does not have (item 12).
+labels. Minting waits for P2.9 and P3.9. P2.9 empties the routing class
+that the widened census measures. P3.9 gives the recovery-bundle sites the
+bundle's row in place of the recorded name. After both, no site on this
+install routes a minted collection by a prefix it does not have (item 12).
 
 **9. The non-stranding rule.** Phase 2 may repoint a reader only after every
 migration source it serves has a test that runs a row-less legacy name
@@ -838,22 +862,41 @@ same attributes as any other). Phase 4 drops the column and
 **12. Routing by content type reads the row (closes the fourth class).**
 No name parsing comes back for these sites. Each prefix test becomes a test
 of the row's `content_type`, read through the source its caller already
-has (T2 `229-research-34`):
+has. The routing class is 23 sites plus the `taxonomy__` half of the 12
+`_BYPASS_SCHEMA_PREFIXES` tests, 35 tests in all (T2 `229-research-34`,
+`229-research-39`):
 
 - *Listing rows in hand.* `health.py:12516` and
   `commands/catalog_cmds/doctor.py:1570` filter `t3.list_collections()`
   rows, which already carry `content_type`; they read it from the row.
-- *A collection name on this install.* `aspect_readers.uri_for`,
-  `aspect_worker._attributed` and `_is_unattributable`,
-  `exporter._stamp_note_keys`, `commands/catalog_cmds/backfill.py`,
-  `aspect_extractor.docs_collection_opted_in` and
-  `extraction_applies_to_source`, `scoring.apply_quality_boost` and the
-  `note_tags_array` rung read the client row cache
-  (`mcp_infra.get_collection_row`). `exporter.import_collection` reads
-  through its `db`'s own row resolver.
+- *A collection name on this install.* These read the client row cache
+  (`mcp_infra.get_collection_row`): `aspect_readers.uri_for`,
+  `_identity_fields_for` and `_legacy_identity_fields_for` (`:254`, `:427`,
+  `:440`); `aspect_worker._attributed` and `_is_unattributable`;
+  `exporter._stamp_note_keys`; `commands/catalog_cmds/backfill.py:98/103`;
+  `aspect_extractor.docs_collection_opted_in`, `extraction_applies_to_source`
+  and `select_config` (`:1024`, `:1039`, `:1041`, `:1073`);
+  `scoring.apply_quality_boost`; `search_engine._threshold_for_collection`
+  and `_overfetch_multiplier` (`:802`, `:906`);
+  `metadata_schema.chunk_content_type_for_collection` (`:187`);
+  `catalog/manifest_backfill.py:865`; `commands/taxonomy_cmd.py:95`; and
+  the `note_tags_array` rung. `exporter.import_collection` reads through its
+  `db`'s own row resolver.
+- *The `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`.* P2.5 moves the
+  `quarantine-` half to `lifecycle_state`. P2.9 moves the `taxonomy__` half
+  at the same 12 sites to the row. No writer in `src/nexus` creates a
+  `taxonomy__` collection, so the half only ever meets legacy names (T2
+  `229-research-39`).
+- *The shipped default exclude pattern.* `config.py:1391`
+  (`"local_exclude_collections": ["code__*"]`) excludes code collections
+  from local-mode taxonomy by name. P2.9 replaces that default with a
+  content-type rule. User patterns in the same list stay label patterns.
+- *Docs opt-in patterns.* `docs_collection_opted_in` keeps matching
+  `aspects.docs_collections` patterns against the label through `fnmatch`,
+  because a user's patterns name labels. Only its `_DOCS_PREFIX` gate
+  (`:1024`) moves to the row.
 - *A URI only.* The client's `aspect_readers.is_note_uri` (callers
-  `exporter.py:927`, `catalog/recovery_bundle.py:101`,
-  `commands/catalog_cmds/reconcile_stale.py:380`,
+  `exporter.py:927`, `commands/catalog_cmds/reconcile_stale.py:380`,
   `db/serving_engine_version.py:149`) resolves the URI's collection segment
   through the row cache. The engine's `NoteUri.isNote` and
   `isFileRoutedCollection` take the content type from
@@ -865,9 +908,11 @@ has (T2 `229-research-34`):
   backfill predicate, gains each case's content type as an input beside the
   URI.
 - *A bundle entry from another install.* `catalog/recovery_bundle.py:92,
-  121, 212` read a name that may have no row here. They are migration
-  sources: the row from the bundle once P3.9 ships, `legacy_names` before
-  that, under the non-stranding rule (item 9).
+  121, 212`, and its `is_note_uri` call at `:101`, read a name that may
+  have no row here. They are migration sources, not routing: they read the
+  row from the bundle once P3.9 ships, and `legacy_names` before that,
+  under the non-stranding rule (item 9). Minting therefore waits for P3.9
+  (item 8).
 
 What happens when a URI's collection has no row (a deleted collection's
 leftover note) is decided in P2.9 and pinned by the corpus. Inferred, not
@@ -1070,8 +1115,9 @@ its acceptance is that test green plus the census pin it lowers.
 **Phase 1: the census and the measurement**
 
 - P1.1 Widen the client census (new shapes, derived helper set, class label
-  per site) and re-pin at the measured count. First live run pasted into the
-  bead.
+  per site) and re-pin at the measured count. The shapes include every shape
+  of the routing census (item 4; T2 `229-research-39`), so the routing
+  class is measured, not listed. First live run pasted into the bead.
 - P1.2 Read-only census on both production tenants: per live row, row versus
   name for content type, model, version and lifecycle; owner differences
   counted separately as expected; live labels that would clash under a
@@ -1110,7 +1156,9 @@ its acceptance is that test green plus the census pin it lowers.
 - P2.4 Score calibration and taxonomy thresholds from the row.
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
-  `PgVectorRepository`; client `_BYPASS_SCHEMA_PREFIXES` reads the row.
+  `PgVectorRepository`; the `quarantine-` half of the client's
+  `_BYPASS_SCHEMA_PREFIXES` tests reads `lifecycle_state` (the `taxonomy__`
+  half is P2.9's).
 - P2.6 Changeset after `vectors-030` and after each function's last
   definer (`vectors-005`, `vectors-053`, `vectors-056`; T2
   `229-research-23`): `chash_conformance_report`,
@@ -1124,14 +1172,23 @@ its acceptance is that test green plus the census pin it lowers.
   `collection_for_repo` uses the returned row instead of rendering. Test: a
   knowledge collection whose label is not of the conformant shape is found
   by its subject.
-- P2.9 Routing by content type reads the row (item 12): the 17 client
-  prefix tests, `aspect_readers.is_note_uri`, and the engine's
-  `NoteUri.isNote` and `isFileRoutedCollection` with their shared
-  `note-uri-corpus.json`, which gains each case's content type. The census's
-  routing class falls to zero. Test: a docs collection whose label carries
-  no prefix (a fixture `c<digits>` label) still gets its aspect extractor,
-  its quality boost and its file-routed identity, on the client and in the
-  engine's stale-note repair. Blocks P3.6 and P3.8.
+- P2.9 Routing by content type reads the row (item 12): the 23 routing
+  sites and the `taxonomy__` half of the 12 `_BYPASS_SCHEMA_PREFIXES` tests
+  (T2 `229-research-39`, listed in item 12), the shipped `"code__*"` exclude
+  default, `aspect_readers.is_note_uri`, and the engine's `NoteUri.isNote`
+  and `isFileRoutedCollection` with their shared `note-uri-corpus.json`,
+  which gains each case's content type. The recovery-bundle sites are
+  migration sources and wait for P3.9. P1.1's widened census measures the
+  routing class at zero. Test, for each content type the routers key on
+  (docs, knowledge, rdr, code), with a fixture `c<digits>` label that
+  carries no prefix: a docs collection still gets its aspect extractor when
+  opted in, its quality boost and its file-routed identity; a knowledge
+  collection still gets its base extractor, quality boost and note
+  identity; an rdr collection its frontmatter extractor and file-routed
+  identity; a code collection its search threshold and over-fetch, its
+  chunk content type and the local-mode taxonomy exclusion. On the engine,
+  the stale-note repair still tells file residue from notes. Blocks P3.6 and
+  P3.8.
 - P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6 and P2.9; client
   floor bumps in the release that ships P2.3 onward.
 
@@ -1186,7 +1243,7 @@ its acceptance is that test green plus the census pin it lowers.
   rewritten. Test: a rename leaves chunk, manifest and taxonomy rows
   untouched and the per-collection index in place, and a task queued before
   the rename names the new label.
-- P3.8 Minting (item 8), after P2.9 and P3.6: the engine mints `c<id>` when no label is given;
+- P3.8 Minting (item 8), after P2.9, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
   indexer reroute are removed. Registration requires explicit attributes
@@ -1215,8 +1272,8 @@ its acceptance is that test green plus the census pin it lowers.
   row's label can be reused by a new live collection.
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
 - P4.3 Delete every parser outside `legacy_names`; both census gates fall to
-  the migration-source and diagnostic floor (the routing class is already
-  zero from P2.9).
+  the migration-source and diagnostic floor. The routing class has been
+  zero since P2.9, as P1.1's widened census measures it.
 - P4.4 At minor release N+1 after P3.9 (Open Item O1): old bundles refused with the
   re-export message naming the last version that imports them;
   `legacy_names` loses its bundle callers.
@@ -1226,8 +1283,9 @@ its acceptance is that test green plus the census pin it lowers.
 
 P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 2 and for RDR-246's activation (Prerequisites). P3.2 blocks P3.3 and P3.4. P3.3 blocks P3.5 and P3.7. P3.7 also waits
-for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9 and P3.6, which
-enforces the reserved minted form; P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
+for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P3.6 (which
+enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
+item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
 production tenants; P4.4 waits for its release count.
 
 ### Day 2 Operations
@@ -1256,11 +1314,13 @@ None.
 - **Scenario**: a recovery bundle recorded under a legacy two-segment and a
   four-segment name is restored after each Phase 2 and Phase 3 bead —
   **Verify**: it restores with the same attributes as before.
-- **Scenario**: a docs collection with a minted, prefix-free label is
-  indexed, searched and repaired after P2.9 — **Verify**: its aspect
-  extractor runs, the quality boost applies, its file URIs keep their
-  file-routed identity on the client, and the engine's stale-note repair
-  does not class its file residue as notes.
+- **Scenario**: a docs, a knowledge, an rdr and a code collection, each
+  with a minted, prefix-free label, are indexed, searched and repaired
+  after P2.9 — **Verify**: each gets the behaviour its content type routes
+  to (P2.9's list: extractor, quality boost, search threshold and
+  over-fetch, chunk content type, taxonomy exclusion, file-routed or note
+  identity), and the engine's stale-note repair does not class file
+  residue as notes.
 - **Scenario**: a new raw parse site of each shape is added to a fixture
   file — **Verify**: the client census fails, naming the shape.
 - **Scenario**: `chash_conformance_report` before and after the rewrite on
