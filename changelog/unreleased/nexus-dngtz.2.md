@@ -1,3 +1,0 @@
-### Added
-
-- **`nx doctor --probe-edge` reports what the path does to `X-Correlation-ID`** (RDR-167 Phase 2). The probe's keyed no-op POST now carries a known correlation id, and a second row names one of four outcomes from the engine's echo: pass-through, inbound strip (the engine generated its own `nxe-` id), overwrite, or response strip (no echo, which an engine without Phase 1 also gives). A missing echo counts as a response strip only on the engine's own 200, never on an error answer an edge or gateway may have sent, and the row never changes the probe's exit code (nexus-dngtz.2).

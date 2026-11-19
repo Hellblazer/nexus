@@ -1,3 +1,0 @@
-### Fixed
-
-- **`/clear` hands the new session to the MCP server on a macOS framework Python.** On an install whose interpreter is a framework build (Homebrew `python@3.x`, the python.org installer), the MCP server runs as `.../Python.app/Contents/MacOS/Python`, and the hook's process matcher only recognised a lowercase `python`. It found no server, so `/clear` wrote no handoff marker, the server stayed on the old session id, and the first scratch write after the `/clear` failed with `t1_explicit_session_no_usable_lease`. The match is now case-insensitive, and a `/clear` that finds no MCP server logs `t1_handoff_no_mcp_server_found` instead of returning silently. Installs on uv-managed Python were not affected.
