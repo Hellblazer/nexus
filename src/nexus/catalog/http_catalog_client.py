@@ -285,6 +285,7 @@ STUB_METADATA_TIMED_OUT = object()
 #: the engine's per-collection ``timed_out`` rows arrive instead of a client-side timeout, and under the public edge's
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
+from nexus.catalog.doc_route_wire import read_docs_by_scheme
 from nexus.catalog.doctor_route_wire import (  # noqa: F401 — the constants are re-exported: callers import them here
     INDEX_RUN_CENSUS_MAX_LIMIT,
     INDEX_RUN_CENSUS_RULES_DIFFER,
@@ -1289,6 +1290,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """The owners whose ``next_seq`` trails their highest child (``GET /v1/catalog/owners/next_seq_drift``, engine
         0.1.189): see :func:`nexus.catalog.doctor_route_wire.read_next_seq_drift`. ``None`` is "cannot say"."""
         return read_next_seq_drift(self._get, self._version_flags(), limit)
+
+    def documents_by_scheme(self, scheme: str) -> list[CatalogEntry] | None:
+        """Every live document whose ``urlparse(source_uri).scheme`` is *scheme* lowercased (``GET /docs/by-scheme``,
+        nexus-uwggq.1.5), all pages, in tumbler order: see :func:`nexus.catalog.doc_route_wire.read_docs_by_scheme`.
+        ``None`` when the engine lacks the route (no request is sent); an error or a malformed body raises."""
+        rows = read_docs_by_scheme(self._get, self._version_flags(), scheme)
+        return None if rows is None else [_to_entry(d) for d in rows if d.get("tumbler")]
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

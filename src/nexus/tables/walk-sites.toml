@@ -19,8 +19,8 @@
 #   calls   how many all_documents calls the function holds (the scan counts ast.Call nodes
 #           whose callee is an attribute or a name `all_documents`; enumerate_all_documents is
 #           another name and is not counted).
-#   reason  one sentence: what the function does with the rows. The four wrappers
-#           (enumerate_all_documents, _all_entries, _entries_of_type, reference_only_candidates)
+#   reason  one sentence: what the function does with the rows. The three wrappers
+#           (enumerate_all_documents, _all_entries, _entries_of_type)
 #           are ordinary rows and name their callers here, because a new caller of a wrapper
 #           escapes the scan.
 #   next    optional: the bead that removes or lowers the row.
@@ -54,7 +54,6 @@ domain = [
   "commands/catalog_cmds/remediation.py::prune_stale_cmd",
   "commands/catalog_cmds/remediation.py::remediate_paths_cmd",
   "commands/catalog_cmds/sensitivity.py::_targets",
-  "doctor_references.py::reference_only_candidates",
   "mcp/catalog.py::catalog_list",
   "mcp/catalog.py::catalog_search",
   "operators/sensitive_paths.py::file_tool_restriction",
@@ -136,11 +135,6 @@ emit = { class = "BULK JOB", calls = 1, reason = "Resolves the path of each row;
 id = "commands/catalog_cmds/sensitivity.py::_targets"
 match = { site = "commands/catalog_cmds/sensitivity.py::_targets" }
 emit = { class = "BULK JOB", calls = 1, reason = "Serves nx catalog sensitive with no tumbler, --collection or --owner; stays." }
-
-[[row]]
-id = "doctor_references.py::reference_only_candidates"
-match = { site = "doctor_references.py::reference_only_candidates" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants the non-file:// rows; the wrapper's one caller is run_check_references (doctor_references.py:288), and Phase 2 reads registered schemes, in any case, through the scheme-prefix route.", next = "nexus-uwggq.1.5" }
 
 [[row]]
 id = "mcp/catalog.py::catalog_list"

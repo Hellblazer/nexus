@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -80,6 +81,7 @@ from nexus.aspect_readers import (
     HTTPS_STAT_RETRY_DELAYS_S,
     HTTPS_STAT_TIMEOUT_S,
     StalenessSignal,
+    registered_stat_schemes,
     staleness_signal,
     stat_source,
 )
@@ -147,21 +149,48 @@ def is_reference_only(source_uri: str) -> bool:
     """
     if not source_uri:
         return False
-    scheme = urlparse(source_uri).scheme
+    scheme = _scheme_of(source_uri)
     return bool(scheme) and scheme != "file"
 
 
-def reference_only_candidates(cat: Any) -> list[Any]:
-    """Every live (non-alias) reference-only ``CatalogEntry`` in *cat*.
+#: The scheme's lexical form, as the engine's by-scheme route matches it (``CatalogDocReads.SCHEME_GRAMMAR``).
+_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
 
-    Walks the full catalog (``all_documents(limit=0)``, the same unbounded-
-    but-paged pattern ``nx catalog reconcile-stale`` uses) — a metadata-only
-    read, not the expensive part of this check.
+
+def _scheme_of(source_uri: str) -> str:
+    """``urlparse(source_uri).scheme``. Where ``urlparse`` raises ``ValueError`` (an invalid bracketed host, an
+    NFKC-invalid netloc) the engine's by-scheme route still answers the row, so the scheme is read lexically
+    instead, as the route does (leading controls and spaces dropped, lowercased), and ``stat_one`` reports the
+    row as not stattable rather than aborting the check (nexus-uwggq.1.5)."""
+    try:
+        return urlparse(source_uri).scheme
+    except ValueError:
+        m = _SCHEME_RE.match(source_uri.lstrip("".join(map(chr, range(0x01, 0x21)))))
+        return m.group(1).lower() if m else ""
+
+
+def reference_only_candidates(cat: Any) -> list[Any] | None:
+    """Every live (non-alias) ``CatalogEntry`` in *cat* whose scheme a reader can stat, ``file`` excepted.
+
+    One engine read per registered non-``file`` scheme (``cat.documents_by_scheme``, ``GET
+    /v1/catalog/docs/by-scheme``, RDR-241 Phase 2), never a walk of the catalog. The route keeps a row iff
+    ``urlparse(source_uri).scheme`` equals the scheme lowercased, so ``HTTPS://...`` is read as ``https``, as the
+    walk did (Sam 2026-11-16, ask uwggq15-scheme-case option C); a row whose scheme no reader can stat
+    (``chroma://``, a Windows drive path) is not read, since it could only ever report "unknown". Rows come back
+    sorted by tumbler text, the order the walk listed them in.
+
+    ``None`` when the engine lacks the route: the caller reports the check not checked, and nothing walks in its
+    place (RDR-241).
     """
-    return [
-        e for e in cat.all_documents(limit=0)
-        if not e.alias_of and is_reference_only(e.source_uri)
-    ]
+    out: list[Any] = []
+    for scheme in registered_stat_schemes():
+        if scheme == "file":
+            continue
+        rows = cat.documents_by_scheme(scheme)
+        if rows is None:
+            return None
+        out.extend(e for e in rows if not e.alias_of)
+    return sorted(out, key=lambda e: str(e.tumbler))
 
 
 def sample_candidates(candidates: list[Any], sample: int, seed: int) -> list[Any]:
@@ -174,7 +203,7 @@ def sample_candidates(candidates: list[Any], sample: int, seed: int) -> list[Any
 
 def stat_one(entry: Any, *, http_client: Any) -> ReferenceCheckResult:
     """Stat one catalog entry's ``source_uri`` and classify its staleness."""
-    scheme = urlparse(entry.source_uri).scheme
+    scheme = _scheme_of(entry.source_uri)
     meta = entry.meta or {}
     recorded_etag = meta.get(HTTPS_ETAG_META_KEY, "") if scheme == "https" else None
     try:
@@ -290,6 +319,12 @@ def run_check_references(*, sample: int, seed: int | None) -> None:
         click.echo(f"[✗] Reference staleness: catalog UNREADABLE ({type(exc).__name__}: {exc})")
         raise SystemExit(1) from exc
 
+    if candidates is None:
+        click.echo(
+            "[ ] Reference staleness: not checked (the engine does not answer GET /v1/catalog/docs/by-scheme; "
+            "an engine that advertises catalog_docs_by_scheme_supported does)"
+        )
+        return
     if not candidates:
         click.echo("[✓] Reference staleness: not applicable (no reference-only catalog documents)")
         return

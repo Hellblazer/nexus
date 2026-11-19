@@ -29,9 +29,9 @@ Blind spots, stated (RDR-241 section "The ratchet"):
 - The scan counts calls, not their arguments: an existing call edited from a page
   (``limit=n``) to a whole read (no limit, or ``limit=0``) keeps its count, so the
   BOUNDED class is a label, not a check.
-- A new caller of a helper that wraps a walk is not seen. The four wrappers
-  (``enumerate_all_documents``, ``_all_entries``, ``_entries_of_type``,
-  ``reference_only_candidates``) are listed as sites and their reasons name
+- A new caller of a helper that wraps a walk is not seen. The three wrappers
+  (``enumerate_all_documents``, ``_all_entries``, ``_entries_of_type``) are
+  listed as sites and their reasons name
   today's callers, but nothing checks those names: a new caller rests on review.
   The same holds for any other listed helper a new function calls.
 - Whole-tenant shapes that are not ``all_documents`` calls are outside this
