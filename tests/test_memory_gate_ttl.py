@@ -896,3 +896,16 @@ def test_the_pointer_read_back_also_compares_the_state_of_a_carried_record(db: T
     _lossy_after_write(monkeypatch, on_write=1, change=lambda rec: rec.pop("state", None))     # the carried state is lost
     out = _phase3("nexus-ps", expect=1)
     assert "did not read back from T3 with the same list" in out
+
+
+def test_the_output_counts_the_rows_examined_and_the_gate_rows_seen_so_zero_listed_is_not_vacuous(db: T2Database) -> None:
+    _gate(db, "nexus-ex", sha="aaa1111")
+    _gate(db, "nexus-ex", sha="bbb2222")
+    _put(db, "a-plain-note", "not a gate record", tags="notes")
+    out = _phase3("nexus-ex", "--dry-run")
+    assert f"examined 3 row(s) of {REPO}, 2 with the tag kind:gate" in out and "2 listed" in out
+    out = _phase3("nexus-wrong-bead", "--dry-run")                       # a wrong --beads: nothing listed, but visibly so
+    assert "0 listed" in out and "examined 4 row(s)" in out and "3 with the tag kind:gate" not in out
+    assert "none of the 2 kind:gate rows is in this run" in out and "--beads" in out and "--project" in out
+    out = _run_raw("--phase", "3", "--beads", "nexus-ex", "--dry-run")
+    assert "2 with the tag kind:gate" in out                              # the count row is not a gate row

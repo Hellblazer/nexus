@@ -1229,9 +1229,12 @@ loss check) is run live once and its first run, with the counts examined
 and skipped, goes in its bead before close. The first live run is the first run
 without `--dry-run` that passes the loss check: it is the one that writes the
 pointer and reads it back, so checks 1 to 3 all run (the dry run skips the
-pointer write and read-back). Its counts are the records examined, those
-skipped by cause (open phase, unresolvable title, verdict chain, unmapped,
-restored) and those given a TTL; in the plan that run is nexus-1gdv0.2.17.
+pointer write and read-back). Its counts are the records examined (the run
+prints `examined N row(s) of <repo>, G with the tag kind:gate` first, and a
+note when none of the gate rows is in the run, so a wrong `--beads` or
+`--project` reading "0 listed" is visibly not a pass), those skipped by cause
+(open phase, unresolvable title, verdict chain, unmapped, restored, changed since
+archived) and those given a TTL; in the plan that run is nexus-1gdv0.2.17.
 
 ### Performance Expectations
 
@@ -1369,3 +1372,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Review round 1, blocker 4: the count guard compared only the recorded number, so time passing (a record crossing its effective TTL after the dry run) left the count Sam was told stale while the guard still passed. The real run now recomputes the engine rule over its candidates at its own clock and refuses when the number differs from the recorded count; the guard paragraph says so. |
 | 2026-11-19 | Review round 1, blocker 5: `--project` accepted `<repo>_rdr` and any other project, so the open-phase check could read one repository's RDR files for another repository's records. A project ending `_rdr` is refused, and so is a project that is not the working directory's repository (the check reads that checkout's RDR files and nothing maps a project name to another checkout; refusing was chosen over a lookup because the command runs from the checkout it rolls up). |
 | 2026-11-19 | Review round 1, blocker 6: the pointer read-back compared only (project, title), so a pointer that came back with different `ttl_set`, `restored` or `state` marks, the ones the next run decides from, passed. It now compares those too. |
+| 2026-11-19 | Review round 1, blocker 7: a wrong `--beads` or `--project` printed "0 listed", which read as a pass. The output now starts with the rows examined and the `kind:gate` rows seen, and says so when none of the gate rows is in the run; the first live run's counts (nexus-1gdv0.2.17) come from these lines. |

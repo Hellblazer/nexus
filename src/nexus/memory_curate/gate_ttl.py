@@ -25,6 +25,7 @@ import httpx
 
 from nexus.memory_curate import _all_closed, _parse_ts, closed_phase_numbers, closed_rdr_numbers
 from nexus.memory_curate import gate_rollup as gr
+from nexus.tables.audit_tags import split_tags
 
 SEVERITY = {"justified": 0, "partial": 1, "not-justified": 2}
 TTL_DAYS = 30
@@ -48,6 +49,8 @@ class Result:
     quarantined: list[str] = field(default_factory=list)
     restored: list[str] = field(default_factory=list)
     drifted: list[str] = field(default_factory=list)
+    examined: int = 0
+    gate_rows: int = 0
     mismatches: list[str] = field(default_factory=list)
 
 
@@ -392,6 +395,11 @@ def run(mem: Any, *, project: str, scope: gr.Scope, dry_run: bool, accept_open: 
     rows = list(mem.get_all(project))
     sel = gr.select_records(rows, project=project, rdr=scope.rdr, beads=scope.beads, phase=scope.phase)
     res = Result(scope, sel, gr.listing_lines(scope, project, sel))
+    res.examined = len(rows)
+    res.gate_rows = sum("kind:gate" in split_tags(r.get("tags")) for r in rows)
+    res.lines.insert(1, f"examined {res.examined} row(s) of {project}, {res.gate_rows} with the tag kind:gate")
+    if res.gate_rows and not sel.listed and not sel.unmapped:
+        res.lines.insert(2, f"none of the {res.gate_rows} kind:gate rows is in this run: check --beads, --rdr and --project")
     res.pointer_title = gr.pointer_title(scope.rdr, scope.phase)
 
     chains = verdict_chains(sel)
