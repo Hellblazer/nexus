@@ -301,6 +301,18 @@ def test_pointer_is_a_knowledge_note_in_the_research_subject_with_its_category(d
     assert pointer.meta["category"] == "gate_pointer" and "gate-pointer" in pointer.meta["tags"]
 
 
+def test_pointer_lists_timestamp_per_record_as_get_all_returned_it(db: T2Database) -> None:
+    a = _gate(db, "nexus-t1", age_days=3)
+    b = _gate(db, "nexus-t2", sha="bbb2222", age_days=9)
+    stamps = {t: r["timestamp"] for t, r in _rows(db).items()}
+    _phase3("nexus-t1,nexus-t2")
+    got = {r["title"]: r for r in _pointer().listed}
+    assert got[a]["timestamp"] == stamps[a] and got[b]["timestamp"] == stamps[b]
+    assert got[a]["timestamp"] != got[b]["timestamp"]
+    for r in got.values():
+        datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))   # a real timestamp, to the second
+
+
 def test_the_verdict_comes_from_the_header_or_from_an_older_records_last_outcome_line(db: T2Database) -> None:
     head = _gate(db, "nexus-h1", outcome="not-justified")
     old = "review-abc1234-nexus-h2-2026-11-10"

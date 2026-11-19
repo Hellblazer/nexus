@@ -490,9 +490,13 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   Rule 1: reuse a subject, and RDR postmortems already live in a subject under a
   category), `category=gate_pointer`, titled `gate-records-rdr-<NNN>-phase-<P>`
   or `-all`, so a rerun replaces it. It lists, for each record, its project,
-  title, kind, bead, the sha it reviewed and its verdict, taken from the
-  field header `gate_record` writes (`gate_record.lua:79-88`) or, for an older
-  record, from its last `outcome` line. It is a pointer: it keeps its sources
+  title, kind, bead, the sha it reviewed, its verdict and its timestamp, the
+  verdict and sha taken from the field header `gate_record` writes
+  (`gate_record.lua:79-88`) or, for an older record, the verdict from its last
+  `outcome` line. The timestamp is the row's, exactly as `get_all` returned it
+  (to the second): the creation date a record has, which Step 3's import keeps
+  and which the pointer therefore still shows after the TTL write and the reap.
+  An unmapped record carries its timestamp too. It is a pointer: it keeps its sources
   by title and copies no body. Records whose verdict or bead cannot be read
   are listed under "unmapped" and keep no TTL. A pointer over the store_put cap
   (`QUOTAS.MAX_DOCUMENT_BYTES`, 16,384 bytes) is written in parts, split at line
@@ -864,7 +868,8 @@ and `-p3a-` for phase 3, not `-p2-` or `-p13-`); a record with neither tag is
 not listed; an unmapped record gets no TTL; a quarantined record is not listed;
 another tenant's rows are not listed; the `<repo>_rdr` rows are neither listed
 nor changed; a seeded closed phase yields one pointer listing its three
-records; a pointer over the cap is split and still lists every record, and a
+records, each with its timestamp as `get_all` returned it; a pointer over the
+cap is split and still lists every record, and a
 rerun that needs fewer parts names the stale ones; a rerun replaces the pointer;
 `--dry-run` writes nothing, and no run writes anything to T2.
 
@@ -1151,3 +1156,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Phase 3 Step 1, the command (nexus-1gdv0.2.1). `nx memory gate-rollup` is built with the pointer record as designed. The size question the gate left to the implementation (critique observation 4) is settled as split, not refuse: a pointer over 16,384 bytes is written in titled parts that the first part counts, and a rerun that needs fewer parts names the stale ones (a T3 delete is a catalog tombstone path, so none is deleted). A run that lists nothing writes no pointer. Wording only; the design is unchanged. |
 | 2026-11-19 | Gate finding d021dc53c85b, first half (nexus-1gdv0.2.2): the "unmapped" list was unreachable, because under `--phase` a record was selected by a bead and under `--all` by `rdr:<NNN>`, so a record with no bead was never selected. The rule is now written in Step 1 and built: a `kind:gate` record that carries `rdr:<NNN>` and has no `bead:` tag is unmapped under `--all`, and under `--phase P` when its title also names phase P by the `-p<N>` / `-phase-<N>` rule (sub-phase 3a counts toward 3); a listed record with no readable verdict is unmapped; a `kind:gate` record with neither tag is in no run's scope. An untagged record whose title names no listed bead is not unmapped, because it has no `rdr:` tag to put it in scope, so the earlier wording "or a title that names none" is narrowed to match. Unmapped records get no TTL. |
 | 2026-11-19 | Gate finding d021dc53c85b, second half (nexus-1gdv0.2.3): the fix round dropped `--include-titled`, so title matching became unconditional, and no predicate for "a title that names a listed bead" was written. It is now named in Step 1 and built (`title_names_bead`): the row has no tags at all, and its title holds the bead id as a whole token, `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive, with a hyphen not counted as an id character because gate titles join words with it. It is on only under `--phase` (`--all` has no bead list), and a title naming two listed beads is unmapped. The Step 1 test list gains the negative cases. The predicate was checked on the live store: 628 of the 646 untagged gate-shaped titles that carry a bead-shaped id match each id they carry (the other 18 are an id cut short by the checking pattern, not by the predicate). |
+| 2026-11-19 | Gate finding S6, pointer half (nexus-1gdv0.2.4): the pointer now lists each record's timestamp exactly as `get_all` returned it, unmapped records included, because the pointer was the one place that would keep a record's date after the TTL write and the reap and did not carry it. The second half of S6, what a rerun does with a record a person restored (`nx memory restore` clears the TTL), belongs to Step 3 with the TTL write and is not settled here. |

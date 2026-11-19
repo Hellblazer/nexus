@@ -143,7 +143,7 @@ def _entry(project: str, row: dict[str, Any], header: dict[str, str], bead: str 
            verdict: str | None) -> dict[str, Any]:
     return {
         "project": project, "title": row["title"], "kind": header.get("kind"), "bead": bead,
-        "sha": header.get("sha"), "verdict": verdict,
+        "sha": header.get("sha"), "verdict": verdict, "timestamp": row.get("timestamp") or "",
     }
 
 
@@ -192,7 +192,7 @@ def select_records(rows: Iterable[dict[str, Any]], *, project: str, rdr: int, be
             sel.unmapped.append({**_entry(project, row, header, bead, None), "reason": "verdict unreadable"})
             continue
         sel.listed.append(_entry(project, row, header, bead, verdict))
-    key = lambda e: e["title"]  # noqa: E731 — one-line sort key, used twice
+    key = lambda e: (e["timestamp"], e["title"])  # noqa: E731 — one-line sort key, used twice
     sel.listed.sort(key=key)
     sel.unmapped.sort(key=key)
     return sel
@@ -390,8 +390,8 @@ class Result:
 
 def _listing_lines(scope: Scope, project: str, sel: Selection) -> list[str]:
     out = [f"{scope.label} in {project}: {len(sel.listed)} listed, {len(sel.unmapped)} unmapped"]
-    out += [f"  listed    {e['verdict']:<13} {e['bead']}  {e['title']}" for e in sel.listed]
-    out += [f"  unmapped  {e['title']} ({e['reason']})" for e in sel.unmapped]
+    out += [f"  listed    {e['timestamp']}  {e['verdict']:<13} {e['bead']}  {e['title']}" for e in sel.listed]
+    out += [f"  unmapped  {e['timestamp']}  {e['title']} ({e['reason']})" for e in sel.unmapped]
     return out
 
 
