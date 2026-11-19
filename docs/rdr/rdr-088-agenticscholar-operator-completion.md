@@ -329,6 +329,14 @@ Mitigations).
   RDR-189 P1 forbids hiding a declared witness obligation inside a bundle;
   nexus-z1d0l.1.4 picks the one boundary rule (direct dispatch or a
   non-bundling boundary) and this amendment does not presuppose either.
+- Only items fed by retrieval ids carry the plan's own host identities. A
+  check step given its items as explicit `inputs` or as a list of texts
+  (`check(items=$stepN.contents)`) gets one record per non-empty item, in
+  list order, with no tumbler, chash or collection; only a reserved
+  primary-source item or a repair item merged into that list keeps its own
+  identity. Those plan items are never `bound`, so `requires_review` is
+  true. A step that must yield a witness is written `check(ids=$stepN.ids)`
+  (nexus-z1d0l.1.13).
 
 ## Problem Statement
 
