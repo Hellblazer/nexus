@@ -833,10 +833,18 @@ The key moves table by table in strangler order:
   dropped, and with them the chunks and centroid name primary keys, the
   three name child keys and `aspect_extraction_queue`'s cascading name key;
   then the `(tenant_id, name, embedding_model)` UNIQUE, which no key
-  references any more, and
-  the name-based arms of `COLLECTION_SCOPED_TABLES` go with them. Dropping
+  references any more (P4.1). Dropping
   `superseded_by` drops the label index whose predicate reads it, so P4.1
-  re-creates that index on `superseded_by_id` (item 7).
+  re-creates that index on `superseded_by_id` (item 7). Before any of
+  that, an engine release retires the Java name path (P4.0): the name
+  readers, the rename's fourteen-table rewrite and the name-based arms of
+  `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:10733-10752`). Until
+  that release the dual path stays in Java. That engine carries a boot
+  floor, because a release reaches an install whatever its moves have
+  done: it serves migration-only until gate 3 of the completion check
+  holds on the install and P3.7's name-key drop move has `completed_at`
+  set, the state in which P3.7's one-row rename runs (T2
+  `229-research-59`).
 
 **How each Phase 3 step runs (RDR-246).** No Phase 3 step rewrites the rows
 of, or builds an index on, a table that grows with user data inside the
@@ -1082,7 +1090,9 @@ while the engine serves:
     `failed:` move" (RDR-246 lines 891-892). On such an install the stamp
     never completes. Readers stay on names, no index is built on the id, a
     rename keeps its fourteen-table rewrite, and Phase 4's drops never apply
-    (P4.1).
+    (P4.1). P4.0's floor never holds there either, so a P4.0 engine would
+    serve that install migration-only; it stays on a release before P4.0
+    until its moves run (P4.0; T2 `229-research-59`).
 
 Whether any step needs a maintenance window is unverified (Critical
 Assumption 5). Inferred, not read: the swap's DDL holds ACCESS EXCLUSIVE on
@@ -1887,7 +1897,30 @@ its acceptance is that test green plus the census pin it lowers.
 
 **Phase 4: contract and retire**
 
-- P4.1 After P3.11; its acceptance includes RDR-248's committed fixture
+- P4.0 Engine release that retires the Java name path: the jOOQ readers
+  of the name columns that P3.5 switched at gate 3, `renameCollectionTxn`'s
+  fourteen-table rewrite (the one-row rename of P3.7 is the only rename
+  left), and the name-based arms of `COLLECTION_SCOPED_TABLES`
+  (`CatalogRepository.java:10733-10752`), which keep serving delete and
+  re-home by id. Until this release the dual path stays in Java. It keeps
+  P3.1 to P3.7's changesets, moves, completion check and index passes, so
+  an install that jumps from before P3.1 to this release still reaches
+  its floor. The floor: at boot the completion check reads gate 3 and the
+  `completed_at` of P3.7's name-key drop move; until both hold, the engine
+  serves migration-only. It starts, applies its changesets and runs the
+  move worker and the index passes, and refuses every collection-scoped
+  read and write with a typed error that names the floor. It does not
+  exit at boot, as the engine's other refusals do (`ChunksIsolationCheck`
+  "refuses to serve"), because the move worker and the reconciler start
+  only after `service.start()` (`Main.java:620`, `:646`, `:681`), so an
+  exiting engine would never run the moves its floor waits for (inferred,
+  not read; T2 `229-research-59`). Like every gate, the floor lifts at
+  the first boot after it holds (item 6). Test: the P4.0 engine booted on
+  a half-stamped store (the stamp move paused part-way) refuses
+  collection-scoped routes naming the floor, keeps the stamp move running
+  and reports it in `boot_work`, and serves by the id at the first boot
+  after the floor holds.
+- P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
   and a stated effect on backups taken before P3.1 (item 10). Primary key
   to `(tenant_id, collection_id)`; drop the three name child keys; then
   the name columns on referencing tables, which takes the chunks and
@@ -1951,7 +1984,9 @@ validation move; the engine's id readers, P3.7's name-key drop move and
 one-row rename and P4.1's
 drop move wait also for P3.4 on that install; the one-row rename waits
 also for the name-key drop move's `completed_at`. P3.5b's SQL readers wait for
-the stamp moves.
+the stamp moves. P4.0's engine serves migration-only until gate 3 and the
+name-key drop move's `completed_at` hold on the install (P4.0), and P4.1
+waits for P4.0 in bead order.
 
 ### Day 2 Operations
 
@@ -1994,6 +2029,11 @@ None.
   its chunks stamped (the stamp move paused part-way) — **Verify**: search,
   listings and a rename return what they returned before the cut, and the
   engine reads by the id from the first boot after the move completes.
+- **Scenario**: an engine with P4.0 boots on a store with only half its
+  chunks stamped — **Verify**: it serves migration-only, refusing
+  collection-scoped routes with an error that names the floor, the stamp
+  move keeps running in `boot_work`, and it serves by the id at the first
+  boot after gate 3 and the name-key drop move hold.
 - **Scenario**: rename a collection that has chunk and `canary_query_ring`
   rows after P3.7 — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
@@ -2219,7 +2259,10 @@ label meets a file path beyond P3.6's Windows test.
   older client keeps working until the floor bump. An install that skips
   releases is guarded by its own moves, not by the cut order: its readers
   switch at the first boot after the completion check's gates pass there
-  (item 6, "Readers during the stamp").
+  (item 6, "Readers during the stamp"). The same holds at Phase 4: an
+  install that skips from before P3.1 to a release with P4.0 meets P4.0's
+  boot floor, which serves it migration-only until gate 3 and P3.7's
+  name-key drop move hold there (P4.0; T2 `229-research-59`).
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
@@ -2238,7 +2281,9 @@ label meets a file path beyond P3.6's Windows test.
   P3.5's readers stay on names, P3.4 builds no index on the id, and P3.7's
   rename keeps its fourteen-table rewrite. P4.1's drops never apply,
   because each waits for the stamp's `completed_at` (item 6, "A blocked
-  move"). Inferred, not read: P3.3b's pass is an engine pass, not a move,
+  move"). P4.0's floor never holds either, so a P4.0 engine would serve
+  such an install migration-only; it stays on a release before P4.0 until
+  its moves run (P4.0). Inferred, not read: P3.3b's pass is an engine pass, not a move,
   so it still builds; P3.6 and P3.8 touch only the registry and still
   apply. T2 `229-research-47`.
 - **Windows**: RDR-246 verified pg_background on the Windows x64 bundle:
@@ -2257,7 +2302,10 @@ label meets a file path beyond P3.6's Windows test.
   safe engine downgrade point is open (Contradiction Check). On each
   install that happens only after its stamp moves have completed, because
   the one-row rename waits for the same check (item 6, "Readers during the
-  stamp").
+  stamp"). The Java name path stays in the engine until P4.0, whose boot
+  floor serves an install migration-only until that install's gate 3 and
+  name-key drop move hold, so an id-only engine never serves a
+  half-stamped store (P4.0).
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: N/A.
 
