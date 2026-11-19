@@ -739,6 +739,7 @@ class Sandbox:
         self.tmux("new-session", "-d", "-s", "rs", "-x", "220", "-y", "50", "-n", "ctl", "-c", str(self.work),
                   "bash --noprofile --norc", check=True)
         self.watch.start()
+        _load_slash("sandbox_work").register(self.real_nx, self.sock)  # a label: this run's identity owns the private server
 
     def native_layout(self) -> None:
         """Give the scratch HOME a native install's layout, so the script's /restart path is the one tested.
@@ -1806,10 +1807,10 @@ RUNNERS = {"roll": scenario_roll, "variant": scenario_variant, "abort": scenario
            "pane": scenario_pane}
 
 
-def _load_slash():
-    """slash_restart.py beside this file, by path: run.py runs under ``python -I``, which leaves its own
+def _load_slash(name: str = "slash_restart"):
+    """<name>.py beside this file, by path: run.py runs under ``python -I``, which leaves its own
     directory off sys.path."""
-    loc = importlib.util.spec_from_file_location("restart_sandbox_slash", SANDBOX_PY.with_name("slash_restart.py"))
+    loc = importlib.util.spec_from_file_location(f"restart_sandbox_{name}", SANDBOX_PY.with_name(f"{name}.py"))
     mod = importlib.util.module_from_spec(loc)
     loc.loader.exec_module(mod)
     return mod
@@ -2289,10 +2290,7 @@ def cleanup(sb: Sandbox, notes: list[str]) -> list[str]:
         UNVERIFIED.append(f"{sb.spec.name}: {unverified}")
         notes.append(f"UNVERIFIED: nx-mcp's teardown is NOT judged in this run: {unverified}")
     base = Baseline() if unverified else read_baseline(sb, True)
-    try:
-        sb.tmux("kill-server", timeout=30)
-    except subprocess.TimeoutExpired:
-        notes.append("tmux kill-server timed out")
+    _load_slash("sandbox_work").kill_server(sb, notes)  # asks `nx identity may-stop` first (RDR-253 Step 6)
     # The hangup reaches nx-mcp now; its teardown reads config.yml, so the config stays until it is done.
     stragglers = wait_for_exit(nx_mcp, TEARDOWN_WAIT_S)
     teardown: list[str] = []

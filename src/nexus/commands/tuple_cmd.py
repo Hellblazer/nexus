@@ -431,7 +431,12 @@ def tuple_wait_cmd(
         run_wait,
     )
 
+    from nexus.identity.work import finish_own, register_own  # noqa: PLC0415 — deferred: CLI startup cost
+
     store = None
+    # RDR-253 Step 6: the wait is background work the session owns, so a checkpoint and the restart report list it by
+    # identity. A label only: it is written best effort and never fails or delays the wait.
+    labelled = register_own("wait", session_id)
     try:
         store = _store()
         outcome = run_wait(
@@ -453,6 +458,8 @@ def tuple_wait_cmd(
     finally:
         if store is not None:
             store.close()
+        if labelled:
+            finish_own("wait", session_id)
 
     notes = {
         SUPERSEDED: (

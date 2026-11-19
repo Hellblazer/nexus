@@ -81,10 +81,11 @@ git worktree list | grep "$(pwd)"
 | 3. Keep | No | No |
 | 4. Discard | Yes | Yes (force) |
 
-If in a worktree (options 1, 2, 4):
+If in a worktree (options 1, 2, 4), run `nx identity may-stop --kind worktree --ref <path>` first; a nonzero exit names a live owner, so stop and tell the user. Then:
 ```bash
 cd <base-worktree>
 git worktree remove <path>
+nx identity work done --kind worktree --ref <path>
 ```
 
 ## Beads Integration
