@@ -36,6 +36,7 @@ from tests.identity import (
     test_pending_bind,
     test_session_start_bind,
     test_sweep,
+    test_work_engine_rows,
 )
 from tests.identity.conftest import Journey, World, run_journeys
 
@@ -59,6 +60,10 @@ JOURNEYS = (
     # fence row sends identity tokens, so the module needs Step 2 and resets the same caches.
     _journey(test_identity_step4, "st4", precheck=test_identity_step4.step2_skip_reason, require_env=test_identity_step4.REQUIRE_ENV,
              cleanup=token_header.reset_for_tests),
+    # Step 6 (nexus-hczdo.1.9): identity scratch, memberships, per-identity T2 and background work. The rows send identity
+    # tokens, so the module needs Step 2 and resets the same caches.
+    _journey(test_work_engine_rows, "wrk", precheck=test_work_engine_rows.step2_skip_reason,
+             require_env=test_work_engine_rows.REQUIRE_ENV, cleanup=token_header.reset_for_tests),
 )
 
 
