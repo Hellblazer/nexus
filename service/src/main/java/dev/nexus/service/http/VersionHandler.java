@@ -56,6 +56,7 @@ import java.util.function.Supplier;
  *  "catalog_docs_by_scheme_supported":true,
  *  "catalog_docs_by_author_supported":true,
  *  "catalog_docs_by_meta_supported":true,
+ *  "catalog_move_supported":true,
  *  "catalog_sensitive_locators_supported":true,
  *  "chash_constraints_validate_job_supported":true,
  *  "tenant_export_supported":true,
@@ -700,6 +701,19 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-254 capability advertisement: does the engine carry {@code POST /v1/catalog/documents/move} and
+     * {@code POST /v1/catalog/owners/move}, the two routes that keep a document's (or a repo owner's) identity when its
+     * path moves? One flag for both: they ship together and a client needs both or neither. A route, so an old engine
+     * answers 404 and a client can tell; the flag lets a client learn it from {@code /version} first, and a client whose
+     * engine lacks it must refuse the move command and print no move hint. Always present, always {@code true} on an
+     * engine carrying the change. Cloud clients see it only once the public conexus edge allowlists it (the
+     * {@code nx_answer_steps_supported} precedent, nexus-04sff; engine-release pre-tag check 3e).
+     */
+    static void appendCatalogMoveCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_move_supported\":true");
+    }
+
+    /**
      * nexus-uwggq.2.5 capability advertisement: does {@code GET /v1/catalog/sensitive/locators?limit=N} list the live sensitive documents and the live aliases of them, with the fields operator dispatch reads to write a deny rule, without a walk of the catalog?
      * A route, so an old engine answers 404 and a client can tell; the flag lets a client learn it from {@code /version}
      * first. Always present, always {@code true} on an engine carrying the change. Cloud clients see it only once the
@@ -1019,6 +1033,8 @@ public final class VersionHandler implements HttpHandler {
         appendCatalogDocsByAuthorCapabilityField(body);
         // nexus-uwggq.2.4: GET /v1/catalog/docs/by-meta (documents by their own metadata: text equality, defaults, integer lower bound).
         appendCatalogDocsByMetaCapabilityField(body);
+        // RDR-254: POST /v1/catalog/documents/move and /owners/move (identity when a path moves).
+        appendCatalogMoveCapabilityField(body);
         // nexus-uwggq.2.5: GET /v1/catalog/sensitive/locators (the sensitive and aliased-sensitive locators operator dispatch reads).
         appendCatalogSensitiveLocatorsCapabilityField(body);
         // nexus-f3yqd (0.1.190): POST /v1/admin/validate-constraints, the user-started VALIDATE CONSTRAINT job.

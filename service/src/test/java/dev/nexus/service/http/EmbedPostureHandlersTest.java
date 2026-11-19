@@ -401,6 +401,8 @@ class EmbedPostureHandlersTest {
         assertThat(body.get("catalog_docs_by_author_supported").asBoolean()).isTrue();
         // nexus-uwggq.2.4: the RDR-241 Phase 2 engine read route, its flag its own
         assertThat(body.get("catalog_docs_by_meta_supported").asBoolean()).isTrue();
+        // RDR-254: POST /v1/catalog/documents/move and /owners/move, one flag
+        assertThat(body.get("catalog_move_supported").asBoolean()).isTrue();
         // nexus-uwggq.2.5: the RDR-241 Phase 2 engine read route, its flag its own
         assertThat(body.get("catalog_sensitive_locators_supported").asBoolean()).isTrue();
         assertThat(body.get("chash_constraints_validate_job_supported").asBoolean()).isTrue();
