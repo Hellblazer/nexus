@@ -9626,7 +9626,8 @@ def mailbox_send(
     no resolution, while this tool resolves a name against the live
     session directory first (and still works as a `tuple_out` shorthand
     when `to` is already a session or agent id). Returns
-    `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "..."}`.
+    `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "...", "notice": "..."}`; `notice` is
+    present only when `to` was a renamed seat's old name, still delivering in its 7-day grace (RDR-253).
 
     A name resolves through `directory/<name>`'s live rows: no live
     holder is refused, naming the name; more than one distinct holding
@@ -9667,8 +9668,9 @@ def mailbox_send(
             return tuple_id, address, address_kind, target.notice
 
         tuple_id, address, address_kind, notice = _t2_index_write(_send, op="mailbox_send")
-        sent = {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
-        return {**sent, "notice": notice} if notice else sent
+        if notice:  # RDR-253 Step 5: a retired alias inside its 7-day grace
+            return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id, "notice": notice}
+        return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _fail({"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")})
 

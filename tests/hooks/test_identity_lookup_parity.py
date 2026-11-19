@@ -33,7 +33,7 @@ def lookup():
 
 def _token(directory: Path, pid: int, record: dict, mtime: float | None = None) -> None:
     path = directory / f"{pid}.1.token"
-    path.write_text(json.dumps({"generation": 1, "pid": pid, "started_at": 1, **record}))
+    path.write_text(json.dumps({"generation": 1, "pid": pid, "started_at": 1, **record}), encoding="utf-8")
     if mtime is not None:
         os.utime(path, (mtime, mtime))
 
@@ -55,7 +55,7 @@ def test_both_resolve_the_same_identity_from_the_same_token_files(lookup, tmp_pa
     _token(directory, 1, {"identity": "i12", "token": "t", "session_id": NEW, "session_ids": [OLD, NEW]})
     _token(directory, 2, {"identity": "i9", "session_id": NEW}, mtime=1)  # stale: older than the live one
     _token(directory, 3, {"identity": "not-an-id", "session_id": OTHER})
-    (directory / "4.1.token").write_text("{broken")
+    (directory / "4.1.token").write_text("{broken", encoding="utf-8")
     for sid in (NEW, OLD, OLD.upper(), OTHER, "", "dddddddd-0000-4000-8000-000000000004"):
         assert lookup.lookup(sid, tmp_path)[0] == board.identity_for_session(sid, tmp_path), sid
     assert lookup.lookup(OLD, tmp_path) == ("i12", "t")

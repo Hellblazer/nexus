@@ -1610,8 +1610,8 @@ class TestIdentityLine:
         (directory / "4242.1.token").write_text(json.dumps({
             "identity": "i12", "generation": 3, "token": "tok", "session_id": SID, "session_ids": [self.STALE, SID],
             "pid": 4242, "started_at": 1,
-        }))
-        (directory / "pending.1.2").write_text("{}")  # not a token file name
+        }), encoding="utf-8")
+        (directory / "pending.1.2").write_text("{}", encoding="utf-8")  # not a token file name
         assert _identity_lookup.lookup(self.STALE.upper(), tmp_path) == ("i12", "tok")
         assert _identity_lookup.lookup("00000000-0000-4000-8000-000000000000", tmp_path) == ("", "")
         assert _identity_lookup.lookup(SID, tmp_path / "absent") == ("", "")
