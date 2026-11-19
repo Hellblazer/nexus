@@ -989,9 +989,7 @@ FAKE_SERVER = ("/tmp/fake-tmux/default", 1)
 
 def _with_plan(crs, argv: list[str]) -> list[str]:
     """The detached half is given the plan its foreground wrote: here, every live session of the scratch dir."""
-    if "--detached" not in argv:
-        return argv
-    return [*argv, "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))]
+    return [*argv, "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))] if "--detached" in argv else argv
 
 
 def _live(rd: Path, name: str, status: str = "idle", pane: str = "%5", **extra) -> Path:
