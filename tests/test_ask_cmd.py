@@ -1549,3 +1549,39 @@ def test_the_outcome_walk_ends_on_a_cycle_and_reads_it_as_definite() -> None:
     from nexus.commands.ask import _outcome_unknown
 
     assert _outcome_unknown(_a_cycle()) is False
+
+
+# --- RDR-253 Step 5: the identity line routes the answer --------------------------------------------
+
+
+def _identity_world(world: World, identity: str = "i12") -> World:
+    world.t2.add("threads", "halcyon", f"identity: {identity}\n" + text("halcyon.txt"))
+    return world
+
+
+def test_an_answer_reaches_the_asking_seats_identity_mailbox(world: World) -> None:
+    """The asker's entry carries an identity: line, so the answer goes to mailbox/<id>: the identity outlives /clear,
+    the session: line does not. The mail is an ordinary tuple_out; it needs no identity token."""
+    r = _identity_world(world).run(*mediator_args())
+    assert r.exit_code == 0, r.output
+    (call,) = world.tuples.calls
+    assert call["subspace"] == "mailbox/i12"
+    assert call["keys"] == {"to": "i12"}
+    assert call["dims"]["address_kind"] == "identity"
+    assert world.t2.record(f"i12/{ASK_ID}/{VERSION}")["status"] == "sent"
+
+
+def test_an_answer_recorded_under_the_session_key_by_an_old_client_still_counts(world: World) -> None:
+    _identity_world(world)
+    world.t2.add("asks", TITLE, json.dumps({**js("answer_record_v1.json"), "status": "sent"}))
+    r = world.run(*mediator_args())
+    assert r.exit_code != 0 and "already answered" in r.output
+    untouched(world)
+
+
+def test_one_identity_on_two_entries_routes_no_answer(world: World) -> None:
+    _identity_world(world)
+    world.t2.add("threads", "other", "identity: i12\n## X\nstate: y\n")
+    r = world.run(*mediator_args())
+    assert r.exit_code != 0 and "identity i12 is carried by more than one entry" in r.output
+    untouched(world)
