@@ -163,7 +163,8 @@ async def test_scenario_1_one_missing_facet_gets_exactly_one_repair_and_the_face
     assert len(repair_q) == 1, "exactly one targeted query: one missing facet, one target"
     assert repair_q[0]["query"] == FACET_TEXT.format(n=3) and repair_q[0]["corpus"] == "rdr"
     assert repair_q[0]["limit"] == REPAIR_RESULTS_PER_QUERY
-    assert d.tools.count("search") == 2 and d.tools.count("store_get_many") == 2, "the plan's own search and fetch, plus the repair's"
+    assert d.tools.count("search") == 3 and d.tools.count("store_get_many") == 2, \
+        "the plan's own search and fetch, plus the repair's search and its content-word twin (GH #1667) and one fetch"
     assert d.tools.count("operator_check") == 3, "vector and graph before repair, one reassessment after"
     last = d.args_of("operator_check")[-1]
     assert _tag_lines(last["check_instruction"]) == ["f3"], "only the unsupported facet is reassessed"
@@ -178,7 +179,8 @@ async def test_scenario_1_one_missing_facet_gets_exactly_one_repair_and_the_face
     context = d.args_of("generate")[0]["context"]
     assert isinstance(context, str) and REPAIR_TEXT in context, "generation got the repair evidence"
     assert context.index(REPAIR_TEXT) < context.index(VECTOR_TEXTS[0]), "repair evidence leads the plan's own secondary items"
-    assert (cov.repair.outcome, cov.repair.facet_ids, cov.repair.queries, cov.repair.items_merged) == ("completed", ("f3",), 1, 1)
+    assert (cov.repair.outcome, cov.repair.facet_ids, cov.repair.queries, cov.repair.items_merged) == \
+        ("completed", ("f3",), 2, 1), "one query and its content-word twin (GH #1667)"
 
 
 @pytest.mark.asyncio
@@ -186,7 +188,7 @@ async def test_scenario_1_the_repair_is_recorded_in_the_existing_step_vocabulary
     d = RepairDispatcher()
     result = await _run(d, CoverageBoundary(request=_request(3)))
     records = _repair_records(result)
-    assert [r.operator for r in records] == ["search", "store_get_many"]
+    assert [r.operator for r in records] == ["search", "search", "store_get_many"], "the twin is a second search (GH #1667)"
     assert all(r.source == "sql" and r.ok and r.cost_usd == 0.0 for r in records), "retrieval is a known-zero sql step"
     indices = [r.step_index for r in result.step_records]
     assert len(set(indices)) == len(indices) and min(r.step_index for r in records) >= result.total_planned_steps
@@ -645,7 +647,7 @@ async def test_the_counts_the_run_summary_reads_carry_the_repair_usage() -> None
     d = RepairDispatcher()
     result = await _run(d, CoverageBoundary(request=_request(3)))
     counts = _cov(result).counts()
-    assert counts["repair_outcome"] == "completed" and counts["repair_queries"] == 1
+    assert counts["repair_outcome"] == "completed" and counts["repair_queries"] == 2, "the query and its twin (GH #1667)"
     assert counts["repair_items_merged"] == 1 and counts["repair_facets"] == 1 and counts["rounds"] == 2
     wire = _cov(result).to_wire()
     assert wire["repair"]["outcome"] == "completed" and "text" not in json.dumps(wire["repair"])

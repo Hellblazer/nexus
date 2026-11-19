@@ -1,0 +1,3 @@
+### Changed
+
+- **`nx_answer`'s coverage repair can now search lexically for a question that names no identifier.** Until now a repair query got a lexical twin only when the facet carried an exact term (a quoted string, `a_b`, `a.b`, a hyphen token with a digit, a `--flag` or a CamelCase name). A plain-prose facet now gets one too, from the last four content words of its first clause (`What is the service's per-tool-result byte budget, and where is it set?` searches `tool result byte budget`). It runs after the exact-term twins and only in the query slots the vector queries leave, so the repair budget is unchanged. It finds code whose comments use the question's words; a fact written only in other words still needs a rewrite the repair does not do. GH #1667.

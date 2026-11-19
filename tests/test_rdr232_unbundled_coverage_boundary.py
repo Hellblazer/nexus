@@ -220,7 +220,8 @@ KNOWN = {_h(t): t for t in (*TEXTS, *TEXTS_B, REPAIR_TEXT)}
 def _retrieve_for(*, repair: bool):
     async def retrieve(**kw: Any) -> dict[str, Any]:
         text = str(kw.get("query") or kw.get("question") or "")
-        if text == "q-empty":
+        if text == "q-empty" or kw.get("lexical"):
+            # a lexical repair twin (GH #1667) finds nothing here: these tests pin the closure, not the twin
             return _structured([])
         if repair and text.startswith(FACET_TEXT):
             return _structured([REPAIR_TEXT])

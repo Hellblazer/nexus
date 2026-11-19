@@ -222,7 +222,7 @@ async def test_with_room_for_both_the_tail_facet_is_still_never_queried() -> Non
     """A mixed repair retrieves for the unsupported facets only; the tail facet is reassessed against its unread anchors."""
     d, cov = await _drive(12, facets=2, max_repair_queries=2)
     assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 2"]
-    assert cov.repair.queries == 1 and cov.repair.unread_facet_ids == ("f1",)
+    assert cov.repair.queries == 2 and cov.repair.unread_facet_ids == ("f1",), "topic 2's query and its twin (GH #1667)"
 
 
 @pytest.mark.asyncio
@@ -258,7 +258,7 @@ async def test_a_tail_only_repair_makes_no_retrieval_call_and_reassesses_the_unr
 async def test_a_mixed_repair_retrieves_for_the_unsupported_facet_only() -> None:
     d, cov = await _drive(12, facets=2)
     assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 2"]
-    assert (cov.repair.reason, cov.repair.queries) == ("unsupported_and_unread_tail", 1)
+    assert (cov.repair.reason, cov.repair.queries) == ("unsupported_and_unread_tail", 2), "plus its twin (GH #1667)"
 
 
 # ── what a repair does not do ────────────────────────────────────────────────────────────────────────────────
@@ -465,7 +465,7 @@ async def test_the_repair_budget_is_unchanged_for_a_contradicted_facet_beside_an
     hits = [f"repair hit number {i:02d} with some text" for i in range(30)]
     d, cov = await _drive(12, facets=2, check=_contradicted_check(tail="supports"), repair_hits=hits)
     assert [a["query"] for a in d.repair_searches()] == ["what the document says about topic 2"]
-    assert cov.repair.queries == 1 and cov.repair.items_merged == 12 == MAX_REPAIR_ITEMS
+    assert cov.repair.queries == 2 and cov.repair.items_merged == 12 == MAX_REPAIR_ITEMS, "one query plus its twin (GH #1667)"
     assert cov.repair.facet_ids == ("f2", "f1") and cov.ledger.rounds == 2
     assert d.tools.count("generate") == 1
 

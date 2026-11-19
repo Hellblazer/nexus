@@ -36,6 +36,7 @@ from nexus.plans.coverage_repair import (
     MAX_REPAIR_QUERIES,
     RepairTarget,
     build_repair_queries,
+    content_terms,
     key_terms,
 )
 from nexus.plans.evidence import ScopeConstraint
@@ -120,6 +121,7 @@ def test_the_twins_follow_every_vector_query_in_the_same_order() -> None:
         ("f3", "who set max_hops", False),
         ("f1", "retry_budget", True),
         ("f3", "max_hops", True),
+        ("f2", "ledger read", True),
     ]
     twin = qs[3]
     assert twin.tool == "search" and twin.origin == "plan"
@@ -336,3 +338,53 @@ async def test_a_confined_runs_twin_carries_the_document_filter_and_its_outside_
     twins = d.lexical_searches()
     assert len(twins) == 1 and twins[0]["chash_allow"] == sorted(allowed)
     assert all(a.content != LEXICAL_HIT for a in cov.ledger.anchors), "a hit outside the document never enters"
+
+
+# ── content-word twins (GH #1667) ───────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    # the head noun phrase of the first clause, owner and framing dropped, at most four words, last ones kept
+    ("What is the alpha-svc's per-request-retry timeout window, and where is it configured?",
+     ("request", "retry", "timeout", "window")),
+    ("how the coverage repair reads the ledger", ("coverage", "repair", "reads", "ledger")),
+    ("which port does the beta gateway listen on", ("port", "beta", "gateway", "listen")),
+    ("the cache eviction policy; also its size", ("cache", "eviction", "policy")),
+])
+def test_content_terms_are_the_first_clauses_last_four_content_words(text: str, expected: tuple[str, ...]) -> None:
+    assert content_terms(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", "what is it?", "where, and why", "12 34 2026"])
+def test_content_terms_need_two_content_words(text: str) -> None:
+    assert content_terms(text) == ()
+
+
+def test_a_facet_without_identifiers_gets_a_content_word_twin_after_the_identifier_twins() -> None:
+    """GH #1667: a facet whose text names no identifier still gets a lexical twin, from its own content words, so
+    a constant the code describes in the question's words ("byte budget") is reachable; identifier twins, the more
+    precise, keep the first spare slots."""
+    qs = build_repair_queries(
+        [_f("f1", "What is the alpha-svc's per-request-retry timeout window, and where is it set?"),
+         _f("f2", "what the retry_budget allows")],
+        primary_collections=[], plan_targets=[RepairTarget("code")], max_queries=6, limit=5, max_lexical=3,
+    )
+    assert [(q.facet_id, q.args["query"]) for q in qs if q.args.get("lexical")] == [
+        ("f2", "retry_budget"),
+        ("f1", "request retry timeout window"),
+    ]
+
+
+def test_a_facet_with_identifiers_gets_no_content_word_twin() -> None:
+    qs = build_repair_queries(
+        [_f("f1", "where the retry_budget timeout window is set")], primary_collections=[],
+        plan_targets=[RepairTarget("code")], max_queries=6, limit=5, max_lexical=3,
+    )
+    assert [q.args["query"] for q in qs if q.args.get("lexical")] == ["retry_budget"]
+
+
+def test_content_word_twins_stay_inside_the_spare_slots() -> None:
+    facets = [_f(f"f{i}", f"how the cache{i} eviction policy works") for i in range(1, 6)]
+    qs = build_repair_queries(facets, primary_collections=[], plan_targets=[RepairTarget("code")],
+                              max_queries=6, limit=5, max_lexical=3)
+    assert len(qs) == 6 and sum(1 for q in qs if q.args.get("lexical")) == 1, "five vector queries leave one slot"
