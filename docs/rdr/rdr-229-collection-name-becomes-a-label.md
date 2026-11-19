@@ -2399,6 +2399,23 @@ found these in those fixes, now resolved in the text:
   CHECK, `NoteUriMoveTest`, and seven wording rows (P2.10, P3.1, item 8,
   item 12, P1.2, CA5, Prerequisites, Approach; T2 `229-research-67`).
 
+The accept fix check (`nexus_rdr/229-fix-check-3c7aa425d443`, FAIL) found
+this in those fixes, recorded as the last residual of
+`nexus_rdr/229-gate-latest`. Sam chose on 2026-11-19 to fix it in the text
+(ask `baton/rdr229-refusal-owner`, option 1). Now resolved in the text:
+
+- The gate-3 rename refusal had no owner before P3.7: it ended on a move
+  only P3.7 ships and registers, so a release with P3.5 and not P3.7
+  refused every rename or reopened the new-id hazard, and the Approach
+  and Incremental adoption said each step up to P3.6 could stop alone.
+  P3.5 and P3.7 now ship in one engine cut with the refusal and the
+  name-key drop move's registration; the refusal holds from gate 3 until
+  that move has `completed_at` and every P3.5b changeset has applied, and
+  names the missing condition, which also covers the check's DISCOVER row
+  on the state between those two (item 6, Approach, P3.5, P3.5a, P3.7,
+  P3.R, Phase dependencies, Versioning, Incremental adoption;
+  `9ea4521a4`; T2 `229-research-69`).
+
 To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
 `nexus_rdr/229-gate-critique-2026-11-19-r3`), not resolved here:
 
@@ -2659,3 +2676,4 @@ large, and moved under a ratchet.
 - 2026-11-19: Gate round 3 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `2e06cb126e67`; critique `nexus_rdr/229-gate-critique-2026-11-19-r3`.
 - 2026-11-19: Round 3 residuals dispositioned (Sam, ask `baton/rdr229-accept-route`, option 1). Fixed: residual 1 `f0d64bc6a`, residual 2 `a59ef5325`, residual 3 `4ce3d0def` and `e9684ddca`, residual 4 `1d2e07f8d`, S-1 `bed7b07a7`, sweep `0947955d2`; S-2 to S-8 to beads at accept. Contradiction Check and Scope Verification regenerated. T2 `229-research-55` to `-60` added.
 - 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
+- 2026-11-19: Last residual of `nexus_rdr/229-gate-latest` (the gate-3 rename refusal had no owner before P3.7; accept fix check `3c7aa425d443`) fixed in the text (Sam, ask `baton/rdr229-refusal-owner`, option 1): P3.5 and P3.7 ship in one engine cut with the refusal and the name-key drop move's registration, and the refusal holds until every P3.5b changeset has applied, `9ea4521a4`. Contradiction Check regenerated. T2 `229-research-69` added.
