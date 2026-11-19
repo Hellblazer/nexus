@@ -574,7 +574,8 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   each move's `chunk_size`, `sleep_ms` and `statement_timeout_ms`. A local
   measurement bounds the backfill and the index rebuild per 1M rows (T2
   `229-research-30`); it does not time the key swap, the validations, the
-  P3.3b pass or P4.1's drop on that tenant (T2 `229-research-54`).
+  P3.3b pass, P3.7's name-key drop or P4.1's drop on that tenant (T2
+  `229-research-54`, `229-research-67`).
 - [ ] No two live rows of one tenant share a label once renames stop
   tombstoning, so the partial UNIQUE on live labels (item 7) can be
   created without data repair. — **Status**: Unverified, expected true (the
@@ -586,8 +587,10 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
 ### Approach
 
 Fix what reads the name first, then change what the name is. Phases 1 and 2
-close Gaps 1, 2, 4, 5 and 7 by moving every reader onto the registry row;
-they change no schema key and rename nothing. Phase 3 adds the surrogate key
+close Gaps 1, 2, 4, 5 and 7 by moving every reader onto the registry row,
+and Phase 2 also stops note-URI moves from carrying `chroma://` residue
+and repairs residue already moved (P2.10), a row repair that touches no
+key; they change no schema key and rename nothing. Phase 3 adds the surrogate key
 and moves every reference onto it in the strangler order (expand, switch,
 contract): new id columns are added and backfilled beside the name columns,
 writers fill both, readers and constraints switch to the id, and only then
@@ -851,7 +854,7 @@ The key moves table by table in strangler order:
   re-creates that index on `superseded_by_id` (item 7). Before any of
   that, an engine release retires the Java name path (P4.0): the name
   readers, the rename's fourteen-table rewrite and the name-based arms of
-  `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:10733-10752`). Until
+  `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:10733-10760`). Until
   that release the dual path stays in Java. That engine carries a boot
   floor, because a release reaches an install whatever its moves have
   done: it serves migration-only until gate 3 of the completion check
@@ -1283,7 +1286,8 @@ path that renders a conformant name for a new collection
 (`CollectionName.render`, `t3_collection_name`'s write branch, the
 indexer's reroute, `collection_for_repo`'s client-side render) stops doing
 so and registers by attributes. Existing collections keep their names as
-labels. Minting waits for P2.9 and P3.9. P2.9 empties the routing class
+labels. Minting waits for P2.9, P2.10 and P3.9. P2.10 stops residue
+moving onto a prefix-free label (item 7). P2.9 empties the routing class
 that the widened census measures. P3.9 gives the recovery-bundle sites the
 bundle's row in place of the recorded name. After both, no site on this
 install routes a minted collection by a prefix it does not have (item 12).
@@ -1422,7 +1426,10 @@ list stays complete because of one fact, one repair and one rule:
   renders `f"{self.content_type}__{self.owner_id}..."`,
   `collection_name.py:90-93`), so `isNote` classes the value as residue
   again and the stale-note repair skips it. Inferred, not read: every
-  `moveTo` caller sets a row's collection and its URI in one UPDATE, so
+  URI-move path leaves a row's URI segment equal to its new collection
+  when its transaction commits (the rename in two UPDATEs, the URI's
+  selected by the new collection, `CatalogRepository.java:11412-11414`,
+  `:11463-11466`; the others in one; T2 `229-research-67`), so
   moved residue names its own collection; a row whose new value a live
   document already holds (catalog-016) is skipped, stays counted, and
   leaves the move's verification empty. The `file://` identity is not
@@ -1623,8 +1630,8 @@ every script and note URI that names one.
 - [ ] Critical Assumption 5 measured (P3.2) before P3.1's changeset is
   final, and so before the Phase 3 switch changesets: it sets each move's
   `chunk_size`, `sleep_ms` and `statement_timeout_ms`.
-- [ ] RDR-246's data-move mechanism active on the cloud before Phase 3
-  runs there:
+- [ ] RDR-246's data-move mechanism active on the cloud before P2.10's
+  repair moves and Phase 3 run there:
   nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
   boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
   on Sam's go: cloud pg_background install and the first registered move")
@@ -1676,8 +1683,8 @@ its acceptance is that test green plus the census pin it lowers.
   T2 `229-research-50`). Bounded load, results in T2.
   Also, on every install as a pre-flight and not only on the two tenants,
   the rows of `catalog_documents`, `document_aspects` and
-  `document_highlights` whose `chroma://` segment has no content-type
-  prefix, split by whether the row's collection has content type `code`,
+  `document_highlights` whose `chroma://` segment has no `rdr__`,
+  `docs__` or `code__` prefix, split by whether the row's collection has content type `code`,
   `docs` or `rdr`; among those, the rows whose segment is not their own
   collection; and the `nx-note://` rows of such a collection whose segment
   has no `rdr__`, `docs__` or `code__` prefix (Critical Assumption 3,
@@ -1698,7 +1705,7 @@ its acceptance is that test green plus the census pin it lowers.
 - P1.R Review gate for Phase 1 (code-review-expert and substantive-critic;
   "Ship when the three gates are green at pins that match a fresh census").
 
-**Phase 2: readers move to the row**
+**Phase 2: readers move to the row, and residue stops moving**
 
 - P2.1 Non-stranding tests first: recovery bundle import, migrate-fallback,
   legacy-collection migration, ETL import, each
@@ -1764,6 +1771,19 @@ its acceptance is that test green plus the census pin it lowers.
   (`catalog_documents`, `document_aspects`, `document_highlights`), with
   item 12's rule as the template and, as the verification, the rows that
   still match it with a free new value; never a boot rewrite (RDR-246).
+  The `catalog_documents` move runs first and its `on_complete` registers
+  the two satellite moves, as the chunks swap registers its child moves
+  (item 6). Only documents can meet a held value: highlights are unique
+  on `(tenant, doc_id)` and aspects on `(tenant, collection,
+  source_path)` (`CatalogRepository.java:7319-7322`). So a satellite row
+  is repaired only where its document was, and one whose document was
+  skipped for a held value is skipped too and counted. From P3.1's cut,
+  P3.1's CHECK would refuse a repair UPDATE of a row the stamp has not
+  reached, so P3.1's writer census includes the move templates open at
+  its cut, and P3.1's changeset supersedes any P2.10 repair move not yet
+  complete with one whose template also sets `collection_id` where the
+  row has none ("a new move with a new label" that "names the old label
+  in `supersedes`", RDR-246 lines 961-963; T2 `229-research-67`).
   The first cloud run of those moves waits for nexus-f3yqd.2.23, as
   P3.1's does (Prerequisites). RDR-246 sets no default to borrow: a
   move's chunk size and `sleep_ms` are "the value measured in the Minimum
@@ -1797,8 +1817,9 @@ its acceptance is that test green plus the census pin it lowers.
   a collection update and a reconcile commit that repoints them, leaves
   both on their old segment, still classed
   file-routed by `NoteUri.isNote` and `is_note_uri`, and skipped by the
-  stale-note repair; `NoteUriCorpusTest`'s `moveTo` assertions, which pin
-  the `chroma://` arm today, are inverted. Test, for the verb: moved
+  stale-note repair; `NoteUriCorpusTest`'s `moveTo` assertions and
+  `NoteUriMoveTest`'s (`:108`, `:187`, `:225`), which pin the `chroma://`
+  arm today, are inverted. Test, for the verb: moved
   residue and repaired residue are re-derived to `file://`, not refused.
   Blocks P3.6 and P3.8.
 - P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6, P2.9 and P2.10; client
@@ -1819,8 +1840,9 @@ its acceptance is that test green plus the census pin it lowers.
   key (item 6); every writer (item 6's census: 109 Java
   write sites, 26 SQL functions) sets the id on insert and update from this
   cut, and its acceptance re-runs that census over helper-routed and
-  by-name writes and finds every writer of `taxonomy_centroids` before the
-  CHECK lands (item 6; `TaxonomyCentroidRepository.java:156` is one); `TenantExport`'s table model in the same cut (P3.11); the stamp
+  by-name writes and the move templates open at the cut, finds every writer of `taxonomy_centroids` before the
+  CHECK lands (item 6; `TaxonomyCentroidRepository.java:156` is one), and
+  supersedes any P2.10 repair move not yet complete (P2.10); `TenantExport`'s table model in the same cut (P3.11); the stamp
   registered in `nexus.data_moves` per table, run per tenant and leaf, with
   a null-`collection_id` verification query, the CHECK's VALIDATE as its
   `on_complete`, and the `chunk_size`, `sleep_ms` and `statement_timeout_ms`
@@ -1989,7 +2011,7 @@ its acceptance is that test green plus the census pin it lowers.
   of the name columns that P3.5 switched at gate 3, `renameCollectionTxn`'s
   fourteen-table rewrite (the one-row rename of P3.7 is the only rename
   left), and the name-based arms of `COLLECTION_SCOPED_TABLES`
-  (`CatalogRepository.java:10733-10752`), which keep serving delete and
+  (`CatalogRepository.java:10733-10760`), which keep serving delete and
   re-home by id. Until this release the dual path stays in Java. It keeps
   P3.1 to P3.7's changesets, moves, completion check and index passes, so
   an install that jumps from before P3.1 to this release still reaches
