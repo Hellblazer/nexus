@@ -81,7 +81,7 @@ emit = { class = "BULK JOB", calls = 1, reason = "The nx catalog recovery export
 [[row]]
 id = "commands/catalog.py::list_cmd"
 match = { site = "commands/catalog.py::list_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "The --meta mode and the bounded page read documents with all_documents; --sensitive without --owner no longer walks (it reads /sensitive, then resolve_many, nexus-uwggq.1.7); Phase 2 sends --meta through the metadata route, and the row then becomes BOUNDED.", next = "nexus-uwggq.2.14" }
+emit = { class = "BOUNDED", calls = 1, reason = "The one-page list (no --meta, --sensitive or --owner) reads limit + offset + 1 documents with all_documents; --meta asks the metadata route (nexus-uwggq.2.14) and --sensitive the sensitive list (nexus-uwggq.1.7), neither walks." }
 
 [[row]]
 id = "commands/catalog.py::reconcile_cmd"

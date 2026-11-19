@@ -180,11 +180,9 @@ _CASES = [
     pytest.param({"content_type": "knowledge"}, id="type"),
     pytest.param({"content_type": "knowledge", "limit": 1, "offset": 1}, id="type-paged"),
     pytest.param({"content_type": "paper"}, id="type-with-no-sensitive-row"),
-    pytest.param({"meta": ("extraction_method=mineru",)}, id="meta"),
-    pytest.param({"meta": ("extraction_method=mineru",), "limit": 1}, id="meta-paged"),
-    pytest.param({"meta": ("extraction_method=mineru", "quality_gate_overridden=true")}, id="meta-anded"),
-    pytest.param({"meta": ("extraction_method=mineru",), "content_type": "rdr"}, id="meta-and-type"),
 ]
+# --sensitive with --meta is not this route's: since nexus-uwggq.2.14 it is one by-meta request with the sensitive
+# clause (tests/commands/test_catalog_list_meta_route.py), so no case here carries --meta.
 
 
 def _argv(case: dict, *, as_json: bool) -> list[str]:
@@ -243,11 +241,10 @@ def test_next_page_line_uses_the_routes_count(monkeypatch: pytest.MonkeyPatch) -
     assert engine.calls == [("GET", "/sensitive", {"limit": 2}), ("POST", "/resolve_many", ["1.1.10", "1.1.2"])]
 
 
-@pytest.mark.parametrize("argv", [["--type", "knowledge"], ["--meta", "extraction_method=mineru"]], ids=["type", "meta"])
-def test_request_sequence_with_a_filter_resolves_every_listed_tumbler(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
+def test_request_sequence_with_a_type_resolves_every_listed_tumbler(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = FakeEngine(_fixture_rows())
     engine.wired(monkeypatch)
-    result = _run(*argv, "-n", "1")
+    result = _run("--type", "knowledge", "-n", "1")
     assert result.exit_code == 0, result.stderr
     assert engine.calls == [
         ("GET", "/sensitive", {"limit": 10_000}),
@@ -359,12 +356,10 @@ def test_a_page_ending_at_ten_thousand_still_works_and_one_past_it_is_refused(mo
     assert [c[1] for c in engine.calls] == ["/sensitive"], "refused before anything is resolved"
 
 
-@pytest.mark.parametrize("argv", [["--type", "knowledge"], ["--meta", "extraction_method=mineru"]], ids=["type", "meta"])
-def test_a_filter_on_a_capped_tenant_is_refused_naming_the_limit_and_owner(monkeypatch: pytest.MonkeyPatch,
-                                                                           argv: list[str]) -> None:
+def test_a_type_filter_on_a_capped_tenant_is_refused_naming_the_limit_and_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _big_tenant()
     engine.wired(monkeypatch)
-    result = _run(*argv)
+    result = _run("--type", "knowledge")
     assert result.exit_code != 0
     assert "more than 10000 sensitive documents" in result.stderr
     assert "--type and --meta need the whole list" in result.stderr and "--owner" in result.stderr

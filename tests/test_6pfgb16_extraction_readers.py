@@ -377,10 +377,20 @@ def catalog_cli(world, monkeypatch):
     class _Cat:
         def __init__(self):
             self.calls = []
+            self.by_meta_calls = []
 
         def all_documents(self, limit=0, *, content_type="", offset=0):
             self.calls.append((limit, content_type, offset))
             return [d for d in docs if not content_type or d.content_type == content_type]
+
+        def documents_by_meta(self, *, content_type=None, meta=(), meta_min=(), sensitive=False, limit=1000, offset=0):
+            """The engine's by-meta route with the client's rules: ``(page, count)`` over the matches in tumbler order
+            (nexus-uwggq.2.14); a read of the catalog's documents is not what the command does any more."""
+            from nexus.catalog.meta_filter import documents_with_meta  # noqa: PLC0415
+
+            self.by_meta_calls.append({"content_type": content_type, "meta": list(meta), "limit": limit, "offset": offset})
+            matches = documents_with_meta([d for d in docs if not content_type or d.content_type == content_type], list(meta))
+            return matches[offset:offset + limit], len(matches)
 
     cat = _Cat()
     import nexus.commands.catalog as catalog_cmd
@@ -405,6 +415,13 @@ def test_filters_are_anded_and_an_absent_source_reads_as_file(catalog_cli) -> No
     assert _audit("--meta", "extraction_source=dt_content", "--meta", "quality_gate_overridden=true") == ["1.1.1"]
     assert _audit("--meta", "extraction_source=file") == ["1.1.2", "1.1.3"], "an absent source is a file, as for the pre-nexus-6pfgb.6 document"
     assert _audit("--meta", "extraction_method=mineru", "--meta", "quality_gate_overridden=true") == []
+
+
+def test_the_audit_asks_the_route_and_never_reads_the_documents(catalog_cli) -> None:
+    _audit("--meta", "extraction_source=file", "--type", "pdf")
+    assert catalog_cli.calls == [], "no read of the catalog's documents (RDR-241)"
+    assert [(c["content_type"], c["meta"], c["limit"], c["offset"]) for c in catalog_cli.by_meta_calls] == [
+        ("pdf", [("extraction_source", "file")], 50, 0)]
 
 
 def test_a_malformed_filter_is_a_usage_error_not_a_silent_scan(catalog_cli) -> None:

@@ -385,7 +385,9 @@ nx catalog list --meta extraction_method=mineru
 Each document's catalog `meta` carries its own `extraction_method`,
 `quality_gate_overridden` and `extraction_source` (`file`, or `dt_content` /
 `dt_ocr` / `dt_transcribe` for DEVONthink text; an absent source means `file`), and
-`nx catalog list --meta KEY=VALUE` (repeatable, ANDed) filters the documents on them.
+`nx catalog list --meta KEY=VALUE` (repeatable, ANDed) filters the documents on them: it
+asks the engine's metadata route a page at a time (engine-service 0.1.197 or later), and
+an engine without the route is an error naming it, never a scan of the catalog.
 `nx store get` prints them from the same place: an `Extractor:` line, a `Gate:` line for
 a document that overrode the quality gate and a `Source:` line for text that did not come
 from a file, one set per owning document when a chunk is shared. The chunk row's copy is
