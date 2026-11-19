@@ -1962,6 +1962,29 @@ Gate round 2 (2026-11-19) found these, now addressed in the text:
 - Name columns with no disposition, and Day 2 promises with no bead: the
   table in item 6 and P3.12 (T2 `229-research-48`).
 
+The round 2 fix check (`nexus_rdr/229-fix-check-1b112f9c770c`, FAIL) found
+these in the round 2 fixes, now addressed in the text:
+
+- A null-parity CHECK on `superseded_by`, which is `''` on a live row, so
+  `superseded_by_id` could never be NULL and P4.1's live-label index would
+  match nothing: `superseded_by` has its own CHECK `(superseded_by = '') =
+  (superseded_by_id IS NULL)` (item 6, item 7, P3.1, P4.1; T2
+  `229-research-50`).
+- A swap move whose verification needs P3.3b's indexes, registered before
+  they exist: P3.3b's pass registers it once every leaf's index is valid
+  (item 6, P3.3b, P3.3c; T2 `229-research-51`).
+- P4.1's drop using a verification as a wait, an undefined label set, and
+  readers and the one-row rename not waiting for P3.4: the completion
+  check's read set and three gates, with P4.1's drop move registered at
+  gate 3 (item 6, P3.4, P3.5, P3.7, P4.1; T2 `229-research-52`).
+- Name-keyed upsert targets and name-only child cascades after a swap that
+  dropped the name key, and client caches trusting ids a name-path rename
+  replaces: P3.3c adds the id key beside the name keys until P4.1, the
+  writers move at gate 3, the rename sets the new id, and caches trust ids
+  from gate 3 (item 6, P3.3c, P3.5, P4.1; T2 `229-research-53`).
+- P3.2 timing only the stamp, the swap and the rebuild: it times every
+  move and pass (P3.2, Critical Assumption 5; T2 `229-research-54`).
+
 Recorded residuals, for Sam at acceptance (gate record
 `nexus_rdr/229-gate-latest`; not resolved here):
 
@@ -2023,8 +2046,14 @@ disposition of all sixteen name columns without a registry foreign key
 (item 6's table: `catalog_documents.corpus` is a history label,
 `catalog_reconcile_rows.physical_collection` transient), the Day 2
 surfaces (P3.12), and the `taxonomy_centroids` writer (P3.1's acceptance;
-one is `TaxonomyCentroidRepository.java:156`).
-Still without one: the history tables' nullable `collection_id` (item 6)
+one is `TaxonomyCentroidRepository.java:156`). Items the round 2 fix
+check found now have one too: `superseded_by_id`'s own CHECK (P3.1), the
+swap's registration by the P3.3b pass (P3.3b), the completion check's read
+set and gates (P3.1, P3.4, P3.5, P3.7, P4.1), the name-keyed upserts and
+child cascades until P4.1 (P3.3c, P3.5c), the old composites' drop
+(P4.1), and the timing of every move and pass (P3.2).
+Still without one: P3.5b's plan measurement of each both-shapes reader
+has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
 stores; no rule says what a mint does when a live label already has the
 minted form (P1.2 only counts such labels); and no audit covers where a
@@ -2083,7 +2112,8 @@ label meets a file path beyond P3.6's Windows test.
 ### Proportionality
 
 The schema work is now large: a new key on the registry, eight foreign keys
-and two partitioned primary keys moved, every per-collection index rebuilt,
+and two partitioned tables given an id key beside their name keys until
+P4.1, ten foreign-key validation moves, every per-collection index rebuilt,
 and a route contract that accepts ids. That is what D3 asks for, and it is
 the only way a label becomes free to change. The client side is as before:
 large, and moved under a ratchet.
@@ -2106,7 +2136,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-49`, and
+- T2 `nexus_rdr/229-research-1` to `-54`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -2170,3 +2200,14 @@ large, and moved under a ratchet.
   written into P4.1. The three recorded
   residuals are listed for Sam, not resolved. Contradiction Check and
   Scope Verification regenerated. T2 `229-research-43` to `-49` added.
+- 2026-11-19: Fix check 1 of round 2 (`nexus_rdr/229-fix-check-1b112f9c770c`,
+  FAIL) re-fix. `superseded_by` gets its own CHECK, so `superseded_by_id`
+  is NULL exactly on live rows. P3.3b's pass registers the swap once every
+  leaf's index is valid. The completion check has a read set (a label with
+  no row is incomplete; a failed move on a dropped table is complete) and
+  three gates; readers, the one-row rename and P4.1's drop move wait for
+  P3.4. P3.3c adds the id key beside the name keys until P4.1, and the
+  upserts move to it at gate 3. P3.2 times every move and pass. Wording
+  rows corrected. Contradiction Check and Scope Verification regenerated,
+  with the three residuals still recorded for Sam. T2 `229-research-50` to
+  `-54` added.
