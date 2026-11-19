@@ -338,6 +338,37 @@ def _run_nx(args: list[str], cwd: str | None, timeout: float) -> tuple[str, str 
     return result.stdout, None
 
 
+#: Seconds the running-work read may take. It is an addition to the checkpoint, never a reason to hold compaction.
+_WORK_TIMEOUT_S = 3.0
+
+
+def _running_work_section(cwd: str | None) -> list[str]:
+    """The background work this session's own identity still has running (RDR-253 "Background work": the checkpoint
+    lists it by identity after a ``/clear``), as checkpoint lines; ``[]`` on any failure, and when there is none.
+
+    ``nx identity work list --running --json`` with no argument is the caller's own identity, which ``nx`` resolves itself
+    through the token file of its nearest Claude ancestor, so this reads no token. A running row of an identity that is
+    not alive is stale and is not listed. Never raises; one try, no retry."""
+    try:
+        base = _nx_command()
+        if base is None:
+            return []
+        done = subprocess.run(
+            [*base, "identity", "work", "list", "--running", "--json"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=_WORK_TIMEOUT_S, cwd=cwd if cwd and os.path.isdir(cwd) else None, check=False)
+        if done.returncode != 0:
+            return []
+        rows = json.loads(done.stdout)["work"]
+        lines = [f"- {r['kind']} {r['ref']}" for r in rows if isinstance(r, dict) and r.get("kind") and r.get("ref")]
+    except Exception:  # noqa: BLE001 — an addition to the checkpoint: any failure leaves it out, silently
+        return []
+    if not lines:
+        return []
+    return ["## Background work this identity still has running\n",
+            "(registered with `nx identity work register`; each row is the session's own, and a restart ends the waits, "
+            "watchers and lab runs among them)\n", _cap("\n".join(lines)).rstrip() + "\n"]
+
+
 def _write_atomic(path: Path, text: str) -> None:
     """Write *text* to *path* through a temp file in the same directory. ``mkstemp`` creates it mode 0600."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1000,6 +1031,7 @@ def run_pre(payload: dict) -> str:
         else:
             parts.append(f"[no board entry: {board_error or 'empty'}]\n")
     parts.extend(checks)
+    parts.extend(_running_work_section(cwd))
     parts.append(f"## Working state\n\n(nx command-context continuation, run {state_stamp}; old tool output is "
                  "as of when it ran)\n")
     shaped = _filter_in_progress(_shape_state(state), board)
