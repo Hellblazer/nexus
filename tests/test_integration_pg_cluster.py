@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 import structlog.testing
 
+from nexus.daemon import service_registry
 from nexus.daemon.service_registry import pid_alive, process_command
 from tests import _child_process as cp
 from tests import _ddl_cluster_sites as csites
@@ -294,6 +295,46 @@ class TestOwnerRecord:
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         child.wait(timeout=5)
         sub.record_integration_child(child)  # no command line to identify it by: nothing to record
+        assert sub._owner_records == {}
+        assert not list(tmp_path.glob(sub._OWNER_RECORD_GLOB))
+
+    def test_a_child_whose_command_line_is_not_yet_readable_is_still_recorded(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        """Popen returns once the child's exec closes its CLOEXEC error pipe; Linux sets the new image's argv
+        range only after that, while it loads the binary, so a loaded box reads an empty /proc/<pid>/cmdline in
+        that window. The record waits for the command line rather than dropping a live child (the shard 5 red at
+        9eec09d3f: no record, no warning)."""
+        monkeypatch.setattr(sub, "_original_tempdir", lambda: tmp_path)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        owned_children.append(child)
+        time.sleep(0.1)
+        real = service_registry.process_command
+        blank = {"left": 3}
+
+        def mid_exec(pid: int) -> str:
+            if pid == child.pid and blank["left"] > 0:
+                blank["left"] -= 1
+                return ""
+            return real(pid)
+
+        monkeypatch.setattr(service_registry, "process_command", mid_exec)
+        sub.record_integration_child(child)
+        assert blank["left"] == 0
+        rec = json.loads(sub._owner_record_path(tmp_path).read_text())
+        assert rec["children"] == [{"pid": child.pid, "cmdline": real(child.pid)}]
+
+    def test_a_live_child_with_no_command_line_ever_is_not_waited_on_forever(
+        self, tmp_path, monkeypatch, owned_children,
+    ) -> None:
+        monkeypatch.setattr(sub, "_original_tempdir", lambda: tmp_path)
+        monkeypatch.setattr(sub, "_CMDLINE_WAIT_S", 0.3)
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        owned_children.append(child)
+        monkeypatch.setattr(service_registry, "process_command", lambda pid: "")
+        started = time.monotonic()
+        sub.record_integration_child(child)
+        assert time.monotonic() - started < 2.0
         assert sub._owner_records == {}
         assert not list(tmp_path.glob(sub._OWNER_RECORD_GLOB))
 
