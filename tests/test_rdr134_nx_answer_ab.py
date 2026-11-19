@@ -162,12 +162,12 @@ def test_each_question_is_run_under_both_arms_and_paired() -> None:
     assert out["stopped"] is None and out["spent_usd"] == pytest.approx(0.06)
 
 
-def test_the_primary_ordering_sorts_by_distance_and_the_envelope_order_is_kept_beside_it() -> None:
+def test_the_raw_distance_ordering_sorts_nearest_first_and_the_envelope_order_is_kept_beside_it() -> None:
     answer = _answer({"off": [("far", 0.9), ("good", 0.1)], "top1": [("far", 0.9), ("good", 0.1)]})
     (row,) = _run(_Q[:1], answer)["rows"]
     assert row["off"]["distance"]["top3"][0] == "benchmarking.md", "nearest first"
     assert row["off"]["envelope"]["top3"][0] == "far.md", "as the envelope listed them"
-    assert row["off"]["ndcg3"] == row["off"]["distance"]["ndcg3"] > row["off"]["envelope"]["ndcg3"]
+    assert row["off"]["distance"]["ndcg3"] > row["off"]["envelope"]["ndcg3"]
 
 
 def test_the_primary_is_the_calibrated_order_and_raw_distance_is_kept_beside_it() -> None:
@@ -203,6 +203,33 @@ def test_a_mixed_envelope_is_scored_on_the_calibrated_order() -> None:
     off = row["off"]
     assert off["calibrated"]["top3"][0] == "benchmarking.md" and off["distance"]["top3"][0] == "other.md"
     assert off["ndcg3"] == off["calibrated"]["ndcg3"] > off["distance"]["ndcg3"]
+
+
+def test_a_catalog_row_model_wins_over_the_name_and_each_arm_records_the_models_used() -> None:
+    # Search asks the catalog row first (nexus-ml9vu); a legacy name carries no model token.
+    legacy, code = "docs__legacy-papers", "code__1-1__voyage-code-3__v1"
+    rows = [("bad", code, 0.38), ("good", legacy, 0.50)]
+    asked: list = []
+
+    def resolver(colls):
+        asked.append(sorted(colls))
+        return lambda c: "voyage-context-3" if c == legacy else None
+
+    async def fn(*, question: str, structured: bool, trace: bool, **kw: Any) -> dict:
+        if trs.configured_route() is not None:
+            _log.info(ab.ROUTE_EVENT, routed=1, no_topics=0, fallback=0, skipped=0, unreported=0, unrouted_reason=None)
+        return {"chunks": [{"chash": h, "collection": c, "distance": d} for h, c, d in rows], "cost_usd": 0.01,
+                "steps": [{"cost_usd": 0.01}], "plan_id": "p1", "step_count": 1, "budget_exhausted_at_step": None}
+
+    (row,) = _run(_Q[:1], fn, model_resolver=resolver)["rows"]
+    assert row["off"]["calibration_models"] == {legacy: "voyage-context-3", code: "voyage-code-3"}
+    assert row["off"]["calibrated"]["top3"][0].endswith("benchmarking.md"), "the context-3 factor put it first"
+    assert asked and asked[0] == sorted({legacy, code})
+
+
+def test_the_raw_ordering_is_summarized_beside_the_secondary() -> None:
+    s = ab.summarize([_paired(f"R{i}", "rdr", 0.0, 0.5) for i in range(3)])
+    assert set(s["informational"]) >= {"secondary_ordering_rule", "raw_ordering_rule"}
 
 
 def test_one_model_calibrates_to_the_raw_order() -> None:
@@ -379,11 +406,14 @@ def test_a_resume_runs_an_unpaired_question_again() -> None:
 
 
 def test_a_resume_of_a_different_measurement_is_refused() -> None:
-    head = {"queries": {"a.yaml": "1"}, "scope": None, "manifest": {"git_sha": "x", "engine_build": "e1"}}
+    head = {"queries": {"a.yaml": "1"}, "scope": None, "primary": "calibrated",
+            "manifest": {"git_sha": "x", "engine_build": "e1"}}
     assert ab.resume_mismatch(dict(head), head) == ""
     assert "question files" in ab.resume_mismatch({**head, "queries": {"a.yaml": "2"}}, head)
     assert "scope" in ab.resume_mismatch({**head, "scope": "docs"}, head)
     assert "engine_build" in ab.resume_mismatch({**head, "manifest": {"git_sha": "x", "engine_build": "e0"}}, head)
+    old = {k: v for k, v in head.items() if k != "primary"}  # a results file from before the primary changed
+    assert "primary ordering" in ab.resume_mismatch(old, head)
 
 
 def test_an_answer_with_no_chunks_is_unpaired_not_a_loss() -> None:
