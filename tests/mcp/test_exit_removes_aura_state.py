@@ -7,6 +7,7 @@ The state file is written by the real ``state_writer``; only the process exit (`
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -90,3 +91,53 @@ def test_a_failing_removal_never_stops_the_t1_teardown(written: Path, monkeypatc
     monkeypatch.setattr(aura_session, "remove_own_state_files", _boom, raising=False)
     core._exit_teardown()
     assert order == ["t1_shutdown"]
+
+
+def _blocked_sink(monkeypatch: pytest.MonkeyPatch):
+    """A real sink over the real writer whose file write blocks on an event, so a write is in flight when the removal runs."""
+    started, release = threading.Event(), threading.Event()
+    real_write = ls.write_state
+
+    def _slow(path: Path, state: ls.LoadedState) -> None:
+        started.set()
+        assert release.wait(10), "the test never released the write"
+        real_write(path, state)
+
+    monkeypatch.setattr(ls, "write_state", _slow)
+    monkeypatch.setattr(aura_session, "_CLOSE_WAIT_S", 0.05, raising=False)
+    sink = aura_session.threaded_sink(aura_session.state_writer("sid-race", register_exit=lambda *_a, **_k: None))
+    return sink, started, release
+
+
+def test_a_write_in_flight_at_removal_does_not_recreate_the_file(
+    written: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-252 Step 4 confirmation round (nexus-igea9.7): a write still running on the sink when the teardown removes the
+    file used to land afterwards and leave the file behind; a write submitted after the removal did the same."""
+    written.unlink()
+    sink, started, release = _blocked_sink(monkeypatch)
+    state = ls.LoadedState(identity="id-b", loaded_identity="id-b", auras={"x": ls.AuraState(True, "loaded", None)})
+    sink(4242, state)
+    assert started.wait(10), "the sink write never began"
+
+    aura_session.remove_own_state_files()                    # the write is blocked: nothing on disk yet
+    release.set()
+    assert sink.wait_idle(10)
+    assert not written.exists(), "a write in flight at removal recreated the state file"
+
+    sink(4242, state)                                        # submitted after the removal
+    assert sink.wait_idle(10)
+    assert not written.exists(), "a write after the removal recreated the state file"
+
+
+def test_a_queued_write_is_dropped_by_the_removal(written: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    written.unlink()
+    sink, started, release = _blocked_sink(monkeypatch)
+    sink(4242, ls.LoadedState(identity="id-b", loaded_identity="id-b", auras={}))
+    assert started.wait(10)
+    sink(4242, ls.LoadedState(identity="id-c", loaded_identity="id-c", auras={}))   # queued behind the blocked one
+
+    aura_session.remove_own_state_files()
+    release.set()
+    assert sink.wait_idle(10)
+    assert not written.exists()

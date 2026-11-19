@@ -23,6 +23,8 @@ decision is recorded (:attr:`AuraLoader.decisions`) and handed to the state-file
 from __future__ import annotations
 
 import dataclasses
+import threading
+import weakref
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -578,12 +580,30 @@ def read_memberships(identity: str) -> list[str]:
 #: server's exit teardown; both read this one record.
 _OWN_STATE_FILES: dict[Path, int] = {}
 
+#: The state writers and sinks that can still write a file, so removal can close them first (see
+#: :func:`remove_own_state_files`). Weak: a writer or sink nothing holds any more has nothing left to close.
+_CLOSABLES: weakref.WeakSet[Any] = weakref.WeakSet()
+
+#: How long removal waits for a write already running on a sink before it removes anyway. The write checks the closed
+#: flag again after it lands its file and removes it itself, so the wait only spares a second removal; it is not what
+#: makes removal final.
+_CLOSE_WAIT_S = 1.0
+
 
 def remove_own_state_files() -> int:
-    """Remove each state file this process wrote and still owns (a successor's file stays). Safe to call twice: a file
-    already gone removes nothing. Returns how many files were removed."""
+    """Close every state writer and sink, then remove each state file this process wrote and still owns (a successor's
+    file stays). Once this starts no later write recreates a file: a write not yet started or still queued does
+    nothing, and one already running removes its own file when it lands. Safe to call twice: a file already gone
+    removes nothing. Returns how many files were removed."""
     from nexus.auras.loaded_state import remove_own  # noqa: PLC0415
 
+    closables = list(_CLOSABLES)
+    for c in closables:
+        c.close()
+    for c in closables:
+        wait = getattr(c, "wait_idle", None)
+        if wait is not None:
+            wait(_CLOSE_WAIT_S)
     removed = 0
     for path, server_pid in list(_OWN_STATE_FILES.items()):
         try:
@@ -593,44 +613,61 @@ def remove_own_state_files() -> int:
     return removed
 
 
-def state_writer(
-    session_id: str, *, register_exit: Callable[..., Any] | None = None
-) -> Callable[[int, LoadedState], None]:
-    """The ``state_sink`` of the real loader: it names the holder (the Claude process the registry file records),
-    writes ``<config>/auras/loaded-<claude pid>.<startedAt>.json``, and removes it when the server exits.
-    *register_exit* registers the removal (``atexit.register``, or a stand-in in a test)."""
-    import atexit  # noqa: PLC0415
-    import os  # noqa: PLC0415
+class _StateWriter:
+    """The state file writer: it names the holder (the Claude process the registry file records) and writes
+    ``<config>/auras/loaded-<claude pid>.<startedAt>.json``. :meth:`close` ends it: a later write does nothing, and a
+    write already running removes the file it just landed."""
 
-    on_exit = register_exit if register_exit is not None else atexit.register
+    def __init__(self, session_id: str, on_exit: Callable[..., Any]) -> None:
+        self._session_id = session_id
+        self._on_exit = on_exit
+        self._closed = threading.Event()
+        self._registered: set[Path] = set()
+        _CLOSABLES.add(self)
 
-    from nexus import config as _config  # noqa: PLC0415 -- resolved at call time, so a redirected config dir is honoured
-    from nexus.auras.loaded_state import remove_own, state_dir, state_path, write_state  # noqa: PLC0415
-    from nexus.identity.holder import read_registry_entry, this_host  # noqa: PLC0415
+    def close(self) -> None:
+        self._closed.set()
 
-    registered: set[Path] = set()
+    def __call__(self, pid: int, state: LoadedState) -> None:
+        import os  # noqa: PLC0415
 
-    def write(pid: int, state: LoadedState) -> None:
+        from nexus import config as _config  # noqa: PLC0415 -- resolved at call time, so a redirected config dir is honoured
+        from nexus.auras.loaded_state import remove_own, state_dir, state_path, write_state  # noqa: PLC0415
+        from nexus.identity.holder import read_registry_entry, this_host  # noqa: PLC0415
+
+        if self._closed.is_set():
+            return
         entry = read_registry_entry(pid)
         if entry is None or entry.started_at is None:
-            _log.info("auras_state_not_written", session_id=session_id, reason="no registry file for the claude process")
+            _log.info("auras_state_not_written", session_id=self._session_id, reason="no registry file for the claude process")
             return
         path = state_path(state_dir(_config.nexus_config_dir()), pid, entry.started_at)
         write_state(path, dataclasses.replace(
             state, host=this_host(), pid=pid, started_at=entry.started_at, proc_start=entry.proc_start,
-            server_pid=os.getpid(), session_id=session_id,
+            server_pid=os.getpid(), session_id=self._session_id,
         ))
-        if path not in registered:
-            registered.add(path)
-            _OWN_STATE_FILES[path] = os.getpid()
-            on_exit(remove_own, path, server_pid=os.getpid())
+        _OWN_STATE_FILES[path] = os.getpid()
+        if path not in self._registered:
+            self._registered.add(path)
+            self._on_exit(remove_own, path, server_pid=os.getpid())
+        if self._closed.is_set():  # removal started while this write ran: it may already have passed this file
+            remove_own(path, server_pid=os.getpid())
 
-    return write
+
+def state_writer(
+    session_id: str, *, register_exit: Callable[..., Any] | None = None
+) -> Callable[[int, LoadedState], None]:
+    """The ``state_sink`` of the real loader: it writes the state file and removes it when the server exits.
+    *register_exit* registers the removal (``atexit.register``, or a stand-in in a test)."""
+    import atexit  # noqa: PLC0415
+
+    return _StateWriter(session_id, register_exit if register_exit is not None else atexit.register)
 
 
 class _Sink:
     """A state sink that hands each write to one worker thread, in order, so the file I/O of a load or an identity change
-    never runs on the waiter's loop. ``wait_idle`` is for a test and for shutdown."""
+    never runs on the waiter's loop. ``wait_idle`` is for a test and for shutdown; ``close`` ends it: queued writes are
+    dropped, a call after it does nothing, and the write behind it is closed too."""
 
     def __init__(self, write: Callable[[int, LoadedState], None]) -> None:
         from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
@@ -638,16 +675,30 @@ class _Sink:
         self._write = write
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aura-state")
         self._pending: list[Any] = []
+        self._closed = threading.Event()
+        _CLOSABLES.add(self)
 
     def __call__(self, pid: int, state: LoadedState) -> None:
+        if self._closed.is_set():
+            return
         self._pending = [f for f in self._pending if not f.done()]
         self._pending.append(self._pool.submit(self._run, pid, state))
 
     def _run(self, pid: int, state: LoadedState) -> None:
+        if self._closed.is_set():
+            return
         try:
             self._write(pid, state)
         except Exception as exc:  # noqa: BLE001 -- the state file is a convenience for nx aura list
             _log.warning("auras_state_write_failed", error=str(exc))
+
+    def close(self) -> None:
+        self._closed.set()
+        for f in list(self._pending):
+            f.cancel()
+        close = getattr(self._write, "close", None)
+        if close is not None:
+            close()
 
     def wait_idle(self, timeout: float) -> bool:
         from concurrent.futures import wait  # noqa: PLC0415
