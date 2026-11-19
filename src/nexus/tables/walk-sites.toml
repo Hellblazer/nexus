@@ -134,8 +134,6 @@ match = { site = "mcp/catalog.py::catalog_list" }
 emit = { class = "BOUNDED", calls = 2, reason = "Its all_documents calls read one page of limit + 1 documents and stay; its owner and content_type branches read the whole owner or type and slice, which this table does not count." }
 
 [[row]]
-
-[[row]]
 id = "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan"
 match = { site = "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan" }
 emit = { class = "BULK JOB", calls = 1, reason = "Gap 2, deferred; guarded unattended on a managed service." }
