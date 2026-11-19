@@ -100,8 +100,9 @@ class IdentityTokenTest extends IdentityFenceHarness {
     void anExpiredTokenDoesNotStandInTheWayOfTheBindThatRefreshesIt() {
         Seat seat = bindSeat("token-asleep", 612);
         expire(seat.token());
-        // A client woken from a long sleep refreshes through bind with whatever header it holds: the route that
-        // mints the replacement does not read the token, so the expired one is ignored there and nowhere else.
+        // With the TENANT credential, a client woken from a long sleep refreshes through bind with whatever header it
+        // holds: the expired token is ignored on the bind route and the tenant credential needs none. (A data-credential
+        // refresh with an expired token is refused: RDR-253 option A, IdentityDataSelfServiceTest.)
         Resp refreshed = call(TENANT_TOKEN, seat.token(), null, "POST", "/v1/identity/" + seat.id() + "/bind",
             Map.of("event", "refresh", "expected_generation", 1));
         assertThat(refreshed.status()).as(refreshed.raw()).isEqualTo(200);

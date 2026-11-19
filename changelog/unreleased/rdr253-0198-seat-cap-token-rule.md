@@ -1,0 +1,3 @@
+### Changed
+
+- **The data credential's identity self-service is bounded (RDR-253, engine).** An identity may create at most 5 seats through the data credential, counted for the identity's life (409 `seat_limit`); the tenant credential is uncapped. A data-credential bind `refresh` or `fork` now needs the identity's own live identity token (no token, or an expired one, is 403 `identity_token_required`; another identity's is 403 `not_owner`), so a holder of the data credential can no longer quietly mint a token for a session it does not hold. Deploys after the sessions run conexus 8.5.1, which sends the session's own token on refresh and fork.

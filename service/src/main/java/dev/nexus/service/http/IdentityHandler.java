@@ -60,7 +60,8 @@ import java.util.Set;
  * makes in a running session. Each route admits exactly the scopes that need it, in {@link #admit}; purge, rename
  * and the {@code gone} verdict are tenant-only; seat creation, promotion and delegated creation take the tenant
  * credential, or the data credential for the identity its own identity token names only ({@link #selfService}; RDR-253
- * amendment, Sam 2026-11-19), and a data credential binds only the events {@link #DATA_EVENTS}. Any other scope is a
+ * amendment, Sam 2026-11-19), and a data credential binds only the events {@link #DATA_EVENTS}, a {@code refresh} or
+ * {@code fork} only with the identity's own live token ({@link #TOKEN_GUARDED_DATA_EVENTS}). Any other scope is a
  * 403, as is a scope not listed. Reads admit both.
  */
 public final class IdentityHandler implements HttpHandler {
