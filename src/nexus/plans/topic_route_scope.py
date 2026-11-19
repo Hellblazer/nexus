@@ -8,7 +8,8 @@ The transport mirrors the document confinement's ``chash_allow`` (``document_con
    ``off``). A value it cannot read logs ``topic_route_setting_invalid`` and is off, never routed.
 2. The runner attaches the route to a step's args with :func:`route_for_step`: a ``search`` or ``query`` step whose
    ``scope.taxonomy_domain`` is ``prose``, and not a ``query`` step on the catalog route (``author``,
-   ``content_type``, ``follow_links``, ``subtree``), which never reaches ``search_cross_corpus``.
+   ``content_type``, ``follow_links``, ``subtree``), which never reaches ``search_cross_corpus``, and not a step
+   that names a ``topic`` (a post-filter to that topic).
 3. The default dispatcher pops it before the kwargs-drop pass (neither tool has the parameter) and runs the tool
    inside :func:`topic_route_scope`; ``search_cross_corpus`` reads :func:`active_topic_route` when its caller passed
    no ``topic_route`` of its own.
@@ -91,6 +92,10 @@ def route_for_step(
     if scope.get("taxonomy_domain") != "prose":
         return None
     if tool == "query" and any(args.get(k) for k in _QUERY_CATALOG_PARAMS):
+        return None
+    if args.get("topic"):
+        # ``topic`` post-filters to a named topic; routing to the query's nearest one first would leave the
+        # filter little or nothing to keep.
         return None
     return dict(route)
 

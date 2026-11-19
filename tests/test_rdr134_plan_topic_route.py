@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 import structlog
 
+from bench.topic_route_nx_answer_ab import arm_setting
 from nexus import call_deadline
 from nexus.config import _DEFAULTS  # type: ignore[attr-defined]
 from nexus.mcp import core
@@ -139,6 +140,16 @@ async def test_only_a_prose_scope_is_routed(monkeypatch) -> None:
     ])
     routed = {a["query"]: "topic_route" in a for a in d.of("search")}
     assert routed == {"a": False, "b": False, "c": False, "d": True}
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_names_a_topic_is_not_routed(monkeypatch) -> None:
+    _setting(monkeypatch, "top1")
+    d = await _run([
+        {"tool": "search", "args": {"query": "a", "topic": "Some label"}, "scope": _PROSE},
+        {"tool": "search", "args": {"query": "b"}, "scope": {"taxonomy_domain": "prose", "topic": "Some label"}},
+    ])
+    assert all("topic_route" not in a for a in d.of("search"))
 
 
 @pytest.mark.asyncio
@@ -282,3 +293,43 @@ async def test_a_plan_run_sends_topic_route_in_the_engine_request(monkeypatch) -
     await plan_run(_match({"steps": steps}), {}, bundle_operators=False)
     assert engine.route_calls()[before:] and all("topic_route" not in c for c in engine.route_calls()[before:])
 
+
+
+def _wire_core(monkeypatch, cols: list[str]):
+    engine = _engine(monkeypatch, cols)
+    monkeypatch.setattr(core, "_get_t3", lambda: engine.client)
+    monkeypatch.setattr(core, "_get_catalog", lambda: None)
+    monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
+    monkeypatch.setattr(core, "_search_telemetry_sink", lambda: None)
+    monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, t3, **k: list(cols))
+    # the ranking boosts read the collection listing; the route double serves only the search routes
+    monkeypatch.setattr(engine.client, "list_collections",
+                        lambda *a, **k: [{"name": c, "count": 4} for c in cols], raising=False)
+    return engine
+
+
+def test_a_routed_and_an_unrouted_search_never_share_a_cached_page(monkeypatch) -> None:
+    # Step 9 runs the two arms of one question seconds apart, inside the page cache's TTL: the route must be part
+    # of the key the page is looked up by.
+    cols = _cols("docs", _BGE, 2)
+    _wire_core(monkeypatch, cols)
+    keys: list = []
+    monkeypatch.setattr(core, "_page_cache_get", lambda key, need: keys.append(key))
+    for route in (_TOP1, None, {"mode": "band", "width": 0.1}, _TOP1):
+        with topic_route_scope(route):
+            core.search(query="same question", corpus=",".join(cols), threshold=2.0, structured=True)
+    assert len(keys) == 4
+    assert len({keys[0], keys[1], keys[2]}) == 3, "routed, unrouted and band each have their own page"
+    assert keys[0] == keys[3], "the same route reuses its page"
+
+
+@pytest.mark.asyncio
+async def test_the_ab_drivers_arm_switch_reaches_the_runner(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: {"search": {}})
+    steps = [{"tool": "search", "args": {"query": "q"}, "scope": _PROSE}]
+    with arm_setting("top1"):
+        on = await _run(steps)
+    with arm_setting("off"):
+        off = await _run(steps)
+    assert on.of("search")[0]["topic_route"] == _TOP1
+    assert "topic_route" not in off.of("search")[0]

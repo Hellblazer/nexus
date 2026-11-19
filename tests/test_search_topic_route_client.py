@@ -492,10 +492,28 @@ class TestEvent:
         assert (e["unreported"], e["skipped"], e["routed"]) == (2, 0, 0)
         assert e["unrouted_reason"] == "capability_absent" and e["statuses"] == {}
 
-    def test_with_the_per_collection_route_off_the_request_cannot_route(self, monkeypatch) -> None:
+    def test_a_routed_call_takes_the_per_collection_route_without_the_opt_in(self, monkeypatch) -> None:
+        # RDR-134 Step 7: the opt-in keeps the DEFAULT path off the slower route; a call that asks for topic
+        # routing has asked for the one route that can route.
         cols = _cols("docs", _BGE, 2)
         engine = _engine(monkeypatch, cols)
         monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV)
+        (e,), _ = _events(lambda: _search(engine, cols, topic_route=_TOP1))
+        (call,) = engine.route_calls()
+        assert call["topic_route"]["collections"] == cols
+        assert e["unrouted_reason"] is None and e["routed"] == 2
+
+    def test_without_the_opt_in_an_unrouted_call_stays_off_the_route(self, monkeypatch) -> None:
+        cols = _cols("docs", _BGE, 2)
+        engine = _engine(monkeypatch, cols)
+        monkeypatch.delenv(hvc.PER_COLLECTION_ROUTE_ENV)
+        _search(engine, cols)
+        assert engine.route_calls() == [], "the default path is unchanged"
+
+    def test_a_client_without_the_route_cannot_route(self, monkeypatch) -> None:
+        cols = _cols("docs", _BGE, 2)
+        engine = _engine(monkeypatch, cols)
+        monkeypatch.setattr(engine.client, "supports_per_collection_search", False, raising=False)
         (e,), _ = _events(lambda: _search(engine, cols, topic_route=_TOP1))
         assert engine.route_calls() == [] and e["unrouted_reason"] == "per_collection_route_off"
         assert e["unreported"] == 2

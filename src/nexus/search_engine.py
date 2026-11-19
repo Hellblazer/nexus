@@ -2015,9 +2015,11 @@ def search_cross_corpus(
     # _search_batch; see _search_group_per_collection.
     # Opt-in (nexus-tu8wp.3): the route is used only when NX_SEARCH_PER_COLLECTION
     # is 1/true/on/yes; it measured ~2x slower than the batched path on the cloud.
+    # A call that asks for topic routing takes it regardless (RDR-134 Step 7): the
+    # route is the only one that can route, and the caller asked for exactly that.
     per_collection_route = (
         getattr(t3, "supports_per_collection_search", False) is True
-        and per_collection_route_enabled()
+        and (per_collection_route_enabled() or topic_route is not None)
     )
 
     route_tally = (
