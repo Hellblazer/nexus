@@ -11,7 +11,7 @@ this module holds the constants, the report, the query builder and the two affor
 
 **The queries are deterministic and cost no client model call.** A repair query is the facet's own text, which is
 what the request asked for and what the first assessment found nothing for (a lexical twin, below, is its key
-terms). The order is the RDR's: every
+terms or, for a facet with none, its content words). The order is the RDR's: every
 unsupported facet against the primary source's collections first (a named source is the strongest claim on
 the answer), then against the corpora the plan's own retrieval steps used, which are already narrowed to the
 caller's explicit scope. The targets are therefore never wider than the scope that governed the plan: a
@@ -59,7 +59,8 @@ not a measurement.
 (:func:`content_terms`: the first clause's last four content words), queued after every key-term twin. The case
 that motivated it asked for a "byte budget" whose answer is a constant (``CHAT_TOOL_RESULT_MAX_BYTES``) that no
 identifier in the question names; its code's comments use the question's words, and a lexical search for "tool
-result byte budget" ranked the budget chunks first where every vector query missed them. It cannot reach a fact
+result byte budget" returned budget code as all of its top ten, where every vector query had missed it (the chunk
+holding the default value itself was not among them). It cannot reach a fact
 written in words the question does not use: that wants a rewrite into the target's vocabulary, which this module
 does not do.
 
@@ -162,7 +163,12 @@ _STOPWORDS = frozenset(
 #: Content words one content-word twin carries (GH #1667): ANDed by the full-text route, so few.
 _MAX_CONTENT_TERMS = 4
 #: A clause ends here; a content-word twin reads only the first clause, where a question puts what it asks about.
-_CLAUSE_END = re.compile(r"[,;:?!]|\band\b|\bor\b", re.IGNORECASE)
+_CLAUSE_END = re.compile(r"[,;:?!]|\.(?:\s|$)|\b(?:and|or|when|while|because|if|which|whose)\b", re.IGNORECASE)
+#: Verbs a question ends its clause on ("...byte budget work", "...where it is set"): never the thing asked about.
+_FRAMING_TAIL = frozenset(
+    "work works set configured defined decide decides issue issued run runs mean means happen happens use used "
+    "stored kept live lives located found come comes go goes behave behaves handled".split()
+)
 _CONTENT_STOPWORDS = _STOPWORDS | frozenset(
     "per s do did can could should would will there that these those into about also its their whose".split()
 )
@@ -248,16 +254,26 @@ def key_terms(text: str) -> tuple[str, ...]:
 def content_terms(text: str) -> tuple[str, ...]:
     """The content words of *text*'s first clause, for a lexical twin of a facet with no :func:`key_terms` (GH #1667).
 
-    The first clause ends at the first ``, ; : ? !``, ``and`` or ``or``. Its words are split at hyphens and
-    apostrophes, lowercased, and stopwords, single letters and bare numbers dropped; the LAST four are kept,
+    The first clause ends at the first ``, ; : ? !``, a sentence's period, or ``and``, ``or``, ``when``, ``while``,
+    ``because``, ``if``, ``which`` or ``whose``. A framing verb that ends it (``work``, ``set``, ``configured``, ``run``
+    and the like) is dropped. Its words (Unicode letters and digits) are
+    split at hyphens, a possessive ``'s`` is dropped and any other word with an apostrophe (a contraction such as
+    ``don't``) is left out, then lowercased, and stopwords, single letters and bare numbers dropped; the LAST four are kept,
     because a question names the thing it asks about (the head of its noun phrase) after the owner it belongs to
     ("the alpha-svc's per-request-retry timeout window" keeps "request retry timeout window"). The engine's
     full-text route ANDs every word, so a short, specific phrase in the code's likely words is what can match.
     Empty when fewer than two content words remain: one word alone matches too much to be a twin."""
-    m = _CLAUSE_END.search(text)
+    # a clause ends at the first end mark with words before it ("which port does ..." is not cut at its first word)
+    m = next((m for m in _CLAUSE_END.finditer(text) if re.search(r"\w", text[:m.start()])), None)
     clause = text[:m.start()] if m else text
-    words = [w.lower() for w in re.findall(r"[A-Za-z0-9]+", clause)]
+    words = []
+    for w in re.findall(r"[^\W_]+(?:['’][^\W_]+)*", clause):
+        w = re.sub(r"['’][sS]$", "", w)
+        if "'" not in w and "’" not in w:
+            words.append(w.lower())
     kept = [w for w in words if len(w) > 1 and not w.isdigit() and w not in _CONTENT_STOPWORDS]
+    while kept and kept[-1] in _FRAMING_TAIL:
+        kept.pop()
     out = tuple(kept[-_MAX_CONTENT_TERMS:])
     return out if len(out) >= 2 else ()
 
