@@ -114,15 +114,19 @@ def _clean_path() -> str:
     return os.pathsep.join(keep)
 
 
-def _run(work: Path, *argv: str, nx_dir: Path | None, log: Path, env: dict | None = None) -> subprocess.CompletedProcess:
+def _env(work: Path, nx_dir: Path | None, log: Path, env: dict | None = None) -> dict[str, str]:
     base = {k: v for k, v in os.environ.items() if not k.startswith(("NX_PUSH_", "FAKE_NX_"))}
     path = _clean_path()
     if nx_dir is not None:
         path = f"{nx_dir}{os.pathsep}{path}"
-    merged = {**base, "PATH": path, "FAKE_NX_LOG": str(log), "FAKE_NX_ORIGIN": str(work.parent / "origin"),
-              "NX_PUSH_SKIP_SCOPE_AUDIT": "record test, scope not under test", "NX_PUSH_BATCH_MINUTES": "0",
-              **(env or {})}
-    return subprocess.run([str(SCRIPT), *argv], cwd=work, env=merged, capture_output=True, text=True, timeout=60)
+    return {**base, "PATH": path, "FAKE_NX_LOG": str(log), "FAKE_NX_ORIGIN": str(work.parent / "origin"),
+            "NX_PUSH_SKIP_SCOPE_AUDIT": "record test, scope not under test", "NX_PUSH_BATCH_MINUTES": "0",
+            **(env or {})}
+
+
+def _run(work: Path, *argv: str, nx_dir: Path | None, log: Path, env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([str(SCRIPT), *argv], cwd=work, env=_env(work, nx_dir, log, env), capture_output=True,
+                          text=True, timeout=60)
 
 
 def _log(log: Path) -> list[list[str]]:
@@ -286,19 +290,54 @@ def test_a_hung_write_is_stopped_and_never_holds_the_push(repos, fake_nx) -> Non
     assert any("ran past 1s" in ln for ln in proc.stderr.splitlines() if ln.startswith("PUSH_RECORD_FAILED"))
 
 
-def test_no_claude_ancestor_writes_from_unknown(repos, fake_nx) -> None:
-    """From a plain shell the record says from=unknown, as the RDR prescribes (the stamper counts it as no
-    record for ownership and still chains its base). Today the seam returns unknown in every case, so this
-    pins the label the stamper and readers see; it starts to discriminate once the seam resolves an
-    identity through a shell verb for RDR-253's resolver."""
+def test_the_record_claims_no_identity_whatever_the_session_env_says(repos, fake_nx) -> None:
+    """``from`` is always ``unknown``: the engine stamps the pusher from the caller's session, so the script must not
+    derive a claim from its environment. Two pushes, one with a Claude session in the env and one from a plain shell,
+    write the same label; a script that read ``CLAUDE_CODE_SESSION_ID`` into ``from`` fails the first (nexus-igea9.3 L7)."""
     _origin, work = repos
     nx_dir, log = fake_nx
-    a = _commit(work, "a")
-    env = {k: "" for k in ("CLAUDE_CODE_SESSION_ID", "NX_SESSION_ID", "CLAUDECODE")}
-    proc = _run(work, a, nx_dir=nx_dir, log=log, env=env)
+    seen: list[str] = []
+    for env in ({"CLAUDE_CODE_SESSION_ID": "sess-claimed", "NX_SESSION_ID": "sess-claimed", "CLAUDECODE": "1"},
+                {k: "" for k in ("CLAUDE_CODE_SESSION_ID", "NX_SESSION_ID", "CLAUDECODE")}):
+        proc = _run(work, _commit(work, f"c{len(seen)}"), nx_dir=nx_dir, log=log, env=env)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        seen.append(" ".join(_opt(_records(log)[-1], "--dim")))
+    assert len(seen) == 2 and all("from=unknown" in dims.split() for dims in seen), seen
+    assert not any("sess-claimed" in dims for dims in seen), seen
+
+
+def test_a_timeout_with_a_leading_zero_is_read_in_base_10(repos, fake_nx) -> None:
+    """``NX_PUSH_RECORD_TIMEOUT_S=08`` is 8 seconds. Read as bash octal it is an arithmetic error and the 20 s default
+    silently wins (nexus-igea9.3 L7)."""
+    _origin, work = repos
+    nx_dir, log = fake_nx
+    proc = _run(work, _commit(work, "a"), nx_dir=nx_dir, log=log,
+                env={"FAKE_NX_RECORD_SLEEP": "30", "NX_PUSH_RECORD_TIMEOUT_S": "08"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    (record,) = _records(log)
-    assert "from=unknown" in _opt(record, "--dim")
+    assert "value too great for base" not in proc.stderr
+    assert any("ran past 8s" in ln for ln in proc.stderr.splitlines() if ln.startswith("PUSH_RECORD_FAILED")), proc.stderr
+
+
+def test_a_script_killed_mid_write_leaves_no_temp_file(repos, fake_nx, tmp_path: Path) -> None:
+    """TERM while the record write runs: the EXIT trap removes the record's temp file (nexus-igea9.3 L7)."""
+    _origin, work = repos
+    nx_dir, log = fake_nx
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    a = _commit(work, "a")
+    env = _env(work, nx_dir, log, {"FAKE_NX_RECORD_SLEEP": "30", "NX_PUSH_RECORD_TIMEOUT_S": "25", "TMPDIR": str(tmpdir)})
+    proc = subprocess.Popen([str(SCRIPT), a], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 30
+        while not list(tmpdir.glob("push-record.*")):
+            assert proc.poll() is None and time.monotonic() < deadline, "the record write never started"
+            time.sleep(0.1)
+        proc.terminate()
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert list(tmpdir.glob("push-record.*")) == [], "the record's temp file outlived the script"
 
 
 def test_stdout_contract_unchanged(repos, fake_nx) -> None:

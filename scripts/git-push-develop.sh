@@ -326,7 +326,9 @@ _lock_describe_scope() {
 # no-op before the lock is ever claimed, since _lock_claim_id starts empty
 # (including when the lock was skipped, or when nx-resolution or the
 # reachability probe refused before any claim was attempted).
+_record_tmp=""   # the push record's temp file while its write runs; the EXIT trap removes it if the script dies mid-write
 _release_push_lock() {
+  [[ -n "$_record_tmp" ]] && rm -f "$_record_tmp"
   if [[ -n "$_lock_claim_id" ]]; then
     local out
     if ! out="$("$_nx_bin" tuple release "$_lock_claim_id" --claimant "$_lock_claimant" 2>&1)"; then
@@ -911,7 +913,8 @@ _bounded() {
 _write_push_record() {
   [[ "$branch" == "develop" ]] || return 0
   local nxbin="${_nx_bin:-}" body outfile code=0 limit="${NX_PUSH_RECORD_TIMEOUT_S:-20}" last
-  [[ "$limit" =~ ^[0-9]+$ && "$limit" -gt 0 ]] || limit=20
+  [[ "$limit" =~ ^[0-9]+$ ]] && limit=$(( 10#$limit )) || limit=20   # base 10: a leading zero (08) is not octal
+  (( limit > 0 )) || limit=20
   # The lock path already resolved the installed nx; --skip-lock resolves it here, the same way.
   [[ -n "$nxbin" ]] || nxbin="$(installed_nx_resolve || true)"
   if [[ -z "$nxbin" ]]; then
@@ -920,6 +923,7 @@ _write_push_record() {
   fi
   body="{\"base\": \"${_record_base}\", \"n\": ${#range[@]}}"
   outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { echo "PUSH_RECORD_FAILED no temp file (the push stands)" >&2; return 0; }
+  _record_tmp="$outfile"
   _bounded "$limit" "$outfile" "$nxbin" tuple out "board/ci/nexus-develop--push" --key "topic=nexus-develop--push" \
     --nonce "push-$tip" --dim "from=$(_push_record_from)" --dim "kind=push" --dim "sha=$tip" --body "$body" || code=$?
   if (( code == 124 )); then
@@ -930,6 +934,7 @@ _write_push_record() {
     echo "PUSH_RECORD_FAILED exit $code: ${last:0:400} (the push stands)" >&2
   fi
   rm -f "$outfile"
+  _record_tmp=""
   return 0
 }
 _write_push_record || true
