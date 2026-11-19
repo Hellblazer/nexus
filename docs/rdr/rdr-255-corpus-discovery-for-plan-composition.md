@@ -89,9 +89,9 @@ three shapes:
 Every decline is an aggregate or release question. The "affected" shape, which
 is closest to a single relevance search, never declined.
 
-The planner chose the same plan for nearly all of them. Plan matching reused
-library plan 10 (`hybrid-factual-lookup`, a curated top-k relevance plan) on 51
-of the 55 declines. The inline planner never ran. These questions are
+The planner chose the same plan for nearly all of them. The run executed library plan 10 (`hybrid-factual-lookup`, a curated top-k
+relevance plan) on 51 of the 55 declines, through the routing path in Gap 2.
+The inline planner never ran. These questions are
 **set-enumeration** and **aggregation** questions: collect every record that
 matches a facet (a component, an impact, a bug status) inside a named scope (a
 product), join each record to its entity key, then list or count by entity.
@@ -110,17 +110,36 @@ shapes the corpus supports. Without these it cannot write a step that filters
 by product or by artifact type, even though the `search` tool it is given
 accepts a `where` metadata filter (`src/nexus/mcp/core.py:3995`).
 
-#### Gap 2: A weak library match is never re-examined
+#### Gap 2: Aggregate questions are classified as lookups, and a below-floor plan is routed in
 
-> **Under review (research finding 11).** A read-only probe of `plan_match` on HERB company questions, on both develop and the stock run's code, scores `entity-resolution` (plan 8) 0.50-0.54 and `hybrid-factual-lookup` (plan 10) 0.14-0.17, below the floor. The stock run still executed plan 10 on 51 of 55 declines, so a step between matching and execution chose it. The gap stands as "the routed plan was the wrong shape", but the mechanism below is not yet confirmed.
+Established from the stock run's own telemetry (research finding 15; the
+draft's first account of this gap was wrong and is replaced here). For the
+"company with the most ... bugs" questions:
 
-Plan matching accepts any match at cosine confidence 0.40 or above
-(`_PLAN_MATCH_MIN_CONFIDENCE`, `src/nexus/mcp/core.py:10947`; hit test at
-`11154`). Above the floor the matched plan runs as is, whatever the question's
-shape. Plan 10's description is about single-fact lookup, yet HERB company
-questions clear the floor against it. Nothing measures whether the matched plan
-suits the question's shape, so the inline planner is not reached for the
-questions that most need it.
+1. Model-assisted request extraction (RDR-232) classified the request as
+   `answer_kind=lookup`.
+2. RDR-232 eligibility, enforced because extraction succeeded, dropped
+   `entity-resolution` (plan 8, kind `discovery/listing`) from the cosine pool,
+   although it scored 0.50 to 0.54, above the 0.40 floor. So the shape gate
+   already exists, and it fired against the plan that answers company
+   questions: plan 8 answered 11 of the 13 runs that were classified as
+   listings.
+3. With the above-floor pool empty, the matcher's category route
+   (`src/nexus/plans/matcher.py:1015-1037`, at dc0244253) picked the best
+   relative cosine among builtin plans whose verb fits. Eligibility left only
+   `hybrid-factual-lookup` (plan 10, the library's one `lookup` plan, raw
+   cosine 0.14 to 0.17).
+4. The route returns it with `confidence=None`, which `_nx_answer_match_is_hit`
+   treats as an unconditional hit (`core.py:11086-11087`, dc0244253). No floor,
+   including a caller's `min_confidence`, applies.
+
+All 103 plan-10 runs in the stock run follow this path. Two defects come out
+of it. First, an argmax or count question is not a lookup, and no answer kind
+in the vocabulary names "aggregate". Second, the category route was written for
+"cosine scored nothing" (the comment at matcher.py:1015) but also fires for
+"cosine scored, eligibility refused", forcing a plan that never cleared the
+floor instead of falling through to the inline planner
+(`all_candidates_ineligible`).
 
 #### Gap 3: The library has no filter-and-scan or count plan, and the planner is not told the operators that could build one
 
@@ -292,7 +311,7 @@ provenance tag from callers, so only the grow path can mark a plan grown.
   filter-and-scan or filter-and-count plan. The pre-registered experiment
   (below) tests this.
 
-Research records (T2 `nexus_rdr/255-research-1` to `-14`, 2026-11-19):
+Research records (T2 `nexus_rdr/255-research-1` to `-15`, 2026-11-19):
 
 - **✅ Verified** (spike) — All 55 HERB declines are aggregate (max-bugs, 46 of 60) or prev-release (9 of 20) questions; the 50 "affected" questions never declined and score mean F1 58.7.
   *Source: T2 `nexus_rdr/herb-full-pool-decline-shapes-2026-11-19` (255-research-1)*
@@ -314,7 +333,7 @@ Research records (T2 `nexus_rdr/255-research-1` to `-14`, 2026-11-19):
   *Source: `TupleLimits.java`, `TupleRepository.java`, templates (255-research-9)*
 - **✅ Verified** (source search) — Taxonomy clustering cannot be tuple work (it fits the whole vector set); RDR-251 plans it on the memory-only `EngineJobs` registry.
   *Source: `taxonomy_cmd.py`, `taxonomy_compute.py`, `EngineJobs.java` (255-research-10)*
-- **✅ Verified** (spike) — `plan_match` scores plan 8 at 0.50-0.54 and plan 10 at 0.14-0.17 on HERB questions on both code versions; why the run executed plan 10 is not yet identified (see the Gap 2 note).
+- **✅ Verified** (spike) — `plan_match` scores plan 8 at 0.50-0.54 and plan 10 at 0.14-0.17 on HERB questions on both code versions; the cause is research finding 15 (see Gap 2).
   *Source: scratchpad `rdr255-match-probe*.py` (255-research-11)*
 - **✅ Verified** (source search) — No plan step can scan: operators cap at 100 items, retrieval at 300, and the unranked catalog by-meta route is not dispatchable.
   *Source: `runner.py:2159`, `db/limits.py:53`, `aspect_sql.py:72-80` (255-research-12)*
@@ -323,6 +342,9 @@ Research records (T2 `nexus_rdr/255-research-1` to `-14`, 2026-11-19):
 - **✅ Verified** (source search) — The inline planner reads no per-collection context; a profile block fits at `_nx_answer_plan_miss` (core.py:13178, prompt 13241-13250), and `force_dynamic` is already a public argument.
   *Source: `src/nexus/mcp/core.py` (255-research-14)*
 
+
+- **✅ Verified** (spike) — Why plan 10 ran: extraction classified max-bugs questions as `lookup`; enforced RDR-232 eligibility dropped plan 8 (above the floor, kind `discovery/listing`); the category route returned plan 10 with `confidence=None`, an unconditional hit. All 103 plan-10 runs show it.
+  *Source: sandbox `nx_answer_runs` 1-130, scratchpad `rdr255-plan10-runs.json` (255-research-15)*
 
 ### Critical Assumptions
 
@@ -380,15 +402,24 @@ identifies.
 *Generic versus specific.* The command and items 1, 2 and 4 are generic. A
 facet schema is dataset-specific even when a model proposes it.
 
-**Option B: a match-quality gate.** Make a library match prove it fits before
-it runs. Candidates, cheapest first: raise the curated-plan floor for questions
-whose request coverage (RDR-232) names an aggregate or listing answer kind; or
-compare the question's shape (from the profile's shape hints, or from the
-request's facets) with a shape declared on the plan, and fall through to the
-inline planner on a mismatch. Generic. Costs one inline planner call per
-fall-through. Its risk is the reverse failure: routing questions away from
-plans that answer them, which a gate set too high would do. It needs Option A
-or a declared plan shape to be more than a threshold change.
+**Option B: fix the routing that sent these questions to the wrong plan.**
+Research finding 15 replaces the original idea (raise the curated floor), which
+would not have changed these runs: a category-routed plan carries no
+confidence, so no floor applies. The shape gate the original idea asked for
+already exists as RDR-232 eligibility. Two changes instead:
+
+1. Give aggregate questions their own answer kind (count, argmax, top-k), so
+   extraction does not file them as lookups, and declare it on the plans that
+   can answer it.
+2. When eligibility removes every above-floor candidate, fall through to the
+   inline planner instead of letting the category route force a plan that never
+   cleared the floor; or require a routed plan to carry a real confidence.
+
+Generic. The risk is the reverse failure: questions that the category route
+currently answers well would go to the inline planner, at one model call each.
+Measure it on the stock run's 130 questions first (the telemetry records each
+route). This touches RDR-232's vocabulary and the matcher, so it may belong in
+its own RDR.
 
 **Option C: a filter-and-scan plan shape in the curated library.** Add a
 curated plan, or two, with no relevance ranking at the front: filter by the
@@ -638,5 +669,6 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: research finding 15: Gap 2 rewritten from the stock run's telemetry (aggregate questions classified as lookup; category route after eligibility); Option B rewritten.
 - 2026-11-19: research findings 1-14 added; Gap 2 flagged under review; Gap 5 added; open question 7 (RDR-251 split).
 - 2026-11-19: Option E added (tuple space for discovery and lifecycle state; execution path excluded unless measured value justifies it, per Sam).
