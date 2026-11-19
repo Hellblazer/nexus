@@ -1150,3 +1150,4 @@ large, and moved under a ratchet.
   `-31` added (`-17` to `-29` supersede `-1` to `-8`, `-10`, `-11` and `-14`
   to `-16`; `-30` measurement; `-31` census total and bead state), with
   `229-refresh-2026-11-19` recording that `-9`, `-12` and `-13` still hold.
+- 2026-11-19: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 2 ship-blocker(s)); blob `691241710dec`; critique `nexus_rdr/229-gate-critique-2026-11-19-r1`.
