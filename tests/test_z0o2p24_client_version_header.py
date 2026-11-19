@@ -452,6 +452,9 @@ _NOT_SENDERS: dict[str, str] = {
     # RDR-253 Step 3: the SessionStart hook's identity client; client_version rides in the bind and
     # renew bodies, and importing nexus.db would put its package init on every hook call
     "nexus/identity/bind_client.py": "identity bind: the version is in the request body",
+    # RDR-252 Step 4: the group and membership routes; the session's client version already reaches the
+    # engine on its identity bind and on every renewal (bind_client above), and nothing here writes a chunk
+    "nexus/groups.py": "group and membership routes: the version rides the identity bind and renewal",
     # probes and admin calls of the engine; none writes a chunk
     "nexus/commands/daemon.py": "engine probe: GET /health",
     "nexus/commands/doctor.py": "probes: health and the MinerU server",
