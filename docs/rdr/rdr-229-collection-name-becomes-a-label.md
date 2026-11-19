@@ -2211,3 +2211,4 @@ large, and moved under a ratchet.
   rows corrected. Contradiction Check and Scope Verification regenerated,
   with the three residuals still recorded for Sam. T2 `229-research-50` to
   `-54` added.
+- 2026-11-19: Gate round 3 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `2e06cb126e67`; critique `nexus_rdr/229-gate-critique-2026-11-19-r3`.
