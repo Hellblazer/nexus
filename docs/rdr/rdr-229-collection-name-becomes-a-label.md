@@ -1753,7 +1753,7 @@ its acceptance is that test green plus the census pin it lowers.
   chunk content type and the local-mode taxonomy exclusion. On the engine,
   the stale-note repair still tells file residue from notes. Blocks P3.6 and
   P3.8.
-- P2.10 Engine: `NoteUri.moveTo` rewrites only `nx-note://` URIs that
+- P2.10 Engine and client: `NoteUri.moveTo` rewrites only `nx-note://` URIs that
   `isNote` classes as notes, and `namesCollection` selects only those; a
   changeset redefines `nexus.catalog_reconcile_commit` with the same rule
   in its three URI rewrites; so no path moves `chroma://` residue or an
@@ -1765,7 +1765,18 @@ its acceptance is that test green plus the census pin it lowers.
   item 12's rule as the template and, as the verification, the rows that
   still match it with a free new value; never a boot rewrite (RDR-246).
   The first cloud run of those moves waits for nexus-f3yqd.2.23, as
-  P3.1's does (Prerequisites). Test, for the repair: on a fixture, a
+  P3.1's does (Prerequisites). On the client, `nx catalog
+  backfill-source-uri` today refuses residue that does not start
+  `chroma://<physical_collection>/` as "malformed" (`backfill.py:109-111`),
+  which after P2.10 is all moved and repaired residue. P2.10 relaxes the
+  check to the residue's own segment: a `chroma://` row is a candidate
+  when its own segment has a `rdr__`, `docs__` or `code__` prefix or its
+  collection's row has content type `code`, `docs` or `rdr`; the path is
+  the text after `chroma://<own segment>/`, still required absolute; and
+  the new value is `uri_for`'s `file://` result, which does not depend on
+  the collection's name. So the verb can still retire residue to its
+  `file://` identity, whatever segment it carries (T2 `229-research-65`).
+  Test, for the repair: on a fixture, a
   docs collection renamed with `--allow-legacy` to a prefix-free label
   before P2.10 has its residue rewritten to a `docs__` segment and classed
   file-routed; a knowledge collection's `chroma://` note on a prefix-free
@@ -1777,7 +1788,9 @@ its acceptance is that test green plus the census pin it lowers.
   both on their old segment, still classed
   file-routed by `NoteUri.isNote` and `is_note_uri`, and skipped by the
   stale-note repair; `NoteUriCorpusTest`'s `moveTo` assertions, which pin
-  the `chroma://` arm today, are inverted. Blocks P3.6 and P3.8.
+  the `chroma://` arm today, are inverted. Test, for the verb: moved
+  residue and repaired residue are re-derived to `file://`, not refused.
+  Blocks P3.6 and P3.8.
 - P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6, P2.9 and P2.10; client
   floor bumps in the release that ships P2.3 onward.
 
