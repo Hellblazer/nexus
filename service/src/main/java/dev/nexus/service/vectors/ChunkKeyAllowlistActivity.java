@@ -35,6 +35,7 @@ public final class ChunkKeyAllowlistActivity {
 
     private static final AtomicLong WOULD_REFUSE = new AtomicLong();
     private static final ConcurrentHashMap<String, LongAdder> BY_ROUTE_CLASS = new ConcurrentHashMap<>();
+    private static final LongAdder LOG_OVERFLOW = new LongAdder();
 
     private ChunkKeyAllowlistActivity() {
     }
@@ -70,9 +71,24 @@ public final class ChunkKeyAllowlistActivity {
         return out;
     }
 
+    /**
+     * Count one offending request the log limiter had no slot for (it went to the shared overflow bucket, whose line
+     * names only the bucket's first key). Step 2b prep (nexus-6pfgb.66): non-zero means the would-refuse log missed
+     * writers in that window, so the 2b read cannot conclude "no other writer" from the log alone.
+     */
+    static void recordLogOverflow() {
+        LOG_OVERFLOW.increment();
+    }
+
+    /** @return offending requests since boot that the log limiter could not give their own line. */
+    public static long logOverflowTotal() {
+        return LOG_OVERFLOW.sum();
+    }
+
     /** Test-only reset: production code never calls this. */
     public static void resetForTests() {
         WOULD_REFUSE.set(0);
         BY_ROUTE_CLASS.clear();
+        LOG_OVERFLOW.reset();
     }
 }

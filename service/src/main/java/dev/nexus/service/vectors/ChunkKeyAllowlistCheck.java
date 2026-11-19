@@ -98,7 +98,7 @@ public final class ChunkKeyAllowlistCheck {
     private final OwnerlessLogLimiter limiter;
 
     public ChunkKeyAllowlistCheck() {
-        this(OwnerlessLogLimiter.system());
+        this(new OwnerlessLogLimiter(System::currentTimeMillis, ChunkKeyAllowlistActivity::recordLogOverflow));
     }
 
     ChunkKeyAllowlistCheck(OwnerlessLogLimiter limiter) {

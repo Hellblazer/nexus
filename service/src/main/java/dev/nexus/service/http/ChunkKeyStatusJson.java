@@ -12,6 +12,8 @@ import dev.nexus.service.vectors.ChunkKeyAllowlistActivity;
  *   <li>{@code chunk_metadata_key_would_refuse_total}: number, offending requests since boot.</li>
  *   <li>{@code chunk_metadata_key_would_refuse_by_route_class}: array of {@code {route, key_class, count}},
  *       one per route and key class seen; {@code key_class} is document, position, legacy or other.</li>
+ *   <li>{@code chunk_metadata_key_log_overflow_total}: number, offending requests since boot that the log limiter had
+ *       no slot for, so they share one overflow line; non-zero means the log missed writers (Step 2b prep).</li>
  * </ul>
  *
  * <p>Every label here is fixed by the engine (a route name, one of four classes), so the body carries no
@@ -39,6 +41,7 @@ final class ChunkKeyStatusJson {
             first = false;
         }
         b.append(']');
+        b.append(",\"chunk_metadata_key_log_overflow_total\":").append(ChunkKeyAllowlistActivity.logOverflowTotal());
         return b.toString();
     }
 }

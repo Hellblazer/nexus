@@ -76,6 +76,29 @@ class OwnerlessLogLimiterTest {
         assertThat(limiter.size()).as("the stale keys were evicted").isEqualTo(1);
     }
 
+    @Test
+    void everyRequestThatLandsInTheSharedBucketIsReported_aKeyWithASlotNeverIs() {
+        // RDR-236 Phase 4 Step 2b prep (nexus-6pfgb.66): the overflow bucket pools writers, so its one line per window
+        // names only the first; the callback lets a caller count every request that had no slot of its own.
+        var now = new AtomicLong(5L);
+        var overflowed = new AtomicLong();
+        var limiter = new OwnerlessLogLimiter(now::get, overflowed::incrementAndGet);
+        for (int i = 0; i < OwnerlessLogLimiter.MAX_KEYS; i++) {
+            limiter.tryAcquire("k" + i);
+        }
+        limiter.tryAcquire("k0");
+        assertThat(overflowed.get()).as("keys with a slot, new or repeated, are not overflow").isZero();
+
+        for (int i = 0; i < 7; i++) {
+            limiter.tryAcquire("overflow-" + i);
+        }
+        assertThat(overflowed.get()).as("logged or suppressed, each request without a slot counts once").isEqualTo(7);
+
+        now.addAndGet(OwnerlessLogLimiter.WINDOW_MS);
+        limiter.tryAcquire("fits-after-the-sweep");
+        assertThat(overflowed.get()).as("a key that finds room after the sweep is not overflow").isEqualTo(7);
+    }
+
     /** The measured volume bound the javadoc states: MAX_KEYS + 1 lines per window under key churn, not 1. */
     @Test
     void underKeyChurn_aWindowCarriesUpToMaxKeysPlusOneLines_notOne() {
