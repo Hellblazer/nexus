@@ -27,6 +27,14 @@ PRIMARY checkout is denied with the hand-back protocol. Allowed:
   tree and their local commits are the documented harvest choreography.
 - A valid ``# routing-allow:`` escape (deliberate orchestrator-sanctioned
   exception, auditable in the routing log).
+- One literal ``git -C <absolute path> <verb> ...`` command whose path git
+  proves is a linked worktree's root, with the verb and every flag on the
+  ``_DASH_C_FLAGS`` allowlist (2026-11-18, see ``_dash_c_worktree_target``). This
+  is the one place the guard reads ``-C`` from the command text: a subagent's cwd
+  is always its session's start directory, so the cwd rule below could never
+  exempt an agent working in its session's worktree.
+- One ssh command whose git runs on a named remote test host (nexus-yc7fs, see
+  ``_remote_test_host_command``).
 
 Fail mode is SPLIT by what is at stake (nexus-ays2l item 3, Hal ruling
 2026-07-25):
@@ -143,8 +151,10 @@ The worktree exemption is narrowed to match: it fires ONLY when
 ``_in_linked_worktree`` POSITIVELY PROVES (via real ``git rev-parse`` calls
 against the actual ``cwd``, not by parsing ``-C``/``--work-tree`` flags out
 of the command text) that this call runs inside a linked worktree. Every
-other state — the primary checkout, OR an undeterminable worktree — now
-falls through to the primary rule's verdict uniformly. This retires the old
+other state — the primary checkout, OR an undeterminable worktree — falls
+through to the primary rule's verdict, except the two named carve-outs in the
+Allowed list above (the literal ``git -C <linked worktree root>`` shape and the
+remote test host), each an allowlist that refuses anything it cannot read. This retires the old
 commit/add-vs-destructive-verb fail-open/fail-closed split (nexus-ays2l item
 3): that split existed to protect hygiene verbs from a flaky
 ``git rev-parse``, but the primary rule's whole point is that "I could not
@@ -3662,6 +3672,16 @@ def _deny_message(agent_type: str, verb_names: str, *,
                   sidefx: bool = False) -> str:
     who = f"you are subagent `{agent_type or 'unknown'}`"
     head = (
+        f"Working in your session's linked worktree from the primary cwd? One "
+        f"literal command per call passes: `git -C <absolute worktree root> "
+        f"<verb> ...` with verb add, commit, rm, mv, switch -c, checkout -b, "
+        f"reset (--soft/--mixed), rebase, cherry-pick, revert, merge or branch "
+        f"<new>; every flag spelled out in full and separately (no `-am`, no "
+        f"abbreviations); nothing chained or redirected; any word holding "
+        f"`~ ^ {{ }} ( ) % $ #` or spaces inside single quotes (`'HEAD~1'`); and "
+        f"a commit message that names a git verb goes through `-F <file>`. "
+        f"Discarding changes (reset --hard, restore, checkout -- <path>), stash, "
+        f"tag and branch deletion are never admitted that way: hand those back.\n"
         f"Subagents never run git write verbs ({verb_names}) in the shared "
         f"tree ({who}); that includes `gh`/`hub` commands that move HEAD or "
         f"rewrite the working tree (gh pr checkout, gh repo sync). This guard is intentionally STRUCTURE-AGNOSTIC "
@@ -3768,14 +3788,9 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"can POSITIVELY PROVE a linked worktree (a linked worktree is "
         f"yours to destroy); an undeterminable worktree state does not "
         f"qualify. The cwd of the tool call decides that, and a `cd <wt>` "
-        f"inside the command does not count. Working in your session's linked "
-        f"worktree from the primary cwd? Run ONE literal git command per call, "
-        f"`git -C <absolute worktree path> <verb> ...` (verbs: add, commit, rm, "
-        f"mv, restore, checkout, switch, reset, stash, rebase without -x, "
-        f"cherry-pick, revert, merge, branch, tag), with nothing chained, no "
-        f"`$` or backtick, no other global option, and a commit message in "
-        f"single quotes or via `-F <file>`; git must prove the path is a linked "
-        f"worktree. Or dispatch with isolation: worktree.\n"
+        f"inside the command does not count; the one exception is the literal "
+        f"`git -C <absolute worktree path>` shape described at the top. Or "
+        f"dispatch with isolation: worktree.\n"
         f"An escape (`# routing-allow: <reason>`) exists for this "
         f"guard, but only on the user's explicit instruction to use "
         f"it -- it is not yours to reach for."
@@ -3952,21 +3967,73 @@ def _remote_test_host_command(command: str) -> str | None:
     return host
 
 
-#: Verbs the ``git -C <worktree>`` carve-out admits: none of them runs a command
-#: named on its own command line. ``submodule`` (foreach), ``bisect`` (run),
-#: ``filter-branch``, ``difftool``/``mergetool`` and the like are absent on
-#: purpose, and ``rebase`` is admitted only without -x/--exec.
-_DASH_C_VERBS: frozenset[str] = frozenset({
-    "add", "commit", "rm", "mv", "restore", "checkout", "switch", "reset",
-    "stash", "rebase", "cherry-pick", "revert", "merge", "branch", "tag",
-    "status", "diff", "log", "show",
-})
+#: The ``git -C <worktree>`` carve-out's verbs and, per verb, EVERY flag it
+#: admits, mapped to whether the flag takes a value (the next word, or the
+#: ``--flag=value`` form). An allowlist, not a blocklist (review round 1,
+#: 2026-11-19): git accepts any unambiguous prefix of a long option, so a refusal
+#: of ``--exec`` let ``rebase --exe '<cmd>'`` run a command. A flag spelled any
+#: way other than exactly as listed, a combined short-flag cluster (``-am``)
+#: included, is refused. The set is chosen so that nothing admitted runs a
+#: command, discards uncommitted work, or moves state other worktrees share:
+#: no ``reset --hard``, ``restore``, ``checkout -- <path>``/``-f``/``-B``,
+#: ``stash`` (refs/stash is shared), ``tag`` (shared), destructive ``branch``
+#: flags, ``rebase --exec``/``--autostash``, or ``merge -s``/``-X``. Reads need
+#: no carve-out: the primary rule never matches them.
+_DASH_C_FLAGS: dict[str, dict[str, bool]] = {
+    "add": {"-A": False, "--all": False, "-u": False, "--update": False,
+            "-N": False, "--intent-to-add": False, "-v": False, "--": False},
+    "commit": {"-m": True, "--message": True, "-F": True, "--file": True,
+               "-a": False, "--all": False, "--amend": False, "--no-edit": False,
+               "--allow-empty": False, "-s": False, "--signoff": False,
+               "--fixup": True, "--squash": True, "-q": False, "--": False},
+    "rm": {"--cached": False, "-r": False, "-q": False, "--": False},
+    "mv": {"-k": False, "-v": False},
+    "switch": {"-c": True, "--create": True, "--detach": False, "-q": False},
+    "checkout": {"-b": True, "--detach": False, "-q": False},
+    "reset": {"--soft": False, "--mixed": False, "-q": False, "--": False},
+    "rebase": {"--onto": True, "--continue": False, "--abort": False,
+               "--skip": False, "--quit": False, "--autosquash": False,
+               "--no-autosquash": False, "-r": False, "--rebase-merges": False,
+               "--keep-base": False, "-q": False},
+    "cherry-pick": {"--continue": False, "--abort": False, "--skip": False,
+                    "--quit": False, "-x": False, "-n": False, "--no-commit": False,
+                    "--allow-empty": False, "-m": True, "--mainline": True},
+    "revert": {"--continue": False, "--abort": False, "--skip": False,
+               "--quit": False, "-n": False, "--no-commit": False,
+               "--no-edit": False, "-m": True, "--mainline": True},
+    "merge": {"--ff-only": False, "--no-ff": False, "--ff": False,
+              "--no-edit": False, "--abort": False, "--continue": False,
+              "--squash": False, "-m": True, "-q": False},
+    "branch": {},  # create only: `git branch <name> [<start>]`
+}
+
+
+def _dash_c_flags_ok(verb: str, rest: list[str]) -> bool:
+    """True when every option word in *rest* is one ``_DASH_C_FLAGS[verb]``
+    lists, spelled exactly; the word after a value-taking flag is its value."""
+    allowed = _DASH_C_FLAGS[verb]
+    expect_value = False
+    for tok in rest:
+        if expect_value:
+            expect_value = False
+            continue
+        if not tok.startswith("-") or tok == "-":
+            continue
+        name, eq, _value = tok.partition("=")
+        if name not in allowed or (eq and not (name.startswith("--") and allowed[name])):
+            return False
+        expect_value = allowed[name] and not eq
+        if tok == "--":
+            # Past `--` every word is a path; only the verbs that list it get here.
+            return True
+    return not expect_value
 
 
 def _dash_c_worktree_target(command: str) -> str | None:
     """The path a subagent command names when the WHOLE command is one literal
     ``git -C <absolute path> <verb> ...`` invocation the carve-out may admit;
-    otherwise None. The caller must still prove the path is a linked worktree.
+    otherwise None. The caller must still prove the path is a linked worktree's
+    root (``_is_linked_worktree_root``).
 
     Why (2026-11-18): a subagent's Bash cwd is its session's start directory,
     the primary checkout, and a ``cd`` does not persist between its calls, so a
@@ -3975,11 +4042,16 @@ def _dash_c_worktree_target(command: str) -> str | None:
     is narrow by construction: the shell reads it literally (``_read_literally``:
     no expansion, substitution, chaining, redirect or line break outside single
     quotes), it is one ``git`` word with exactly one ``-C`` and no other global
-    option (so no ``--git-dir``, ``--work-tree``, ``-c`` or second ``-C``), the
-    verb is in ``_DASH_C_VERBS``, ``rebase`` carries no -x/--exec, and the text
-    after the path spells no other git write under the primary rule (so a
-    single-quoted ``'git -C <primary> reset --hard'`` handed to any option
-    denies)."""
+    option, the verb and every flag are in ``_DASH_C_FLAGS``, and the text after
+    the path spells no other git write under the primary rule (so a single-quoted
+    ``'git -C <primary> reset --hard'`` in a message denies; such a message goes
+    through ``-F <file>``).
+
+    Known limit: git proves the path is A linked worktree, not the dispatching
+    session's own; no hook field names that. The flag allowlist is what bounds
+    the damage: nothing admitted discards uncommitted work or touches shared
+    refs, so the worst a mistaken path can do is add a commit to another
+    worktree's branch, which its owner can drop."""
     if not _read_literally(command):
         return None
     try:
@@ -3989,19 +4061,39 @@ def _dash_c_worktree_target(command: str) -> str | None:
     if len(tokens) < 4 or tokens[0] != "git" or tokens[1] != "-C":
         return None
     path, verb, rest = tokens[2], tokens[3], tokens[4:]
-    if not os.path.isabs(path) or verb not in _DASH_C_VERBS:
+    if not os.path.isabs(path) or verb not in _DASH_C_FLAGS:
         return None
-    for tok in rest:
-        if tok in ("-C", "-c") or tok.startswith(("--git-dir", "--work-tree", "--exec")):
-            return None
-        if verb == "rebase" and tok.startswith("-") and not tok.startswith("--") and "x" in tok[1:]:
-            return None
+    if not _dash_c_flags_ok(verb, rest):
+        return None
     tail = " ".join(rest)
     if "git" in tail:
         spliced, primary, _relaxed, _view = _scan_command(tail, _normalize_for_primary_scan(tail))
         if spliced or primary is not None:
             return None
     return path
+
+
+def _is_linked_worktree_root(path: str) -> bool:
+    """True only when git, run at *path*, reports a work tree whose top level IS
+    *path* and whose git dir differs from the common dir. Review round 1: a
+    worktree's administrative dir (``<primary>/.git/worktrees/<name>``) passes
+    the git-dir test alone, and from there ``branch -D`` and ``tag -d`` reach the
+    shared refs."""
+    if _in_linked_worktree(path) is not True:
+        return False
+    try:
+        git = _exec_path.which_off_cwd("git")
+        if git is None:
+            return False
+        top = subprocess.run(
+            [git, "rev-parse", "--show-toplevel"],
+            cwd=path, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+        )
+    except Exception:  # noqa: BLE001 -- unprovable: no carve-out
+        return False
+    if top.returncode != 0 or not top.stdout.strip():
+        return False
+    return os.path.realpath(top.stdout.strip()) == os.path.realpath(path)
 
 
 def _scan_command(
@@ -4094,7 +4186,7 @@ def body(payload: dict[str, Any]) -> None:
     # and side-effect rules still apply there, exactly as for an agent whose cwd
     # is the worktree; a hit falls through to the deny below.
     dash_c = _dash_c_worktree_target(command)
-    if dash_c is not None and _in_linked_worktree(dash_c) is True:
+    if dash_c is not None and _is_linked_worktree_root(dash_c):
         dash_c_hit = (
             _config_hit(normalized, config_view, worktree=True)
             or _sidefx_hit(
@@ -4128,8 +4220,9 @@ def body(payload: dict[str, Any]) -> None:
     wt_hit: str | None = None
     if worktree is True:
         # Linked worktree, POSITIVELY PROVEN: the agent owns its tree,
-        # including destroying it. This is the ONLY exemption from either
-        # gate's verdict. It does NOT cover a `git config` write that reaches
+        # including destroying it. Beside the two allowlisted carve-outs above
+        # (git -C <worktree root>, remote test host), this is the only
+        # exemption from either gate's verdict. It does NOT cover a `git config` write that reaches
         # shared state (nexus-dsr6a): a plain `git config`, `--global`,
         # `--system` and `--local` write the common config the primary reads.
         # `--worktree` writes pass (git refuses them in a repo with linked
