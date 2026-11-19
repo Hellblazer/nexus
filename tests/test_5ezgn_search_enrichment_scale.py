@@ -122,13 +122,34 @@ def test_cap_ranks_unscored_rows_by_calibrated_distance_across_embedding_models(
 
 
 def test_cap_takes_the_model_of_resolver_the_search_built() -> None:
-    """The cut must agree with the scoring on each collection's model: a legacy name with no model token
-    is calibrated by the row-preferred resolver, not left at factor 1.0."""
-    legacy = "docs__legacy"
-    rows = [_in(CODE, "code-a", 0.38), _in(CODE, "code-b", 0.39), _in(legacy, "doc", 0.50)]
-    models = {CODE: "voyage-code-3", legacy: "voyage-context-3"}
-    kept = _cap_enrichment_pool(rows, set(), cap=2, model_of=models.get)
-    assert "doc" in [r.id for r in kept]
+    """The cut must agree with the scoring on each collection's model. Names with no model token resolve
+    to one install model by name alone (every factor 1.0, the raw cut); only the row-preferred resolver
+    can say they differ, so this fails without *model_of* whatever the install posture."""
+    code, prose = "code__legacy", "docs__legacy"
+    rows = [_in(code, "code-a", 0.38), _in(code, "code-b", 0.39), _in(prose, "doc", 0.50)]
+    models = {code: "voyage-code-3", prose: "voyage-context-3"}
+    assert "doc" not in [r.id for r in _cap_enrichment_pool(rows, set(), cap=2)]
+    assert "doc" in [r.id for r in _cap_enrichment_pool(rows, set(), cap=2, model_of=models.get)]
+
+
+def test_search_cross_corpus_hands_its_own_model_resolver_to_the_cut(monkeypatch) -> None:
+    """The production call site passes the search's row-preferred resolver, not None (review of 4a11ee38c)."""
+    import nexus.search_engine as se  # noqa: PLC0415 — the module under test, patched by attribute
+
+    def resolver(name: str) -> str | None:
+        return "voyage-context-3"
+
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections: resolver)
+    seen: list[object] = []
+    real = se._cap_enrichment_pool
+
+    def spy(results, lexical_ids, cap=None, *, model_of=None):
+        seen.append(model_of)
+        return real(results, lexical_ids, cap, model_of=model_of)
+
+    monkeypatch.setattr(se, "_cap_enrichment_pool", spy)
+    search_cross_corpus("q", _cols(), n_results=10, t3=_WideT3(), sensitivity="include")
+    assert seen == [resolver]
 
 
 def test_cap_within_one_model_is_still_by_raw_distance() -> None:

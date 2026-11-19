@@ -3028,8 +3028,8 @@ def _cap_enrichment_pool(
     uses, resolved with *model_of*, the row-preferred resolver the search
     built. A raw-distance cut over a pool spanning voyage-code-3 and
     voyage-context-3 kept only code, whose distances run tighter, and dropped
-    the prose rows the calibrated ordering after it would have ranked first. A lexical row is always kept: it is threshold-exempt
-    because its vector distance is usually the worst in the window, so a
+    the prose rows the calibrated ordering after it would have ranked first.
+    A lexical row is always kept: it is threshold-exempt because its vector distance is usually the worst in the window, so a
     distance cut would drop exactly what that leg exists to find. Kept rows
     stay in their input order, so every step after this sees the same
     sequence it did before, minus the dropped rows.
