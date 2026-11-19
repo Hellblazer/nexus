@@ -15,6 +15,8 @@ _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
 #: The clock the unknown-subspace fallback measures the board wait with (a seam for tests).
 _now = time.monotonic
+#: The sleep between GitHub reads under --latest-attempt (a seam for tests).
+_sleep = time.sleep
 
 
 def _store():
@@ -35,6 +37,11 @@ def ci_group() -> None:
 @click.option("--fresh", is_flag=True,
               help="Count only a row that arrives after the wait starts: for a wait on a rerun, "
                    "while the earlier attempt's row is still on the topic. Ignored in GitHub-only mode.")
+@click.option("--latest-attempt", is_flag=True,
+              help="Follow a re-run: accept the sha's row only when GitHub shows no newer attempt of any run in "
+                   "it, and otherwise wait for the newer attempt's row (GitHub read at most once a minute). "
+                   "Cannot be combined with --fresh. Ignored in GitHub-only mode, which reads the latest "
+                   "attempts already.")
 @click.option("--repo", default="nexus", show_default=True, help="Repository part of the board topic.")
 @click.option("--branch", default="develop", show_default=True,
               help="Branch part of the board topic. Only develop and main have one; any other branch "
@@ -46,14 +53,18 @@ def ci_group() -> None:
 @click.option("--park-s", type=click.IntRange(1, ci_wait.PARK_CAP_S), default=ci_wait.PARK_CAP_S,
               hidden=True, help="Seconds per park (tests).")
 def ci_wait_cmd(
-    sha: str, timeout_min: float, fresh: bool, repo: str, branch: str, gh_repo: str | None, park_s: int,
+    sha: str, timeout_min: float, fresh: bool, latest_attempt: bool, repo: str, branch: str, gh_repo: str | None,
+    park_s: int,
 ) -> None:
     """Wait for SHA's CI runs to complete and print one line with the result.
 
     Parks on board/ci/<repo>-<branch>--done until the row for SHA (a full sha
     or a prefix of at least 7 hex digits) is there; a row already on the topic
     counts unless --fresh, and when a rerun gave the sha more than one row,
-    the newest is used. Meant to run as a background command, so its exit
+    the newest is used. --latest-attempt follows a re-run instead: a row counts
+    only when GitHub's push runs show no newer attempt of any run in it, and
+    the wait goes on for the newer attempt's row (GitHub read at most once a
+    minute). Meant to run as a background command, so its exit
     wakes the session that pushed. The board wake is best effort, so at the
     deadline a full SHA is looked up on GitHub once: finished runs are
     reported as usual, unfinished ones as a timeout. A row the board capped
@@ -89,6 +100,9 @@ def ci_wait_cmd(
     ignored; SHA may be a prefix, which GitHub resolves; --gh-repo must be
     OWNER/NAME (anything else exits 5).
     """
+    if fresh and latest_attempt:
+        raise click.UsageError("--fresh and --latest-attempt cannot be combined: --latest-attempt already "
+                               "skips an earlier attempt's row")
     if not math.isfinite(timeout_min):
         click.echo(f"{sha} unusable: --timeout must be a number of minutes")
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
@@ -109,10 +123,18 @@ def ci_wait_cmd(
         click.echo(f"{sha[:12]} unusable: no tuple store: {type(exc).__name__}: {exc}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE) from None
     started = _now()
+    unchecked = False
     try:
-        row = ci_wait.find_done_row(
-            store, subspace, sha, timeout_s=timeout_min * 60, fresh=fresh, park_s=park_s,
-        )
+        if latest_attempt:
+            row, listed = ci_wait.wait_latest_attempt(
+                store, subspace, sha, gh, branch, timeout_s=timeout_min * 60, park_s=park_s, clock=_now,
+                sleep=_sleep,
+            )
+            unchecked = row is not None and listed is None
+        else:
+            row = ci_wait.find_done_row(
+                store, subspace, sha, timeout_s=timeout_min * 60, fresh=fresh, park_s=park_s,
+            )
     except ci_wait.BoardSubspaceUnknownError:
         _github_only(sha, gh, branch, max(0.0, timeout_min * 60 - (_now() - started)))
     except ci_wait.BoardUnreadableError as exc:
@@ -128,7 +150,7 @@ def ci_wait_cmd(
         click.echo(line)
         raise SystemExit(code)
     line, code = ci_wait.summarize(ci_wait.complete_runs(ci_wait.fill_conclusions(row, gh), gh, branch))
-    click.echo(line)
+    click.echo(line + (" (latest attempt not checked: GitHub could not be read)" if unchecked else ""))
     raise SystemExit(code)
 
 

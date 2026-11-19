@@ -363,6 +363,51 @@ def find_done_row(
     return found
 
 
+def behind_latest(row: DoneRow, listed: list[Run]) -> list[Run]:
+    """The runs of *row* that GitHub's *listed* push runs show at a newer attempt: a re-run started
+    after the row was written. A run GitHub does not list is taken at the attempt the row names."""
+    newest: dict[int, int] = {}
+    for r in listed:
+        newest[r.run_id] = max(newest.get(r.run_id, 0), r.attempt)
+    return [r for r in row.runs if newest.get(r.run_id, r.attempt) > r.attempt]
+
+
+def wait_latest_attempt(
+    store: _Reader, subspace: str, sha: str, gh_repo: str, branch: str, *, timeout_s: float,
+    park_s: int = PARK_CAP_S, clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    runs: Callable[[str, str, str], list[Run] | None] | None = None,
+) -> tuple[DoneRow | None, list[Run] | None]:
+    """``nx ci wait --latest-attempt``: the ``--done`` row for *sha* whose every run is at its latest
+    attempt, as GitHub's push runs for the sha on *branch* list them.
+
+    :func:`find_done_row` gives the newest row already on the topic, or the first to arrive; after a
+    re-run starts that is the replaced attempt's row. So each candidate is checked against one read
+    of GitHub (by the row's full sha, so a prefix works): a row with no run behind GitHub's newest
+    attempt is returned; otherwise the wait goes on, reading the board again (the newest row wins)
+    and GitHub at most once per :data:`GITHUB_POLL_S`, until the deadline. Returns ``(row, listed)``:
+    ``(None, listed)`` when no acceptable row came in time, for the caller's deadline read (which
+    reports the latest attempts from GitHub, or a timeout), and ``(row, None)`` when GitHub could not
+    be read, so the row stands and the caller says it was not checked."""
+    fetch = runs or gh_push_runs
+    deadline = clock() + timeout_s
+    listed: list[Run] | None = None
+    while True:
+        row = find_done_row(store, subspace, sha, timeout_s=max(0.0, deadline - clock()), park_s=park_s,
+                            clock=clock, sleep=sleep)
+        if row is None:
+            return None, listed
+        listed = fetch(gh_repo, row.sha, branch)
+        if listed is None:
+            return row, None
+        if not behind_latest(row, listed):
+            return row, listed
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return None, listed
+        sleep(min(GITHUB_POLL_S, remaining))
+
+
 def result_line(row: DoneRow, outcome: str | None) -> str:
     runs = ", ".join(
         f"{r.workflow or 'run'} {r.conclusion or 'unknown'} (run {r.run_id}"
