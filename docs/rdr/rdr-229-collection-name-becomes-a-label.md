@@ -9,7 +9,7 @@ reviewed-by: self
 created: 2026-10-17
 accepted_date:
 related_issues: ["nexus-j4gl6", "nexus-zvcou"]
-related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227]
+related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227, RDR-246]
 ---
 
 # RDR-229: The Collection Name Becomes a Label
@@ -171,6 +171,7 @@ name, so these paths have to find the row by its attributes first.
 | RDR-204 (embedding profile; `catalog_collections` as the authority) | Origin, closed | Shipped most of nexus-j4gl6 steps 1 and 2. Rejected step 3 (opaque names) on 2026-09-09 with a reopen trigger. This RDR takes over its two census gates, repairs their blind spots, and finishes the reader move. It does not restate RDR-204's schema; it builds on it. |
 | RDR-210 (one local engine serves both embedders) | Adjacent, closed 2026-10-26 | Finds model siblings and its re-embed target by the row tuple `(content_type, owner_id)`, never by a name (its Gap 4 fix and its RDR-229 row). One name-based sibling matcher is left, `repo_identity.list_sibling_collections`, with no caller in `src`; P2.7 retires it. |
 | RDR-225 (one vector table per embedding model) | Adjacent, closed 2026-10-22 (T2 `229-research-25`) | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`; the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
+| RDR-246 (data moves are background jobs) | Dependency, accepted 2026-11-16 | Its `nexus.data_moves` registry and `DataMoveWorker` run Phase 3's stamp and key swap as visible, resumable background moves, never at boot (item 6; T2 `229-research-32`). Its activation (nexus-f3yqd.2) is a Phase 3 prerequisite. |
 | RDR-227 (per-collection HNSW above the router threshold) | Adjacent, closed 2026-10-12 (T2 `229-research-25`) | Builds each per-collection index as a partial index `WHERE collection = '<name>'` and names it from a hash of model, tenant and name. Phase 3 rebuilds every such index on `collection_id`. |
 
 Searched `docs/rdr/README.md` and the RDR tree for "collection name",
@@ -431,8 +432,9 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
 - **✅ Verified** (source search) — Bead nexus-j4gl6 is closed (2026-11-10,
   Sam's grooming walk: "folded into RDR-247 ... so index layout and
   collection identity ... are designed together"); RDR-247 is deferred, and
-  RDR-246's data-move registry (`nexus.data_moves`) is on develop. *T2
-  `229-research-31`.*
+  RDR-246's data-move registry (`nexus.data_moves`) is on develop, with
+  per-tenant and per-leaf runs, a verification query and an `on_complete`.
+  Phase 3 runs on it (item 6). *T2 `229-research-31`, `229-research-32`.*
 - **✅ Verified** (measured) — conexus shipped 36 releases between 2026-10-08
   and 2026-11-07 (`git tag`), so "a stated number of releases" (D4) is weeks,
   not months, at the current rate.
@@ -462,10 +464,12 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
 - [ ] Re-keying `nexus.chunks` and `nexus.taxonomy_centroids` on
   `collection_id` (a new column backfilled on every row, a new primary key
   per leaf, three child foreign keys re-pointed) and rebuilding every
-  per-collection index fits in a maintenance window per tenant on the larger
-  production tenant. — **Status**: Unverified — **Method**: Spike (P3.2, a
-  timed run on a PITR fork of that tenant, before the changeset is written
-  in its final form). A local measurement bounds the backfill and the index
+  per-collection index completes as background work (item 6, "How each
+  Phase 3 step runs") in a time the operator can see and accept, both on the
+  larger production tenant and on a large local store. — **Status**:
+  Unverified — **Method**: Spike (P3.2, a timed run on a PITR fork of that
+  tenant and a sizing on a local store, before the changesets are written in
+  their final form). A local measurement bounds the backfill and the index
   rebuild per 1M rows (T2 `229-research-30`); it does not time the key swap
   on that tenant.
 - [ ] No two live rows of one tenant share a label once renames stop
@@ -590,11 +594,12 @@ The key moves table by table in strangler order:
   operational name columns with no foreign key (`physical_collection`,
   `pdf_pipeline`, `chash_remap`, `reembed_jobs`, `superseded_by` as
   `superseded_by_id`). The engine writes both columns on every insert; a
-  per-tenant backfill fills the old rows in bounded batches. The quarantine
+  registered data move fills the old rows (below). The quarantine
   `origin_collection` metadata tag gains an `origin_collection_id` beside it.
 - **Switch.** Each foreign key is re-created on `(tenant_id, collection_id)`
   (or `(tenant_id, collection_id, embedding_model)` for the RDR-225
-  composite), `NOT VALID` first and validated after, as fk-002 did. The
+  composite), `NOT VALID` first and validated after by a data move's
+  `on_complete` (below). The
   chunks and centroid primary keys are rebuilt per leaf on `(tenant_id,
   collection_id, chash, embedding_model)` and `(tenant_id, collection_id,
   topic_id, embedding_model)`, and the three child foreign keys follow. Every
@@ -608,6 +613,58 @@ The key moves table by table in strangler order:
 - **Contract (Phase 4).** The name columns on referencing tables are
   dropped, the `(tenant_id, name, embedding_model)` UNIQUE is dropped, and
   the name-based arms of `COLLECTION_SCOPED_TABLES` go with them.
+
+**How each Phase 3 step runs (RDR-246).** No Phase 3 step rewrites rows or
+builds an index inside the boot-time schema walk, the rule RDR-246 (accepted
+2026-11-16) and the upgrade-boot write gate (nexus-f3yqd.1) enforce. A Phase 3
+changeset only adds what costs no row rewrite: nullable `collection_id`
+columns, constraints added `NOT VALID`, and one INSERT per move into
+`nexus.data_moves` ("a changeset registers a move with one INSERT, and
+DataMoveWorker (the engine thread) works the open ones",
+`datamoves-001-registry.xml`; T2 `229-research-32`). Three kinds of work
+follow, each while the engine serves:
+
+- *The stamp is a data move.* P3.1 registers one move per referencing
+  table. `DataMoveWorker` runs it through dml_utils in primary-key chunks,
+  per tenant, and per leaf on the partitioned tables (runs named
+  `<label>/<tenant>/<leaf>`). Its verification query returns the tenant's
+  rows whose `collection_id` is still null. Its `on_complete` validates the
+  constraint that P3.1's changeset added `NOT VALID` to require the id. It
+  reports in `boot_work` as `data-move:<label>`, with `on_stop: "resumes
+  from the last committed batch"`, so a killed engine resumes at the first
+  unprocessed chunk (RDR-246 lines 867-868).
+- *Index builds follow the PCI reconciler's pattern.* RDR-246 keeps index
+  builds out of a move: `on_complete` holds transactional DDL, "never CREATE
+  INDEX CONCURRENTLY" (lines 546-550). The per-leaf unique indexes for the
+  new chunks and centroid keys, and every per-collection index on the id
+  (P3.4), are built the way the PCI reconciler builds today. An engine pass
+  runs in the background after the engine serves and issues one `CREATE
+  INDEX CONCURRENTLY` at a time. It reports in `boot_work` (the reconciler's
+  entry is `pci-reconcile`, "building search indexes"). A build ended by a
+  database stop, or by a restart that applies a schema change, "is left
+  INVALID, and a later pass drops it and rebuilds it from the start"
+  (`PciBootWork.java`; T2 `229-research-33`). The new key's index is created
+  `ON ONLY` the partitioned parent, built per leaf with `CONCURRENTLY` and
+  attached, so the parent step is metadata only (PostgreSQL 17,
+  `ddl-partitioning.html` and `sql-createindex.html`).
+- *The switch is a move's `on_complete`.* `ADD ... USING INDEX` "is not
+  currently supported on partitioned tables" (`sql-altertable.html`). So
+  P3.3 registers a move whose verification query returns any leaf without a
+  valid unique index on the new key, and any row with a null id. Its
+  `on_complete` swaps the chunks and centroid primary keys, re-points the
+  three child foreign keys and validates the switched foreign keys. It runs
+  only once the builds are done, as one transaction under RDR-246's
+  `lock_timeout`. A lock it cannot get "fails fast as a transient
+  `blocked:` (55P03)", and a kill before the commit leaves the old keys in
+  place (RDR-246 lines 545-547, 914-916). On these chunk-family tables that
+  `on_complete` also ends any per-collection index build in flight, which the
+  reconciler then restarts. Inferred, not read: that `ADD PRIMARY KEY` on the
+  parent adopts the matching per-leaf index the way `CREATE INDEX` does. P3.2
+  confirms it.
+
+There is no maintenance window. No step holds a lock longer than one
+`on_complete` transaction under `lock_timeout` (inferred from RDR-246's rule,
+not measured).
 
 The history tables (`relevance_log`, `search_telemetry`, `hook_failures`,
 `gc_audit`) gain a nullable `collection_id` for joins and keep their name
@@ -691,6 +748,8 @@ same attributes as any other). Phase 4 drops the column and
 | Row cache | Engine `CollectionRegistry` (keyed by tenant and name), client `mcp_infra._collections_cache`, client registration cache | Change: key by `collection_id`, with a label index for the route boundary. |
 | Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI rewrite; `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
 | Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: predicate and name hash on `collection_id`; every existing index rebuilt. |
+| Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, and one whose `on_complete` swaps the keys; no new mover. |
+| Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | Reuse the pattern: background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
 | Recovery bundle | `catalog/recovery_bundle.py` | Extend: the format carries the registry row; the name path stays for N minor releases (Open Item O1). |
 
 ### Decision Rationale
@@ -792,11 +851,12 @@ every script and note URI that names one.
   disagreeing row is listed and decided before Phase 2 starts.
 - **Risk**: A migration source loses its only way to learn attributes.
   **Mitigation**: the non-stranding rule (item 9) and its tests-first step.
-- **Risk**: The chunks re-key and the per-collection index rebuild take
-  longer than a maintenance window on the larger tenant. **Mitigation**:
-  Critical Assumption 5, timed on a PITR fork in P3.2 before the changeset
-  is final; the backfill runs in bounded per-tenant batches while both
-  columns are written, so only the key swap needs the window.
+- **Risk**: The chunks re-key and the per-collection index rebuild run for
+  hours on a large store. **Mitigation**: none of it runs at boot. The stamp
+  is a resumable data move, the builds follow the reconciler's pattern, and
+  the swap is one `on_complete` transaction (item 6). Critical Assumption 5
+  is timed on a PITR fork and sized on a local store in P3.2 before the
+  changesets are final.
 - **Risk**: A writer misses the dual write, leaving a row with a null
   `collection_id` when the switch validates. **Mitigation**: the `NOT VALID`
   then validate pattern fails the validation loudly; a census test counts
@@ -834,6 +894,11 @@ every script and note URI that names one.
 - [ ] Critical Assumptions 1 and 6 measured (P1.2).
 - [ ] Critical Assumption 5 measured (P3.2) before the Phase 3 switch
   changesets are final.
+- [ ] RDR-246's data-move mechanism active everywhere Phase 3 runs:
+  nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
+  boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
+  on Sam's go: cloud pg_background install and the first registered move")
+  open (T2 `229-research-32`). Blocks P3.1.
 
 ### Minimum Viable Validation
 
@@ -909,18 +974,29 @@ its acceptance is that test green plus the census pin it lowers.
 
 - P3.1 Expand: `catalog_collections.collection_id` with UNIQUE `(tenant_id,
   collection_id)`; `collection_id` columns on every referencing table
-  (item 6 list); engine dual-writes; per-tenant bounded backfill; a census
-  test that counts null ids per table.
-- P3.2 Spike: time the chunks and centroid re-key and the per-collection
-  index rebuild on a PITR fork of the larger production tenant (Critical
-  Assumption 5). Result in T2 and on the bead; it sets the window and the
-  batch size for P3.3 and P3.4.
+  (item 6 list) and the `NOT VALID` constraint requiring the id; engine
+  dual-writes; the stamp registered in `nexus.data_moves` per table, run per
+  tenant and leaf, with a null-`collection_id` verification query and the
+  constraint's VALIDATE as its `on_complete` (item 6); a census test that
+  counts null ids per table. Test: an upgrade boot registers the move and
+  rewrites no row; a killed run resumes from its last committed batch.
+- P3.2 Spike: time the stamp, the chunks and centroid re-key and the
+  per-collection index rebuild on a PITR fork of the larger production
+  tenant, and size them on a local store of the largest size class
+  (Critical Assumption 5). Result in T2 and on the bead; it sets the chunk
+  size and throttle for P3.1's move and confirms that the parent key step is
+  metadata only.
 - P3.3 Switch the foreign keys: the eight registry foreign keys and the
-  RDR-225 composite onto `collection_id`, `NOT VALID` then validated; the
-  chunks and centroid primary keys and their three children rebuilt per
-  leaf. Walked on a PITR fork before the cloud deploy.
+  RDR-225 composite onto `collection_id`, added `NOT VALID`; the per-leaf
+  unique indexes for the chunks and centroid keys built in the reconciler's
+  pattern; then a registered move whose `on_complete` swaps the two primary
+  keys, re-points their three children and validates the switched foreign
+  keys (item 6). Walked on a PITR fork before the cloud deploy and on a
+  local store.
 - P3.4 Rebuild every per-collection index on `collection_id` (predicate and
-  name hash); `PciCatalog` reads the id back from the predicate.
+  name hash) through the PCI reconciler, which reports in `boot_work` and
+  rebuilds a killed build from the start; `PciCatalog` reads the id back
+  from the predicate.
 - P3.5 Engine readers and routes: `CollectionRegistry` keyed by id with a
   label index; every collection-taking route accepts `collection_id` and a
   label; responses carry both. Client caches keyed by id.
@@ -963,7 +1039,7 @@ its acceptance is that test green plus the census pin it lowers.
 ### Phase dependencies
 
 P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.8. P3.1 waits for Phase
-2. P3.2 blocks P3.3 and P3.4. P3.3 blocks P3.5 and P3.7. P3.8 waits for
+2 and for RDR-246's activation (Prerequisites). P3.2 blocks P3.3 and P3.4. P3.3 blocks P3.5 and P3.7. P3.8 waits for
 P2.8. Phase 4 waits for every Phase 3 bead to be deployed on both
 production tenants; P4.4 waits for its release count.
 
@@ -1099,8 +1175,11 @@ and again after Phase 3, and is not deferred.
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
-  before the cloud deploy. The P3.3 key switch and the P3.4 index rebuild
-  run in a maintenance window sized by P3.2.
+  before the cloud deploy, and on a local store. No Phase 3 step rewrites
+  rows or builds an index at boot: the stamp and the key swap run as
+  registered data moves, the index builds in the PCI reconciler's pattern,
+  each visible in `boot_work` and resumable (item 6). No maintenance window
+  is needed.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
   Each Phase 3 step leaves the name path working until Phase 4.
