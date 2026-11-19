@@ -43,7 +43,7 @@ def _fixture_rows() -> list[dict[str, Any]]:
         _row("1.1.2", "two", meta={"extraction_method": "mineru"}),
         _row("1.1.10", "ten", meta={"extraction_method": "mineru", "extraction_source": "dt_content"}),
         _row("1.1.3", "three", "rdr", sensitive=True, meta={"extraction_method": "mineru", "quality_gate_overridden": True}),
-        _row("1.2.1", "docs-one", "docs", sensitive=True, meta={"extraction_method": "docling"}),
+        _row("1.2.1", "docs-one", "docs", sensitive=True, meta={"extraction_method": "pymupdf"}),
         _row("1.2.4", "paper", "paper", meta={"quality_gate_overridden": False}),
         _row("1.3.1", "plain"),
         _row("1.3.2", "tombstoned", deleted=True, meta={"extraction_method": "mineru"}),
@@ -363,7 +363,7 @@ def test_rows_that_break_a_clause_the_command_sent_are_dropped_by_the_client(mon
     meta = {"extraction_method": "mineru"}
     unflagged = FakeEngine.wire(_row("1.5.1", "unflagged", meta=meta))
     other_type = FakeEngine.wire(_row("1.5.2", "paper", "paper", sensitive=True, meta=meta))
-    other_meta = FakeEngine.wire(_row("1.5.3", "other meta", sensitive=True, meta={"extraction_method": "docling"}))
+    other_meta = FakeEngine.wire(_row("1.5.3", "other meta", sensitive=True, meta={"extraction_method": "pymupdf"}))
     engine = FakeEngine(_fixture_rows(), inject=[unflagged, other_type, other_meta])
     engine.wired(monkeypatch)
     both = _run("--sensitive", "--type", "rdr", "--meta", "extraction_method=mineru", "--json")

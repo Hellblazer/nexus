@@ -937,7 +937,7 @@ vcase() {  # <label> <want-rc> <want-text> <python update>
   local out rc
   # shellcheck disable=SC1091
   out="$(cd "$HERE/../.." && source "$TMP/vfn.sh" && _version_contract_verdict "$(_vbody "$4")" 2>&1)"; rc=$?
-  if [ "$rc" = "$2" ] && printf '%s' "$out" | grep -qF -- "$3"; then
+  if [ "$rc" = "$2" ] && [[ "$out" == *"$3"* ]]; then
     PASS=$((PASS+1))
   else
     echo "[FAIL] version contract: $1 (rc $rc, want $2 with '$3'): $out"; FAIL=$((FAIL+1))
