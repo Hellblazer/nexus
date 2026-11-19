@@ -32,11 +32,21 @@ import threading
 import time
 from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+if TYPE_CHECKING:
+    from nexus.identity.token_file import TokenFile
+
 _log = structlog.get_logger(__name__)
+
+#: An engine older than 0.1.197 refuses every data-credential delegation the same way: say so once per process, not once
+#: per dispatch (RDR-253 option 2).
+_SEATS_NEED_ENGINE_LOGGED = False
+
+#: What the engine's ``identity_token_required`` means to a dispatch: the parent's token was missing or past its expiry.
+NO_PARENT_TOKEN = "the dispatching session's identity token is missing or expired, and in cloud mode a delegated identity is made only through it"
 
 RENEW_INTERVAL_S: float = 60.0
 
@@ -44,7 +54,7 @@ RENEW_INTERVAL_S: float = 60.0
 END_TIMEOUT_S: float = 5.0
 
 
-def resolve_parent_record(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> Any:
+def resolve_parent_record(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> "TokenFile | None":
     """The token file of the identity this process dispatches for: the one ``NX_IDENTITY_TOKEN`` names (this process is
     itself a delegated child), else its nearest Claude ancestor's; None when there is none. Local reads only."""
     from nexus.identity.token_file import ancestor_token_path, read_token_file  # noqa: PLC0415
@@ -65,6 +75,20 @@ def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -
     """The identity this process dispatches for (:func:`resolve_parent_record`'s), or None."""
     record = resolve_parent_record(environ, identity_dir, procs)
     return record.identity if record is not None else None
+
+
+def _log_refusal(exc: Any) -> None:
+    """One warning for the engine refusing a delegation. An engine older than 0.1.197 says the same thing for every
+    dispatch, so it is logged once per process; every other refusal is its mapped line, each time. The line never holds a
+    token value."""
+    global _SEATS_NEED_ENGINE_LOGGED
+    from nexus.identity.bind_client import is_old_engine_seat_refusal, seat_refusal_message  # noqa: PLC0415
+
+    if is_old_engine_seat_refusal(exc):
+        if _SEATS_NEED_ENGINE_LOGGED:
+            return
+        _SEATS_NEED_ENGINE_LOGGED = True
+    _log.warning("delegated_identity_not_created", error=seat_refusal_message(exc, None, token_source="the dispatching session's token", no_token=NO_PARENT_TOKEN))
 
 
 class DelegatedIdentity:
@@ -123,9 +147,10 @@ class DelegatedIdentity:
             try:
                 # RDR-253 option 2: the data credential delegates only from the caller's own identity, proved by the
                 # parent's token. A tenant credential's call is unchanged.
-                on_behalf = ({"token": parent_record} if getattr(engine, "scope", None) == SCOPE_DATA
-                             and token_contract.usable(parent_record.token, parent_record.expires_at, now=clock()) else {})
-                view = engine.create_delegated(parent, display_name=label, evidence=evidence, **on_behalf)
+                sends_token = (getattr(engine, "scope", None) == SCOPE_DATA
+                               and token_contract.usable(parent_record.token, parent_record.expires_at, now=clock()))
+                view = engine.create_delegated(parent, display_name=label, evidence=evidence,
+                                               token=parent_record if sends_token else None)
             except BaseException:
                 if owned:
                     engine.close()
@@ -150,7 +175,10 @@ class DelegatedIdentity:
                     except Exception:  # noqa: BLE001
                         pass
                 raise
-        except (IdentityApiError, IdentityUnavailableError) as exc:
+        except IdentityApiError as exc:
+            _log_refusal(exc)
+            return None
+        except IdentityUnavailableError as exc:
             _log.warning("delegated_identity_not_created", error=f"{type(exc).__name__}: {exc}")
             return None
         except Exception as exc:  # noqa: BLE001 — a dispatch must never fail over identity

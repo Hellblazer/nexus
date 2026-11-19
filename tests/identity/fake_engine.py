@@ -136,7 +136,8 @@ class FakeEngine:
 
     # ── writes ──────────────────────────────────────────────────────────────
 
-    def create_seat(self, name: str, *, created_by: str = "sam", display_name: str | None = None) -> dict[str, Any]:
+    def create_seat(self, name: str, *, created_by: str = "sam", display_name: str | None = None,
+                    token: Any = None) -> dict[str, Any]:
         self.calls.append(("create_seat", (name, created_by, display_name)))
         if _ID.match(name):
             raise _refuse(400, "reserved_name", "names that look like identity ids (i<digits>) are reserved")
@@ -157,7 +158,8 @@ class FakeEngine:
         self.calls.append(("history", (host, pid, proc_start)))
         return []
 
-    def create_delegated(self, parent: str, *, display_name: str | None, evidence: Mapping[str, Any]) -> dict[str, Any]:
+    def create_delegated(self, parent: str, *, display_name: str | None, evidence: Mapping[str, Any],
+                         token: Any = None) -> dict[str, Any]:
         self.calls.append(("create_delegated", (parent, display_name, dict(evidence))))
         self._maybe_refuse("create_delegated")
         self._get(parent)
@@ -169,7 +171,7 @@ class FakeEngine:
         out["identity_token_expires_in_seconds"] = 3600
         return out
 
-    def promote(self, identity: str, name: str) -> dict[str, Any]:
+    def promote(self, identity: str, name: str, *, token: Any = None) -> dict[str, Any]:
         self.calls.append(("promote", (identity, name)))
         rec = self._get(identity)
         if _ID.match(name):

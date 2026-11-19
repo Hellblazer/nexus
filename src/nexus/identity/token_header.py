@@ -242,14 +242,21 @@ def _verify_session(record: TokenFile) -> None:
         _VERIFIED.add(sid)
 
 
+def verified_current() -> TokenFile | None:
+    """:func:`current`, after the session check (:func:`_verify_session`): the record of a token this process may send
+    for its own session, else None. Raises ``IdentityConflictError`` for a process whose session id names another
+    identity than its token file. What a fenced write and a seat call (RDR-253 option 2) both send the token of."""
+    record = current()
+    if record is not None:
+        _verify_session(record)
+    return record
+
+
 def identity_headers() -> dict[str, str]:
     """The header for a request the caller already knows is fenced (the scratch store's identity scope), with the same
     session check as :func:`fenced_identity_headers`."""
-    record = current()
-    if record is None:
-        return {}
-    _verify_session(record)
-    return token_contract.headers(record.token)
+    record = verified_current()
+    return {} if record is None else token_contract.headers(record.token)
 
 
 def fenced_identity_headers(method: str, path: str) -> dict[str, str]:

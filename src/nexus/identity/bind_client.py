@@ -62,6 +62,48 @@ def is_old_engine_seat_refusal(exc: IdentityApiError) -> bool:
     return exc.status == 403 and exc.message.startswith(OLD_ENGINE_SEAT_REFUSAL)
 
 
+#: What a seat call's caller says of its own token when the engine refuses it (:func:`seat_refusal_message`).
+OWN_TOKEN = "this process's token"
+#: The advice for a seat call that sent no token, for a caller that may be the session or a script naming a session's file.
+NO_TOKEN_ADVICE = ("no identity token was sent, and in cloud mode a seat is made, promoted or delegated only through one: "
+                   "run it inside the session that holds the identity, or name that session's token file with --token-file")
+
+#: One line per engine refusal of a seat call (RDR-253 option 2) that needs nothing from the caller; the codes that name
+#: the caller's token, the identity or the token's owner are built in :func:`seat_refusal_message`.
+_SEAT_REFUSALS = {
+    "identity_not_held": "no process holds this identity now, so its token cannot act for it",
+    "not_ephemeral": "that identity is not an ephemeral one: only an ephemeral identity is promoted to a seat",
+    "forbidden": "this credential may not make, promote or delegate seats",
+}
+
+
+def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, token_source: str = OWN_TOKEN,
+                         no_token: str = NO_TOKEN_ADVICE) -> str:
+    """One line for an engine refusal of a seat call (a data credential's create, promote or delegate). *token_source*
+    says whose token was sent (``this process's token``, or ``the token in <file>``) and *no_token* is the advice for a
+    call that sent none, so each caller words them for itself. Never contains a token value."""
+    if is_old_engine_seat_refusal(exc):
+        return SEATS_NEED_ENGINE
+    code = exc.code
+    if code == "identity_token_required":
+        return no_token
+    if code == "not_owner":
+        return (f"the identity token names {exc.body.get('token_identity') or 'another identity'}, not "
+                f"{identity or 'the one asked for'}: a session acts only for its own identity")
+    if code == "unknown_identity":
+        return f"the engine has no identity {identity or ''}".strip()
+    if code == "generation_superseded":
+        return f"another process holds this identity now, and {token_source} is for an older generation"
+    if code == "identity_token_expired":
+        return (f"{token_source} has expired: a session's server renews it while the session runs, so run this from a "
+                f"live session (or restart this one)")
+    if code == "cross_tenant_identity_token":
+        return f"{token_source} belongs to another tenant than this credential's"
+    if code in _SEAT_REFUSALS:
+        return _SEAT_REFUSALS[code]
+    return f"{code or exc.status}: {exc.message}"
+
+
 def evidence_body(
     *, session_id: str | None = None, host: str | None = None, pid: int | None = None, started_at: int | None = None,
     proc_start: str | None = None, pane: str | None = None, client_version: str | None = None,
