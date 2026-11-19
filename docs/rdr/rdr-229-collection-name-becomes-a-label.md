@@ -1703,3 +1703,4 @@ large, and moved under a ratchet.
   and its no-row answer are withdrawn, and `note-uri-corpus.json` is
   unchanged. `isFileRoutedCollection`, which tests a live collection, stays
   in the routing class. T2 `229-research-42` added.
+- 2026-11-19: Gate round 2 — BLOCKED (1 Critical, 5 Significant, 1 ship-blocker(s)); blob `c1a9d815e8cc`; critique `nexus_rdr/229-gate-critique-2026-11-19-r2`.
