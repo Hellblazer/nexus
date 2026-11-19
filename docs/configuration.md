@@ -539,7 +539,7 @@ T2 memory entries use a heat-weighted effective TTL (RDR-057 Phase 2a):
 effective_ttl = base_ttl * (1 + log(access_count + 1))
 ```
 
-Highly-accessed entries survive longer than their nominal TTL. Unaccessed entries (`access_count=0`) expire at the base rate (`log(1) = 0`, so multiplier = 1). Every `memory_get` or `memory_search` hit increments `access_count` and updates `last_accessed`.
+Highly-accessed entries survive longer than their nominal TTL. Unaccessed entries (`access_count=0`) expire at the base rate (`log(1) = 0`, so multiplier = 1). `access_count` counts the times a caller received the row (RDR-209 Phase 0b, engine-service-v0.1.196): one increment, and a new `last_accessed`, each time the row is returned by title, by id, by unique title prefix, or on a `memory_search` page. A page requested twice counts twice; a row that matched but ranked past the returned page is not counted. `nx memory search` prints every match and so stamps every match, and a caller that sends no page `limit` gets the old wire behaviour, every match stamped. Automated readers count too (hooks, `nx rdr` reading by title), so "received" is not "read by a person". Counts taken before the engine deploy keep the old meaning, one increment per search match.
 
 | access_count | Multiplier | Effective TTL (base 30 days) |
 |--------------|------------|------------------------------|
