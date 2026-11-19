@@ -101,10 +101,12 @@ def test_an_agent_in_the_primary_cwd_commits_in_its_sessions_worktree(primary, w
         f"git -C {wt} reset --soft 'HEAD~1'",
         f"git -C {wt} reset -- f.txt",
         f"git -C {wt} switch -c step-4",
-        f"git -C {wt} checkout -b step-4",
         f"git -C {wt} branch step-4 abc1234",
         f"git -C {wt} cherry-pick abc1234",
         f"git -C {wt} merge --ff-only origin/develop",
+        f"git -C {wt} commit -m '-x is a value here'",
+        f"git -C {wt} add -- -leading-dash.txt",
+        f"git -C {wt} commit --message=msg",
     ]
     blocked = [c for c in allowed if not _allowed(c, primary)]
     assert not blocked, blocked
@@ -146,6 +148,9 @@ def test_git_option_prefixes_cannot_reach_a_refused_flag(primary, worktree):
         f"git -C {wt} commit -am msg",
         f"git -C {wt} commit --mess msg",
         f"git -C {wt} commit -m msg --template=/tmp/t",
+        f"git -C {wt} commit -m=x",
+        f"git -C {wt} commit --all=x -m msg",
+        f"git -C {wt} add -u -x",
     ]
     passed = [c for c in cmds if _allowed(c, primary)]
     assert not passed, passed
@@ -158,6 +163,15 @@ def test_discarding_work_and_shared_refs_are_never_admitted(primary, worktree):
     wt = str(worktree)
     cmds = [
         f"git -C {wt} reset --hard abc1234",
+        f"git -C {wt} checkout .",
+        f"git -C {wt} checkout f.txt",
+        f"git -C {wt} checkout HEAD f.txt",
+        f"git -C {wt} checkout -b step-4",
+        f"git -C {wt} merge --abort",
+        f"git -C {wt} rebase --abort",
+        f"git -C {wt} rebase --skip",
+        f"git -C {wt} rebase --quit",
+        f"git -C {wt} cherry-pick --abort",
         f"git -C {wt} reset --keep abc1234",
         f"git -C {wt} restore f.txt",
         f"git -C {wt} checkout -- f.txt",

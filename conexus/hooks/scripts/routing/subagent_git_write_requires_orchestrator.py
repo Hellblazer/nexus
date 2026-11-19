@@ -3674,14 +3674,14 @@ def _deny_message(agent_type: str, verb_names: str, *,
     head = (
         f"Working in your session's linked worktree from the primary cwd? One "
         f"literal command per call passes: `git -C <absolute worktree root> "
-        f"<verb> ...` with verb add, commit, rm, mv, switch -c, checkout -b, "
+        f"<verb> ...` with verb add, commit, rm, mv, switch -c, "
         f"reset (--soft/--mixed), rebase, cherry-pick, revert, merge or branch "
         f"<new>; every flag spelled out in full and separately (no `-am`, no "
         f"abbreviations); nothing chained or redirected; any word holding "
         f"`~ ^ {{ }} ( ) % $ #` or spaces inside single quotes (`'HEAD~1'`); and "
         f"a commit message that names a git verb goes through `-F <file>`. "
-        f"Discarding changes (reset --hard, restore, checkout -- <path>), stash, "
-        f"tag and branch deletion are never admitted that way: hand those back.\n"
+        f"Discarding changes (reset --hard, restore, checkout), --abort/--skip, "
+        f"stash, tag and branch deletion are never admitted that way: hand those back.\n"
         f"Subagents never run git write verbs ({verb_names}) in the shared "
         f"tree ({who}); that includes `gh`/`hub` commands that move HEAD or "
         f"rewrite the working tree (gh pr checkout, gh repo sync). This guard is intentionally STRUCTURE-AGNOSTIC "
@@ -3975,7 +3975,10 @@ def _remote_test_host_command(command: str) -> str | None:
 #: way other than exactly as listed, a combined short-flag cluster (``-am``)
 #: included, is refused. The set is chosen so that nothing admitted runs a
 #: command, discards uncommitted work, or moves state other worktrees share:
-#: no ``reset --hard``, ``restore``, ``checkout -- <path>``/``-f``/``-B``,
+#: no ``reset --hard``, ``restore``, ``checkout`` at all (a bare word is a
+#: pathspec there, so ``checkout .`` discards edits; ``switch -c`` creates
+#: branches), no ``--abort``/``--skip``/``--quit`` (they throw away a stopped
+#: merge's or rebase's resolved work),
 #: ``stash`` (refs/stash is shared), ``tag`` (shared), destructive ``branch``
 #: flags, ``rebase --exec``/``--autostash``, or ``merge -s``/``-X``. Reads need
 #: no carve-out: the primary rule never matches them.
@@ -3989,20 +3992,16 @@ _DASH_C_FLAGS: dict[str, dict[str, bool]] = {
     "rm": {"--cached": False, "-r": False, "-q": False, "--": False},
     "mv": {"-k": False, "-v": False},
     "switch": {"-c": True, "--create": True, "--detach": False, "-q": False},
-    "checkout": {"-b": True, "--detach": False, "-q": False},
     "reset": {"--soft": False, "--mixed": False, "-q": False, "--": False},
-    "rebase": {"--onto": True, "--continue": False, "--abort": False,
-               "--skip": False, "--quit": False, "--autosquash": False,
+    "rebase": {"--onto": True, "--continue": False, "--autosquash": False,
                "--no-autosquash": False, "-r": False, "--rebase-merges": False,
                "--keep-base": False, "-q": False},
-    "cherry-pick": {"--continue": False, "--abort": False, "--skip": False,
-                    "--quit": False, "-x": False, "-n": False, "--no-commit": False,
+    "cherry-pick": {"--continue": False, "-x": False, "-n": False, "--no-commit": False,
                     "--allow-empty": False, "-m": True, "--mainline": True},
-    "revert": {"--continue": False, "--abort": False, "--skip": False,
-               "--quit": False, "-n": False, "--no-commit": False,
+    "revert": {"--continue": False, "-n": False, "--no-commit": False,
                "--no-edit": False, "-m": True, "--mainline": True},
     "merge": {"--ff-only": False, "--no-ff": False, "--ff": False,
-              "--no-edit": False, "--abort": False, "--continue": False,
+              "--no-edit": False, "--continue": False,
               "--squash": False, "-m": True, "-q": False},
     "branch": {},  # create only: `git branch <name> [<start>]`
 }
@@ -4050,8 +4049,10 @@ def _dash_c_worktree_target(command: str) -> str | None:
     Known limit: git proves the path is A linked worktree, not the dispatching
     session's own; no hook field names that. The flag allowlist is what bounds
     the damage: nothing admitted discards uncommitted work or touches shared
-    refs, so the worst a mistaken path can do is add a commit to another
-    worktree's branch, which its owner can drop."""
+    refs. A mistaken path can still change another worktree's history (commit,
+    amend, reset --soft/--mixed, rebase, switch to another branch), all of it
+    recoverable from the reflog, and git itself refuses ``rm`` of a modified
+    file and a ``switch`` that would overwrite local changes."""
     if not _read_literally(command):
         return None
     try:
