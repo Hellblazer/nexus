@@ -591,7 +591,7 @@ Claude ancestor, runs no lease.
 60 seconds on its lease's heartbeat. The identity
 token lives one hour, the ceiling for a token minted under the data
 credential the MCP server holds (`nexus_rdr/253-research-8` (c)); the server
-refreshes it at half life through `bind` with the same generation (a refresh,
+refreshes it once it has under 50 minutes of life left, through `bind` with the same generation (a refresh,
 not a new binding) and rewrites its process's one token file. A renewal or refresh from a superseded generation is answered 409
 `generation_superseded`, and the server stops writing identity state and says so. The engine marks a seat
 `lapsed`, without changing the generation, when it reads a binding whose last
@@ -604,8 +604,13 @@ the last renewal, not when it is first read), then is free. So a laptop that sle
 process revives its own within a minute, with no generation change; a stray
 launch on the same laptop finds the holder running and gets an ephemeral
 identity, however long the sleep. The identity token, which lives one hour,
-may expire during a long sleep; the server refreshes it on its first wake
-heartbeat. A Bash `nx` in that window does not send a token its file records as
+is refreshed whenever it has under 50 minutes left, so it holds at least 50
+minutes when a sleep begins and a sleep under about 50 minutes never lapses it;
+a sleep longer than about 50 minutes may. The server refreshes a token that is
+still live on its first wake heartbeat. One that has expired cannot be refreshed
+with the data credential (engine 0.1.198): the server stops refreshing until a
+SessionStart bind writes a fresh token into the file, and the hook's `fork`
+refused for want of a live token starts the identity the process holds again. A Bash `nx` in that window does not send a token its file records as
 expired, since the engine would answer 401 to every request carrying it, reads
 included. A fenced write then gets the engine's 403 `identity_token_required`,
 and the next call reads the refreshed file. A Desktop binding is `lease=unleased`: its MCP
@@ -938,8 +943,8 @@ Self-certifying identifiers, signed binding events, witnesses.
   lapse, or for a person's `nx identity release`.
 - **A child takes its parent's seat**: no inherited variable carries
   take-over authority, and a delegated child's hook does not bind.
-- **A token outlives its lifetime**: the MCP server refreshes it at half of
-  its one-hour life and rewrites its process's one token file; the CLI
+- **A token outlives its lifetime**: the MCP server refreshes it under 50
+  minutes of its one-hour life and rewrites its process's one token file; the CLI
   tells an expired token (401, re-read) from a superseded one (409
   `generation_superseded`, stop).
 - **Desktop MCP writes are unattested** (Critical Assumption 4): a Desktop
@@ -1312,3 +1317,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: wording amended to match the reviewed Step 5 code (grant 3), beads nexus-hczdo.1.7 and nexus-hczdo.1.8: a named send goes to the single live `directory/<name>` holder's session mailbox, `mailbox/<id>` only when nobody holds the name, two holders refused; in Phase 1 named mail does not survive `/clear`, and the identity mailbox that does follows in a later step (Sam 2026-11-19, T2 `nexus/sam-ruling-named-mail-phase1-2026-11-19`).
 - 2026-11-19: amended for cloud installs (Sam's ruling "go with option 2, no bridge", T2 `nexus/sam-ruling-rdr253-cloud-seats-option2-2026-11-19`; wording approved as drafted, T2 `nexus/sam-ruling-rdr253-amendment-self-seat-wording-2026-11-19`): the data credential may promote the ephemeral its own identity token names, create a delegated identity from its token's identity, and create an unheld seat stamped `created_by identity:<token id>`; rename, `gone` and purge stay tenant-only; `/version` gains `identity_self_seat_supported`.
 - 2026-11-19: wording amended to match the reviewed cloud-seats client (grant 3), bead nexus-hczdo: the client detects an older engine from the data-credential refusal's wording and says so once, not by reading `/version`. No design change.
+- 2026-11-19: wording amended to match the reviewed 0.1.198 client, round 1 (grant 3), bead nexus-hczdo: the server refreshes under 50 minutes of token life, so a sleep under about 50 minutes never lapses it and a longer one may; after a lapse refreshing stops until a SessionStart bind writes a fresh token; the hook's refused `fork` starts the same identity again, not a new ephemeral.
