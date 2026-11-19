@@ -79,6 +79,12 @@ def test_a_delegated_childs_token_and_seat_are_not_handed_to_the_sessions(run, t
     assert "NX_IDENTITY_TOKEN" not in sb.env and "NX_SEAT" not in sb.env
 
 
+def test_an_operator_nx_override_is_not_handed_to_the_restart_script(run, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("NX_RESTART_NX", "/opt/real/nx")  # the script would run it in place of the sandbox nx shim
+    sb = run.Sandbox(tmp_path, "nx-rs-test-census", "claude", "sonnet", run.SPECS["gate"])
+    assert "NX_RESTART_NX" not in sb.env
+
+
 # -- parsing ------------------------------------------------------------------------------------
 def test_the_census_reads_every_binding_and_none_of_the_unbound_process_lines(census) -> None:
     got = census.parse(SHOW_ALL)
@@ -158,6 +164,12 @@ def test_a_new_row_with_a_sandbox_name_or_a_recorded_pid_fails_naming_it(census,
     assert "i31" not in failures[0] and "i32" not in failures[0]
     assert any("i31 stranger" in n and "not attributed" in n for n in notes), "an unattributed new row is a note naming the row"
     assert any("i32 kid" in n and "delegated" in n and "ignored" in n for n in notes)
+
+
+def test_a_delegated_row_held_by_a_sandbox_pid_is_still_the_sandboxs(census, tmp_path) -> None:
+    nx, _ = fake_nx(tmp_path, out=LIST)
+    failures, _ = census.check(nx, BASE, names=set(), pids={5003})
+    assert len(failures) == 1 and "i32" in failures[0]
 
 
 def test_new_rows_that_are_nobody_the_sandbox_knows_are_notes_not_failures(census, tmp_path) -> None:
@@ -377,6 +389,7 @@ def call(path: Path, *args: str) -> subprocess.CompletedProcess:
     ("identity", "rename", "a", "b"), ("identity", "purge", "i9"),
     ("identity", "work", "register", "--kind", "tmux", "--ref", "s"), ("identity", "work", "done", "--kind", "tmux", "--ref", "s"),
     ("--verbose", "identity", "create", "x"),
+    ("identity", "alive"),  # reports gone holders to the engine: a write on the operator's identities
 ])
 def test_the_shim_refuses_the_identity_writes_logs_them_and_never_reaches_the_real_nx(run, tmp_path, args) -> None:
     path, real_log, _, identity = shim(run, tmp_path)
@@ -391,7 +404,7 @@ def test_the_shim_refuses_the_identity_writes_logs_them_and_never_reaches_the_re
 @pytest.mark.parametrize("args", [
     ("identity", "show", "--session", SID_A, "--json"), ("identity", "show", "--", "rs_alpha"), ("identity", "show", "--all"),
     ("identity", "work", "list", "--session", SID_A, "--running", "--json"), ("identity", "work", "owners", "--kind", "tmux", "--ref", "s"),
-    ("identity", "may-stop", "--kind", "tmux", "--ref", "s"), ("identity", "alive"), ("scratch", "list"), ("tuple", "directory", "rs_alpha"),
+    ("identity", "may-stop", "--kind", "tmux", "--ref", "s"), ("scratch", "list"), ("tuple", "directory", "rs_alpha"),
 ])
 def test_the_shim_passes_reads_and_everything_else_to_the_real_nx(run, tmp_path, args) -> None:
     path, real_log, _, identity = shim(run, tmp_path)
