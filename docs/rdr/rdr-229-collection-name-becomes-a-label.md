@@ -1074,14 +1074,21 @@ its acceptance is that test green plus the census pin it lowers.
 - P1.2 Read-only census on both production tenants: per live row, row versus
   name for content type, model, version and lifecycle; owner differences
   counted separately as expected; live labels that would clash under a
-  partial UNIQUE (Critical Assumption 6). Bounded load, results in T2.
+  partial UNIQUE (Critical Assumption 6); live `(content_type, owner_id,
+  embedding_model)` tuples with more than one candidate row, which
+  `collectionForTuple` today settles by `NAME ASC` behind a grandfathered
+  filter D5 drops; and live names that already match `^c[0-9]+$`, the
+  minted form (T2 `229-research-38`). Bounded load, results in T2.
   Blocks P2.2 onward.
 - P1.3 Widen the engine Java gate to the `quarantine-` literal; add the SQL
   live-body gate. First live run pasted into the bead.
 - P1.4 `http_catalog_client` reads the next version from the `for_tuple`
   row's `model_version`, not by parsing the returned name; `collectionForTuple`
   breaks ties by a stable column, not by name. Test: a row whose
-  `model_version` differs from its name's suffix.
+  `model_version` differs from its name's suffix; and a repo with a legacy
+  slug collection and a conformant collection on one tuple resolves the same
+  collection before and after P1.4, and again after D5's filter drop
+  (P3.8).
 - P1.R Review gate for Phase 1 (code-review-expert and substantive-critic;
   "Ship when the three gates are green at pins that match a fresh census").
 
