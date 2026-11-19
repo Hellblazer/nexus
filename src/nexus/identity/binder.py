@@ -110,6 +110,13 @@ class BindOutcome:
         return self.identity is not None and self.token_file is not None and self.action in ("bound", "ephemeral", "unchanged")
 
 
+def _token_gone(exc: IdentityApiError) -> bool:
+    """Whether the engine refused a ``fork`` for want of a live identity token (engine 0.1.198: a data credential's fork
+    needs one, and a process whose token expired while the laptop slept has none). A ``start`` needs none, so the caller
+    binds the process as a new start. The code is matched, never the message."""
+    return exc.status == 403 and exc.code == "identity_token_required"
+
+
 class SessionBinder:
     """The policy table, against an engine client and a view of the machine."""
 
@@ -228,7 +235,7 @@ class SessionBinder:
                 event = "fork"
                 view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
         except IdentityApiError as exc:
-            if exc.status == 409:
+            if exc.status == 409 or _token_gone(exc):
                 return None
             raise
         return self._finish(facts, view, event, row=f"{facts.source}_in_process", action="bound")
@@ -309,7 +316,12 @@ class SessionBinder:
             outcome.switched_from = own["id"]
             return outcome
         prior = (own.get("holder") or {}).get("session_id")
-        view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+        try:
+            view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+        except IdentityApiError as exc:
+            if not _token_gone(exc):
+                raise
+            return self._startup(facts, rebind=False)   # as _keep does: a start needs no token
         return self._finish(facts, view, "fork", row="resume_unindexed_reuse", action="unchanged")
 
     def _startup(self, facts: LaunchFacts, *, rebind: bool) -> BindOutcome:

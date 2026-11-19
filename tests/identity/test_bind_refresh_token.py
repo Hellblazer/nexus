@@ -18,6 +18,7 @@ from structlog.testing import capture_logs
 
 from nexus.commands.identity_cmd import identity_group
 from nexus.identity import ops, token_contract, token_header
+from nexus.identity.binder import LaunchFacts, SessionBinder
 from nexus.identity.bind_client import (
     SCOPE_DATA, SCOPE_TENANT, IdentityApiError, IdentityClient, IdentityUnavailableError, seat_refusal_message,
 )
@@ -25,6 +26,7 @@ from nexus.identity.ops import CallerFacts, IdentityEnv
 from nexus.identity.token_file import TokenFile, read_token_file, token_path, write_token_file
 from nexus.mcp.identity_lease import HEARTBEAT_S, WAKE_RETRY_S, IdentityLease
 from nexus.operators.delegated_identity import DelegatedIdentity
+from tests.identity.fake_engine import FakeEngine
 from tests.identity.fakes import HOST, FakeProcesses
 
 HEADER = token_contract.IDENTITY_TOKEN_HEADER
@@ -108,28 +110,38 @@ def test_a_tenant_credential_bind_is_unchanged(engine: Engine, monkeypatch: pyte
 
 
 def _limit(**body: Any) -> IdentityApiError:
-    return IdentityApiError(409, "seat_limit", "i7 already created 5 seats", {"error": "seat_limit", **body})
+    return IdentityApiError(409, "seat_limit", "i7 already created 5 seats",
+                            {"error": "seat_limit", "cap": 5, "seats_created": 5, "identity": "i7", **body})
 
 
-def test_seat_limit_is_one_line_naming_the_cap_and_the_way_out() -> None:
+SEAT_LIMIT_LINE = ("i7 has created its 5 seats, the most a session's credential may: reuse one of them, or make a new one "
+                   "from a local-mode or operator shell (the tenant credential has no cap)")
+
+
+def test_seat_limit_is_one_pinned_line_that_says_to_reuse_a_seat_and_never_to_remove_one() -> None:
     said = seat_refusal_message(_limit(), "i7")
-    assert "\n" not in said and "5" in said and "seat" in said
-    assert "tenant" in said, "it says who may still make one"
+    assert said == SEAT_LIMIT_LINE
+    assert "\n" not in said and "purge" not in said and "rename" not in said, "no route removes a seat: do not advise it"
+
+
+def test_seat_limit_reads_the_cap_the_engine_names() -> None:
+    assert "its 7 seats" in seat_refusal_message(_limit(cap=7), "i7")
+    assert "its 5 seats" in seat_refusal_message(IdentityApiError(409, "seat_limit", "x", {"limit": 9}), "i7"), (
+        "a body with no cap says the constant")
 
 
 def test_seat_limit_is_worded_per_caller() -> None:
-    mine = seat_refusal_message(_limit())
-    other = seat_refusal_message(_limit(), seat_limit="ask the operator to purge one of the session's seats")
-    assert other != mine and "ask the operator" in other and "5" in other
+    other = seat_refusal_message(_limit(), "i7", seat_limit="ask the operator to make one")
+    assert other == "i7 has created its 5 seats, the most a session's credential may: ask the operator to make one"
 
 
 def test_seat_limit_through_nx_identity_create_is_a_command_error_with_that_line(engine: Engine, tmp_path: Path) -> None:
-    engine.answers[("POST", "/v1/identity")] = (409, {"error": "seat_limit", "message": "i7 already created 5 seats"})
+    engine.answers[("POST", "/v1/identity")] = (409, {"error": "seat_limit", "message": "i7 already created 5 seats", "cap": 5})
     env = IdentityEnv(client=engine.client(), procs=FakeProcesses(tmp_path / "claude-sessions", host=HOST),
                       identity_dir=tmp_path / "identity", environ={}, caller=lambda: CallerFacts(claude_pid=0, ancestors=()),
                       clock=lambda: 1_000.0, own_token=lambda: _record())
     result = CliRunner().invoke(identity_group, ["create", "sixth"], obj={"identity_env": env})
-    assert result.exit_code == 1 and seat_refusal_message(_limit()) in result.output
+    assert result.exit_code == 1 and "has created its 5 seats" in result.output
     with pytest.raises(ops.IdentityCommandError, match="5"):
         ops.create(env, "sixth")
 
@@ -424,3 +436,75 @@ def test_the_token_file_of_a_lapsed_lease_is_read_back_unchanged(tmp_path: Path)
     engine.refuse_bind = REFUSED
     lease.tick()
     assert read_token_file(_path(tmp_path)) == before
+
+
+# ── the hook: a fork refused for want of a live token falls through to a start ──────────────────────────────
+
+
+class _ExpiredTokenEngine(FakeEngine):
+    """A data credential's engine after the laptop slept past the token's hour: a fork is refused, a start needs no token."""
+
+    def bind(self, identity: str, event: str, expected_generation: int, evidence: Any = None, *, token: Any = None) -> dict:
+        if event == "fork":
+            self.calls.append(("bind", (identity, event, expected_generation, dict(evidence or {}))))
+            raise IdentityApiError(403, "identity_token_required", "a live identity token is required",
+                                   {"error": "identity_token_required"})
+        return super().bind(identity, event, expected_generation, evidence, token=token)
+
+
+def _own(engine: FakeEngine, **kw: Any) -> str:
+    holder = {"host": HOST, "pid": 100, "started_at": 100_000, "proc_start": T0, "session_id": "s1"}
+    return engine.stage(state="live", generation=1, holder=holder, **kw)
+
+
+def _binder_facts(tmp_path: Path, engine: FakeEngine, source: str, **kw: Any) -> tuple[SessionBinder, LaunchFacts]:
+    procs = FakeProcesses(tmp_path / "sessions")
+    procs.start(100, T0, started_at=100_000, session_id="s2")
+    binder = SessionBinder(client=engine, procs=procs, identity_dir=tmp_path / "identity", allow_privileged=False)
+    return binder, LaunchFacts(source=source, session_id="s2", host=procs.host, claude_pid=100, proc_start=T0,
+                               started_at=100_000, entrypoint="cli", **kw)
+
+
+def _events(engine: FakeEngine) -> list[str]:
+    return [args[1] for name, args in engine.calls if name == "bind"] + [name for name, _ in engine.calls if name == "create_ephemeral"]
+
+
+@pytest.mark.parametrize("kind", ["ephemeral", "seat"])
+def test_a_hook_fork_refused_for_an_expired_token_falls_through_to_a_start_and_ends_bound(tmp_path: Path, kind: str) -> None:
+    engine = _ExpiredTokenEngine()
+    own = _own(engine, kind=kind, name="alpha" if kind == "seat" else None)
+    binder, facts = _binder_facts(tmp_path, engine, "fork", seat="alpha" if kind == "seat" else None)
+    out = binder.bind(facts)
+    assert out.action in ("bound", "ephemeral"), f"not left unbound: {out.row} {out.notices}"
+    assert out.identity is not None and out.token_file is not None and out.token_file.exists()
+    assert not out.notices or not any("refused" in n for n in out.notices)
+    if kind == "seat":
+        assert out.identity == own and "start" in _events(engine), "a start of the seat this process holds: no token needed"
+    else:
+        assert "create_ephemeral" in _events(engine), "the ephemeral rebinds as a new one; the restart script promotes it by name"
+    assert "fork" in _events(engine), "the fork was tried first"
+
+
+def test_a_resume_of_an_unindexed_session_refused_for_an_expired_token_falls_through_too(tmp_path: Path) -> None:
+    engine = _ExpiredTokenEngine()
+    _own(engine, kind="ephemeral")
+    binder, facts = _binder_facts(tmp_path, engine, "resume")
+    out = binder.bind(facts)
+    assert out.action in ("bound", "ephemeral") and out.token_file is not None and out.token_file.exists(), out.notices
+    assert "create_ephemeral" in _events(engine)
+
+
+def test_a_fork_refused_for_another_reason_still_ends_unbound_with_the_engines_words(tmp_path: Path) -> None:
+    """Only a missing token falls through: another 403 is not a reason to start a second identity."""
+
+    class _NotOwner(_ExpiredTokenEngine):
+        def bind(self, identity: str, event: str, expected_generation: int, evidence: Any = None, *, token: Any = None) -> dict:
+            if event == "fork":
+                raise IdentityApiError(403, "not_owner", "the token names another identity", {})
+            return FakeEngine.bind(self, identity, event, expected_generation, evidence, token=token)
+
+    engine = _NotOwner()
+    _own(engine, kind="ephemeral")
+    binder, facts = _binder_facts(tmp_path, engine, "fork")
+    out = binder.bind(facts)
+    assert out.action == "unbound" and "not_owner" in " ".join(out.notices)

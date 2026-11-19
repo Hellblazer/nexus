@@ -46,7 +46,7 @@ SEATS_NEED_ENGINE: str = "seats need engine 0.1.197 in cloud mode"
 TOKEN_BIND_EVENTS: frozenset[str] = frozenset({"refresh", "fork"})
 
 #: Seats one identity may create through a data credential (RDR-253, Sam 2026-11-19: cap 5). The engine's 409
-#: ``seat_limit`` may name its own ``limit``, which wins; this is only the number the line says when it does not.
+#: ``seat_limit`` names its own ``cap``, which wins; this is only the number the line says when it does not.
 SEAT_LIMIT: int = 5
 
 
@@ -81,10 +81,11 @@ NO_TOKEN_ADVICE = ("no identity token was sent, and in cloud mode a seat is made
 #: script and a dispatch are not run from a session, so they never say to.
 OWN_TOKEN_401_ADVICE = "a session's server renews its token while it runs, so run this from a live session (or restart this one)"
 FILE_TOKEN_401_ADVICE = "the session that wrote that file renews the token while it runs, so that session must be live"
-#: What a caller adds to the ``seat_limit`` line: who may still make a seat. The tenant credential has no cap, and rename
-#: and purge are its own, so a seat made by mistake is cleaned up from a local-mode or operator shell.
-SEAT_LIMIT_ADVICE = ("make the seat from a local-mode or operator shell (the tenant credential has no cap), or remove one of "
-                     "this identity's there with `nx identity rename` or `purge`")
+#: What a caller adds to the ``seat_limit`` line. The cap is per identity for its whole life: no route removes a seat (purge
+#: keeps it, rename keeps its creator), so the way out is to reuse a seat, or make a new one with the uncapped tenant
+#: credential from a local-mode or operator shell.
+SEAT_LIMIT_ADVICE = ("reuse one of them, or make a new one from a local-mode or operator shell "
+                     "(the tenant credential has no cap)")
 #: One line per engine refusal of a seat call (RDR-253 option 2) that needs nothing from the caller; the codes that name
 #: the caller's token, the identity or the token's owner are built in :func:`seat_refusal_message`.
 _SEAT_REFUSALS = {
@@ -123,9 +124,9 @@ def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, 
     if code == "session_held":
         return "the engine already indexes that session id under another identity, so a delegated identity cannot be bound to it"
     if code == "seat_limit":
-        limit = exc.body.get("limit")
-        cap = limit if isinstance(limit, int) and not isinstance(limit, bool) else SEAT_LIMIT
-        return f"{identity or 'this identity'} has made {cap} seats, the most a session's credential may: {seat_limit}"
+        named = exc.body.get("cap")
+        cap = named if isinstance(named, int) and not isinstance(named, bool) else SEAT_LIMIT
+        return f"{identity or 'this identity'} has created its {cap} seats, the most a session's credential may: {seat_limit}"
     if code == "bad_created_by":
         return "a tenant credential may give created_by only as sam or restart"
     if code in _SEAT_REFUSALS:
