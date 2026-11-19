@@ -36,6 +36,10 @@ final class OwnerFixture {
     boolean served = true;
     Instant now = T0.plus(Duration.ofHours(1));
 
+    OwnerFixture() {
+        seat("L");   // the leader is a live, leased seat unless a test says otherwise
+    }
+
     /** A live, leased identity that a session {@code s<id>} maps to, joined to the group. */
     OwnerFixture seat(String id) {
         stamps.put("s" + id, id);
@@ -141,8 +145,10 @@ final class OwnerFixture {
         dims.put("from", "engine");
         dims.put("kind", d.post().kind());
         dims.put("sha", d.post().sha());
-        owners.add(new BoardRow("o" + (++seq), at, dims, d.post().bodyJson(), null));
-        clock = at;
+        Instant last = owners.isEmpty() ? null : owners.getLast().createdAt();
+        Instant when = last != null && !at.isAfter(last) ? last.plusSeconds(1) : at;   // rows land in order
+        owners.add(new BoardRow(String.format("o%05d", ++seq), when, dims, d.post().bodyJson(), null));
+        clock = when;
         return this;
     }
 

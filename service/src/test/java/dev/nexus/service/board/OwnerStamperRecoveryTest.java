@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.board;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * RDR-252 Step 3 against a real database: a stamper fault posts the leader with {@code reason=stamper_error}, and
+ * the timer rebuild after an engine restart arms the deadline of an open red from its latest owner row and no other.
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class OwnerStamperRecoveryTest {
+
+    StamperEnv se;
+
+    @BeforeAll
+    void up() throws Exception {
+        se = new StamperEnv();
+    }
+
+    @AfterAll
+    void down() throws Exception {
+        se.close();
+    }
+
+    /** A scheduler that records what is scheduled and runs none of it. */
+    private static final class Recording extends ScheduledThreadPoolExecutor {
+        final List<Long> delaysMs = new ArrayList<>();
+
+        Recording() {
+            super(1);
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+            delaysMs.add(unit.toMillis(delay));
+            return null;
+        }
+    }
+
+    private String[] redOnY() {
+        String t = se.tenant();
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        return new String[] {t, l, a, c};
+    }
+
+    /** What an engine start does: a new wiring over the same database, its timer rebuilt from the rows. */
+    private BoardOwnerWiring restart(String tenant) {
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+        wiring.start(new Recording(), () -> List.of(tenant));
+        wiring.rebuild(List.of(tenant));
+        return wiring;
+    }
+
+    @Test
+    void aStamperFaultPostsTheLeaderWithReasonStamperError() throws Exception {
+        String[] f = redOnY();
+        var faulty = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            (in, trigger) -> { throw new IllegalStateException("boom"); });
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+
+        faulty.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.getFirst().sha()).isEqualTo("Y");
+        assertThat(rows.getFirst().body()).containsEntry("owner", f[1]).containsEntry("reason", "stamper_error");
+
+        // A green that faults posts nothing: there is no block to name, and no open owner row to clear is known.
+        String[] g = redOnY();
+        faulty.afterOut(g[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "success", "from", "github"), "{}");
+        assertThat(se.ownerRows(g[0], StamperEnv.BASE)).isEmpty();
+    }
+
+    @Test
+    void aRestartRearmsTheDeadlineOfAnOpenRedFromItsEpisode() {
+        String[] f = redOnY();
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
+        se.env.ids.clock.advance(Duration.ofMinutes(5));
+
+        BoardOwnerWiring wiring = restart(f[0]);
+
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+    }
+
+    @Test
+    void aRestartAfterARefreshKeepsTheOriginalDeadline() {
+        String[] f = redOnY();
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
+        se.env.ids.clock.advance(Duration.ofMinutes(4));
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.done(f[0], StamperEnv.BASE, "Z", "failure");
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE).getLast().body()).containsEntry("refresh", true);
+
+        BoardOwnerWiring wiring = restart(f[0]);
+
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+    }
+
+    @Test
+    void noDeadlineIsRevivedForAClearedAnAckedOrAnEscalatedRed() {
+        String[] cleared = redOnY();
+        se.done(cleared[0], StamperEnv.BASE, "Y", "failure");
+        se.push(cleared[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.done(cleared[0], StamperEnv.BASE, "Z", "success");
+        assertThat(restart(cleared[0]).timer().armedAt(cleared[0], StamperEnv.BASE)).isNull();
+
+        String[] acked = redOnY();
+        se.done(acked[0], StamperEnv.BASE, "Y", "failure");
+        se.ack(acked[0], StamperEnv.BASE, "Y", "sess-alpha");
+        assertThat(restart(acked[0]).timer().armedAt(acked[0], StamperEnv.BASE)).isNull();
+
+        String[] escalated = redOnY();
+        se.done(escalated[0], StamperEnv.BASE, "Y", "failure");
+        for (int miss = 0; miss < 2; miss++) {
+            se.env.ids.clock.advance(Duration.ofMinutes(21));
+            for (int i = 1; i < escalated.length; i++) {
+                se.env.renew(escalated[0], escalated[i]);   // the seats keep renewing; only the acknowledgement is missing
+            }
+            se.stamper.onDeadline(escalated[0], StamperEnv.BASE);
+        }
+        var rows = se.ownerRows(escalated[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("earliest_suspect", "handoff", "escalated");
+        assertThat(restart(escalated[0]).timer().armedAt(escalated[0], StamperEnv.BASE)).isNull();
+        se.stamper.onDeadline(escalated[0], StamperEnv.BASE);
+        assertThat(se.ownerRows(escalated[0], StamperEnv.BASE)).as("no second escalated row").hasSize(3);
+    }
+}

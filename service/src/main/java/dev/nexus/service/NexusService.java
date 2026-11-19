@@ -878,13 +878,13 @@ public final class NexusService {
                 new dev.nexus.service.http.ValidateConstraintsHandler(() -> chashConstraintValidator, validateConstraintsJobs));
         validateConstraintsCtx.getFilters().addAll(authFilter);
 
-        // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered
-        // only when a boot-checked TemplateRegistry was supplied (see the constructor
-        // javadoc above) — a null registry means the feature was never loaded, so the
-        // route is simply absent (404) rather than a 503 stub.
+        // /v1/tuples/* — RDR-205 Linda tuple space (bead nexus-em75s.4). Registered only when a boot-checked
+        // TemplateRegistry was supplied (see the constructor javadoc above): else the route is absent (404), no 503 stub.
+        dev.nexus.service.board.BoardOwnerWiring boardOwner = null;   // RDR-252 Step 3: the owner stamper, started with the sweeps below
         if (tupleTemplateRegistry != null) {
             this.tupleRepo = TupleRepository.fromEnv(tenantScope, tupleTemplateRegistry);
-            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo, identityFence));
+            boardOwner = new dev.nexus.service.board.BoardOwnerWiring(tenantScope, tupleRepo, identityRepo, java.time.Clock.systemUTC());
+            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo, identityFence, boardOwner.hook()));
             tuplesCtx.getFilters().addAll(authFilter);
         } else {
             this.tupleRepo = null;
@@ -905,9 +905,9 @@ public final class NexusService {
                 t.setDaemon(true);
                 return t;
             });
-        // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple
-        // sweep's sibling): with a six-hour first delay an engine process that lives less than six hours never
-        // expires T1 rows.
+        if (boardOwner != null) { boardOwner.start(this.sweepScheduler, this::reaperTenants); }   // RDR-252 Step 3: deadline timer and its rebuild
+        // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple sweep's
+        // sibling): with a six-hour first delay an engine that lives less than six hours never expires T1 rows.
         this.t1SweepTask = surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC)));
         this.sweepScheduler.scheduleAtFixedRate(
             this.t1SweepTask, ChunkReaper.INITIAL_DELAY.toSeconds(),

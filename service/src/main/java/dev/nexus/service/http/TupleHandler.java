@@ -172,8 +172,15 @@ public final class TupleHandler implements HttpHandler {
     private final TupleRepository repo;
     /** RDR-253 Step 2: the ownership and generation checks of the owner's mailbox claims. */
     private final IdentityFence fence;
+    private final dev.nexus.service.board.OwnerOutHook ownerHook;
 
     public TupleHandler(TupleRepository repo, IdentityFence fence) {
+        this(repo, fence, dev.nexus.service.board.OwnerOutHook.NONE);
+    }
+
+    /** {@code ownerHook} runs after a committed write has been answered (RDR-252's owner stamper); it never throws. */
+    public TupleHandler(TupleRepository repo, IdentityFence fence, dev.nexus.service.board.OwnerOutHook ownerHook) {
+        this.ownerHook = ownerHook;
         this.repo = repo;
         this.fence = fence;
     }
@@ -303,11 +310,13 @@ public final class TupleHandler implements HttpHandler {
                     delaySeconds);
             HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(res.id()))
                     + ",\"outcome\":" + HttpUtil.jsonString(res.outcome().wire()) + "}");
+            ownerHook.afterOut(tenant, subspace, dims, tupleBody);
             return;
         }
         byte[] id = repo.out(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                 delaySeconds);
         HttpUtil.send(ex, 200, "{\"id\":" + HttpUtil.jsonString(HEX.formatHex(id)) + "}");
+        ownerHook.afterOut(tenant, subspace, dims, tupleBody);   // RDR-252: after the answer, so it cannot fail or slow the write
     }
 
     // ── rd / rdp ─────────────────────────────────────────────────────────────

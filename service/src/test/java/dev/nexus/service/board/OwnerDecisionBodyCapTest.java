@@ -29,7 +29,7 @@ class OwnerDecisionBodyCapTest {
         OwnerDecision.Post post = f.decide().post();
 
         Map<String, Object> b = OwnerFixture.bodyOf(post);
-        assertThat((List<?>) b.get("suspects")).hasSize(10).startsWith(sha(0));
+        assertThat((List<?>) b.get("suspects")).hasSize(10).first().isEqualTo(sha(0));
         assertThat(b).containsEntry("suspects_total", 12);
         assertThat(post.bodyJson().getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(1024);
     }

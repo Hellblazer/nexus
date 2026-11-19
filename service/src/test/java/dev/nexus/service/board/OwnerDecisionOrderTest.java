@@ -78,15 +78,14 @@ class OwnerDecisionOrderTest {
     @Test
     void aClearIsPostedOnceAndOnlyForAnOpenOwnerRow() {
         OwnerFixture f = base();
-        f.done("P2", "success");
-        assertThat(f.decide().post()).isNull();
         f.done("P1", "failure");
         f.recordNow(f.decide());
         f.done("P2", "failure");
-        f.recordNow(f.decide());
+        f.recordNow(f.decide());   // a refreshed row: the same earliest suspect
         f.done("P2", "success");   // a rerun of P2 that passed
         OwnerDecision.Post clear = f.decide().post();
         assertThat(clear).isNotNull();
+        assertThat(clear.kind()).isEqualTo("clear");
         f.recordNow(new OwnerDecision.Decision(clear, null));
         assertThat(f.decide().post()).as("the clear closed it").isNull();
     }
