@@ -766,7 +766,11 @@ A rename becomes `UPDATE catalog_collections SET name = <new>` on one row.
 `renameCollectionTxn` stops inserting, rewriting fourteen tables and
 tombstoning. It still rewrites the `nx-note://<label>/` source URIs of the
 collection's notes, as it does today; moving note identity off the label is
-a catalog-identity change outside this RDR. The one-row rename needs every
+a catalog-identity change outside this RDR. It also still rewrites queued
+aspect tasks, which name their collection in the task body: "a collection
+rename ... has to rewrite or delete the tasks itself, in the same
+transaction" (`AspectTaskRefs.java:23-26`, called at
+`CatalogRepository.java:11393`; T2 `229-research-37`). The one-row rename needs every
 reader off the referencing tables' name columns (P3.5) and every
 per-collection index off the name (P3.4). From P3.7 those columns are dead:
 unread, and no longer rewritten by a rename, so they hold the label each row
@@ -871,7 +875,7 @@ outside the three prefixes.
 | Lifecycle at registration | `CatalogRepository.upsertCollection`, `lifecycleStateForImport` | Extend: explicit `lifecycle_state` input; prefix only as the import fallback. |
 | Surrogate key | `catalog_collections`, the fk-002 / fk-003 / vectors-030 / vectors-054 foreign keys | New column and constraints; the fk-002 `NOT VALID` then validate pattern is reused for every switch. |
 | Row cache | Engine `CollectionRegistry` (keyed by tenant and name), client `mcp_infra._collections_cache`, client registration cache | Change: key by `collection_id`, with a label index for the route boundary. |
-| Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI rewrite; `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
+| Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI and aspect-task rewrites (`AspectTaskRefs`); `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
 | Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: predicate and name hash on `collection_id`; every existing index rebuilt. |
 | Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, and one whose `on_complete` swaps the keys; no new mover. |
 | Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | Reuse the pattern: background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
@@ -1133,9 +1137,17 @@ its acceptance is that test green plus the census pin it lowers.
   after its rows are stamped (stamp-before-build, Scope boundary with
   RDR-247); `PciCatalog` reads the id back from the predicate. The bounded
   drop of the shared leaf graph that follows is RDR-247's.
-- P3.5 Engine readers and routes: `CollectionRegistry` keyed by id with a
-  label index; every collection-taking route accepts `collection_id` and a
-  label; responses carry both. Client caches keyed by id.
+- P3.5 Readers switch to the id, as three beads; "P3.5" elsewhere means
+  all three.
+  - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
+    label index; every collection-taking route accepts `collection_id` and
+    a label; responses carry both. Client caches keyed by id.
+  - P3.5b SQL readers: the plpgsql functions, the views keyed on names
+    (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
+    name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
+    physical_collection, deleted_at ON nexus.catalog_documents`) read the
+    id (T2 `229-research-37`).
+  - P3.5c Java readers: the jOOQ queries on the name columns read the id.
 - P3.6 Label rule, after P2.9: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
@@ -1143,9 +1155,10 @@ its acceptance is that test green plus the census pin it lowers.
   Label reuse after supersession waits for P4.1.
 - P3.7 After P3.4 and P3.5: rename becomes a one-row label update plus the
   note-URI rewrite; history tables and the referencing tables' dead name
-  columns stop being rewritten (item 7). Test: a rename leaves chunk,
-  manifest and taxonomy rows untouched and the per-collection index in
-  place.
+  columns stop being rewritten (item 7); queued aspect tasks are still
+  rewritten. Test: a rename leaves chunk, manifest and taxonomy rows
+  untouched and the per-collection index in place, and a task queued before
+  the rename names the new label.
 - P3.8 Minting (item 8), after P2.9 and P3.6: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
