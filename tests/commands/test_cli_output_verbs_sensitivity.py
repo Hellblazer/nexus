@@ -63,6 +63,11 @@ class _FakeCatalog:
     def all_documents(self, limit=0, *, content_type="", offset=0):
         return list(self.entries) if offset == 0 else []
 
+    def documents_by_meta(self, *, meta_min=(), limit=1000, offset=0, **_kw):
+        (key, n), = meta_min
+        rows = [e for e in self.entries if e.meta.get(key, 0) >= n]
+        return rows[offset:offset + limit], len(rows)
+
     def resolve(self, t, follow_alias=False):
         e = self._by(t)
         if e is not None and follow_alias and e.alias_of:

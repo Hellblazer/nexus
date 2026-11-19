@@ -84,9 +84,10 @@ def _entry(tumbler: str, miss_count) -> SimpleNamespace:
 
 def test_gc_skips_a_document_whose_miss_count_is_not_an_integer() -> None:
     cat = MagicMock(spec=HttpCatalogClient)
-    cat.all_documents.return_value = [
-        _entry("1.1.1", "2.9"), _entry("1.1.2", 2), _entry("1.1.3", 2.0), _entry("1.1.4", 1),
-    ]
+    # nexus-uwggq.2.15: the engine filters on the bound; this fake answers every row, as an engine that does not,
+    # so the command's own final rule is what is under test.
+    rows = [_entry("1.1.1", "2.9"), _entry("1.1.2", 2), _entry("1.1.3", 2.0), _entry("1.1.4", 1)]
+    cat.documents_by_meta.return_value = (rows, len(rows))
     with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
             patch("nexus.commands.catalog._get_catalog_writer",
                   return_value=MagicMock(spec=list(CATALOG_WRITE_OPS))), \

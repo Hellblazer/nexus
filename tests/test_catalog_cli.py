@@ -3576,7 +3576,7 @@ class TestWhh61MaintenanceCarve:
         # nexus-i711w: spec'd against HttpCatalogClient — the only catalog
         # _get_catalog() can return now that the local Catalog is deleted.
         cat = MagicMock(spec=HttpCatalogClient)
-        cat.all_documents.return_value = []
+        cat.documents_by_meta.return_value = ([], 0)
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch(
                     "nexus.commands.catalog._get_catalog_writer",
@@ -3585,7 +3585,8 @@ class TestWhh61MaintenanceCarve:
             result = CliRunner().invoke(main, ["catalog", "gc"])
         assert result.exit_code == 0, result.output
         assert "No orphan entries found." in result.output
-        cat.all_documents.assert_called()
+        cat.documents_by_meta.assert_called_once_with(meta_min=[("miss_count", 2)], limit=1000, offset=0)
+        cat.all_documents.assert_not_called()
 
 
 class TestWhh61RemediationCarve:

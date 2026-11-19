@@ -49,6 +49,12 @@ class _StubCat:
         page = self._entries[offset : offset + limit]
         return list(page)
 
+    def documents_by_meta(self, *, meta_min=(), limit: int = 1000, offset: int = 0, **_kw):
+        # The metadata route: the rows whose miss_count bound holds, with the exact count.
+        (key, n), = meta_min
+        rows = [e for e in self._entries if int(e.meta.get(key, 0)) >= n]
+        return rows[offset : offset + limit], len(rows)
+
     def owners_with_roots(self):
         return {"1.1": "/nonexistent-root-vxgnh"}
 

@@ -33,6 +33,40 @@ import click
 
 from nexus.catalog.tumbler import Tumbler
 
+#: One metadata-route page (the route's maximum, ``DOC_PAGE_MAX``).
+_GC_PAGE = 1000
+
+
+def _read_orphans(cat) -> list:
+    """The documents whose ``miss_count`` the engine says is 2 or more, read through ``GET /docs/by-meta``
+    (RDR-241 Phase 2, nexus-uwggq.2.15): pages of 1000 by offset until the offset reaches the route's exact count.
+
+    The first occurrence of a tumbler that repeats across pages is kept. A route that is not answered, or a page
+    that comes back empty before the count is reached, ends the command with an error: the delete set is never built
+    from a partial list, and the catalog is never walked in its place."""
+    from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable  # noqa: PLC0415 — deferred to avoid CLI startup cost
+
+    rows: dict[str, object] = {}
+    offset = 0
+    while True:
+        try:
+            page, count = cat.documents_by_meta(meta_min=[("miss_count", 2)], limit=_GC_PAGE, offset=offset)
+        except EngineRouteUnavailable as exc:
+            raise click.ClickException(str(exc)) from exc
+        if not page:
+            if offset >= count:
+                break
+            raise click.ClickException(
+                f"the engine's metadata route answered no documents at offset {offset} of {count}; "
+                "nothing was changed. Run the command again."
+            )
+        for e in page:
+            rows.setdefault(str(e.tumbler), e)
+        offset += len(page)
+        if offset >= count:
+            break
+    return list(rows.values())
+
 
 @click.command("gc")
 @click.option(
@@ -72,23 +106,11 @@ def gc_cmd(dry_run: bool, confirm: bool) -> None:
     cat = _cat_cmd._get_catalog()
     writer = _cat_cmd._get_catalog_writer()
 
-    # nexus-xnz0o: use all_documents() (uniform across SQLite + service mode).
-    all_docs = []
-    offset = 0
-    while True:
-        page = cat.all_documents(limit=200, offset=offset)
-        if not page:
-            break
-        all_docs.extend(page)
-        if len(page) < 200:
-            break
-        offset += 200
-
     from nexus.catalog.meta_filter import meta_at_least  # noqa: PLC0415 — deferred to avoid CLI startup cost
     from nexus.sensitive_output import CliDocumentLines, entries_flagged  # noqa: PLC0415 — deferred to avoid CLI startup cost
 
     # nexus-uwggq.2.2: one integer-bound rule; a miss_count that is not an integer is skipped, not raised.
-    orphan_entries = [e for e in all_docs if meta_at_least(e.meta, "miss_count", 2)]
+    orphan_entries = [e for e in _read_orphans(cat) if meta_at_least(e.meta, "miss_count", 2)]
     orphans: list[tuple[str, str, str]] = [
         (str(e.tumbler), e.title or "", e.file_path or "") for e in orphan_entries
     ]

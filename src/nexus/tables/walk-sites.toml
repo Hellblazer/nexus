@@ -48,7 +48,6 @@ domain = [
   "commands/catalog_cmds/doctor.py::_run_store_put_integrity",
   "commands/catalog_cmds/integrity.py::_audit_membership_all",
   "commands/catalog_cmds/integrity.py::_verify_full",
-  "commands/catalog_cmds/maintenance.py::gc_cmd",
   "commands/catalog_cmds/reconcile_fences.py::reconcile_fences",
   "commands/catalog_cmds/reconcile_stale.py::_classify",
   "commands/catalog_cmds/remediation.py::prune_stale_cmd",
@@ -103,11 +102,6 @@ emit = { class = "BULK JOB", calls = 1, reason = "Checks per-row collection memb
 id = "commands/catalog_cmds/integrity.py::_verify_full"
 match = { site = "commands/catalog_cmds/integrity.py::_verify_full" }
 emit = { class = "BULK JOB", calls = 1, reason = "Verifies every row, and the ghost rows feed the manifest attribution; stays." }
-
-[[row]]
-id = "commands/catalog_cmds/maintenance.py::gc_cmd"
-match = { site = "commands/catalog_cmds/maintenance.py::gc_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants only documents with miss_count >= 2; Phase 2 reads them through the metadata route with an integer lower bound.", next = "nexus-uwggq.2.15" }
 
 [[row]]
 id = "commands/catalog_cmds/reconcile_fences.py::reconcile_fences"

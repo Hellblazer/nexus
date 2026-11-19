@@ -1,0 +1,3 @@
+### Changed
+
+- **`nx catalog gc` asks the engine for the documents with a `miss_count` of 2 or more instead of walking the catalog (RDR-241 Phase 2).** It reads `GET /v1/catalog/docs/by-meta` in pages of 1000 until the exact count is reached, and still applies the integer rule to every row, so a `miss_count` such as `2.9` is skipped. The listing, the dry-run default and `--no-dry-run --confirm` deletion are unchanged. It needs an engine that advertises `catalog_docs_by_meta_supported` on `GET /version` (engine-service 0.1.197 or later): on an older engine, or one that answers 404, it exits non-zero naming the route and the engine release that has it, and on a 503 it says the engine could not answer in time. It never falls back to a walk.
