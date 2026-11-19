@@ -2,14 +2,14 @@
 title: "The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name"
 id: RDR-229
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-10-17
-accepted_date:
+accepted_date: 2026-11-19
 related_issues: ["nexus-j4gl6", "nexus-zvcou"]
-related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227]
+related_rdrs: [RDR-101, RDR-103, RDR-155, RDR-156, RDR-176, RDR-204, RDR-210, RDR-225, RDR-227, RDR-231, RDR-236, RDR-246, RDR-247, RDR-248]
 ---
 
 # RDR-229: The Collection Name Becomes a Label
@@ -32,11 +32,15 @@ the only reliable place to keep collection metadata. ChromaDB was retired at
 RDR-155. Collections are now Postgres rows, and one team owns both the client
 (`nx`, Python) and the server (the engine, a Java service).
 
-Bead nexus-j4gl6 (Sam, 2026-06-29) asks to stop encoding those facts in the
+Bead nexus-j4gl6 (Sam, 2026-06-29) asked to stop encoding those facts in the
 name, and to plan the work fully: "no need to encode anything in the name...
 given we control the horizontal AND the vertical, revisit these constraints."
 Its trigger, the production local-to-managed cutover, has passed (Sam's
-2026-10-17 grooming).
+2026-10-17 grooming). The bead was closed on 2026-11-10, "folded into RDR-247
+(nexus-f3yqd.8 ...) Superseded here", and Sam's 2026-11-12 ruling then
+deferred RDR-247 until this RDR is ready (Relationship to Prior RDRs). No
+bead tracks RDR-229 now; this RDR is its record until its beads are planned
+at acceptance (T2 `229-research-31`, `229-research-35`).
 
 Most of the bead's first two steps shipped in the meantime, under a different
 record. RDR-204 (closed 2026-09-10) made `nexus.catalog_collections` (the
@@ -70,14 +74,36 @@ RDR-204 moved `collection_content_type`, `collection_owner` and
 `src/nexus/corpus.py` was not moved: `embedding_model_for_collection` and its
 alias `index_model_for_collection`, `voyage_model_for_collection`,
 `embedding_model_for_collection_calibrated`, `default_projection_threshold`
-and `_legacy_content_type_for_collection` still parse the name. They are
-called from the paths that stamp `embedding_model` into every chunk's
-metadata on write, from the score calibration in `scoring.py`, and from the
-taxonomy projection thresholds. The owner segment is worse than stale: for
+and `_legacy_content_type_for_collection` still parse the name. `nx index
+repo` takes its code and docs target model from the name
+(`indexer.py:5408-5409`, `:5496-5498`), and the taxonomy projection
+thresholds take their content type from it. Since the draft, note writes,
+`nx index md`/`pdf` and score calibration read the row first, but each
+falls back to a name parse when the row read answers nothing
+(`embedding_model_row_preferred`, `doc_indexer.py:1600-1612`,
+`scoring.py:176-182`; T2 `229-research-20`). The owner segment is worse than stale: for
 repo collections the engine deliberately overwrites the row's `owner_id`
 with a tumbler-derived value that differs from the name (nexus-6pbwx), so a
 reader that takes the owner from the name reads a value the row has
 overridden.
+
+Other sites read no attribute out of the name. They route behaviour by its
+content-type prefix. There are 23 client sites: tests against prefix
+constants, loops over prefix-keyed tables (`_REGISTRY`, `_PREFIX_TO_KEY`,
+`_PREFIX_CONTENT_TYPES`, `CHROMA_IDENTITY_FIELD`), a literal prefix tuple,
+and the shipped default taxonomy exclude pattern `"code__*"`. The
+`taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES` adds 12 more sites, and the
+engine's `NoteUri.isFileRoutedCollection` tests a live collection at one
+site (T2 `229-research-34`, `229-research-39`, `229-research-42`). Apart
+from these, `aspect_readers.is_note_uri` and the engine's `NoteUri.isNote`
+classify a URI string over a frozen list. They stay as they are once
+`NoteUri.moveTo` and `catalog_reconcile_commit` stop moving `chroma://`
+residue on every path and the
+rows they have already moved onto a prefix-free label are repaired (item 7,
+item 12, P2.10). A minted label carries no prefix. A
+minted collection would therefore lose its aspect extractor, its quality
+boost, its search threshold and over-fetch, its chunk content type and its
+file-routed identity.
 
 #### Gap 2: Lifecycle state is still read from the `quarantine-` name prefix
 
@@ -85,14 +111,15 @@ RDR-204 Gap 4 replaced the `quarantine-` prefix with a `lifecycle_state`
 column for corpus resolution. The engine still infers `lifecycle_state` from
 the prefix when it registers a row, still guards quarantine operations by the
 prefix (`QuarantineOrigin.isQuarantineName`), routes reaper work by it, and
-two live SQL functions refuse or select by it. The client skips quarantine
-collections by a prefix tuple in five places. A collection's lifecycle is a
+two live SQL functions refuse or select by it (the Java reads it in 12
+places; T2 `229-research-22`, `-23`). The client skips quarantine collections by a
+prefix tuple in twelve places (T2 `229-research-21`). A collection's lifecycle is a
 column; the prefix is a second source of truth for it.
 
 #### Gap 3: New writes still have to have the conformant shape
 
 `get_or_create_collection` refuses a new non-conformant name
-(`src/nexus/db/t3.py:733-742`); `nx catalog rename-collection` refuses a
+(`src/nexus/db/t3.py:671-684`, T2 `229-research-18`); `nx catalog rename-collection` refuses a
 non-conformant target without `--allow-legacy`; the indexer reroutes any
 non-conformant collection to a rendered one; the client derives
 `legacy_grandfathered` and, when attributes are missing, all four attributes
@@ -110,7 +137,8 @@ and `CollectionParseGateTest` on the engine. The client gate matches four raw
 call shapes plus callers of three named primitives outside `corpus.py`; it
 does not see callers of the second-ring helpers, f-string prefix tests,
 substring owner matches, or `startswith` on a tuple variable. The engine gate
-counts Java string literals that contain `__`; it cannot see the
+counts Java string literals that contain `__` (it pins three, RDR-231's
+`NoteUri.FILE_ROUTED_PREFIXES`; T2 `229-research-17`); it cannot see the
 `quarantine-` prefix and does not scan SQL at all. Both gates are green while
 most of the surface in the census is unguarded.
 
@@ -119,7 +147,10 @@ most of the surface in the census is unguarded.
 Some code legitimately reads a name that has no row on this install yet:
 restoring a recovery bundle (whose format carries the recorded name, not the
 source row), `nx catalog migrate-fallback`, the indexer's legacy-collection
-migration, and the engine's ETL import. A reader repoint that removes their
+migration, and the engine's ETL import. (The tenant restore of RDR-248's
+`nx backup` loads rows as they were exported and parses no name, so it is
+not one of these; its key model is item 10's and P3.11's. T2
+`229-research-41`.) A reader repoint that removes their
 name-parse fallback before they have another source would break the upgrade
 and restore paths. The bead names this hazard directly: the reader cutover
 must not be able to strand a migration path.
@@ -131,8 +162,9 @@ point at that key or at the RDR-225 composite `(tenant_id, name,
 embedding_model)`. The name also sits inside two primary keys, the chunks
 table's `(tenant_id, collection, chash, embedding_model)` and
 `taxonomy_centroids`', and three more foreign keys reach the name through the
-chunks key (the manifest, `topic_assignments`, `chunk_orphaned_at`). Fifteen
-further columns in twelve tables hold a name with no foreign key at all. The
+chunks key (the manifest, `topic_assignments`, `chunk_orphaned_at`). Fourteen
+further columns in eleven tables hold a name with no foreign key at all
+(T2 `229-research-27`, `229-research-48`, `229-research-54`). The
 RDR-227 per-collection index is built with the predicate `WHERE collection =
 '<name>'` and named from a hash that includes the name. So changing what a
 collection is called means rewriting every one of those rows and rebuilding
@@ -163,8 +195,13 @@ name, so these paths have to find the row by its attributes first.
 | RDR-176 (survivable managed migration) | Precedent, closed | Shipped nexus-zvcou (one config-first service URL and token chain for every storage command) as nexus-t9rmg.8. The bead asked to fold zvcou in or hard-depend on it; it is satisfied and carries no work here. |
 | RDR-204 (embedding profile; `catalog_collections` as the authority) | Origin, closed | Shipped most of nexus-j4gl6 steps 1 and 2. Rejected step 3 (opaque names) on 2026-09-09 with a reopen trigger. This RDR takes over its two census gates, repairs their blind spots, and finishes the reader move. It does not restate RDR-204's schema; it builds on it. |
 | RDR-210 (one local engine serves both embedders) | Adjacent, closed 2026-10-26 | Finds model siblings and its re-embed target by the row tuple `(content_type, owner_id)`, never by a name (its Gap 4 fix and its RDR-229 row). One name-based sibling matcher is left, `repo_identity.list_sibling_collections`, with no caller in `src`; P2.7 retires it. |
-| RDR-225 (one vector table per embedding model) | Adjacent, accepted and deployed | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`; the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
-| RDR-227 (per-collection HNSW above the router threshold) | Adjacent, deployed | Builds each per-collection index as a partial index `WHERE collection = '<name>'` and names it from a hash of model, tenant and name. Phase 3 rebuilds every such index on `collection_id`. |
+| RDR-225 (one vector table per embedding model) | Adjacent, closed 2026-10-22 (T2 `229-research-25`) | Keys every chunk on `(tenant_id, collection, embedding_model)` through a composite foreign key to `catalog_collections`, written from the row, never the name. Phase 3 here moves that key to `(tenant_id, collection_id, embedding_model)`, which targets a new registry UNIQUE on those three columns (item 6, P3.1); the partitioning (by model, then tenant) does not change, because no partition key holds the name. |
+| RDR-246 (data moves are background jobs) | Dependency, accepted 2026-11-16 | Its `nexus.data_moves` registry and `DataMoveWorker` run Phase 3's stamp and key swap as visible, resumable background moves, never at boot (item 6; T2 `229-research-32`). Its activation (nexus-f3yqd.2) is a Phase 3 prerequisite. |
+| RDR-247 (one index per row) | Downstream, deferred 2026-11-12 | Waits for this RDR and then rides with it as one visible job (Scope boundary with RDR-247). Received nexus-j4gl6 when Sam closed it on 2026-11-10. |
+| RDR-236 (chunk-row metadata normalization) | Adjacent, accepted, Phase 4 in progress | Its not-additive Phase 4 cut and Phase 3's dual write both change the chunk write path (Sequencing). |
+| RDR-248 (cloud tenant backup) | Adjacent, closed 2026-11-15 | Its tenant export keys `catalog_collections` and the chunks on names; its table model changes with P3.1, P3.3 and P4.1 (item 10, P3.11). |
+| RDR-231 (note source URI scheme) | Adjacent, closed 2026-11-10 | Owns `NoteUri` and `note-uri-corpus.json`, which route by the label's prefix until P2.9 (item 12). |
+| RDR-227 (per-collection HNSW above the router threshold) | Adjacent, closed 2026-10-12 (T2 `229-research-25`) | Builds each per-collection index as a partial index `WHERE collection = '<name>'` and names it from a hash of model, tenant and name. Phase 3 rebuilds every such index on `collection_id`. |
 
 Searched `docs/rdr/README.md` and the RDR tree for "collection name",
 "naming", "conformant", "opaque", "quarantine", "segment" and "sibling". No
@@ -177,17 +214,49 @@ sibling is found by the row tuple `(content_type, owner_id)` through the
 catalog list route's filters, never by rendering or matching a name. The old
 Open Question 6 (which lands first) is moot.
 
-**Sequencing with RDR-225.** No blocking dependency. RDR-225 is deployed
-(nexus-3wh8d, 29 of 31 beads closed; open are the 14-day drop of
-`chunks_retired_225` and its phase-review gate). Two ordering rules apply:
+**Sequencing with RDR-225.** No blocking dependency. RDR-225 is closed
+(2026-10-22; nexus-3wh8d and every bead under it are closed, including the
+14-day drop of `chunks_retired_225` and its phase-review gate; T2
+`229-research-25`). Two ordering rules apply:
 every changeset this RDR adds is ordered after `vectors-030` (and, for the
 Phase 3 key work, after the latest `vectors-` changeset on develop at the
-time), and a function
-`vectors-030` defines (for example `quarantine_restore_chunks`) is redefined
+time, `vectors-062` on 2026-11-19), and a function
+`vectors-030` or a later changeset defines (for example
+`quarantine_restore_chunks`, last defined in `vectors-053`; T2
+`229-research-23`) is redefined
 with its four-column write sites intact and stays under
 `PlpgsqlCheckGateTest`. The manifest's new `embedding_model` column
 (`vectors-030-model-tenant-partition-functions.xml` lines 786-791) lets Phase 2 rewrite `chash_conformance_report` without
 parsing.
+
+**Scope boundary with RDR-247.** Sam deferred RDR-247 on 2026-11-12: "keep
+both indexes and wait for RDR-229 ... When RDR-229 is ready on its own
+merits, RDR-247 rides with it as one sequence, run as a visible job: stamp
+collection ids (stamp-before-build), build each per-collection index on the
+id, then the bounded drop of the shared leaf graph" (nexus-f3yqd.8, comment
+of 2026-11-12; RDR-247 Revision History; T2 `229-research-35`). Phase 3
+follows that order. RDR-229 owns the stamp (P3.1) and the per-collection
+index rebuild on the id (P3.4). A collection's rows are stamped before its
+index is built on the id, so no index is built twice. RDR-247 owns the
+bounded drop of the shared leaf graph, which is not in this RDR. The stamp
+cannot stop at new rows, the cost comparison's option (c): D3's chunks
+key holds `collection_id`, so every row must carry one before P3.3c
+adds that key. What (c) adds, stamping a collection's old rows just before
+its index build, fits P3.1's order. It is not an alternative to stamping
+everything.
+
+**Sequencing with RDR-236, RDR-246, RDR-248 and RDR-231.** RDR-246 (accepted)
+supplies the data-move mechanism Phase 3 runs on, and its activation
+(nexus-f3yqd.2) is a Phase 3 prerequisite (item 6). RDR-236 (accepted, Phase
+4 in progress: "Refuse, retire, sweep (not-additive, one paired cut)")
+changes what a chunk write may carry, and Phase 3's dual write changes the
+same write path. Inferred, not read: `collection_id` is a column, not a
+metadata key RDR-236's allow-list governs, so the two do not conflict, and
+their engine cuts are ordered at planning. RDR-248 (closed 2026-11-15)
+exports and restores a tenant keyed on names (item 10). RDR-231 (closed
+2026-11-10) put the collection label inside every note's
+`nx-note://<label>/` URI and owns `NoteUri` (item 12). T2
+`229-research-35`.
 
 ## Context
 
@@ -231,12 +300,25 @@ order, with `<rollback>` blocks stripped, and then searched those bodies for
 `split_part(...'__'...)`, `string_to_array(...'__')` and the `quarantine-`
 prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 
+Every census was re-run on develop `020118bf7` (2026-11-19) as a script,
+each first calibrated on the tree its old record was measured on. The
+client second-ring walk and the SQL census reproduce their old counts
+exactly there. The raw-shape census is now a scripted AST walk over
+`src/nexus` and `scripts/` (f-string and constant prefix tests, substring
+owner matches, the legacy hash suffix, and the existing scanner's shapes
+over `scripts/`); on `2ad1f90c9` it finds 31 sites where the hand list had
+nine. The surrogate-key census was re-run as a static walk of the included
+changelogs on `1fcfaf57b` and `020118bf7` and diffed. Findings are
+registered in T2 `nexus_rdr/229-research-17` to `-31`; the records that
+still hold (`-9`, `-12`, `-13`) are noted in T2
+`nexus_rdr/229-refresh-2026-11-19`.
+
 #### Dependency Source Verification
 
 | Dependency | Source Searched? | Key Findings |
 | --- | --- | --- |
-| nexus engine (`service/src/main`) | Yes | No `__` literal remains; the `quarantine-` prefix is read in 11 places; three live SQL functions parse names. |
-| nexus client (`src/nexus`) | Yes | 46 sites under the existing census, 75 second-ring helper calls outside it, 9 raw shapes it cannot match. |
+| nexus engine (`service/src/main`) | Yes | Three `__` literals remain, RDR-231's `NoteUri.FILE_ROUTED_PREFIXES`, read as a content-type prefix test in two places that route note handling (T2 `229-research-34`); the `quarantine-` prefix is read in 12 places; three live SQL functions parse names (T2 `229-research-22`, `-23`). |
+| nexus client (`src/nexus`, `scripts/`) | Yes | 46 sites under the existing census, 89 second-ring helper calls outside it, 43 raw shapes it cannot match, 33 of them in `src/nexus` (T2 `229-research-19` to `-21`). |
 | Liquibase / PostgreSQL | N/A | No new library behaviour is relied on. |
 
 ### Key Discoveries
@@ -245,63 +327,91 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
   and 2, and Sam rejected its opaque-name phase on 2026-09-09 (commit
   `6d9e7d124`), with the reopen trigger "a field report of a mint-time name
   whose segments disagree with the row it registered". *Source: RDR-204 lines
-  754-763; T2 `229-research-1`.*
+  754-763; T2 `229-research-1`, re-verified in `229-research-17`.*
 - **✅ Verified** (source search) — Of the three essential sites the bead
   named, `_is_same_model_passthrough` is deleted (`3ccf25a48`), engine dim
   dispatch reads the registry, and the 4-segment guard is still live at
-  `src/nexus/db/t3.py:733-742`, with the rename gate at
-  `src/nexus/commands/catalog_cmds/collections.py:279`. *Source: T2
-  `229-research-2`.*
-- **✅ Verified** (source search) — **The parse-site census: 152 sites on five
-  surfaces.** This is the count the rest of this RDR cites.
-  1. *Client, inside the existing census* (46 sites, 19 files):
-     `collection_shape.py:190/193/197`; `commands/catalog.py:1249/1286/1465/
-     1628/1634/1662/1876/1877`; `commands/collection.py:704/860/861/947/
-     1199(x2)/1206/1235`; `db/http_vector_client.py:1109/1153/3212/5717`;
-     `db/t3.py:413/920/1405/1843`; `commands/index.py:115/1141/1150/2345`;
-     `catalog/chunk_quarantine.py:139/144`;
-     `commands/catalog_cmds/reconcile_stale.py:313/385`; and one each at
-     `catalog/orphan_backfill.py:371`, `catalog/owner_scope.py:39`,
-     `commands/catalog_cmds/doctor.py:1053`,
-     `commands/catalog_cmds/integrity.py:651`, `commands/doctor.py:1558`,
-     `commands/enrich.py:1207`, `commands/store.py:761`, `exporter.py:1450`,
-     `health.py:8916`, `mcp/core.py:3731`, `search_engine.py:660`.
-     *T2 `229-research-3`.*
-  2. *Client, second ring outside the census* (75 calls): see T2
-     `229-research-4` for the full list by helper. The decisive ones are
-     chunk metadata `embedding_model` taken from the name
-     (`db/http_vector_client.py:3211-3214`, `db/t3.py:919-921`,
-     `catalog/note_write.py:260`), the indexers' target model
-     (`doc_indexer.py:1753/2710`, `indexer.py:5288/5289/5513`), score
-     calibration (`scoring.py:124`, `catalog/store_hook.py:193`), taxonomy
-     thresholds by prefix (`commands/taxonomy_cmd.py:2715/2724/2935`,
-     `db/t2/http_taxonomy_store.py:2625`), and the next version computed by
-     parsing a name (`catalog/http_catalog_client.py:3299`).
-  3. *Client, raw shapes the census cannot match* (9 sites):
-     `corpus.py:1306` and `corpus.py:2489-2490` (f-string prefix tests),
-     `repo_identity.py:451-452` and `:455` (substring and hash-suffix sibling
-     match), `_BYPASS_SCHEMA_PREFIXES` prefix tests at `db/t3.py:151`,
-     `exporter.py:1393`, `commands/collection.py:697`,
+  `src/nexus/db/t3.py:671-684`, with the rename gate at
+  `src/nexus/commands/catalog_cmds/collections.py:287`. *Source: T2
+  `229-research-2`, lines updated in `229-research-18`.*
+- **✅ Verified** (source search, develop `020118bf7`, 2026-11-19) — **The
+  parse-site census: 203 sites on five surfaces** (152 on `2ad1f90c9`).
+  This is the count the rest of this RDR cites. *T2 `229-research-31`.*
+  1. *Client, inside the existing census* (46 sites, 20 files):
+     `collection_shape.py:190/193/197`; `commands/catalog.py:1481/1518/1721/
+     1925/1931/1960/2174/2175`; `commands/collection.py:790/970/971/1111/
+     1426(x2)/1433/1469`; `db/http_vector_client.py:1316/1360/7499`;
+     `db/t3.py:351/858/1347/1791`; `commands/index.py:134/1201/1210/2451`;
+     `catalog/chunk_quarantine.py:148/153`;
+     `commands/catalog_cmds/reconcile_stale.py:314/386`; and one each at
+     `catalog/http_catalog_client.py:4065`,
+     `catalog/orphan_backfill.py:390`, `catalog/owner_scope.py:39`,
+     `commands/catalog_cmds/doctor.py:1145`,
+     `commands/catalog_cmds/integrity.py:651`, `commands/doctor.py:1646`,
+     `commands/enrich.py:1768`, `commands/store.py:1045`, `exporter.py:1904`,
+     `health.py:11236`, `mcp/core.py:4300`, `search_engine.py:916`.
+     *T2 `229-research-19`.*
+  2. *Client, second ring outside the census* (89 calls): see T2
+     `229-research-20` for the count by helper. Since the draft, note
+     writes, the md/pdf indexer and score calibration read the row first and
+     parse the name only as a fallback (`catalog/note_write.py:281`,
+     `catalog/store_hook.py:197`, `doc_indexer.py:1600-1612`,
+     `scoring.py:176-182`). The decisive name-only reads left are
+     `T3Database.put`'s chunk metadata `embedding_model`
+     (`db/t3.py:857-860`, with no production caller found), `nx index
+     repo`'s target model (`indexer.py:5408-5409/5496-5498`) and registration
+     model (`indexer.py:5649-5650`), taxonomy thresholds by prefix
+     (`commands/taxonomy_cmd.py:2862/2871/3142`,
+     `db/t2/http_taxonomy_store.py:2667`), and the next version computed by
+     parsing a name (`catalog/http_catalog_client.py:3875`).
+  3. *Client, raw shapes the census cannot match* (43 sites: 33 in
+     `src/nexus`, 10 in `scripts/`). In `src/nexus`: `corpus.py:1429` and
+     `corpus.py:2736-2737` (f-string prefix tests), `repo_identity.py:471-472`
+     and `:475` (substring and hash-suffix sibling match), 12
+     `_BYPASS_SCHEMA_PREFIXES` prefix tests (`db/t3.py:91`,
+     `exporter.py:1847`, `commands/collection.py:783`,
      `commands/catalog_cmds/t3_orphans.py:89`,
-     `commands/catalog_cmds/integrity.py:550`, and one script,
-     `scripts/rdr-108-je0b-backfill.py:92`. *T2 `229-research-5`.*
-  4. *Engine Java, quarantine prefix* (11 sites):
-     `CatalogRepository.java:7983-7984` (new-row lifecycle in
-     `upsertCollection`), `:8375`, `:11261-11262`
-     (`lifecycleStateForImport`); `QuarantineOrigin.java:85/162` (the
-     predicate itself at `:73`); `VectorHandler.java:1854`;
-     `PgVectorRepository.java:5756/5772`; `ChunkReaper.java:278/828/830`.
-     Names are rendered with the prefix at `ChunkReaper.java:986` and
-     `PgVectorRepository.java:5817`. *T2 `229-research-6`.*
+     `commands/catalog_cmds/integrity.py:550`,
+     `commands/catalog_cmds/collections.py:70/591`,
+     `commands/catalog_cmds/doctor.py:438/651/768/911/1096`), 11
+     `FILE_ROUTED_PREFIXES` tests (`aspect_readers.py`, `aspect_worker.py`,
+     `catalog/recovery_bundle.py`, `commands/catalog_cmds/backfill.py`,
+     `exporter.py`), and six tests on other content-type prefix constants
+     (`aspect_extractor.py:1024/1039`, `scoring.py:532`, `health.py:12516`,
+     `commands/catalog_cmds/doctor.py:1570`,
+     `upgrade_ladder/rungs/note_tags_array.py:131`). The routing class
+     (item 1) is wider than these shapes. The routing census (T2
+     `229-research-39`) also scans loops over prefix tables, literal prefix
+     tuples, default glob patterns and client SQL. It finds 23 routing sites
+     plus the `taxonomy__` half of the 12 `_BYPASS_SCHEMA_PREFIXES` tests.
+     The three `FILE_ROUTED_PREFIXES` tests in `catalog/recovery_bundle.py`
+     are migration sources.
+     In `scripts/`:
+     `rdr-108-je0b-backfill.py:92`, `upgrade_boot_seed.py:67/86`, and seven
+     in `bench/`, `experiments/` and `spikes/`. *T2 `229-research-21`.*
+  4. *Engine Java* (14 sites). The `quarantine-` prefix (12):
+     `CatalogRepository.java:9829-9830` (new-row lifecycle in
+     `upsertCollection`), `:10241`, `:13528-13529`
+     (`lifecycleStateForImport`); `QuarantineOrigin.java:85/162/171` (the
+     predicate itself at `:73`); `VectorHandler.java:2592`;
+     `PgVectorRepository.java:7419/7438`; `ChunkReaper.java:280/877/879`.
+     Names are rendered with the prefix at `ChunkReaper.java:1035` and
+     `PgVectorRepository.java:7549`. A content-type prefix (2):
+     `NoteUri.java:178` (`isFileRoutedCollection`, called at
+     `CatalogRepository.java:4399`) and `:194`, over
+     `FILE_ROUTED_PREFIXES` (`NoteUri.java:22`, RDR-231); both route by
+     content type (`NoteUri.isNote` is called at
+     `CatalogRepository.java:4206/4215/4393`).
+     *T2 `229-research-22`, `229-research-34`.*
   5. *Live SQL* (11 expressions in three functions):
      `nexus.chash_conformance_report(dim)`,
-     `vectors-005-repoint-functions-views.xml:1193-1295`, nine
+     `vectors-005-repoint-functions-views.xml:1081-1183`, nine
      `split_part(collection, '__', 3)` model IN-lists;
      `nexus.quarantine_restore_chunks`,
-     `vectors-030-model-tenant-partition-functions.xml:2198`;
+     `vectors-053-quarantine-restore-chunk-keys-only.xml:122`;
      `nexus.reaper_expire_client_quarantine`,
-     `vectors-028-reaper-expire-client-quarantine.xml:107`. *T2
-     `229-research-7`.*
+     `vectors-056-gc-quarantine-expires-at.xml:404`. *T2
+     `229-research-23`.*
 
   The parsers these sites call are defined in `corpus.py`:
   `_CONFORMANT_COLLECTION_RE` (:153), `is_conformant_collection_name` (:161),
@@ -314,7 +424,8 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 - **✅ Verified** (source search) — `validate_collection_name`
   (`corpus.py:30-95`) still enforces ChromaDB's 63-character, charset and
   128-byte limits. No Postgres object is named from a collection name:
-  RDR-225 leaf names and PCI index names are hashes. *T2 `229-research-8`.*
+  RDR-225 leaf names and PCI index names are hashes. *T2 `229-research-8`,
+  re-verified in `229-research-24`.*
 - **✅ Verified** (source search) — For repo collections the row's
   `owner_id` is set from the documents' tumbler and differs from the name's
   owner segment by design (`catalog-044`, nexus-6pbwx). *T2
@@ -322,50 +433,81 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 - **✅ Verified** (source search) — RDR-225 writes each chunk's
   `embedding_model` from the registry row and keys the chunk foreign key on
   `(tenant_id, name, embedding_model)`; a rename stays inside its partition
-  when the model is unchanged. *T2 `229-research-10`.*
-- **✅ Verified** (source search) — RDR-210 finds siblings and its re-embed
-  target by name. *T2 `229-research-11`.*
+  when the model is unchanged. *T2 `229-research-10`, re-verified in
+  `229-research-25`.*
+- **✅ Verified** (source search) — RDR-210 (closed 2026-10-26) finds
+  siblings and its re-embed target by the row tuple `(content_type,
+  owner_id)`, never by a name. The name matcher
+  `repo_identity.list_sibling_collections` has no caller in `src/nexus`.
+  *T2 `229-research-26`, superseding `229-research-11`.*
 - **✅ Verified** (source search) — nexus-zvcou is closed, shipped under
   RDR-176 as nexus-t9rmg.8, label `verification:passed`. *T2
   `229-research-12`.*
 - **✅ Verified** (source search) — The recovery bundle format carries a
   collection's recorded name and no registry row, so its import must read the
-  name (`catalog/recovery_bundle.py:403-414`). `db/embed_migrate.py`, which
-  RDR-204's census listed as a holdout, no longer exists.
+  name (`catalog/recovery_bundle.py:582-593`; T2 `229-research-29`).
+  `db/embed_migrate.py`, which RDR-204's census listed as a holdout, no
+  longer exists.
 - **❓ Assumed** (needs a spike) — On every production tenant, every live
   row's `content_type` and `embedding_model` equal what its name parses to.
   RDR-204 measured zero disagreements for the model on 2026-09-06; nobody
   has measured since RDR-225's walk. *T2 `229-research-13`.*
-- **✅ Verified** (source search, develop `1fcfaf57b`, 2026-11-08) — **The
-  surrogate-key census.** Eight live foreign keys target the registry
+- **✅ Verified** (source search, develop `1fcfaf57b`, 2026-11-08;
+  re-run on `020118bf7`, 2026-11-19) — **The surrogate-key census.** Eight live foreign keys target the registry
   (`topic_assignments` fk-002:241 with an ON UPDATE CASCADE that never
   fires, `document_aspects`, `topics`, `taxonomy_meta`, `document_highlights`
   in fk-003, `chunks` vectors-030:1063 with no ON UPDATE, `canary_query_ring`
   vectors-054:90, and the conditional `aspect_extraction_queue`). The name is
   inside the chunks and centroid primary keys (vectors-030:677, :690), and
   three ON UPDATE CASCADE foreign keys reach it through the chunks key
-  (vectors-030:1018/1033/1048). Fifteen name columns in twelve tables have no
-  foreign key; four more carriers are not columns (quarantine
-  `origin_collection` metadata, quarantine sibling names, `nx-note://` source
-  URIs, aspect tasks in the tuple space). No partition key or leaf name holds
-  the name. *T2 `229-research-14`.*
+  (vectors-030:1018/1033/1048). Sixteen name columns in thirteen tables have
+  no foreign key to the registry, two of them reaching it only through the
+  chunks key (item 6 lists all sixteen with a disposition; T2
+  `229-research-48`) (the one added since 2026-11-08 is
+  `catalog_reconcile_rows.physical_collection`, `catalog-048-reconcile.xml:103`,
+  a staging table reaped after 24 hours); four more carriers are not columns
+  (quarantine `origin_collection` metadata, quarantine sibling names,
+  `nx-note://` source URIs, aspect tasks in the tuple space). No partition
+  key or leaf name holds the name. *T2 `229-research-14`, re-run in
+  `229-research-27`.*
 - **✅ Verified** (source search) — `renameCollectionTxn`
-  (`CatalogRepository.java:11160-11492`) never updates a registry name in
+  (`CatalogRepository.java:11134-11484`) never updates a registry name in
   place; it inserts, rewrites fourteen tables, retags and tombstones. The
   RDR-227 per-collection index is keyed by name in its predicate
-  (`PciBuilderSession.java:103-105`) and its name hash
-  (`PciCatalog.java:415-439`). At least 123 of 345 engine routes carry a
-  collection name, always in the query string or body, never in the path.
-  *T2 `229-research-15`.*
+  (`PciBuilderSession.java:116-118`) and its name hash
+  (`PciCatalog.java:644-669`). At least 123 of 361 engine routes carry a
+  collection name, always in the query string or body, never in the path;
+  none of the routes added since 2026-11-08 carries one. *T2
+  `229-research-15`, re-run in `229-research-28`.*
 - **✅ Verified** (source search) — A knowledge subject resolves by name
-  rendering and probing (`corpus.py:1318-1527`); `nx index repo` parses the
-  version from a returned name (`http_catalog_client.py:3646`);
+  rendering and probing (`corpus.py:1336-1545`); `nx index repo` parses the
+  version from a returned name (`http_catalog_client.py:3875`);
   `collectionForTuple` breaks ties by name and filters on
-  `legacy_grandfathered`. Fifteen MCP tools, 48 CLI options and 30 positional
-  CLI arguments address collections by name. *T2 `229-research-16`.*
-- **✅ Verified** (measured) — conexus shipped 36 releases between 2026-10-08
-  and 2026-11-07 (`git tag`), so "a stated number of releases" (D4) is weeks,
-  not months, at the current rate.
+  `legacy_grandfathered`. Fifteen MCP tools, 49 CLI options and 30 positional
+  CLI arguments address collections by name (the option added since
+  2026-11-08 is `nx catalog resolve --corpus`). *T2 `229-research-16`,
+  re-run in `229-research-29`.*
+- **✅ Verified** (measured on a local engine, chas, 2026-11-12) — Stamping
+  a new nullable bigint column (the stand-in for `collection_id`) on every
+  chunk row costs about 52 min and 24.6 GB of WAL per 1M rows; only 14.5%
+  of the updates are HOT, the HNSW graphs do not grow, and fill factor 90
+  does not pay for itself. Rewriting one collection's rows just before its
+  per-collection index is built costs about the same per row. One
+  per-collection index build costs 32-40 min and 52-63 GB of device writes
+  per 1M rows. No schema change since the run touches `nexus.chunks`, its
+  leaves or `taxonomy_centroids`. The run does not time the per-leaf
+  primary-key swap on a production tenant. *T2 `229-research-30`, citing
+  T2 `nexus/rdr247-measurement-backfill` and `nexus/rdr247-measurement-M4`.*
+- **✅ Verified** (source search) — Bead nexus-j4gl6 is closed (2026-11-10,
+  Sam's grooming walk: "folded into RDR-247 ... so index layout and
+  collection identity ... are designed together"); RDR-247 is deferred, and
+  RDR-246's data-move registry (`nexus.data_moves`) is on develop, with
+  per-tenant and per-leaf runs, a verification query and an `on_complete`.
+  Phase 3 runs on it (item 6). *T2 `229-research-31`, `229-research-32`.*
+- **✅ Verified** (measured) — conexus shipped 36 client releases between
+  2026-10-08 and 2026-11-07 (`git tag`), 24 of them minor (`x.y.0`, v7.75.0
+  to v7.98.0), so "a stated number of releases" (D4) is weeks, not months,
+  at the current rate. *T2 `229-research-36`.*
 
 ### Critical Assumptions
 
@@ -378,26 +520,64 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
   read-only census on both tenants, before any reader moves).
 - [ ] The row cache (`mcp_infra.get_collection_row`) is populated for every
   collection a write path names, so a row-first read on the write path costs
-  no extra round trip. — **Status**: Unverified — **Method**: Source Search
-  of `get_collection_row`'s refresh path plus a test that counts HTTP calls
-  per indexed document before and after (Phase 2 Step 2).
-- [x] No code path needs a fact from the name that the row cannot carry,
-  except the migration sources in Gap 5. — **Status**: Verified —
+  no extra round trip. A collection with no row yet, or a failed read,
+  answers as item 1 says, not with an error. The cache cannot hold a
+  collection with no chunk yet: "The listing omits a registered collection
+  that holds no chunk yet" (`corpus.embedding_model_row_preferred`; T2
+  `229-research-41`). So from P3.8 the registering call returns the row and
+  the writer uses it. The name fallback applies only to a legacy name
+  registered before P3.8. — **Status**: Unverified —
+  **Method**: Source Search of `get_collection_row`'s refresh path plus a
+  test that counts HTTP calls per indexed document before and after, on an
+  existing collection and a new one (P2.3).
+- [ ] No code path needs a fact from the name that the row cannot carry,
+  except the migration sources in Gap 5 and the URI-string classifiers
+  (item 1's fifth class), which read a URI's segment, not a live
+  collection. — **Status**: Verified for the parse sites; Unverified for
+  the URI-string classifiers until P1.2's count and P2.10's repair move
+  (below) —
   **Method**: Source Search (the parse-site census: every extracted value is
   content type, owner, model, version or the quarantine prefix, each a
-  column).
+  column). The census also holds sites that extract nothing and route by the
+  content-type prefix (T2 `229-research-34`, widened in `229-research-39`); the row carries what they
+  need too (`content_type`), but they are not repointed by moving a parse
+  (item 12, P2.9). The URI-string classifiers (the fifth class) take
+  nothing from a row. They read a URI's segment against RDR-231's frozen
+  list, which is complete only while no `chroma://` residue carries a
+  segment without a file-routed prefix. That does not hold today:
+  `nx catalog rename-collection --allow-legacy` already renames to a
+  prefix-free label (`collections.py:287-293`), and `moveTo` and
+  `catalog_reconcile_commit` have moved residue onto any such label (T2
+  `229-research-57`, `229-research-62`). It holds on an
+  install once P2.10's change to both ships and its repair move has
+  completed there, apart from the two shapes item 12 leaves unrepaired,
+  which P1.2 counts (item 7, item 12; T2 `229-research-42`,
+  `229-research-55`). **Method** for that half: Spike (P1.2's count on
+  every install) and P2.10's repair move.
 - [x] Nothing in Postgres requires a collection name to fit ChromaDB's
   limits. — **Status**: Verified — **Method**: Source Search (no object is
   named from a collection name; the per-collection index name is a hash).
 - [ ] Re-keying `nexus.chunks` and `nexus.taxonomy_centroids` on
-  `collection_id` (a new column backfilled on every row, a new primary key
-  per leaf, three child foreign keys re-pointed) and rebuilding every
-  per-collection index fits in a maintenance window per tenant on the larger
-  production tenant. — **Status**: Unverified — **Method**: Spike (P3.2, a
-  timed run on a PITR fork of that tenant, before the changeset is written
-  in its final form).
+  `collection_id` (a new column backfilled on every row, a new id key per
+  leaf beside the name key, three child id keys, ten foreign-key
+  validation moves) and rebuilding every per-collection index completes as
+  background work (item 6, "How each Phase 3 step runs") in a time the
+  operator can see and accept, both on the larger production tenant and on
+  a large local store. Each move's `on_complete` (the key swap's, with the
+  directly validated composite foreign key; each validation's; P3.7's
+  name-key drop; P4.1's chunk-family drop) holds its locks for a time the operator accepts, and
+  the P3.3b index pass finishes in such a time. Until
+  this is measured, the RDR does not claim that no maintenance window is
+  needed. — **Status**: Unverified — **Method**: Spike (P3.2, a timed run
+  on a PITR fork of that tenant and a sizing on a local store). P3.2 runs
+  before P3.1's changeset is final, because the registering INSERT carries
+  each move's `chunk_size`, `sleep_ms` and `statement_timeout_ms`. A local
+  measurement bounds the backfill and the index rebuild per 1M rows (T2
+  `229-research-30`); it does not time the key swap, the validations, the
+  P3.3b pass, P3.7's name-key drop or P4.1's drop on that tenant (T2
+  `229-research-54`, `229-research-67`).
 - [ ] No two live rows of one tenant share a label once renames stop
-  tombstoning, so the partial UNIQUE on live labels (Design item 6) can be
+  tombstoning, so the partial UNIQUE on live labels (item 7) can be
   created without data repair. — **Status**: Unverified, expected true (the
   label is the primary key today) — **Method**: Spike (folded into P1.2's
   census).
@@ -407,28 +587,46 @@ prefix. Findings are registered in T2 `nexus_rdr/229-research-1` to `-13`.
 ### Approach
 
 Fix what reads the name first, then change what the name is. Phases 1 and 2
-close Gaps 1, 2, 4, 5 and 7 by moving every reader onto the registry row;
-they change no schema key and rename nothing. Phase 3 adds the surrogate key
+close Gaps 1, 2, 4, 5 and 7 by moving every reader onto the registry row,
+and Phase 2 also stops note-URI moves from carrying `chroma://` residue
+and repairs residue already moved (P2.10), a row repair that touches no
+key; they change no schema key and rename nothing. Phase 3 adds the surrogate key
 and moves every reference onto it in the strangler order (expand, switch,
 contract): new id columns are added and backfilled beside the name columns,
 writers fill both, readers and constraints switch to the id, and only then
-does Phase 4 drop the name columns and the parsers. At every step the old
-path still works, so each step ships on its own and can stop.
+does Phase 4 drop the name columns and the parsers. Up to P3.4 the old
+path still works, so each of those steps ships on its own and can stop.
+P3.5 and P3.7 ship in one engine cut, because P3.5a's rename refusal
+ends only when a move that P3.7 ships and registers completes (P3.7);
+P3.6 ships on its own. From P3.7 the referencing tables' name columns are dead until P4.1 drops
+them (item 7), so an engine downgraded past P3.7 reads stale names; the
+safe downgrade point is still open (Contradiction Check). On each install, readers leave the name path only once every
+stamp move there has completed (item 6, "Readers during the stamp").
 
 Nothing is renamed by any phase. An existing collection's name becomes its
 label unchanged. Only collections created after Phase 3 get a minted label.
 
 ### Technical Design
 
-**1. One resolver, one parser, three classes of caller.** The client gets a
+**1. One resolver, one parser, five classes of caller.** The client gets a
 single read path for a collection's attributes and a single place where a
 name may still be parsed.
 
 ```text
 // Illustrative; verify against corpus.py and mcp_infra.py during implementation
-resolve_collection(ref: str | int) -> CollectionAttributes
+resolve_collection(ref: str | int) -> Row(CollectionAttributes) | NoRow | Unreadable
     # a label or a collection_id; reads the registry row (cached);
-    # raises CollectionNotRegisteredError
+    # three outcomes, as the write paths tell them apart today:
+    #   Row: the row answers;
+    #   NoRow: no row backs the name (the cache also omits a collection
+    #     with no chunk yet); from P3.8 the writer uses the row its
+    #     registering call returned, and only a legacy name registered
+    #     before P3.8 answers with the mint-class derivation, as
+    #     embedding_model_row_preferred does;
+    #   Unreadable: the read failed; a write answers with the name too,
+    #     flagged, so the unchanged-content skip does not judge a stored
+    #     stamp against that guess (doc_indexer._target_model, nexus-s8r5o)
+    # a strict reader may turn NoRow into CollectionNotRegisteredError
 find_collection(content_type, owner_id, embedding_model) -> CollectionAttributes | None
     # by attributes, through GET /v1/catalog/collections/for_tuple
 CollectionAttributes: collection_id, label, content_type, owner_id,
@@ -437,15 +635,33 @@ legacy_names.candidate_attributes(name: str) -> CandidateAttributes | None
     # the only name parser left; callers must be classified
 ```
 
-Every caller of `legacy_names` is one of three classes, recorded in the
-census beside the site: **mint** (the name is the user's own input or one
-`nx` is about to register, so no row exists yet; this class empties at
-Phase 3, when minting stops rendering names), **migration source** (the name
-comes from another install or an older era: recovery bundle import,
-migrate-fallback, legacy-collection migration), or **diagnostic** (doctor,
-reconcile and shape checks whose purpose is to report a name that disagrees
-with its row). Any other caller is a defect the census refuses. RDR-204's
-four dispositions (a) to (d) map onto these three; its class (b),
+Every census site is one of five classes, recorded in the census beside the
+site. Three are callers of `legacy_names`: **mint** (the name is the user's
+own input or one `nx` is about to register, so no row exists yet; this class
+empties at Phase 3, when minting stops rendering names), **migration
+source** (the name comes from another install or an older era: recovery
+bundle import, migrate-fallback, legacy-collection migration), or
+**diagnostic** (doctor, reconcile and shape checks whose purpose is to
+report a name that disagrees with its row). The fourth is **routing by
+content type**: a site on this install that picks behaviour by the name's
+content-type prefix (T2 `229-research-39`). A site that classifies a name
+from another install, such as a recovery-bundle entry, is a migration
+source, not this class. So this class never calls `legacy_names`. It reads
+the row's `content_type` instead (item 12), and the class is empty from
+P2.9 on. A user-configured name pattern (`fnmatch` over
+`aspects.docs_collections` or the taxonomy exclude list) names labels. It
+is not prefix routing and keeps matching the label. Only a shipped default
+that is itself a prefix pattern (`"code__*"`) is routing. The fifth is
+**URI-string classifiers over a frozen list**. These sites classify a
+source_uri string by its collection segment against RDR-231's frozen
+`rdr__`/`docs__`/`code__` list: `NoteUri.isNote`, `fileRouted` and
+`canonical` in the engine; `aspect_readers.is_note_uri`,
+`canonical_note_uri` and `_collection_is_file_routed`
+(`aspect_readers.py:126`), and `db/note_uri_pairs.py:69` on the client.
+They are not repointed, and they stay at their count (item 12; T2
+`229-research-39`, `229-research-42`).
+Any other site is a defect the census refuses. RDR-204's
+four dispositions (a) to (d) map onto the first three; its class (b),
 write-model resolution, becomes a row read and leaves the list.
 
 **2. Lifecycle is a column, set by the caller that knows it.** The engine
@@ -475,7 +691,14 @@ gates are widened and re-pinned at the measured count:
   parser definitions, not typed as a list. New shapes: f-string `startswith`
   / `endswith` whose literal part ends in `__`, `startswith` on a module
   constant that holds a collection prefix, and `"__<x>__" in name`
-  substring tests. Calls inside `legacy_names` are the floor.
+  substring tests. Calls inside `legacy_names` are the floor. For the
+  routing class it also matches every shape the routing census scans (T2
+  `229-research-39`): `startswith` on a literal prefix tuple, and on a name
+  bound by a loop or comprehension over a prefix constant, a prefix-keyed
+  dict or its `.items()`/`.keys()`. It also matches a default glob string
+  `<type>__*`, client SQL text with `starts_with(..., '<type>__')`, `LIKE
+  '<type>...'` or `split_part(..., '__', ...)`, and every `fnmatch` call,
+  each labelled as a label pattern, a file path or routing.
 - Engine: the Java gate also counts the `quarantine-` literal outside the
   one constant that renders it. A new SQL gate resolves each live plpgsql
   function to its last definer, as the research census did, and pins the
@@ -498,7 +721,14 @@ two-segment knowledge name that has no row.
 bigint GENERATED ALWAYS AS IDENTITY`, unique across the installation, with a
 UNIQUE `(tenant_id, collection_id)` that every reference targets, so
 `tenant_id` still leads every foreign key (row-level security and partition
-pruning on tenant leaves are unchanged). At Phase 4 the primary key becomes
+pruning on tenant leaves are unchanged). The RDR-225 composite foreign key
+needs one more: it now references "UNIQUE (tenant_id, name,
+embedding_model)" (`vectors-030:126-127`, `:1062-1066`), and PostgreSQL
+requires that "the refcolumn list must refer to the columns of a
+non-deferrable unique or primary key constraint or be the columns of a
+non-partial unique index" (T2 `229-research-44`). So P3.1 also adds
+UNIQUE `(tenant_id, collection_id, embedding_model)`, and it stays after
+Phase 4 as that key's target. At Phase 4 the primary key becomes
 `(tenant_id, collection_id)` and `(tenant_id, name)` stops being a key.
 
 A bigint rather than a UUID because the id joins the chunks primary key,
@@ -517,25 +747,417 @@ The key moves table by table in strangler order:
   `chunk_orphaned_at` (which reach the name through the chunks key), and the
   operational name columns with no foreign key (`physical_collection`,
   `pdf_pipeline`, `chash_remap`, `reembed_jobs`, `superseded_by` as
-  `superseded_by_id`). The engine writes both columns on every insert; a
-  per-tenant backfill fills the old rows in bounded batches. The quarantine
+  `superseded_by_id`, NULL for a live row and the successor's id for a
+  tombstone; the table after the history tables, below, gives
+  every name column without a registry foreign key its disposition). The
+  engine writes both columns on every insert; a
+  registered data move fills the old rows (below). The quarantine
   `origin_collection` metadata tag gains an `origin_collection_id` beside it.
-- **Switch.** Each foreign key is re-created on `(tenant_id, collection_id)`
+- **Switch.** Each foreign key gets an id twin on `(tenant_id, collection_id)`
   (or `(tenant_id, collection_id, embedding_model)` for the RDR-225
-  composite), `NOT VALID` first and validated after, as fk-002 did. The
-  chunks and centroid primary keys are rebuilt per leaf on `(tenant_id,
+  composite and for `canary_query_ring`'s, which also references the name
+  UNIQUE today, vectors-054:90-93) beside its name key, `NOT VALID` first and validated after by a data move's
+  `on_complete` (P3.3a). The exception is the RDR-225 composite from the
+  partitioned `nexus.chunks`, which PostgreSQL validates directly (below).
+  Each validation is its own move, one per foreign key (so
+  `topic_assignments` has two): the seven
+  registry foreign keys from tables that are not partitioned
+  (`topic_assignments`, `document_aspects`, `topics`, `taxonomy_meta`,
+  `document_highlights`, `canary_query_ring`, and `aspect_extraction_queue`
+  where it still exists), and the three child foreign keys into
+  `nexus.chunks` (the manifest, `topic_assignments`, `chunk_orphaned_at`;
+  vectors-030:1017-1050). Each move's driving table is the referencing
+  table. Its template is the stamp's re-stamp of rows whose id is still
+  null, which matches no row once the stamp has run. Its verification
+  returns rows with a null id, and its `on_complete` is the VALIDATE. A
+  template with no DML is not allowed: dml_utils raises "i_sql_text must
+  contain <driving_table> exactly once" and the same for
+  `<chunking_clause>` (`assert_chunking_template.sql:28-40`; T2
+  `229-research-44`). The P3.3a changeset registers the seven registry
+  moves. The three child moves are registered by the `nexus.chunks` swap's
+  `on_complete` in its own transaction (the `taxonomy_centroids` swap
+  registers none), because their constraints exist only after it,
+  and a move worked before its constraint exists would fail for good: the
+  worker "goes on to the next open move" past a blocked one
+  (`DataMoveWorker.java:49`), and an `on_complete` error that is not
+  transient "is the move's" (`DataMoveFailureClassifier.java:165-168`).
+  Inferred, not read: VALIDATE of a missing constraint raises 42704, and
+  an `on_complete` can INSERT into `nexus.data_moves`. Four of these
+  moves are chunk-family (`topic_assignments` twice, the manifest,
+  `chunk_orphaned_at`), and such an `on_complete` ends the per-collection
+  index builders (`VerifyingFinisher.java:40-41`). So P3.4's builds start
+  only after every validation move has completed, read by the boot-time
+  completion check (below). The
+  chunks and centroid tables gain an id key per leaf, `(tenant_id,
   collection_id, chash, embedding_model)` and `(tenant_id, collection_id,
-  topic_id, embedding_model)`, and the three child foreign keys follow. Every
+  topic_id, embedding_model)`, beside their name primary keys, which stay
+  until P4.1, and the three child foreign keys gain id twins (P3.3c,
+  below).
+
+  Not every name key to the registry can stay until P4.1. P3.7's one-row
+  rename updates `catalog_collections.name`, and PostgreSQL's default `ON
+  UPDATE` action, NO ACTION, is to "Produce an error if the deletion or
+  update would create a foreign key constraint violation" (sql-createtable;
+  T2 `229-research-58`). Of the eight name keys:
+  - `chunks_collection_fk` (vectors-030:1062-1066),
+    `canary_query_ring_collection_fk` (vectors-054:90-93), and
+    `document_aspects`', `topics`', `taxonomy_meta`' and
+    `document_highlights`' keys (fk-003:114-119, :152-157, :171-176,
+    :192-197) have no `ON UPDATE`, so each refuses the rename of a
+    collection that has a row in its table;
+  - `topic_assignments_collection_fk` is `ON UPDATE CASCADE`
+    (fk-002:240-246). Inferred, not read: the label it copies into
+    `source_collection` then fails `topic_assignments_chunk_fk`, which
+    references the chunks' name key (vectors-030:1032-1036), because the
+    chunks keep the old name; so it refuses the rename too;
+  - `aspect_extraction_queue_collection_fk` is `ON DELETE CASCADE ON
+    UPDATE CASCADE` (aspects-005:103-107), and the queue's only other key
+    references `catalog_documents`, so it refuses nothing.
+
+  So P3.3a drops none of the name keys, and the seven that refuse the
+  rename are dropped before P3.7's one-row rename by one move, the name-key
+  drop move. Two of the seven sit on chunk-family tables, where "A later
+  finishing step ... is therefore a new move whose on_complete does it"
+  (RDR-246 lines 911-913), and `ChunkFamily` counts a move as chunk-family
+  "over the driving table's name ... and over the `on_complete` text"
+  (lines 917-920). So its driving table is the small
+  `nexus.catalog_collections`, which keeps the move short (T2
+  `229-research-63`).
+  The completion check registers it once gate 3 holds on the install, as
+  it registers P4.1's drop move (below). Its template is the no-op
+  re-stamp, its verification returns the table's null ids, and its
+  `on_complete` drops the seven keys and, where `aspect_extraction_queue`
+  still exists, the queue's key too, under the guard the engine already
+  uses for a table that may be gone (`IF to_regclass(...) IS NOT NULL
+  THEN ... DROP CONSTRAINT IF EXISTS`, fk-002:217-223), because P4.1's
+  primary key swap cannot drop `(tenant_id, name)` while a key references
+  it (T2 `229-research-61`). P3.7's one-row rename waits for its
+  `completed_at`. Every
   per-collection index is rebuilt with `WHERE collection_id = <id>` and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
-  the id. Every engine route that takes a collection accepts
+  the id, on each install only once the completion check's gates pass
+  ("Readers during the stamp", below; T2 `229-research-43`,
+  `229-research-52`). Every engine route that takes a collection accepts
   `collection_id`; a label is still accepted at the route boundary and
   resolved to the id once, by `CollectionRegistry`, which is keyed by id
   with a label index beside it. Responses carry both.
-- **Contract (Phase 4).** The name columns on referencing tables are
-  dropped, the `(tenant_id, name, embedding_model)` UNIQUE is dropped, and
-  the name-based arms of `COLLECTION_SCOPED_TABLES` go with them.
+- **Contract (Phase 4).** All eight name keys to the registry, the two
+  composites and the six plain ones, are already gone, dropped before
+  P3.7's one-row rename by the name-key drop move (Switch). The name
+  columns on referencing tables are dropped, and with them the chunks and
+  centroid name primary keys and the three name child keys; then
+  `superseded_by` and the `(tenant_id, name, embedding_model)` UNIQUE, and
+  last the registry's primary key swap. The registry changeset runs only
+  once a check finds no foreign key on the name, and once the name-key
+  drop move has completed, so the drops cannot meet a key that still
+  depends on them (P4.1; T2 `229-research-61`). Dropping
+  `superseded_by` drops the label index whose predicate reads it, so P4.1
+  re-creates that index on `superseded_by_id` (item 7). Before any of
+  that, an engine release retires the Java name path (P4.0): the name
+  readers, the rename's fourteen-table rewrite and the name-based arms of
+  `COLLECTION_SCOPED_TABLES` (`CatalogRepository.java:10733-10760`). Until
+  that release the dual path stays in Java. That engine carries a boot
+  floor, because a release reaches an install whatever its moves have
+  done: it serves migration-only until gate 3 of the completion check
+  holds on the install, P3.7's name-key drop move has `completed_at`
+  set and every P3.5b changeset has applied, the state in which P3.7's
+  one-row rename runs (T2 `229-research-59`, `229-research-64`).
+
+**How each Phase 3 step runs (RDR-246).** No Phase 3 step rewrites the rows
+of, or builds an index on, a table that grows with user data inside the
+boot-time schema walk. That is the rule RDR-246 (accepted 2026-11-16) and the
+upgrade-boot write gate (nexus-f3yqd.1) enforce. On those tables a Phase 3
+changeset only adds what costs no row rewrite: nullable `collection_id`
+columns, constraints added `NOT VALID`, and one INSERT per move into
+`nexus.data_moves` ("a changeset registers a move with one INSERT, and
+DataMoveWorker (the engine thread) works the open ones",
+`datamoves-001-registry.xml`; T2 `229-research-32`). `catalog_collections`
+itself is small. Its new identity column and the UNIQUE `(tenant_id,
+collection_id)` are ordinary changeset work. The changeset gate raises no
+finding for them, because its generated-column rule matches `generated always
+as (` and `catalog_collections` is not one of rule 2's boot-scan tables, so
+no exemption line is needed (T2 `229-research-41`; inferred, not read: the
+identity fill rewrites that small table). Three kinds of work follow, each
+while the engine serves:
+
+- *The stamp is a data move.* P3.1's changeset adds, `NOT VALID`, on every
+  table in the Expand list, a CHECK that the id is set wherever the name is
+  set: `(<name column> IS NULL) = (collection_id IS NULL)`. The exception
+  is `superseded_by`, which is `TEXT NOT NULL DEFAULT ''`
+  (`catalog-001-baseline.xml:208`) and empty on a live row: the engine
+  writes `.set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")` to make a row current
+  (`CatalogRepository.java:9922`) and the new name on a rename's tombstone
+  (`:11477`). Its CHECK is `(superseded_by = '') = (superseded_by_id IS
+  NULL)`, added `NOT VALID` in P3.1 and validated with the stamp. The
+  stamp fills it from the text column: a non-empty `superseded_by`
+  resolves to the `collection_id` of the row with the same `tenant_id` and
+  name, and `''` stays NULL. Inferred, not read: a tombstone whose
+  successor was later deleted names no row, so P1.2 counts those (T2
+  `229-research-50`). The
+  partitioned `nexus.chunks` already carries a `NOT VALID` CHECK this way
+  (`chunks_chash_octet_check`; T2 `229-research-41`). P3.1 then registers one
+  move per table. `DataMoveWorker` runs it through dml_utils in primary-key
+  chunks, per tenant, and per leaf on the partitioned tables (runs named
+  `<label>/<tenant>/<leaf>`). Its verification query returns the tenant's
+  rows whose `collection_id` is still null. Its `on_complete` validates the
+  CHECK. Its `statement_timeout_ms` bounds each verification run and the
+  `on_complete`, and RDR-246 sets the `on_complete`'s `lock_timeout` to
+  "min(5 s, `statement_timeout_ms` / 2)". P3.2 sizes the timeout, with
+  `chunk_size` and `sleep_ms`. The move reports in `boot_work` as
+  `data-move:<label>`, with `on_stop: "resumes from the last committed
+  batch"`, so a killed engine resumes at the first unprocessed chunk
+  (RDR-246 lines 867-868).
+- *Every writer sets the id from P3.1's cut.* Inferred, not read:
+  PostgreSQL checks a `NOT VALID` constraint on every inserted and every
+  updated row. So an insert without the id fails at once, and so does an
+  update of a row the stamp has not reached unless it sets the id. The
+  writers are 109 engine Java write sites (jOOQ and raw SQL) and 26 live
+  SQL functions across the tables that gain the column. Insert and update
+  paths both count, among them the chunk movers (`gc_quarantine_orphans`,
+  `gc_restore_rereferenced`, `quarantine_restore_chunks`,
+  `reaper_quarantine_chunks`), rename and re-home, `catalog_reconcile_commit`
+  and the taxonomy assigners (T2 `229-research-41`). The census found no
+  writer of `taxonomy_centroids` because it matched named tables only. One
+  writes through a helper: `TaxonomyCentroidRepository.upsertCentroids`
+  runs `ctx.insertInto(ct.table())` with `ct = DimTables.CENTROIDS.get(dim)`
+  (`TaxonomyCentroidRepository.java:147-156`), the same shape that writes
+  chunks at `PgVectorRepository.java:1283`, and `TenantImportLoad.java:256`
+  inserts into any table by name (T2 `229-research-48`). Inferred, not
+  read: the 109 is a lower bound. P3.1's acceptance re-runs the writer
+  census over helper-routed and by-name writes and finds every writer of
+  `taxonomy_centroids` before its CHECK lands.
+- *Index builds follow the PCI reconciler's pattern.* RDR-246 keeps index
+  builds out of a move: `on_complete` holds transactional DDL, "never CREATE
+  INDEX CONCURRENTLY" (lines 546-550). The per-leaf unique indexes for the
+  new chunks and centroid keys (P3.3b), and every per-collection index on
+  the id (P3.4), are built the way the PCI reconciler builds today. The
+  per-leaf pass is new code: the reconciler builds per-collection HNSW
+  indexes, "USING hnsw ... WHERE collection = %L"
+  (`PciBuilderSession.java:115-118`; T2 `229-research-44`). An engine pass
+  runs in the background after the engine serves and issues one `CREATE
+  INDEX CONCURRENTLY` at a time. It reports in `boot_work` (the reconciler's
+  entry is `pci-reconcile`, "building search indexes"). A build ended by a
+  database stop, or by a restart that applies a schema change, "is left
+  INVALID, and a later pass drops it and rebuilds it from the start"
+  (`PciBootWork.java`; T2 `229-research-33`). The per-leaf pass (P3.3b)
+  starts only once the boot-time completion check (below) reports every
+  stamp move and every P3.3a move complete, because those moves'
+  chunk-family `on_complete` ends builds in flight
+  (`VerifyingFinisher.java:40-41`). The pass is engine code, not a move,
+  and it records its completion by registering the swap. Inferred, not
+  read: on each boot it reads every leaf, builds any id unique index that
+  is missing or INVALID (`PciCatalog` reads `pg_index.indisvalid`,
+  `PciCatalog.java:349`), and once every leaf of a table has a valid one
+  and no row carries that table's swap label, its last step inserts the
+  swap move's row on the admin connection, as the chunks swap registers
+  its child moves. So the swap's verification never runs before the
+  indexes exist. Inferred, not read: from P3.3b's cut the helper that
+  creates a leaf (`nexus.partition_ensure_leaf`) also creates its id unique
+  index, so a leaf added later never lacks one (T2 `229-research-51`). The per-collection indexes on
+  the id (P3.4) are built after P3.3c's swap and after every foreign-key
+  validation move has completed (Switch, above), and a collection's index
+  only once none of its rows has a null `collection_id`. That is the
+  stamp-before-build order of Sam's RDR-247 ruling (Scope boundary with
+  RDR-247). Built after the swap and the validations, they are not ended
+  by those moves' chunk-family `on_complete`, which ends builds in flight
+  (RDR-246). So an index is built a second time only after a kill.
+- *The switch is a move's `on_complete`.* The id key is added beside the
+  name primary key, not in its place. PostgreSQL's documented route for a
+  partitioned table is `ALTER TABLE ONLY` the parent `ADD UNIQUE`, a
+  matching key on each leaf, then `ALTER INDEX ... ATTACH PARTITION` for
+  each leaf ("ALTER TABLE ONLY measurement ADD UNIQUE (city_id, logdate);
+  ... ALTER INDEX measurement_city_id_logdate_key ATTACH PARTITION ...",
+  `ddl-partitioning.html`; T2 `229-research-41`). Each leaf's key takes the
+  unique index built concurrently above, through `ADD ... USING INDEX`,
+  which "is not currently supported on partitioned tables" but is on a
+  leaf. So P3.3c has, per table (`nexus.chunks`,
+  `nexus.taxonomy_centroids`), a move that P3.3b's pass registers when
+  that table's indexes are all valid (above), whose driving table is that
+  table, run per tenant and leaf. Its template re-stamps rows whose id is
+  still null, which is a no-op after P3.1. Inferred, not read: dml_utils
+  still walks every chunk of the leaf, one chunked pass. Its verification
+  query returns any leaf without a valid unique index on the new key, and
+  any row with a null id; neither can be found once the pass has
+  registered it after the stamp completed. Its `on_complete` adds the id
+  key by that route, adds the three child id keys `NOT VALID` with `ON
+  UPDATE CASCADE` (their referencing tables are not partitioned), and, on
+  the chunks move only, registers the three moves that validate them
+  (Switch, above). It drops nothing: the name primary key and the three
+  name child keys stay until P4.1. The outbound composite
+  foreign key from `nexus.chunks` to `catalog_collections` on the id cannot be added
+  `NOT VALID`, "because PostgreSQL does not take NOT VALID for a partitioned
+  referencing table", so it is validated directly in the same `on_complete`
+  (vectors-030 lines 1013-1016); the old `chunks_collection_fk` stays until
+  the name-key drop move (Switch, P3.7). The `on_complete` runs as one transaction.
+  A lock it cannot get "fails fast as a transient `blocked:` (55P03)", and
+  a kill before the commit leaves the table as it was (RDR-246 lines
+  545-547, 914-916).
+- *The name path keeps working after P3.3c.* Both writers name the name
+  key as their conflict target: `insert.onConflict(ch.tenantId(),
+  ch.collection(), ch.chash(), ch.embeddingModel())`
+  (`PgVectorRepository.java:1294`) and `.onConflict(ct.tenantId(),
+  ct.collection(), ct.topicId(), ct.embeddingModel())`
+  (`TaxonomyCentroidRepository.java:161`). PostgreSQL infers "All
+  table_name unique indexes that ... contain exactly the conflict_target"
+  columns, and "If an attempt at inference is unsuccessful, an error is
+  raised" (T2 `229-research-53`). Keeping the name primary key keeps an
+  arbiter for both until P4.1. Both writers move their conflict target to
+  the id key with P3.5c, when gate 3 passes on the install (below); both
+  keys exist from P3.3c to P4.1, so either target has an arbiter. The
+  child keys cascade names only (`ON UPDATE CASCADE`,
+  vectors-030:1017-1051), and `chunk_orphaned_at` is not among the
+  `COLLECTION_SCOPED_TABLES`, so a rename reaches its name only through
+  that cascade. Inferred, not read: from P3.1 the name-path rename, which
+  inserts a new registry row and so a new id, sets that id wherever it
+  rewrites a name and in `chunk_orphaned_at`; from P3.3c the child id
+  keys' `ON UPDATE CASCADE` carries it too. Inferred, not read: after P4.1
+  drops the name primary key the id key is a UNIQUE, and a UNIQUE admits
+  "duplicate rows that contain a null value", so P3.1 also adds `CHECK
+  (collection_id IS NOT NULL)` `NOT VALID` on `nexus.chunks` and
+  `nexus.taxonomy_centroids`, validated with the stamp.
+- *Readers during the stamp.* RDR-246 requires this RDR to say it: "Each
+  move's RDR or bead states how readers behave while it runs: read both
+  shapes, or keep the feature off until `completed_at` is set" (RDR-246
+  lines 895-897). The rule: on each install, readers keep the name path
+  until every stamp move on that install has `completed_at` set, and the
+  engine's id readers and the one-row rename also wait for the gates of
+  the completion check below. A move's
+  `completed_at` is "set when the move verified and on_complete ran", one
+  row per move (`datamoves-001-registry.xml:30`), and a move counts as
+  complete when it, or the move that supersedes it, has it set. Bead order
+  is not this guard, because an install can boot a release that holds
+  P3.1 to P3.5 at once. T2 `229-research-43`.
+  - *SQL readers (P3.5b).* A redefining changeset whose body names no
+    chunk-family table carries, for each stamp label, "a Liquibase
+    precondition on `nexus.data_moves.completed_at` for that label with
+    `onFail="CONTINUE"`, so it is skipped and retried on each boot until the
+    move completes" (RDR-246 lines 937-940), and joins the lint's CONTINUE
+    allowlist. That form is refused for a body that names `nexus.chunks`, a
+    leaf, `catalog_document_chunks`, `topic_assignments` or
+    `chunk_orphaned_at`: "a later-release changeset that waits with
+    `onFail="CONTINUE"` is refused there" (RDR-246 lines 902-906). Both
+    named views read `nexus.chunks` and the manifest (vectors-032:65-67,
+    vectors-019:1153-1155). A move cannot do the waiting instead, because a
+    verification that still finds old-shape rows is a permanent failure
+    (`DataMoveFailureClassifier.java:160`). So a SQL reader that names a
+    chunk-family table takes the rule's other option, read both shapes:
+    P3.5b redefines it to match a row by `collection_id` where both sides
+    carry one and by the name where either does not, and P4.1 removes the
+    name arm with the name columns. Inferred, not read: that match is right
+    at every point of the stamp, because a rename keeps rewriting the name
+    columns until the check below passes (P3.7). Inferred, not read: a
+    two-key match can lose an index, so P3.5b measures each such reader's
+    plan on a large store.
+  - *Java readers (P3.5c), the registry (P3.5a), P3.4's builds and P3.7's
+    rename.* These wait on a completion check that the engine makes at
+    boot. Only the admin connection may read the registry: "on the admin
+    connection only: `nexus_svc` holds no grant on it"
+    (`DataMoveRegistry.java:17-18`). No read answers the question today.
+    `DataMoveRegistry` reads open moves (`:39-46`) and failed moves
+    (`:66-79`). `MoveBootWork` publishes a `data-move:<label>` entry only
+    for an open or failed move and finishes it when the move leaves both
+    (`MoveBootWork.java:277-299`), so a missing entry does not tell a
+    completed move from an unregistered or superseded one. P3.1 adds the
+    read: after `SchemaMigrator.migrate` (`Main.java:285`), on the admin
+    connection resolved at `Main.java:277`, the engine reads the rows of
+    its read set and keeps the answers for the process. Each release adds
+    its own labels to the set: the stamp labels (P3.1), P3.3a's seven
+    validation labels, P3.3c's two swap labels and three child
+    validation labels, and P3.7's name-key drop label. A label with no row
+    counts as incomplete, because the swap, child and drop rows are
+    registered at run time. A move whose row
+    has `failed_at` set and whose driving table no longer exists
+    (`to_regclass` of its `driving_schema` and `driving_table` is NULL)
+    counts as complete. That is how `aspect_extraction_queue` ends: once
+    emptied, "the next boot's guard drops the emptied table"
+    (`Main.java:674-676`), and a move on a missing table fails with 42P01
+    as "permanent" (`MovePreflight.java:67-71`,
+    `DataMoveFailureClassifier.java:153-154`); nx doctor still shows its
+    `failed:` row. Inferred, not read: the check decides it from those two
+    columns (T2 `229-research-52`). The gates, in order:
+    1. Every stamp move and every P3.3a move complete: P3.3b's pass
+       starts.
+    2. Also both swap moves and the three child validation moves complete:
+       P3.4's builds start.
+    3. Also P3.4 complete on the install, read from `PciCatalog`, whose
+       index records carry `valid`, "`pg_index.indisvalid`", and the
+       collection "its predicate selects" (`PciCatalog.java:349-350`).
+       Inferred, not read: P3.4 is complete when every collection with a
+       valid name-predicate index also has a valid id-predicate one. Then
+       `CollectionRegistry` and the jOOQ readers move to the id (P3.5a,
+       P3.5c), the check registers P3.7's name-key drop move (Switch), the
+       rename becomes one row (P3.7) once that move also has `completed_at`
+       set, and the check registers P4.1's drop move once P4.1's release
+       is installed.
+    Until gate 3, `CollectionRegistry` hands readers the name, the jOOQ
+    readers read the name columns, and `renameCollectionTxn` keeps
+    rewriting the fourteen `COLLECTION_SCOPED_TABLES`. From gate 3 until
+    the one-row rename can run, that is until P3.7's name-key drop move
+    has `completed_at` set and every P3.5b changeset has applied (below),
+    readers are on the
+    id while the rename is still the name path, which gives the collection
+    a new id that its index on the old id does not select (T2
+    `229-research-53`, `229-research-63`). The engine therefore refuses a
+    rename in that window: gate 3 holds and not both of those. The typed
+    error names the missing condition, the move while it has no
+    `completed_at`, else the restart that applies P3.5b's changesets. The
+    window is that move's run, a short pass over the registry and its
+    `on_complete`, and, where a P3.5b changeset has not applied, the time
+    to that restart (inferred, not read). The refusal, the drop move's
+    registration at gate 3 and the one-row rename ship in one engine cut,
+    P3.5's and P3.7's: the drop label joins the read set only with the
+    release that ships the move, and a label with no row counts as
+    incomplete, so a release with the refusal and not the move refuses
+    every rename from gate 3 on, and one with the move and not the
+    refusal lets a name-path rename give an id-keyed collection a new id
+    (P3.7; T2 `229-research-69`). A rename between gate 2 and gate 3
+    costs only an index P3.4 builds again for the new id before gate 3 can
+    hold, while readers are on names (inferred, not read). So no search
+    reads by an id before that collection's index on it exists.
+
+    The check is not read only at boot. The move worker knows in process
+    when a move completes: the completion transaction sets `completed_at`
+    and returns `Result.completed()` (`VerifyingFinisher.java:244-287`),
+    and the worker acts on it (`case COMPLETED -> ...`,
+    `DataMoveWorker.java:562`). So the engine re-reads the check when the
+    worker records a `completed_at`, and, inferred, not read, when a
+    reconciler pass ends, since gate 3 reads `PciCatalog`; the gates the
+    engine's Java acts on (P3.3b's pass, P3.4's builds, registering the
+    name-key and P4.1 drop moves, the Java readers, the one-row rename and
+    P4.0's floor) take effect with no restart (T2 `229-research-64`). A
+    CONTINUE changeset still "applies at the first boot after the move
+    completes" (RDR-246 lines 942-944): P3.5b's SQL readers on tables
+    outside the chunk family, and P4.1's changesets. Until P3.5b's apply,
+    those readers read the name columns, which a one-row rename no longer
+    rewrites, so the one-row rename also waits for every P3.5b changeset
+    to be recorded as applied (inferred, not read: read from Liquibase's
+    `databasechangelog`). When every stamp move is complete and a P3.5b
+    changeset is not yet applied, the check publishes a `boot_work` entry
+    that asks for a restart, which nx doctor shows (inferred, not read).
+    That is the one restart the chain from a half-stamped store needs. A client cache
+    keyed by id holds a stable id only from the name-key drop move's
+    `completed_at` on the install, when the
+    rename becomes one row: before it, the name-path rename inserts a new
+    registry row with a new id (T2 `229-research-53`), so until then the
+    client refreshes an id-keyed entry on a rename and keys its lookups by
+    label.
+  - *A blocked move.* A BYO or `--no-pg-bundle` PostgreSQL "gets it from
+    its DBA ... Until the step has run, moves report `blocked:`" (RDR-246
+    lines 801-805), and nx doctor "shows one red row per `blocked:` or
+    `failed:` move" (RDR-246 lines 891-892). On such an install the stamp
+    never completes. Readers stay on names, no index is built on the id, a
+    rename keeps its fourteen-table rewrite, and Phase 4's drops never apply
+    (P4.1). P4.0's floor never holds there either, so a P4.0 engine would
+    serve that install migration-only; it stays on a release before P4.0
+    until its moves run (P4.0; T2 `229-research-59`).
+
+Whether any step needs a maintenance window is unverified (Critical
+Assumption 5). Inferred, not read: the swap's DDL holds ACCESS EXCLUSIVE on
+the table it alters, and the directly validated composite foreign key scans
+`nexus.chunks` while that lock is held. `lock_timeout` bounds the wait for a
+lock, not how long it is held. P3.2 times the swap, the foreign-key
+validations included, before the move's `statement_timeout_ms` is set.
 
 The history tables (`relevance_log`, `search_telemetry`, `hook_failures`,
 `gc_audit`) gain a nullable `collection_id` for joins and keep their name
@@ -543,43 +1165,146 @@ column as a record of the label at the time of the event. A rename stops
 rewriting them; their old rows keep the old label, which is what a log
 should say.
 
+Every name column without a foreign key to the registry, from a census of
+the included changelogs (24 live name columns, 16 of them in 13 tables
+without such a key; T2 `229-research-48`). "Expand" means a `collection_id`
+beside the name (one per name column on a two-name table; inferred, not
+read) under P3.1's CHECK and stamp. "Rename" says whether
+`renameCollectionTxn` rewrites the column today; from P3.7 it rewrites none
+of them.
+
+| Column | Reaches the registry | Disposition | Rename today |
+| --- | --- | --- | --- |
+| `catalog_collections.superseded_by` | no | Expand as `superseded_by_id` (NULL when live, the successor's id on a tombstone), under its own CHECK `(superseded_by = '') = (superseded_by_id IS NULL)`; dropped at P4.1 | written on the tombstone |
+| `catalog_document_chunks.collection` | through the chunks key | Expand; child id key added in P3.3c, name key dropped at P4.1 | rewritten |
+| `chunk_orphaned_at.collection` | through the chunks key | Expand; child id key added in P3.3c, name key dropped at P4.1; the name-path rename sets its id (item 6) | rewritten by its `ON UPDATE CASCADE` from the chunks key (vectors-030:1047-1051) |
+| `catalog_documents.physical_collection` | no | Expand | rewritten |
+| `catalog_documents.corpus` | no | History label: set at index time (`corpus=collection_name`, `indexer.py:2852`, or a user `--corpus`), kept as written | no |
+| `catalog_reconcile_rows.physical_collection` | no | Transient: a staging table reaped after 24 hours (`catalog-048-reconcile.xml:103`); no id | no |
+| `chash_remap.source_collection`, `.target_collection` | no | Expand | no |
+| `pdf_pipeline.collection` | no | Expand | no |
+| `reembed_jobs.source_collection`, `.target_collection` | no | Expand | no |
+| `taxonomy_centroids.collection` | no | Expand; id key added beside the name primary key in P3.3c | rewritten |
+| `relevance_log.collection` | no | History label with a nullable id | rewritten until P3.7 |
+| `search_telemetry.collection` | no | History label with a nullable id | rewritten until P3.7 |
+| `hook_failures.collection` | no | History label with a nullable id | rewritten until P3.7 |
+| `gc_audit.collection` | no | History label with a nullable id | rewritten until P3.7 |
+
 **7. The label and what uniqueness it keeps.** The `name` column becomes
 the label: the string a person types and reads, and what the 15 MCP tools,
-the 48 CLI options and the 30 positional CLI arguments accept. It is no
+the 49 CLI options and the 30 positional CLI arguments accept (T2
+`229-research-29`). It is no
 longer a key. No foreign key targets it, no index is named from it, and no
 partition holds it. It keeps one uniqueness rule, for addressing only: **a
 label is unique among a tenant's live collections**, enforced by a partial
 UNIQUE index on `(tenant_id, name)` over rows that are not superseded. Two
 collections of one tenant can no longer answer to the same label, so a
-label in a command names one collection without ambiguity. A superseded
-(tombstoned) row keeps its label for history and releases it, so the label
-can be reused. Model siblings no longer collide, because each sibling gets
+label in a command names one collection without ambiguity. From P4.1, a
+superseded (tombstoned) row keeps its label for history and releases it, so
+the label can be reused. P3.6's index reads `superseded_by` (`TEXT NOT NULL
+DEFAULT ''`, `catalog-001-baseline.xml:208`), and P4.1 drops that column.
+PostgreSQL drops "Indexes and table constraints involving the column"
+with it (T2 `229-research-45`). So P4.1 re-creates the partial UNIQUE over
+`superseded_by_id IS NULL` in the same changeset as the primary-key swap.
+Inferred, not read: a predicate column counts as involved. That predicate
+selects exactly the live rows, because `superseded_by_id` is NULL on a
+live row and set on a tombstone, under the CHECK `(superseded_by = '') =
+(superseded_by_id IS NULL)` that the stamp validates (item 6; T2
+`229-research-50`). Until P4.1 the name is still the primary key
+(`PRIMARY KEY (tenant_id, name)`, `catalog-001-baseline.xml:211`; T2
+`229-research-36`), so a superseded row, including one a past rename left,
+keeps its name taken. Model siblings no longer collide, because each sibling gets
 its own minted label. Labels in different tenants are independent, as
 names are today.
 
 The label rule replaces ChromaDB's limits in `validate_collection_name`:
 non-empty, valid UTF-8 without control characters, at most 255 bytes, and
 not of the minted form (item 8) unless the engine minted it, so a user
-cannot claim a label that a later mint would produce.
+cannot claim a label that a later mint would produce. The rule may drop the
+conformant shape only because, after P2.9, no site in the widened routing
+census (item 4, P1.1) routes by the label's prefix (item 12). P3.6 waits
+for it. Whether the alphabet excludes `/` is still open (Contradiction
+Check), and no audit yet covers where a label meets a file path. P3.6's
+tests exercise one label with a space, `%`, `:` and a non-ASCII character
+on Windows (Cross-Cutting, Windows).
 
-A rename becomes `UPDATE catalog_collections SET name = <new>` on one row.
+In the registry, a rename becomes `UPDATE catalog_collections SET name =
+<new>` on one row; the note-URI and aspect-task rewrites below still touch
+the collection's notes and queued tasks.
 `renameCollectionTxn` stops inserting, rewriting fourteen tables and
 tombstoning. It still rewrites the `nx-note://<label>/` source URIs of the
 collection's notes, as it does today; moving note identity off the label is
-a catalog-identity change outside this RDR.
+a catalog-identity change outside this RDR. From P2.10, a Phase 2 engine
+bead that P3.6 and P3.8 wait for, `NoteUri.moveTo` itself rewrites only
+`nx-note://` URIs that `isNote` classes as notes, and `namesCollection`
+selects exactly what `moveTo` rewrites. Today `moveTo` rewrites "{@code
+nx-note://<old>/} becomes {@code nx-note://<new>/} and {@code
+chroma://<old>/} becomes {@code chroma://<new>/}", and `namesCollection`
+selects both schemes with no `isNote` test (T2 `229-research-40`,
+`229-research-55`). The rule sits in `moveTo`, not on the rename path,
+because four of the five operations that move a document's URI go
+through it, and each one's
+collision pre-check also goes through it (`CatalogRepository.java`; T2
+`229-research-55`):
+
+- the collection update (`:2346`; pre-check `:2200`);
+- the re-embed move (`completeMove`, `:7336`, `:7356`, `:7363`; pre-check
+  `moveUriCollisions`, `:7401`);
+- re-home (`moveScopedTable`, `:11850`; pre-check `:11127`);
+- rename (`:11464`, `:11468`, `:11472`, its rows selected by
+  `namesCollection` at `:11466`, `:11470`, `:11474`; pre-check `:11127`).
+
+A fifth path copies `moveTo` in plpgsql: `nexus.catalog_reconcile_commit`
+(`catalog-048-reconcile.xml`, defined once at `:151`) rewrites a moved
+document's URI in its collision pre-check (`:433-441`) and its two
+document UPDATEs (`:527-535`, `:545-551`), each with a `WHEN
+starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')`
+arm and no file-routed test. A census of every SQL splice of a note scheme
+onto a collection finds only these and the run-once `note-uri-001`
+backfill (T2 `229-research-62`). P2.10 redefines the function by
+changeset with `moveTo`'s rule.
+
+So on all five, `chroma://` residue keeps the segment it was written with,
+and so does an `nx-note://` value whose segment is file-routed, which the
+shared corpus classes as no note (`"nx-note://docs__1-1__voyage-context-3__v1/docs/catalog.md",
+"is_note": false`, `note-uri-corpus.json:11`). Moving either onto a
+prefix-free label would turn it into a note, because `isNote` reads only
+the segment. That keeps the URI-string classifiers' frozen list complete
+(item 12). P2.10 does not come before every prefix-free label: `nx catalog
+rename-collection --allow-legacy` makes one today (`collections.py:287-293`;
+T2 `229-research-57`), so residue may already sit on such a segment, and
+P2.10 also repairs those rows (item 12). A legacy-spelled note that `moveTo` no longer moves becomes a
+stale note that the stale-note repair rewrites to `nx-note://<collection>/`
+(T2 `229-research-42`). It also still rewrites queued
+aspect tasks, which name their collection in the task body: "a collection
+rename ... has to rewrite or delete the tasks itself, in the same
+transaction" (`AspectTaskRefs.java:23-26`, called at
+`CatalogRepository.java:11393`; T2 `229-research-37`). The one-row rename needs every
+reader off the referencing tables' name columns (P3.5) and every
+per-collection index off the name (P3.4). From P3.7 those columns are dead:
+unread, and no longer rewritten by a rename, so they hold the label each row
+was written under until P4.1 drops them. An engine downgraded to a release
+before P3.7 would read them; where a downgrade is safe is still open
+(Contradiction Check).
 
 **8. Minting (D2).** When a collection is registered with no label, the
 engine takes the next `collection_id` and sets the label to `c` followed by
 that id in decimal (`c4812`), in the one insert. It is opaque: it carries
 no content type, owner, model or version. Listings show the attributes
-beside it (`nx collection list`, `collection_list`, `nx catalog show`). A
+beside it (`nx collection list`, `collection_list`, `nx catalog show`).
+`nx collection list` already shows content type, owner, model, dimension
+and state (`commands/collection.py:91-95`); the id column is new (P3.12). A
 user who wants a readable label sets one with `nx collection rename`; a subject or repo collection is found by its attributes
 either way (item 5), so a label is never needed to find one. Every client
 path that renders a conformant name for a new collection
 (`CollectionName.render`, `t3_collection_name`'s write branch, the
 indexer's reroute, `collection_for_repo`'s client-side render) stops doing
 so and registers by attributes. Existing collections keep their names as
-labels.
+labels. Minting waits for P2.9, P2.10 and P3.9. P2.10 stops residue
+moving onto a prefix-free label (item 7). P2.9 empties the routing class
+that the widened census measures. P3.9 gives the recovery-bundle sites the
+bundle's row in place of the recorded name. After both, no site on this
+install routes a minted collection by a prefix it does not have (item 12).
 
 **9. The non-stranding rule.** Phase 2 may repoint a reader only after every
 migration source it serves has a test that runs a row-less legacy name
@@ -594,16 +1319,153 @@ target mints, and keeps the label (or reports a clash with a live label on
 the target and refuses that collection). An old bundle, which carries names
 only, still imports through `legacy_names` for N minor releases after the
 release that ships the new format. N is open for Sam to set at the gate
-(Open Item O1; this draft proposes 20, about one month at the measured
-rate). From minor release N+1 on it is refused with a message that says to re-export from the source, and,
+(Open Item O1; this draft proposes 20, about 25 days at the measured rate
+of 24 minor releases in 30 days). From minor release N+1 on it is refused with a message that says to re-export from the source, and,
 because a recovery bundle may outlive its source, names the last conexus
 version that still imports it.
+
+The tenant backup (RDR-248) is a second serialization of the key, keyed
+today on `catalog_collections` `("tenant_id text", "name text")` and the
+chunks' foreign key `"tenant_id,name,embedding_model"` (`TenantExport.java:355`,
+`:389-390`; T2 `229-research-36`). Its table model changes in the same
+engine cut as each schema change it describes: P3.1's columns, P3.3's keys
+and P4.1's drops. Otherwise `TenantExportRegistryParityTest` goes red: "A
+schema change that the registry does not describe fails here" (T2
+`229-research-41`). Until P4.1, `collection_id` is not
+`catalog_collections`' primary key. `TenantExport`'s `reassignedId` is "the
+primary-key column a restore gives new values from the table's own
+sequence", so the id is not a reassigned key there. It is a referenced
+column that the restore maps from old values to the values the target
+assigns. A backup taken before P3.1 has no `collection_id`. RDR-248 loads
+an older file "filling new columns from their defaults". The restore then
+fills each row's id from the restored registry row with the same
+`(tenant_id, name)`, because P3.1's CHECK refuses a row with a name and no
+id; the name columns still exist until P4.1. RDR-248's own rule binds the
+Phase 4 column drops: "a migration that drops or retypes an exported column
+goes red there and must say what it does to old backups" (lines 580-582).
+P4.1 therefore states what it does to a backup taken before P3.1, and
+RDR-248's committed fixture is part of its acceptance.
 
 **11. `legacy_grandfathered` goes (D5).** Phase 3 stops writing it: the
 client stops deriving it, and `collectionForTuple` drops its
 `legacy_grandfathered = false` filter (a grandfathered collection has the
 same attributes as any other). Phase 4 drops the column and
 `idx_catalog_collections_legacy` with it.
+
+**12. Routing by content type reads the row (closes the fourth class).**
+No name parsing comes back for these sites. Each prefix test becomes a test
+of the row's `content_type`, read through the source its caller already
+has. The routing class is 23 sites plus the `taxonomy__` half of the 12
+`_BYPASS_SCHEMA_PREFIXES` tests, 35 client tests, and one engine site,
+`NoteUri.isFileRoutedCollection`: 36 in all (T2 `229-research-34`,
+`229-research-39`, `229-research-49`):
+
+- *Listing rows in hand.* `health.py:12516` and
+  `commands/catalog_cmds/doctor.py:1570` filter `t3.list_collections()`
+  rows, which already carry `content_type`; they read it from the row.
+- *A collection name on this install.* These read the client row cache
+  (`mcp_infra.get_collection_row`): `aspect_readers.uri_for`,
+  `_identity_fields_for` and `_legacy_identity_fields_for` (`:254`, `:427`,
+  `:440`); `aspect_worker._attributed` and `_is_unattributable`;
+  `exporter._stamp_note_keys`; `commands/catalog_cmds/backfill.py:98/103`;
+  `aspect_extractor.docs_collection_opted_in`, `extraction_applies_to_source`
+  and `select_config` (`:1024`, `:1039`, `:1041`, `:1073`);
+  `scoring.apply_quality_boost`; `search_engine._threshold_for_collection`
+  and `_overfetch_multiplier` (`:802`, `:906`);
+  `metadata_schema.chunk_content_type_for_collection` (`:187`);
+  `catalog/manifest_backfill.py:865`; `commands/taxonomy_cmd.py:95`; and
+  the `note_tags_array` rung. `exporter.import_collection` reads through its
+  `db`'s own row resolver.
+- *The `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`.* P2.5 moves the
+  `quarantine-` half to `lifecycle_state`. P2.9 moves the `taxonomy__` half
+  at the same 12 sites to the row. No writer in `src/nexus` creates a
+  `taxonomy__` collection, so the half only ever meets legacy names (T2
+  `229-research-39`).
+- *The shipped default exclude pattern.* `config.py:1391`
+  (`"local_exclude_collections": ["code__*"]`) excludes code collections
+  from local-mode taxonomy by name. P2.9 replaces that default with a
+  content-type rule. User patterns in the same list stay label patterns.
+- *Docs opt-in patterns.* `docs_collection_opted_in` keeps matching
+  `aspects.docs_collections` patterns against the label through `fnmatch`,
+  because a user's patterns name labels. Only its `_DOCS_PREFIX` gate
+  (`:1024`) moves to the row.
+- *A live collection in the engine's stale-note repair.*
+  `NoteUri.isFileRoutedCollection` is called once, at
+  `CatalogRepository.java:4399`, with the row's live `physical_collection`,
+  not a URI segment (T2 `229-research-42`). It takes the content type from
+  `CollectionRegistry.require(ctx, tenant, coll)`. Its caller,
+  `classifyStaleNotes`, runs inside `tenantScope.withTenant(tenant, ctx ->
+  ...)`, so it holds `ctx` and `tenant`.
+- *A bundle entry from another install.* `catalog/recovery_bundle.py:92,
+  121, 212`, and its `is_note_uri` call at `:101`, read a name that may
+  have no row here. They are migration sources, not routing: they read the
+  row from the bundle once P3.9 ships, and `legacy_names` before that,
+  under the non-stranding rule (item 9). Minting therefore waits for P3.9
+  (item 8).
+
+**URI-string classifiers stay on their frozen list.** The fifth caller
+class (item 1) is not repointed. These classify a source_uri string over
+RDR-231's frozen prefix list (`rdr__`, `docs__`, `code__`):
+- in the engine, `NoteUri.isNote`, its `fileRouted` and `NoteUri.canonical`
+  (callers `CatalogRepository.java:4206/4215/4393`);
+- on the client, `aspect_readers.is_note_uri`, `canonical_note_uri` and
+  `_collection_is_file_routed` (`aspect_readers.py:126`; callers
+  `exporter.py:927`, `commands/catalog_cmds/reconcile_stale.py:380`,
+  `db/serving_engine_version.py:149`);
+- and the SQL in `db/note_uri_pairs.py:69`.
+
+The engine's recorded design is that NoteUri "classifies a source_uri
+STRING, not a live collection: a note URI's collection segment can name a
+collection that was renamed or never registered, so a CollectionRegistry
+lookup cannot answer it" (`CollectionParseGateTest.java:239-247`). The
+list stays complete because of one fact, one repair and one rule:
+- A new collection's file-routed documents get `file://` and its notes
+  `nx-note://`, never `chroma://` (`aspect_readers.uri_for`; T2
+  `229-research-40`).
+- Residue that already sits on a prefix-free segment is repaired. Such
+  labels exist today: `nx catalog rename-collection --allow-legacy` skips
+  "the is_conformant_collection_name gate on the new name"
+  (`collections.py:236`, gate at `:287-293`), and `moveTo` has moved the
+  collection's residue onto the new label, and onto any such label a
+  re-home, re-embed move or collection update targets, as
+  `catalog_reconcile_commit` has for a reconcile repoint (T2
+  `229-research-57`, `229-research-62`). How many rows that touched is unmeasured; P1.2
+  counts them on every install. P2.10 registers one RDR-246 data move per
+  table that holds a source URI (`catalog_documents`, `document_aspects`,
+  `document_highlights`) that restores a file-routed segment: a
+  `chroma://S/rest` value whose segment `S` has no `rdr__`, `docs__` or
+  `code__` prefix, on a row filed under `S` whose registry row has content
+  type `code`, `docs` or `rdr`, becomes `chroma://<content_type>__S/rest`.
+  A content type's name prefix is `<content_type>__` (`CollectionName`
+  renders `f"{self.content_type}__{self.owner_id}..."`,
+  `collection_name.py:90-93`), so `isNote` classes the value as residue
+  again and the stale-note repair skips it. Inferred, not read: every
+  URI-move path leaves a row's URI segment equal to its new collection
+  when its transaction commits (the rename in two UPDATEs, the URI's
+  selected by the new collection, `CatalogRepository.java:11412-11414`,
+  `:11463-11466`; the others in one; T2 `229-research-67`), so
+  moved residue names its own collection; a row whose new value a live
+  document already holds (catalog-016) is skipped, stays counted, and
+  leaves the move's verification empty. The `file://` identity is not
+  the target: `uri_for` returns `"file://" + os.path.normpath(source_path)`,
+  which a SQL template does not reproduce (inferred, not read), and a
+  `file://` value can collide with the document a later re-index made for
+  the same path. No safe rule covers two shapes, which P1.2 counts and
+  this RDR leaves unrepaired: residue whose segment no longer names its
+  collection, and residue that `note-uri-001` rewrote to `nx-note://<label>/`
+  because the rename came before that changeset (inferred, not read: it
+  rewrote every `chroma://` value whose segment is not file-routed,
+  `note-uri-001-backfill.xml:24`), which no string rule tells from a note.
+- From P2.10 no path moves `chroma://` residue, or an `nx-note://` value
+  with a file-routed segment: not `NoteUri.moveTo` on rename, re-home, the
+  re-embed move or the collection update, and not
+  `catalog_reconcile_commit` (item 7; T2 `229-research-55`,
+  `229-research-62`). Residue
+  keeps its prefixed segment, and the stale-note repair keeps skipping it
+  at `if (!NoteUri.isNote(uri)) continue;` whether or not that segment
+  still names a live row (T2 `229-research-42`).
+
+`note-uri-corpus.json` does not gain a content type.
 
 ### Existing Infrastructure Audit
 
@@ -616,8 +1478,10 @@ same attributes as any other). Phase 4 drops the column and
 | Lifecycle at registration | `CatalogRepository.upsertCollection`, `lifecycleStateForImport` | Extend: explicit `lifecycle_state` input; prefix only as the import fallback. |
 | Surrogate key | `catalog_collections`, the fk-002 / fk-003 / vectors-030 / vectors-054 foreign keys | New column and constraints; the fk-002 `NOT VALID` then validate pattern is reused for every switch. |
 | Row cache | Engine `CollectionRegistry` (keyed by tenant and name), client `mcp_infra._collections_cache`, client registration cache | Change: key by `collection_id`, with a label index for the route boundary. |
-| Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI rewrite; `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
+| Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI and aspect-task rewrites (`AspectTaskRefs`); `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
 | Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: predicate and name hash on `collection_id`; every existing index rebuilt. |
+| Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, one per foreign key for each validation (P3.3a, P3.3c), and one per table whose `on_complete` adds the id key beside the name key; no new mover. |
+| Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | New code in the reconciler's pattern (P3.3b): the reconciler builds per-collection HNSW indexes (`PciBuilderSession.java:115-118`), not per-leaf unique indexes. Background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
 | Recovery bundle | `catalog/recovery_bundle.py` | Extend: the format carries the registry row; the name path stays for N minor releases (Open Item O1). |
 
 ### Decision Rationale
@@ -631,7 +1495,8 @@ rename rewrites the schema's largest tables. Once those reference an id, a
 rename is one row and the label can be whatever a person finds useful,
 which is what Sam's opaque-id ruling needs. The census-first order follows
 RDR-204's method, which worked; the widened gates exist because RDR-204's
-gates reported done while 106 of the census's sites were outside them. The
+gates reported done while most of the census's sites were outside them (157
+of 203 on develop `020118bf7`; T2 `229-research-31`). The
 strangler order is Sam's own condition for reopening the phase ("with good
 planning/execution (strangler pattern, etc), this should not be an issue",
 2026-10-18).
@@ -718,15 +1583,22 @@ every script and note URI that names one.
   disagreeing row is listed and decided before Phase 2 starts.
 - **Risk**: A migration source loses its only way to learn attributes.
   **Mitigation**: the non-stranding rule (item 9) and its tests-first step.
-- **Risk**: The chunks re-key and the per-collection index rebuild take
-  longer than a maintenance window on the larger tenant. **Mitigation**:
-  Critical Assumption 5, timed on a PITR fork in P3.2 before the changeset
-  is final; the backfill runs in bounded per-tenant batches while both
-  columns are written, so only the key swap needs the window.
-- **Risk**: A writer misses the dual write, leaving a row with a null
-  `collection_id` when the switch validates. **Mitigation**: the `NOT VALID`
-  then validate pattern fails the validation loudly; a census test counts
-  null ids per table before each switch.
+- **Risk**: The chunks re-key and the per-collection index rebuild run for
+  hours on a large store. **Mitigation**: none of it runs at boot. The stamp
+  is a resumable data move, the builds follow the reconciler's pattern, and
+  the swap is one `on_complete` transaction (item 6). Critical Assumption 5
+  is timed on a PITR fork and sized on a local store in P3.2 before the
+  changesets are final.
+- **Risk**: A writer misses the dual write. Under P3.1's `NOT VALID` CHECK
+  its insert, or its update of a row the stamp has not reached, fails at
+  once (inferred, not read: PostgreSQL checks every new row version), so a
+  missed writer is a write failure after P3.1's cut, not a null found at the
+  switch. **Mitigation**: P3.1 works from the writer census (109 Java write
+  sites, 26 SQL functions; T2 `229-research-41`) and tests each path, and a
+  census test counts null ids per table before each switch. That census
+  test runs on fixtures. The guard on a user's install is that its readers
+  switch only once its own stamp moves have `completed_at` set (item 6,
+  "Readers during the stamp").
 - **Risk**: The engine change to registration lifecycle reaches a client
   that still relies on the prefix inference. **Mitigation**: the client
   never registers quarantine siblings since nexus-syfes (the engine does,
@@ -737,9 +1609,16 @@ every script and note URI that names one.
 
 ### Failure Modes
 
-- A write path reads a collection with no row: `CollectionNotRegisteredError`
+- A strict reader reads a collection with no row: `CollectionNotRegisteredError`
   names the collection and the register call that should have preceded the
-  write. Visible, not silent.
+  read. Visible, not silent. A write path that finds no row answers with the
+  mint-class derivation, as it does today (item 1).
+- A write path cannot read the row (a catalog or listing outage): it writes
+  with the name's model, flagged, and the unchanged-content skip does not
+  re-index a file on that guess. Today's behaviour is kept: "A row read
+  that FAILED answers the name too, flagged ``False``: the skip must not
+  judge a stored stamp against that guess" (`doc_indexer._target_model`;
+  T2 `229-research-36`).
 - A new parse site is added outside `legacy_names`: the client census fails
   with the file, line and shape.
 - The SQL live-body gate misresolves a function's last definer: the gate's
@@ -747,9 +1626,12 @@ every script and note URI that names one.
   rewrites, so an empty scan fails rather than passing.
 - A label clash on a recovery-bundle import: that collection is refused
   with both labels named; the rest of the bundle imports.
-- A route receives a label that two live rows hold: impossible once the
-  partial UNIQUE exists; before it exists (Phases 1 and 2) the name is
-  still the primary key.
+- A route receives a label that two live rows hold: impossible in every
+  phase. Until P4.1 the name is the primary key. From P4.1 the partial
+  UNIQUE on live labels holds it: added in P3.6 over `superseded_by`, and
+  re-created by P4.1 over `superseded_by_id IS NULL` in the changeset that
+  drops `superseded_by` (item 7). That column is NULL exactly on live rows,
+  under its own CHECK (item 6).
 
 ## Implementation Plan
 
@@ -757,9 +1639,24 @@ every script and note URI that names one.
 
 - [x] Sam's rulings on the open questions (D1 to D5, 2026-10-18 and
   2026-11-08).
-- [ ] Critical Assumptions 1 and 6 measured (P1.2).
-- [ ] Critical Assumption 5 measured (P3.2) before the Phase 3 switch
-  changesets are final.
+- [ ] Critical Assumptions 1 and 6 measured (P1.2), and Critical
+  Assumption 3's residue rows counted there on every install.
+- [ ] Critical Assumption 5 measured (P3.2) before P3.1's changeset is
+  final, and so before the Phase 3 switch changesets: it sets each move's
+  `chunk_size`, `sleep_ms` and `statement_timeout_ms`.
+- [ ] RDR-246's data-move mechanism active on the cloud before P2.10's
+  repair moves and Phase 3 run there:
+  nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
+  boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
+  on Sam's go: cloud pg_background install and the first registered move")
+  open (T2 `229-research-32`). It gates the first cloud run of P2.10's
+  repair moves and of P3.1's move, not their registration, so P2.10's can
+  be the first registered moves that .2.23 waits for (T2
+  `229-research-57`). A Phase 3 cut can still reach an install whose moves are
+  blocked. There its readers stay on names (item 6, "A blocked move"). A
+  BYO or `--no-pg-bundle` PostgreSQL "gets it from its DBA" (RDR-246 lines
+  801-802); until then that install is such a case (Cross-Cutting, "BYO
+  or `--no-pg-bundle` local PostgreSQL").
 
 ### Minimum Viable Validation
 
@@ -785,37 +1682,69 @@ its acceptance is that test green plus the census pin it lowers.
 **Phase 1: the census and the measurement**
 
 - P1.1 Widen the client census (new shapes, derived helper set, class label
-  per site) and re-pin at the measured count. First live run pasted into the
-  bead.
+  per site) and re-pin at the measured count. The shapes include every shape
+  of the routing census (item 4; T2 `229-research-39`), so the routing
+  class is measured, not listed. First live run pasted into the bead.
 - P1.2 Read-only census on both production tenants: per live row, row versus
   name for content type, model, version and lifecycle; owner differences
   counted separately as expected; live labels that would clash under a
-  partial UNIQUE (Critical Assumption 6). Bounded load, results in T2.
+  partial UNIQUE (Critical Assumption 6); live `(content_type, owner_id,
+  embedding_model)` tuples with more than one candidate row, which
+  `collectionForTuple` today settles by `NAME ASC` behind a grandfathered
+  filter D5 drops; and live names that already match `^c[0-9]+$`, the
+  minted form (T2 `229-research-38`); and tombstones whose `superseded_by`
+  names no row of their tenant, which the stamp cannot give an id (item 6;
+  T2 `229-research-50`). Bounded load, results in T2.
+  Also, on every install as a pre-flight and not only on the two tenants,
+  the rows of `catalog_documents`, `document_aspects` and
+  `document_highlights` whose `chroma://` segment has no `rdr__`,
+  `docs__` or `code__` prefix, split by whether the row's collection has content type `code`,
+  `docs` or `rdr`; among those, the rows whose segment is not their own
+  collection; and the `nx-note://` rows of such a collection whose segment
+  has no `rdr__`, `docs__` or `code__` prefix (Critical Assumption 3,
+  item 12; T2 `229-research-57`). Inferred, not read: it extends the
+  per-collection `chroma://` census that `nx catalog backfill-source-uri`
+  prints today (`backfill.py:74`, `:90`) and ships as an `nx doctor` row
+  before P2.10's repair move registers.
   Blocks P2.2 onward.
 - P1.3 Widen the engine Java gate to the `quarantine-` literal; add the SQL
   live-body gate. First live run pasted into the bead.
 - P1.4 `http_catalog_client` reads the next version from the `for_tuple`
   row's `model_version`, not by parsing the returned name; `collectionForTuple`
   breaks ties by a stable column, not by name. Test: a row whose
-  `model_version` differs from its name's suffix.
+  `model_version` differs from its name's suffix; and a repo with a legacy
+  slug collection and a conformant collection on one tuple resolves the same
+  collection before and after P1.4, and again after D5's filter drop
+  (P3.8).
 - P1.R Review gate for Phase 1 (code-review-expert and substantive-critic;
   "Ship when the three gates are green at pins that match a fresh census").
 
-**Phase 2: readers move to the row**
+**Phase 2: readers move to the row, and residue stops moving**
 
 - P2.1 Non-stranding tests first: recovery bundle import, migrate-fallback,
-  legacy-collection migration, ETL import, each with a row-less legacy name.
-  Blocks P2.2 to P2.8.
+  legacy-collection migration, ETL import, each
+  with a row-less legacy name.
+  Blocks P2.2 to P2.9.
 - P2.2 `resolve_collection`, `find_collection` and the `legacy_names`
   module; move the parsers; classify every remaining caller.
 - P2.3 Write paths: chunk metadata model and indexer target model from the
-  row (Gap 1). Includes the per-document HTTP call count test for Critical
-  Assumption 2.
-- P2.4 Score calibration and taxonomy thresholds from the row.
+  row (Gap 1), keeping the three outcomes of item 1. Includes the
+  per-document HTTP call count test for Critical Assumption 2, on an
+  existing collection and on a new one that has no row yet. Test: a
+  listing outage during `nx index md` neither fails the write nor
+  re-indexes an unchanged file.
+- P2.4 Taxonomy thresholds from the row. Score calibration already reads
+  the row first and parses the name only when that answers nothing
+  (`scoring.py:175-182`), item 1's NoRow outcome, which stays (T2
+  `229-research-49`).
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
-  `PgVectorRepository`; client `_BYPASS_SCHEMA_PREFIXES` reads the row.
-- P2.6 Changeset after `vectors-030`: `chash_conformance_report`,
+  `PgVectorRepository`; the `quarantine-` half of the client's
+  `_BYPASS_SCHEMA_PREFIXES` tests reads `lifecycle_state` (the `taxonomy__`
+  half is P2.9's).
+- P2.6 Changeset after `vectors-030` and after each function's last
+  definer (`vectors-005`, `vectors-053`, `vectors-056`; T2
+  `229-research-23`): `chash_conformance_report`,
   `quarantine_restore_chunks`, `reaper_expire_client_quarantine` read
   columns. Under `PlpgsqlCheckGateTest`.
 - P2.7 Retire `repo_identity.list_sibling_collections`' name matcher (no
@@ -826,59 +1755,371 @@ its acceptance is that test green plus the census pin it lowers.
   `collection_for_repo` uses the returned row instead of rendering. Test: a
   knowledge collection whose label is not of the conformant shape is found
   by its subject.
-- P2.R Review gate for Phase 2. Engine cut for P2.5 and P2.6; client floor
-  bumps in the release that ships P2.3 onward.
+- P2.9 Routing by content type reads the row (item 12): the 23 routing
+  sites and the `taxonomy__` half of the 12 `_BYPASS_SCHEMA_PREFIXES` tests
+  (T2 `229-research-39`, listed in item 12), the shipped `"code__*"` exclude
+  default, and the engine's `isFileRoutedCollection`, which tests a live
+  collection. The URI-string classifiers (`NoteUri.isNote`, `canonical`,
+  `is_note_uri`, `canonical_note_uri`, `_collection_is_file_routed`,
+  `db/note_uri_pairs.py:69`) are the fifth class and are not moved, and
+  `note-uri-corpus.json` is unchanged. The recovery-bundle sites are
+  migration sources and wait for P3.9. P1.1's widened census measures the
+  routing class at zero. Test, for each content type the routers key on
+  (docs, knowledge, rdr, code), with a fixture `c<digits>` label that
+  carries no prefix: a docs collection still gets its aspect extractor when
+  opted in, its quality boost and its file-routed identity; a knowledge
+  collection still gets its base extractor, quality boost and note
+  identity; an rdr collection its frontmatter extractor and file-routed
+  identity; a code collection its search threshold and over-fetch, its
+  chunk content type and the local-mode taxonomy exclusion. On the engine,
+  the stale-note repair still tells file residue from notes. Blocks P3.6 and
+  P3.8.
+- P2.10 Engine and client: `NoteUri.moveTo` rewrites only `nx-note://` URIs that
+  `isNote` classes as notes, and `namesCollection` selects only those; a
+  changeset redefines `nexus.catalog_reconcile_commit` with the same rule
+  in its three URI rewrites; so no path moves `chroma://` residue or an
+  `nx-note://<file-routed>` value (item 7; T2 `229-research-55`,
+  `229-research-56`, `229-research-62`). It changes no schema. Its
+  changeset also registers the repair of
+  residue already on a prefix-free segment, one data move per table
+  (`catalog_documents`, `document_aspects`, `document_highlights`), with
+  item 12's rule as the template and, as the verification, the rows that
+  still match it with a free new value; never a boot rewrite (RDR-246).
+  The `catalog_documents` move runs first and its `on_complete` registers
+  the two satellite moves, as the chunks swap registers its child moves
+  (item 6). Only documents can meet a held value: highlights are unique
+  on `(tenant, doc_id)` and aspects on `(tenant, collection,
+  source_path)` (`CatalogRepository.java:7319-7322`). So a satellite row
+  is repaired only where its document was, and one whose document was
+  skipped for a held value is skipped too and counted. From P3.1's cut,
+  P3.1's CHECK would refuse a repair UPDATE of a row the stamp has not
+  reached, so P3.1's writer census includes the move templates open at
+  its cut, and P3.1's changeset supersedes any P2.10 repair move not yet
+  complete with one whose template also sets `collection_id` where the
+  row has none ("a new move with a new label" that "names the old label
+  in `supersedes`", RDR-246 lines 961-963; T2 `229-research-67`).
+  The first cloud run of those moves waits for nexus-f3yqd.2.23, as
+  P3.1's does (Prerequisites). RDR-246 sets no default to borrow: a
+  move's chunk size and `sleep_ms` are "the value measured in the Minimum
+  Viable Validation, written into the registering INSERT before the
+  release" (RDR-246 lines 395-398), and P3.2 times Phase 3 only. So P2.10
+  carries its own sizing step before its changeset is final: it times the
+  three moves on a PITR fork of the larger production tenant and sizes
+  them on a local store, starting from the cloud `sleep_ms` RDR-246's
+  validation set, and writes `chunk_size`, `sleep_ms` and
+  `statement_timeout_ms` into the INSERT. Inferred, not read: dml_utils
+  walks every row of the driving table, so the cost follows the table's
+  size, not the residue count (T2 `229-research-66`). On the client, `nx catalog
+  backfill-source-uri` today refuses residue that does not start
+  `chroma://<physical_collection>/` as "malformed" (`backfill.py:109-111`),
+  which after P2.10 is all moved and repaired residue. P2.10 relaxes the
+  check to the residue's own segment: a `chroma://` row is a candidate
+  when its own segment has a `rdr__`, `docs__` or `code__` prefix or its
+  collection's row has content type `code`, `docs` or `rdr`; the path is
+  the text after `chroma://<own segment>/`, still required absolute; and
+  the new value is `uri_for`'s `file://` result, which does not depend on
+  the collection's name. So the verb can still retire residue to its
+  `file://` identity, whatever segment it carries (T2 `229-research-65`).
+  Test, for the repair: on a fixture, a
+  docs collection renamed with `--allow-legacy` to a prefix-free label
+  before P2.10 has its residue rewritten to a `docs__` segment and classed
+  file-routed; a knowledge collection's `chroma://` note on a prefix-free
+  label is left alone; a row whose new value a live document holds is
+  skipped and counted. Test, for the rule: moving the documents of a file-routed
+  collection that carry `chroma://` residue and an `nx-note://<file-routed>`
+  value onto a prefix-free label, by a rename, a re-home, a re-embed move,
+  a collection update and a reconcile commit that repoints them, leaves
+  both on their old segment, still classed
+  file-routed by `NoteUri.isNote` and `is_note_uri`, and skipped by the
+  stale-note repair; `NoteUriCorpusTest`'s `moveTo` assertions and
+  `NoteUriMoveTest`'s (`:108`, `:187`, `:225`), which pin the `chroma://`
+  arm today, are inverted. Test, for the verb: moved
+  residue and repaired residue are re-derived to `file://`, not refused.
+  Blocks P3.6 and P3.8.
+- P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6, P2.9 and P2.10; client
+  floor bumps in the release that ships P2.3 onward.
 
 **Phase 3: the surrogate key and the label**
 
-- P3.1 Expand: `catalog_collections.collection_id` with UNIQUE `(tenant_id,
-  collection_id)`; `collection_id` columns on every referencing table
-  (item 6 list); engine dual-writes; per-tenant bounded backfill; a census
-  test that counts null ids per table.
-- P3.2 Spike: time the chunks and centroid re-key and the per-collection
-  index rebuild on a PITR fork of the larger production tenant (Critical
-  Assumption 5). Result in T2 and on the bead; it sets the window and the
-  batch size for P3.3 and P3.4.
-- P3.3 Switch the foreign keys: the eight registry foreign keys and the
-  RDR-225 composite onto `collection_id`, `NOT VALID` then validated; the
-  chunks and centroid primary keys and their three children rebuilt per
-  leaf. Walked on a PITR fork before the cloud deploy.
-- P3.4 Rebuild every per-collection index on `collection_id` (predicate and
-  name hash); `PciCatalog` reads the id back from the predicate.
-- P3.5 Engine readers and routes: `CollectionRegistry` keyed by id with a
-  label index; every collection-taking route accepts `collection_id` and a
-  label; responses carry both. Client caches keyed by id.
-- P3.6 Label rule: partial UNIQUE on live `(tenant_id, name)`;
+- P3.1 Expand, after P3.2: `catalog_collections.collection_id` (identity)
+  with UNIQUE `(tenant_id, collection_id)` and UNIQUE `(tenant_id,
+  collection_id, embedding_model)`, the RDR-225 composite's future target
+  (item 6), as plain changeset work on a small table; `collection_id` columns on every referencing table (item 6
+  list) and, `NOT VALID`, the CHECK `(<name column> IS NULL) =
+  (collection_id IS NULL)` on each, except `superseded_by`, whose CHECK is
+  `(superseded_by = '') = (superseded_by_id IS NULL)` and whose stamp
+  resolves a non-empty name to the successor's id (item 6); `CHECK
+  (collection_id IS NOT NULL)` `NOT VALID` on `nexus.chunks` and
+  `nexus.taxonomy_centroids`, the id key's guard once P4.1 drops the name
+  key (item 6); every writer (item 6's census: 109 Java
+  write sites, 26 SQL functions) sets the id on insert and update from this
+  cut, and its acceptance re-runs that census over helper-routed and
+  by-name writes and the move templates open at the cut, finds every writer of `taxonomy_centroids` before the
+  CHECK lands (item 6; `TaxonomyCentroidRepository.java:156` is one), and
+  supersedes any P2.10 repair move not yet complete (P2.10); `TenantExport`'s table model in the same cut (P3.11); the stamp
+  registered in `nexus.data_moves` per table, run per tenant and leaf, with
+  a null-`collection_id` verification query, the CHECK's VALIDATE as its
+  `on_complete`, and the `chunk_size`, `sleep_ms` and `statement_timeout_ms`
+  P3.2 set; a census test that counts null ids per table; the boot-time
+  completion check, with the read set and gates later releases extend
+  (item 6, "Readers during the stamp"). Test: an upgrade
+  boot registers the move and rewrites no row of a large table; a killed run
+  resumes from its last committed batch; an insert and an update without the
+  id are refused; a name-path rename gives every rewritten row, and the
+  collection's `chunk_orphaned_at` rows, the new registry row's id.
+- P3.2 Spike, before P3.1's changeset is final: time the stamp, the chunks
+  and centroid key swap (its `on_complete`, with the directly validated
+  composite foreign key), the ten foreign-key validation moves, the P3.3b
+  unique-index pass, the per-collection index rebuild, P3.7's name-key drop
+  move and P4.1's
+  chunk-family drop on a PITR fork of the larger production tenant, and
+  size them on a local store of the largest size class (Critical
+  Assumption 5), including the extra id-key index from P3.3c to P4.1.
+  Result in T2 and on the bead; it sets each move's `chunk_size`,
+  `sleep_ms` and `statement_timeout_ms` ("the bound on each verification
+  run and on `on_complete`", RDR-246 line 403), and says whether any
+  `on_complete` needs a maintenance window.
+- P3.3 Switch the keys, as three beads; "P3.3" elsewhere means all three.
+  Walked on a PITR fork before the cloud deploy and on a local store.
+  `TenantExport`'s key model changes in P3.3a's and P3.3c's cuts (P3.11).
+  - P3.3a Foreign-key repoint: the seven registry foreign keys from tables
+    that are not partitioned gain an id twin on `collection_id`, `NOT VALID`,
+    beside the name key, which P3.3a does not drop (the name-key drop move
+    of P3.7 drops all seven; item 6, Switch), and
+    one validation move per referencing table registered in the same
+    changeset (driving table that table, template a re-stamp of rows still
+    null, the VALIDATE as its `on_complete`; item 6, Switch). Test: each
+    move completes and leaves its constraint validated. After P3.1.
+  - P3.3b Per-leaf unique-index pass: new engine code in the reconciler's
+    pattern builds, per leaf, the unique indexes for the new chunks and
+    centroid keys (item 6). It starts once the completion check reports
+    every stamp move and every P3.3a move complete, and its last step
+    registers each table's P3.3c swap move; the leaf-creating helper
+    creates the index on a new leaf. Test: a pass ended mid-build leaves an
+    INVALID index that the next pass drops and rebuilds; the swap is never
+    registered while a leaf's unique index is missing or INVALID.
+  - P3.3c Swap: per table, a move registered by P3.3b's pass (driving table
+    that table, template a re-stamp of rows still null) whose `on_complete`
+    adds the id key beside the name primary key by `ALTER TABLE ONLY ...
+    ADD UNIQUE`, per-leaf `ADD ... USING INDEX` and `ALTER INDEX ... ATTACH
+    PARTITION`, adds the three child id keys `NOT VALID` with `ON UPDATE
+    CASCADE`, registers the three moves that validate them (the chunks
+    swap only), and validates the RDR-225 composite on the id directly
+    (item 6). It drops nothing; the name primary key and the three name
+    child keys stay until P4.1, and `chunks_collection_fk` until P3.7's
+    name-key drop move. Test: no
+    child validation move exists before its constraint does; after the
+    swap, a chunk and a centroid upsert on the name target still succeed,
+    and a name-path rename leaves every child row with the new id.
+- P3.4 After P3.3: rebuild every per-collection index on `collection_id`
+  (predicate and name hash) through the PCI reconciler, which reports in
+  `boot_work` and rebuilds a killed build from the start; each collection's
+  index is built only once none of its rows has a null id
+  (stamp-before-build, Scope boundary with RDR-247), and no build starts
+  until gate 2 of the completion check (both swaps and every validation
+  move complete), so a chunk-family `on_complete` cannot end it (item 6);
+  `PciCatalog` reads the id back from the predicate, and its records are
+  what gate 3 reads to tell that P3.4 is complete on the install. Test: a
+  collection with a row whose `collection_id` is null gets no index on the
+  id; readers and the rename stay on the name path while any collection
+  with a name-predicate index lacks a valid id-predicate one. The bounded drop of the
+  shared leaf graph that follows is RDR-247's.
+- P3.5 Readers switch to the id, as three beads; "P3.5" elsewhere means
+  all three. P3.5 ships in one engine cut with P3.7, which holds the
+  rename refusal P3.5a states (P3.7). On each install the switch waits for the completion check
+  (item 6, "Readers during the stamp"): P3.5b for every stamp move, by the
+  CONTINUE precondition or, on the chunk family, by reading both shapes;
+  P3.5a and P3.5c for gate 3, which includes P3.4 on that install. Test: a store with only half its
+  chunks stamped (the stamp move paused part-way) still searches, lists and
+  renames correctly after the P3.5 and P3.7 cut while gate 3 does not
+  hold, and reads by the id once the check sees gate 3 hold, with no
+  restart; from gate 3 a rename is refused until P3.7's one-row rename
+  can run (P3.7).
+  - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
+    label index; every collection-taking route accepts `collection_id` and
+    a label; responses carry both. Client caches keyed by id, which they
+    trust as stable only once P3.7's name-key drop move has `completed_at`
+    set on the install (item 6): until then a rename gives the collection a
+    new id, and from gate 3 until P3.7's one-row rename can run (that move
+    complete and every P3.5b changeset applied) the engine refuses a
+    rename, with a typed error that names the missing condition, the move
+    or the restart. The refusal ships in P3.7's engine cut, which is
+    P3.5's (P3.7).
+  - P3.5b SQL readers: the plpgsql functions, the views keyed on names
+    (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
+    name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
+    physical_collection, deleted_at ON nexus.catalog_documents`) read the
+    id (T2 `229-research-37`).
+  - P3.5c Java readers: the jOOQ queries on the name columns read the id,
+    and the two upserts (`PgVectorRepository.java:1294`,
+    `TaxonomyCentroidRepository.java:161`) take the id key as their
+    conflict target, from gate 3 on the install (item 6).
+- P3.6 Label rule, after P2.9 and P2.10: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
-  character is refused, a second live row with one label is refused, a
-  superseded row's label can be reused.
-- P3.7 Rename becomes a one-row label update plus the note-URI rewrite;
-  history tables stop being rewritten. Test: a rename leaves chunk,
-  manifest and taxonomy rows untouched and the per-collection index in
-  place.
-- P3.8 Minting (item 8): the engine mints `c<id>` when no label is given;
+  character is refused, a second live row with one label is refused, and a
+  user label of the minted form (`c` followed by digits) is refused; on
+  Windows, a label holding a space, `%`, `:` and a non-ASCII character is
+  registered, listed, searched and renamed (Cross-Cutting, Windows).
+  Label reuse after supersession waits for P4.1. The "second live row
+  with one label is refused" test stays in the suite through P4.1.
+- P3.7 After P3.4 and P3.5: rename becomes a one-row registry update plus the
+  note-URI rewrite; history tables and the referencing tables' dead name
+  columns stop being rewritten (item 7); queued aspect tasks are still
+  rewritten. On each install the one-row rename waits for gate 3 of the
+  completion check, which includes P3.4's index builds there, and until it
+  passes the rename keeps its fourteen-table rewrite (item 6, "Readers during the stamp"). P3.7 also ships the name-key drop move: the
+  completion check registers it once gate 3 holds, its `on_complete` drops
+  the seven name foreign keys that refuse a one-row rename and the queue's
+  key where that table exists, and the
+  one-row rename waits for its `completed_at` as well, and for every
+  P3.5b changeset to have applied (item 6, Switch; T2
+  `229-research-58`, `229-research-61`, `229-research-64`). From gate 3
+  until the one-row rename can run, that is while the move has no
+  `completed_at` or a P3.5b changeset has not applied, the engine refuses
+  a rename with a typed error that names the missing condition, the move
+  or the restart that applies P3.5b's changesets, because
+  readers are on the id and the name-path rename would give the
+  collection a new id (item 6; T2 `229-research-63`). P3.7 ships in one
+  engine cut with P3.5: the rename refusal, the name-key drop move's
+  registration at gate 3 and the one-row rename are all in that cut,
+  because the drop label joins the completion check's read set only with
+  the release that ships the move (item 6; T2 `229-research-69`). The rename, like every other URI-move path, rewrites only
+  `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
+  residue, the rule P2.10 ships (item 7). Test: a rename leaves
+  chunk, manifest and taxonomy rows untouched and the per-collection index
+  in place, and a task queued before the rename names the new label; a
+  one-row rename of a collection that has chunk rows and
+  `canary_query_ring` rows succeeds, and so does one of a collection with
+  topic assignments, aspects, topics, `taxonomy_meta` and highlights rows;
+  and the one-row rename of a file-routed collection that has `chroma://`
+  residue to a prefix-free label leaves the residue on its old segment
+  (P2.10's test covers the other four paths); a rename after gate 3 and
+  before the name-key drop move completes is refused with the move named;
+  and a rename after that move completes and before every P3.5b changeset
+  has applied is refused with the restart named.
+- P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
   indexer reroute are removed. Registration requires explicit attributes
-  (`http_catalog_client.py:3145-3151`). Stop writing
-  `legacy_grandfathered`; drop the `for_tuple` filter on it.
+  (`http_catalog_client.py:3709-3716`; T2 `229-research-29`), and the
+  registering call returns the row, which the writer uses for the first
+  write because the row cache omits a collection with no chunk yet (T2
+  `229-research-41`). Stop writing `legacy_grandfathered`; drop the
+  `for_tuple` filter on it. Test: the first `store_put` to a new subject
+  stamps the row's model with no name derivation.
 - P3.9 Recovery bundle format carries the registry row and `collection_id`;
   import re-maps ids and checks label clashes. The release that ships it
   starts the N-minor-release count (item 10, Open Item O1).
 - P3.10 Rewrite `docs/collections.md` Rule 3 and `docs/storage-tiers.md` §
   Collections for labels, minted ids and attribute lookup.
-- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.5; client
-  floor bumps in the release that first depends on each.
+- P3.11 Tenant backup carries the id (item 10), shipped in P3.1's engine
+  cut and again with P3.3's key changes: `TenantExport`'s table model gains
+  `collection_id` as a referenced column on every table that has it, and
+  the restore maps old ids to the target's. A pre-P3.1 backup's rows take
+  the id of the restored registry row with the same `(tenant_id, name)`.
+  Test: `TenantExportRegistryParityTest` is green at P3.1 and at P3.3; a
+  backup taken after P3.1 restores with every chunk on its collection's new
+  id; RDR-248's committed fixture, taken before P3.1, still loads with every
+  id filled.
+- P3.12 Day 2 surfaces, after P3.5a and P3.6: an id column in `nx
+  collection list` (it already shows content type, owner, model, dimension
+  and state, `commands/collection.py:91-95`), an `nx doctor` census of null
+  ids per table and of live labels held by more than one row, and `nx
+  collection delete` by label or id (it takes a name today,
+  `commands/collection.py:547-550`). T2 `229-research-48`. Test: each
+  surface on a fixture with a null id and a minted label.
+- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3, P3.4, P3.5
+  with P3.7 as one cut (the rename refusal, the name-key drop move's
+  registration and the one-row rename; P3.7), P3.6, P3.8 and P3.11; client
+  floor bumps in the release that first depends on each. One release may
+  hold several of these cuts, and an install may skip releases, so the
+  cut order does not decide when an install's readers switch; its own
+  stamp moves' `completed_at` does (item 6, "Readers during the stamp").
 
 **Phase 4: contract and retire**
 
-- P4.1 Primary key to `(tenant_id, collection_id)`; drop the name columns on
-  referencing tables, the `(tenant_id, name, embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`).
+- P4.0 Engine release that retires the Java name path: the jOOQ readers
+  of the name columns that P3.5 switched at gate 3, `renameCollectionTxn`'s
+  fourteen-table rewrite (the one-row rename of P3.7 is the only rename
+  left), and the name-based arms of `COLLECTION_SCOPED_TABLES`
+  (`CatalogRepository.java:10733-10760`), which keep serving delete and
+  re-home by id. Until this release the dual path stays in Java. It keeps
+  P3.1 to P3.7's changesets, moves, completion check and index passes, so
+  an install that jumps from before P3.1 to this release still reaches
+  its floor. The floor: the completion check reads gate 3, the
+  `completed_at` of P3.7's name-key drop move and whether every P3.5b
+  changeset has applied; until all three hold, the engine
+  serves migration-only. It starts, applies its changesets and runs the
+  move worker and the index passes, and refuses every collection-scoped
+  read and write with a typed error that names the floor. It does not
+  exit at boot, as the engine's other refusals do (`ChunksIsolationCheck`
+  "refuses to serve"), because the move worker and the reconciler start
+  only after `service.start()` (`Main.java:620`, `:646`, `:681`), so an
+  exiting engine would never run the moves its floor waits for (inferred,
+  not read; T2 `229-research-59`). The check is re-read when the move
+  worker records a `completed_at` and when a reconciler pass ends, so the
+  floor lifts in the running process once it holds (item 6). From a
+  half-stamped store the chain needs one restart: the boot after the
+  stamp moves complete, which applies P3.5b's CONTINUE changesets, asked
+  for by a `boot_work` entry (item 6; T2 `229-research-64`). Test, over
+  the whole chain: the P4.0 engine booted on a half-stamped store (the
+  stamp move paused part-way) refuses collection-scoped routes naming the
+  floor and reports the stamp move in `boot_work`; when the stamp
+  completes it asks for a restart; after that one restart, gates 1 to 3,
+  the name-key drop move and the floor follow in one process with no
+  further restart, and it then serves by the id.
+- P4.1 After P3.11 and P4.0; its acceptance includes RDR-248's committed fixture
+  and a stated effect on backups taken before P3.1 (item 10). Drops first:
+  the three name child keys; then the name columns on referencing tables,
+  which takes the chunks and centroid name primary keys with them; then,
+  in the registry changeset, `superseded_by` (replaced by
+  `superseded_by_id`) and the `(tenant_id, name, embedding_model)` UNIQUE;
+  and last in that changeset, the primary key swap to `(tenant_id,
+  collection_id)` (T2 `229-research-53`). No name key to the registry is
+  P4.1's: P3.7's name-key drop move has dropped all eight, the queue's
+  where that table exists (item 6, Switch; T2 `229-research-58`,
+  `229-research-61`). PostgreSQL refuses to drop "a constraint that
+  something else depends on", such as "a unique or primary key constraint"
+  a foreign key references, without CASCADE (ddl-alter), so the registry
+  changeset carries `onFail="CONTINUE"` preconditions on the
+  `completed_at` of the `catalog_collections` stamp move (P3.1), which is
+  the move that drives that table and so the label RDR-246's rule 3
+  requires for its `DROP COLUMN`, of P3.7's name-key drop move and of
+  P4.1's drop move, and a check that no foreign key references
+  `catalog_collections` but the id keys (inferred, not read: read from
+  `pg_constraint`). It is skipped and retried at each boot until all
+  hold. UNIQUE `(tenant_id,
+  collection_id, embedding_model)` stays: the RDR-225 composite depends on
+  it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
+  `229-research-44`). Each drop waits for this install's stamp, swap and
+  validation moves and for P3.4 (gate 3 of the completion check, item 6,
+  "Readers during the stamp"). On the
+  chunk family (`nexus.chunks`, the manifest, `topic_assignments`,
+  `chunk_orphaned_at`) a drop is a move's `on_complete`: a destructive
+  statement on a table a move drives "must carry a precondition on that
+  move's `completed_at` with `onFail="CONTINUE"` ...; on a chunk-family
+  table it is refused outright, by the CONTINUE-precondition lint, and the
+  step belongs in a move's `on_complete`" (RDR-246 lines 986-992). That
+  `on_complete` also removes the name arm of P3.5b's both-shapes readers.
+  The boot-time completion check registers that move once gate 3 holds,
+  so the move never exists before the moves it depends on have
+  completed, and its verification only checks its own table (T2
+  `229-research-52`). On every other table the dropping changeset carries
+  CONTINUE preconditions on that table's own stamp move's `completed_at`,
+  the label of a move that drives the table as rule 3 requires (RDR-246
+  lines 986-999), and on that drop move's, so it waits for the same gate
+  (T2 `229-research-61`). The registry changeset, after it drops
+  `superseded_by`, also re-creates the partial UNIQUE on live labels over
+  `superseded_by_id IS NULL` (item 7), which holds because the CHECK
+  `(superseded_by = '') = (superseded_by_id IS NULL)` keeps that column NULL
+  exactly on live rows. Test: a superseded
+  row's label can be reused by a new live collection, and P3.6's test that
+  refuses a second live row with one label still passes.
 - P4.2 Drop `legacy_grandfathered` and `idx_catalog_collections_legacy`.
 - P4.3 Delete every parser outside `legacy_names`; both census gates fall to
-  the migration-source and diagnostic floor.
+  the migration-source and diagnostic floor. The routing class has been
+  zero since P2.9, as P1.1's widened census measures it.
 - P4.4 At minor release N+1 after P3.9 (Open Item O1): old bundles refused with the
   re-export message naming the last version that imports them;
   `legacy_names` loses its bundle callers.
@@ -886,10 +2127,35 @@ its acceptance is that test green plus the census pin it lowers.
 
 ### Phase dependencies
 
-P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.8. P3.1 waits for Phase
-2. P3.2 blocks P3.3 and P3.4. P3.3 blocks P3.5 and P3.7. P3.8 waits for
-P2.8. Phase 4 waits for every Phase 3 bead to be deployed on both
-production tenants; P4.4 waits for its release count.
+P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
+2 and for P3.2; the first cloud run of its move waits for nexus-f3yqd.2.23
+(Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. Within P3.3, P3.3c waits for P3.3b, whose
+indexes its verification requires. P3.12 waits for P3.5a and P3.6. P3.3a waits for P3.1. P3.3 blocks P3.5 and P3.7. P3.7 also waits
+for P3.4 and P3.5 (item 7), and P3.5 and P3.7 ship in one engine cut,
+with the rename refusal and the name-key drop move's registration (P3.7). P3.8 waits for P2.8, P2.9, P2.10 (the
+residue rule, item 7), P3.6 (which
+enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
+item 8); P3.6 waits for P2.9 and P2.10. Phase 4 waits for every Phase 3 bead to be deployed on both
+production tenants; P4.4 waits for its release count. These are bead
+orders. At run time each install also passes the completion check's gates
+(item 6, "Readers during the stamp"): P3.3b's pass waits for the stamp and
+P3.3a's moves; P3.3c's swap is registered by that pass only once every leaf
+has a valid unique index; P3.4's builds wait for the swaps and every
+validation move; the engine's id readers, P3.7's name-key drop move and
+one-row rename and P4.1's
+drop move wait also for P3.4 on that install; the one-row rename waits
+also for the name-key drop move's `completed_at` and for every P3.5b
+changeset to have applied, and from gate 3 until then the engine refuses
+a rename. P3.5b's SQL readers wait for
+the stamp moves, and apply at the first boot after them. P4.0's engine
+serves migration-only until gate 3, the
+name-key drop move's `completed_at` and P3.5b's changesets hold on the
+install (P4.0). Every other gate takes effect in the running engine when
+the check is re-read (item 6). P4.1
+waits for P4.0 in bead order. On each install P4.1's registry changeset
+waits for the `catalog_collections` stamp move, P3.7's name-key drop move
+and P4.1's drop move to have `completed_at` set, and for no foreign key to
+reference the registry's name (P4.1).
 
 ### Day 2 Operations
 
@@ -897,7 +2163,7 @@ production tenants; P4.4 waits for its release count.
 | --- | --- | --- | --- | --- | --- |
 | Census pins (client, engine, SQL) | In scope (the tests print their tables) | In scope | N/A | In scope (`-m lint` and the Java gate tests) | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
-| `collection_id` and label | `nx collection list` (id, label, attributes) | `nx catalog show` | `nx collection delete` (by label or id) | `nx doctor` null-id and label-clash census | Recovery bundle (carries the row from P3.9) |
+| `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or id, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (carries the id from P3.1's cut, P3.11) |
 
 ### New Dependencies
 
@@ -917,11 +2183,30 @@ None.
 - **Scenario**: a recovery bundle recorded under a legacy two-segment and a
   four-segment name is restored after each Phase 2 and Phase 3 bead —
   **Verify**: it restores with the same attributes as before.
+- **Scenario**: a docs, a knowledge, an rdr and a code collection, each
+  with a minted, prefix-free label, are indexed, searched and repaired
+  after P2.9 — **Verify**: each gets the behaviour its content type routes
+  to (P2.9's list: extractor, quality boost, search threshold and
+  over-fetch, chunk content type, taxonomy exclusion, file-routed or note
+  identity), and the engine's stale-note repair does not class file
+  residue as notes.
 - **Scenario**: a new raw parse site of each shape is added to a fixture
   file — **Verify**: the client census fails, naming the shape.
 - **Scenario**: `chash_conformance_report` before and after the rewrite on
   the same seeded data — **Verify**: identical rows.
-- **Scenario**: rename a collection after P3.7 — **Verify**: one registry
+- **Scenario**: an engine with the P3.5 and P3.7 cut boots on a store with only half
+  its chunks stamped (the stamp move paused part-way) — **Verify**: search,
+  listings and a rename return what they returned before the cut while
+  gate 3 does not hold, and the
+  engine reads by the id once the check sees gate 3 hold, with no restart.
+- **Scenario**: an engine with P4.0 boots on a store with only half its
+  chunks stamped — **Verify**: it serves migration-only, refusing
+  collection-scoped routes with an error that names the floor, the stamp
+  move keeps running in `boot_work`, it asks for one restart once the
+  stamp completes, and after that restart it reaches gate 3, the
+  name-key drop move and the floor in one process and serves by the id.
+- **Scenario**: rename a collection that has chunk and `canary_query_ring`
+  rows after P3.7 — **Verify**: one registry
   row changes; chunk, manifest, taxonomy and history rows and the
   per-collection index are untouched; search by the new label returns the
   same results.
@@ -949,8 +2234,10 @@ No new query on a hot path is intended: the row cache already serves corpus
 resolution. Critical Assumption 2 states the one place this could fail (a
 write path naming a collection the cache does not hold) and P2.3 measures
 it. The chunks key shrinks from a text name to a bigint, so the chunks
-primary key and its children get smaller; the one-off cost is the re-key
-and index rebuild, measured in P3.2.
+key and its children get smaller from P4.1. From P3.3c to P4.1 both the
+name primary key and the id key exist, so those indexes are larger for that
+window (inferred, not read); the one-off cost is the re-key, the window's
+extra index and the index rebuild, measured in P3.2.
 
 ## Decisions (Sam)
 
@@ -980,8 +2267,8 @@ threads board, recorded through halcyon's session).
 - **O1. How many minor releases does the old-bundle fallback last?** D4
   says a stated number; Sam sets it at the gate. Proposed: 20 minor
   releases after the release that ships the new bundle format (P3.9).
-  conexus shipped 36 releases in the 30 days to 2026-11-07, so 20 is about a
-  month at that rate; a smaller number shortens the window in which a
+  conexus shipped 36 releases in the 30 days to 2026-11-07, 24 of them
+  minor, so 20 minor releases is about 25 days at that rate; a smaller number shortens the window in which a
   recovery bundle from a lost installation restores on a current release,
   and the refusal message names the last version that still imports one
   either way.
@@ -990,51 +2277,305 @@ threads board, recorded through halcyon's session).
 
 ### Contradiction Check
 
-None known. The draft's tension with RDR-204's 2026-09-09 ruling is
-resolved by D1. The draft's rejection of a surrogate key is reversed by D3,
-and Alternative 2 now records the rejected name-as-key design.
+The draft's tension with RDR-204's 2026-09-09 ruling is resolved by D1. The
+draft's rejection of a surrogate key is reversed by D3, and Alternative 2
+now records the rejected name-as-key design. Gate round 1 (2026-11-19) found
+these, now resolved in the text:
+
+- Phase 3 written as boot changesets against RDR-246's rule: item 6, "How
+  each Phase 3 step runs".
+- Sam's 2026-11-12 RDR-247 ruling (stamp before build) against an
+  unordered full stamp: Scope boundary with RDR-247.
+- nexus-j4gl6, closed into RDR-247, still cited as this RDR's live tracker:
+  Problem Statement.
+- Label reuse and a one-row rename asserted in Phase 3 while the name is
+  still the primary key: item 7 and P4.1.
+
+The round 1 fix check found these, now resolved in the text:
+
+- A routing class counted over one code shape, which P2.9 said it emptied:
+  the routing census (T2 `229-research-39`), item 12 and P2.9, measured by
+  P1.1.
+- Minting allowed before the recovery bundle carries the row: item 8 and
+  P3.8 wait for P3.9.
+- "No maintenance window" asserted while Critical Assumption 5 was
+  unverified: item 6 and Deployment model now leave it to P3.2.
+- A `NOT VALID` composite foreign key on the partitioned `nexus.chunks`,
+  which PostgreSQL refuses: item 6 validates it directly.
+
+Gate round 2 (2026-11-19) found these, now addressed in the text:
+
+- Readers switched to `collection_id` with no guard that the install's
+  stamp had completed, against RDR-246's reader rule: item 6, "Readers
+  during the stamp", with P3.1's boot-time completion check, P3.5, P3.7,
+  P4.1 and the half-stamped store test (T2 `229-research-43`).
+- A composite foreign key with no UNIQUE on its new columns, validations
+  named but no moves, and the swap bead holding three kinds of work: P3.1's
+  UNIQUE `(tenant_id, collection_id, embedding_model)`, the named
+  validation moves, and P3.3 split into P3.3a to P3.3c (T2
+  `229-research-44`).
+- A label index whose predicate column P4.1 drops: P4.1 re-creates it on
+  `superseded_by_id` (item 7; T2 `229-research-45`).
+- "At every step the old path still works" against the dead name columns
+  from P3.7: the Approach now says "up to P3.4", with P3.5 and P3.7 one
+  cut and P3.6 on its own, and points at the open downgrade point.
+- The RDR-246 prerequisite stated for every install while BYO PostgreSQL
+  blocks moves, and no Windows line: Prerequisites and Cross-Cutting (T2
+  `229-research-47`).
+- Name columns with no disposition, and Day 2 promises with no bead: the
+  table in item 6 and P3.12 (T2 `229-research-48`).
+
+The round 2 fix check (`nexus_rdr/229-fix-check-1b112f9c770c`, FAIL) found
+these in the round 2 fixes, now addressed in the text:
+
+- A null-parity CHECK on `superseded_by`, which is `''` on a live row, so
+  `superseded_by_id` could never be NULL and P4.1's live-label index would
+  match nothing: `superseded_by` has its own CHECK `(superseded_by = '') =
+  (superseded_by_id IS NULL)` (item 6, item 7, P3.1, P4.1; T2
+  `229-research-50`).
+- A swap move whose verification needs P3.3b's indexes, registered before
+  they exist: P3.3b's pass registers it once every leaf's index is valid
+  (item 6, P3.3b, P3.3c; T2 `229-research-51`).
+- P4.1's drop using a verification as a wait, an undefined label set, and
+  readers and the one-row rename not waiting for P3.4: the completion
+  check's read set and three gates, with P4.1's drop move registered at
+  gate 3 (item 6, P3.4, P3.5, P3.7, P4.1; T2 `229-research-52`).
+- Name-keyed upsert targets and name-only child cascades after a swap that
+  dropped the name key, and client caches trusting ids a name-path rename
+  replaces: P3.3c adds the id key beside the name keys until P4.1, the
+  writers move at gate 3, the rename sets the new id, and caches trust ids
+  from gate 3 (item 6, P3.3c, P3.5, P4.1; T2 `229-research-53`).
+- P3.2 timing only the stamp, the swap and the rebuild: it times every
+  move and pass (P3.2, Critical Assumption 5; T2 `229-research-54`).
+
+Gate round 3 (2026-11-19, PASSED) recorded twelve residuals in
+`nexus_rdr/229-gate-latest`. Sam chose on 2026-11-19 to fix the five
+classed BLOCKS-PLANNING in the text and to carry the seven
+DISCOVER-AT-IMPLEMENTATION ones as beads at accept (ask
+`baton/rdr229-accept-route`, option 1). The five, now resolved in the text:
+
+- The `chroma://` residue rule covered the rename only: the rule is in
+  `NoteUri.moveTo`, for all four callers (item 7, item 12, P2.10; T2
+  `229-research-55`).
+- The rule was stated in force from P3.6 but owned by P3.7: P2.10 owns
+  it, and P3.6 and P3.8 wait for it (item 7, P2.10, P3.6, P3.8, Phase
+  dependencies; T2 `229-research-56`).
+- Prefix-free labels are possible today through `--allow-legacy`: the
+  "prefixed before P3.6" premise is withdrawn, Critical Assumption 3 is
+  reopened for the URI-string classifiers, P1.2 counts the rows on every
+  install, and P2.10 repairs residue already moved (item 12, Critical
+  Assumption 3, P1.2, P2.10; T2 `229-research-57`).
+- The name composite foreign keys refused P3.7's one-row rename: seven of
+  the eight name keys refuse it, and P3.7's name-key drop move drops them
+  once gate 3 holds, before the rename (item 6 Switch and Contract, P3.3a,
+  P3.3c, P3.7, P4.1; T2 `229-research-58`).
+- S-1, Phase 4 retired the engine's name path with no per-install guard:
+  P4.0, behind a boot floor (Contract, P4.0, Phase dependencies,
+  Cross-Cutting; T2 `229-research-59`).
+
+The accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL)
+found these in those fixes, now resolved in the text:
+
+- P4.1's registry primary key swap and UNIQUE drop were not ordered after
+  the name keys that depend on them: the name-key drop move also drops
+  the queue's key, and the registry changeset drops before it swaps and
+  waits on the `catalog_collections` stamp move, the name-key drop move,
+  its own drop move and a check that no key references the name (item 6,
+  Contract, P4.1, Phase dependencies; T2 `229-research-61`).
+- `catalog_reconcile_commit` is a fifth URI-move path: P2.10 redefines it
+  (item 7, item 12, P2.10; T2 `229-research-62`).
+- Readers on the id from gate 3 while a rename still minted a new id: the
+  engine refuses a rename until the name-key drop move completes and
+  every P3.5b changeset has applied (item 6, P3.5a, P3.7, Versioning; T2
+  `229-research-63`, `229-research-69`).
+- P4.0's floor waited on restarts with no trigger: the check is re-read
+  in process, and the one restart the chain needs is asked for (item 6,
+  P3.7, P4.0, Test Plan; T2 `229-research-64`).
+- `backfill-source-uri` refused moved and repaired residue: P2.10 relaxes
+  its check to the residue's own segment (P2.10; T2 `229-research-65`).
+- P2.10's repair moves had no sizing owner: P2.10 sizes them (T2
+  `229-research-66`).
+- The repair's order across its three tables, its meeting with P3.1's
+  CHECK, `NoteUriMoveTest`, and seven wording rows (P2.10, P3.1, item 8,
+  item 12, P1.2, CA5, Prerequisites, Approach; T2 `229-research-67`).
+
+The accept fix check (`nexus_rdr/229-fix-check-3c7aa425d443`, FAIL) found
+this in those fixes, recorded as the last residual of
+`nexus_rdr/229-gate-latest`. Sam chose on 2026-11-19 to fix it in the text
+(ask `baton/rdr229-refusal-owner`, option 1). Now resolved in the text:
+
+- The gate-3 rename refusal had no owner before P3.7: it ended on a move
+  only P3.7 ships and registers, so a release with P3.5 and not P3.7
+  refused every rename or reopened the new-id hazard, and the Approach
+  and Incremental adoption said each step up to P3.6 could stop alone.
+  P3.5 and P3.7 now ship in one engine cut with the refusal and the
+  name-key drop move's registration; the refusal holds from gate 3 until
+  that move has `completed_at` and every P3.5b changeset has applied, and
+  names the missing condition, which also covers the check's DISCOVER row
+  on the state between those two (item 6, Approach, P3.5, P3.5a, P3.7,
+  P3.R, Phase dependencies, Versioning, Incremental adoption;
+  `9ea4521a4`; T2 `229-research-69`).
+
+To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
+`nexus_rdr/229-gate-critique-2026-11-19-r3`), not resolved here:
+
+- S-2, P3.4's planner transition and gate 3's "P3.4 complete" test.
+- S-3, P3.3b and P3.3c against the two-level partitioning, installs with
+  PCI off, and the `changeset_id` of a move registered at run time.
+- S-4, `aspect_extraction_queue` absent on most installs.
+- S-5, the BYO paragraph's "P3.3b's pass ... still builds", which
+  contradicts gate 1; the text still reads so.
+- S-6, the downgrade boundary, which P3.1's CHECK places at P3.1, not
+  after P3.3 as "Still open" below says.
+- S-7, the client's trust in an id, which now starts at the name-key
+  drop move's `completed_at`, with no engine signal.
+- S-8, a tombstone whose successor was deleted, which the stamp cannot
+  give an id.
+
+Still open, for a design call: whether the label alphabet excludes `/`,
+which `NoteUri.collectionOf` treats as the end of the collection; what
+makes a live `(content_type, owner_id, embedding_model)` tuple unique once
+minting removes the name from that job; the safe engine downgrade
+point after P3.3, which matters most from P3.7, when the name columns go
+dead (Approach, item 7; S-6 above); a repair for residue whose segment no
+longer names its collection and for residue `note-uri-001` rewrote to
+`nx-note://` (P1.2 counts both; item 12); and a note that `moveTo` moves
+onto a label that starts with `rdr__`, `docs__` or `code__`, which
+`isNote` then classes as no note, because P2.10's rule tests only the old
+segment (`NoteUri.java:110`, `:191-200`; T2 `229-research-60`).
 
 ### Assumption Verification
 
-Four Critical Assumptions are unverified, and each has a bead that verifies
-it before the work that depends on it (P1.2 for 1 and 6, P2.3 for 2, P3.2
-for 5).
+Five Critical Assumptions are unverified, Critical Assumption 3 in part,
+and each has a bead that verifies it before the work that depends on it
+(P1.2 for 1 and 6, P1.2 and P2.10 for 3, P2.3 for 2, P3.2 for 5).
 
 #### API Verification
 
 | API Call | Library | Verification |
 | --- | --- | --- |
 | `GET /v1/catalog/collections/list` with `content_type` and `lifecycle_state` filters | nexus engine | Source Search (RDR-204 Phase 2) |
-| `GET /v1/catalog/collections/for_tuple` | nexus engine | Source Search (`CatalogRepository.java:10529`, `http_catalog_client.py:3612-3657`) |
+| `GET /v1/catalog/collections/for_tuple` | nexus engine | Source Search (`CatalogRepository.java:10500-10553`, `http_catalog_client.py:3845-3891`; T2 `229-research-29`) |
 | `catalog_document_chunks.embedding_model` | nexus schema | Source Search (`vectors-030` lines 786-791) |
 | `ALTER TABLE ... ADD CONSTRAINT ... NOT VALID` then `VALIDATE CONSTRAINT` on a partitioned referencing table | PostgreSQL 17 | Source Search (fk-002 and vectors-030 already use it on `nexus.chunks`) |
 
 ### Scope Verification
 
 The Minimum Viable Validation runs in the local-service gate during Phase 2
-and again after Phase 3, and is not deferred.
+and again after Phase 3, and is not deferred. Items that gate round 1 found
+with no plan step now have one: routing by content type, 23 sites plus the
+`taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES` (P2.9), the recovery-bundle
+sites (migration sources, P3.9 before P3.8), the tenant backup (P3.11, in
+P3.1's and P3.3's cuts), every writer of the dual write (P3.1), queued
+aspect tasks on rename (P3.7), and name-keyed views and triggers (P3.5b).
+Items that gate round 2 found with no plan step now have one: the
+per-install reader guard (P3.1's completion check, P3.5, P3.7, P4.1), the
+foreign-key validation moves (P3.3a, P3.3c), the per-leaf unique-index
+pass as new code (P3.3b), the label index after P4.1 (P4.1), blocked moves
+on BYO PostgreSQL and the Windows label test (Cross-Cutting, P3.6), the
+disposition of all sixteen name columns without a registry foreign key
+(item 6's table: `catalog_documents.corpus` is a history label,
+`catalog_reconcile_rows.physical_collection` transient), the Day 2
+surfaces (P3.12), and the `taxonomy_centroids` writer (P3.1's acceptance;
+one is `TaxonomyCentroidRepository.java:156`). Items the round 2 fix
+check found now have one too: `superseded_by_id`'s own CHECK (P3.1), the
+swap's registration by the P3.3b pass (P3.3b), the completion check's read
+set and gates (P3.1, P3.4, P3.5, P3.7, P4.1), the name-keyed upserts and
+child cascades until P4.1 (P3.3c, P3.5c), the old composites' drop
+(P3.7's name-key drop move), and the timing of every move and pass (P3.2).
+Items the round 3 residuals found now have one: the residue rule on every
+`moveTo` caller (P2.10), its order before P3.6 and P3.8 (P2.10), the count
+of residue on a prefix-free segment on every install (P1.2) and its repair
+(P2.10's moves), the drop of the name keys that refuse the one-row rename
+(P3.7's name-key drop move), and the retirement of the Java name path
+behind a boot floor (P4.0). Items the accept-time fix check found now
+have one: the order of P4.1's registry drops (P4.1), the reconcile path
+(P2.10), the rename refused in the gate 3 window (P3.7), the in-process
+re-read of the check and P4.0's one restart (item 6, P4.0), the
+backfill verb (P2.10), the repair moves' sizing and order (P2.10), and
+the repair against P3.1's CHECK (P3.1). The seven DISCOVER residuals,
+S-2 to S-8, go to beads at accept (Contradiction Check).
+Still without one: P3.5b's plan measurement of each both-shapes reader
+has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
+names no consumer; P1.2 measures the two production tenants, not local
+stores, apart from its residue count, which runs on every install; no
+rule says what a mint does when a live label already has the
+minted form (P1.2 only counts such labels); no audit covers where a
+label meets a file path beyond P3.6's Windows test; and no repair covers
+the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: P2.5, P2.6 and the Phase 3 engine beads ride engine cuts;
+- **Versioning**: P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts,
+  P3.5 and P3.7 one cut together with the rename refusal and the name-key
+  drop move's registration (P3.7);
   the client floor bumps in the release that first depends on each, engine
   deployed first. Routes accept both a label and an id from P3.5, so an
-  older client keeps working until the floor bump.
+  older client keeps working until the floor bump. An install that skips
+  releases is guarded by its own moves, not by the cut order: its readers
+  switch once the completion check sees its gates pass there
+  (item 6, "Readers during the stamp"). A client trusts a collection's
+  id as stable only from P3.7's name-key drop move's `completed_at`
+  there; from gate 3 until that point and every P3.5b changeset has
+  applied, the engine refuses a rename (item 6). The same holds at Phase 4: an
+  install that skips from before P3.1 to a release with P4.0 meets P4.0's
+  boot floor, which serves it migration-only until gate 3, P3.7's
+  name-key drop move and P3.5b's changesets hold there (P4.0; T2
+  `229-research-59`, `229-research-64`).
 - **Build tool compatibility**: N/A.
 - **Licensing**: N/A.
 - **Deployment model**: every changeset is walked on a PITR fork rehearsal
-  before the cloud deploy. The P3.3 key switch and the P3.4 index rebuild
-  run in a maintenance window sized by P3.2.
+  before the cloud deploy, and on a local store. No Phase 3 step rewrites
+  the rows of, or builds an index on, a table that grows with user data at
+  boot: the stamp and the key swap run as registered data moves, the index
+  builds in the PCI reconciler's pattern, each visible in `boot_work` and
+  resumable (item 6). Whether the swap's `on_complete` needs a maintenance
+  window is unverified until P3.2 times it (Critical Assumption 5).
+- **BYO or `--no-pg-bundle` local PostgreSQL**: such an install gets
+  pg_background "from its DBA ... Until the step has run, moves report
+  `blocked:`" (RDR-246 lines 801-805), and nx doctor shows a red row for
+  each (lines 891-892). Per bead: P3.1's changeset still applies (columns,
+  `NOT VALID` CHECKs, move registration, the dual write), but every move
+  stays blocked (the stamp, P3.3a's and P3.3c's validations and the swap).
+  P3.5's readers stay on names, P3.4 builds no index on the id, and P3.7's
+  rename keeps its fourteen-table rewrite. P4.1's drops never apply,
+  because each waits for the stamp's `completed_at` (item 6, "A blocked
+  move"). P4.0's floor never holds either, so a P4.0 engine would serve
+  such an install migration-only; it stays on a release before P4.0 until
+  its moves run (P4.0). Inferred, not read: P3.3b's pass is an engine pass, not a move,
+  so it still builds; P3.6 and P3.8 touch only the registry and still
+  apply. T2 `229-research-47`.
+- **Windows**: RDR-246 verified pg_background on the Windows x64 bundle:
+  "built for Linux x86_64 and arm64 (manylinux_2_28), macOS arm64 and
+  Windows x64. On each, a relocated bundle ran `CREATE EXTENSION` and a
+  background worker" (RDR-246 lines 225-227). Inferred, not read: so a
+  bundled Windows install runs the moves; RDR-246 verified the extension
+  and a background worker there, not a data move. Where a label meets a file path is not audited yet, and
+  the label alphabet is open (Contradiction Check). P3.6's tests exercise on Windows one
+  label holding a space, `%`, `:` and a non-ASCII character.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
-  Each Phase 3 step leaves the name path working until Phase 4.
+  Each Phase 3 step up to P3.4 leaves the name path working and can ship
+  and stop alone, and so can P3.6. P3.5 and P3.7 are one engine cut:
+  P3.5a's rename refusal ends only when P3.7's name-key drop move
+  completes, and only P3.7 ships and registers that move (P3.7). From P3.7 a
+  rename leaves the referencing tables' name columns on the old label, so
+  the name path is dead from there until P4.1 drops it (item 7), and the
+  safe engine downgrade point is open (Contradiction Check). On each
+  install that happens only after its stamp moves have completed, because
+  the one-row rename waits for the same check (item 6, "Readers during the
+  stamp"). The Java name path stays in the engine until P4.0, whose boot
+  floor serves an install migration-only until that install's gate 3,
+  name-key drop move and P3.5b changesets hold, so an id-only engine never serves a
+  half-stamped store (P4.0).
 - **Secret/credential lifecycle**: N/A.
 - **Memory management**: N/A.
 
 ### Proportionality
 
 The schema work is now large: a new key on the registry, eight foreign keys
-and two partitioned primary keys moved, every per-collection index rebuilt,
+and two partitioned tables given an id key beside their name keys until
+P4.1, ten foreign-key validation moves, every per-collection index rebuilt,
 and a route contract that accepts ids. That is what D3 asks for, and it is
 the only way a label becomes free to change. The client side is as before:
 large, and moved under a ratchet.
@@ -1049,8 +2590,18 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-225-vector-tables-per-embedding-model.md`, Technical Design.
 - `docs/rdr/rdr-227-per-collection-hnsw-above-the-router-threshold.md`.
 - `docs/rdr/rdr-210-dual-mode-local-engine.md`, Gap 4.
+- `docs/rdr/rdr-246-data-moves-are-background-jobs.md`, Technical Design.
+- `docs/rdr/rdr-247-one-index-per-row.md`, Revision History (2026-11-12
+  deferral); bead nexus-f3yqd.8 (Sam's 2026-11-12 ruling);
+  T2 `nexus/rdr247-cost-comparison-2026-11-12`.
+- `docs/rdr/rdr-236-chunk-row-metadata-normalization.md`, Phase 4.
+- `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
+- `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-16`.
+- T2 `nexus_rdr/229-research-1` to `-68`, and
+  `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
+  superseded).
+- T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
 
 ## Revision History
 
@@ -1064,3 +2615,66 @@ large, and moved under a ratchet.
   Item O1 (proposed 20 minor releases);
   `legacy_grandfathered` dropped; the open questions became Decisions; new
   surrogate-key census (T2 `229-research-14` to `-16`).
+- 2026-11-19: Research refreshed on develop `020118bf7` (no design change):
+  every census re-run as a script; counts, site lists, file:line citations
+  and RDR statuses brought current (the census is 203 sites, was 152); the
+  local `collection_id` backfill measurement cited. T2 `229-research-17` to
+  `-31` added (`-17` to `-29` supersede `-1` to `-8`, `-10`, `-11` and `-14`
+  to `-16`; `-30` measurement; `-31` census total and bead state), with
+  `229-refresh-2026-11-19` recording that `-9`, `-12` and `-13` still hold.
+- 2026-11-19: Gate round 1 — BLOCKED (2 Critical, 8 Significant, 2 ship-blocker(s)); blob `691241710dec`; critique `nexus_rdr/229-gate-critique-2026-11-19-r1`.
+- 2026-11-19: Gate round 1 fixes. C1: Phase 3 runs on RDR-246's data
+  moves and the PCI reconciler's build pattern, with no maintenance window.
+  C2: a fourth census class, routing by content type, moved to the row by
+  P2.9 before P3.6 and P3.8. S1, S3, S5 and S8 fixed; S2 and S6 in part;
+  S4 and S7 left for a design call; Observation 3 corrected. The Finalization
+  Gate's Contradiction Check and Scope Verification regenerated. T2
+  `229-research-32` to `-38` added.
+- 2026-11-19: Fix check 1 (`nexus_rdr/229-fix-check-759ec4ba66a9`, FAIL)
+  re-fix. The routing census was re-run over every prefix shape (23 sites
+  plus the `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`). Minting now
+  waits for P3.9, and the recovery-bundle sites are migration sources. The
+  Phase 3 mechanics are stated as rules: the CHECK's scope and writers, the
+  move timeouts, PostgreSQL's partitioned-key route, the direct validation
+  of the composite key, the swap move's shape, P3.2 before P3.1 and P3.4
+  after P3.3. The "no maintenance window" claim is withdrawn until P3.2.
+  The tenant backup ships in P3.1's and P3.3's cuts and is no longer listed
+  as a name reader. T2 `229-research-39` to `-41` added.
+- 2026-11-19: URI-string classifiers settled (baton's rename rule). From
+  P3.6 a rename rewrites only `nx-note://` URIs, so `chroma://` residue
+  keeps its prefixed segment. The URI-string classifiers become the fifth
+  caller class and stay on RDR-231's frozen list. Round 1's registry route
+  and its no-row answer are withdrawn, and `note-uri-corpus.json` is
+  unchanged. `isFileRoutedCollection`, which tests a live collection, stays
+  in the routing class. T2 `229-research-42` added.
+- 2026-11-19: Gate round 2 — BLOCKED (1 Critical, 5 Significant, 1 ship-blocker(s)); blob `c1a9d815e8cc`; critique `nexus_rdr/229-gate-critique-2026-11-19-r2`.
+- 2026-11-19: Gate round 2 fixes. C-A: readers keep the name path on each
+  install until every stamp move there has `completed_at` set (RDR-246's
+  reader rule), by a CONTINUE precondition, a both-shapes read on the chunk
+  family, or a boot-time completion check; blocked moves keep readers on
+  names and Phase 4's drops unapplied. S-1: UNIQUE `(tenant_id,
+  collection_id, embedding_model)` in P3.1, named validation moves, P3.3
+  split into P3.3a to P3.3c. S-2: P4.1 re-creates the live-label index on
+  `superseded_by_id`. S-3: the Approach says "up to P3.6". S-4: BYO
+  PostgreSQL and Windows lines. S-5: a disposition for all sixteen no-FK
+  name columns, P3.12 for Day 2, the `taxonomy_centroids` writer in P3.1's
+  acceptance. Observations 3 and 4 corrected, and Observation 6's rule
+  written into P4.1. The three recorded
+  residuals are listed for Sam, not resolved. Contradiction Check and
+  Scope Verification regenerated. T2 `229-research-43` to `-49` added.
+- 2026-11-19: Fix check 1 of round 2 (`nexus_rdr/229-fix-check-1b112f9c770c`,
+  FAIL) re-fix. `superseded_by` gets its own CHECK, so `superseded_by_id`
+  is NULL exactly on live rows. P3.3b's pass registers the swap once every
+  leaf's index is valid. The completion check has a read set (a label with
+  no row is incomplete; a failed move on a dropped table is complete) and
+  three gates; readers, the one-row rename and P4.1's drop move wait for
+  P3.4. P3.3c adds the id key beside the name keys until P4.1, and the
+  upserts move to it at gate 3. P3.2 times every move and pass. Wording
+  rows corrected. Contradiction Check and Scope Verification regenerated,
+  with the three residuals still recorded for Sam. T2 `229-research-50` to
+  `-54` added.
+- 2026-11-19: Gate round 3 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `2e06cb126e67`; critique `nexus_rdr/229-gate-critique-2026-11-19-r3`.
+- 2026-11-19: Round 3 residuals dispositioned (Sam, ask `baton/rdr229-accept-route`, option 1). Fixed: residual 1 `f0d64bc6a`, residual 2 `a59ef5325`, residual 3 `4ce3d0def` and `e9684ddca`, residual 4 `1d2e07f8d`, S-1 `bed7b07a7`, sweep `0947955d2`; S-2 to S-8 to beads at accept. Contradiction Check and Scope Verification regenerated. T2 `229-research-55` to `-60` added.
+- 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
+- 2026-11-19: Last residual of `nexus_rdr/229-gate-latest` (the gate-3 rename refusal had no owner before P3.7; accept fix check `3c7aa425d443`) fixed in the text (Sam, ask `baton/rdr229-refusal-owner`, option 1): P3.5 and P3.7 ship in one engine cut with the refusal and the name-key drop move's registration, and the refusal holds until every P3.5b changeset has applied, `9ea4521a4`. Contradiction Check regenerated. T2 `229-research-69` added.
+- 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
