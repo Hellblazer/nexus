@@ -1661,9 +1661,10 @@ def test_the_deny_message_gives_the_hand_back_protocol(shared_repo):
     assert "routing-allow" in reason and "not yours to reach for" in reason, reason
     assert "background" in low and "foreground" in low, reason
     # nexus-7mgnd/0l6zh review: the tool call's cwd decides the worktree
-    # exemption, so a cd or `git -C` inside the command must not be read as one.
+    # exemption, so a cd inside the command must not be read as one; the one
+    # literal `git -C <worktree>` shape is the named carve-out (2026-11-18).
     assert "cwd of the tool call decides" in low, reason
-    assert "`cd <wt>`" in reason and "`git -C <wt>`" in reason, reason
+    assert "`cd <wt>`" in reason and "`git -C <absolute worktree path>" in reason, reason
     assert "isolation: worktree" in reason, reason
 
 

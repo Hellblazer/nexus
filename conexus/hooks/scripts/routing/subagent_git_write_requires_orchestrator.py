@@ -3767,9 +3767,15 @@ def _deny_message(agent_type: str, verb_names: str, *,
         f"Worktree-isolated agents are exempt automatically when this guard "
         f"can POSITIVELY PROVE a linked worktree (a linked worktree is "
         f"yours to destroy); an undeterminable worktree state does not "
-        f"qualify. The cwd of the tool call decides that, and a `cd <wt>` or "
-        f"`git -C <wt>` inside the command does not count: dispatch with "
-        f"isolation: worktree instead.\n"
+        f"qualify. The cwd of the tool call decides that, and a `cd <wt>` "
+        f"inside the command does not count. Working in your session's linked "
+        f"worktree from the primary cwd? Run ONE literal git command per call, "
+        f"`git -C <absolute worktree path> <verb> ...` (verbs: add, commit, rm, "
+        f"mv, restore, checkout, switch, reset, stash, rebase without -x, "
+        f"cherry-pick, revert, merge, branch, tag), with nothing chained, no "
+        f"`$` or backtick, no other global option, and a commit message in "
+        f"single quotes or via `-F <file>`; git must prove the path is a linked "
+        f"worktree. Or dispatch with isolation: worktree.\n"
         f"An escape (`# routing-allow: <reason>`) exists for this "
         f"guard, but only on the user's explicit instruction to use "
         f"it -- it is not yours to reach for."
@@ -3946,6 +3952,58 @@ def _remote_test_host_command(command: str) -> str | None:
     return host
 
 
+#: Verbs the ``git -C <worktree>`` carve-out admits: none of them runs a command
+#: named on its own command line. ``submodule`` (foreach), ``bisect`` (run),
+#: ``filter-branch``, ``difftool``/``mergetool`` and the like are absent on
+#: purpose, and ``rebase`` is admitted only without -x/--exec.
+_DASH_C_VERBS: frozenset[str] = frozenset({
+    "add", "commit", "rm", "mv", "restore", "checkout", "switch", "reset",
+    "stash", "rebase", "cherry-pick", "revert", "merge", "branch", "tag",
+    "status", "diff", "log", "show",
+})
+
+
+def _dash_c_worktree_target(command: str) -> str | None:
+    """The path a subagent command names when the WHOLE command is one literal
+    ``git -C <absolute path> <verb> ...`` invocation the carve-out may admit;
+    otherwise None. The caller must still prove the path is a linked worktree.
+
+    Why (2026-11-18): a subagent's Bash cwd is its session's start directory,
+    the primary checkout, and a ``cd`` does not persist between its calls, so a
+    developer dispatched by a session working in a linked worktree could never
+    commit there; two RDR-252/253 steps stalled on it the same night. The shape
+    is narrow by construction: the shell reads it literally (``_read_literally``:
+    no expansion, substitution, chaining, redirect or line break outside single
+    quotes), it is one ``git`` word with exactly one ``-C`` and no other global
+    option (so no ``--git-dir``, ``--work-tree``, ``-c`` or second ``-C``), the
+    verb is in ``_DASH_C_VERBS``, ``rebase`` carries no -x/--exec, and the text
+    after the path spells no other git write under the primary rule (so a
+    single-quoted ``'git -C <primary> reset --hard'`` handed to any option
+    denies)."""
+    if not _read_literally(command):
+        return None
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if len(tokens) < 4 or tokens[0] != "git" or tokens[1] != "-C":
+        return None
+    path, verb, rest = tokens[2], tokens[3], tokens[4:]
+    if not os.path.isabs(path) or verb not in _DASH_C_VERBS:
+        return None
+    for tok in rest:
+        if tok in ("-C", "-c") or tok.startswith(("--git-dir", "--work-tree", "--exec")):
+            return None
+        if verb == "rebase" and tok.startswith("-") and not tok.startswith("--") and "x" in tok[1:]:
+            return None
+    tail = " ".join(rest)
+    if "git" in tail:
+        spliced, primary, _relaxed, _view = _scan_command(tail, _normalize_for_primary_scan(tail))
+        if spliced or primary is not None:
+            return None
+    return path
+
+
 def _scan_command(
     command: str, normalized: str,
 ) -> tuple[str | None, str | None, bool, _ConfigView]:
@@ -4030,6 +4088,26 @@ def body(payload: dict[str, Any]) -> None:
     spliced_fragment, primary_match, _relaxed, config_view = _scan_command(command, normalized)
     if not spliced_fragment and primary_match is None:
         _lib.pass_through()
+
+    # The session-worktree carve-out (2026-11-18): one literal `git -C <path>`
+    # invocation whose path git itself proves is a linked worktree. The config
+    # and side-effect rules still apply there, exactly as for an agent whose cwd
+    # is the worktree; a hit falls through to the deny below.
+    dash_c = _dash_c_worktree_target(command)
+    if dash_c is not None and _in_linked_worktree(dash_c) is True:
+        dash_c_hit = (
+            _config_hit(normalized, config_view, worktree=True)
+            or _sidefx_hit(
+                normalized, config_view, worktree=True,
+                branch_of=functools.cache(lambda: _current_branch(dash_c)),
+            )
+        )
+        if dash_c_hit is None:
+            _lib.log_routing_event(
+                rule=RULE_NAME, outcome="allow_dash_c_worktree", tool_name="Bash",
+                command_fragment=command,
+            )
+            _lib.pass_through()
 
     # Match FIRST, escape SECOND (the nexus-mzvwa.8 telemetry rule) — applies
     # to EITHER gate above.
