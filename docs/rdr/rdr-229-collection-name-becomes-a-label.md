@@ -92,10 +92,12 @@ content-type prefix. There are 23 client sites: tests against prefix
 constants, loops over prefix-keyed tables (`_REGISTRY`, `_PREFIX_TO_KEY`,
 `_PREFIX_CONTENT_TYPES`, `CHROMA_IDENTITY_FIELD`), a literal prefix tuple,
 and the shipped default taxonomy exclude pattern `"code__*"`. The
-`taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES` adds 12 more sites. The
-string-only `aspect_readers.is_note_uri` has four callers, and the engine's
-`NoteUri.isNote` and `isFileRoutedCollection` have four call sites (T2
-`229-research-34`, `229-research-39`). A minted label carries no prefix. A
+`taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES` adds 12 more sites, and the
+engine's `NoteUri.isFileRoutedCollection` tests a live collection at one
+site (T2 `229-research-34`, `229-research-39`, `229-research-42`). Apart
+from these, `aspect_readers.is_note_uri` and the engine's `NoteUri.isNote`
+classify a URI string over a frozen list. They stay as they are once a
+rename stops moving `chroma://` residue (item 12). A minted label carries no prefix. A
 minted collection would therefore lose its aspect extractor, its quality
 boost, its search threshold and over-fetch, its chunk content type and its
 file-routed identity.
@@ -524,14 +526,19 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   test that counts HTTP calls per indexed document before and after, on an
   existing collection and a new one (P2.3).
 - [x] No code path needs a fact from the name that the row cannot carry,
-  except the migration sources in Gap 5. — **Status**: Verified —
+  except the migration sources in Gap 5 and the URI-string classifiers
+  (item 1's fifth class), which read a URI's segment, not a live
+  collection. — **Status**: Verified —
   **Method**: Source Search (the parse-site census: every extracted value is
   content type, owner, model, version or the quarantine prefix, each a
   column). The census also holds sites that extract nothing and route by the
   content-type prefix (T2 `229-research-34`, widened in `229-research-39`); the row carries what they
-  need too (`content_type`), but they are not repointed by moving a parse,
-  and the string-only ones need the collection's row looked up (item 12,
-  P2.9).
+  need too (`content_type`), but they are not repointed by moving a parse
+  (item 12, P2.9). The URI-string classifiers (the fifth class) take
+  nothing from a row. They read a URI's segment against RDR-231's frozen
+  list, which stays complete because no `chroma://` URI carries a
+  prefix-free segment once a rename stops moving residue (item 7; T2
+  `229-research-42`).
 - [x] Nothing in Postgres requires a collection name to fit ChromaDB's
   limits. — **Status**: Verified — **Method**: Source Search (no object is
   named from a collection name; the per-collection index name is a hash).
@@ -574,7 +581,7 @@ label unchanged. Only collections created after Phase 3 get a minted label.
 
 ### Technical Design
 
-**1. One resolver, one parser, four classes of caller.** The client gets a
+**1. One resolver, one parser, five classes of caller.** The client gets a
 single read path for a collection's attributes and a single place where a
 name may still be parsed.
 
@@ -601,7 +608,7 @@ legacy_names.candidate_attributes(name: str) -> CandidateAttributes | None
     # the only name parser left; callers must be classified
 ```
 
-Every census site is one of four classes, recorded in the census beside the
+Every census site is one of five classes, recorded in the census beside the
 site. Three are callers of `legacy_names`: **mint** (the name is the user's
 own input or one `nx` is about to register, so no row exists yet; this class
 empties at Phase 3, when minting stops rendering names), **migration
@@ -617,7 +624,15 @@ the row's `content_type` instead (item 12), and the class is empty from
 P2.9 on. A user-configured name pattern (`fnmatch` over
 `aspects.docs_collections` or the taxonomy exclude list) names labels. It
 is not prefix routing and keeps matching the label. Only a shipped default
-that is itself a prefix pattern (`"code__*"`) is routing.
+that is itself a prefix pattern (`"code__*"`) is routing. The fifth is
+**URI-string classifiers over a frozen list**. These sites classify a
+source_uri string by its collection segment against RDR-231's frozen
+`rdr__`/`docs__`/`code__` list: `NoteUri.isNote`, `fileRouted` and
+`canonical` in the engine; `aspect_readers.is_note_uri`,
+`canonical_note_uri` and `_collection_is_file_routed`
+(`aspect_readers.py:126`), and `db/note_uri_pairs.py:69` on the client.
+They are not repointed, and they stay at their count (item 12; T2
+`229-research-39`, `229-research-42`).
 Any other site is a defect the census refuses. RDR-204's
 four dispositions (a) to (d) map onto the first three; its class (b),
 write-model resolution, becomes a row read and leaves the list.
@@ -851,7 +866,17 @@ the collection's notes and queued tasks.
 `renameCollectionTxn` stops inserting, rewriting fourteen tables and
 tombstoning. It still rewrites the `nx-note://<label>/` source URIs of the
 collection's notes, as it does today; moving note identity off the label is
-a catalog-identity change outside this RDR. It also still rewrites queued
+a catalog-identity change outside this RDR. From P3.6, when a prefix-free
+label first becomes possible, a rename no longer rewrites `chroma://`
+URIs. Today `NoteUri.moveTo` rewrites "{@code chroma://<old>/} ... {@code
+chroma://<new>/}", and `namesCollection` selects both schemes (T2
+`229-research-40`, `229-research-42`). From P3.6, `moveTo` on the rename
+path and `renameCollectionTxn` rewrite only `nx-note://` URIs, so
+`chroma://` residue keeps the prefixed segment it was written with, which
+keeps the URI-string classifiers' frozen list complete (item 12). A
+legacy-spelled note the rename no longer moves becomes a stale note that
+the stale-note repair rewrites to `nx-note://<collection>/` (T2
+`229-research-42`). It also still rewrites queued
 aspect tasks, which name their collection in the task body: "a collection
 rename ... has to rewrite or delete the tasks itself, in the same
 transaction" (`AspectTaskRefs.java:23-26`, called at
@@ -959,18 +984,13 @@ has. The routing class is 23 sites plus the `taxonomy__` half of the 12
   `aspects.docs_collections` patterns against the label through `fnmatch`,
   because a user's patterns name labels. Only its `_DOCS_PREFIX` gate
   (`:1024`) moves to the row.
-- *A URI only.* The client's `aspect_readers.is_note_uri` (callers
-  `exporter.py:927`, `commands/catalog_cmds/reconcile_stale.py:380`,
-  `db/serving_engine_version.py:149`) resolves the URI's collection segment
-  through the row cache. The engine's `NoteUri.isNote` and
-  `isFileRoutedCollection` take the content type from
-  `CollectionRegistry.require(ctx, tenant, collection)`. Each of their
-  callers, `repairStaleNoteUris` and `classifyStaleNotes`
-  (`CatalogRepository.java:4206/4215/4393/4399`), runs inside
-  `tenantScope.withTenant(tenant, ctx -> ...)`, so it holds `ctx` and
-  `tenant`. The shared `note-uri-corpus.json`, which pins both sides and the
-  backfill predicate, gains each case's content type as an input beside the
-  URI.
+- *A live collection in the engine's stale-note repair.*
+  `NoteUri.isFileRoutedCollection` is called once, at
+  `CatalogRepository.java:4399`, with the row's live `physical_collection`,
+  not a URI segment (T2 `229-research-42`). It takes the content type from
+  `CollectionRegistry.require(ctx, tenant, coll)`. Its caller,
+  `classifyStaleNotes`, runs inside `tenantScope.withTenant(tenant, ctx ->
+  ...)`, so it holds `ctx` and `tenant`.
 - *A bundle entry from another install.* `catalog/recovery_bundle.py:92,
   121, 212`, and its `is_note_uri` call at `:101`, read a name that may
   have no row here. They are migration sources, not routing: they read the
@@ -978,10 +998,33 @@ has. The routing class is 23 sites plus the `taxonomy__` half of the 12
   under the non-stranding rule (item 9). Minting therefore waits for P3.9
   (item 8).
 
-What happens when a URI's collection has no row (a deleted collection's
-leftover note) is decided in P2.9 and pinned by the corpus. Inferred, not
-read: the safe answer is "not file-routed", today's answer for any segment
-outside the three prefixes.
+**URI-string classifiers stay on their frozen list.** The fifth caller
+class (item 1) is not repointed. These classify a source_uri string over
+RDR-231's frozen prefix list (`rdr__`, `docs__`, `code__`):
+- in the engine, `NoteUri.isNote`, its `fileRouted` and `NoteUri.canonical`
+  (callers `CatalogRepository.java:4206/4215/4393`);
+- on the client, `aspect_readers.is_note_uri`, `canonical_note_uri` and
+  `_collection_is_file_routed` (`aspect_readers.py:126`; callers
+  `exporter.py:927`, `commands/catalog_cmds/reconcile_stale.py:380`,
+  `db/serving_engine_version.py:149`);
+- and the SQL in `db/note_uri_pairs.py:69`.
+
+The engine's recorded design is that NoteUri "classifies a source_uri
+STRING, not a live collection: a note URI's collection segment can name a
+collection that was renamed or never registered, so a CollectionRegistry
+lookup cannot answer it" (`CollectionParseGateTest.java:239-247`). The
+list stays complete because of two facts and one rule:
+- A new collection's file-routed documents get `file://` and its notes
+  `nx-note://`, never `chroma://` (`aspect_readers.uri_for`; T2
+  `229-research-40`).
+- `chroma://` residue exists only for names written before P3.6, which are
+  prefixed.
+- From P3.6 a rename no longer moves `chroma://` residue (item 7). Residue
+  keeps its prefixed segment, and the stale-note repair keeps skipping it
+  at `if (!NoteUri.isNote(uri)) continue;` whether or not that segment
+  still names a live row (T2 `229-research-42`).
+
+`note-uri-corpus.json` does not gain a content type.
 
 ### Existing Infrastructure Audit
 
@@ -1245,9 +1288,11 @@ its acceptance is that test green plus the census pin it lowers.
 - P2.9 Routing by content type reads the row (item 12): the 23 routing
   sites and the `taxonomy__` half of the 12 `_BYPASS_SCHEMA_PREFIXES` tests
   (T2 `229-research-39`, listed in item 12), the shipped `"code__*"` exclude
-  default, `aspect_readers.is_note_uri`, and the engine's `NoteUri.isNote`
-  and `isFileRoutedCollection` with their shared `note-uri-corpus.json`,
-  which gains each case's content type. The recovery-bundle sites are
+  default, and the engine's `isFileRoutedCollection`, which tests a live
+  collection. The URI-string classifiers (`NoteUri.isNote`, `canonical`,
+  `is_note_uri`, `canonical_note_uri`, `_collection_is_file_routed`,
+  `db/note_uri_pairs.py:69`) are the fifth class and are not moved, and
+  `note-uri-corpus.json` is unchanged. The recovery-bundle sites are
   migration sources and wait for P3.9. P1.1's widened census measures the
   routing class at zero. Test, for each content type the routers key on
   (docs, knowledge, rdr, code), with a fixture `c<digits>` label that
@@ -1324,9 +1369,14 @@ its acceptance is that test green plus the census pin it lowers.
 - P3.7 After P3.4 and P3.5: rename becomes a one-row registry update plus the
   note-URI rewrite; history tables and the referencing tables' dead name
   columns stop being rewritten (item 7); queued aspect tasks are still
-  rewritten. Test: a rename leaves chunk, manifest and taxonomy rows
-  untouched and the per-collection index in place, and a task queued before
-  the rename names the new label.
+  rewritten. The rename rewrites only `nx-note://` URIs, never `chroma://`
+  residue, a rule in force from P3.6's cut (item 7). Test: a rename leaves
+  chunk, manifest and taxonomy rows untouched and the per-collection index
+  in place, and a task queued before the rename names the new label; and
+  renaming a file-routed collection that has `chroma://` residue to a
+  prefix-free label leaves the residue on its old segment, still classed
+  file-routed by `NoteUri.isNote` and `is_note_uri`, and skipped by the
+  stale-note repair.
 - P3.8 Minting (item 8), after P2.9, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
@@ -1512,17 +1562,18 @@ The round 1 fix check found these, now resolved in the text:
   unverified: item 6 and Deployment model now leave it to P3.2.
 - A `NOT VALID` composite foreign key on the partitioned `nexus.chunks`,
   which PostgreSQL refuses: item 6 validates it directly.
+- URI-string classifiers routed through the registry, against the
+  engine's recorded design that a URI's segment "can name a collection that
+  was renamed or never registered": they stay on RDR-231's frozen list as
+  the fifth class. The list stays complete because from P3.6 a rename no
+  longer moves `chroma://` residue (item 7, item 12, P3.7; T2
+  `229-research-42`).
 
 Still open, for a design call: whether the label alphabet excludes `/`,
 which `NoteUri.collectionOf` treats as the end of the collection; what
 makes a live `(content_type, owner_id, embedding_model)` tuple unique once
-minting removes the name from that job; the safe engine downgrade point
-after P3.3; and how a URI-string classifier (`NoteUri.isNote`,
-`is_note_uri`) tells file residue from a note once a rename to a
-prefix-free label moves residue onto that label. `NoteUri.moveTo` rewrites
-`chroma://<old>/` to `chroma://<new>/` for residue too, so item 12's
-registry route and a frozen prefix list both misclassify that residue (T2
-`229-research-40`).
+minting removes the name from that job; and the safe engine downgrade
+point after P3.3.
 
 ### Assumption Verification
 
@@ -1603,7 +1654,7 @@ large, and moved under a ratchet.
 - `docs/rdr/rdr-248-cloud-tenant-backup.md`, restore and compatibility.
 - `docs/rdr/rdr-231-note-source-uri-scheme.md`.
 - `docs/collections.md`, Rules 3 and 6.
-- T2 `nexus_rdr/229-research-1` to `-41`, and
+- T2 `nexus_rdr/229-research-1` to `-42`, and
   `nexus_rdr/229-refresh-2026-11-19` (which records hold, which are
   superseded).
 - T2 `nexus/rdr247-measurement-backfill`, `nexus/rdr247-measurement-M4`.
@@ -1644,5 +1695,11 @@ large, and moved under a ratchet.
   of the composite key, the swap move's shape, P3.2 before P3.1 and P3.4
   after P3.3. The "no maintenance window" claim is withdrawn until P3.2.
   The tenant backup ships in P3.1's and P3.3's cuts and is no longer listed
-  as a name reader. The URI-string classifier change was not made (T2
-  `229-research-40`). T2 `229-research-39` to `-41` added.
+  as a name reader. T2 `229-research-39` to `-41` added.
+- 2026-11-19: URI-string classifiers settled (baton's rename rule). From
+  P3.6 a rename rewrites only `nx-note://` URIs, so `chroma://` residue
+  keeps its prefixed segment. The URI-string classifiers become the fifth
+  caller class and stay on RDR-231's frozen list. Round 1's registry route
+  and its no-row answer are withdrawn, and `note-uri-corpus.json` is
+  unchanged. `isFileRoutedCollection`, which tests a live collection, stays
+  in the routing class. T2 `229-research-42` added.
