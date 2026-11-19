@@ -71,13 +71,14 @@ def _group_reader() -> tuple[Any, str]:
     return default_group_reader(), ""
 
 
-def _loaded_inputs() -> tuple[Path, Any, int | None, str | None]:
+def _loaded_inputs() -> tuple[Path, Any, int | None, str | None, Path | None]:
     """What the state-file view needs of this process: the directory of the files, the process table, the pid of the
-    nearest Claude ancestor (``None`` with none) and the identity this process resolves to (``None`` when it cannot
-    say). The one process seam of ``list``."""
+    nearest Claude ancestor (``None`` with none), the identity this process resolves to (``None`` when it cannot
+    say) and the token-file directory the holder check reads. The one process seam of ``list``."""
     from nexus import config as _config  # noqa: PLC0415 -- deferred: CLI startup cost
     from nexus.auras.loaded_state import state_dir  # noqa: PLC0415
     from nexus.identity import token_header  # noqa: PLC0415
+    from nexus.identity.token_file import identity_dir  # noqa: PLC0415
     from nexus.identity.holder import Processes  # noqa: PLC0415
     from nexus.session import _command_name_of, find_immediate_claude_pid  # noqa: PLC0415
 
@@ -91,7 +92,8 @@ def _loaded_inputs() -> tuple[Path, Any, int | None, str | None]:
         identity = record.identity if record is not None else None
     except Exception:  # noqa: BLE001 -- a process that cannot be read is no ancestor and no identity
         pass
-    return state_dir(_config.nexus_config_dir()), Processes(), pid, identity
+    config_dir = _config.nexus_config_dir()
+    return state_dir(config_dir), Processes(), pid, identity, identity_dir(config_dir)
 
 
 def _fail(message: str) -> SystemExit:
@@ -268,8 +270,8 @@ def list_cmd(json_out: bool) -> None:
     unscanned = _unscanned_repo_files(scope)
     if unscanned:
         click.echo(_unscanned_note(unscanned), err=True)
-    directory, procs, claude_pid, identity = _loaded_inputs()
-    view = loaded_state.view(directory, claude_pid=claude_pid, procs=procs, current_identity=identity)
+    directory, procs, claude_pid, identity, token_dir = _loaded_inputs()
+    view = loaded_state.view(directory, claude_pid=claude_pid, procs=procs, current_identity=identity, identity_dir=token_dir)
     if view.mismatch:
         click.echo(f"warning: {view.mismatch}", err=True)
     loaded = view.state.auras if view.state is not None else {}
