@@ -1198,8 +1198,9 @@ def _no_restore_notice(session_id: str) -> str:
     return (
         "The conexus PreCompact hook has no working-state checkpoint for this compaction (its pre step "
         "did not run or failed), so nothing is restored here and the compact summary is all you have. "
-        "Recover your state before acting on it: read your threads board entry (project threads, titled "
-        f"with your session name, or the entry whose first line is `session: {session_id}`), then check "
+        "Recover your state before acting on it: read your threads board entry (project threads: the entry "
+        "whose `identity:` line names your identity, `nx identity show` prints it; else the one titled "
+        f"with your session name, or whose `session:` line is `{session_id}`), then check "
         "git status, the branch and `bd list --status=in_progress`.\n"
     )
 

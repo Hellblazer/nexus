@@ -96,3 +96,11 @@ class TestIdentityLine:
         assert _identity_lookup.lookup(self.STALE.upper(), tmp_path) == ("i12", "tok")
         assert _identity_lookup.lookup("00000000-0000-4000-8000-000000000000", tmp_path) == ("", "")
         assert _identity_lookup.lookup(SID, tmp_path / "absent") == ("", "")
+
+
+def test_the_no_checkpoint_notice_tells_the_session_to_look_for_its_identity_line_first(mod) -> None:
+    """A session with no checkpoint is told how to find its entry: by ``identity:``, with ``session:`` as the
+    fallback for an entry that has none (RDR-253 Step 5, board readers)."""
+    text = mod._no_restore_notice(SID)
+    assert "`identity:` line" in text and "nx identity show" in text
+    assert text.index("identity:") < text.index(f"`session:` line is `{SID}`")
