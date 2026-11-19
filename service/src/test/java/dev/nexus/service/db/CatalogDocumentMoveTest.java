@@ -569,6 +569,38 @@ class CatalogDocumentMoveTest {
     }
 
     @Test
+    void acceptsAWindowsDriveLetterPathAndAUncPathWhateverTheEngineHost() throws Exception {
+        // RDR-254 confirmation: absoluteness is a shape check, not the engine host's Paths.get, so a Windows client's
+        // path is accepted by a Linux engine (curator registration already accepts such documents).
+        String t = tenant();
+        owner(t, "1.1", "pdfs", "curator");
+        String drive = doc(t, "1.1", "drive", "file:///C:/old/a.pdf", "C:\\old\\a.pdf");
+        String unc = doc(t, "1.1", "unc", "file://server/old/b.pdf", "\\\\server\\old\\b.pdf");
+
+        var r1 = moves.moveDocument(t, drive, "file:///C:/docs/a.pdf", "C:\\docs\\a.pdf", false).toMap();
+        var r2 = moves.moveDocument(t, unc, "file://server/share/b.pdf", "\\\\server\\share\\b.pdf", false).toMap();
+
+        assertThat(r1).containsEntry("repointed", 1);
+        assertThat(r2).containsEntry("repointed", 1);
+        assertThat(row(t, drive)).containsEntry("source_uri", "file:///C:/docs/a.pdf").containsEntry("file_path", "C:\\docs\\a.pdf");
+        assertThat(row(t, unc)).containsEntry("source_uri", "file://server/share/b.pdf")
+            .containsEntry("file_path", "\\\\server\\share\\b.pdf");
+        // a forward-slash drive path too
+        assertThat(moves.moveDocument(t, drive, "file:///C:/more/a.pdf", "C:/more/a.pdf", true).toMap()).containsEntry("dry_run", true);
+    }
+
+    @Test
+    void stillRefusesADriveWithNoSeparatorAndARelativePath() {
+        String t = tenant();
+        assertThatThrownBy(() -> moves.moveDocument(t, "1.1.1", "file:///C:docs/a.pdf", "C:docs", false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("absolute");
+        assertThatThrownBy(() -> moves.moveDocument(t, "1.1.1", NEW_URI, "docs/a.pdf", false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("absolute");
+        assertThatThrownBy(() -> moves.moveDocument(t, "1.1.1", NEW_URI, "..\\a.pdf", false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("absolute");
+    }
+
+    @Test
     void refusesBlankNewPath() {
         String t = tenant();
         assertThatThrownBy(() -> moves.moveDocument(t, "1.1.1", "", "/new/a.pdf", false))
