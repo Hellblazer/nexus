@@ -12,7 +12,7 @@ from nexus.catalog.engine_reads.route_unavailable import DOC_PAGE_MAX, EngineRou
 
 
 def read_author_rows(cat: Any, author: str, *, want: int, offset: int) -> tuple[list[Any], int]:
-    """Up to *want* raw rows from *offset* for *author*, and the route's exact match count.
+    """Up to *want* raw rows from *offset* for *author*, and the route's match count (an upper bound on the client rule's).
 
     Pages the route in steps of at most ``DOC_PAGE_MAX`` until *want* rows are held or the matches run out. Raises
     :class:`EngineRouteUnavailable` when the engine, or a reader that has no author route, does not answer; a

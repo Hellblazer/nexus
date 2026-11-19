@@ -498,8 +498,9 @@ Each is a new path, `GET`, tenant-scoped like every catalog route, and follows
 the shape of `CatalogBoundedReadRoutes`. The sensitive-locator route answers the
 envelope of `/sensitive`, `{count, limit, capped, documents}` (limit up to
 10,000). The three paged routes (author, metadata, scheme) answer
-`{count, limit, offset, documents}`: `count` is the exact number of live matches
-whatever the page, there is no `capped` flag, and a caller pages with `offset`
+`{count, limit, offset, documents}`: `count` is the exact number of live rows
+the route's own predicate matches, whatever the page (for the author route, an
+upper bound on the client's rule, below), there is no `capped` flag, and a caller pages with `offset`
 (`limit` 1 to 1,000, default 1,000, `offset` 0 or more, else 400). One statement
 carries the window count; a page past the last match has no row to carry it, so
 then a second statement counts. Rows come in the engine's text order of
