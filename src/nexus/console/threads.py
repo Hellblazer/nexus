@@ -45,7 +45,7 @@ from typing import Any
 STALE_AFTER = timedelta(hours=24)
 
 _HEADING = re.compile(r"^#{1,3}\s+(\S.*)$")
-_IGNORED_KEYS = frozenset({"updated"})
+_IGNORED_KEYS = frozenset({"updated", "identity"})  #: identity: is read whole-entry (RDR-253 Step 5)
 
 _NO_VALUES = frozenset({"", "none", "no", "n/a", "-", "—"})
 _THREAD_FIELDS = {
@@ -108,6 +108,7 @@ class Ask:
     version: str = ""
     entry: str = ""  #: the T2 title of the entry holding the ask
     session_id: str = ""  #: the asker, from the entry's ``session:`` line
+    identity: str = ""  #: the asker's identity, from the entry's ``identity:`` line (RDR-253 Step 5)
     thread: str = ""  #: title of the thread holding the ask
     refs: tuple[str, ...] = ()  #: that thread's refs
     lines: tuple[str, ...] = ()
@@ -168,6 +169,7 @@ class Session:
     threads: tuple[Thread, ...] = ()
     notes: tuple[str, ...] = ()
     session_id: str = ""
+    identity: str = ""  #: the entry's ``identity:`` line, read as the engine's fence reads it (RDR-253 Step 5)
 
 
 @dataclass(frozen=True)
@@ -313,7 +315,8 @@ def _yes_no(value: str) -> bool:
 
 
 def _build_ask(
-    block: list[tuple[str, str, str]], *, entry: str, session_id: str, thread: str, refs: tuple[str, ...]
+    block: list[tuple[str, str, str]], *, entry: str, session_id: str, thread: str, refs: tuple[str, ...],
+    identity: str = "",
 ) -> Ask:
     """``block`` is ``(normalized key, value, stripped line)`` in file order, the ``ask:`` line first."""
     first: dict[str, str] = {}
@@ -361,6 +364,7 @@ def _build_ask(
         version=ask_version(line for _k, _v, line in block),
         entry=entry,
         session_id=session_id,
+        identity=identity,
         thread=thread,
         refs=refs,
         lines=tuple(line for _k, _v, line in block),
@@ -428,6 +432,9 @@ def _following_fields(lines: list[str], i: int, *, past_thread_fields: bool = Fa
 
 
 def parse_session(name: str, content: str) -> Session:
+    from nexus.identity.board import identity_of
+
+    identity = identity_of(content)
     notes: list[str] = []
     threads: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
@@ -540,16 +547,18 @@ def parse_session(name: str, content: str) -> Session:
     flush()
     return Session(
         name=name,
-        threads=tuple(_finish_thread(t, name, session_id) for t in threads),
+        threads=tuple(_finish_thread(t, name, session_id, identity) for t in threads),
         notes=tuple(notes),
         session_id=session_id,
+        identity=identity,
     )
 
 
-def _finish_thread(t: dict[str, Any], entry: str, session_id: str) -> Thread:
+def _finish_thread(t: dict[str, Any], entry: str, session_id: str, identity: str = "") -> Thread:
     refs = tuple(t["refs"])
     asks = tuple(
-        _build_ask(b, entry=entry, session_id=session_id, thread=t["title"], refs=refs) for b in t["blocks"]
+        _build_ask(b, entry=entry, session_id=session_id, thread=t["title"], refs=refs, identity=identity)
+        for b in t["blocks"]
     )
     needs_sam = t["needs_sam"]
     if asks:
@@ -852,18 +861,30 @@ class Finding:
 
 
 def answer_title(ask: Ask) -> str:
-    """T2 title of the answer record for this ask at this version: ``<asker session id>/<ask id>/<version>``.
+    """T2 title of the answer record for this ask at this version: ``<asker>/<ask id>/<version>``.
 
-    The session id is lower-cased, the canonical form records are written under. An ask in an entry with no
-    ``session:`` line has no title (empty): no record can exist for it.
+    The asker is the entry's identity when it has an ``identity:`` line (RDR-253 Step 5: the identity outlives
+    ``/clear``, the session id does not), else its session id, lower-cased, the canonical form records are written
+    under. An ask in an entry with neither line has no title (empty): no record can exist for it.
     """
+    if ask.identity:
+        return f"{ask.identity}/{ask.id}/{ask.version}"
     if not ask.session_id:
         return ""
     return f"{ask.session_id.lower()}/{ask.id}/{ask.version}"
 
 
+def answer_titles(ask: Ask) -> tuple[str, ...]:
+    """Every title an answer record for this ask may sit under: the identity-keyed one, then the session-keyed one a
+    pre-Step-5 ``nx ask`` wrote (Phase 1 runs a mixed fleet)."""
+    titles = [answer_title(ask)]
+    if ask.identity and ask.session_id:
+        titles.append(f"{ask.session_id.lower()}/{ask.id}/{ask.version}")
+    return tuple(t for t in titles if t)
+
+
 def _is_answered(ask: Ask, statuses: Mapping[str, str]) -> bool:
-    return bool(ask.session_id) and statuses.get(answer_title(ask)) == "sent"
+    return any(statuses.get(t) == "sent" for t in answer_titles(ask))
 
 
 def _record_status(record: Any) -> str:
@@ -990,14 +1011,17 @@ def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
     for title in unreadable:
         found.append(Finding(title, "", "unreadable-entry", "the entry could not be read, so its asks are not checked"))
     by_session: dict[str, list[str]] = {}
+    by_identity: dict[str, list[str]] = {}
     has_asks: dict[str, bool] = {}
     for title, session, _stamp in read:
         asks = [a for t in session.threads for a in t.asks]
         if session.session_id:
             by_session.setdefault(session.session_id.lower(), []).append(title)
+        if session.identity:
+            by_identity.setdefault(session.identity, []).append(title)
         has_asks[title] = has_asks.get(title, False) or bool(asks)
-        if asks and not session.session_id:
-            found.append(Finding(title, "", "no-session", "no session: line, so answers cannot be routed"))
+        if asks and not (session.session_id or session.identity):
+            found.append(Finding(title, "", "no-session", "no identity: or session: line, so answers cannot be routed"))
         for t in session.threads:
             found.extend(_unopened_asks(title, t))
         seen: set[str] = set()
@@ -1031,4 +1055,8 @@ def lint(entries: Iterable[Mapping[str, Any]]) -> tuple[Finding, ...]:
         if len(titles) > 1 and any(has_asks[t] for t in titles):
             for title in titles:
                 found.append(Finding(title, "", "duplicate-session", f"session: {sid} is also carried by another entry"))
+    for ident, titles in by_identity.items():
+        if len(titles) > 1:
+            for title in titles:
+                found.append(Finding(title, "", "duplicate-identity", f"identity: {ident} is also carried by another entry"))
     return tuple(found)

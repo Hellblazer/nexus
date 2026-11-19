@@ -6,13 +6,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from nexus.identity.board import entries_for_identity
 from nexus.console.threads import (
     Bead,
     BeadsResult,
     build_board,
     format_age,
+    answer_title,
     has_value,
     headline,
+    lint,
     merge_asks,
     parse_beads_json,
     parse_session,
@@ -89,6 +92,56 @@ def test_a_session_id_line_alone_does_not_make_a_thread() -> None:
     is only that line has no thread, no note and no ask."""
     only = parse_session("bullock", f"session: {SESSION_ID}\n")
     assert only.threads == () and only.notes == ()
+
+
+def test_entry_found_by_identity_line_when_session_line_is_stale() -> None:
+    """RDR-253 Step 5: after a ``/clear`` the ``session:`` line names the id from before it; the ``identity:`` line
+    still names the seat, so the parser returns the entry for that identity (and the board shows it)."""
+    content = f"session: {SESSION_ID}\nidentity: i12\n## T\nstate: building\nneeds_sam: pick the port\n"
+    found = parse_session("alpha", content)
+    assert found.identity == "i12"
+    assert found.session_id == SESSION_ID, "the session: line is still read, as the fallback for an entry with no identity line"
+    stale = "11111111-2222-3333-4444-555555555555"  # the id the entry was written under, before /clear
+    assert entries_for_identity([_entry("alpha", f"session: {stale}\nidentity: i12\n## T\nstate: x\n", "2026-10-25T19:00:00Z")], "i12") == ["alpha"]
+    assert entries_for_identity([_entry("alpha", f"session: {stale}\nidentity: i12\n## T\nstate: x\n", "2026-10-25T19:00:00Z")], "i13") == []
+
+
+@pytest.mark.parametrize("line", ["identity: i12", "Identity: i7", "identity: nonsense"])
+def test_identity_line_is_ignored_not_a_note(line: str) -> None:
+    pre = parse_session("a", f"{line}\n## T\nstate: x\n")
+    assert pre.notes == () and pre.threads[0].notes == ()
+    inside = parse_session("a", f"## T\nstate: x\n{line}\n")
+    assert inside.threads[0].notes == ()
+
+
+def test_an_identity_line_alone_does_not_make_a_thread_and_a_bad_value_is_no_identity() -> None:
+    only = parse_session("bullock", "identity: i3\nsession: s\n")
+    assert only.threads == () and only.notes == () and only.identity == "i3"
+    assert parse_session("bullock", "identity: nonsense\n").identity == ""
+
+
+def test_the_lint_asks_for_an_identity_or_a_session_line_and_flags_one_identity_on_two_entries() -> None:
+    ask = (
+        "## T\nask: pick\nasked: 2026-10-25T18:00Z\nquestion: Which?\ncontext: c\noption 1: a\noption 2: b\n"
+        "reversible: yes\nblocking: no\n"
+    )
+    rules = {f.rule for f in lint([_entry("a", f"identity: i4\n{ask}", "2026-10-25T19:00:00Z")])}
+    assert "no-session" not in rules, "an identity line routes the answer as well as a session line does"
+    assert "no-session" in {f.rule for f in lint([_entry("a", ask, "2026-10-25T19:00:00Z")])}
+    both = lint([_entry("a", f"identity: i4\n{ask}", "2026-10-25T19:00:00Z"), _entry("b", f"identity: i4\n{ask}", "2026-10-25T19:00:00Z")])
+    assert [f.rule for f in both if f.rule == "duplicate-identity"] == ["duplicate-identity", "duplicate-identity"]
+
+
+def test_an_ask_names_its_identity_and_its_answer_record_is_keyed_by_it() -> None:
+    ask = (
+        "identity: i9\nsession: 7c1d35ea-f694-4536-b5d6-eb1a5e4e951c\n## T\nask: pick\nasked: 2026-10-25T18:00Z\n"
+        "question: Which?\ncontext: c\noption 1: a\noption 2: b\nreversible: yes\nblocking: no\n"
+    )
+    a = parse_session("a", ask).threads[0].asks[0]
+    assert a.identity == "i9" and a.session_id == "7c1d35ea-f694-4536-b5d6-eb1a5e4e951c"
+    assert answer_title(a) == f"i9/pick/{a.version}", "the identity outlives /clear, the session id does not"
+    legacy = parse_session("a", ask.replace("identity: i9\n", "")).threads[0].asks[0]
+    assert answer_title(legacy) == f"7c1d35ea-f694-4536-b5d6-eb1a5e4e951c/pick/{legacy.version}"
 
 
 def test_headingless_fields_belong_to_an_implicit_thread_named_for_the_session() -> None:
