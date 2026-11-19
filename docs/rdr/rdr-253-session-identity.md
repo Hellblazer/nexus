@@ -796,14 +796,22 @@ seat's alias differ.
   drops the `session:` line. It is titled by the seat's live alias and
   written with `memory_put` under the fencing rule above. The compaction
   checkpoint and Desktop restore find it by identity.
-- **Mailbox and names.** Mail goes to `mailbox/<id>`; a name resolves through
-  `alias/<name>`. Phase 1 runs a mixed fleet, since old clients keep running
-  for days: a sender resolves `alias/<name>` first and sends to
-  `mailbox/<id>`, and falls back to `directory/<name>` and
-  `mailbox/<session id>` when the seat has no binding by a new client; a new
-  client subscribes to both `mailbox/<id>` and its `mailbox/<session id>`
-  until Phase 2. `mailbox_send`'s guard against a session-shaped `from` gets
-  an identity counterpart.
+- **Mailbox and names.** Mail to an identity id goes to `mailbox/<id>`; a
+  name resolves through `alias/<name>`. Phase 1 runs a mixed fleet, since old
+  clients keep running for days, and a live binding does not show whether its
+  client reads `mailbox/<id>`. So a sender resolves `alias/<name>` first and
+  then sends to the session mailbox of the name's single live
+  `directory/<name>` holder; it sends to `mailbox/<id>` only when nobody holds
+  the name, and refuses a name with two holders. A retired alias keeps the
+  7-day notice and the refusal after it. A new client subscribes to both
+  `mailbox/<id>` and its `mailbox/<session id>` until Phase 2. So in Phase 1
+  named mail goes to the holder's current session mailbox, not an
+  identity-owned mailbox, and does not survive `/clear`, which is no worse
+  than before Step 5; mail sent to the id, or to a name nobody holds, does.
+  The identity mailbox that survives `/clear` follows in a later step (Sam
+  2026-11-19, T2 `nexus/sam-ruling-named-mail-phase1-2026-11-19`: accepted
+  for 8.5). `mailbox_send`'s guard against a session-shaped `from` gets an
+  identity counterpart.
 - **Identity scratch and per-identity T2.** The identity scope holds working
   state that must cross `/clear` and restart but is not worth a permanent
   record; it lives as long as the identity, and is the T1 scope whose
@@ -1094,9 +1102,10 @@ dispatch that grants tools, and a `gone` row for a dead dispatcher.
 #### Step 5: Threads entry, mailbox and names
 
 The `identity:` line beside `session:`, and the checkpoint, `nx ask`, console,
-due-date hook and aura readers moved to it; `mailbox/<id>` with alias
-resolution, the 7-day notice, dual subscription and sender fallback; the
-identity-shaped `from` guard.
+due-date hook and aura readers moved to it; alias resolution with a named
+send going to the single live directory holder's session mailbox
+(`mailbox/<id>` only when nobody holds the name, two holders refused), the
+7-day notice, dual subscription; the identity-shaped `from` guard.
 
 #### Step 6: Identity scratch, per-identity T2, memberships and background work
 
@@ -1299,3 +1308,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-17: wording amended to match the reviewed Step 2 code (grant 3), bead nexus-hczdo.1.2: identity tokens and their expiry rule, stale-generation and holder-mismatch codes, the four fences' refusal codes and check-then-write limit, threads, scratch and mailbox behaviour, and what the stamps say.
 - 2026-11-17: wording amended to match the reviewed Step 3 code (grant 3), bead nexus-hczdo.1.4: the identity lease on its own thread and `end` only after Claude exits; a notice, not a seat list, for an `NX_SEAT` naming no seat; the cases where the hook binds nothing; the resolver's fourth input and the token file's fields; which requests carry the token and the client-side session check; the holder check's registry-directory rule, unknown holders and Windows start time; data-credential degradation; `NX_IDENTITY_LEASE=0`; the pending bind logging its notices; the unindexed-resume reuse row; the Step 3 plan entry; the Desktop pending bind and the in-process `/resume` registry timing stated as unverified.
 - 2026-11-18: wording amended to match the reviewed Step 4 code (grant 3), bead nexus-hczdo.1.5: delegated identities for tool-granting dispatches only, their binding naming the dispatcher process and the sweep that records `gone` for a dead one and removes its token files (not after a 403); `nx identity show --all` scoped to bindings on this host and live processes without one, `claude -p` children left out; the restart script keeps a held seat through `NX_SEAT`, promotes an ephemeral or creates a seat for a `nameSource` `user` name, before an in-place `/restart` too, and passes no derived name back as `-n`; the take-over ancestor guard exempts the caller's own Claude process; Test Plan lines for these.
+- 2026-11-19: wording amended to match the reviewed Step 5 code (grant 3), beads nexus-hczdo.1.7 and nexus-hczdo.1.8: a named send goes to the single live `directory/<name>` holder's session mailbox, `mailbox/<id>` only when nobody holds the name, two holders refused; in Phase 1 named mail does not survive `/clear`, and the identity mailbox that does follows in a later step (Sam 2026-11-19, T2 `nexus/sam-ruling-named-mail-phase1-2026-11-19`).
