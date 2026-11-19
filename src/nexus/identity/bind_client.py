@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -120,13 +121,14 @@ class IdentityClient:
         try:
             body = resp.json() if resp.content else {}
         except ValueError:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
+            body = None
         if resp.status_code >= 400:
+            body = body if isinstance(body, dict) else {}
             message = body.get("message") or body.get("error") or resp.reason_phrase
             raise IdentityApiError(resp.status_code, body.get("error") if isinstance(body.get("error"), str) else None,
                                    str(message), body)
+        if not isinstance(body, dict):  # a 2xx that is not the engine's JSON object (a proxy page) is not an answer
+            raise IdentityApiError(resp.status_code, "bad_response", "the engine's answer was not a JSON object")
         return body
 
     # ── reads ───────────────────────────────────────────────────────────────
@@ -158,8 +160,13 @@ class IdentityClient:
 
     def memberships(self, identity: str) -> list[dict[str, Any]]:
         """The groups *identity* belongs to, in join order: ``{identity, group, role, joined_at}`` each (RDR-253 Step 1,
-        ``GET /v1/identity/<id>/memberships``). 404 ``unknown_identity`` for an identity the engine has no record of."""
-        return list(self._request("GET", f"/{identity}/memberships").get("memberships") or [])
+        ``GET /v1/identity/<id>/memberships``). 404 ``unknown_identity`` for an identity the engine has no record of.
+        The one reader of this route (``nexus.groups`` delegates here). An answer with no ``memberships`` list is
+        :class:`IdentityApiError` ``bad_response``, never "no memberships"."""
+        rows = self._request("GET", f"/{quote(identity, safe='')}/memberships").get("memberships")
+        if not isinstance(rows, list):
+            raise IdentityApiError(200, "bad_response", "the membership answer carries no memberships list")
+        return rows
 
     def log(self, identity: str) -> list[dict[str, Any]]:
         """The identity's binding log, oldest first (``nx identity show`` prints its tail)."""

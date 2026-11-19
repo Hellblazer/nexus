@@ -50,7 +50,7 @@ def group_reader_from(client: Any) -> GroupReader:
     def read(name: str) -> GroupRecord | None:
         try:
             record = read_group(client, name)
-        except (GroupsError, GroupsUnavailableError) as exc:
+        except (GroupsError, GroupsUnavailableError, KeyError, ValueError, TypeError) as exc:  # the last three: a record the wire cannot build
             raise GroupUnreadable(f"group {name} could not be read") from exc
         if record is None:
             return None

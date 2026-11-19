@@ -51,7 +51,7 @@ class Wire:
         if not answers:
             return httpx.Response(404, json={"error": "not_found", "message": f"no route {request.method} {request.url.path}"})
         status, body = answers.pop(0) if len(answers) > 1 else answers[0]
-        return httpx.Response(status, json=body)
+        return httpx.Response(status, text=body) if isinstance(body, str) else httpx.Response(status, json=body)
 
     def sent(self, method: str, path: str) -> list[httpx.Request]:
         return [r for r in self.requests if r.method == method and r.url.path == path]
@@ -343,6 +343,41 @@ def test_list_of_a_group_with_no_record_and_of_a_disbanded_one() -> None:
                   .on("GET", "/v1/identity/groups/push-train", 200, {"group": "push-train", "members": []})
     out = _run(_env(ended), "list", "push-train")
     assert out.exit_code == 0 and "disbanded" in out.output
+
+
+# ── a 2xx answer that is not the engine's JSON object (nexus-igea9.7 round 1, S1) ──
+
+_HTML = "<html><body>captive portal</body></html>"
+
+
+@pytest.mark.parametrize("body", [_HTML, "[]", "null", "42"])
+def test_a_2xx_answer_that_is_not_a_json_object_is_an_error_never_an_empty_answer(body: str) -> None:
+    wire = Wire().on("GET", "/v1/group/push-train", 200, body).on("GET", "/v1/identity/i3/memberships", 200, body)
+    wire.on("GET", "/v1/identity/groups/push-train", 200, body).on("DELETE", "/v1/identity/i3/memberships/push-train", 200, body)
+    client = _client(wire)
+    for call in (lambda: client.read("push-train"), lambda: client.record("push-train"), lambda: client.memberships("i3"),
+                 lambda: client.roster("push-train"), lambda: client.leave("i3", "push-train")):
+        with pytest.raises(GroupsError):
+            call()
+
+
+def test_a_membership_answer_without_a_list_is_an_error_not_no_memberships() -> None:
+    wire = Wire().on("GET", "/v1/identity/i3/memberships", 200, {"identity": "i3"})
+    wire.on("GET", "/v1/identity/groups/push-train", 200, {"members": "nope"})
+    client = _client(wire)
+    with pytest.raises(GroupsError):
+        client.memberships("i3")
+    with pytest.raises(GroupsError):
+        client.roster("push-train")
+
+
+def test_leave_and_list_over_an_html_answer_exit_one_instead_of_not_a_member_or_none() -> None:
+    wire = Wire().on("DELETE", "/v1/identity/i3/memberships/push-train", 200, _HTML)
+    left = _run(_env(wire), "leave", "push-train")
+    assert left.exit_code == 1 and "not a member" not in left.output, left.output
+    listing = Wire().on("GET", "/v1/group/push-train", 200, RECORD).on("GET", "/v1/identity/groups/push-train", 200, _HTML)
+    shown = _run(_env(listing), "list", "push-train")
+    assert shown.exit_code == 1 and "(none)" not in shown.output, shown.output
 
 
 # ── ack-times ───────────────────────────────────────────────────────────────
