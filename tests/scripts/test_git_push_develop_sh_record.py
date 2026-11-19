@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._tmp_root import child_env_with_tmpdir
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "git-push-develop.sh"
 RECORD_SUBSPACE = "board/ci/nexus-develop--push"
@@ -325,7 +327,8 @@ def test_a_script_killed_mid_write_leaves_no_temp_file(repos, fake_nx, tmp_path:
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir()
     a = _commit(work, "a")
-    env = _env(work, nx_dir, log, {"FAKE_NX_RECORD_SLEEP": "30", "NX_PUSH_RECORD_TIMEOUT_S": "25", "TMPDIR": str(tmpdir)})
+    env = child_env_with_tmpdir(_env(work, nx_dir, log, {"FAKE_NX_RECORD_SLEEP": "30", "NX_PUSH_RECORD_TIMEOUT_S": "25"}),
+                                tmpdir)
     proc = subprocess.Popen([str(SCRIPT), a], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         deadline = time.monotonic() + 30
