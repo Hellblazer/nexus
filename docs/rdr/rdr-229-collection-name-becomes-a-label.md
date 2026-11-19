@@ -237,8 +237,8 @@ index rebuild on the id (P3.4). A collection's rows are stamped before its
 index is built on the id, so no index is built twice. RDR-247 owns the
 bounded drop of the shared leaf graph, which is not in this RDR. The stamp
 cannot stop at new rows, the cost comparison's option (c): D3's chunks
-primary key holds `collection_id`, so every row must carry one before P3.3c
-swaps the key. What (c) adds, stamping a collection's old rows just before
+key holds `collection_id`, so every row must carry one before P3.3c
+adds that key. What (c) adds, stamping a collection's old rows just before
 its index build, fits P3.1's order. It is not an alternative to stamping
 everything.
 
@@ -733,7 +733,8 @@ The key moves table by table in strangler order:
   `origin_collection` metadata tag gains an `origin_collection_id` beside it.
 - **Switch.** Each foreign key is re-created on `(tenant_id, collection_id)`
   (or `(tenant_id, collection_id, embedding_model)` for the RDR-225
-  composite), `NOT VALID` first and validated after by a data move's
+  composite and for `canary_query_ring`'s, which also references the name
+  UNIQUE today, vectors-054:90-93), `NOT VALID` first and validated after by a data move's
   `on_complete` (P3.3a). The exception is the RDR-225 composite from the
   partitioned `nexus.chunks`, which PostgreSQL validates directly (below).
   Each validation is its own move, one per referencing table: the seven
@@ -764,9 +765,11 @@ The key moves table by table in strangler order:
   index builders (`VerifyingFinisher.java:40-41`). So P3.4's builds start
   only after every validation move has completed, read by the boot-time
   completion check (below). The
-  chunks and centroid primary keys are rebuilt per leaf on `(tenant_id,
+  chunks and centroid tables gain an id key per leaf, `(tenant_id,
   collection_id, chash, embedding_model)` and `(tenant_id, collection_id,
-  topic_id, embedding_model)`, and the three child foreign keys follow. Every
+  topic_id, embedding_model)`, beside their name primary keys, which stay
+  until P4.1, and the three child foreign keys gain id twins (P3.3c,
+  below). Every
   per-collection index is rebuilt with `WHERE collection_id = <id>` and a
   name hashed from model, tenant and id, so a label change never strands
   one. Readers (engine repositories, SQL functions, client caches) key on
@@ -777,7 +780,10 @@ The key moves table by table in strangler order:
   resolved to the id once, by `CollectionRegistry`, which is keyed by id
   with a label index beside it. Responses carry both.
 - **Contract (Phase 4).** The name columns on referencing tables are
-  dropped, the `(tenant_id, name, embedding_model)` UNIQUE is dropped, and
+  dropped, and with them the chunks and centroid name primary keys and the
+  three name child keys; the old composites `chunks_collection_fk` and
+  `canary_query_ring_collection_fk` are dropped first, then the
+  `(tenant_id, name, embedding_model)` UNIQUE they reference, and
   the name-based arms of `COLLECTION_SCOPED_TABLES` go with them. Dropping
   `superseded_by` drops the label index whose predicate reads it, so P4.1
   re-creates that index on `superseded_by_id` (item 7).
@@ -880,33 +886,60 @@ while the engine serves:
   RDR-247). Built after the swap and the validations, they are not ended
   by those moves' chunk-family `on_complete`, which ends builds in flight
   (RDR-246). So an index is built a second time only after a kill.
-- *The switch is a move's `on_complete`.* The partitioned key follows
-  PostgreSQL's documented route: `ALTER TABLE ONLY` the parent `ADD PRIMARY
-  KEY`, a matching key on each leaf, then `ALTER INDEX ... ATTACH
-  PARTITION` for each leaf ("The same technique applies to PRIMARY KEY
-  constraints", `ddl-partitioning.html`; T2 `229-research-41`). Each leaf's
-  key takes the unique index built concurrently above, through `ADD ...
-  USING INDEX`, which "is not currently supported on partitioned tables"
-  but is on a leaf. So P3.3c has, per table whose key it swaps
-  (`nexus.chunks`, `nexus.taxonomy_centroids`), a move that P3.3b's pass
-  registers when that table's indexes are all valid (above), whose driving table
-  is that table, run per tenant and leaf. Its template re-stamps rows whose
-  id is still null, which is a no-op after P3.1. Inferred, not read:
-  dml_utils still walks every chunk of the leaf, one chunked pass. Its
-  verification query returns any leaf without a valid unique index on the
-  new key, and any row with a null id; neither can be found once the pass
-  has registered it after the stamp completed. Its `on_complete` drops the old key
-  and the three child foreign keys, adds the new key by that route, and
-  re-adds the three child foreign keys `NOT VALID` (their referencing
-  tables are not partitioned), and registers the three moves that validate
-  them (Switch, above). The outbound composite
-  foreign key from `nexus.chunks` to `catalog_collections` cannot be added
+- *The switch is a move's `on_complete`.* The id key is added beside the
+  name primary key, not in its place. PostgreSQL's documented route for a
+  partitioned table is `ALTER TABLE ONLY` the parent `ADD UNIQUE`, a
+  matching key on each leaf, then `ALTER INDEX ... ATTACH PARTITION` for
+  each leaf ("ALTER TABLE ONLY measurement ADD UNIQUE (city_id, logdate);
+  ... ALTER INDEX measurement_city_id_logdate_key ATTACH PARTITION ...",
+  `ddl-partitioning.html`; T2 `229-research-41`). Each leaf's key takes the
+  unique index built concurrently above, through `ADD ... USING INDEX`,
+  which "is not currently supported on partitioned tables" but is on a
+  leaf. So P3.3c has, per table (`nexus.chunks`,
+  `nexus.taxonomy_centroids`), a move that P3.3b's pass registers when
+  that table's indexes are all valid (above), whose driving table is that
+  table, run per tenant and leaf. Its template re-stamps rows whose id is
+  still null, which is a no-op after P3.1. Inferred, not read: dml_utils
+  still walks every chunk of the leaf, one chunked pass. Its verification
+  query returns any leaf without a valid unique index on the new key, and
+  any row with a null id; neither can be found once the pass has
+  registered it after the stamp completed. Its `on_complete` adds the id
+  key by that route, adds the three child id keys `NOT VALID` with `ON
+  UPDATE CASCADE` (their referencing tables are not partitioned), and, on
+  the chunks move only, registers the three moves that validate them
+  (Switch, above). It drops nothing: the name primary key and the three
+  name child keys stay until P4.1. The outbound composite
+  foreign key from `nexus.chunks` to `catalog_collections` on the id cannot be added
   `NOT VALID`, "because PostgreSQL does not take NOT VALID for a partitioned
   referencing table", so it is validated directly in the same `on_complete`
-  (vectors-030 lines 1013-1016). The `on_complete` runs as one transaction.
+  (vectors-030 lines 1013-1016); the old `chunks_collection_fk` stays until
+  P4.1. The `on_complete` runs as one transaction.
   A lock it cannot get "fails fast as a transient `blocked:` (55P03)", and
-  a kill before the commit leaves the old keys in place (RDR-246 lines
+  a kill before the commit leaves the table as it was (RDR-246 lines
   545-547, 914-916).
+- *The name path keeps working after P3.3c.* Both writers name the name
+  key as their conflict target: `insert.onConflict(ch.tenantId(),
+  ch.collection(), ch.chash(), ch.embeddingModel())`
+  (`PgVectorRepository.java:1294`) and `.onConflict(ct.tenantId(),
+  ct.collection(), ct.topicId(), ct.embeddingModel())`
+  (`TaxonomyCentroidRepository.java:161`). PostgreSQL infers "All
+  table_name unique indexes that ... contain exactly the conflict_target"
+  columns, and "If an attempt at inference is unsuccessful, an error is
+  raised" (T2 `229-research-53`). Keeping the name primary key keeps an
+  arbiter for both until P4.1. Both writers move their conflict target to
+  the id key with P3.5c, when gate 3 passes on the install (below); both
+  keys exist from P3.3c to P4.1, so either target has an arbiter. The
+  child keys cascade names only (`ON UPDATE CASCADE`,
+  vectors-030:1017-1051), and `chunk_orphaned_at` is not among the
+  `COLLECTION_SCOPED_TABLES`, so a rename reaches its name only through
+  that cascade. Inferred, not read: from P3.1 the name-path rename, which
+  inserts a new registry row and so a new id, sets that id wherever it
+  rewrites a name and in `chunk_orphaned_at`; from P3.3c the child id
+  keys' `ON UPDATE CASCADE` carries it too. Inferred, not read: after P4.1
+  drops the name primary key the id key is a UNIQUE, and a UNIQUE admits
+  "duplicate rows that contain a null value", so P3.1 also adds `CHECK
+  (collection_id IS NOT NULL)` `NOT VALID` on `nexus.chunks` and
+  `nexus.taxonomy_centroids`, validated with the stamp.
 - *Readers during the stamp.* RDR-246 requires this RDR to say it: "Each
   move's RDR or bead states how readers behave while it runs: read both
   shapes, or keep the feature off until `completed_at` is set" (RDR-246
@@ -984,9 +1017,12 @@ while the engine serves:
     by the id before that collection's index on the id exists. Inferred,
     not read: each gate takes effect at the first boot after it holds,
     the boot at which a CONTINUE changeset "applies at the first boot
-    after the move completes" (RDR-246 lines 942-944). Inferred, not read:
-    client caches keyed by id are safe from P3.1, because P3.1's changeset
-    fills the registry's identity column.
+    after the move completes" (RDR-246 lines 942-944). A client cache
+    keyed by id holds a stable id only from gate 3 on the install, when the
+    rename becomes one row: before it, the name-path rename inserts a new
+    registry row with a new id (T2 `229-research-53`), so until then the
+    client refreshes an id-keyed entry on a rename and keys its lookups by
+    label.
   - *A blocked move.* A BYO or `--no-pg-bundle` PostgreSQL "gets it from
     its DBA ... Until the step has run, moves report `blocked:`" (RDR-246
     lines 801-805), and nx doctor "shows one red row per `blocked:` or
@@ -1019,15 +1055,15 @@ of them.
 | Column | Reaches the registry | Disposition | Rename today |
 | --- | --- | --- | --- |
 | `catalog_collections.superseded_by` | no | Expand as `superseded_by_id` (NULL when live, the successor's id on a tombstone), under its own CHECK `(superseded_by = '') = (superseded_by_id IS NULL)`; dropped at P4.1 | written on the tombstone |
-| `catalog_document_chunks.collection` | through the chunks key | Expand; child key switched in P3.3c | rewritten |
-| `chunk_orphaned_at.collection` | through the chunks key | Expand; child key switched in P3.3c | rewritten by its `ON UPDATE CASCADE` from the chunks key (vectors-030:1047-1051) |
+| `catalog_document_chunks.collection` | through the chunks key | Expand; child id key added in P3.3c, name key dropped at P4.1 | rewritten |
+| `chunk_orphaned_at.collection` | through the chunks key | Expand; child id key added in P3.3c, name key dropped at P4.1; the name-path rename sets its id (item 6) | rewritten by its `ON UPDATE CASCADE` from the chunks key (vectors-030:1047-1051) |
 | `catalog_documents.physical_collection` | no | Expand | rewritten |
 | `catalog_documents.corpus` | no | History label: set at index time (`corpus=collection_name`, `indexer.py:2852`, or a user `--corpus`), kept as written | no |
 | `catalog_reconcile_rows.physical_collection` | no | Transient: a staging table reaped after 24 hours (`catalog-048-reconcile.xml:103`); no id | no |
 | `chash_remap.source_collection`, `.target_collection` | no | Expand | no |
 | `pdf_pipeline.collection` | no | Expand | no |
 | `reembed_jobs.source_collection`, `.target_collection` | no | Expand | no |
-| `taxonomy_centroids.collection` | no | Expand; primary key rebuilt in P3.3c | rewritten |
+| `taxonomy_centroids.collection` | no | Expand; id key added beside the name primary key in P3.3c | rewritten |
 | `relevance_log.collection` | no | History label with a nullable id | rewritten until P3.7 |
 | `search_telemetry.collection` | no | History label with a nullable id | rewritten until P3.7 |
 | `hook_failures.collection` | no | History label with a nullable id | rewritten until P3.7 |
@@ -1255,7 +1291,7 @@ list stays complete because of two facts and one rule:
 | Row cache | Engine `CollectionRegistry` (keyed by tenant and name), client `mcp_infra._collections_cache`, client registration cache | Change: key by `collection_id`, with a label index for the route boundary. |
 | Rename | `CatalogRepository.renameCollectionTxn`, `COLLECTION_SCOPED_TABLES` | Replace: a one-row label update plus the note-URI and aspect-task rewrites (`AspectTaskRefs`); `COLLECTION_SCOPED_TABLES` keeps serving delete and rehome, keyed by id. |
 | Per-collection index | `PciBuilderSession`, `PciCatalog` | Change: predicate and name hash on `collection_id`; every existing index rebuilt. |
-| Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, one per referencing table for each foreign-key validation (P3.3a, P3.3c), and one whose `on_complete` swaps the keys; no new mover. |
+| Stamp and key swap (Phase 3) | RDR-246: `nexus.data_moves`, `DataMoveWorker`, dml_utils, `MoveBootWork` | Reuse: one registered move per table (per tenant and leaf) for the stamp, one per foreign key for each validation (P3.3a, P3.3c), and one per table whose `on_complete` adds the id key beside the name key; no new mover. |
 | Per-leaf unique index builds | `PciReconciler`, `PciBuilderSession`, `PciBootWork` | New code in the reconciler's pattern (P3.3b): the reconciler builds per-collection HNSW indexes (`PciBuilderSession.java:115-118`), not per-leaf unique indexes. Background `CREATE INDEX CONCURRENTLY` after serve, `boot_work`, INVALID leftovers dropped and rebuilt. |
 | Recovery bundle | `catalog/recovery_bundle.py` | Extend: the format carries the registry row; the name path stays for N minor releases (Open Item O1). |
 
@@ -1548,7 +1584,10 @@ its acceptance is that test green plus the census pin it lowers.
   list) and, `NOT VALID`, the CHECK `(<name column> IS NULL) =
   (collection_id IS NULL)` on each, except `superseded_by`, whose CHECK is
   `(superseded_by = '') = (superseded_by_id IS NULL)` and whose stamp
-  resolves a non-empty name to the successor's id (item 6); every writer (item 6's census: 109 Java
+  resolves a non-empty name to the successor's id (item 6); `CHECK
+  (collection_id IS NOT NULL)` `NOT VALID` on `nexus.chunks` and
+  `nexus.taxonomy_centroids`, the id key's guard once P4.1 drops the name
+  key (item 6); every writer (item 6's census: 109 Java
   write sites, 26 SQL functions) sets the id on insert and update from this
   cut, and its acceptance re-runs that census over helper-routed and
   by-name writes and finds every writer of `taxonomy_centroids` before the
@@ -1561,7 +1600,8 @@ its acceptance is that test green plus the census pin it lowers.
   (item 6, "Readers during the stamp"). Test: an upgrade
   boot registers the move and rewrites no row of a large table; a killed run
   resumes from its last committed batch; an insert and an update without the
-  id are refused.
+  id are refused; a name-path rename gives every rewritten row, and the
+  collection's `chunk_orphaned_at` rows, the new registry row's id.
 - P3.2 Spike, before P3.1's changeset is final: time the stamp, the chunks
   and centroid key swap (its `on_complete`, with the directly validated
   composite foreign key) and the per-collection index rebuild on a PITR fork
@@ -1587,12 +1627,16 @@ its acceptance is that test green plus the census pin it lowers.
     INVALID index that the next pass drops and rebuilds; the swap is never
     registered while a leaf's unique index is missing or INVALID.
   - P3.3c Swap: per table, a move registered by P3.3b's pass (driving table
-    that table, template a re-stamp of rows still null) whose `on_complete` swaps the
-    primary key by `ALTER TABLE ONLY ... ADD PRIMARY KEY`, per-leaf `ADD ...
-    USING INDEX` and `ALTER INDEX ... ATTACH PARTITION`, re-adds the three
-    child foreign keys `NOT VALID`, registers the three moves that validate
-    them (the chunks swap only), and validates the RDR-225 composite directly (item 6). Test: no
-    child validation move exists before its constraint does.
+    that table, template a re-stamp of rows still null) whose `on_complete`
+    adds the id key beside the name primary key by `ALTER TABLE ONLY ...
+    ADD UNIQUE`, per-leaf `ADD ... USING INDEX` and `ALTER INDEX ... ATTACH
+    PARTITION`, adds the three child id keys `NOT VALID` with `ON UPDATE
+    CASCADE`, registers the three moves that validate them (the chunks
+    swap only), and validates the RDR-225 composite on the id directly
+    (item 6). It drops nothing; the name keys stay until P4.1. Test: no
+    child validation move exists before its constraint does; after the
+    swap, a chunk and a centroid upsert on the name target still succeed,
+    and a name-path rename leaves every child row with the new id.
 - P3.4 After P3.3: rebuild every per-collection index on `collection_id`
   (predicate and name hash) through the PCI reconciler, which reports in
   `boot_work` and rebuilds a killed build from the start; each collection's
@@ -1616,13 +1660,18 @@ its acceptance is that test green plus the census pin it lowers.
   boot after the move completes.
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route accepts `collection_id` and
-    a label; responses carry both. Client caches keyed by id.
+    a label; responses carry both. Client caches keyed by id, which they
+    trust as stable only once gate 3 passes on the install (item 6): until
+    then a rename gives the collection a new id.
   - P3.5b SQL readers: the plpgsql functions, the views keyed on names
     (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
     name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
     physical_collection, deleted_at ON nexus.catalog_documents`) read the
     id (T2 `229-research-37`).
-  - P3.5c Java readers: the jOOQ queries on the name columns read the id.
+  - P3.5c Java readers: the jOOQ queries on the name columns read the id,
+    and the two upserts (`PgVectorRepository.java:1294`,
+    `TaxonomyCentroidRepository.java:161`) take the id key as their
+    conflict target, from gate 3 on the install (item 6).
 - P3.6 Label rule, after P2.9: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
@@ -1686,9 +1735,13 @@ its acceptance is that test green plus the census pin it lowers.
 
 - P4.1 After P3.11; its acceptance includes RDR-248's committed fixture
   and a stated effect on backups taken before P3.1 (item 10). Primary key
-  to `(tenant_id, collection_id)`; drop the name columns on
-  referencing tables, the `(tenant_id, name, embedding_model)` UNIQUE and
-  `superseded_by` (replaced by `superseded_by_id`). UNIQUE `(tenant_id,
+  to `(tenant_id, collection_id)`; drop the old composites
+  `chunks_collection_fk` (vectors-030:1062-1066) and
+  `canary_query_ring_collection_fk` (vectors-054:90-93), which reference
+  the name UNIQUE, and the three name child keys; then the name columns on
+  referencing tables, which takes the chunks and centroid name primary
+  keys with them, the `(tenant_id, name, embedding_model)` UNIQUE and
+  `superseded_by` (replaced by `superseded_by_id`) (T2 `229-research-53`). UNIQUE `(tenant_id,
   collection_id, embedding_model)` stays: the RDR-225 composite depends on
   it, and PostgreSQL drops such a constraint only with CASCADE (item 6; T2
   `229-research-44`). Each drop waits for this install's stamp, swap and
@@ -1809,8 +1862,10 @@ No new query on a hot path is intended: the row cache already serves corpus
 resolution. Critical Assumption 2 states the one place this could fail (a
 write path naming a collection the cache does not hold) and P2.3 measures
 it. The chunks key shrinks from a text name to a bigint, so the chunks
-primary key and its children get smaller; the one-off cost is the re-key
-and index rebuild, measured in P3.2.
+key and its children get smaller from P4.1. From P3.3c to P4.1 both the
+name primary key and the id key exist, so those indexes are larger for that
+window (inferred, not read); the one-off cost is the re-key, the window's
+extra index and the index rebuild, measured in P3.2.
 
 ## Decisions (Sam)
 
