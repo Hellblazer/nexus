@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """claude-restart-sessions resumes a session through Claude Code's own /restart first, and exits and
-relaunches it only where /restart is not taken. The behaviour these fakes stand for was measured in the
-restart sandbox's opt-in ``slash`` scenario (tests/e2e/restart-sessions/slash_restart.py, 2.1.323)."""
+relaunches it only where /restart is not taken. The behaviour these fakes stand for was measured on
+Claude Code 2.1.323."""
 
 from __future__ import annotations
 
@@ -324,5 +324,5 @@ def test_a_fresh_restart_never_tries_slash_restart(crs, monkeypatch, tmp_path) -
 def test_rerun_command_carries_no_slash_restart(crs) -> None:
     a = argparse.Namespace(fresh=False, wait=600, handoff_timeout=600, fallback_resume=False, keep_dev_channel=False,
                            force=False, no_ready_check=False, no_wake=False, no_slash_restart=True,
-                           skip_sandbox_check=None, only=[], skip=[])
+                           only=[], skip=[])
     assert "--no-slash-restart" in shlex.split(crs.rerun_command(a, []))

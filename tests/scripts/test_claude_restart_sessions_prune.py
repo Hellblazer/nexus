@@ -124,7 +124,7 @@ class TestTheWriteTimeWrapper:
         assert any("pruned 1 handoff file(s)" in line for line in logged)
 
     def test_the_env_override_moves_the_prune_and_leaves_tmp_alone(self, crs, logged, tmp_path, monkeypatch) -> None:
-        """The e2e harness sets it so a sandboxed roll cannot prune the operator's real /tmp."""
+        """The test conftest sets it so a roll cannot prune the operator's real /tmp."""
         sandbox = tmp_path / "sandbox"
         sandbox.mkdir()
         monkeypatch.setenv("NX_RESTART_PRUNE_DIR", str(sandbox))
@@ -142,16 +142,6 @@ class TestTheWriteTimeWrapper:
         monkeypatch.setattr(crs, "prune_old_handoffs", boom)
         crs._prune_handoffs_at_write()  # must not raise
         assert any("handoff prune skipped" in line and "disk on fire" in line for line in logged)
-
-    def test_the_harness_sets_the_override_on_its_roll_command(self) -> None:
-        """tests/e2e/restart-sessions/run.py runs the real script; without this its rolls prune real /tmp."""
-        harness = (SCRIPT.parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py").read_text(encoding="utf-8")
-        # In roll_command's code, not merely somewhere in the file (a comment would satisfy a substring grep).
-        import ast  # noqa: PLC0415
-        fn = next(n for n in ast.walk(ast.parse(harness))
-                  if isinstance(n, ast.FunctionDef) and n.name == "roll_command")
-        strings = [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-        assert any("NX_RESTART_PRUNE_DIR=" in s for s in strings)
 
 
 def test_the_script_and_command_context_prune_by_the_same_rule(crs) -> None:

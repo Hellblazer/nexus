@@ -483,19 +483,13 @@ def test_a_delegated_identity_is_judged_by_its_dispatcher_process(box: Box) -> N
     assert box.run("may-stop", "--kind", "labrun", "--ref", "r").exit_code == 0
 
 
-def test_the_exit_statuses_are_the_contract_the_sandbox_keys_on(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
-    """S7: 0 no live owner, 3 a live identity owns it, 1 anything else (the engine not answering, a bad ref). The sandbox's
-    guard keys on the 3 alone; it lives outside the package and spells the number itself, so it is pinned here."""
-    import importlib.util
-
+def test_the_may_stop_exit_statuses(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S7: 0 no live owner, 3 a live identity owns it, 1 anything else (the engine not answering, a bad ref).
+    A caller outside the package keys on the 3 alone, so the number is pinned here."""
     from nexus.identity import work
     from nexus.identity.bind_client import IdentityUnavailableError
 
-    sibling = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "sandbox_work.py"
-    spec = importlib.util.spec_from_file_location("sandbox_work_pin", sibling)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    assert mod.EXIT_OWNED == work.EXIT_OWNED == 3
+    assert work.EXIT_OWNED == 3
 
     i1 = box.running_seat("alpha", 100)
     box.engine.put_work(i1, "tmux", "owned", "running")

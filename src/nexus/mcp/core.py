@@ -2891,8 +2891,8 @@ def _install_exit_handlers(
     hangs up the session's pty, and the kernel sends SIGHUP to its
     foreground process group, this server included. Its default action
     ends the process with no teardown, so the T1 token, its lease file and
-    the peer-directory name were left behind until they lapsed (measured in
-    the restart sandbox, nexus-xwijj). An inherited ignore is kept: a
+    the peer-directory name were left behind until they lapsed (measured on
+    a scratch-HOME session, nexus-xwijj). An inherited ignore is kept: a
     session started under ``nohup`` ignores SIGHUP, and this server, its
     child, must outlive a hangup with it rather than die alone.
     *register* and *set_signal* default to ``atexit.register`` and

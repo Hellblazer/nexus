@@ -1,0 +1,3 @@
+### Removed
+
+- **The restart sandbox and its weekly run are removed, and `claude-restart-sessions` no longer checks for a sandbox pass.** Sam's 2026-11-19 ruling, after a sandbox restart reached four live sessions: `tests/e2e/restart-sessions/` (its harness, scenarios and probes), `scripts/restart-sandbox-weekly.sh` and the sandbox's own tests are gone. The restart script drops the sandbox-pass gate and its warning (in the foreground, detached and `--dry-run` runs and in `--status`), the `sandbox-pass.json` record and the `--skip-sandbox-check` flag; a release no longer runs or consults a sandbox. `NX_IDENTITY_BIND=0` and `NX_IDENTITY_LEASE=0` stay.

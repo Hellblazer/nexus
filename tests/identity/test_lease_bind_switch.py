@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``NX_IDENTITY_BIND=0`` also keeps the MCP server's identity lease from starting, so the one switch that stops the hook
-from binding stops the lease from binding or renewing as well (the restart sandbox sets both switches; an installed nx
+from binding stops the lease from binding or renewing as well (a process may set both switches; an installed nx
 that has only the hook's, or only the lease's, still stops). Tenant-free: the lease returns before it looks for a
 Claude ancestor or builds a client."""
 from __future__ import annotations

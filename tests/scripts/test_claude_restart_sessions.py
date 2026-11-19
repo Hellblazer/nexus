@@ -975,14 +975,23 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "READY_MANIFEST", tmp_path / "restart-ready.json")
     monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
-    # The sandbox gate has its own tests; its inputs are stubbed too, so no test runs the real claude.
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
-    monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
-    monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
+    # No real tmux: every session lives on the one server the run reaches (tested in ..._plan.py); plans go in tmp.
+    monkeypatch.setattr(crs, "PLAN_DIR", tmp_path / "plans")
+    monkeypatch.setattr(crs, "check_server", lambda found: (FAKE_SERVER, list(found), ""))
     # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
+
+
+FAKE_SERVER = ("/tmp/fake-tmux/default", 1)
+
+
+def _with_plan(crs, argv: list[str]) -> list[str]:
+    """The detached half is given the plan its foreground wrote: here, every live session of the scratch dir."""
+    if "--detached" not in argv:
+        return argv
+    return [*argv, "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))]
 
 
 def _live(rd: Path, name: str, status: str = "idle", pane: str = "%5", **extra) -> Path:
@@ -1173,18 +1182,14 @@ def test_status_prints_the_table_and_exits_nonzero_while_a_target_blocks(crs, rd
     assert "busy" in rows["beta"] and "busy now" in rows["beta"]
 
 
-def test_status_is_still_go_while_the_sandbox_pass_does_not_hold(crs, rd, monkeypatch, capsys) -> None:
-    """--status exits 0 only when a restart would be allowed; the sandbox pass is advisory and never changes it."""
+def test_status_is_go_when_the_round_is_ready(crs, rd, monkeypatch, capsys) -> None:
+    """--status exits 0 only when a restart would be allowed, and says nothing about a sandbox pass."""
     _live(rd, "alpha")
     _round(crs, rd, ["alpha"], alpha=60)
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     assert crs.main() == 0
-    assert "sandbox pass: holds" in capsys.readouterr().out
-    # the pass is advisory (A1, 2026-11-19): any warning is reported, and --status still says go
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "no sandbox pass recorded (x)")
-    assert crs.main() == 0
-    assert "sandbox pass: warning, no sandbox pass recorded" in capsys.readouterr().out
+    assert "sandbox" not in capsys.readouterr().out
 
 
 def test_status_without_a_round_says_so(crs, rd, monkeypatch, capsys) -> None:
@@ -1213,6 +1218,7 @@ def _run_main(crs, monkeypatch, argv: list[str]) -> tuple[int, list[list[str]]]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return real(cmd, **kw)
 
+    argv = _with_plan(crs, argv)  # before the fake: reading the sessions runs `ps`
     setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", *argv])
@@ -1615,7 +1621,8 @@ def _child(crs, rd, monkeypatch, *argv: str) -> tuple[int, list[str]]:
     restarted: list[str] = []
     monkeypatch.setattr(crs, "restart", lambda s, handoff="": restarted.append(s["name"]) or True)
     monkeypatch.setattr(crs, "update_plugins", lambda: None)
-    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--detached", "--no-update", "--wait", "1", *argv])
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--detached", "--no-update", "--wait", "1", *argv,
+                                      "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))])
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     return crs.main(), restarted
 
@@ -1752,7 +1759,6 @@ def test_fresh_and_resume_are_opposites(crs, rd, monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--fresh", "--resume"])
     with pytest.raises(SystemExit):
         crs.main()
-SHA = "a" * 64  # the sandbox-gate tests live in test_claude_restart_sessions_sandbox.py
 
 
 # ── withdrawing a mailed ask (nexus-o581r) ───────────────────────────────────────────────
@@ -2044,7 +2050,6 @@ def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
     (rd / "ready-gamma.json").write_text("{not json", encoding="utf-8")
     calls: list[tuple] = []
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
@@ -2194,7 +2199,6 @@ def test_status_removes_only_the_answered_targets_markers(crs, rd, monkeypatch) 
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"}, markers=True)
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert not _marker_of(crs, rd, "alpha").exists() and _marker_of(crs, rd, "beta").exists()
@@ -2735,8 +2739,7 @@ def test_a_pane_that_cannot_be_kept_is_replaced_by_a_window_with_a_shell(crs, mo
 def _roll_args(**over) -> argparse.Namespace:
     """The Namespace _roll and stop_report read, every field the real parser would give."""
     base = dict(fresh=False, nx="", fallback_resume=False, wait=5, handoff_timeout=1, repo="", endpoint="",
-                caller_pane="", only=[], skip=[], keep_dev_channel=False, force=False, no_ready_check=False,
-                skip_sandbox_check=None)
+                caller_pane="", only=[], skip=[], keep_dev_channel=False, force=False, no_ready_check=False)
     return argparse.Namespace(**{**base, **over})
 
 

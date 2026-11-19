@@ -25,6 +25,14 @@ development channel, the session is exited and relaunched as described next. --n
 It always runs detached inside the tmux server (tmux run-shell -b), so it can
 restart the session that started it. Progress goes to ~/.claude/restart-sessions.log.
 
+The foreground decides which sessions to restart and writes them to a plan file
+(~/.claude/restart-plans/, mode 0600), which the detached half is told to read: it restarts exactly those
+sessions, never enumerates any itself, and refuses (exit 6) when the plan is missing or unreadable. Both halves
+restart a session only when the tmux server they reach is the one it lives on (its pane answers to the session's
+tmux field and its process runs in that pane): with TMUX unset tmux falls back to the default server, so a run that
+reaches a server holding none of the sessions refuses before anything starts, naming the server and what each
+session records, and a session on another server is skipped and logged.
+
 With --nx X.Y.Z it first brings the whole box to one release, in the
 foreground, and restarts nothing unless every step holds:
   1. engine gate: the cloud engine (public /version) is at or above the
@@ -126,7 +134,7 @@ session's exit: a session whose reply has gone stale or turned not ready, or tha
 skipped and logged. With --fresh that last check is against the ready reply as of the start of the
 background run, not idle: a session writing its handoff is busy by design. --force restarts anyway
 after printing the same list (and also restarts a session in status 'shell'); --no-ready-check
-skips the check alone, for sandbox gates. --dry-run prints the verdict (nothing goes to the log)
+skips the check alone. --dry-run prints the verdict (nothing goes to the log)
 and does not refuse.
 
 Each restart run records its mode and options in ~/.claude/restart-last.json and prints the mode
@@ -134,26 +142,8 @@ first: "fresh: each session writes a handoff, then starts fresh" or "resume: eac
 its context". A bare run (neither --fresh nor --resume) after a --fresh run refuses (exit 4): "the
 last restart was --fresh; pass --fresh or --resume".
 
-Sandbox pass (nexus-8zdbu), advisory since Sam's 2026-11-19 ruling (T2 nexus/sam-ruling-restart-sandbox-gate-2026-11-19):
-a restart (not --revive) checks whether tests/e2e/restart-sessions/run.sh has passed all its scenarios on this
-exact script (its sha256), this Claude Code version, this tmux version and this copy of the harness (run.py's
-sha256); a pass records them in ~/.local/state/claude-restart-sessions/sandbox-pass.json. The check never refuses.
-A missing or unreadable pass, another script, tmux, harness or Claude Code version, or a Claude Code version that
-cannot be read is a WARN line in the log and on stdout, naming the problem, the last pass and the weekly run's last
-result, and the restart goes on to the ready round; the detached roll logs the same line. --dry-run and --status
-report the pass the same way, and --status's exit code ignores it. --skip-sandbox-check REASON is still accepted so
-existing invocations keep working; it only logs REASON. Not in the key: nx and the engine (the sandbox runs the
-installed nx), macOS, and reinstall-tool.sh (the sandbox replaces it with a stand-in).
-
-The regression check is scripts/restart-sandbox-weekly.sh, run weekly from a launchd job
-(`scripts/restart-sandbox-weekly.sh --install` sets it up), so a pass is kept current through Claude Code updates.
-A change to the roll path (the restart, abort, gate or pane code) runs tests/e2e/restart-sessions/run.sh in its own
-review before it lands: that is where the cost of the sandbox is paid now, not at every release. A restart that
-misbehaves (a session not resumed, a pane closed, a missing wake, a busy session exited) should be followed by a
-sandbox run before the next one, whatever the log says.
-
 Install as a symlink to the primary checkout, which tracks develop, so the copy you
-run cannot drift from the one the sandbox tested:
+run cannot drift from it:
   ln -sfn ~/git/nexus/scripts/claude-restart-sessions ~/.local/bin/claude-restart-sessions
 
 Usage:
@@ -206,6 +196,8 @@ MARKER_SWEEP_MARGIN_S = 3600
 MARKER_NAME = re.compile(r"[^/]{8}-[0-9a-f]{12}")
 #: The last restart run's mode and options, so a bare run after a --fresh one is refused.
 LAST_RUN = Path.home() / ".claude" / "restart-last.json"
+#: Where a run's plan goes: the sessions the foreground decided on, read back by the detached half (one file per run).
+PLAN_DIR = Path.home() / ".claude" / "restart-plans"
 #: Where the typed ready ask's instruction file goes (created per round, O_EXCL, mode 0600).
 ASK_DIR = Path("/tmp")
 
@@ -213,8 +205,7 @@ ASK_DIR = Path("/tmp")
 def _claude_binary() -> str:
     """The claude executable: NX_RESTART_CLAUDE, else ~/.local/bin/claude, else the one on PATH.
 
-    The PATH fallback is what lets the sandbox harness (tests/e2e/restart-sessions) run this
-    script under a scratch HOME that has no ~/.local/bin/claude of its own.
+    The PATH fallback covers a HOME that has no ~/.local/bin/claude of its own.
     """
     override = os.environ.get("NX_RESTART_CLAUDE", "")
     if override:
@@ -227,8 +218,6 @@ def _claude_binary() -> str:
 
 CLAUDE = _claude_binary()
 REPO = Path.home() / "git" / "nexus"
-#: Where a passing sandbox run (tests/e2e/restart-sessions/run.sh) records what it passed on.
-SANDBOX_PASS = Path.home() / ".local" / "state" / "claude-restart-sessions" / "sandbox-pass.json"
 ENDPOINT = "https://api.conexus-nexus.com"
 PLUGINS = ("conexus@nexus-plugins", "sn@nexus-plugins")  # required: must be installed
 MARKETPLACE = "nexus-plugins"
@@ -239,21 +228,6 @@ MARKETPLACES = Path.home() / ".claude" / "plugins" / "marketplaces"
 KNOWN_MARKETPLACES = Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
 
 
-def script_sha256(path: Path | None = None) -> str:
-    """The sha256 of this script's bytes (a symlink's target's, as reading follows it): the identity a sandbox pass is for."""
-    return hashlib.sha256((path or Path(__file__)).read_bytes()).hexdigest()
-
-
-def claude_version(claude: str | None = None) -> str:
-    """Claude Code's version, as `claude --version` prints its first word, or "" if it cannot be read."""
-    try:
-        r = subprocess.run([claude or CLAUDE, "--version"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    words = r.stdout.split() if r.returncode == 0 else []
-    return words[0] if words else ""
-
-
 def tmux_version() -> str:
     """tmux's version as `tmux -V` prints it ("tmux 3.6a"), or "" if it cannot be read."""
     try:
@@ -261,101 +235,6 @@ def tmux_version() -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return (r.stdout or "").strip() if r.returncode == 0 else ""
-
-
-#: The sandbox harness, beside this script in its checkout (resolved through the install symlink).
-HARNESS = Path(__file__).resolve().parents[1] / "tests" / "e2e" / "restart-sessions" / "run.py"
-#: The weekly scheduled sandbox run (a launchd job it installs with --install), beside this script.
-#: It records its last invocation in sandbox-weekly-last.json beside SANDBOX_PASS.
-WEEKLY_RUN = Path(__file__).resolve().parent / "restart-sandbox-weekly.sh"
-
-
-def harness_sha256(path: Path | None = None) -> str:
-    """The sha256 of the sandbox harness's bytes, or "" when this copy has no harness beside it."""
-    try:
-        return hashlib.sha256((path or HARNESS).read_bytes()).hexdigest()
-    except OSError:
-        return ""
-
-
-def sandbox_pass_check(script: str, claude: str) -> str:
-    """The warning for the recorded sandbox pass against this script, Claude Code, tmux and harness,
-    or "" when the pass covers all four. Advisory (Sam, 2026-11-19, T2 nexus/sam-ruling-restart-sandbox-gate-2026-11-19):
-    the caller logs it and the restart goes on, whatever it says. It names the problem, the last pass
-    where one is recorded, and the weekly run's status, since scripts/restart-sandbox-weekly.sh is the
-    regression check; a change to the roll path runs tests/e2e/restart-sessions/run.sh in its own review.
-
-    One problem is named, the first found: a changed script, harness or tmux, or no readable pass,
-    ahead of a Claude Code version other than the pass's, so the likelier cause is never hidden."""
-    problem = _sandbox_pass_problem(script, claude)
-    if not problem:
-        return ""
-    return f"{problem}; {weekly_run_status()}; run tests/e2e/restart-sessions/run.sh to refresh it"
-
-
-def _sandbox_pass_problem(script: str, claude: str) -> str:
-    """The first way the recorded pass differs from now, or "" when it covers all four."""
-    if not claude:
-        return "could not read Claude Code's version"
-    try:
-        rec = json.loads(SANDBOX_PASS.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return f"no sandbox pass recorded ({SANDBOX_PASS})"
-    except (OSError, ValueError) as e:
-        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})"
-    if not isinstance(rec, dict):
-        return f"the sandbox pass record {SANDBOX_PASS} is not an object"
-    passed = rec.get("passed_at", "?")
-    recorded_claude = rec.get("claude_version")
-    if not isinstance(recorded_claude, str) or not recorded_claude:
-        return f"the sandbox pass record {SANDBOX_PASS} names no Claude Code version"
-    if rec.get("script_sha256") != script:
-        return f"the last sandbox pass ({passed}) was on another copy of this script"
-    if rec.get("tmux_version") != (tmux := tmux_version()):
-        return (f"the last sandbox pass ({passed}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
-                f"not {tmux or 'an unreadable tmux'}")
-    if rec.get("harness_sha256") != (harness := harness_sha256()):
-        if not harness:
-            return (f"this copy has no sandbox harness beside it ({HARNESS}); install the script as a symlink "
-                    "into a checkout, as the header says")
-        return f"the last sandbox pass ({passed}) was on another copy of the sandbox harness"
-    if recorded_claude != claude:
-        return f"the last sandbox pass ({passed}) was on Claude Code {recorded_claude}, not {claude}"
-    return ""
-
-
-def weekly_run_status() -> str:
-    """One clause on the weekly sandbox job, for the version warning: its last result, or how to
-    set it up when it has never run here."""
-    path = SANDBOX_PASS.parent / "sandbox-weekly-last.json"
-    try:
-        rec = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return f"no weekly sandbox run has happened here ({WEEKLY_RUN.name} --install sets one up)"
-    except (OSError, ValueError):
-        return f"the weekly sandbox run's record {path} is unreadable"
-    if not isinstance(rec, dict):
-        return f"the weekly sandbox run's record {path} is not an object"
-    status, ended = rec.get("status", "?"), rec.get("ended", "?")
-    on = f" on Claude Code {v}" if isinstance(v := rec.get("claude_version"), str) and v else ""
-    if status == "passed":
-        return f"the last weekly sandbox run ({ended}{on}) passed"
-    return f"the last weekly sandbox run ({ended}{on}) did not record a pass: {status}, {rec.get('reason', '?')}"
-
-
-def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float,
-                        tmux: str | None = None, harness: str | None = None) -> None:
-    """Write the record sandbox_pass_check reads (the sandbox harness calls this on a full pass).
-    *tmux* and *harness* default to what is installed now; the harness passes the values it read
-    before its first scenario, so a mid-run change is not recorded as tested."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"script_sha256": script, "claude_version": claude,
-           "tmux_version": tmux_version() if tmux is None else tmux,
-           "harness_sha256": harness_sha256() if harness is None else harness, "scenarios": scenarios,
-           "seconds": round(seconds), "passed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1) + "\n", encoding="utf-8")
-    tmp.replace(path)
 
 
 def nexus_plugins() -> tuple[str, ...]:
@@ -911,8 +790,131 @@ class RelaunchStalled(Exception):
 
 
 #: Exit status of a run stopped by a RelaunchStalled (0 all restarted, 1 some left, 2 install aborted,
-#: 3 not ready (the go gate), 4 mode refused). The sandbox pass never sets an exit status (A1).
+#: 3 not ready (the go gate), 4 mode refused).
 EXIT_STALLED = 5
+#: Exit status of a run that refused to touch any session: no readable plan, or no planned session lives on the
+#: tmux server the run reaches.
+EXIT_REFUSED = 6
+
+
+class PlanError(Exception):
+    """The detached half has no usable plan: it restarts nothing rather than look for sessions itself."""
+
+
+def tmux_server() -> tuple[str, int] | None:
+    """(socket path, pid) of the tmux server a bare `tmux` reaches from this process, or None when none answers.
+
+    With TMUX set that is the server of the pane the script runs in; with it unset tmux falls back to the default
+    socket (TMUX_TMPDIR, else /tmp, then tmux-<uid>/default), which is how a run from a stripped environment reaches
+    the operator's own server instead of the one its sessions are on."""
+    r = tmux_run("display-message", "-p", "#{socket_path}\t#{pid}")
+    sock, _, pid = r.stdout.strip().partition("\t")
+    if r.returncode != 0 or not sock or not pid.isdigit():
+        return None
+    return sock, int(pid)
+
+
+def parent_pid(pid: int) -> int:
+    """The parent of *pid*, or 0 when it cannot be read."""
+    out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return int(out) if out.isdigit() else 0
+
+
+def _runs_in(pid: int, pane_pid: int) -> bool:
+    """Whether *pid* is the pane's process or one of its descendants (a shell in the pane started it)."""
+    for _ in range(32):
+        if pid == pane_pid:
+            return True
+        if pid <= 1:
+            return False
+        pid = parent_pid(pid)
+    return False
+
+
+def _pane_problem(s: dict) -> str:
+    """Why the tmux server this process reaches does not host session *s*, or "" when it does.
+
+    A session's tmux field is `<session>:<window id>.<pane id>` and names no socket or server pid, and pane ids
+    repeat from one server to the next, so the field alone cannot say which server it is on. The server hosts the
+    session when its pane answers to the same field and the session's process runs in that pane's process tree
+    (a pane's process belongs to exactly one server)."""
+    field, pid = str(s.get("tmux", "")), int(s.get("pid", 0))
+    r = tmux_run("display-message", "-p", "-t", s["pane"], "#{session_name}:#{window_id}.#{pane_id}\t#{pane_pid}")
+    if r.returncode != 0:
+        return f"it records {field}, and that server has no pane {s['pane']}"
+    where, _, pane_pid = r.stdout.strip().partition("\t")
+    if not pane_pid.isdigit():  # tmux answers a pane it does not have with an empty line on some versions
+        return f"it records {field}, and that server has no pane {s['pane']}"
+    if where != field:
+        return f"it records {field}, but that server's pane {s['pane']} is {where}"
+    if not _runs_in(pid, int(pane_pid)):
+        return f"it records {field}, but its process {pid} does not run in that server's pane {s['pane']}"
+    return ""
+
+
+def check_server(found: list[dict]) -> tuple[tuple[str, int] | None, list[dict], str]:
+    """(the tmux server this run reaches, the sessions of *found* it hosts, why the run must refuse or "").
+
+    A session the reached server does not host is left alone and logged as skipped; the run refuses (the third
+    value) when that leaves none, or when no server answers. The refusal names the server reached and what each
+    session records, so a run that fell to the default server (TMUX unset) is never silent about it."""
+    server = tmux_server()
+    if server is None:
+        return None, [], "no tmux server answers, so no session can be tied to one"
+    kept, why = [], []
+    for s in found:
+        problem = _pane_problem(s)
+        if not problem:
+            kept.append(s)
+            continue
+        why.append(f"{s.get('name') or s['sessionId'][:8]}: {problem}")
+    if kept:
+        for line in why:
+            log(f"SKIP {line}; this run reaches tmux server {server[0]} (pid {server[1]})")
+        return server, kept, ""
+    if not found:
+        return server, [], ""
+    how = ("TMUX is not set, so tmux used the default server" if not os.environ.get("TMUX")
+           else "TMUX names this server")
+    return server, [], (f"refusing to restart anything: this run reaches tmux server {server[0]} (pid {server[1]}; {how}), "
+                        f"and none of the {len(found)} session(s) lives on it: " + "; ".join(why))
+
+
+def write_plan(found: list[dict], server: tuple[str, int]) -> Path:
+    """Write the sessions this run decided on, and the tmux server they live on, for the detached half (mode 0600)."""
+    PLAN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = PLAN_DIR / f"plan-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}.json"
+    body = {"version": 1, "created": time.time(), "server": {"socket": server[0], "pid": server[1]},
+            "sessions": [{**s, "file": str(s.get("file", ""))} for s in found]}
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(body, fh, default=str)
+    return path
+
+
+def load_plan(path: str) -> tuple[tuple[str, int], list[dict]]:
+    """The (tmux server, sessions) a foreground run planned; PlanError when the file is not given, missing or unusable."""
+    if not path:
+        raise PlanError("the detached run was given no plan; it never looks for sessions itself")
+    try:
+        body = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise PlanError(f"the plan {path} cannot be read ({e})") from e
+    if not isinstance(body, dict) or body.get("version") != 1:
+        raise PlanError(f"the plan {path} is not a version 1 plan")
+    srv = body.get("server")
+    if not (isinstance(srv, dict) and isinstance(srv.get("socket"), str) and isinstance(srv.get("pid"), int)):
+        raise PlanError(f"the plan {path} names no tmux server")
+    planned = body.get("sessions")
+    if not isinstance(planned, list) or not planned:
+        raise PlanError(f"the plan {path} lists no session")
+    out = []
+    for d in planned:
+        if not (isinstance(d, dict) and isinstance(d.get("sessionId"), str) and isinstance(d.get("pane"), str)
+                and d["pane"].startswith("%") and isinstance(d.get("pid"), int) and isinstance(d.get("tmux"), str)):
+            raise PlanError(f"the plan {path} has a session entry without its id, pane, pid and tmux field")
+        out.append({**d, "file": Path(str(d.get("file", "")))})
+    return (srv["socket"], srv["pid"]), out
 
 
 def pane_state(pane: str) -> tuple[int, bool, str] | None:
@@ -1098,7 +1100,7 @@ def slash_restart(s: dict) -> tuple[bool, str]:
     """Resume a session in place with Claude Code's own /restart (2.1.288+); (True, "") when it came back,
     (False, why) when it did not take, and the caller exits and resumes it as before.
 
-    Measured in the sandbox's opt-in ``slash`` scenario (2.1.323, 2026-11-13): the process restarts on the same
+    Measured on Claude Code 2.1.323 (2026-11-13): the process restarts on the same
     pid, as its CURRENT session id (after a /clear too), in the same pane, idle, with bypass permissions, model,
     name and channel kept and its MCP servers replaced, in 4-7 s. It keeps the old process's environment, where
     the exit path relaunches from the pane shell's. Claude Code offers the command only to a native install, on
@@ -1570,7 +1572,7 @@ def origin_note(s: dict, path: str) -> str:
     """The opening of a mailed ask: who sent it and a check the session can make itself.
 
     Mail from a script carries no session token, so the channel labels it unattested and a model may
-    rightly decline it (nexus-cmqe8 sandbox, 2026-11-01). The check is that an EMPTY regular file
+    rightly decline it (nexus-cmqe8, 2026-11-01). The check is that an EMPTY regular file
     exists which the script created just before it mailed. The mail names the file, so the session is
     told what binds the name: the fixed directory and its own session id's first 8 characters. Without
     that binding a mail naming /etc/hosts, the directory itself or any leftover marker would pass.
@@ -1931,7 +1933,7 @@ def _mail_wake(s: dict, text: str) -> tuple[str, str, Path | None]:
         tid, marker = SENT_ASKS.pop(sid, ""), SENT_MARKERS.pop(sid, None)
         if marker is not None:
             # The session checks the marker a model turn after the mail arrives, and the footprint report at
-            # the end of the run removes every marker in MADE_MARKERS: a 22:17 sandbox run's session found
+            # the end of the run removes every marker in MADE_MARKERS: a 22:17 run's session found
             # it gone and rightly declined the wake. Left out of MADE_MARKERS, it expires by its own stamp
             # (mail_ask sets its mtime to the ask's expiry; sweep_stale_markers removes it after that).
             MADE_MARKERS.discard(marker)
@@ -2189,7 +2191,7 @@ def _write_handoffs(found: list[dict], ready: set[str], wait: int, timeout: int,
                 lines = [l for l in lines if l]
                 # The marker on the last line is the completeness proof; the size floor only rules
                 # out a file holding little more than the marker. 1000 bytes refused a complete
-                # 959-byte handoff from a short session (nexus-cmqe8 sandbox, 2026-11-01).
+                # 959-byte handoff from a short session (nexus-cmqe8, 2026-11-01).
                 # Headings: the ask names the continuation command's sectioned format, so a
                 # marker with a line or two of text is not a handoff.
                 written = (st.st_mtime >= t0 and st.st_size >= 200 and time.time() - st.st_mtime > 10
@@ -2908,9 +2910,6 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
                 if t["sessionId"] not in {s["sessionId"] for s in found}]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
-        # The sandbox pass is advisory (A1): it is reported here and never makes the answer "not allowed".
-        sandbox_warn = sandbox_pass_check(script_sha256(), claude_version())
-        print(f"sandbox pass: {f'warning, {sandbox_warn}' if sandbox_warn else 'holds for this script, Claude Code, tmux and the harness'}")
         return 0 if rows and not problem and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
@@ -2985,11 +2984,6 @@ def exit_on_stop_signals() -> None:
         signal.signal(sig, stop)
 
 
-def _sandbox_tags(skip_reason: str, detached: bool = False) -> str:
-    """The parenthetical on the advisory sandbox WARN line: where it was logged, and the --skip-sandbox-check reason."""
-    return ", ".join([*(["detached"] if detached else []), *([f"--skip-sandbox-check: {skip_reason}"] if skip_reason else [])]) or "advisory"
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", action="append", default=[], help="restart only this session name (repeatable)")
@@ -3039,11 +3033,8 @@ def main() -> int:
                     help="each session resumes its context (the default mode, stated); after a --fresh run a bare "
                          "restart is refused until you pass --fresh or --resume")
     ap.add_argument("--no-ready-check", action="store_true",
-                    help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
+                    help="skip the ready-round check entirely; unlike --force it does not also "
                          "restart sessions in status 'shell'")
-    ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
-                    help="accepted so existing invocations keep working; the sandbox gate is advisory now "
-                         "(a missing or stale pass only warns, see above), so this only logs REASON")
     ap.add_argument("--no-slash-restart", action="store_true",
                     help="resume each session by exiting it and relaunching `claude ... --resume <id>`, "
                          "never through Claude Code's own /restart")
@@ -3052,15 +3043,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--detached", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
+    ap.add_argument("--plan", default="", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    # Checked on the parsed value, so every spelling argparse accepts (--flag=X, an abbreviation) is
-    # held to it, before anything else runs (--revive included); non-printing characters (an escape,
-    # a zero-width space) are dropped and whitespace collapsed, so a reason can neither be blank in
-    # disguise nor forge a second log line.
-    skip_reason = (" ".join("".join(ch for ch in a.skip_sandbox_check if ch.isprintable() or ch.isspace()).split())
-                   if a.skip_sandbox_check is not None else "")
-    if a.skip_sandbox_check is not None and not skip_reason:
-        ap.error("--skip-sandbox-check takes a reason, logged with the restart")
     global FALLBACK_RESUME, KEEP_DEV_CHANNEL, NO_WAKE, NO_SLASH
     FALLBACK_RESUME = a.fallback_resume
     NO_SLASH = a.no_slash_restart
@@ -3075,7 +3059,9 @@ def main() -> int:
         ap.error("--ask-ready and --status are separate steps; run one, then the other")
     if (a.ask_ready or a.status) and (a.nx or a.fresh or a.resume):
         ap.error("--ask-ready and --status restart nothing; give --nx, --fresh and --resume to the restart itself")
-    listed = sessions()
+    # The detached half restarts what the foreground planned and never enumerates (it may run under another HOME or
+    # on another tmux server than the one the plan was made on); the foreground reads the sessions dir.
+    listed = [] if a.detached else sessions()
     found = [s for s in listed if (not a.only or s.get("name") in a.only) and not skipped(s.get("name"), s["sessionId"], a.skip)]
     if a.ask_ready or a.status:
         if not found:
@@ -3087,17 +3073,25 @@ def main() -> int:
         # TERM or HUP (the tmux server going away) must still run the finally blocks: the asks'
         # withdrawal and the footprint report. By default they end the process with neither.
         exit_on_stop_signals()
-        # The pass is advisory (A1, Sam 2026-11-19): the roll's own log says what it ran against.
-        if warning := sandbox_pass_check(script_sha256(), claude_version()):
-            log(f"WARN: sandbox pass: {warning}; restarting anyway ({_sandbox_tags(skip_reason, detached=True)})")
+        try:
+            plan_server, planned = load_plan(a.plan)
+        except PlanError as e:
+            log(f"ABORT: {e}")
+            return EXIT_REFUSED
+        server, found, problem = check_server(planned)
+        if not problem and server != plan_server:
+            problem = (f"the plan was made on tmux server {plan_server[0]} (pid {plan_server[1]}), but this run reaches "
+                       f"{server[0]} (pid {server[1]})" if server else "no tmux server answers")
+        if problem:
+            log(f"ABORT: {problem}")
+            return EXIT_REFUSED
     if not a.detached:
-        # The sandbox pass first, so the log opens with it. It is advisory (A1, Sam 2026-11-19): a
-        # warning is logged and printed, and the restart goes on to the ready round (nexus-8zdbu).
-        warning = sandbox_pass_check(script_sha256(), claude_version())
-        if a.dry_run:
-            print(f"sandbox pass: {f'warning, {warning}' if warning else 'holds for this script, Claude Code, tmux and the harness'}")
-        elif warning:
-            log(f"WARN: sandbox pass: {warning}; restarting anyway ({_sandbox_tags(skip_reason)})")  # log() prints the line as well
+        server = None
+        if found:  # none: the "no interactive tmux Claude sessions found" answer below stands
+            server, found, problem = check_server(found)
+            if problem:
+                log(f"ABORT: {problem}")
+                return EXIT_REFUSED
         last = read(LAST_RUN)
         if not (a.fresh or a.resume) and isinstance(last, dict) and last.get("mode") == "fresh":
             print("the last restart was --fresh; pass --fresh or --resume")
@@ -3135,14 +3129,24 @@ def main() -> int:
             if gate:
                 return gate
         record_last_run(a)
+        try:
+            plan = write_plan(found, server)
+        except OSError as e:
+            log(f"ABORT: cannot write the plan the background run restarts from ({e})")
+            return EXIT_REFUSED
         rest = sys.argv[1:]
         if a.nx and a.fresh:  # gated above; the child installs after the handoffs
             rest = [x for x in rest if x != "--skip-engine-gate"] + ["--skip-engine-gate", "--no-update"]
         elif a.nx:  # converged above; the detached child only restarts
             rest = [x for i, x in enumerate(rest) if x != "--nx" and not x.startswith("--nx=") and not (i and rest[i - 1] == "--nx")]
             rest = [x for x in rest if x != "--skip-engine-gate"] + ["--no-update"]
-        args = [sys.executable, os.path.abspath(__file__), "--detached", "--caller-pane", os.environ.get("TMUX_PANE", "")] + rest
-        subprocess.run(["tmux", "run-shell", "-b", " ".join(shlex.quote(x) for x in args) + f" > /dev/null 2>&1"], check=True)
+        args = [sys.executable, os.path.abspath(__file__), "--detached", "--plan", str(plan),
+                "--caller-pane", os.environ.get("TMUX_PANE", "")] + rest
+        try:
+            subprocess.run(["tmux", "run-shell", "-b", " ".join(shlex.quote(x) for x in args) + f" > /dev/null 2>&1"], check=True)
+        except BaseException:
+            plan.unlink(missing_ok=True)
+            raise
         print(f"started in the background for {len(found)} session(s); progress in {LOG}")
         return 0
 
@@ -3170,6 +3174,8 @@ def main() -> int:
     finally:
         withdraw_ready_asks(round_used)
         footprint_report(found, LAST_HANDOFFS, round_used)
+        if a.plan:
+            Path(a.plan).unlink(missing_ok=True)
 
 
 #: The handoffs write_handoffs returned for this run, for the footprint report (empty until then).
@@ -3211,9 +3217,9 @@ def prune_old_handoffs(directory: Path, *, now: float) -> list[str]:
 def _prune_handoffs_at_write() -> None:
     """Prune old handoffs just before a roll writes new ones. Never raises.
 
-    The directory is TMP unless `NX_RESTART_PRUNE_DIR` names another one: the e2e harness runs this
-    script for real in a sandbox HOME, and without the override its rolls would prune the operator's own
-    /tmp. Only the prune moves; the handoffs themselves are still written under /tmp.
+    The directory is TMP unless `NX_RESTART_PRUNE_DIR` names another one: the tests set it, because
+    without the override a test's roll would prune the operator's own /tmp. Only the prune moves; the
+    handoffs themselves are still written under /tmp.
     """
     directory = Path(os.environ.get("NX_RESTART_PRUNE_DIR") or TMP)
     try:
@@ -3276,8 +3282,6 @@ def rerun_command(a: argparse.Namespace, skips: list[str]) -> str:
                      ("--no-slash-restart", getattr(a, "no_slash_restart", False))):
         if on:
             parts.append(flag)
-    if a.skip_sandbox_check:
-        parts += ["--skip-sandbox-check", a.skip_sandbox_check]
     parts += [x for name in a.only for x in ("--only", name)]
     parts += [x for name in dict.fromkeys([*a.skip, *skips]) for x in ("--skip", name)]
     return " ".join(q(p) for p in parts)
