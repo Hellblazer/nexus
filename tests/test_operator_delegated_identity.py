@@ -5,7 +5,7 @@ fake registry tree under ``tmp_path``. (``tests/test_operator_dispatch.py`` is o
 What the real engine records for a delegated identity is checked by ``tests/identity/test_identity_step4.py``.
 
 Covers: the child's environment and token file at spawn; the token file gone and an ``end`` row on every exit path
-(success, harness failure, timeout, spawn failure); renewal and the half-life refresh; no delegation without a parent
+(success, harness failure, timeout, spawn failure); renewal and the refresh at 50 minutes left; no delegation without a parent
 identity or for a tool-free dispatch; and the DISCOVER decision: a dead dispatcher's delegated identity gets a ``gone``
 row from the SessionStart sweep and its token file is removed.
 """
@@ -154,6 +154,27 @@ def test_a_tick_renews_and_a_refresh_at_half_life_rewrites_the_file(box: Machine
     assert second.token != first.token and second.generation == 1 and second.expires_at > first.expires_at
     assert [b[1] for b in box.engine.ids_called("bind")] == ["refresh"]
     assert box.events(handle.identity) == ["start", "refresh"]
+
+
+def test_a_delegated_child_refreshes_where_the_sessions_lease_does_with_50_minutes_of_life_left(
+        box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lease refreshes a token with under ``token_contract.refresh_below`` seconds left (50 of 60 minutes), so a sleep
+    under about 50 minutes never lapses it. The child refreshed at half life, leaving 30 to 60 minutes: a sleep of 45
+    minutes lapsed a token the session's own lease would have kept. Same line for both."""
+    from nexus.identity import token_contract
+
+    box.as_child_of_claude_100(monkeypatch)
+    now = {"t": 10_000.0}
+    handle = DelegatedIdentity.begin(environ={}, clock=lambda: now["t"])
+    assert handle is not None
+    first = read_token_file(handle.path)
+    due_after = 3_600.0 - token_contract.refresh_below(3_600.0)               # 10 minutes in: 50 minutes of life left
+    now["t"] += due_after - 60
+    assert handle.tick() is True
+    assert read_token_file(handle.path).token == first.token, "above the line: no refresh yet"
+    now["t"] += 61
+    assert handle.tick() is True
+    assert read_token_file(handle.path).token != first.token, "under 50 minutes of life left: refreshed, as the lease does"
 
 
 def test_a_renewal_the_engine_says_is_no_longer_ours_stops_the_loop(box: Machine, monkeypatch: pytest.MonkeyPatch) -> None:
