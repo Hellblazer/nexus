@@ -19,7 +19,7 @@ One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (
 state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: post kind=ack sha=8b30c161bdb23adab27171f3185c2b52f158b736 to board/ci/nexus-develop--owner.
 ```
 
-There are six displays. `<owner>` is the owner's identity id: the row carries ids, not aliases, and the procedure has no read grant to resolve one.
+There are six displays. `<owner>` is the owner's alias, else its identity id: from engine 0.1.198 the row carries the owner's live alias (`owner_alias`) beside the id, and the notice shows it; a row with no alias (an older engine, or an identity with none) shows the id. Who owns the red is always decided on the ids; the alias is a name to show.
 
 | The row says | The block says | Wakes you |
 |---|---|---|
@@ -27,8 +27,8 @@ There are six displays. `<owner>` is the owner's identity id: the row carries id
 | You own it, the leader takes it (`owner_unleased`, `owner_not_live`, `owner_not_member`, `no_record`, `chain_gap`, `stamper_error`) | `Develop is red at <sha>; the leader takes it (<reason>). Diagnose it.` | yes |
 | You own it after a hand-off (`handoff`) | `Develop is red at <sha>; it was handed to you after no acknowledgement. Diagnose it.` | yes |
 | Escalated, and it names you or no one (`escalated`) | `Develop is red at <sha>; no one acknowledged. Raise an ask to Sam.` | yes |
-| You are next up | `Develop is red at <sha>; <owner> owns it. You are next up.` | yes |
-| Someone else owns it | `Develop is red at <sha>; <owner> owns it. Hold your pushes.` | no |
+| You are next up | `Develop is red at <sha>; <owner: alias, else id> owns it. You are next up.` | yes |
+| Someone else owns it | `Develop is red at <sha>; <owner: alias, else id> owns it. Hold your pushes.` | no |
 
 The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the post rather than the command, and is left off when it would not fit whole. The command is `nx tuple out board/ci/nexus-develop--owner --dim from=<your identity id> --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>` (`from` is the template's one required dimension, and on a board or CI post it is the identity id the engine records from your token, never an alias; `kind` and `sha` are dimensions, `topic` is the key the subspace carries). An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
 
@@ -78,7 +78,7 @@ Posts on the aura's subspace are not announced to the agent unless the session a
 
 ## When an aura fails
 
-A procedure error, a limit, a missing field or a display error replaces the block's line with `aura error: <kind> on tuple <id>`. It never stops the session's other mail. Three failures in a row disable the aura for the rest of the session, and the line becomes `aura disabled after 3 failures: <kind>`. A disabled aura neither fires nor clears until the server starts again.
+A procedure error, a limit, a missing or mistyped result field, an argument source the post cannot supply or a display error replaces the block's line with `aura error: <kind> on tuple <id>`. The sources that cannot be supplied are a `dims.<f>` the post lacks, a `self.identity` when the session has none, and a body that is not a JSON object. A `body.<f>` that a JSON-object body lacks is not a failure by itself: the argument is left out and the procedure sees it absent. That is fine for an optional argument (`owner_alias` and `next_alias` of `ci_red_notice`, or a `next` that is null), and a failure for a required one, because the procedure's header then refuses the run (kind `args`). It never stops the session's other mail. Three failures in a row disable the aura for the rest of the session, and the line becomes `aura disabled after 3 failures: <kind>`. A disabled aura neither fires nor clears until the server starts again.
 
 ## Loading an aura for a group
 

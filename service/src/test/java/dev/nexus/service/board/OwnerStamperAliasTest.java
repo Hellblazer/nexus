@@ -104,4 +104,35 @@ class OwnerStamperAliasTest {
         assertThat(se.ownerRows(t, StamperEnv.BASE).getFirst().body())
             .containsEntry("owner", a).containsEntry("owner_alias", "alfa");
     }
+
+    /**
+     * The alias is a cosmetic field: an alias read that fails must not suppress the owner row. Without the guard the
+     * failure leaves evaluate, the hook falls back to the stamper_error row, which reads the aliases again and fails the
+     * same way, so a red with a down alias read would post no row at all.
+     */
+    @Test
+    void aFailingAliasReadStillPostsTheOwnerRowWithIdsAndNoAliasFields() {
+        String t = se.tenant();
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        se.doneRowOnly(t, StamperEnv.BASE, "Y", "failure");
+        OwnerStamper broken = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            OwnerDecision::decide, (ctx, tenant, ids) -> {
+                throw new IllegalStateException("alias read is down");
+            });
+
+        broken.afterOut(t, "board/ci/" + StamperEnv.BASE + "--done",
+            Map.of("from", "github", "kind", "sha", "sha", "Y", "outcome", "failure"),
+            "{\"state\":\"concluded\",\"sha\":\"Y\"}");
+
+        var rows = se.ownerRows(t, StamperEnv.BASE);
+        assertThat(rows).as("the owner row is posted").hasSize(1);
+        assertThat(rows.getFirst().body()).containsEntry("owner", a).containsEntry("next", c)
+            .doesNotContainKey("owner_alias").doesNotContainKey("next_alias");
+        assertThat(rows.getFirst().body()).as("a real decision, not the stamper_error fallback").containsEntry("reason", "earliest_suspect");
+    }
 }

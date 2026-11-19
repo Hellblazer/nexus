@@ -291,6 +291,23 @@ def test_an_alias_that_is_not_an_address_segment_is_refused_without_echoing_it(f
     with pytest.raises(lua54.LuaError, match=f"{field} must be") as err:
         _run(**args)
     assert "evil" not in str(err.value) and "needs_sam" not in str(err.value)
+    assert "alias" in str(err.value) and "identity id" not in str(err.value), "the text names what the value is"
+
+
+def test_a_row_missing_a_required_field_still_strikes_through_the_real_header() -> None:
+    """docs/auras.md says what strikes: the aura runtime leaves out a body field the row lacks, and the procedure's
+    header then refuses the run when that argument is required (kind ``args``) and accepts it when it is optional."""
+    from nexus.lua_runtime import header as header_mod  # noqa: PLC0415
+    from nexus.lua_runtime.errors import ScriptError  # noqa: PLC0415
+
+    h = hd.parse(SOURCE, name="ci_red_notice")
+    ok = {"sha": SHA, "refresh": False, "reason": "earliest_suspect", "me": ME}
+    assert "owner_alias" not in header_mod.prepare_args(h, ok, cwd=None), "optional: omitted, accepted"
+    for required in ("sha", "refresh", "reason", "me"):
+        args = {k: v for k, v in ok.items() if k != required}
+        with pytest.raises(ScriptError) as err:
+            header_mod.prepare_args(h, args, cwd=None)
+        assert err.value.kind == "args", required
 
 
 # -- the aura ---------------------------------------------------------------------

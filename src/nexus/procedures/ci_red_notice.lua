@@ -33,9 +33,9 @@ if not string.match(sha, "^[0-9a-f]+$") or #sha < 7 or #sha > 64 then
   error("sha must be 7 to 64 lower-case hex digits; got " .. #sha .. " characters", 0)
 end
 
-local function segment(value, name)
+local function segment(value, name, what)
   if value ~= nil and not string.match(value, "^[A-Za-z0-9][A-Za-z0-9._-]*$") then
-    error(name .. " must be an identity id of letters, digits, dot, dash and underscore", 0)
+    error(name .. " must be " .. (what or "an identity id") .. " of letters, digits, dot, dash and underscore", 0)
   end
   return value
 end
@@ -43,9 +43,9 @@ end
 local me = segment(args.me, "me")
 local owner = segment(args.owner, "owner")
 local next_up = segment(args.next, "next")
-segment(args.next_alias, "next_alias")
+segment(args.next_alias, "next_alias", "an alias")
 -- The name shown for the owner: its alias when the row has one, else its id.
-local owner_name = segment(args.owner_alias, "owner_alias") or owner
+local owner_name = segment(args.owner_alias, "owner_alias", "an alias") or owner
 
 local reason = args.reason
 if not string.match(reason, "^[a-z][a-z_]*$") or #reason > 32 then
