@@ -16,10 +16,13 @@ fixtures.
 """
 from __future__ import annotations
 
+import json
 import time
+import types
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
+from typing import Any
 
 import pytest
 
@@ -1203,3 +1206,58 @@ def test_a_set_loaded_before_the_token_file_follows_the_lease_when_it_adopts_an_
     assert subs.identity_mailbox == "mailbox/i13"
     identity_lease._notify_identity("not-an-id")  # noqa: SLF001
     assert subs.identity_mailbox is None
+
+
+class _T1WithSet:
+    """A T1 whose only entry is a persisted subscription set for one session (what ``persist`` writes)."""
+
+    def __init__(self, entries: list[dict[str, Any]]) -> None:
+        self._entries = entries
+
+    def list_entries(self) -> list[dict[str, Any]]:
+        return self._entries
+
+
+def _bound_to(monkeypatch: pytest.MonkeyPatch, identity: str | None) -> None:
+    import nexus.identity.token_header as token_header  # noqa: PLC0415
+
+    record = None if identity is None else types.SimpleNamespace(identity=identity)
+    monkeypatch.setattr(token_header, "current", lambda: record)
+
+
+def test_token_identity_reads_the_leased_token_file_and_rejects_what_is_not_an_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nexus.mcp import subscriptions  # noqa: PLC0415
+
+    _bound_to(monkeypatch, "i12")
+    assert subscriptions._token_identity() == "i12"  # noqa: SLF001
+    _bound_to(monkeypatch, "not-an-id")
+    assert subscriptions._token_identity() is None  # noqa: SLF001
+    _bound_to(monkeypatch, None)
+    assert subscriptions._token_identity() is None  # noqa: SLF001
+
+    def boom() -> None:
+        raise OSError("unreadable token file")
+
+    monkeypatch.setattr("nexus.identity.token_header.current", boom)
+    assert subscriptions._token_identity() is None  # noqa: SLF001 -- no identity is the session mailbox alone
+
+
+def test_load_gives_a_new_set_and_a_restored_one_the_identity_of_the_token_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both load paths dual-subscribe: a fresh set (no persisted entry) and one restored from T1."""
+    from nexus.mcp import subscriptions  # noqa: PLC0415
+
+    sid = "11111111-2222-4333-8444-555555555555"
+    _bound_to(monkeypatch, "i12")
+    fresh = subscriptions.load(_T1WithSet([]), sid, store_factory=lambda: None)
+    assert [e["subspace"] for e in fresh.entries()] == [f"mailbox/{sid}", "mailbox/i12"]
+
+    stored = {"id": "e1", "tags": subscriptions._TAG, "content": json.dumps(SubscriptionSet(session_id=sid).to_json())}  # noqa: SLF001
+    restored = subscriptions.load(_T1WithSet([stored]), sid, store_factory=lambda: None)
+    assert [e["subspace"] for e in restored.entries()] == [f"mailbox/{sid}", "mailbox/i12"]
+
+    _bound_to(monkeypatch, None)
+    assert [e["subspace"] for e in subscriptions.load(_T1WithSet([stored]), sid, store_factory=lambda: None).entries()] == [
+        f"mailbox/{sid}"
+    ]
