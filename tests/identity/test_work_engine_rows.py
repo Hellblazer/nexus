@@ -246,14 +246,18 @@ def row_the_work_limit_forgets_finished_rows_once_and_registers(world: World) ->
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "s1")
-    for n in range(200):
-        world.client.put_work(alpha, "wait", f"w{n}", "done" if n < 120 else "running")
-    err = pytest.raises(IdentityApiError, world.client.put_work, alpha, "wait", "fresh")
+    current, old = world.q("s1"), world.q("s-old")
+    world.client.put_work(alpha, "wait", current, "running")                    # the current session's wait: kept
+    world.client.put_work(alpha, "wait", old, "running")                        # a wait from an earlier session: dropped
+    for n in range(198):
+        world.client.put_work(alpha, "labrun", f"w{n}", "done" if n < 120 else "running")
+    err = pytest.raises(IdentityApiError, world.client.put_work, alpha, "labrun", "fresh")
     assert err.value.status == 409 and err.value.code == "work_limit"
-    row = work.register(world.client, alpha, "wait", "fresh")
+    row = work.register(world.client, alpha, "labrun", "fresh")
     assert row.state == "running"
     refs = {w.ref for w in work.of(world.client, alpha)}
-    assert "fresh" in refs and "w199" in refs and not any(f"w{n}" in refs for n in range(120))
+    assert "fresh" in refs and "w197" in refs and not any(f"w{n}" in refs for n in range(120))
+    assert current in refs and old not in refs, "the engine's holder session decides which wait is left over"
 
 
 ROWS = (
