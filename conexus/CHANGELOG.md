@@ -1,5 +1,11 @@
 # Changelog
 
+## [8.4.1] - 2026-11-19
+
+Plugin version aligned with conexus 8.4.1, a plugin-only patch off 8.4.0. These plugin changes become live at this pin.
+
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`: a subagent may run one literal `git -C <absolute linked-worktree root> <verb> ...` command from the primary cwd, with the verb and every flag on an allowlist that runs no command, discards no uncommitted work and moves no shared ref. Before, a subagent's cwd was always the primary checkout, so an agent dispatched by a worktree session could never commit there.
+
 ## [8.4.0] - 2026-11-18
 
 Plugin version aligned with conexus 8.4.0. These plugin changes become live at this pin (the `PENDING_RELEASE.md` entries, now emptied).

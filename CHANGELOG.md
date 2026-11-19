@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [8.4.1] - 2026-11-19
+
+Pairs with engine-service-v0.1.195 (REQUIRED_ENGINE_VERSION unchanged from 8.4.0). A plugin-only patch: a developer agent dispatched by a session that works in a linked worktree can commit in that worktree.
+
+### Fixed
+
+- A subagent dispatched by a session that works in a linked worktree can commit there: the subagent git-write guard admits one literal `git -C <absolute path> <verb> ...` command when git proves the path is a linked worktree's root, and the verb and every flag (spelled exactly) are on an allowlist that runs no command, discards no uncommitted work and moves no shared ref (add, commit, rm, mv, switch -c, checkout -b, reset --soft/--mixed, rebase without --exec, cherry-pick, revert, merge, branch <new>). Before, the subagent's cwd was always the primary checkout, so every commit was refused and the session had to ask before committing the agent's work itself.
+
 ## [8.4.0] - 2026-11-18
 
 Pairs with engine-service-v0.1.195 (REQUIRED_ENGINE_VERSION moves from 0.1.194 to 0.1.195; the cloud deploy is paired with this release). 8.4 adds the groundwork for background data moves, joins client and engine log lines with one correlation id, escapes client-chosen text in engine logs, closes ways a blank catalog filter widened a call to the whole catalog, and adds a recall-canary row to `nx doctor`. No data move is registered in 8.4, so nothing is moved on an existing install, and in the cloud the data-move machinery stays off: pg_background is not installed on the cloud database host, so the engine skips the libraries there.
