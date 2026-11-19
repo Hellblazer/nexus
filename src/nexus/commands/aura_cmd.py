@@ -242,6 +242,20 @@ def _loaded_text(load: dict[str, Any] | None) -> str:
     return f"  loaded{group}" if load["loaded"] else f"  not loaded: {load['reason']}{group}"
 
 
+def _unclaimed_files_text(listed: tuple[loaded_state.LoadedState, ...]) -> list[str]:
+    """The lines for ``list`` run with no Claude ancestor: each state file's holder and identity, and each aura's load
+    decision. It claims none of them, so nothing here reaches the table or ``--json``."""
+    lines = ["no Claude ancestor: showing every MCP server's state file, none of them this process's"]
+    for state in listed:
+        name = loaded_state.state_path(Path(), state.pid, state.started_at).name
+        identity = f"identity {state.identity}" if state.identity else "no identity"
+        lines.append(f"  {name}: claude pid {state.pid}, {identity}, server pid {state.server_pid}")
+        for aura, seen in sorted(state.auras.items()):
+            group = f" (group {seen.group})" if seen.group else ""
+            lines.append(f"    {aura}: " + (f"loaded{group}" if seen.loaded else f"not loaded: {seen.reason}{group}"))
+    return lines
+
+
 def _match_text(match: tuple[tuple[str, str], ...]) -> str:
     return " {" + ",".join(f"{k}={v}" for k, v in match) + "}" if match else ""
 
@@ -274,6 +288,9 @@ def list_cmd(json_out: bool) -> None:
     view = loaded_state.view(directory, claude_pid=claude_pid, procs=procs, current_identity=identity, identity_dir=token_dir)
     if view.mismatch:
         click.echo(f"warning: {view.mismatch}", err=True)
+    if not view.claimed and view.listed:
+        for line in _unclaimed_files_text(view.listed):
+            click.echo(line, err=True)
     loaded = view.state.auras if view.state is not None else {}
     rows: list[dict[str, Any]] = []
     for e in entries:

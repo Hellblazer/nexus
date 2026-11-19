@@ -280,6 +280,37 @@ def test_list_json_carries_the_load_state_per_aura(
     assert rows["idle"]["loaded"] is None
 
 
+def test_list_with_no_claude_ancestor_lists_the_state_files_on_stderr_without_claiming_one(
+    shipped: Path, monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses,
+) -> None:
+    """nexus-igea9.7 round 1 (SB1): bead item 6, "with no Claude ancestor it lists the files without claiming one"."""
+    procs.start(4242, START, started_at=4242000)
+    procs.start(4343, START, started_at=4343000)
+    _put(adir, _state(
+        pid=4242, started_at=4242000, identity="id-a", loaded="id-a",
+        gated=ls.AuraState(False, "not_a_member", "push-train"), plain=ls.AuraState(True, "loaded", None),
+    ))
+    _put(adir, _state(pid=4343, started_at=4343000, identity=None, loaded=None, gated=ls.AuraState(False, "unbound", "push-train")))
+    _inputs(monkeypatch, adir, procs, pid=None, identity=None)
+    res = _list()
+    assert res.exit_code == 0, res.output
+    err = res.stderr
+    assert "no Claude ancestor" in err and "loaded-4242.4242000.json" in err and "loaded-4343.4343000.json" in err
+    assert "identity id-a" in err and "no identity" in err
+    assert "gated: not loaded: not_a_member (group push-train)" in err and "plain: loaded" in err
+    assert "gated: not loaded: unbound (group push-train)" in err
+    assert "not_a_member" not in res.stdout, "the table on stdout stays the table, and claims no file"
+    rows = {r["name"]: r for r in json.loads(_list("--json").stdout)}
+    assert all(r["loaded"] is None for r in rows.values()), "--json claims no file either"
+    assert "no Claude ancestor" not in _inputs_and_list(monkeypatch, adir, procs, pid=4242).stderr, (
+        "a caller that has an ancestor claims its own file and does not list the others")
+
+
+def _inputs_and_list(monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses, *, pid: int) -> Any:
+    _inputs(monkeypatch, adir, procs, pid=pid, identity="id-a")
+    return _list()
+
+
 def test_list_reports_an_identity_mismatch_and_says_to_reconnect(
     shipped: Path, monkeypatch: pytest.MonkeyPatch, adir: Path, procs: FakeProcesses,
 ) -> None:
