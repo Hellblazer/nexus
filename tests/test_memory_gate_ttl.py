@@ -551,3 +551,67 @@ def test_pointer_still_lists_each_timestamp_after_the_ttl_write(db: T2Database) 
     assert got[a]["timestamp"] == stamps[a] and got[b]["timestamp"] == stamps[b]      # the import kept them
     assert all(_rows(db)[t]["timestamp"] == stamps[t] for t in (a, b))
     assert got[a]["ttl_set"] is True and got[b]["ttl_set"] is True
+
+
+# ── --dry_run applies the loss check and says what it skips (nexus-1gdv0.2.12) ───
+
+def test_dry_run_names_a_missing_title_and_stops(db: T2Database) -> None:
+    _gate(db, "nexus-dm")
+    ghost = {"project": REPO, "title": "review-ghost-nexus-dm0-2026-11-01", "kind": "review", "bead": "nexus-dm0",
+             "sha": "0000000", "verdict": "justified", "timestamp": "2026-11-01T00:00:00Z",
+             "archive": gr.archive_title(REPO, "review-ghost-nexus-dm0-2026-11-01"), "parts": 1}
+    planted, _ = gr.render_pointer(gr.parse_scope(rdr=RDR, phase="3", beads="nexus-dm", all_phases=False), REPO,
+                                   gr.Selection(listed=[ghost]))
+    gr.write_parts(make_t3(), title=POINTER_P3, text=planted, tags="gate-pointer", category=gr.POINTER_CATEGORY)
+    out = _phase3("nexus-dm", "--dry-run", expect=1)
+    assert ghost["title"] in out and "nothing was written" in out
+
+
+def test_dry_run_applies_the_verdict_chain_and_accept_open(db: T2Database) -> None:
+    worse = _gate(db, "nexus-dv", outcome="not-justified")
+    out = _phase3("nexus-dv", "--dry-run", expect=1)
+    assert "nexus-dv" in out and worse in out and "not justified" in out
+    out = _phase3("nexus-dv", "--dry-run", "--accept-open", "nexus-dv")
+    assert "would be quarantined by the next expire sweep: 0 of 1" in out
+    assert _rows(db)[worse]["ttl"] is None
+
+
+def test_dry_run_skips_the_pointer_and_says_so_and_writes_nothing_to_t3(
+        db: T2Database, monkeypatch: pytest.MonkeyPatch) -> None:
+    name = _gate(db, "nexus-ds")
+    reads: list[str] = []
+    real = gr.read_pointer
+
+    def counting_read(t3, title):
+        reads.append(title)
+        return real(t3, title)
+
+    def no_write(*_a, **_k):
+        raise AssertionError("a dry run wrote to T3")
+
+    monkeypatch.setattr(gr, "read_pointer", counting_read)
+    monkeypatch.setattr(gr, "store_note", no_write)
+    out = _phase3("nexus-ds", "--dry-run")
+    assert "archives, the pointer write and its read-back skipped" in out
+    assert reads == [POINTER_P3]          # the earlier pointer, once: no read-back of a pointer it never wrote
+    assert documents_by_title(POINTER_P3) == [] and documents_by_title(f"{REPO}/{name}") == []
+
+
+def test_dry_run_leaves_every_access_count_unchanged(db: T2Database) -> None:
+    a = _gate(db, "nexus-da")
+    db.get(project=REPO, title=a)
+    before = {t: r["access_count"] for t, r in _rows(db).items()}
+    _phase3("nexus-da", "--dry-run")
+    assert {t: r["access_count"] for t, r in _rows(db).items()} == before == {a: 1}
+
+
+def test_dry_run_does_not_count_an_unmapped_or_restored_record(db: T2Database) -> None:
+    mapped = _gate(db, "nexus-dn", age_days=40)
+    bare = "review-abc1234-no-bead-p3-2026-11-10"
+    _put(db, bare, "kind: review\n\nbody", tags="kind:gate,rdr:209", age_days=60)
+    restored = _gate(db, "nexus-dn", sha="bbb2222", age_days=50)
+    _phase3("nexus-dn")
+    _restore_by_hand(db, restored)
+    out = _phase3("nexus-dn", "--dry-run")
+    assert "quarantined by the next expire sweep: 0 of 0" in out and f"restored, left alone: {restored}" in out
+    assert bare not in "".join(ln for ln in out.splitlines() if ln.startswith("  candidate")) and mapped

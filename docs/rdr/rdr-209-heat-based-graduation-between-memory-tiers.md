@@ -567,6 +567,13 @@ the cause if any of these fail:
    refused. Every non-justified record of a listed bead is printed. A record
    with no bead has no chain to check; it is "unmapped" and gets no TTL.
 
+`--dry-run` applies checks 1 and 3 and the earlier-pointer half of check 2 (it
+reads the earlier pointer and the quarantined listing, and writes nothing), and
+refuses exactly as the real run does. It skips the archives, the pointer write
+and its read-back, and says so in its output. Its candidate set is the listed
+records that pass those checks and have no TTL, minus unmapped and restored
+records, and it never stamps access: it reads with `get_all`.
+
 This is narrower than Amendment A1's wording, "each ship-blocker named in a
 gate record is either fixed by a listed sha or names its bead". A ship-blocker
 is free text and a script cannot tell one from a quoted example, so the check
@@ -1144,7 +1151,12 @@ is deleted. The listing tests include the untagged-body record, which is
 the case that motivated reading whole tags. The null-attribution TTL test must
 fail for its stated reason when the step is switched to `put`. A new check (the
 loss check) is run live once and its first run, with the counts examined
-and skipped, goes in its bead before close.
+and skipped, goes in its bead before close. The first live run is the first run
+without `--dry-run` that passes the loss check: it is the one that writes the
+pointer and reads it back, so checks 1 to 3 all run (the dry run skips the
+pointer write and read-back). Its counts are the records examined, those
+skipped by cause (open phase, unresolvable title, verdict chain, unmapped,
+restored) and those given a TTL; in the plan that run is nexus-1gdv0.2.17.
 
 ### Performance Expectations
 
@@ -1273,3 +1285,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Fix check d021dc53c85b, defects A and C (nexus-1gdv0.2.10): the null-attribution test of Step 3 could not tell `put` from import, because in a bare test process `NX_AGENT` and the session both resolve to None and a `put` would also leave them null. The test now sets `NX_AGENT` and `NX_SESSION_ID` (and stops the config file leaking in), asserts first that a `put` under those settings writes both non-null, then asserts the import keeps both null; it refuses to pass when the control writes nothing. |
 | 2026-11-19 | Fix check d021dc53c85b, defects B and C, A on cost (nexus-1gdv0.2.11): keeping the row's own timestamp means the expire sweep can quarantine an old record before it is read back, and `get_all` hides a quarantined row. The read-back now looks a missing row up in the quarantined listing before calling it missing and reports it as quarantined, restorable with `nx memory restore <id>`, still comparing its fields. A rerun carries a record an earlier pointer listed that the read no longer lists: `state: quarantined` when it is in the quarantined listing (whatever its archive, its row is restorable), `state: absent` when it is neither live nor quarantined and its archive reads back whole (the reaped-record rule of nexus-1gdv0.2.6), and stops naming it when that archive is gone. A run whose read lists nothing still refreshes an earlier pointer. The read cost per run is stated in Step 3: one `get_all` before and one after the writes, one quarantined listing and one pointer read, none per record. |
 | 2026-11-19 | Gate finding S6, second half (nexus-1gdv0.2.4): `nx memory restore` makes a row permanent again (`ttl` NULL) and clears the rollup mark, so a restored gate record looks exactly like one never given a TTL, and a rerun would have given it a TTL again, undoing a person's decision. The rule is written in Step 3 (Rerun) and built, in the form the bead recommended (skip and name): each listed record in the pointer carries `ttl_set`, written false before the TTL writes and true after them for each record a run gave a TTL (the pointer is written a second time for that), so a rerun that finds a listed record with `ttl_set` and no TTL leaves it alone, prints `restored, left alone: <title>` and keeps it marked `restored`. A record the earlier pointer lists unmarked, whose write stopped part way, stays a candidate, so a partial write is not mistaken for a restore. The Consequences bullet now says Step 4's census flags a restored record again and why that is left as the reminder. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect B and observations A and C (nexus-1gdv0.2.12): the RDR did not say which Step 2 checks the dry run applies, though it writes no pointer, nor which run is the loss check's first live run. Step 2 now says: `--dry-run` applies the closed-phase check, the verdict chain and the earlier-pointer half of check 2 (reading the earlier pointer and the quarantined listing), refuses exactly as the real run does, skips the archives, the pointer write and its read-back and says so, and counts the listed records that pass and have no TTL, minus unmapped and restored ones. The Testing Strategy defines the first live run as the first run without `--dry-run` that passes the loss check, with its counts (examined, skipped by cause, given a TTL) recorded in its bead. |
