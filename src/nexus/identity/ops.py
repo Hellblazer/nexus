@@ -34,7 +34,7 @@ from nexus.identity import token_contract
 from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body
 from nexus.identity.delegated import check_dispatcher, sweep_delegated
 from nexus.identity.holder import (
-    GONE, INTERACTIVE_ENTRYPOINTS, RUNNING, Processes, Verdict, check_holder, holder_process,
+    GONE, INTERACTIVE_ENTRYPOINTS, OTHER_HOST, RUNNING, Processes, Verdict, check_holder, holder_process,
     normalise_instant, read_registry_entry,
 )
 from nexus.identity.sweep import sweep_host
@@ -318,6 +318,32 @@ def judge(env: IdentityEnv, view: Mapping[str, Any]) -> Verdict | None:
     if view.get("kind") == "delegated":
         return check_dispatcher(holder, procs=env.procs, host=env.host)
     return check_holder(holder, procs=env.procs, host=env.host, identity_dir=env.identity_dir)
+
+
+def is_alive(env: IdentityEnv, identity_id: str) -> bool:
+    """Whether the identity still has a live holder, for the code that reads liveness before it acts (RDR-253 Gap 4:
+    worktree removal, tmux cleanup, the restart round). Read only: nothing is recorded, unlike ``nx identity alive``.
+
+    An identity the engine does not know, one that is ended, released or unheld, and a holder the check finds gone are
+    not alive. A holder running on this host, and one whose process cannot be judged (a pid that runs but whose start time
+    cannot be read), are alive: a reader that cannot prove a holder gone must not act as if it were. A holder on another host
+    is alive while its lease is (``state`` live). An engine that cannot be asked raises :class:`IdentityCommandError`."""
+    try:
+        view = env.client.show(identity_id)
+    except IdentityApiError as exc:
+        if exc.status == 404:
+            return False
+        raise IdentityCommandError(f"{exc.code or exc.status}: {exc.message}") from exc
+    except IdentityUnavailableError as exc:
+        raise IdentityCommandError(f"the engine is not answering ({exc})") from exc
+    if view.get("state") not in ("live", "lapsed"):
+        return False
+    verdict = judge(env, view)
+    if verdict is None or verdict.state == GONE:
+        return False
+    if verdict.state == OTHER_HOST:
+        return view.get("state") == "live"
+    return True
 
 
 def alive_lines(env: IdentityEnv, ref: str | None) -> list[str]:

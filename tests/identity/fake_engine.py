@@ -37,6 +37,9 @@ class FakeEngine:
         self._n = 0
         self._minted = 0
         self.refuse: dict[str, IdentityApiError] = {}     # route name -> the refusal it answers with (a staged failure)
+        self.work: dict[tuple[str, str, str], tuple[str, float]] = {}     # (identity, kind, ref) -> (state, updated_at)
+        self.memberships: dict[str, dict[str, str]] = {}                  # identity -> {group: role}, in join order
+        self.caller_token: str | None = None   # the identity the caller's token names; a membership write is fenced on it
 
     # ── staging (not routes) ────────────────────────────────────────────────
 
@@ -276,3 +279,71 @@ class FakeEngine:
             out["identity_token"] = self._token(identity, rec["generation"])
             out["identity_token_expires_in_seconds"] = 3600
         return out
+
+    # ── work and memberships (RDR-253 Step 6) ───────────────────────────────
+
+    def _work_row(self, identity: str, kind: str, ref: str) -> dict[str, Any]:
+        state, at = self.work[(identity, kind, ref)]
+        return {"identity": identity, "kind": kind, "ref": ref, "state": state, "updated_at": at}
+
+    def put_work(self, identity: str, kind: str, ref: str, state: str = "running") -> dict[str, Any]:
+        self.calls.append(("put_work", (identity, kind, ref, state)))
+        self._maybe_refuse("put_work")
+        self._get(identity)
+        if kind not in ("watcher", "wait", "labrun", "worktree", "tmux"):
+            raise _refuse(400, "bad_kind", "kind must be one of ['labrun', 'tmux', 'wait', 'watcher', 'worktree']")
+        if state not in ("running", "done"):
+            raise _refuse(400, "bad_state", "state must be running or done")
+        if (identity, kind, ref) not in self.work and sum(1 for k in self.work if k[0] == identity) >= 200:
+            raise _refuse(409, "work_limit", f"{identity} already holds 200 work rows")
+        self.work[(identity, kind, ref)] = (state, float(self.now()))
+        return self._work_row(identity, kind, ref)
+
+    def remove_work(self, identity: str, kind: str, ref: str) -> dict[str, Any]:
+        self.calls.append(("remove_work", (identity, kind, ref)))
+        removed = int(self.work.pop((identity, kind, ref), None) is not None)
+        return {"identity": identity, "kind": kind, "ref": ref, "removed": removed}
+
+    def work_of(self, identity: str) -> list[dict[str, Any]]:
+        self.calls.append(("work_of", (identity,)))
+        self._get(identity)
+        return [self._work_row(*k) for k in sorted(self.work) if k[0] == identity]
+
+    def work_owners(self, kind: str, ref: str) -> list[dict[str, Any]]:
+        self.calls.append(("work_owners", (kind, ref)))
+        return [self._work_row(*k) for k in sorted(self.work) if k[1:] == (kind, ref)]
+
+    def join_group(self, identity: str, group: str, role: str, *, as_identity: str | None = None) -> dict[str, Any]:
+        self.calls.append(("join_group", (identity, group, role, as_identity)))
+        self._get(identity)
+        self._fence(identity, as_identity)
+        if role not in ("leader", "member"):
+            raise _refuse(400, "bad_role", "role must be leader or member")
+        self.memberships.setdefault(identity, {})[group] = role
+        return {"identity": identity, "group": group, "role": role, "joined_at": "2026-11-18T00:00:00Z"}
+
+    def leave_group(self, identity: str, group: str, *, as_identity: str | None = None) -> dict[str, Any]:
+        self.calls.append(("leave_group", (identity, group, as_identity)))
+        self._get(identity)
+        self._fence(identity, as_identity)
+        removed = int(self.memberships.get(identity, {}).pop(group, None) is not None)
+        return {"identity": identity, "group": group, "removed": removed}
+
+    def groups_of(self, identity: str) -> list[dict[str, Any]]:
+        self.calls.append(("groups_of", (identity,)))
+        self._get(identity)
+        return [{"identity": identity, "group": g, "role": r, "joined_at": "2026-11-18T00:00:00Z"}
+                for g, r in self.memberships.get(identity, {}).items()]
+
+    def roster(self, group: str) -> list[dict[str, Any]]:
+        self.calls.append(("roster", (group,)))
+        return [{"identity": i, "group": group, "role": g[group], "joined_at": "2026-11-18T00:00:00Z"}
+                for i, g in self.memberships.items() if group in g]
+
+    def _fence(self, identity: str, as_identity: str | None) -> None:
+        """The engine's ownership fence on memberships: the writer's token names the identity, or the write is refused."""
+        as_identity = self.caller_token if as_identity is None else as_identity
+        if as_identity is None:
+            raise _refuse(403, "identity_token_required", "this write needs the identity's token")
+        if as_identity != identity:
+            raise _refuse(403, "not_owner", f"{as_identity} does not own {identity}")

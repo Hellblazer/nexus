@@ -112,8 +112,15 @@ class IdentityClient:
 
     # ── transport ───────────────────────────────────────────────────────────
 
-    def _request(self, method: str, path: str, *, json: Any = None, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    def _request(self, method: str, path: str, *, json: Any = None, params: Mapping[str, Any] | None = None,
+                 fenced: bool = False) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._bearer()}", "X-Nexus-Tenant": self._tenant}
+        if fenced:
+            # RDR-253 Step 6: a membership write is fenced by the engine (ownership and generation). The token is the
+            # caller's own; with none, the engine's 403 identity_token_required is the honest answer.
+            from nexus.identity.token_header import identity_headers  # noqa: PLC0415 — deferred: hook import cost
+
+            headers.update(identity_headers())
         try:
             resp = self._http.request(method, f"{self._base}/v1/identity{path}", json=json, params=params, headers=headers)
         except httpx.HTTPError as exc:
@@ -124,6 +131,11 @@ class IdentityClient:
             body = None
         if resp.status_code >= 400:
             body = body if isinstance(body, dict) else {}
+            if fenced:
+                from nexus.identity.token_header import superseded_from_body  # noqa: PLC0415 — deferred, as above
+
+                if (typed := superseded_from_body(resp.status_code, body)) is not None:
+                    raise typed
             message = body.get("message") or body.get("error") or resp.reason_phrase
             raise IdentityApiError(resp.status_code, body.get("error") if isinstance(body.get("error"), str) else None,
                                    str(message), body)
@@ -228,3 +240,39 @@ class IdentityClient:
         if client_version:
             body["client_version"] = client_version
         return self._request("POST", f"/{identity}/renew", json=body)
+
+    # ── work and memberships (RDR-253 Step 6) ───────────────────────────────
+
+    def put_work(self, identity: str, kind: str, ref: str, state: str = "running") -> dict[str, Any]:
+        """Register work *identity* owns, or change its state in place (a label, not fenced: a lab run on another host
+        has no token file). ``409 work_limit`` at 200 rows."""
+        return self._request("POST", f"/{identity}/work", json={"kind": kind, "ref": ref, "state": state})
+
+    def remove_work(self, identity: str, kind: str, ref: str) -> dict[str, Any]:
+        """Forget the work; the answer's ``removed`` is 0 for work that was not there."""
+        return self._request("DELETE", f"/{identity}/work", params={"kind": kind, "ref": ref})
+
+    def work_of(self, identity: str) -> list[dict[str, Any]]:
+        """Every work row of *identity* (``kind``, ``ref``, ``state``, ``updated_at``), by kind and ref."""
+        return list(self._request("GET", f"/{identity}/work").get("work") or [])
+
+    def work_owners(self, kind: str, ref: str) -> list[dict[str, Any]]:
+        """Every identity that registered the resource (*kind*, *ref*), one row each, with its state."""
+        return list(self._request("GET", "/work", params={"kind": kind, "ref": ref}).get("owners") or [])
+
+    def join_group(self, identity: str, group: str, role: str = "member") -> dict[str, Any]:
+        """Join *group* as ``leader`` or ``member``, or change the role (the join time stays). Fenced: the caller's
+        token must be *identity*'s."""
+        return self._request("POST", f"/{identity}/memberships", json={"group": group, "role": role}, fenced=True)
+
+    def leave_group(self, identity: str, group: str) -> dict[str, Any]:
+        """Leave *group*; leaving one never joined removes nothing (``removed`` 0). Fenced."""
+        return self._request("DELETE", f"/{identity}/memberships/{group}", fenced=True)
+
+    def groups_of(self, identity: str) -> list[dict[str, Any]]:
+        """The groups *identity* belongs to, in join order (``group``, ``role``, ``joined_at``)."""
+        return list(self._request("GET", f"/{identity}/memberships").get("memberships") or [])
+
+    def roster(self, group: str) -> list[dict[str, Any]]:
+        """The members of *group* in join order."""
+        return list(self._request("GET", f"/groups/{group}").get("members") or [])

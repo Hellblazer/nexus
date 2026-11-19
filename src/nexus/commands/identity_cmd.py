@@ -168,3 +168,120 @@ def purge_cmd(ctx: click.Context, identity: str, operator: bool) -> None:
 
     _run(ctx, lambda env: ops.purge(env, identity))
 
+
+
+_KINDS = ["worktree", "tmux", "watcher", "wait", "labrun"]
+_KIND = click.option("--kind", required=True, type=click.Choice(_KINDS), help="The kind of work or resource.")
+_REF = click.option("--ref", required=True,
+                    help="Its label: an absolute worktree path, a tmux -L socket name, or the work's own name.")
+
+
+@identity_group.command("may-stop")
+@_KIND
+@_REF
+@click.pass_context
+def may_stop_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+    """Exit 0 when no live identity other than this process owns the resource; else refuse, naming the owner.
+
+    Run it before removing a worktree or killing a tmux server. Ownership is read from the work rows
+    (`nx identity work register`) and liveness from the holder check, never from a name pattern or a process listing.
+    A resource no row names is unowned and the answer is yes.
+    """
+    from nexus.identity import work  # noqa: PLC0415
+
+    _run(ctx, lambda env: work.may_stop_lines(env, kind, ref))
+
+
+@identity_group.group("work")
+def work_group() -> None:
+    """Work this session owns: worktrees, tmux servers, waits, watchers and lab runs (RDR-253)."""
+
+
+@work_group.command("register")
+@_KIND
+@_REF
+@click.pass_context
+def work_register_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+    """Register work this session owns, in state running. A process with no identity registers nothing (exit 0)."""
+    from nexus.identity import work  # noqa: PLC0415
+
+    _run(ctx, lambda env: work.register_lines(env, kind, ref, work.RUNNING))
+
+
+@work_group.command("done")
+@_KIND
+@_REF
+@click.pass_context
+def work_done_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+    """Mark work this session owns finished (state done)."""
+    from nexus.identity import work  # noqa: PLC0415
+
+    _run(ctx, lambda env: work.register_lines(env, kind, ref, work.DONE))
+
+
+@work_group.command("forget")
+@_KIND
+@_REF
+@click.pass_context
+def work_forget_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+    """Drop a work row of this session."""
+    from nexus.identity import work  # noqa: PLC0415
+
+    _run(ctx, lambda env: work.forget_lines(env, kind, ref))
+
+
+@work_group.command("list")
+@click.argument("seat", required=False)
+@click.option("--session", "session_id", default=None, help="List the work of the identity a Claude session id belongs to.")
+@click.option("--running", "only_running", is_flag=True,
+              help="Only work that is running and whose identity is alive (a crashed session's running rows are stale).")
+@click.option("--json", "as_json", is_flag=True, help="Print the identity, whether it is alive, and its rows as JSON.")
+@click.pass_context
+def work_list_cmd(ctx: click.Context, seat: str | None, session_id: str | None, only_running: bool, as_json: bool) -> None:
+    """List the work of an identity: SEAT (a name or an id), --session, or the caller's own.
+
+    A running row of an identity that is not alive is marked stale.
+    """
+    from nexus.identity import work  # noqa: PLC0415
+
+    if seat and session_id:
+        raise click.UsageError("give a seat or --session, not both")
+    try:
+        report = work.list_rows(_env(ctx), seat, session_id, only_running=only_running)
+    except IdentityCommandError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        for line in work.list_lines(report):
+            click.echo(line)
+
+
+@work_group.command("owners")
+@_KIND
+@_REF
+@click.pass_context
+def work_owners_cmd(ctx: click.Context, kind: str, ref: str) -> None:
+    """Who registered a resource, and whether each owner's holder is alive."""
+    from nexus.identity import work  # noqa: PLC0415
+
+    _run(ctx, lambda env: work.owners_lines(env, kind, ref))
+
+
+@work_group.command("run", context_settings={"ignore_unknown_options": True})
+@_KIND
+@_REF
+@click.argument("argv", nargs=-1, type=click.UNPROCESSED, required=True)
+@click.pass_context
+def work_run_cmd(ctx: click.Context, kind: str, ref: str, argv: tuple[str, ...]) -> None:
+    """Register work, run the command after --, mark it done when it exits, and exit with its status.
+
+    nx identity work run --kind labrun --ref pytest-full -- lab-remote -c lab-m -- uv run pytest tests/x
+    """
+    from nexus.identity import work  # noqa: PLC0415
+
+    try:
+        code = work.run_command(_env(ctx), kind, ref, argv)
+    except IdentityCommandError as exc:
+        raise click.ClickException(str(exc)) from exc
+    ctx.exit(code)
