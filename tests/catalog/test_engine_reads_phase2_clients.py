@@ -253,14 +253,9 @@ def test_locators_bound_is_checked_before_sending(monkeypatch: pytest.MonkeyPatc
 # ── the engine release named to users ───────────────────────────────────────────
 
 
-def test_the_named_engine_release_is_newer_than_the_last_cut_without_the_routes() -> None:
-    """engine-service-v0.1.196 (cut 2026-11-18) carries none of the Phase 2 routes, so a message naming it, or anything
-    older, would send a user to an engine without the route. The landing (nexus-uwggq.2.18) raises REQUIRED_ENGINE_VERSION
-    to the release that carries them; the client floor must never pass the release the messages name."""
-    from nexus.engine_version import REQUIRED_ENGINE_VERSION, parse_engine_version
+def test_the_named_engine_release_is_the_release_floor() -> None:
+    """The release users are sent to is the floor scripts/check_engine_release_floor.py holds a release pin to
+    (CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION); the floor's own tests pin it past engine-service-v0.1.196."""
+    from nexus.engine_version import CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION
 
-    named = parse_engine_version(PHASE2_ROUTES_ENGINE)
-    assert named is not None and named > (0, 1, 196)
-    assert REQUIRED_ENGINE_VERSION <= named, (
-        "the client floor is past the engine the route messages name: set PHASE2_ROUTES_ENGINE to the release that "
-        "carries the routes")
+    assert PHASE2_ROUTES_ENGINE == ".".join(map(str, CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION))

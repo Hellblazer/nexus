@@ -116,7 +116,10 @@ surfaces the whole fix list. The checks:
   engine with vectors-055, or every `nx_answer` search step is refused), and when it
   is below `RESOLVE_SENSITIVE_MIN_ENGINE_VERSION` (RDR-193 Step 6: a release must pin
   an engine whose `resolve_or_register` accepts `sensitive`, or every sensitive titled
-  put and curator register is refused with a 400);
+  put and curator register is refused with a 400), and when it is below
+  `CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION` (RDR-241 Phase 2: a release must pin an
+  engine with the catalog routes, or author search, `list --meta`, `gc` and
+  `--check-references` answer errors and operator dispatch drops its file tools);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under

@@ -11,9 +11,11 @@ from typing import Any
 
 import httpx
 
-#: The first engine-service release that carries the RDR-241 Phase 2 routes. The engine handoff (nexus-uwggq.2.11)
-#: confirms the number and the landing (nexus-uwggq.2.18) raises ``REQUIRED_ENGINE_VERSION`` to it.
-PHASE2_ROUTES_ENGINE: str = "0.1.197"
+from nexus.engine_version import CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION
+
+#: The first engine-service release that carries the RDR-241 Phase 2 routes, as users read it: the release floor
+#: :data:`nexus.engine_version.CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION`, one source for the message and the check.
+PHASE2_ROUTES_ENGINE: str = ".".join(str(p) for p in CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION)
 
 
 class EngineRouteUnavailable(Exception):

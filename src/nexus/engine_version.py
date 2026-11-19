@@ -863,6 +863,17 @@ SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 182)
 #: the pin to v0.1.185. ``(0, 0, 0)`` means unset.
 RESOLVE_SENSITIVE_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 185)
 
+#: The first engine that answers the RDR-241 Phase 2 catalog routes (``GET /v1/catalog/docs/by-author``, ``/docs/by-meta``,
+#: ``/docs/by-scheme`` and ``/sensitive/locators``, each advertised by its ``catalog_*_supported`` flag on ``GET /version``;
+#: nexus-uwggq.2.3-.2.5, .1.5). The client switches that read them (MCP catalog_search by author, operator dispatch's
+#: file-tool deny rules, ``nx catalog list --meta``, ``nx catalog gc``, ``nx doctor --check-references``) never walk the
+#: catalog in their place: on an older engine they answer an error naming the route, and operator dispatch drops Read,
+#: Grep and Glob. So a release must not pin an older engine (``scripts/check_engine_release_floor.py`` fails
+#: ``--ledger-only`` and the tag-time forms while :data:`REQUIRED_ENGINE_VERSION` is below it). Provisional at 0.1.197
+#: until Sam cuts the engine release that carries the routes (nexus-uwggq.2.11); set it to that tag if the number
+#: differs. On develop it leads the pin until that release commit moves the pin. ``(0, 0, 0)`` means unset.
+CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 197)
+
 
 def parse_engine_version(raw: str | None) -> tuple[int, int, int] | None:
     """Parse ``X.Y.Z`` (optional leading ``v``/``V``) to a tuple, else ``None``.
