@@ -8445,13 +8445,18 @@ def scratch(
     with a footer when more entries exist; other actions return a single
     status or content line.
     """
+    opened = None
     try:
         t1, isolated = _get_t1()
         prefix = "[T1 isolated] " if isolated else ""
         if scope == "identity":
+            if persist:
+                return _fail("Error: persist flags an entry for the session-end flush, which never runs for identity "
+                             "scratch; use scratch_manage(action=\"promote\", scope=\"identity\") to copy an entry to T2")
             from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
-            t1, prefix = identity_scratch(t1), "[identity] "
+            t1 = opened = identity_scratch(t1)
+            prefix = "[identity] "
         elif scope != "session":
             return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
 
@@ -8537,6 +8542,9 @@ def scratch(
             return _fail(f"Error: unknown action {action!r}. Use: put, search, list, get, delete")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("scratch", e)
+    finally:
+        if opened is not None:
+            opened.close()
 
 
 @mcp.tool(
@@ -8549,6 +8557,9 @@ def scratch_manage(
     entry_id: Annotated[str, Field(description="Scratch entry id.")],
     project: Annotated[str, Field(description="Target T2 project namespace (required for \"promote\").")] = "",
     title: Annotated[str, Field(description="Target T2 entry title (required for \"promote\").")] = "",
+    scope: Annotated[str, Field(
+        description="\"session\" (default) or \"identity\" (the identity's scratch: promote only, never flag).",
+    )] = "session",
 ) -> str:
     """Flag a T1 scratch entry for persistence, or promote it to a T2 memory entry.
 
@@ -8557,9 +8568,20 @@ def scratch_manage(
 
     Returns a status line naming the flag or promotion outcome.
     """
+    opened = None
     try:
         t1, isolated = _get_t1()
         prefix = "[T1 isolated] " if isolated else ""
+        if scope == "identity":
+            if action == "flag":
+                return _fail("Error: flag marks an entry for the session-end flush, which never runs for identity scratch; "
+                             "use action=\"promote\" to copy it to T2")
+            from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
+
+            t1 = opened = identity_scratch(t1)
+            prefix = "[identity] "
+        elif scope != "session":
+            return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
 
         if action == "flag":
             # `scratch list` prints an 8-character prefix and the engine matches
@@ -8589,6 +8611,9 @@ def scratch_manage(
             return _fail(f"Error: unknown action {action!r}. Use: flag, promote")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("scratch_manage", e)
+    finally:
+        if opened is not None:
+            opened.close()
 
 
 @mcp.tool(

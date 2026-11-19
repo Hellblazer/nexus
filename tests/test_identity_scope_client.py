@@ -22,12 +22,18 @@ from nexus.identity import scratch_scope
 from nexus.identity.scratch_scope import IdentityScopeError, scope_id, scope_owner
 
 
+_REAL_IDENTITY_SCRATCH = scratch_scope.identity_scratch     # the `stores` fixture replaces the module attribute
+
+
 class Client:
     def __init__(self, **views: dict[str, Any]) -> None:
         self.views = views
 
     def show(self, identity: str) -> dict[str, Any]:
         return self.views[identity]
+
+    def close(self) -> None:
+        pass
 
 
 def holds(monkeypatch: pytest.MonkeyPatch, identity: str | None) -> None:
@@ -68,8 +74,9 @@ def test_the_store_carries_the_identity_scope_and_the_sessions_own_token(monkeyp
     base = SimpleNamespace(_store=SimpleNamespace(_session_token="minted-token"))        # the CLI-dedicated wrapper
     scratch_scope.identity_scratch(base, client=Client(i7={"id": "i7", "kind": "seat"}))
     scratch_scope.identity_scratch(SimpleNamespace(_session_token="direct"), client=Client(i7={"id": "i7", "kind": "seat"}))
-    assert built == [{"session_id": "identity:i7", "_session_token": "minted-token"},
-                     {"session_id": "identity:i7", "_session_token": "direct"}]
+    assert built == [{"session_id": "identity:i7", "_session_token": "minted-token", "export_adopted_token": False},
+                     {"session_id": "identity:i7", "_session_token": "direct", "export_adopted_token": False}], \
+        "never the process's own scope: an adopted token must not replace NX_T1_SESSION"
 
 
 # ── nx scratch --scope ──────────────────────────────────────────────────────
@@ -86,6 +93,12 @@ class Entries:
     def put(self, **kw: Any) -> str:
         self.puts.append(kw)
         return f"{self.label}-id"
+
+    def clear(self) -> int:
+        return 0
+
+    def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -187,3 +200,67 @@ def test_mine_with_a_project_or_without_an_identity_is_an_error_and_put_still_ne
     assert db.calls == []
     assert runner.invoke(memory, ["put", "b", "-p", "plain", "-t", "t"]).exit_code == 0
     assert db.calls[0][1]["project"] == "plain", "--project is unchanged"
+
+
+# ── fix round 1 ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "refused"])
+def test_an_engine_that_cannot_answer_is_a_clean_cli_error_never_a_traceback(monkeypatch, stores, failure) -> None:
+    """S1: IdentityUnavailableError and IdentityApiError are plain exceptions; the CLI turned neither into a message."""
+    from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError
+
+    holds(monkeypatch, "i7")
+
+    class Down(Client):
+        def show(self, identity):
+            raise (IdentityUnavailableError("connection refused") if failure == "unavailable"
+                   else IdentityApiError(404, "unknown_identity", "no identity i7", {}))
+
+    monkeypatch.setattr("nexus.identity.bind_client.IdentityClient.from_config", classmethod(lambda cls, **k: Down()))
+    monkeypatch.setattr("nexus.identity.scratch_scope.identity_scratch", _REAL_IDENTITY_SCRATCH)
+    out = CliRunner().invoke(scratch, ["--scope", "identity", "list"])
+    assert out.exit_code == 1 and "Traceback" not in out.output and out.exception.__class__ is SystemExit, out.output
+    assert ("not answering" if failure == "unavailable" else "unknown_identity") in out.output
+
+
+def test_clear_is_refused_for_identity_scratch_because_the_engine_would_report_success_and_delete_nothing(stores) -> None:
+    out = CliRunner().invoke(scratch, ["--scope", "identity", "clear", "-y"])
+    assert out.exit_code == 2 and "delete identity scratch entries one by one" in out.output
+    assert CliRunner().invoke(scratch, ["clear", "-y"]).exit_code == 0, "the session scope still clears"
+
+
+def test_flag_is_refused_for_identity_scratch(stores) -> None:
+    out = CliRunner().invoke(scratch, ["--scope", "identity", "flag", "abcdef12"])
+    assert out.exit_code == 2 and "never ends with a session" in out.output
+
+
+def test_the_mcp_tool_refuses_persist_and_flag_for_identity_scratch_and_closes_the_store(monkeypatch, stores) -> None:
+    from nexus.mcp import core
+
+    closed: list[str] = []
+    stores["identity"].close = lambda: closed.append("closed")                         # type: ignore[attr-defined]
+    stores["identity"].resolve_prefix_candidates = lambda i: [i]                       # type: ignore[attr-defined]
+    stores["identity"].promote = lambda *a, **k: SimpleNamespace(action="new")         # type: ignore[attr-defined]
+    monkeypatch.setattr(core, "_get_t1", lambda: (stores["session"], False))
+    monkeypatch.setattr(core, "_record_tier_write", lambda **k: None)
+    monkeypatch.setattr(core, "_t2_ctx", lambda: contextlib.nullcontext(None))
+    assert "never runs for identity" in core.scratch(action="put", content="n", scope="identity", persist=True)
+    assert not stores["identity"].puts
+    assert "never runs for identity" in core.scratch_manage(action="flag", entry_id="e", scope="identity")
+    done = core.scratch_manage(action="promote", entry_id="e", project="p", title="t", scope="identity")
+    assert done.startswith("[identity] Promoted") and "action=new" in done
+    core.scratch(action="list", scope="identity")
+    assert closed and set(closed) == {"closed"}, "the per-call identity store is closed"
+    assert "unknown scope" in core.scratch_manage(action="promote", entry_id="e", scope="galaxy")
+
+
+def test_mine_for_a_delegated_child_is_its_parents_project(monkeypatch, db) -> None:
+    """The child's notes live where its identity scratch lives, so they do not orphan when the child ends."""
+    holds(monkeypatch, "i9")
+    monkeypatch.setenv("NX_IDENTITY_TOKEN", "/some/token/file")
+    closed: list[bool] = []
+    client = SimpleNamespace(show=lambda i: {"id": i, "kind": "delegated", "parent": "i7"}, close=lambda: closed.append(True))
+    monkeypatch.setattr("nexus.identity.bind_client.IdentityClient.from_config", classmethod(lambda cls, **k: client))
+    assert CliRunner().invoke(memory, ["put", "body", "--mine", "-t", "plan"]).exit_code == 0
+    assert db.calls[0][1]["project"] == "identity/i7" and closed == [True]
