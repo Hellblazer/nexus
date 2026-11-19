@@ -997,8 +997,7 @@ def _token_identity() -> str | None:
         record = current()
     except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
         return None
-    identity = str(record.identity) if record is not None else ""
-    return identity if re.fullmatch(r"i[0-9]+", identity) else None
+    return _valid_identity(str(record.identity) if record is not None else "")
 
 
 def persist(t1: Any, subs: "SubscriptionSet") -> None:
@@ -1028,7 +1027,24 @@ def get_or_load(t1: Any, session_id: str, *, store_factory: Callable[[], Any]) -
         if obj is None:
             obj = load(t1, session_id, store_factory=store_factory)
             _CACHE[session_id] = obj
+            _follow_identity(obj)
         return obj
+
+
+def _follow_identity(subs: SubscriptionSet) -> None:
+    """RDR-253 Step 5: keep *subs*'s identity mailbox in step with this server's lease. The set usually loads before
+    the token file exists (the MCP server and the bind hook start together), so the lease tells it when it adopts
+    an identity, and again on a switch or take-over."""
+    try:
+        from nexus.mcp.identity_lease import add_identity_listener  # noqa: PLC0415 -- deferred: MCP import cost
+
+        add_identity_listener(lambda identity: subs.set_identity(_valid_identity(identity)))
+    except Exception as exc:  # noqa: BLE001 -- no lease module path: the session mailbox alone, as before Step 5
+        _log.debug("identity_follow_unavailable", error=str(exc))
+
+
+def _valid_identity(identity: str | None) -> str | None:
+    return identity if identity and re.fullmatch(r"i[0-9]+", identity) else None
 
 
 def reset_cache(session_id: str | None = None) -> None:

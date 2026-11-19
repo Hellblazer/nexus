@@ -231,7 +231,10 @@ def start_for_waiter(waiter: Any, subs: Any, *, store_ctx: Callable[[], Any], cw
     def make_runtime(auras: list[Aura]) -> AuraRuntime:
         read, put = t2_threads_io(store_ctx)
         return AuraRuntime(
-            auras, writer=ThreadsBlockWriter(session_id, read_entries=read, put=put, identity=_own_identity(session_id)),
+            auras,
+            writer=ThreadsBlockWriter(
+                session_id, read_entries=read, put=put, identity_source=lambda: _own_identity(session_id),
+            ),
             notify=notify,
         )
 

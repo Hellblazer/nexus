@@ -381,7 +381,7 @@ def test_due_items_are_found_by_the_identity_line_when_the_session_line_is_stale
     search, calls = _search([{"title": "marlowe", "content": "identity: i12\n" + ENTRY}])
     lines = due_lines(new_sid, datetime(2026, 11, 14, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="",
                       identity="i12")
-    assert calls == ["i12"]
+    assert calls == ["identity: i12"]
     assert lines[1].startswith("- RDR-230 readings: due 2026-11-14")
 
 

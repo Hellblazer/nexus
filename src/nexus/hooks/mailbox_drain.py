@@ -633,8 +633,13 @@ def _transport_error_text(exc: BaseException) -> str:
 _IDENTITY_TOKEN = ""
 
 
-def _identity_headers(subspace: object) -> dict[str, str]:
-    if _IDENTITY_TOKEN and isinstance(subspace, str) and subspace.startswith("mailbox/i") and subspace[9:].isdigit():
+#: The address being drained now; the token is chosen per address, never per body (see the plugin script).
+_DRAIN_ADDRESS = ""
+
+
+def _identity_headers() -> dict[str, str]:
+    a = _DRAIN_ADDRESS
+    if _IDENTITY_TOKEN and a.startswith("i") and a[1:].isdigit():
         return {"X-Nexus-Identity-Token": _IDENTITY_TOKEN}
     return {}
 
@@ -665,7 +670,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     req = urllib.request.Request(
         url, data=payload, method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
-                 **_identity_headers(body.get("subspace"))},
+                 **_identity_headers()},
     )
     # Never spend longer than the drain has left: a sequence of calls each
     # just under the per-call cap would otherwise blow the whole budget while
@@ -929,7 +934,17 @@ def _drain_claimant(address: str) -> str:
     return f"mailbox-drain-{digest}-{pid_str}-{secrets.token_hex(4)}"
 
 
-def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
+def _drain_address(base_url: str, token: str, address: str, **kw: Any) -> str:
+    """:func:`_drain_address_inner` with :data:`_DRAIN_ADDRESS` set for every request it makes (RDR-253 Step 5)."""
+    global _DRAIN_ADDRESS
+    _DRAIN_ADDRESS = address
+    try:
+        return _drain_address_inner(base_url, token, address, **kw)
+    finally:
+        _DRAIN_ADDRESS = ""
+
+
+def _drain_address_inner(base_url: str, token: str, address: str, *, is_local: bool,
                    config_dir: Path, deadline: float, out: _Out) -> str:
     """Probe one address and deliver what it can, writing each row as it goes.
 

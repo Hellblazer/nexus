@@ -1183,3 +1183,23 @@ def test_setting_the_identity_bumps_the_set_so_the_waiter_rereads_it() -> None:
     assert seen == [1] and subs.identity_mailbox == "mailbox/i12"
     subs.set_identity(None)
     assert seen == [1, 2] and [e["subspace"] for e in subs.entries()] == [subs.session_mailbox]
+
+
+def test_a_set_loaded_before_the_token_file_follows_the_lease_when_it_adopts_an_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP server and the bind hook start together, so the set usually loads with no identity; the lease
+    tells it when it adopts one (a late token file), and again on a switch."""
+    from nexus.mcp import identity_lease, subscriptions  # noqa: PLC0415
+
+    monkeypatch.setattr(identity_lease, "_IDENTITY_LISTENERS", [])
+    monkeypatch.setattr(identity_lease, "_LEASE", None)
+    subs = subscriptions.SubscriptionSet(session_id="11111111-2222-4333-8444-555555555555")
+    subscriptions._follow_identity(subs)  # noqa: SLF001 -- what get_or_load does on first load
+    assert subs.identity_mailbox is None
+    identity_lease._notify_identity("i12")  # noqa: SLF001 -- what IdentityLease._adopt does on a change
+    assert [e["subspace"] for e in subs.entries()][1] == "mailbox/i12"
+    identity_lease._notify_identity("i13")  # noqa: SLF001 -- a cross-seat switch
+    assert subs.identity_mailbox == "mailbox/i13"
+    identity_lease._notify_identity("not-an-id")  # noqa: SLF001
+    assert subs.identity_mailbox is None

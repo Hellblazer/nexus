@@ -541,7 +541,8 @@ def _board_entry(
         return min(left(), _SESSION_PHASE_S - (_mono() - started))
 
     error: str | None = None
-    for query, how in (((identity, "identity"),) if identity else ()) + ((session_id, "session id"),):
+    # the identity phase searches for the whole line, so prose that merely mentions the id cannot fill the candidates
+    for query, how in (((f"identity: {identity}", "identity"),) if identity else ()) + ((session_id, "session id"),):
         found, error = _search_phase(query, how, session_id, identity, cwd, phase_left)
         if found is not None:
             return found
@@ -549,6 +550,9 @@ def _board_entry(
         return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
     missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
     body, title_error = _board_by_title(name, cwd, left(), missing)
+    if body.strip() and identity and _identity_line(body) not in ("", identity):
+        # a same-named entry of another seat is not ours (two sessions with one display name)
+        return "", "", "", f"the entry titled {name!r} names another identity ({_identity_line(body)})"
     if title_error and error:
         title_error = f"{title_error} (the session-line search also failed: {error})"
     return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
@@ -583,7 +587,9 @@ def _search_phase(
                 own = _identity_line(body)
                 if how == "identity" and own == identity:
                     return (title, body, "identity", None), None
-                if how == "session id" and _has_session_line(body, session_id) and own in ("", identity):
+                # identity known: an entry naming another seat is never ours; unknown (a Desktop session with no
+                # token file): our own session line is trusted whatever identity the entry names
+                if how == "session id" and _has_session_line(body, session_id) and (not identity or own in ("", identity)):
                     return (title, body, "session id", None), None
             if unfetched:
                 # Hits that were never read cannot be called absent (review r2 L2).

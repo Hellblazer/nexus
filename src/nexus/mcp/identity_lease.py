@@ -72,6 +72,28 @@ class TickReport:
     error: str | None = None
 
 
+#: RDR-253 Step 5: called with the new identity whenever a lease adopts one (a late token file, a switch, a
+#: take-over). The subscription set registers here so ``mailbox/<identity>`` is delivered from the moment the
+#: binding exists, not only when the set happened to load after it.
+_IDENTITY_LISTENERS: list[Callable[[str | None], None]] = []
+
+
+def add_identity_listener(callback: Callable[[str | None], None]) -> None:
+    """Register *callback*; it is called at once with the current lease's identity when one is bound."""
+    _IDENTITY_LISTENERS.append(callback)
+    identity = getattr(globals().get("_LEASE"), "identity", None)  # _LEASE is defined below, set by start()
+    if identity:
+        callback(identity)
+
+
+def _notify_identity(identity: str | None) -> None:
+    for callback in list(_IDENTITY_LISTENERS):
+        try:
+            callback(identity)
+        except Exception as exc:  # noqa: BLE001 -- a listener's failure never stops the lease
+            _log.warning("identity_listener_failed", error=str(exc))
+
+
 class IdentityLease:
     """This MCP server's binding, kept alive. *claude_pid* is the nearest Claude ancestor.
 
@@ -198,7 +220,9 @@ class IdentityLease:
             self._known_sessions.update(record.session_ids)
             if record.session_id:
                 self._known_sessions.add(record.session_id)
-            return True
+        if changed:
+            _notify_identity(record.identity)  # outside the lock: a listener may take its own
+        return True
 
     def adopt_marker(self, *, identity: str | None, generation: int | None, token_file: str | None) -> bool:
         """Adopt the identity a T1 handoff marker names, reading the token file it points at. The path must be this

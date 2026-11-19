@@ -14,6 +14,7 @@ fence is no identity here either, so the board never trusts a line the engine di
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -94,5 +95,7 @@ def binding_for_session(session_id: str, config_dir: Path | None = None) -> tupl
         except OSError:
             continue
         if best is None or stamp > best[0]:
-            best = (stamp, str(record.identity), record.token or "")
+            fresh = record.token if record.token and not (
+                record.expires_at is not None and record.expires_at <= time.time()) else ""  # never an expired token
+            best = (stamp, str(record.identity), fresh or "")
     return (best[1], best[2]) if best else ("", "")

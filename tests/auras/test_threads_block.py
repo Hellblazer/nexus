@@ -182,3 +182,13 @@ def test_an_entry_owned_by_another_identity_is_never_written_and_a_legacy_twin_d
     ])
     assert ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12").set_block("a", "A", "x")
     assert [p[0] for p in io.puts] == ["tamsin"]
+
+
+def test_a_writer_built_before_the_binding_asks_for_the_identity_at_write_time() -> None:
+    stale = "99999999-8888-4777-8666-555555555555"
+    io = _Io([{"title": "tamsin", "content": f"identity: i12\nsession: {stale}\n## W\nstate: x\n", "tags": "board"}])
+    known: list[str] = [""]
+    writer = ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity_source=lambda: known[0])
+    assert not writer.set_block("a", "A", "x"), "no identity yet, and the entry is another seat's as far as we know"
+    known[0] = "i12"
+    assert writer.set_block("a", "A", "x") and io.puts[-1][0] == "tamsin"

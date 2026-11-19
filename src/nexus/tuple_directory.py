@@ -230,10 +230,10 @@ def resolve_send(to: str, tuples: Any, alias: AliasLookup | None = None) -> Send
         return SendTarget(*resolve_send_address(to, tuples))
     if found.get("identity_state") == "live":
         return SendTarget(identity, "identity", notice)
-    try:
-        address, kind = resolve_send_address(to, tuples)
-    except DirectoryResolutionError:
+    entries = list_directory_entries(to, tuples)
+    if not any((row.dims or {}).get("session_id") for row in entries):
         return SendTarget(identity, "identity", notice)  # nobody holds the name: the seat reads it when it binds
+    address, kind = classify_directory_holders(to, entries)  # two holders is still refused, naming both
     return SendTarget(address, kind, notice)
 
 

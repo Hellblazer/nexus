@@ -107,7 +107,7 @@ def _entries(
     found = []
     if identity:
         # RDR-253 Step 5: the entry's identity: line finds it across /clear and restart, whatever its session: line says
-        for row in search(identity):
+        for row in search(f"identity: {identity}"):  # the whole line: prose naming the id does not match it
             title = str(row.get("title", ""))
             session = parse_session(title, str(row.get("content", "")))
             if session.identity == identity:
@@ -117,14 +117,17 @@ def _entries(
     for row in search(session_id):
         title = str(row.get("title", ""))
         session = parse_session(title, str(row.get("content", "")))
-        # an entry whose identity line names another seat is that seat's, even if its session line is stale here
-        if session.session_id == session_id and session.identity in ("", identity):
+        # with our identity known, an entry naming another seat is that seat's, even with our session line; with it
+        # unknown (no token file: a Desktop session), our own session line is trusted whatever identity it names
+        if session.session_id == session_id and (not identity or session.identity in ("", identity)):
             found.append((title, session))
     if found or not name:
         return found
     row = by_title(name)
     if row is not None and str(row.get("title", "")) == name:
-        found.append((name, parse_session(name, str(row.get("content", "")))))
+        session = parse_session(name, str(row.get("content", "")))
+        if not identity or session.identity in ("", identity):  # a same-named entry of another seat is not ours
+            found.append((name, session))
     return found
 
 

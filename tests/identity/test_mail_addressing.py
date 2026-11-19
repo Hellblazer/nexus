@@ -134,3 +134,10 @@ def test_an_identity_shaped_from_that_is_not_the_senders_own_is_refused(monkeypa
     monkeypatch.setattr(td, "_own_identity", lambda _sd, _pid: "")
     with pytest.raises(DirectoryResolutionError, match="none resolved for this server"):
         check_from_address_is_own("i12")
+
+
+def test_a_name_held_by_two_sessions_is_still_refused_when_the_seat_is_not_live() -> None:
+    engine = _Engine(NOW, {"wren": ("i4", "lapsed", None, "")})
+    tuples = _Tuples({"wren": [OLD_SESSION, "22222222-2222-4333-8444-555555555555"]})
+    with pytest.raises(DirectoryResolutionError, match="held by more than one session"):
+        resolve_send("wren", tuples, engine.alias)

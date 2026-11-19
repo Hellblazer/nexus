@@ -1570,13 +1570,13 @@ class TestIdentityLine:
         body = f"session: {self.STALE}\nidentity: i12\n## Work\nstate: going\n"
         (title, got, how, error), searches = self._drive(mod, monkeypatch, {"7": ("baton", body)}, "i12")
         assert (title, how, error) == ("baton", "identity", None) and got == body
-        assert searches == ["i12"], "the identity search comes first and ends the lookup"
+        assert searches == ["identity: i12"], "the identity search comes first and ends the lookup"
 
     def test_an_entry_naming_another_identity_is_not_ours_even_with_our_session_line(self, mod, monkeypatch) -> None:
         theirs = f"session: {SID}\nidentity: i7\n## Theirs\nstate: x\n"
         (title, _got, how, error), searches = self._drive(mod, monkeypatch, {"8": ("other", theirs)}, "i12")
         assert (title, how) == ("", "") and error
-        assert searches == ["i12", SID]
+        assert searches == ["identity: i12", SID]
 
     def test_with_no_identity_the_session_line_still_finds_a_legacy_entry(self, mod, monkeypatch) -> None:
         legacy = f"session: {SID}\n## Work\nstate: going\n"

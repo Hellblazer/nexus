@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
 
 _TOKEN_NAME = re.compile(r"^[0-9]+\.[0-9]+\.token$")  #: token_file._TOKEN_NAME, without the groups
@@ -54,6 +55,9 @@ def lookup(session_id: str, config_dir: Path) -> tuple[str, str]:
         if want not in {s.lower() for s in held if isinstance(s, str) and s}:
             continue
         token = data.get("token") if isinstance(data.get("token"), str) else ""
+        expires = data.get("expires_at")
+        if token and isinstance(expires, (int, float)) and expires <= time.time():
+            token = ""  # never send an expired token (token_header.current withholds it too); the MCP server refreshes
         if best is None or stamp > best[0]:
             best = (stamp, identity, token or "")
     return (best[1], best[2]) if best else ("", "")

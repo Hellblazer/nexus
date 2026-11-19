@@ -702,8 +702,14 @@ _IDENTITY_TOKEN = ""
 _IDENTITY_MAILBOX = re.compile(r"mailbox/i[0-9]+")
 
 
-def _identity_headers(subspace: object) -> dict[str, str]:
-    if _IDENTITY_TOKEN and isinstance(subspace, str) and _IDENTITY_MAILBOX.fullmatch(subspace):
+#: The address :func:`_drain_address` is draining now. The token is chosen per drained ADDRESS, not per request
+#: body: ``ack``, ``nack``, ``renew`` and ``release`` name only a claim id, and the engine fences them by the claim's
+#: subspace (``IdentityFence.mailboxClaimById``), so a body-based choice would claim with the token and ack without.
+_DRAIN_ADDRESS = ""
+
+
+def _identity_headers() -> dict[str, str]:
+    if _IDENTITY_TOKEN and _IDENTITY_MAILBOX.fullmatch(f"mailbox/{_DRAIN_ADDRESS}"):
         return {"X-Nexus-Identity-Token": _IDENTITY_TOKEN}
     return {}
 
@@ -734,7 +740,7 @@ def _post(base_url: str, token: str, route: str, body: dict[str, Any],
     req = urllib.request.Request(
         url, data=payload, method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
-                 **_identity_headers(body.get("subspace"))},
+                 **_identity_headers()},
     )
     # Never spend longer than the drain has left: a sequence of calls each
     # just under the per-call cap would otherwise blow the whole budget while
@@ -791,7 +797,7 @@ def _get(base_url: str, token: str, route: str, params: dict[str, str],
         raise _Skip(f"{route}: the service URL carries credentials (user:password@); not sent")
     url = f"{base_url}{route}?{urllib.parse.urlencode(params)}"
     req = urllib.request.Request(
-        url, method="GET", headers={"Authorization": f"Bearer {token}", **_identity_headers(params.get("subspace"))},
+        url, method="GET", headers={"Authorization": f"Bearer {token}", **_identity_headers()},
     )
     call_timeout = max(0.1, min(_ASK_GET_CAP_S, budget_s))
     outcome: dict[str, Any] = {}
@@ -1231,7 +1237,17 @@ def _drain_claimant(address: str) -> str:
     return f"mailbox-drain-{digest}-{pid_str}-{secrets.token_hex(4)}"
 
 
-def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
+def _drain_address(base_url: str, token: str, address: str, **kw: Any) -> str:
+    """:func:`_drain_address_inner` with :data:`_DRAIN_ADDRESS` set for every request it makes (RDR-253 Step 5)."""
+    global _DRAIN_ADDRESS
+    _DRAIN_ADDRESS = address
+    try:
+        return _drain_address_inner(base_url, token, address, **kw)
+    finally:
+        _DRAIN_ADDRESS = ""
+
+
+def _drain_address_inner(base_url: str, token: str, address: str, *, is_local: bool,
                    config_dir: Path, deadline: float, out: _Out) -> str:
     """Probe one address and deliver what it can, writing each row as it goes.
 
