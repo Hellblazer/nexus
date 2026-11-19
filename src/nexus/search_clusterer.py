@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -12,6 +13,8 @@ def cluster_results(
     results: list[dict[str, Any]],
     embeddings: np.ndarray,
     k: int | None = None,
+    *,
+    calibration_factors: Mapping[str, float] | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Cluster search results by semantic similarity.
 
@@ -21,6 +24,11 @@ def cluster_results(
         results: Search result dicts with at least ``distance`` key.
         embeddings: ``(N, D)`` float32 array, one row per result.
         k: Number of clusters.  Defaults to ``max(2, ceil(n / 5))``.
+        calibration_factors: ``collection -> factor`` from
+            :func:`nexus.scoring._resolve_calibration_factors` (GH #1667 follow-up C).
+            Both sorts below rank by ``distance * factor`` so a model whose distances run
+            tighter (voyage-code-3) does not lead every cluster; the ``distance`` each
+            row reports is untouched.  ``None`` ranks by raw distance, as before.
 
     Returns:
         List of clusters sorted by best (lowest) distance.
@@ -43,6 +51,11 @@ def cluster_results(
     except ImportError:
         labels = _kmeans_numpy(embeddings, k, seed=42)
 
+    factors = calibration_factors or {}
+
+    def _distance(r: dict[str, Any]) -> float:
+        return r.get("distance", 0.0) * factors.get(r.get("collection", ""), 1.0)
+
     # Group by label
     clusters: dict[int, list[dict[str, Any]]] = {}
     for r, label in zip(results, labels):
@@ -51,14 +64,14 @@ def cluster_results(
     # Sort within each cluster by distance, assign label
     out: list[list[dict[str, Any]]] = []
     for cluster_list in clusters.values():
-        sorted_cluster = sorted(cluster_list, key=lambda r: r.get("distance", 0.0))
+        sorted_cluster = sorted(cluster_list, key=_distance)
         label_title = _cluster_label(sorted_cluster[0])
         for r in sorted_cluster:
             r["_cluster_label"] = label_title
         out.append(sorted_cluster)
 
-    # Sort clusters by best distance
-    out.sort(key=lambda c: c[0].get("distance", 0.0))
+    # Sort clusters by best (calibrated) distance
+    out.sort(key=lambda c: _distance(c[0]))
     return out
 
 

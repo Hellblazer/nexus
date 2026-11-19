@@ -10,7 +10,7 @@ import re
 import contextvars
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1680,6 +1680,8 @@ def search_cross_corpus(
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     diag_kept: dict[str, int] = {}
+    #: Every collection's rerank state, whether or not the caller asked for ``rerank_meta_out``.
+    rerank_meta_by_col: dict[str, dict] = {}
     failed_collections: dict[str, str] = {}
     total_dropped = 0
     total_raw = 0
@@ -2491,6 +2493,8 @@ def search_cross_corpus(
         min_raw_per_collection[col] = part["min_raw_distance"]
         if rerank_meta_out is not None and part.get("rerank_meta"):
             rerank_meta_out[col] = part["rerank_meta"]
+        if part.get("rerank_meta"):
+            rerank_meta_by_col[col] = part["rerank_meta"]
         total_raw += part["raw_count"]
         total_dropped += part["dropped"]
         if part["dropped"]:
@@ -2606,10 +2610,18 @@ def search_cross_corpus(
     # answer (plan 473's threshold=2.0 over knowledge,code,docs,rdr: 80
     # collections, 54 s of enrichment even with the embedding fetch
     # parallel). No caller can show more than MAX_QUERY_RESULTS.
+    # GH #1667 follow-up C: the collections whose rerank DEGRADED, read as core's partial_rerank branch
+    # reads them (the engine's "degraded" flag, the benign all-sensitive case left out); a collection
+    # whose rows merely run past rerank_max_candidates reports none.
+    benign_degrades = benign_held_degrades(rerank_meta_by_col, all_results)
+    degraded_collections = frozenset(
+        c for c, m in rerank_meta_by_col.items() if m.get("degraded") and c not in benign_degrades
+    )
     all_results = _cap_enrichment_pool(
         all_results, pool_lexical_ids,
         cap=max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
         model_of=model_of,
+        degraded_collections=degraded_collections,
     )
     call_deadline.check("search_cross_corpus:before_doc_ids")
 
@@ -2696,7 +2708,7 @@ def search_cross_corpus(
             call_deadline.check("search_cross_corpus:after_embeddings")
         if not topic_grouped and fetched_embeddings is not None:
             if not failed_indices:
-                all_results = _apply_clustering(all_results, fetched_embeddings)
+                all_results = _apply_clustering(all_results, fetched_embeddings, model_of=model_of)
             else:
                 _log.warning(
                     "clustering_skipped_partial_failure",
@@ -3018,6 +3030,7 @@ def _cap_enrichment_pool(
     cap: int | None = None,
     *,
     model_of: "Callable[[str], str | None] | None" = None,
+    degraded_collections: Collection[str] = frozenset(),
 ) -> list[SearchResult]:
     """Keep at most *cap* non-lexical rows of *results*, best first.
 
@@ -3033,7 +3046,11 @@ def _cap_enrichment_pool(
     the prose rows the calibrated ordering after it would have ranked first.
     One exception: when some embedding family has no scored row while another has (a degraded
     rerank over a mixed pool), every row is ranked by calibrated distance and the scores are ignored,
-    so the scored family cannot fill the cut and drop the other.
+    so the scored family cannot fill the cut and drop the other. So does a pool holding a non-lexical
+    row of a collection in *degraded_collections* (the collections whose rerank reported a degrade,
+    benign all-sensitive ones left out, as core's ``partial_rerank`` reads them): one collection can
+    degrade inside a family that was otherwise scored. Unscored rows past local mode's
+    ``rerank_max_candidates`` are not a degrade and keep score-first.
     A lexical row is always kept: it is threshold-exempt because its vector distance is usually the worst in the window, so a
     distance cut would drop exactly what that leg exists to find. Kept rows
     stay in their input order, so every step after this sees the same
@@ -3069,7 +3086,9 @@ def _cap_enrichment_pool(
         scored_by_group[group] = scored_by_group.get(group, False) or (
             results[i].metadata.get("rerank_score") is not None
         )
-    calibrated_only = any(scored_by_group.values()) and not all(scored_by_group.values())
+    calibrated_only = (any(scored_by_group.values()) and not all(scored_by_group.values())) or any(
+        results[i].collection in degraded_collections for i in ranked
+    )
 
     def _key(i: int) -> tuple[int, float]:
         calibrated = results[i].distance * factors.get(results[i].collection, 1.0)
@@ -3485,12 +3504,19 @@ def _relabel_clusters(results: list[SearchResult]) -> None:
 def _apply_clustering(
     results: list[SearchResult],
     embeddings: "np.ndarray",
+    *,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Cluster results using pre-fetched embeddings, returning flat list with labels.
 
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
     a second embedding fetch.
+
+    Clusters and the rows inside them are ordered by calibrated distance (GH #1667 follow-up C),
+    with the factors :func:`nexus.scoring._resolve_calibration_factors` resolves from *model_of*,
+    the row-preferred resolver the search built. Over one model every factor is 1.0.
     """
+    from nexus.scoring import _resolve_calibration_factors  # noqa: PLC0415 — branch-local search helper import
     from nexus.search_clusterer import cluster_results  # noqa: PLC0415 — branch-local; only when clustering applied
 
     # Convert SearchResults to dicts for cluster_results API
@@ -3501,7 +3527,10 @@ def _apply_clustering(
         for r in results
     ]
 
-    clusters = cluster_results(result_dicts, embeddings)
+    clusters = cluster_results(
+        result_dicts, embeddings,
+        calibration_factors=_resolve_calibration_factors(results, model_of=model_of),
+    )
 
     # Flatten clusters back to SearchResult list, preserving cluster labels
     out: list[SearchResult] = []

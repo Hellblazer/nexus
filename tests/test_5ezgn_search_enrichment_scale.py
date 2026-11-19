@@ -143,9 +143,9 @@ def test_search_cross_corpus_hands_its_own_model_resolver_to_the_cut(monkeypatch
     seen: list[object] = []
     real = se._cap_enrichment_pool
 
-    def spy(results, lexical_ids, cap=None, *, model_of=None):
+    def spy(results, lexical_ids, cap=None, *, model_of=None, **kwargs):
         seen.append(model_of)
-        return real(results, lexical_ids, cap, model_of=model_of)
+        return real(results, lexical_ids, cap, model_of=model_of, **kwargs)
 
     monkeypatch.setattr(se, "_cap_enrichment_pool", spy)
     search_cross_corpus("q", _cols(), n_results=10, t3=_WideT3(), sensitivity="include")
@@ -223,6 +223,103 @@ def test_cap_lexical_rows_do_not_make_a_family_unscored() -> None:
     ]
     kept = _cap_enrichment_pool(rows, {"doc-lexical"}, cap=2)
     assert [r.id for r in kept] == ["code-a", "code-b", "doc-lexical"]
+
+
+def test_cap_ranks_every_row_by_distance_when_one_collection_of_a_scored_family_degraded() -> None:
+    """The family rule misses a collection that degraded inside a family that was otherwise scored: both
+    collections are voyage-context-3 (one factor), so every family has a scored row. Core's render treats a
+    degraded collection beside scored rows as partial_rerank and keeps every row in calibrated order; the cut
+    must agree, or the scored collection fills it and the degraded one's rows are dropped first."""
+    scored_col, degraded_col = "docs__1-1__voyage-context-3__v1", "knowledge__x__voyage-context-3__v1"
+    rows = [
+        _scored(scored_col, "scored-a", 0.60, 0.9),
+        _scored(scored_col, "scored-b", 0.61, 0.8),
+        _in(degraded_col, "degraded-a", 0.30),
+        _in(degraded_col, "degraded-b", 0.31),
+    ]
+    assert [r.id for r in _cap_enrichment_pool(rows, set(), cap=2)] == ["scored-a", "scored-b"], (
+        "no degrade named: score-first, as before"
+    )
+    kept = _cap_enrichment_pool(rows, set(), cap=2, degraded_collections=frozenset({degraded_col}))
+    assert [r.id for r in kept] == ["degraded-a", "degraded-b"]
+
+
+def test_cap_keeps_score_first_when_the_unscored_rows_are_local_modes_rows_beyond_the_rerank_cap() -> None:
+    """Local mode scores only the first rerank_max_candidates rows of a collection and flags no degrade: its
+    unscored rows are not a degraded collection's, so score-first stands. A degrade named for a collection
+    with no row in the pool changes nothing either."""
+    col = "docs__1-1__voyage-context-3__v1"
+    rows = [_in(col, "near-unscored", 0.30), _scored(col, "far-scored", 0.60, 0.5),
+            _scored(col, "farther-scored", 0.70, 0.4)]
+    assert [r.id for r in _cap_enrichment_pool(rows, set(), cap=2, degraded_collections=frozenset())] == [
+        "far-scored", "farther-scored"]
+    kept = _cap_enrichment_pool(rows, set(), cap=2, degraded_collections=frozenset({"knowledge__elsewhere"}))
+    assert [r.id for r in kept] == ["far-scored", "farther-scored"]
+
+
+def test_cap_ignores_a_degraded_collection_whose_only_rows_are_lexical() -> None:
+    """A lexical row is exempt from the cut, so its degraded collection does not flip the pool."""
+    scored_col, degraded_col = "docs__1-1__voyage-context-3__v1", "knowledge__x__voyage-context-3__v1"
+    rows = [
+        _scored(scored_col, "scored-a", 0.60, 0.9),
+        _scored(scored_col, "scored-b", 0.61, 0.8),
+        _scored(scored_col, "scored-c", 0.62, 0.7),
+        _in(degraded_col, "lexical", 0.30),
+    ]
+    kept = _cap_enrichment_pool(rows, {"lexical"}, cap=2, degraded_collections=frozenset({degraded_col}))
+    assert [r.id for r in kept] == ["scored-a", "scored-b", "lexical"]
+
+
+class _RerankT3:
+    """A reranking backend whose group holding DEGRADED reports the engine's degraded flag."""
+
+    supports_server_rerank = True
+
+    def __init__(self, degraded: set[str], sensitive: set[str] = frozenset()) -> None:
+        self.degraded, self.sensitive = degraded, sensitive
+
+    def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include",
+               rerank=False, rerank_meta_out=None, **kw):
+        if rerank_meta_out is not None and self.degraded & set(collection_names):
+            rerank_meta_out["degraded"] = True
+        return [{"id": f"{c}-{j}", "content": "x", "distance": 0.3 + j * 0.01, "collection": c,
+                 "sensitive": c in self.sensitive} for c in collection_names for j in range(3)]
+
+    def get_embeddings(self, collection_name, ids):
+        return np.ones((len(ids), 4), dtype=np.float32)
+
+
+def _degraded_seen_by_the_cut(monkeypatch, t3: _RerankT3) -> list[frozenset]:
+    import nexus.search_engine as se  # noqa: PLC0415 — the module under test, patched by attribute
+
+    # One model per collection, so each is its own backend call and only one can report a degrade.
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda _t3, cols: lambda name: f"model-{name}")
+    seen: list[frozenset] = []
+    real = se._cap_enrichment_pool
+
+    def spy(results, lexical_ids, cap=None, **kwargs):
+        seen.append(frozenset(kwargs.get("degraded_collections", ())))
+        return real(results, lexical_ids, cap, **kwargs)
+
+    monkeypatch.setattr(se, "_cap_enrichment_pool", spy)
+    search_cross_corpus("q", ["knowledge__a", "knowledge__b"], n_results=5, t3=t3, rerank=True,
+                        cluster_by=None, sensitivity="include")
+    return seen
+
+
+def test_search_cross_corpus_hands_the_degraded_collections_to_the_cut(monkeypatch) -> None:
+    """The production call site names the collections whose rerank degraded, as core's partial_rerank does."""
+    assert _degraded_seen_by_the_cut(monkeypatch, _RerankT3({"knowledge__b"})) == [frozenset({"knowledge__b"})]
+
+
+def test_search_cross_corpus_names_no_degrade_when_none_happened(monkeypatch) -> None:
+    assert _degraded_seen_by_the_cut(monkeypatch, _RerankT3(set())) == [frozenset()]
+
+
+def test_search_cross_corpus_does_not_name_a_benign_held_degrade(monkeypatch) -> None:
+    """The engine's "every rerankable row is sensitive" degrade is no failure and, as in core, no degrade."""
+    t3 = _RerankT3({"knowledge__b"}, sensitive={"knowledge__b"})
+    assert _degraded_seen_by_the_cut(monkeypatch, t3) == [frozenset()]
 
 
 def test_cap_is_a_no_op_under_the_limit() -> None:
@@ -344,4 +441,60 @@ def test_search_cross_corpus_hands_its_own_model_resolver_to_the_topic_grouping(
     monkeypatch.setattr(se, "_apply_topic_grouping", spy)
     search_cross_corpus("q", ["knowledge__a", "knowledge__b"], n_results=5, t3=_T3(),
                         cluster_by="semantic", taxonomy=taxonomy, sensitivity="include")
+    assert seen == [resolver]
+
+
+# --- Ward clustering orders on the calibrated scale (GH #1667 follow-up C) -----------------------------------------
+
+
+def _two_far_clusters() -> np.ndarray:
+    return np.array([[1, 0, 0, 0], [1, 0.01, 0, 0], [1, 0, 0.01, 0],
+                     [0, 1, 0, 0], [0, 1, 0.01, 0], [0, 1, 0, 0.01]], dtype=np.float32)
+
+
+def test_clustering_takes_the_model_of_resolver_the_search_built() -> None:
+    """Names with no model token resolve to one install model by name alone (every factor 1.0, the raw
+    order); only the row-preferred resolver can say the code cluster's 0.38 is farther than the prose 0.50."""
+    from nexus.search_engine import _apply_clustering  # noqa: PLC0415 — test-local
+
+    code, prose = "code__legacy", "docs__legacy"
+    models = {code: "voyage-code-3", prose: "voyage-context-3"}
+    rows = [_in(code, f"c{i}", d) for i, d in enumerate([0.38, 0.40, 0.42])] + [
+        _in(prose, f"d{i}", d) for i, d in enumerate([0.50, 0.52, 0.54])
+    ]
+    plain = _apply_clustering(rows, _two_far_clusters())
+    assert [r.id for r in plain][0] == "c0", "no resolver: factors are 1.0 and the code cluster leads"
+    out = _apply_clustering(rows, _two_far_clusters(), model_of=models.get)
+    assert [r.id for r in out] == ["d0", "d1", "d2", "c0", "c1", "c2"]
+    assert [r.distance for r in out] == [0.50, 0.52, 0.54, 0.38, 0.40, 0.42], "reported distances are raw"
+
+
+def test_search_cross_corpus_hands_its_own_model_resolver_to_the_clustering(monkeypatch) -> None:
+    """The production call site passes the search's row-preferred resolver, as it does to the pool cut and
+    the topic grouping."""
+    import nexus.search_engine as se  # noqa: PLC0415 — the module under test, patched by attribute
+
+    def resolver(name: str) -> str | None:
+        return "bge-base-en-v15-768"
+
+    class _T3:
+        def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
+            return [{"id": f"{c}-{j}", "content": "x", "distance": 0.3 + j * 0.01, "collection": c}
+                    for c in collection_names for j in range(3)]
+
+        def get_embeddings(self, collection_name, ids):
+            rng = np.random.default_rng(len(ids))
+            return rng.normal(size=(len(ids), 4)).astype(np.float32)
+
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections: resolver)
+    seen: list[object] = []
+    real = se._apply_clustering
+
+    def spy(results, embeddings, **kwargs):
+        seen.append(kwargs.get("model_of"))
+        return real(results, embeddings, **kwargs)
+
+    monkeypatch.setattr(se, "_apply_clustering", spy)
+    search_cross_corpus("q", ["knowledge__a", "knowledge__b"], n_results=5, t3=_T3(),
+                        cluster_by="semantic", sensitivity="include")
     assert seen == [resolver]

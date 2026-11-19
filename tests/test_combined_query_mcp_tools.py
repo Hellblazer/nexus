@@ -481,7 +481,6 @@ class _EngineModelUnavailableT3:
         return "onnx-local"
 
     def _raise(self):
-
         raise VectorServiceError(self._MESSAGE, code=422)
 
     def search_metadata_scoped(self, *args, **kwargs):
@@ -514,7 +513,6 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
     Exception at their own boundary, never raise across the wire)."""
 
     def test_search_metadata_scoped_names_the_mismatch(self, monkeypatch):
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
@@ -525,16 +523,15 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         assert "NX_VOYAGE_API_KEY" in out
 
     def test_search_topic_scoped_names_the_mismatch(self, monkeypatch):
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
+        monkeypatch.setattr(core, "collection_model", lambda name: "voyage-context-3")  # the merge groups by model; no tenant needed
 
         out = core.search_topic_scoped("q", topic="anything", corpus="knowledge")
 
         assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
 
     def test_search_graph_hop_names_the_mismatch(self, monkeypatch):
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
@@ -543,7 +540,6 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
 
     def test_search_aspect_scoped_names_the_mismatch(self, monkeypatch):
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
