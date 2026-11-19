@@ -975,7 +975,7 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
     # The sandbox gate has its own tests; its inputs are stubbed too, so no test runs the real claude.
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", ""))
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
     monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
     # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
@@ -1072,7 +1072,7 @@ def test_the_ready_ask_carries_the_task_list(crs, rd, monkeypatch) -> None:
     monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 5000 since t: nx ci wait abc"])
     text = crs.ready_prompt(s, "/tmp/r.json")
     assert "sees 1 background task(s) running under your session, which a restart would cut off: " \
-           "pid 5000 since t: nx ci wait abc. Stop each one you do not need, or answer not ready." in text
+           "pid 5000 since t: nx ci wait abc. Stop your background shells with TaskStop" in text
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     assert "sees no background task running under your session" in crs.ready_prompt(s, "/tmp/r.json")
     assert "A session-only cron or reminder you set may be lost in a restart" in crs.ready_prompt(s, "/tmp/r.json")
@@ -1172,21 +1172,18 @@ def test_status_prints_the_table_and_exits_nonzero_while_a_target_blocks(crs, rd
     assert "busy" in rows["beta"] and "busy now" in rows["beta"]
 
 
-def test_status_is_not_go_while_the_sandbox_pass_does_not_hold(crs, rd, monkeypatch, capsys) -> None:
-    """--status exits 0 only when a restart would be allowed, and the restart checks the pass too."""
+def test_status_is_still_go_while_the_sandbox_pass_does_not_hold(crs, rd, monkeypatch, capsys) -> None:
+    """--status exits 0 only when a restart would be allowed; the sandbox pass is advisory and never changes it."""
     _live(rd, "alpha")
     _round(crs, rd, ["alpha"], alpha=60)
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     assert crs.main() == 0
     assert "sandbox pass: holds" in capsys.readouterr().out
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("no sandbox pass recorded (x)", ""))
-    assert crs.main() == 1
-    assert "sandbox pass: no sandbox pass recorded" in capsys.readouterr().out
-    # a newer Claude Code only warns, so --status still says go
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", "the last sandbox pass (x) was on Claude Code 1, not 2"))
+    # the pass is advisory (A1, 2026-11-19): any warning is reported, and --status still says go
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "no sandbox pass recorded (x)")
     assert crs.main() == 0
-    assert "sandbox pass: warning, the last sandbox pass (x)" in capsys.readouterr().out
+    assert "sandbox pass: warning, no sandbox pass recorded" in capsys.readouterr().out
 
 
 def test_status_without_a_round_says_so(crs, rd, monkeypatch, capsys) -> None:
@@ -2046,7 +2043,7 @@ def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
     (rd / "ready-gamma.json").write_text("{not json", encoding="utf-8")
     calls: list[tuple] = []
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", ""))
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
@@ -2196,7 +2193,7 @@ def test_status_removes_only_the_answered_targets_markers(crs, rd, monkeypatch) 
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"}, markers=True)
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: ("", ""))
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert not _marker_of(crs, rd, "alpha").exists() and _marker_of(crs, rd, "beta").exists()

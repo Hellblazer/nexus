@@ -135,7 +135,7 @@ def test_status_prints_each_targets_running_work_and_the_exit_code_ignores_it(cr
     monkeypatch.setattr(crs, "withdraw_ready_asks", lambda *a, **k: 0)
     monkeypatch.setattr(crs, "read_reply", lambda *a, **k: ("none", {}))
     monkeypatch.setattr(crs, "round_problem", lambda *a, **k: "")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *a: ("", ""))
+    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *a: "")
     monkeypatch.setattr(crs, "script_sha256", lambda *a: "")
     monkeypatch.setattr(crs, "claude_version", lambda *a: "")
     args = argparse.Namespace(status=True, ready_max_age=300)

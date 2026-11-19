@@ -29,9 +29,10 @@ Claude Code's own ``/restart`` in slash_restart.py, never part of a recorded pas
   so nx reports X and only the exit code can stop the roll. Both sessions write their
   handoff; the script must abort after the handoffs with nothing exited, no plugin update,
   X absent from the plugin cache, and the handoffs kept.
-- ``gate``: first the script's sandbox gate against a real process: with the HOME's pass record
-  removed a roll must exit 3 with the sandbox ABORT line, reading no engine and asking nothing;
-  with ``--skip-sandbox-check REASON`` it must log the reason and go on to the engine gate. Then
+- ``gate``: first the script's sandbox gate against a real process; it is advisory (Sam, 2026-11-19): with
+  the HOME's pass record removed a roll must log the ``WARN: sandbox pass: no sandbox pass recorded`` line
+  (naming the weekly run's status) and go on to the engine gate, never exit 3; with
+  ``--skip-sandbox-check REASON`` it must log the same warning with the reason and go on. Then
   the ``/version`` stand-in answers 502, then (a second run) a version below the
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
   ABORT line for that case, after one read, before any handoff is asked or anything installed.
@@ -100,7 +101,7 @@ Shared by every scenario:
   claude CLI's.
 
 Expected in ``roll``: alpha, draft and paste are asked by mail and nochan by typing; all four
-write a handoff; the install (uv cache clean, reinstall-tool.sh with ``conexus==X
+write a handoff; the install (reinstall-tool.sh with ``conexus==X
 --allow-registry-over-dev``, nx at X, both plugins updated to X) runs after the last handoff
 and before the first exit; alpha, draft and nochan restart with a new session id whose own
 argv carries ``-- cat <handoff>`` and whose MCP servers run X from the versioned cache (all
@@ -164,8 +165,8 @@ the token, claude or tmux is missing, or every scenario passed but nx-mcp's tear
 recorded for it. A failed scenario's scratch HOME is kept and named.
 
 A pass of all five scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
-(the script's sha256 and Claude Code's version), which the script's restart gate reads (nexus-8zdbu).
-Each sandbox HOME gets its own record for the script under test, so every roll passes that gate.
+(the script's sha256 and Claude Code's version), which the script's advisory restart gate reads (nexus-8zdbu).
+Each sandbox HOME gets its own record for the script under test, so every roll is let by it without a warning.
 """
 # ruff: noqa: T201 -- a gate harness: stdout carries its progress and verdict line
 from __future__ import annotations
@@ -1117,16 +1118,16 @@ def check_left_running(sb: Sandbox, names: tuple[str, ...], before: dict[str, di
 
 
 def check_install(sb: Sandbox, lines: list[str], failures: list[str]) -> None:
-    """The reinstall stand-in's arguments, uv's cache clean, no uv tool install, and the whole install
-    between the last handoff and the first exit."""
+    """The reinstall stand-in's arguments, no uv cache command (B1, 2026-11-19: it waits on a lock the sessions'
+    MCP servers hold), no uv tool install, and the whole install between the last handoff and the first exit."""
     argv = sb.reinstall_argv.read_text(encoding="utf-8").split() if sb.reinstall_argv.exists() else []
     if argv != [f"conexus=={sb.to_version}", "--allow-registry-over-dev"]:
         failures.append(f"--nx: reinstall-tool.sh was called with {argv}")
     if sb.uv_refused.exists():
         failures.append(f"uv tool install refused in the sandbox: {sb.uv_refused.read_text(encoding='utf-8')[:200]!r}")
     cleans = sb.uv_cleans.read_text(encoding="utf-8").splitlines() if sb.uv_cleans.exists() else []
-    if "cache clean conexus" not in cleans:
-        failures.append(f"--nx: uv cache clean conexus was not run through the sandbox's uv ({cleans})")
+    if cleans:
+        failures.append(f"--nx: the script ran a uv cache command through the sandbox's uv ({cleans})")
     last_handoff = max((i for i, ln in enumerate(lines) if ln.startswith("handoff written by ")), default=-1)
     first_exit = min((i for i, ln in enumerate(lines) if ln.startswith("exit rs_")), default=len(lines))
     installs = [i for i, ln in enumerate(lines)
@@ -1684,36 +1685,29 @@ def run_roll(sb: Sandbox, tag: str, extra: str = "", timeout: float = 120) -> tu
 SKIP_REASON = "restart sandbox: the gate's escape hatch"
 
 
-def check_sandbox_refusal(sb: Sandbox, crs, failures: list[str]) -> None:
-    """The script's sandbox gate against a real process (nexus-wjlbk): with no pass record in the HOME
-    a roll exits 3 having done nothing (no engine read, no install, no ask); with --skip-sandbox-check
-    REASON it logs the reason and goes on to the engine gate. The record is put back after."""
+def check_sandbox_warning(sb: Sandbox, crs, failures: list[str]) -> None:
+    """The script's sandbox gate against a real process (nexus-wjlbk), advisory since 2026-11-19: with no pass
+    record in the HOME a roll logs a WARN line and goes on to the engine gate (which refuses its own way, exit 2),
+    and --skip-sandbox-check REASON only adds the reason to that line. The record is put back after."""
     assert sb.engine is not None
     record = sb.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME)
     saved = record.read_bytes()
     record.unlink()
     try:
-        sb.engine.answers, sb.engine.reads = ["502"], 0
-        rc, log = run_roll(sb, "refuse")
-        lines = body_lines(log)
-        if rc != "3":
-            failures.append(f"sandbox refusal: the script exited {rc} with no sandbox pass, not 3")
-        if not any(ln.startswith("ABORT: sandbox pass: no sandbox pass recorded") for ln in lines):
-            failures.append("sandbox refusal: the log lacks the ABORT: sandbox pass line")
-        if extra := [ln for ln in lines if not ln.startswith("ABORT: sandbox pass:")]:
-            failures.append(f"sandbox refusal: the script went past the gate: {extra[0][:160]}")
-        if sb.engine.reads:
-            failures.append(f"sandbox refusal: the engine was read {sb.engine.reads} time(s) although the gate refused")
-        sb.engine.answers, sb.engine.reads = ["502"], 0
-        rc, log = run_roll(sb, "skip", extra=f"--skip-sandbox-check {shlex.quote(SKIP_REASON)}")
-        lines = body_lines(log)
-        if rc != "2":
-            failures.append(f"sandbox skip: the script exited {rc}, not 2 (the engine gate's refusal)")
-        if not any(ln.startswith("WARN: no sandbox pass recorded") and ln.endswith(f"(--skip-sandbox-check: {SKIP_REASON})")
-                   for ln in lines):
-            failures.append("sandbox skip: the log lacks the WARN line with the reason")
-        if sb.engine.reads != 1:
-            failures.append(f"sandbox skip: /version read {sb.engine.reads} time(s), not once: the skip did not reach the engine gate")
+        for tag, extra, tail in (("warn", "", "(advisory)"),
+                                 ("skip", f"--skip-sandbox-check {shlex.quote(SKIP_REASON)}", f"(--skip-sandbox-check: {SKIP_REASON})")):
+            sb.engine.answers, sb.engine.reads = ["502"], 0
+            rc, log = run_roll(sb, tag, extra=extra)
+            lines = body_lines(log)
+            if rc != "2":
+                failures.append(f"sandbox {tag}: the script exited {rc} with no sandbox pass, not 2 (the engine gate's refusal)")
+            if not any(ln.startswith("WARN: sandbox pass: no sandbox pass recorded") and "weekly sandbox run" in ln
+                       and ln.endswith(f"restarting anyway {tail}") for ln in lines):
+                failures.append(f"sandbox {tag}: the log lacks the WARN: sandbox pass line (restarting anyway {tail})")
+            if any(ln.startswith("ABORT: sandbox pass") for ln in lines):
+                failures.append(f"sandbox {tag}: the script refused on the sandbox pass")
+            if sb.engine.reads != 1:
+                failures.append(f"sandbox {tag}: /version read {sb.engine.reads} time(s), not once: the warning did not reach the engine gate")
     finally:
         record.write_bytes(saved)
 
@@ -1763,7 +1757,7 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if failures:
         return
     assert sb.engine is not None
-    check_sandbox_refusal(sb, crs, failures)
+    check_sandbox_warning(sb, crs, failures)
     check_real_withdrawal(sb, crs, failures, notes)
     runs = (("502", f"engine gate: read of {sb.engine.url}/version failed (",
              f"ABORT: could not read the cloud engine's version from {sb.engine.url}; nothing installed, nothing restarted."),
@@ -1796,7 +1790,7 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
                 failures.append(f"gate run {i}: the script went past the gate: {ln[:160]}")
     for f, what in ((sb.reinstall_argv, "reinstall-tool.sh ran"), (sb.uv_cleans, "uv cache clean ran")):
         if f.exists():
-            failures.append(f"gate: {what} although the gate refused")
+            failures.append(f"gate: {what} although the engine gate refused")
     check_left_running(sb, spec.held, before, sb.read_log(), failures)
     if sb.events(before["rs_alpha"].get("sessionId", "")) and any(
             "nexus-continuation-restart" in json.dumps(e) for e in sb.events(before["rs_alpha"].get("sessionId", ""))):

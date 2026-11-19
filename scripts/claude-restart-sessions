@@ -32,8 +32,9 @@ foreground, and restarts nothing unless every step holds:
      engine is not live would have its managed service refused (GH #1402);
      it re-reads every 30 s for up to --engine-wait seconds (default 1800),
      since a paired release's redeploy fires at the client tag;
-  2. nx: uv's cached conexus entry is cleaned and conexus==X.Y.Z is installed
-     through the repo's scripts/reinstall-tool.sh; `nx --version` must say X.Y.Z;
+  2. nx: conexus==X.Y.Z is installed through the repo's scripts/reinstall-tool.sh
+     (an exact pin; uv's cache is not cleaned, since that waits on a lock every live
+     session's MCP server holds, 2026-11-19); `nx --version` must say X.Y.Z;
   3. plugins: marketplace and plugin update; installed_plugins.json must show
      conexus, sn and every other installed @nexus-plugins plugin (the opt-in
      conexus-tool-spill) at X.Y.Z.
@@ -99,9 +100,18 @@ owned by you, under 4 KiB, written after the round began; anything else reads as
 The round (targets, the sessions left out and why, the file paths) is recorded in
 ~/.claude/restart-ready.json. Excluded, never asked: Desktop sessions and any session with no
 tmux pane, --skip names, and sessions outside --only.
+The ask also names the background tasks (Bash-tool shells) this script sees running under the session and tells it to
+stop them with TaskStop, finished ones included, before it answers ready: a live shell leaves the session at status
+`shell`, and the restart skips it (D1, 2026-11-19).
+The file reply is the only readiness answer. A repeated --ask-ready round within the ready window
+(--ready-max-age) asks again only the sessions whose last answer was not ready, missing, unreadable or older than the
+window, and keeps the fresh ready answers of the others: the new round records them with their old reply file and
+the time of the round that asked them (kept_from, since), so no second store exists (C1, 2026-11-19). An operator's
+hold message to the sessions is a one-way announcement; it asks for no reply.
 --status prints the round as a table: per target the reply (ready, not ready with its reason and
 eta, stale, no reply, unreadable, not in round), the reply's age, and the session's live idle|busy
-from ~/.claude/sessions/*.json, then the excluded sessions. Neither restarts anything.
+from ~/.claude/sessions/*.json, then the excluded sessions; a round that kept earlier answers names the sessions it
+re-asked and the ones whose answers it kept. Neither restarts anything.
 The session that runs the script (the pane in TMUX_PANE) is busy while it runs, so it is exempt
 from the idle requirement only; its ready reply is still required.
 
@@ -124,29 +134,23 @@ first: "fresh: each session writes a handoff, then starts fresh" or "resume: eac
 its context". A bare run (neither --fresh nor --resume) after a --fresh run refuses (exit 4): "the
 last restart was --fresh; pass --fresh or --resume".
 
-Sandbox pass (nexus-8zdbu): a restart (not --dry-run, not --revive) refuses with exit 3, before
-the ready-round check,
-unless tests/e2e/restart-sessions/run.sh has passed all its scenarios on this exact
-script (its sha256), this Claude Code version, this tmux version and this copy of the
-harness (run.py's sha256) since any of them last changed; a pass records them in
-~/.local/state/claude-restart-sessions/sandbox-pass.json. Not in the key: nx and the
-engine (the sandbox runs the installed nx, and keying on it would force a sandbox run
-before every restart that follows a release, which is the restart that rolls sessions
-onto it), macOS (rare, and Claude Code's version stands in for the client side), and
-reinstall-tool.sh (the sandbox replaces it with a stand-in, so a pass says nothing about
-it). A pass on another Claude Code version only warns (Sam, 2026-11-18): the restart goes on,
-and the log's WARN line names the last pass, the version now running and the weekly run's last
-result, since Claude Code updates every couple of days and the script has not changed. Another
-script, harness or tmux, no pass at all, or a Claude Code version that cannot be read, still
-refuses. --dry-run reports whether the pass holds. --skip-sandbox-check REASON restarts past a
-refusal and logs the reason; a version warning needs no flag. The
-detached roll checks the pass too, so calling it directly does not get around the gate.
+Sandbox pass (nexus-8zdbu), advisory since Sam's 2026-11-19 ruling (T2 nexus/sam-ruling-restart-sandbox-gate-2026-11-19):
+a restart (not --revive) checks whether tests/e2e/restart-sessions/run.sh has passed all its scenarios on this
+exact script (its sha256), this Claude Code version, this tmux version and this copy of the harness (run.py's
+sha256); a pass records them in ~/.local/state/claude-restart-sessions/sandbox-pass.json. The check never refuses.
+A missing or unreadable pass, another script, tmux, harness or Claude Code version, or a Claude Code version that
+cannot be read is a WARN line in the log and on stdout, naming the problem, the last pass and the weekly run's last
+result, and the restart goes on to the ready round; the detached roll logs the same line. --dry-run and --status
+report the pass the same way, and --status's exit code ignores it. --skip-sandbox-check REASON is still accepted so
+existing invocations keep working; it only logs REASON. Not in the key: nx and the engine (the sandbox runs the
+installed nx), macOS, and reinstall-tool.sh (the sandbox replaces it with a stand-in).
 
-scripts/restart-sandbox-weekly.sh runs the sandbox once a week from a launchd job
-(`scripts/restart-sandbox-weekly.sh --install` sets it up), so a pass is kept current
-through Claude Code updates. A restart that misbehaves (a session not resumed, a pane
-closed, a missing wake, a busy session exited) should be followed by a sandbox run
-(tests/e2e/restart-sessions/run.sh) before the next restart, whatever the gate says.
+The regression check is scripts/restart-sandbox-weekly.sh, run weekly from a launchd job
+(`scripts/restart-sandbox-weekly.sh --install` sets it up), so a pass is kept current through Claude Code updates.
+A change to the roll path (the restart, abort, gate or pane code) runs tests/e2e/restart-sessions/run.sh in its own
+review before it lands: that is where the cost of the sandbox is paid now, not at every release. A restart that
+misbehaves (a session not resumed, a pane closed, a missing wake, a busy session exited) should be followed by a
+sandbox run before the next one, whatever the log says.
 
 Install as a symlink to the primary checkout, which tracks develop, so the copy you
 run cannot drift from the one the sandbox tested:
@@ -274,45 +278,50 @@ def harness_sha256(path: Path | None = None) -> str:
         return ""
 
 
-def sandbox_pass_check(script: str, claude: str) -> tuple[str, str]:
-    """(refusal, warning) for the recorded sandbox pass against this script, Claude Code, tmux and
-    harness. A refusal stops a restart (exit 3); a warning is logged and the restart goes on; both
-    empty means the pass covers all four.
+def sandbox_pass_check(script: str, claude: str) -> str:
+    """The warning for the recorded sandbox pass against this script, Claude Code, tmux and harness,
+    or "" when the pass covers all four. Advisory (Sam, 2026-11-19, T2 nexus/sam-ruling-restart-sandbox-gate-2026-11-19):
+    the caller logs it and the restart goes on, whatever it says. It names the problem, the last pass
+    where one is recorded, and the weekly run's status, since scripts/restart-sandbox-weekly.sh is the
+    regression check; a change to the roll path runs tests/e2e/restart-sessions/run.sh in its own review.
 
-    Only a Claude Code version other than the pass's is a warning (Sam, 2026-11-18: it changes every
-    couple of days, and refusing on it made every restart need --skip-sandbox-check). A changed
-    script, harness or tmux, or no readable pass, still refuses. The Claude Code check runs last, so
-    a refusal is never hidden behind it."""
+    One problem is named, the first found: a changed script, harness or tmux, or no readable pass,
+    ahead of a Claude Code version other than the pass's, so the likelier cause is never hidden."""
+    problem = _sandbox_pass_problem(script, claude)
+    if not problem:
+        return ""
+    return f"{problem}; {weekly_run_status()}; run tests/e2e/restart-sessions/run.sh to refresh it"
+
+
+def _sandbox_pass_problem(script: str, claude: str) -> str:
+    """The first way the recorded pass differs from now, or "" when it covers all four."""
     if not claude:
-        return "could not read Claude Code's version", ""
+        return "could not read Claude Code's version"
     try:
         rec = json.loads(SANDBOX_PASS.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return f"no sandbox pass recorded ({SANDBOX_PASS})", ""
+        return f"no sandbox pass recorded ({SANDBOX_PASS})"
     except (OSError, ValueError) as e:
-        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})", ""
+        return f"the sandbox pass record {SANDBOX_PASS} is unreadable ({e})"
     if not isinstance(rec, dict):
-        return f"the sandbox pass record {SANDBOX_PASS} is not an object", ""
+        return f"the sandbox pass record {SANDBOX_PASS} is not an object"
     passed = rec.get("passed_at", "?")
     recorded_claude = rec.get("claude_version")
     if not isinstance(recorded_claude, str) or not recorded_claude:
-        # A record that names no Claude Code version says nothing about it: refuse, as before,
-        # rather than warn as if it named an older one.
-        return f"the sandbox pass record {SANDBOX_PASS} names no Claude Code version", ""
+        return f"the sandbox pass record {SANDBOX_PASS} names no Claude Code version"
     if rec.get("script_sha256") != script:
-        return f"the last sandbox pass ({passed}) was on another copy of this script", ""
+        return f"the last sandbox pass ({passed}) was on another copy of this script"
     if rec.get("tmux_version") != (tmux := tmux_version()):
         return (f"the last sandbox pass ({passed}) was on {rec.get('tmux_version') or 'an unrecorded tmux'}, "
-                f"not {tmux or 'an unreadable tmux'}"), ""
+                f"not {tmux or 'an unreadable tmux'}")
     if rec.get("harness_sha256") != (harness := harness_sha256()):
         if not harness:
             return (f"this copy has no sandbox harness beside it ({HARNESS}); install the script as a symlink "
-                    "into a checkout, as the header says"), ""
-        return f"the last sandbox pass ({passed}) was on another copy of the sandbox harness", ""
+                    "into a checkout, as the header says")
+        return f"the last sandbox pass ({passed}) was on another copy of the sandbox harness"
     if recorded_claude != claude:
-        return "", (f"the last sandbox pass ({passed}) was on Claude Code {recorded_claude}, not {claude}; "
-                    f"{weekly_run_status()}; run tests/e2e/restart-sessions/run.sh to refresh it")
-    return "", ""
+        return f"the last sandbox pass ({passed}) was on Claude Code {recorded_claude}, not {claude}"
+    return ""
 
 
 def weekly_run_status() -> str:
@@ -332,12 +341,6 @@ def weekly_run_status() -> str:
     if status == "passed":
         return f"the last weekly sandbox run ({ended}{on}) passed"
     return f"the last weekly sandbox run ({ended}{on}) did not record a pass: {status}, {rec.get('reason', '?')}"
-
-
-def sandbox_pass_problem(script: str, claude: str) -> str:
-    """The refusal or warning from sandbox_pass_check, refusal first, or "" when the pass covers everything."""
-    refusal, warning = sandbox_pass_check(script, claude)
-    return refusal or warning
 
 
 def record_sandbox_pass(path: Path, script: str, claude: str, scenarios: list[str], seconds: float,
@@ -852,7 +855,9 @@ def converge(version: str, repo: Path, endpoint: str, gate: bool, dry: bool, eng
     if dry:
         log(f"dry run: nx now '{nx_version()}', plugins now {plugin_versions()}; would install conexus=={version}")
         return True
-    subprocess.run(["uv", "cache", "clean", "conexus"], capture_output=True, text=True, check=False)
+    # No `uv cache clean` here (B1, Sam 2026-11-19): it waits on ~/.cache/uv/.lock, which every live
+    # session's MCP server holds shared. The exact pin below and the version checks after it show a stale
+    # index as an abort, never as a silent wrong install.
     r = subprocess.run([str(repo / "scripts" / "reinstall-tool.sh"), f"conexus=={version}", "--allow-registry-over-dev"],
                        capture_output=True, text=True)
     log(f"reinstall-tool conexus=={version}: exit {r.returncode}")
@@ -2492,14 +2497,20 @@ def work_note(work: list[str] | None) -> str:
 
 
 def tasks_note(tasks: list[str] | None) -> str:
+    """The background-task paragraph of the ask (D1, Sam 2026-11-19): the tasks this script sees, and the instruction
+    to stop the session's shells with TaskStop before answering ready. A shell that is still alive, a finished one
+    the session has not cleared included, leaves the session at status `shell`, and the restart skips such a session."""
     crons = "A session-only cron or reminder you set may be lost in a restart; count it as work in flight. "
+    stop = ("Stop your background shells with TaskStop, finished ones included, before you answer ready: a live shell "
+            "leaves your session at status `shell`, and the restart skips it. A task you must keep running means you "
+            "answer not ready. ")
     if tasks is None:
-        return "This script could not list your background tasks; check your own before answering. " + crons
+        return "This script could not list your background tasks; check your own with TaskList. " + stop + crons
     if not tasks:
-        return "This script sees no background task running under your session. " + crons
+        return "This script sees no background task running under your session. " + stop + crons
     shown = "; ".join(tasks[:5]) + (f"; and {len(tasks) - 5} more" if len(tasks) > 5 else "")
     return (f"This script sees {len(tasks)} background task(s) running under your session, which a restart "
-            f"would cut off: {shown}. Stop each one you do not need, or answer not ready. " + crons)
+            f"would cut off: {shown}. " + stop + crons)
 
 
 def ready_prompt(s: dict, path: str, mailed: bool = False) -> str:
@@ -2667,6 +2678,12 @@ def read_reply(path: str, since: float, now: float) -> tuple[str, dict]:
                   "eta": round(eta) if _number(eta) else None}
 
 
+def reply_since(t: dict, manifest: dict) -> float:
+    """The time a target's reply must postdate: its round's start, or for an answer a later round kept (C1), the
+    start of the round that asked it."""
+    return t["since"] if _number(t.get("since")) else manifest["at"]
+
+
 def readiness(found: list[dict], manifest: dict, now: float, max_age: int, caller_pane: str = "") -> list[dict]:
     """One row per current target: its reply, the reply's age, its live status, and what blocks a restart.
 
@@ -2685,7 +2702,9 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
         if t is None:
             row["state"], row["blocker"] = "not in round", "not asked in this round (started after it?); ask again"
         else:
-            kind, r = read_reply(t["path"], manifest["at"], now)
+            kind, r = read_reply(t["path"], reply_since(t, manifest), now)
+            if t.get("kept_from"):
+                row["kept_from"] = t["kept_from"]
             if kind == "ok":
                 row["age"] = now - r["mtime"]
             if kind == "none":
@@ -2738,9 +2757,16 @@ def _ago(seconds: float) -> str:
 def print_table(manifest: dict, rows: list[dict], max_age: int, now: float) -> None:
     print(f"ready round {manifest['stamp']}, asked {_ago(now - manifest['at'])} ago; "
           f"a ready reply must be under {_ago(max_age)} old")
+    reasked = [t.get("name") or t["sessionId"][:8] for t in manifest["targets"] if not t.get("kept_from")]
+    kept = {t.get("name") or t["sessionId"][:8]: t["kept_from"] for t in manifest["targets"] if t.get("kept_from")}
+    if kept:  # C1: a later round that kept earlier answers says which sessions it asked again
+        print(f"re-asked: {', '.join(reasked) or 'none'}")
+        print("kept the ready answer of: " + ", ".join(f"{n} (from round {f})" for n, f in kept.items()))
     print(f"{'SESSION':<24} {'REPLY':<13} {'AGE':>6}  {'LIVE':<6} DETAIL")
     for r in rows:
         detail = r["blocker"] if r["blocker"] else ("" if r["state"] != "ready" else r["reason"])
+        if r.get("kept_from"):
+            detail = (detail + " " if detail else "") + f"[kept from round {r['kept_from']}]"
         print(f"{r['name'][:24]:<24} {r['state']:<13} {_ago(r['age']) if r['age'] is not None else '-':>6}  "
               f"{r['live']:<6} {detail}")
         work = r.get("work")
@@ -2765,7 +2791,8 @@ def load_manifest() -> tuple[dict | None, str]:
     ok = (isinstance(d, dict) and isinstance(d.get("stamp"), str) and d["stamp"] and _number(d.get("at"))
           and isinstance(d.get("targets"), list) and all(_strs(t, "sessionId", "path") for t in d["targets"])
           and all(isinstance(t.get("name", ""), str) and isinstance(t.get("how", ""), str)
-                  and isinstance(t.get("marker", ""), str) for t in d["targets"])
+                  and isinstance(t.get("marker", ""), str) and isinstance(t.get("kept_from", ""), str)
+                  and ("since" not in t or _number(t["since"])) for t in d["targets"])
           and isinstance(d.get("excluded", []), list) and all(_strs(e, "name", "why") for e in d.get("excluded", [])))
     if not ok:
         return None, "the ready round file is malformed"
@@ -2826,6 +2853,30 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
     return 3
 
 
+def kept_answers(prev: dict | None, found: list[dict], now: float, max_age: int) -> list[dict]:
+    """The targets of the previous round whose fresh ready answer a repeated round keeps instead of asking again (C1).
+
+    A session is kept when it is a current target, its earlier reply file still reads ok (``read_reply``, against the
+    time of the round that asked it), says ready, and is no older than ``max_age``: the same freshness the restart's
+    check applies. Everything else (not ready, missing, unreadable, stale, never asked) is asked again. The entry
+    reuses the old reply file and records which round asked it (``kept_from``) and its ``since``, so a later round can
+    keep it again; it carries no ``tuple_id`` or ``marker``, the earlier round's ask was withdrawn when this one began."""
+    if not prev:
+        return []
+    live = {s["sessionId"] for s in found}
+    out = []
+    for t in prev["targets"]:
+        if t["sessionId"] not in live:
+            continue
+        since = reply_since(t, prev)
+        kind, r = read_reply(t["path"], since, now)
+        if kind != "ok" or not r["ready"] or now - r["mtime"] > max_age:
+            continue
+        out.append({"name": t.get("name") or t["sessionId"][:8], "sessionId": t["sessionId"], "path": t["path"],
+                    "how": "kept", "kept_from": t.get("kept_from") or prev["stamp"], "since": since})
+    return out
+
+
 def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> int:
     """--ask-ready and --status. Neither restarts anything."""
     if a.status:
@@ -2841,7 +2892,7 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
         print_table(manifest, rows, a.ready_max_age, now)
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
         withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]
-                                       if read_reply(t["path"], manifest["at"], now)[0] != "none"})
+                                       if read_reply(t["path"], reply_since(t, manifest), now)[0] != "none"})
         if UNWITHDRAWN:
             print("asks not withdrawn (they expire with their TTL): " + "; ".join(UNWITHDRAWN))
         problem = round_problem(found, manifest, now, a.ready_max_age)
@@ -2851,11 +2902,10 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
                 if t["sessionId"] not in {s["sessionId"] for s in found}]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
-        # The restart checks the sandbox pass too (exit 3 on a refusal), so "allowed" must include
-        # it; a warning (a newer Claude Code) does not block.
-        sandbox, sandbox_warn = sandbox_pass_check(script_sha256(), claude_version())
-        print(f"sandbox pass: {sandbox or (f'warning, {sandbox_warn}' if sandbox_warn else 'holds for this script, Claude Code, tmux and the harness')}")
-        return 0 if rows and not problem and not sandbox and not any(r["blocker"] for r in rows) else 1
+        # The sandbox pass is advisory (A1): it is reported here and never makes the answer "not allowed".
+        sandbox_warn = sandbox_pass_check(script_sha256(), claude_version())
+        print(f"sandbox pass: {f'warning, {sandbox_warn}' if sandbox_warn else 'holds for this script, Claude Code, tmux and the harness'}")
+        return 0 if rows and not problem and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
     if a.dry_run:
@@ -2868,7 +2918,11 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
     sender = next((s["sessionId"] for s in found if s["pane"] == me), "claude-restart-sessions")
     # The round starts before the first ask: a session can answer while later ones are still being
     # asked, and read_reply rejects a reply older than the round's `at` (review r2).
-    withdraw_ready_asks(load_manifest()[0], final=True)  # the previous round's asks: this round replaces them
+    prev = load_manifest()[0]
+    # A repeated round asks again only the sessions without a fresh ready answer; the others' answers are kept (C1).
+    kept = kept_answers(prev, found, time.time(), a.ready_max_age)
+    kept_ids = {t["sessionId"] for t in kept}
+    withdraw_ready_asks(prev, final=True)  # the previous round's asks: this round replaces them
     sweep_stale_markers()  # and any an unreadable round file or a killed run left
     if UNWITHDRAWN:
         print("asks of the previous round not withdrawn (they expire with their TTL): " + "; ".join(UNWITHDRAWN))
@@ -2876,11 +2930,11 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
     t0 = time.time()
     targets: list[dict] = []
     try:
-        ask_ready(found, stamp, sender, out=targets)
+        ask_ready([s for s in found if s["sessionId"] not in kept_ids], stamp, sender, out=targets)
     finally:
         # Written whatever happened, so every mailed ask's id is on record for withdraw_ready_asks.
         try:
-            write_manifest(stamp, targets, excluded, at=t0)
+            write_manifest(stamp, kept + targets, excluded, at=t0)
         except OSError as e:
             log(f"WARN ready round {stamp}: the round file was not written ({e}); withdrawing its asks now")
             withdraw_ready_asks({"stamp": stamp, "at": t0, "targets": targets, "excluded": excluded}, final=True)
@@ -2888,7 +2942,8 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
         recorded = {t.get("marker") for t in targets}
         for m in [m for m in MADE_MARKERS if str(m) not in recorded]:
             drop_marker(m)
-    print(f"ready round {stamp}: asked {len(targets)} session(s), excluded {len(excluded)}; "
+    print(f"ready round {stamp}: asked {len(targets)} session(s)"
+          + (f", kept {len(kept)} fresh ready answer(s)" if kept else "") + f", excluded {len(excluded)}; "
           f"read the replies with: claude-restart-sessions --status")
     return 0
 
@@ -2917,6 +2972,11 @@ def exit_on_stop_signals() -> None:
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, stop)
+
+
+def _sandbox_tags(skip_reason: str, detached: bool = False) -> str:
+    """The parenthetical on the advisory sandbox WARN line: where it was logged, and the --skip-sandbox-check reason."""
+    return ", ".join([*(["detached"] if detached else []), *([f"--skip-sandbox-check: {skip_reason}"] if skip_reason else [])]) or "advisory"
 
 
 def main() -> int:
@@ -2971,8 +3031,8 @@ def main() -> int:
                     help="skip the ready-round check entirely (sandbox gates); unlike --force it does not also "
                          "restart sessions in status 'shell'")
     ap.add_argument("--skip-sandbox-check", metavar="REASON", default=None,
-                    help="restart past a sandbox refusal: another script, harness or tmux, or no pass (see "
-                         "above); REASON is logged. A newer Claude Code only warns and needs no flag")
+                    help="accepted so existing invocations keep working; the sandbox gate is advisory now "
+                         "(a missing or stale pass only warns, see above), so this only logs REASON")
     ap.add_argument("--no-slash-restart", action="store_true",
                     help="resume each session by exiting it and relaunching `claude ... --resume <id>`, "
                          "never through Claude Code's own /restart")
@@ -3016,30 +3076,17 @@ def main() -> int:
         # TERM or HUP (the tmux server going away) must still run the finally blocks: the asks'
         # withdrawal and the footprint report. By default they end the process with neither.
         exit_on_stop_signals()
-        # The gate holds here too: a direct --detached call must not get around it.
-        problem, warning = sandbox_pass_check(script_sha256(), claude_version())
-        if problem and not skip_reason:
-            log(f"ABORT: sandbox pass: {problem} (detached). Nothing installed, nothing restarted.")
-            return 3
-        if problem:
-            log(f"WARN: {problem}; restarting anyway (detached, --skip-sandbox-check: {skip_reason})")
-        elif warning:
-            log(f"WARN: sandbox pass: {warning} (detached)")
+        # The pass is advisory (A1, Sam 2026-11-19): the roll's own log says what it ran against.
+        if warning := sandbox_pass_check(script_sha256(), claude_version()):
+            log(f"WARN: sandbox pass: {warning}; restarting anyway ({_sandbox_tags(skip_reason, detached=True)})")
     if not a.detached:
-        # The sandbox pass first: it needs no session's answer, and nothing else is worth asking
-        # of a script the sandbox has not passed (nexus-8zdbu).
-        problem, warning = sandbox_pass_check(script_sha256(), claude_version())
+        # The sandbox pass first, so the log opens with it. It is advisory (A1, Sam 2026-11-19): a
+        # warning is logged and printed, and the restart goes on to the ready round (nexus-8zdbu).
+        warning = sandbox_pass_check(script_sha256(), claude_version())
         if a.dry_run:
-            print(f"sandbox pass: {problem or (f'warning, {warning}' if warning else 'holds for this script, Claude Code, tmux and the harness')}")
-        elif problem and skip_reason:
-            log(f"WARN: {problem}; restarting anyway (--skip-sandbox-check: {skip_reason})")
+            print(f"sandbox pass: {f'warning, {warning}' if warning else 'holds for this script, Claude Code, tmux and the harness'}")
         elif warning:
-            log(f"WARN: sandbox pass: {warning}")  # log() prints the line as well
-        elif problem:
-            log(f"ABORT: sandbox pass: {problem}. Run tests/e2e/restart-sessions/run.sh (all scenarios) first, "
-                f"or pass --skip-sandbox-check REASON. Nothing installed, nothing restarted.")
-            print(f"sandbox pass: refused, {problem}; see {LOG}")
-            return 3
+            log(f"WARN: sandbox pass: {warning}; restarting anyway ({_sandbox_tags(skip_reason)})")  # log() prints the line as well
         last = read(LAST_RUN)
         if not (a.fresh or a.resume) and isinstance(last, dict) and last.get("mode") == "fresh":
             print("the last restart was --fresh; pass --fresh or --resume")

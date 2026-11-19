@@ -1130,20 +1130,31 @@ refused while by id works, and anything keyed on the old id (its mailbox, its T1
 board subscriptions, unflagged scratch) is orphaned; the log names each old id
 for `claude --resume <id>` back-out. With `--nx` it runs the engine gate (re-reading `/version`
 every 30 s up to `--engine-wait`, default 1800 s, so a paired release's redeploy
-can land; `--skip-engine-gate` on a local-mode box), then `uv cache clean conexus`
-plus `reinstall-tool.sh conexus==X.Y.Z`, then the marketplace and plugin update,
-and restarts nothing unless every step holds. The pin and the cache clean exist
-because a bare `conexus` spec resolved from uv's cached index and built two
-generations of 7.69.0 minutes after 7.70.0 published (2026-10-04): read
-`nx --version`, never the "built generation" line. Before handing Sam the
-command:
+can land; `--skip-engine-gate` on a local-mode box), then
+`reinstall-tool.sh conexus==X.Y.Z`, then the marketplace and plugin update,
+and restarts nothing unless every step holds. The exact pin exists because a
+bare `conexus` spec resolved from uv's cached index and built two generations
+of 7.69.0 minutes after 7.70.0 published (2026-10-04): read `nx --version`,
+never the "built generation" line. The script does not run `uv cache clean`
+(Sam, 2026-11-19): it waits on `~/.cache/uv/.lock`, which every live session's
+MCP server holds, and stalled the first 8.5.0 restart until its ready replies
+timed out. The pin, the `nx --version` check and the plugin version check
+turn a stale index into an abort, never a silent wrong install. Before handing
+Sam the command:
 
 - Before `--ask-ready`, post the upgrade hold on the board and message every
-  live peer: hold, stop ALL background shells and agents with TaskStop
-  (finished agents' included, not only foreground runs), then reply READY.
-  The releaser cannot stop a peer's shells, and `--ask-ready` types only to an
-  idle session, so a session pinned at `shell` is never asked and is skipped
-  after `--wait` (kimi_nexus_edb, 2026-10-26).
+  live peer. The hold is a one-way announcement: it asks for no reply, and no
+  peer answers READY to it (Sam, 2026-11-19; two ready rounds cost every
+  session two turns). The script's file reply is the only readiness answer.
+  The ask the script sends names each session's own background tasks and tells
+  it to stop them with TaskStop, finished ones included, before it answers
+  ready; `--ask-ready` types only to an idle session, so a session pinned at
+  `shell` is never asked and is skipped after `--wait` (kimi_nexus_edb,
+  2026-10-26). A later `--ask-ready` round within `--ready-max-age` asks again
+  only the sessions whose last answer was not ready, missing, unreadable or
+  stale, and keeps the others' fresh ready answers; `--status` names the
+  sessions it re-asked and the answers it kept. Re-run it until `--status`
+  shows every target ready.
 
 - Read the dry run's `-n` values against ListAgents. A restart keeps each
   session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
@@ -1159,10 +1170,14 @@ command:
   the sessions whose transcripts were written in the 30 minutes before boot.
 - A restart that misbehaved (a session not resumed, a pane closed, a missing
   wake, a busy session exited) gets a sandbox run, `tests/e2e/restart-sessions/run.sh`,
-  before the next restart, whatever the gate says. The gate only warns when the
-  last pass was on another Claude Code version (Sam, 2026-11-18), and
-  `scripts/restart-sandbox-weekly.sh` keeps the pass current from a weekly launchd
-  job (`--install` sets it up).
+  before the next restart, whatever the log says. The sandbox gate is advisory
+  (Sam, 2026-11-19): a missing or stale pass is a WARN line naming the last pass
+  and the weekly run's result, and the restart goes on; `--skip-sandbox-check`
+  is still accepted and only logs its reason. The regression check is
+  `scripts/restart-sandbox-weekly.sh` (a weekly launchd job, `--install` sets
+  it up). A change to the roll path (the restart, abort, gate or pane code)
+  runs `tests/e2e/restart-sessions/run.sh` in its own review before it lands;
+  that is where the sandbox is paid for, not at the release.
 
 Source: memory `feedback_release_and_develop_ci` § coordinated_upgrade_restart.
 The rest of this step is what that run does to this box, and the manual form
@@ -1437,7 +1452,9 @@ also adds the real GitHub marketplace and checks every plugin's version and
 auto-update. Then Step 12 (the `nx --version` check), and restart sessions
 together, as after any release: a plugin update says "Restart to apply" and only a
 restarted session loads it. Restart with `scripts/claude-restart-sessions`: ask
-first with `--ask-ready` and read the table with `--status`. The restart itself
+first with `--ask-ready` (a hold message to peers is one-way; the script's file reply
+is the only answer, and a later round re-asks only the sessions that were not ready) and
+read the table with `--status`. The restart itself
 needs that round: it refuses (exit 3) with no round, a malformed or old one, or
 any target without a fresh ready reply that is idle now (the session running the
 script is exempt from idle only), and checks again after the install and before
