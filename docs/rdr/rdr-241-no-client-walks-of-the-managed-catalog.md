@@ -518,18 +518,23 @@ rule that each is a new path was not.
   live documents whose `author` contains the text, case-insensitively and
   literally (`\`, `%` and `_` escaped, as `CatalogLinksRepository.likePrefix`
   does). `author` is required and non-empty. The match is
-  `lower(author COLLATE "pg_c_utf8") LIKE '%' || lower(:text COLLATE
-  "pg_c_utf8") || '%'`: PostgreSQL 17's builtin collation with Unicode simple
-  case mapping, so it folds non-ASCII letters on the local bundle, which is
-  `initdb --no-locale` (C ctype, where a bare `lower()` folds ASCII only), and
-  does not depend on ICU. Production runs PostgreSQL 17 (`docs/agents/engine-service-release.md`). Python's `needle.lower() in author.lower()` uses
-  the full case mapping, and the two differ in two classes, found by a matrix of
-  26 needles against 19 authors run on a C-ctype cluster and on the test
-  cluster's locale: U+0130 (Python lowers it to `i` plus U+0307, the engine to
-  `i`) and a capital sigma at the end of a word (Python's final sigma, the
-  engine's medial one). That is five (needle, author) pairs, listed in
-  nexus-uwggq.2.6; the client's final filter (`_keep`) removes rows the engine
-  adds and cannot restore a row the engine leaves out. No Unicode normalization
+  `fold(author) LIKE '%' || fold(:text) || '%'`, where `fold(x)` is
+  `replace(replace(lower(x COLLATE "pg_c_utf8"), 'ς', 'σ'), U+0307, '')`:
+  PostgreSQL 17's builtin collation with Unicode simple case mapping, so it
+  folds non-ASCII letters on the local bundle, which is `initdb --no-locale`
+  (C ctype, where a bare `lower()` folds ASCII only), and does not depend on
+  ICU. Production runs PostgreSQL 17 (`docs/agents/engine-service-release.md`).
+  Python's `needle.lower() in author.lower()` (the client's final filter,
+  `_keep`) uses the full case mapping; simple and full lowercase differ only
+  for U+0130 (Python `i` plus U+0307, the engine `i`) and a capital sigma at the
+  end of a word (Python's final sigma, the engine's medial one). Reading the
+  final sigma as the medial one and dropping U+0307 on both sides makes the
+  route a superset of the client's answer: it never leaves out a row `_keep`
+  keeps, its `count` is an upper bound, and `_keep` removes the rows it adds
+  (Sam 2026-11-19, T2 `nexus/sam-ruling-rdr241-author-fold-2026-11-19`). On a
+  matrix of 26 needles against 19 authors, run on a C-ctype cluster and on the
+  test cluster's locale, the added rows are three dotted-I pairs and nothing is
+  missed (`CatalogDocsByAuthorFoldBase`). No Unicode normalization
   on either side. Replaces the walk at `mcp/catalog.py:279-281`; the tool's other
   filters still apply on the client to a page that is complete for the author.
 - **By metadata.** `GET /v1/catalog/docs/by-meta?content_type=&meta.<key>=<value>&meta_min.<key>=<n>&meta_default.<key>=<text>&sensitive=true&limit=&offset=`:
@@ -999,3 +1004,4 @@ the next one without the ratchet.
 - 2026-11-18: Amendment matching the reviewed engine routes `2d33588d9` and their gate (grant 3, linda; code review and critique rounds r1 and r2, T2 `nexus/review-7dfe8e09d-nexus-uwggq.2-2026-11-18-r1`, `nexus/critique-7dfe8e09d-nexus-uwggq.2.3-2026-11-18-r1` and their r2 confirmations): four routes, the fourth being by-scheme, which keeps a row iff `urlparse(source_uri).scheme` equals the requested scheme lowercased (leading-whitespace rows kept); the three paged routes answer `{count, limit, offset, documents}` with the exact count and no `capped` flag; rows come in the engine's text order of `tumbler`; the author match folds with PostgreSQL 17's `pg_c_utf8` simple case mapping and differs from `str.lower()` in two classes (U+0130 and a word-final capital sigma); by-meta takes `sensitive=true` as a clause of its own, which closes the sensitive-cap regression of 2026-11-17 in the engine (no type filter on `/sensitive` is needed), and a `meta_min` bound up to 131,072 characters; locator rows carry `sensitive`; a NUL byte or malformed percent escape is a 400; the author-index assumption records the measured facts (153.7 ms; 131 ms without and 143 ms with the index on the collated statement); the Phase 2 intro, Step 3, Step 4, scope and proportionality lines name four routes and four flags.
 - 2026-11-18: The author route ships without the GIN `pg_trgm` index (Sam, ask author-index-deep-offset, option A); the deep-offset cost of about 150 ms is accepted and keyset paging is named as the fix if it ever matters (grant 3, linda).
 - 2026-11-19: The `--check-references` switch (nexus-uwggq.1.5, review T2 `nexus/review-3149265f7-nexus-uwggq.1.5-2026-11-19`, critique `nexus/critique-3149265f7-nexus-uwggq.1.5-2026-11-19-r1`): candidates come from one by-scheme read per registered non-`file` scheme, filtered last by the client's own scheme test; on an engine without the route the check reads "not checked" and exits 3, "could not check", as `nx catalog doctor --sensitive-with-aspects` does; a failed `/version` probe is an unreadable catalog, exit 1 (grant 3, linda).
+- 2026-11-19: The author route's fold also reads the final sigma as the medial one and drops U+0307 on both sides, so the route is a superset of the client's `str.lower()` answer, its count an upper bound, and nexus-uwggq.2.6's acceptance reads "superset, equal after `_keep`" (Sam's ruling on ask author-fold-five-pairs, T2 `nexus/sam-ruling-rdr241-author-fold-2026-11-19`; engine ff2884d21).
