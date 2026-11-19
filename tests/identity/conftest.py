@@ -38,7 +38,7 @@ import httpx
 import pytest
 
 from nexus.identity.binder import BindOutcome, LaunchFacts, SessionBinder
-from nexus.identity.bind_client import IdentityClient
+from nexus.identity.bind_client import SCOPE_DATA, IdentityClient
 from nexus.identity.holder import normalise_instant
 from tests.identity.fakes import HOST, FakeProcesses
 
@@ -91,7 +91,9 @@ class World:
             minted = httpx.post(f"{self.base_url}/v1/data-tokens/mint", json={"tenant": self.tenant},
                                 headers={"Authorization": f"Bearer {issued.json()['token']}"}, timeout=30)
             assert minted.status_code == 200, minted.text
-            self._data = IdentityClient(self.base_url, minted.json()["data_token"])
+            # scope=data as IdentityClient.from_config gives a minted data token: a data credential's refresh and fork
+            # carry the identity's own token (engine 0.1.198), and a client left at the default tenant scope sends none
+            self._data = IdentityClient(self.base_url, minted.json()["data_token"], scope=SCOPE_DATA)
         return self._data
 
     # ── staging ─────────────────────────────────────────────────────────────
