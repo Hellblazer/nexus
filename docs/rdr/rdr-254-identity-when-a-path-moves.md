@@ -2,12 +2,12 @@
 title: "Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move"
 id: RDR-254
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Hal Hildebrand
-reviewed-by:
+reviewed-by: self
 created: 2026-11-19
-accepted_date:
+accepted_date: 2026-11-19
 related_issues: [GH-1571, GH-1605, nexus-o19i0]
 related: [RDR-101, RDR-103, RDR-137, RDR-231]
 ---
@@ -20,9 +20,8 @@ related: [RDR-101, RDR-103, RDR-137, RDR-231]
 > may not know the jargon; define terms on first use; simplified, never
 > simplistic.
 
-> **Status of this draft:** design chosen (halcyon for Sam, 2026-11-19): an
-> explicit move command, hints that print the command when a move is seen, and
-> a separate owner for a second live clone. Ready for the gate.
+> **Status:** accepted by Sam, 2026-11-19 (gate PASSED round 2). The plan of
+> record is T2 `nexus_rdr/254-plan`.
 
 Terms. The **catalog** is nexus's registry of documents; each document has a
 **tumbler** (a dotted address such as `1.23.22`) and belongs to an **owner**.
