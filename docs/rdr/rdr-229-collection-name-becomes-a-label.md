@@ -811,9 +811,13 @@ The key moves table by table in strangler order:
 
   So P3.3a drops none of the name keys, and the seven that refuse the
   rename are dropped before P3.7's one-row rename by one move, the name-key
-  drop move. Its driving table is `nexus.chunks`, because two of the seven
-  sit on chunk-family tables, where "A later finishing step ... is
-  therefore a new move whose on_complete does it" (RDR-246 lines 911-913).
+  drop move. Two of the seven sit on chunk-family tables, where "A later
+  finishing step ... is therefore a new move whose on_complete does it"
+  (RDR-246 lines 911-913), and `ChunkFamily` counts a move as chunk-family
+  "over the driving table's name ... and over the `on_complete` text"
+  (lines 917-920). So its driving table is the small
+  `nexus.catalog_collections`, which keeps the move short (T2
+  `229-research-63`).
   The completion check registers it once gate 3 holds on the install, as
   it registers P4.1's drop move (below). Its template is the no-op
   re-stamp, its verification returns the table's null ids, and its
@@ -1083,12 +1087,22 @@ while the engine serves:
        is installed.
     Until gate 3, `CollectionRegistry` hands readers the name, the jOOQ
     readers read the name columns, and `renameCollectionTxn` keeps
-    rewriting the fourteen `COLLECTION_SCOPED_TABLES`. So no search reads
-    by the id before that collection's index on the id exists. Inferred,
+    rewriting the fourteen `COLLECTION_SCOPED_TABLES`. From gate 3 until
+    P3.7's name-key drop move has `completed_at` set, readers are on the
+    id while the rename is still the name path, which gives the collection
+    a new id that its index on the old id does not select (T2
+    `229-research-53`, `229-research-63`). The engine therefore refuses a
+    rename in that window, with a typed error that names the move; the
+    window is that move's run, a short pass over the registry and its
+    `on_complete` (inferred, not read). A rename between gate 2 and gate 3
+    costs only an index P3.4 builds again for the new id before gate 3 can
+    hold, while readers are on names (inferred, not read). So no search
+    reads by an id before that collection's index on it exists. Inferred,
     not read: each gate takes effect at the first boot after it holds,
     the boot at which a CONTINUE changeset "applies at the first boot
     after the move completes" (RDR-246 lines 942-944). A client cache
-    keyed by id holds a stable id only from gate 3 on the install, when the
+    keyed by id holds a stable id only from the name-key drop move's
+    `completed_at` on the install, when the
     rename becomes one row: before it, the name-path rename inserts a new
     registry row with a new id (T2 `229-research-53`), so until then the
     client refreshes an id-keyed entry on a rename and keys its lookups by
@@ -1844,8 +1858,9 @@ its acceptance is that test green plus the census pin it lowers.
   - P3.5a Registry and routes: `CollectionRegistry` keyed by id with a
     label index; every collection-taking route accepts `collection_id` and
     a label; responses carry both. Client caches keyed by id, which they
-    trust as stable only once gate 3 passes on the install (item 6): until
-    then a rename gives the collection a new id.
+    trust as stable only once P3.7's name-key drop move has `completed_at`
+    set on the install (item 6): until then a rename gives the collection a
+    new id, and from gate 3 to that point the engine refuses a rename.
   - P3.5b SQL readers: the plpgsql functions, the views keyed on names
     (`collection_vector_stats`, `live_chunks`) and triggers that fire on a
     name column (`catalog-044`'s `AFTER INSERT OR UPDATE OF
@@ -1874,7 +1889,10 @@ its acceptance is that test green plus the census pin it lowers.
   the seven name foreign keys that refuse a one-row rename and the queue's
   key where that table exists, and the
   one-row rename waits for its `completed_at` as well (item 6, Switch; T2
-  `229-research-58`, `229-research-61`). The rename, like every other URI-move path, rewrites only
+  `229-research-58`, `229-research-61`). Between gate 3 and that
+  `completed_at` the engine refuses a rename, naming the move, because
+  readers are on the id and the name-path rename would give the
+  collection a new id (item 6; T2 `229-research-63`). The rename, like every other URI-move path, rewrites only
   `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
   residue, the rule P2.10 ships (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
@@ -1884,7 +1902,8 @@ its acceptance is that test green plus the census pin it lowers.
   topic assignments, aspects, topics, `taxonomy_meta` and highlights rows;
   and the one-row rename of a file-routed collection that has `chroma://`
   residue to a prefix-free label leaves the residue on its old segment
-  (P2.10's test covers the other four paths).
+  (P2.10's test covers the other four paths); a rename after gate 3 and
+  before the name-key drop move completes is refused with the move named.
 - P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
@@ -2333,7 +2352,10 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   older client keeps working until the floor bump. An install that skips
   releases is guarded by its own moves, not by the cut order: its readers
   switch at the first boot after the completion check's gates pass there
-  (item 6, "Readers during the stamp"). The same holds at Phase 4: an
+  (item 6, "Readers during the stamp"). A client trusts a collection's
+  id as stable only from P3.7's name-key drop move's `completed_at`
+  there; between gate 3 and that point the engine refuses a rename (item
+  6). The same holds at Phase 4: an
   install that skips from before P3.1 to a release with P4.0 meets P4.0's
   boot floor, which serves it migration-only until gate 3 and P3.7's
   name-key drop move hold there (P4.0; T2 `229-research-59`).
