@@ -292,7 +292,7 @@ provenance tag from callers, so only the grow path can mark a plan grown.
 
 ### Approach
 
-Four options. They are not exclusive; the experiment decides which carry
+Five options. They are not exclusive; the experiment decides which of A to D carry
 weight. Each is marked generic (works for any corpus once built) or
 dataset-specific (needs per-dataset work).
 
@@ -361,6 +361,31 @@ failures before it acts, so it does nothing for the first questions on a new
 corpus, which is exactly when a discovery pass helps. It also depends on a
 stable shape label, which Options A or B supply.
 
+**Option E: discovery work and lifecycle state on the tuple space.** Run the
+discovery pass (Option A) as tuple-space work instead of one long command, and
+keep every run's lifecycle state there. A profile job posts one work tuple per
+collection; that fans out into census, taxonomy and sampled facet-extraction
+tuples that workers claim under a lease. Each stage writes a result tuple, and
+the profile is assembled when all of them exist. This is the shape the aspect
+queue already uses (indexing HERB left its 10,000 tasks there as available,
+claimed and dead counts). What it buys:
+
+- parallel workers without new scheduling code;
+- restart for free, since an expired lease returns the work;
+- stuck work visible as dead tuples instead of silent;
+- live progress through subscriptions, readable in the console.
+
+Outcome records keyed by (plan, question shape) can live there too, which is
+the data Option D needs.
+
+Scope, by Sam's direction (2026-11-19): discovery and lifecycle state only.
+The `nx_answer` execution and lookup path stays in-process. Moving plan steps
+onto tuples would let independent branches run in parallel, but it adds an
+engine round trip per step and requires idempotent steps and claim-time spend
+caps. It is considered only if a measured gain justifies that cost. Tuples
+carry references (collection names, chunk hashes, tumblers), never bulk text.
+Generic.
+
 ### Technical Design
 
 To be written once the experiment reads out. Interfaces that are likely
@@ -387,6 +412,7 @@ _nx_answer_plan_miss(..., profile: CorpusProfile | None)
 | Planner prompt | `_nx_answer_plan_miss`, `_PLANNER_TOOL_REFERENCE` | Extend: profile block; list the five omitted tools |
 | Counting | `operator_groupby`, `operator_aggregate`, `aspect_sql.py` | Reuse |
 | Plan growth | RDR-084 grow path, `plan_save` | Reuse; Option D adds a shape key to outcome records |
+| Discovery work and lifecycle state | Tuple space (claims, leases, subscriptions, stats; the aspect queue already runs on it) | Reuse (Option E); not in the answer path |
 
 ### Decision Rationale
 
@@ -558,3 +584,4 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: Option E added (tuple space for discovery and lifecycle state; execution path excluded unless measured value justifies it, per Sam).
