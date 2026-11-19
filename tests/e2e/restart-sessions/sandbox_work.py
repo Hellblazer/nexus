@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """The sandbox's private tmux server as work its creator's identity owns (RDR-253 Step 6, nexus-hczdo.1.9).
 
-run.py loads this file by path (``_load_sibling``), as it loads slash_restart.py: it runs under ``python -I``, which leaves
+run.py loads this file by path (``_load_slash("sandbox_work")``), as it loads slash_restart.py: it runs under ``python -I``, which leaves
 its own directory off sys.path. The sandbox starts one ``tmux -L <sock>`` server per run. The run registers it
 (``nx identity work register --kind tmux --ref <sock>``) so that no other session's cleanup stops it, and its own cleanup
 asks ``nx identity may-stop`` before ``kill-server``: ownership comes from the work row and liveness from the owner's
@@ -36,13 +36,18 @@ def register(nx: str, sock: str) -> None:
     _nx(nx, "work", "register", "--kind", "tmux", "--ref", sock)
 
 
+#: ``nx identity may-stop``'s exit status for "a live identity owns it" (``nexus.identity.work.EXIT_OWNED``); 1 is every
+#: other failure, the engine not answering included. This file runs under ``python -I`` with no ``nexus`` on its path, so the
+#: number is spelled here and pinned against the real command in tests/identity/test_work_registry.py.
+EXIT_OWNED = 3
+
+
 def refusal(nx: str, sock: str) -> str:
-    """"" when the server may be stopped; else the owner's refusal (a live identity other than this process owns it)."""
+    """"" when the server may be stopped; else the owner's refusal. Keyed on the exit status, never on the wording."""
     done = _nx(nx, "may-stop", "--kind", "tmux", "--ref", sock)
-    if done is None or done.returncode == 0:
+    if done is None or done.returncode != EXIT_OWNED:
         return ""
-    text = (done.stderr or done.stdout).strip()
-    return text if " is owned by " in text else ""
+    return (done.stderr or done.stdout).strip() or f"tmux {sock} is owned by a live identity"
 
 
 def kill_server(sb, notes: list[str]) -> None:

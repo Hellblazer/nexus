@@ -28,7 +28,7 @@ def fake_nx(tmp_path: Path, *, may_stop: tuple[int, str] = (0, "")) -> tuple[str
     """A stand-in ``nx`` (the sandbox's ``real_nx``) and the file its calls are logged to."""
     log = tmp_path / "nx.log"
     nx = tmp_path / "bin" / "nx"
-    nx.parent.mkdir()
+    nx.parent.mkdir(parents=True)
     code, text = may_stop
     nx.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n'
                   f'case "$2" in may-stop) echo \'{text}\' >&2; exit {code};; esac\nexit 0\n')
@@ -70,12 +70,24 @@ def test_the_server_is_killed_after_the_check_and_marked_done(sw, tmp_path) -> N
 
 def test_a_server_a_live_identity_owns_is_not_killed_and_the_owner_is_named(sw, tmp_path) -> None:
     msg = "Error: tmux rs-1234 is owned by i7 (alpha) (its holder is alive): not stopping it."
-    nx, log = fake_nx(tmp_path, may_stop=(1, msg))
+    nx, log = fake_nx(tmp_path, may_stop=(3, msg))
     sb, notes = Sandbox(nx), []
     sw.kill_server(sb, notes)
     assert sb.calls == [], "kill-server was not sent"
     assert len(notes) == 1 and "NOT sent" in notes[0] and "i7 (alpha)" in notes[0]
     assert "work done" not in "\n".join(lines(log)), "a server that was not stopped is not done"
+
+
+def test_the_refusal_is_the_exit_status_not_the_words(sw, tmp_path) -> None:
+    """Exit 3 refuses whatever the text says; the old wording at any other status is not a refusal."""
+    nx, _log = fake_nx(tmp_path, may_stop=(3, "reworded entirely"))
+    sb, notes = Sandbox(nx), []
+    sw.kill_server(sb, notes)
+    assert sb.calls == [] and "reworded entirely" in notes[0]
+    nx, _log = fake_nx(tmp_path / "b", may_stop=(1, "Error: tmux rs-1234 is owned by i7"))
+    sb, notes = Sandbox(nx), []
+    sw.kill_server(sb, notes)
+    assert sb.calls == [("kill-server",)] and notes == []
 
 
 def test_a_check_that_cannot_run_does_not_leave_the_server_up(sw, tmp_path) -> None:
