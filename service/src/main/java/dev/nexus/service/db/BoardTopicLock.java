@@ -14,8 +14,9 @@ import static org.jooq.impl.DSL.val;
  * The one advisory lock of a board topic family (RDR-252), keyed on (tenant, base topic name): the base name is the
  * topic before {@code --}, so {@code nexus-develop} covers {@code nexus-develop--done}, {@code --push} and
  * {@code --owner}. Every writer that must be alone on a topic takes it through here: the group writes that can make
- * a group serve a topic (form, re-form, {@code set --serves}, {@code set --ends}) and, in Step 3, the owner stamper
- * and its deadline timer. A second key would let two of them hold "the" lock of one topic at once.
+ * a group serve a topic (form, re-form, {@code set --serves}, {@code set --ends}), the writes that end a group (disband,
+ * {@code set ended_at}, the operator override), and, in Step 3, the owner stamper and its deadline timer. A second key
+ * would let two of them hold "the" lock of one topic at once.
  *
  * <p>It is a transaction-scoped lock ({@code pg_advisory_xact_lock}), released at commit or rollback. The two-key
  * form keeps it apart from the single-key locks other repositories take on {@code hashtext(...)}, which are a

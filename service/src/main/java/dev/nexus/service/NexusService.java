@@ -1056,7 +1056,7 @@ public final class NexusService {
 
         // Bead nexus-0bl77 (rtg20 phase A): the test-only tenant reset route. Registered LAST so every structure it
         // evicts (tuple repo, reaper) is already assigned; absent (404) unless NX_TEST_TENANT_RESET_ROUTE=1.
-        this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository));
+        this.tenantKeyedState = List.copyOf(tenantKeyedState(mintRateLimiter, pgVectorRepository, boardOwner));
         if (tenantResetRoute) {
             var resetCtx = server.createContext(dev.nexus.service.http.TenantResetHandler.PATH,
                     new dev.nexus.service.http.TenantResetHandler(this.tenantKeyedState, pciEnabled));
@@ -1076,7 +1076,7 @@ public final class NexusService {
      * structure means adding it here AND to that table, or the gate fails.
      */
     private List<dev.nexus.service.db.TenantKeyedState> tenantKeyedState(
-            dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository) {
+            dev.nexus.service.http.MintRateLimiter mintRateLimiter, PgVectorRepository pgVectorRepository, dev.nexus.service.board.BoardOwnerWiring boardOwner) {
         // TokenCache FIRST (code review B3): it is the one that closes the dead test's bearer. Evicting it before the
         // tuple evictor, which may wait up to TENANT_RESET_TUPLE_BOUND, keeps the window in which the old token still
         // authenticates as short as the first call, instead of the length of that wait.
@@ -1101,8 +1101,8 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("TenantImportSessions", importWiring::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.reconcile", reconcileJobs::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("EngineJobs.manifestFill", manifestFillJobs::evictTenant), dev.nexus.service.db.TenantKeyedState.of("TaxonomyCoverage", t -> taxonomyCoverage().evictTenant(t)),
-            dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs",
-                t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
+            dev.nexus.service.db.TenantKeyedState.of("AckDeadlineTimer", t -> boardOwner == null ? 0 : boardOwner.timer().evictTenant(t)),
+            dev.nexus.service.db.TenantKeyedState.of("ValidateConstraintsJobs", t -> dev.nexus.service.http.ValidateConstraintsJobs.forgetTenant(validateConstraintsJobs, t)));
     }
 
     public TenantImportWiring importWiring() { return importWiring; }   // nexus-csayy.6: the import sessions and the singleton-lock fact

@@ -224,4 +224,24 @@ class AckDeadlineTimerTest {
         assertThat(sched.tasks.get(1).cancelled()[0]).as("the retry is replaced").isTrue();
         assertThat(timer.armedAt("t1", "b")).isEqualTo(EPISODE.plus(Duration.ofMinutes(40)));
     }
+
+    @Test
+    void evictingATenantCancelsItsDeadlinesAndLeavesOthers() {
+        ManualScheduler sched = new ManualScheduler();
+        List<String> fired = new ArrayList<>();
+        AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> fired.add(t + "/" + b));
+        timer.arm("t1", "a", EPISODE.plus(Duration.ofMinutes(20)));
+        timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
+        timer.arm("t2", "a", EPISODE.plus(Duration.ofMinutes(20)));
+
+        assertThat(timer.evictTenant("t1")).as("the two deadlines of t1").isEqualTo(2);
+
+        assertThat(timer.armedAt("t1", "a")).isNull();
+        assertThat(timer.armedAt("t1", "b")).isNull();
+        assertThat(timer.armedAt("t2", "a")).as("another tenant's deadline stands").isNotNull();
+        assertThat(sched.tasks.get(0).cancelled()[0]).as("a cancelled task never fires").isTrue();
+        assertThat(sched.tasks.get(1).cancelled()[0]).isTrue();
+        assertThat(sched.tasks.get(2).cancelled()[0]).isFalse();
+        assertThat(timer.evictTenant("t1")).as("nothing left to evict").isZero();
+    }
 }

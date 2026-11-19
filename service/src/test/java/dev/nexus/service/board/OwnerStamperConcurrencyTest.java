@@ -221,4 +221,100 @@ class OwnerStamperConcurrencyTest {
             sched.shutdownNow();
         }
     }
+
+    // ── a group write and an evaluation wait on one lock ─────────────────────
+
+    /** One evaluation of an open red held inside its arm, and what a test needs to let it go. */
+    private record Held(BlockingScheduler sched, java.util.concurrent.ExecutorService pool, Future<?> evaluation) {
+        void release() {
+            sched.release.countDown();
+        }
+
+        void close() {
+            sched.release.countDown();
+            pool.shutdownNow();
+            sched.shutdownNow();
+        }
+    }
+
+    /** A red on Y, evaluated by a stamper whose timer blocks in {@code arm}: the evaluation holds the topic lock. */
+    private Held holdAnEvaluation(String[] f) throws Exception {
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+        OwnerStamper stamper = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock);
+        BlockingScheduler sched = new BlockingScheduler();
+        stamper.bind(new AckDeadlineTimer(sched, java.time.Clock.systemUTC(), (t, b) -> { }));
+        var pool = Executors.newFixedThreadPool(2);
+        Future<?> evaluation = pool.submit(() -> stamper.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}"));
+        Held held = new Held(sched, pool, evaluation);
+        if (!sched.inArm.await(20, java.util.concurrent.TimeUnit.SECONDS)) {
+            held.close();
+            throw new AssertionError("the evaluation never reached its arm");
+        }
+        return held;
+    }
+
+    private static <T> void assertWaitsThenCompletes(Held held, Future<T> write, String what) throws Exception {
+        Thread.sleep(700);
+        assertThat(write.isDone()).as(what + " waits for the topic lock the evaluation holds").isFalse();
+        held.release();
+        held.evaluation().get(20, java.util.concurrent.TimeUnit.SECONDS);
+        write.get(20, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    private void endsWhileAnEvaluationIsHeld(String what, java.util.function.Consumer<String[]> beforeTheEvaluation,
+                                             java.util.function.Function<String[], dev.nexus.service.http.IdentityTestEnv.Resp> end)
+        throws Exception {
+        String[] f = redOnY();
+        beforeTheEvaluation.accept(f);
+        Held held = holdAnEvaluation(f);
+        try {
+            Future<dev.nexus.service.http.IdentityTestEnv.Resp> ending = held.pool().submit(() -> end.apply(f));
+            assertWaitsThenCompletes(held, ending, what);
+            assertThat(ending.get().status()).as(what).isEqualTo(200);
+            assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(StamperEnv.Row::kind)
+                .as("the evaluation that held the lock posted its row, before the group ended").containsExactly("owner");
+
+            // The group is over: a deadline that falls due now posts no hand-off and no escalation for that red.
+            se.env.ids.clock.advance(Duration.ofMinutes(45));
+            se.stamper.onDeadline(f[0], StamperEnv.BASE);
+            se.stamper.onDeadline(f[0], StamperEnv.BASE);
+            assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(StamperEnv.Row::kind)
+                .as("nothing follows the end of the group").containsExactly("owner");
+        } finally {
+            held.close();
+        }
+    }
+
+    @Test
+    void aDisbandWaitsForAnEvaluationHoldingTheTopicLockAndNothingFollowsIt() throws Exception {
+        endsWhileAnEvaluationIsHeld("the disband", f -> { },
+            f -> se.env.as(f[0], f[1], "POST", "/push-train/disband", Map.of()));
+    }
+
+    @Test
+    void aSetEndedAtWaitsForAnEvaluationHoldingTheTopicLockAndNothingFollowsIt() throws Exception {
+        endsWhileAnEvaluationIsHeld("set ended_at", f -> { },
+            f -> se.env.as(f[0], f[1], "POST", "/push-train/set", Map.of("ended_at", true)));
+    }
+
+    @Test
+    void anOverrideEndingTheGroupWaitsForAnEvaluationHoldingTheTopicLockAndNothingFollowsIt() throws Exception {
+        endsWhileAnEvaluationIsHeld("the override", f -> se.env.end(f[0], f[1]),   // the leader is gone: the override is open
+            f -> se.env.tokenless(f[0], "POST", "/push-train/override", Map.of("ended_at", true)));
+    }
+
+    @Test
+    void aServesChangeWaitsForAnEvaluationOnTheSameTopicKey() throws Exception {
+        String[] f = redOnY();
+        Held held = holdAnEvaluation(f);
+        try {
+            Future<dev.nexus.service.http.IdentityTestEnv.Resp> set = held.pool().submit(() -> se.env.as(f[0], f[1], "POST",
+                "/push-train/set", Map.of("serves", List.of(StamperEnv.BASE, "nexus-main"))));
+            assertWaitsThenCompletes(held, set, "the serves change");
+            assertThat(set.get().status()).isEqualTo(200);
+        } finally {
+            held.close();
+        }
+    }
 }

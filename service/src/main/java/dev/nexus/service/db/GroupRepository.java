@@ -204,6 +204,7 @@ public final class GroupRepository {
                 OffsetDateTime now = OffsetDateTime.now(clock);
                 OffsetDateTime at = endedAt(body.get("ended_at"), now);
                 GroupRecordsRecord rec = lockLive(ctx, tenant, name, expectedLeader);
+                lockServedTopics(ctx, tenant, rec);
                 lockCurrentProcess(ctx, tenant, expectedLeader, tokenGeneration, null);
                 return endGroup(ctx, tenant, rec, at, "group_disband", actor, Map.of(), now);
             });
@@ -268,6 +269,7 @@ public final class GroupRepository {
         return scope.withTenant(tenant, ctx -> {
             OffsetDateTime now = OffsetDateTime.now(clock);
             GroupRecordsRecord rec = lockLive(ctx, tenant, name, expectedLeader);
+            lockServedTopics(ctx, tenant, rec);
             lockCurrentProcess(ctx, tenant, expectedLeader, tokenGeneration, null);
             return endGroup(ctx, tenant, rec, now, "group_disband", actor, Map.of(), now);
         });
@@ -317,6 +319,7 @@ public final class GroupRepository {
             Map<String, Object> extra = new LinkedHashMap<>();
             extra.put("leader_state", state);
             if (setEnded) {
+                lockServedTopics(ctx, tenant, rec);
                 return endGroup(ctx, tenant, rec, at, "group_override", actor, extra, now);
             }
             Map<String, Object> before = fields(rec);
@@ -351,6 +354,15 @@ public final class GroupRepository {
                 Map.of("group", name));
         }
         return rec;
+    }
+
+    /**
+     * Ending a group takes the topic locks of what it serves, after the group row and before any identity row: an
+     * evaluation of the owner stamper or a hand-off holds the topic lock, so the end waits for it and no row follows
+     * the end for a group that is over ({@link BoardTopicLock}).
+     */
+    private static void lockServedTopics(DSLContext ctx, String tenant, GroupRecordsRecord rec) {
+        BoardTopicLock.lockAll(ctx, tenant, GroupInput.servesOf(rec.getServes()));
     }
 
     private Map<String, Object> endGroup(DSLContext ctx, String tenant, GroupRecordsRecord rec, OffsetDateTime at,

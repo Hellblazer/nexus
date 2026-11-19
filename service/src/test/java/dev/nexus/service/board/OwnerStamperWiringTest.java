@@ -193,4 +193,53 @@ class OwnerStamperWiringTest {
         assertThat(rows).hasSize(1);
         assertThat(rows.getFirst().sha()).isEqualTo("X");
     }
+
+    /** The identity token a client holds: the one a refresh of its binding returns (the generation it holds now). */
+    private String identityToken(String tenant, String id) {
+        int generation = ((Number) se.env.ids.show(tenant, id).get("generation")).intValue();
+        var r = se.env.ids.bind(tenant, id, "refresh", generation, Map.of());
+        assertThat(r.status()).as(String.valueOf(r.body())).isEqualTo(200);
+        return r.str("identity_token");
+    }
+
+    private void pushOverHttp(String bearer, String identityToken, String sha, String prev, String from) throws Exception {
+        var body = Map.of("subspace", "board/ci/nexus-develop--push", "keys", Map.of("topic", "nexus-develop--push"),
+            "dims", Map.of("from", from, "kind", "push", "sha", sha),
+            "body", "{\"base\":\"" + prev + "\",\"n\":1}", "nonce", UUID.randomUUID().toString());
+        var r = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/tuples/out")
+            .header("Authorization", "Bearer " + bearer).header("Content-Type", "application/json")
+            .header("X-Nexus-Identity-Token", identityToken)
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+    }
+
+    @Test
+    void aPushWrittenWithAnIdentityTokenIsStampedWithTheIdentitysSessionAndTheOwnerRowNamesTheIdentity() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String adapter = "adapter-" + UUID.randomUUID();
+        String pusher = "pusher-" + UUID.randomUUID();
+        seedToken(adapter, t, TokenStore.SCOPE_BOARD_CI);
+        seedToken(pusher, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+
+        // No stamp is written by hand: the engine stamps sender_session from the identity token (IdentityFence).
+        pushOverHttp(pusher, identityToken(t, a), "X", "G0", "alpha");
+        pushOverHttp(pusher, identityToken(t, c), "Y", "X", "carol");
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--push", Map.of(), 10, null))
+            .extracting(dev.nexus.service.db.TupleRepository.TupleRow::senderSession)
+            .as("the engine stamped each push with its identity's session").containsExactly("sess-alpha", "sess-carol");
+
+        out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+            "dims", Map.of("from", "github", "kind", "sha", "sha", "Y", "outcome", "failure"),
+            "body", "{\"state\":\"concluded\",\"sha\":\"Y\"}", "nonce", UUID.randomUUID().toString()));
+
+        var rows = eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> !r.isEmpty());
+        assertThat(rows).hasSize(1);
+        assertThat(rows.getFirst().body()).as("the owner is the identity whose session stamped the earlier push")
+            .containsEntry("owner", a).containsEntry("next", c);
+    }
 }

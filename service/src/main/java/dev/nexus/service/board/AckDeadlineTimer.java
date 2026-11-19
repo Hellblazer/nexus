@@ -90,6 +90,18 @@ public final class AckDeadlineTimer {
         }
     }
 
+    /** Cancels and removes every deadline armed for {@code tenant} (the test tenant reset); returns how many. */
+    public int evictTenant(String tenant) {
+        int n = 0;
+        for (Key key : java.util.List.copyOf(armed.keySet())) {
+            if (key.tenant().equals(tenant)) {
+                cancel(key);
+                n++;
+            }
+        }
+        return n;
+    }
+
     /** The instant a topic's deadline is armed for, or null; for tests and the status of the timer. */
     public Instant armedAt(String tenant, String base) {
         Armed a = armed.get(new Key(tenant, base));

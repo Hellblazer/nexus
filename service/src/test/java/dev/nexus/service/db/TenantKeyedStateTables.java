@@ -103,6 +103,8 @@ final class TenantKeyedStateTables {
         keyed.put("ChunkReaper.resumeTenant", REAPER);
         keyed.put("ChunkReaper.resumeCollection", REAPER);
         keyed.put("ChunkReaper.resumeExpiry", REAPER);
+        // RDR-252 Step 3 (nexus-igea9): the owner stamper's armed ack deadlines, one scheduled task per (tenant, base topic).
+        keyed.put("AckDeadlineTimer.armed", "AckDeadlineTimer");
         keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
         TenantKeyedStateCoverageEntries.fill(keyed, notKeyed);   // nexus-7fku2.1.2: TaxonomyCoverage and its invalidation helper
         keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
@@ -768,5 +770,20 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciReconciler.ringExpiry", PCI_OFF);
         notKeyed.put("PciIndexSet.NONE", PCI_OFF);
         notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
+        // RDR-252 Step 3 (nexus-igea9): the owner stamper. Everything below is a value read or built for one evaluation
+        // (a record's components, a holder of a function or of the timer); none outlives the call that built it
+        // except the timer's armed map, which is keyed above and cleared by the AckDeadlineTimer evictor.
+        String evaluation = "a component of a value record built for one owner evaluation and dropped with it; "
+            + "it is not stored";
+        for (String f : List.of(
+            "GroupView.members", "GroupView.deadlineByTopic", "OwnerDecision.Input.pushes", "OwnerDecision.Input.dones",
+            "OwnerDecision.Input.owners", "OwnerDecision.Post.body", "BoardRow.dims", "Identities.identityOfStamp",
+            "Identities.presence")) {
+            notKeyed.put(f, evaluation);
+        }
+        notKeyed.put("OwnerStamper.timer", "the stamper's reference to the one AckDeadlineTimer, bound once at boot; "
+            + "the per-tenant state is the timer's armed map, which has its own evictor");
+        notKeyed.put("AckDeadlineTimer.Key.tenant", "the tenant component of the key of the armed map, a record "
+            + "that exists only as that map's key; the map itself is listed as keyed");
     }
 }
