@@ -7,7 +7,7 @@ group = "push-train"
 
 [trigger]
 subspace = "board/ci/nexus-develop--owner"
-match = { kind = "owner" }
+match = { kind = "owner", from = "engine" }
 
 [args]
 sha = "dims.sha"
@@ -21,7 +21,7 @@ me = "self.identity"
 field = "show"
 
 [clear]
-match = { kind = "clear" }
+match = { kind = "clear", from = "engine" }
 
 [display]
 channel = "wake"

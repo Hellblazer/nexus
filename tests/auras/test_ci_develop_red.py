@@ -255,8 +255,8 @@ def test_the_shipped_aura_is_gated_on_push_train_and_triggers_on_the_owner_post(
     aura = _shipped()
     assert aura.load_group == "push-train"
     assert aura.subspace == OWNER_SUBSPACE
-    assert dict(aura.match) == {"kind": "owner"}
-    assert dict(aura.clear_match or ()) == {"kind": "clear"}
+    assert dict(aura.match) == {"kind": "owner", "from": "engine"}
+    assert dict(aura.clear_match or ()) == {"kind": "clear", "from": "engine"}
     assert aura.procedure == "ci_red_notice"
     assert aura.channel == "wake"
 
@@ -343,6 +343,70 @@ def test_the_shipped_aura_is_refused_by_a_template_without_the_owner_fields() ->
     old_body = {k: "..." for k in ("state", "conclusion", "workflow", "job", "sha", "run", "n", "runs", "attempt", "url")}
     findings, _ = check_dictionary(_shipped(), [{**OWNER_TEMPLATE, "doc": {"body": old_body}}])
     assert {f.key for f in findings} == {"args.owner", "args.next", "args.refresh", "args.reason"}
+
+
+# -- who may post the owner row (RDR-252 "The stamper": the engine stamps ``from=engine``; round 1 B3) ----------------
+
+
+class _Recorder:
+    """A runtime's two outputs, recorded: the procedure runs (a fire) and the block writes and removals."""
+
+    def __init__(self) -> None:
+        self.runs: list[dict] = []
+        self.sets: list[str] = []
+        self.removes: list[str] = []
+
+    def run(self, name, args=None, limits=None):
+        self.runs.append(dict(args or {}))
+        return {"show": True, "text": "red", "wake": False}
+
+    def set_block(self, aura: str, threads_value: str, text: str) -> bool:
+        self.sets.append(text)
+        return True
+
+    def remove_block(self, aura: str, threads_value: str) -> bool:
+        self.removes.append(aura)
+        return True
+
+
+def _offer(row_dims: dict[str, str]) -> _Recorder:
+    from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
+    from nexus.db.t2.records import TupleRow  # noqa: PLC0415
+
+    aura = _shipped()
+    rec = _Recorder()
+    rt = AuraRuntime([aura], writer=rec, run=rec.run, identity=ME)
+    body = '{"owner": "i7", "next": null, "reason": "earliest_suspect", "refresh": false}'
+    rt.offer(aura.subspace, [TupleRow(
+        id="t1", subspace=aura.subspace, template="", keys={}, dims=row_dims, body=body, claim_state=None, claimant=None,
+        lease_until=None, attempts=0, consumed_at=None, consumed_by=None, expires_at=None, created_at=None)])
+    assert rt.wait_idle(30)
+    return rec
+
+
+def test_an_owner_row_from_the_engine_fires() -> None:
+    """The control: the row the stamper posts fires, so the two refusals below are not a runtime that fires nothing."""
+    rec = _offer({"kind": "owner", "sha": SHA, "from": "engine"})
+    assert len(rec.runs) == 1 and rec.runs[0]["me"] == ME and rec.sets == ["red"]
+
+
+@pytest.mark.parametrize("writer", ["", "tamsin", "i9", "Engine"])
+def test_an_owner_row_from_any_other_writer_fires_nothing(writer: str) -> None:
+    dims = {"kind": "owner", "sha": SHA, **({"from": writer} if writer else {})}
+    rec = _offer(dims)
+    assert rec.runs == [] and rec.sets == [] and rec.removes == []
+
+
+def test_a_clear_row_from_the_engine_removes_the_block() -> None:
+    rec = _offer({"kind": "clear", "sha": SHA, "from": "engine"})
+    assert rec.removes == ["ci_develop_red"] and rec.runs == []
+
+
+@pytest.mark.parametrize("writer", ["", "tamsin", "i9"])
+def test_a_clear_row_from_any_other_writer_clears_nothing(writer: str) -> None:
+    dims = {"kind": "clear", "sha": SHA, **({"from": writer} if writer else {})}
+    rec = _offer(dims)
+    assert rec.removes == [] and rec.runs == []
 
 
 def test_with_no_config_the_aura_is_off_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
