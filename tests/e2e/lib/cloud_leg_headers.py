@@ -19,8 +19,8 @@ HEADER_COVERAGE: dict[str, str] = {
     "X-Nexus-Client-Version": "memory-put-threads-identity",
     "X-Nexus-T1-Session": "scratch-put",                 # HttpScratchStore's per-session token header
     "X-Nexus-Identity-Token": "memory-put-threads-identity",
-    "X-Nexus-Request-Deadline-Ms": "exempt: sent only on POST /v1/vectors/upsert-chunks (nx index, nx collection "
-                                   "reembed, the exporter's import); nx store put writes through "
+    "X-Nexus-Request-Deadline-Ms": "exempt: sent only on the vectors chunk-upsert route (the indexers, collection "
+                                   "reembed, the exporter's import); a store put writes through "
                                    "/v1/catalog/manifest/write_many and no core step indexes",
     "X-Nexus-Deadline-Outcome": "exempt: a response header the engine sends only on a 503 that refuses or aborts a "
                                 "request at its deadline, which the leg cannot provoke",
