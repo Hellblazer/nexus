@@ -511,6 +511,98 @@ def test_an_ungated_aura_reads_nothing_and_loads_for_an_unbound_server() -> None
     assert h.membership_reads == [] and h.group_reads == []
 
 
+class _FakeRuntime:
+    """What the loader asks of a runtime after the first load: take more auras, and the identity they were gated for."""
+
+    def __init__(self, loaded) -> None:
+        self.auras = [a.name for a in loaded]
+        self.identity: str | None = None
+        self.extended: list[list[str]] = []
+
+    def extend(self, loaded, identity) -> None:
+        self.extended.append([a.name for a in loaded])
+        self.auras += [a.name for a in loaded]
+        self.identity = identity
+
+
+class _LateBind:
+    """The loader with an identity that changes under it, the way the lease's pending bind does (RDR-252 round 1)."""
+
+    def __init__(self, *, auras, identity=None, token_identity=None) -> None:
+        from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
+        from nexus.auras.session import AuraLoader  # noqa: PLC0415
+        from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+        self.subs = SubscriptionSet(session_id=_SID)
+        self.runtimes: list[_FakeRuntime] = []
+        self.attached: list = []
+        self.membership_reads: list[str] = []
+        self.states: list = []
+        self.token_identity = token_identity if token_identity is not None else identity
+
+        def make(loaded):
+            runtime = _FakeRuntime(loaded)
+            self.runtimes.append(runtime)
+            return runtime
+
+        def memberships(who):
+            self.membership_reads.append(who)
+            return ["push-train"]
+
+        self.loader = AuraLoader(
+            _SID, self.subs, discover=lambda: auras, is_on=lambda _n: True, entry=lambda _sid: ("tamsin", 100),
+            registered_owner=lambda: 100, make_runtime=make, attach=self.attached.append,
+            identity=lambda: self.token_identity, memberships=memberships,
+            read_group=lambda name: GroupRecord(name, serves=("nexus-develop",)),
+            state_sink=lambda pid, state: self.states.append((pid, state)),
+        )
+
+
+def test_a_server_that_loaded_unbound_gates_again_once_when_the_lease_reports_its_first_bind() -> None:
+    plain = auras_mod_parse(minimal("plain").replace('threads = "a block"', 'threads = "block plain"'), "plain")
+    h = _LateBind(auras=[*plain, *auras_mod_parse(_GATED, "gated")])
+    h.loader.on_resolve("tamsin")
+    assert h.runtimes[0].auras == ["plain"] and h.loader.decisions["gated"].reason == "unbound"
+    h.loader.note_identity("identity-a")                              # the pending bind: None -> identity-a
+    assert h.loader.decisions["gated"].loaded and h.runtimes[0].extended == [["gated"]]
+    assert h.runtimes[0].identity == "identity-a", "self.identity now fills"
+    assert sorted(h.subs.aura_topics()) == ["board/ci/nexus-develop--owner", "board/topic"]
+    assert h.membership_reads == ["identity-a"]
+    last = h.states[-1][1]
+    assert (last.identity, last.loaded_identity, last.auras["gated"].loaded) == ("identity-a", "identity-a", True)
+    h.loader.note_identity("identity-b")                              # a later switch is the reconnect case, not a re-gate
+    assert h.membership_reads == ["identity-a"] and h.runtimes[0].extended == [["gated"]]
+    assert h.states[-1][1].loaded_identity == "identity-a" and h.states[-1][1].identity == "identity-b"
+
+
+def test_a_desktop_server_with_only_gated_auras_builds_its_runtime_when_it_binds() -> None:
+    h = _LateBind(auras=auras_mod_parse(_GATED, "gated"))
+    h.loader.on_resolve("tamsin")
+    assert h.attached == [] and h.runtimes == [] and h.subs.aura_topics() == []
+    h.loader.note_identity("identity-a")
+    assert len(h.runtimes) == 1 and h.attached == h.runtimes and h.runtimes[0].auras == ["gated"]
+    assert h.subs.aura_topics() == ["board/ci/nexus-develop--owner"]
+
+
+def test_a_bind_the_lease_reported_before_the_load_is_used_even_when_the_token_read_misses_it() -> None:
+    """The pending-bind ordering: the lease adopted the identity (and told the loader) before the registry named the
+    session; the token read at load time returns nothing. The loader keeps what it was told."""
+    h = _LateBind(auras=auras_mod_parse(_GATED, "gated"), token_identity=None)
+    h.loader.note_identity("identity-a")                              # before any load: nothing to rewrite yet
+    assert h.states == [] and h.membership_reads == []
+    h.loader.on_resolve("tamsin")
+    assert h.loader.decisions["gated"].loaded and h.membership_reads == ["identity-a"]
+    assert h.loader.loaded_identity == "identity-a"
+
+
+def test_a_server_that_loaded_bound_does_not_gate_again_on_a_change() -> None:
+    h = _LateBind(auras=auras_mod_parse(_GATED, "gated"), identity="identity-a")
+    h.loader.on_resolve("tamsin")
+    assert h.membership_reads == ["identity-a"]
+    h.loader.note_identity("identity-b")
+    assert h.membership_reads == ["identity-a"] and h.runtimes[0].extended == []
+
+
 def test_an_unbound_server_loads_no_group_gated_aura_and_says_why() -> None:
     plain = auras_mod_parse(minimal("plain"), "plain")
     h = _GatedHarness(identity=None, auras=[*plain, *auras_mod_parse(_GATED, "gated")])

@@ -89,6 +89,13 @@ class AuraLoader:
         self.loaded_identity: str | None = None
         self._state: LoadedState | None = None
         self._state_pid: int | None = None
+        #: The on auras the load saw, the threads values they claimed, the runtime built for them (None until one was),
+        #: the identity the lease reported before a load, and whether the one late re-gate has run.
+        self._discovered: Sequence[Aura] = ()
+        self._blocks: dict[str, str] = {}
+        self._runtime: Any = None
+        self._noted_identity: str | None = None
+        self._regated = False
         #: True once the load decision is final: auras loaded, none turned on, or refused for good.
         self.loaded = False
         self._miss_logged = False
@@ -139,21 +146,35 @@ class AuraLoader:
         if owner != pid:
             self._not_loaded("not_this_sessions_process", entry_pid=pid, owner_pid=owner)
             return
-        identity = self._identity_or_none()
+        # An identity the lease reported before this load (a pending bind that beat the registry) counts when the token
+        # read misses it: the lease wrote the token file before it told us, so a miss is a read that raced the write.
+        identity = self._identity_or_none() or self._noted_identity
         self.loaded_identity = identity
+        self._discovered = auras
         gate = self._gate(auras, identity)
+        accepted = self._admit(auras, gate)
+        self._publish_state(pid, identity)
+        if not accepted:
+            self._not_loaded("none_accepted")
+            return
+        self._runtime = self._make_runtime(accepted)
+        self._attach(self._runtime)
+        _log.info("auras_loaded", session_id=self.session_id, auras=[a.name for a in accepted])
+
+    def _admit(self, auras: Sequence[Aura], gate: dict[str, AuraState]) -> list[Aura]:
+        """Record each aura's decision and subscribe the ones that pass: the gate's verdict, then the threads-block
+        and subscription refusals. Returns the auras now loaded."""
         accepted: list[Aura] = []
-        blocks: dict[str, str] = {}
         for aura in auras:
             verdict = gate.get(aura.name)
             if verdict is not None and not verdict.loaded:
                 self.decisions[aura.name] = verdict
                 _log.info("aura_not_loaded", aura=aura.name, reason=verdict.reason, group=verdict.group)
                 continue
-            if aura.threads in blocks:
+            if aura.threads in self._blocks:
                 _log.warning(
                     "aura_refused", aura=aura.name,
-                    reason=f"display.threads {aura.threads!r} is already written by aura {blocks[aura.threads]!r}",
+                    reason=f"display.threads {aura.threads!r} is already written by aura {self._blocks[aura.threads]!r}",
                 )
                 self.decisions[aura.name] = AuraState(False, "refused_threads", aura.load_group)
                 continue
@@ -163,15 +184,10 @@ class AuraLoader:
                 _log.warning("aura_refused", aura=aura.name, subspace=aura.subspace, reason=str(exc))
                 self.decisions[aura.name] = AuraState(False, "refused_subscription", aura.load_group)
                 continue
-            blocks[aura.threads] = aura.name
+            self._blocks[aura.threads] = aura.name
             accepted.append(aura)
             self.decisions[aura.name] = AuraState(True, "loaded", aura.load_group)
-        self._publish_state(pid, identity)
-        if not accepted:
-            self._not_loaded("none_accepted")
-            return
-        self._attach(self._make_runtime(accepted))
-        _log.info("auras_loaded", session_id=self.session_id, auras=[a.name for a in accepted])
+        return accepted
 
     # -- RDR-252: the group gate and the state file -------------------------------------------------------------------
 
@@ -249,10 +265,47 @@ class AuraLoader:
     def note_identity(self, identity: str | None) -> None:
         """The server's heartbeat saw its identity change: rewrite the state file with the new ``identity``. The loaded
         set and ``loaded_identity`` stay the ones the auras were built for, so ``nx aura list`` can report the
-        mismatch until the server reconnects. A no-op before a load has recorded anything. Never raises."""
-        if self._state is None or self._state.identity == identity:
+        mismatch until the server reconnects. Before a load has recorded anything it only remembers the identity, for
+        the load to use if its token read misses it. Never raises.
+
+        The one exception to "the loaded set stays": a server whose load saw NO identity (a Desktop server, or a pending
+        bind the lease had not made yet) gates its group-gated auras again, once, when the lease reports its first bind,
+        since nothing else would ever load them in this server's life."""
+        if identity is not None:
+            self._noted_identity = identity
+        if self._state is None:
+            return
+        if identity is not None and self.loaded_identity is None and not self._regated:
+            self._regated = True
+            self._regate(identity)
+        if self._state.identity == identity:
             return
         self._state = dataclasses.replace(self._state, identity=identity)
+        self._emit_state()
+
+    def _regate(self, identity: str) -> None:
+        pending = [a for a in self._discovered if self.decisions.get(a.name) == AuraState(False, "unbound", a.load_group)]
+        if not pending:
+            return
+        self.loaded_identity = identity
+        accepted: list[Aura] = []
+        try:
+            accepted = self._admit(pending, self._gate(pending, identity))
+            if accepted:
+                if self._runtime is not None:
+                    self._runtime.extend(accepted, identity)
+                else:
+                    self._runtime = self._make_runtime(accepted)
+                    self._attach(self._runtime)
+                _log.info("auras_loaded_after_bind", session_id=self.session_id, auras=[a.name for a in accepted])
+        except Exception as exc:  # noqa: BLE001 -- an aura never stops the waiter
+            _log.warning("auras_late_load_failed", session_id=self.session_id, error=str(exc))
+            for aura in accepted:  # its subscription stays held, but with no runtime to evaluate it, it is not loaded
+                self.decisions[aura.name] = AuraState(False, "load_failed", aura.load_group)
+        assert self._state is not None
+        self._state = dataclasses.replace(
+            self._state, loaded_identity=identity, auras=dict(self.decisions),
+        )
         self._emit_state()
 
 
