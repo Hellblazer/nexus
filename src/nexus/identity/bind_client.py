@@ -90,6 +90,25 @@ class IdentityClient:
     def close(self) -> None:
         self._http.close()
 
+    # The connection a sibling client over other routes (``nexus.groups``) reuses: same engine, same credential,
+    # same httpx client. Read-only views, so the sibling never owns or closes them.
+
+    @property
+    def base_url(self) -> str:
+        return self._base
+
+    @property
+    def tenant(self) -> str:
+        return self._tenant
+
+    @property
+    def http(self) -> httpx.Client:
+        return self._http
+
+    def credential(self) -> str:
+        """The bearer for this call: a fixed token, or a freshly resolved one."""
+        return self._bearer()
+
     # ── transport ───────────────────────────────────────────────────────────
 
     def _request(self, method: str, path: str, *, json: Any = None, params: Mapping[str, Any] | None = None) -> dict[str, Any]:

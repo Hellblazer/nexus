@@ -5995,6 +5995,101 @@ Remove the fenced state of `IDENTITY` (board entry, mailbox, scratch, membership
 |------|-------------|
 | `--operator` | Required. Confirms the operator override |
 
+## nx group
+
+Groups (RDR-252): a named set of seats that answers a board topic, with one leader. A group is an engine record (`/v1/group`), not a tuple; its members are the memberships RDR-253 keeps on each identity. `form` makes the caller's identity the leader, and every write is fenced by an identity token (the leader's for the record, the member's for a membership), so the verbs run in a Claude session or a Bash child of one. Only `override` takes no token. A refusal prints the engine's code and reason and exits 1. Group names and topic names follow the engine's address pattern: a letter or digit, then letters, digits, `.`, `_` and `-`, at most 64; a topic name has no `--`.
+
+An MCP server reads the identity's memberships once, when it starts, to decide which group-gated auras to load. `join` and `leave` therefore say that the server must reconnect (`/mcp`, or restart the session).
+
+### nx group form
+
+```
+nx group form NAME --serves TOPIC [--serves TOPIC ...] [--purpose TEXT] [--ends UTC|open]
+              [--ack-deadline MINUTES] [--ack-deadline-for TOPIC=MINUTES ...] [--requested-by WHO]
+```
+
+Form `NAME` with the caller as leader, and write the leader's membership in the same call. The caller must hold a live, leased seat. A disbanded name is re-formed by the same call (by its former leader while that one is live, else by any live, leased seat). One live group serves a topic: a second is refused (`topic_served`).
+
+| Flag | Description |
+|------|-------------|
+| `--serves TOPIC` | Required, repeatable. A board topic base name the group answers, such as `nexus-develop` (it covers `--done`, `--push` and `--owner`) |
+| `--purpose TEXT` | What the group is for |
+| `--ends UTC\|open` | When the group ends: a UTC instant in the future, such as `2026-12-01T00:00:00Z`, or `open` |
+| `--ack-deadline MINUTES` | Default acknowledgement deadline, 5 to 240. The engine's default is 20 |
+| `--ack-deadline-for TOPIC=MINUTES` | Deadline for one served topic, 5 to 240; repeatable. The topic must be in `--serves` |
+| `--requested-by WHO` | Who asked for the group; default the caller's identity id |
+
+### nx group set
+
+```
+nx group set NAME [--leader SEAT] [--ack-deadline MINUTES] [--ack-deadline-for TOPIC=MINUTES ...]
+                  [--ends UTC|open] [--serves TOPIC ...]
+```
+
+Change `NAME` in place; only its leader may. Only the fields given are sent, and at least one is required. `--leader` takes a seat name or an identity id; the new leader must already be a member and a live, leased seat. `--ack-deadline-for` is merged into the stored per-topic deadlines (the engine replaces the whole map, so the command reads the record first). `--serves` replaces the list; removing a topic removes its deadline.
+
+### nx group disband
+
+```
+nx group disband NAME
+```
+
+End `NAME` now. `ended_at` is set once and every membership is removed, the leader's included; the record stays as history, and the name can be formed again. Only the leader may.
+
+### nx group override
+
+```
+nx group override NAME --leader SEAT
+nx group override NAME --disband
+```
+
+The operator override, for a leader that cannot write: it uses the tenant credential and sends no identity token. Exactly one of the two flags. The engine allows it only while the stored leader is `ended`, `unheld`, `lapsed` with its holder recorded gone, gone from the table, or `live` with an `unleased` binding, and refuses it while the leader is live (`leader_not_overridable`). A new leader must be a member and a live, leased seat. The change is written to the engine's audit log.
+
+| Flag | Description |
+|------|-------------|
+| `--leader SEAT` | A seat name or identity id to lead the group |
+| `--disband` | End the group |
+
+### nx group join
+
+```
+nx group join NAME
+```
+
+Join `NAME` as a member, as the caller's own identity. Only a seat joins: an ephemeral or delegated identity is refused. A group already held is left alone, so a leader keeps its role. The command prints that the MCP server must reconnect before group-gated auras load.
+
+### nx group leave
+
+```
+nx group leave NAME
+```
+
+Leave `NAME`. The current leader is refused (`leader_cannot_leave`): hand the group on with `nx group set --leader`, or disband it. Leaving a group never joined changes nothing and says so. The command prints that the MCP server must reconnect.
+
+### nx group list
+
+```
+nx group list NAME [--json]
+```
+
+The record of `NAME` (serves, deadlines, `ends`, whether it is live or disbanded), its leader, and its members in join order by alias, each with its role and its RDR-253 state: `unheld`, `live`, `lapsed`, `ended`, or `unleased` (a live binding whose MCP server cannot renew, so the engine cannot say whether its holder is alive).
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the record and the members as JSON |
+
+### nx group ack-times
+
+```
+nx group ack-times NAME [--json]
+```
+
+The calibration read for `NAME`'s acknowledgement deadline: per red on the topics the group serves, the sha, when its episode began (`episode_at`), the time of the counting acknowledgement and the minutes between, with the number of hand-offs. It reads `board/ci/<topic>--owner` and counts an ack as the engine does: the `kind=ack` row of the identity that owned the red at that time, for a red tip of the episode. A red with no counting ack prints `no ack`. The text form prints one summary line (reds, acknowledged reds, median and longest minutes) and then one line per red.
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print the reds as JSON (`topic`, `sha`, `episode_at`, `reason`, `owner`, `handoffs`, `acked_at`, `acked_by`, `minutes`, `cleared_at`) |
+
 ## nx service
 
 Storage-service administration.

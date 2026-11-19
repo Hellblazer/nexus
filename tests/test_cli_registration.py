@@ -53,6 +53,7 @@ def test_all_command_modules_registered():
         "migration_cmd": "migration",
         "migration_audit_cmd": "migration-audit",
         "doctor": "doctor",
+        "group_cmd": "group",
         "hook": "hook",
         "identity_cmd": "identity",
         "mineru": "mineru",
