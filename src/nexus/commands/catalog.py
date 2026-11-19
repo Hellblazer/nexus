@@ -15,6 +15,7 @@ import structlog
 from typing import TYPE_CHECKING, Any
 
 from nexus.aspect_readers import NOTE_URI_SCHEME
+from nexus.catalog.engine_reads.route_unavailable import PHASE2_ROUTES_ENGINE
 from nexus.catalog.tombstones import (
     TombstoneGuardUnavailable,
     has_live_document,
@@ -442,11 +443,12 @@ def _echo_document_rows(presented: "DocumentRows") -> None:
               help="Keep documents whose own catalog meta has KEY equal to VALUE (repeatable, ANDed): "
                    "`--meta quality_gate_overridden=true`, `--meta extraction_method=mineru`. "
                    "An absent key matches nothing, except extraction_source, which is `file` when absent. "
-                   "Asks the engine's metadata route (engine-service 0.1.197 or later), one page at a time (nexus-uwggq.2.14).")
+                   f"Asks the engine's metadata route (engine-service {PHASE2_ROUTES_ENGINE} or later), one page at a time (nexus-uwggq.2.14).")
 @click.option("--sensitive", "only_sensitive", is_flag=True,
               help="Keep only documents flagged sensitive (RDR-243): the list to review before a clear. "
                    "Reads the engine's sensitive list (engine-service 0.1.188 or later), not the catalog's documents; "
-                   "paging applies to the matches. With --meta it asks the metadata route for the sensitive matches. "
+                   "paging applies to the matches. With --meta, or with --type or a page past the list's 10000 when the "
+                   "engine has the metadata route, it asks that route for the sensitive matches. "
                    "Refuses, and does not scan, on an engine without the route.")
 @click.option("--json", "as_json", is_flag=True)
 def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filters: tuple[str, ...], only_sensitive: bool, as_json: bool) -> None:
@@ -481,8 +483,7 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         paged = True
     elif only_sensitive:
         # RDR-241 Phase 1 (nexus-uwggq.1.7): the engine's sensitive list, then resolve_many; never a walk.
-        entries, total = sensitive_page(
-            cat, content_type=content_type, meta_wanted=meta_wanted, offset=offset, limit=limit)
+        entries, total = sensitive_page(cat, content_type=content_type, offset=offset, limit=limit)
         paged = True
     else:
         # GH #568: push --type into SQL so pagination on a small-

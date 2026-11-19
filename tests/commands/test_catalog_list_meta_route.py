@@ -55,8 +55,9 @@ class FakeEngine:
     """The catalog routes this command can reach, over a row store; every request is recorded in ``calls``."""
 
     def __init__(self, rows: list[dict[str, Any]], *, flag: bool | None = True, status: int | None = None,
-                 body: Any = None, probe_failed: bool = False) -> None:
+                 body: Any = None, probe_failed: bool = False, inject: list[dict[str, Any]] | None = None) -> None:
         self.rows, self.flag, self.status, self.body, self.probe_failed = rows, flag, status, body, probe_failed
+        self.inject = inject or []  # wire rows the route answers on top of its matches: an engine fault
         self.calls: list[tuple] = []
 
     def live(self) -> list[dict[str, Any]]:
@@ -98,7 +99,7 @@ class FakeEngine:
                 if (not kw.get("content_type") or r["content_type"] == kw["content_type"])
                 and (kw.get("sensitive") != "true" or r["sensitive"])
                 and meta_matches(r["meta"], eq)]
-        return {"count": len(rows), "limit": limit, "offset": offset, "documents": [self.wire(r) for r in rows[offset:offset + limit]]}
+        return {"count": len(rows), "limit": limit, "offset": offset, "documents": [self.wire(r) for r in rows[offset:offset + limit]] + self.inject}
 
     def post(self, path: str, body: dict | None = None, **kw: Any) -> Any:
         raise AssertionError(f"unexpected POST {path}")
@@ -353,6 +354,38 @@ def test_an_empty_value_is_a_usage_error_with_no_request(monkeypatch: pytest.Mon
     result = _run("--meta", "extraction_method=")
     assert result.exit_code == 2 and "non-empty value" in result.stderr
     assert engine.calls == []
+
+
+def test_rows_that_break_a_clause_the_command_sent_are_dropped_by_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An engine fault cannot widen the answer: the sensitive clause and ``--type`` are checked again, as the meta pairs are."""
+    meta = {"extraction_method": "mineru"}
+    unflagged = FakeEngine.wire(_row("1.5.1", "unflagged", meta=meta))
+    other_type = FakeEngine.wire(_row("1.5.2", "paper", "paper", sensitive=True, meta=meta))
+    other_meta = FakeEngine.wire(_row("1.5.3", "other meta", sensitive=True, meta={"extraction_method": "docling"}))
+    engine = FakeEngine(_fixture_rows(), inject=[unflagged, other_type, other_meta])
+    engine.wired(monkeypatch)
+    both = _run("--sensitive", "--type", "rdr", "--meta", "extraction_method=mineru", "--json")
+    assert both.exit_code == 0, both.stderr
+    assert [r["tumbler"] for r in json.loads(both.stdout)] == ["1.1.3"]
+    typed = _run("--type", "rdr", "--meta", "extraction_method=mineru", "--json")
+    assert [r["tumbler"] for r in json.loads(typed.stdout)] == ["1.1.3"], "--type without --sensitive keeps unflagged rdr rows too, and drops other types"
+    plain = _run("--meta", "extraction_method=mineru", "--json")
+    assert "1.5.1" in [r["tumbler"] for r in json.loads(plain.stdout)], "without --sensitive or --type those clauses are not applied"
+    assert "1.5.3" not in [r["tumbler"] for r in json.loads(plain.stdout)]
+
+
+def test_a_malformed_tumbler_in_the_answer_is_the_routes_fault_not_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    bad = {**FakeEngine.wire(_row("1.1.2", "two", meta={"extraction_method": "mineru"})), "tumbler": "not.a.tumbler"}
+    engine = FakeEngine(_fixture_rows(), inject=[bad])
+    engine.wired(monkeypatch)
+    result = _run("--meta", "extraction_method=mineru")
+    assert result.exit_code == 1, "a ClickException, not exit 2 (usage)"
+    assert _ROUTE in result.stderr and "--meta:" not in result.stderr and "Usage" not in result.stderr
+
+
+def test_the_engine_version_in_the_help_is_the_constant() -> None:
+    result = CliRunner().invoke(main, ["catalog", "list", "--help"])
+    assert result.exit_code == 0 and PHASE2_ROUTES_ENGINE in result.stdout.replace("\n", " ").replace("  ", " ")
 
 
 def test_the_bounded_list_still_reads_one_page_of_documents(monkeypatch: pytest.MonkeyPatch) -> None:
