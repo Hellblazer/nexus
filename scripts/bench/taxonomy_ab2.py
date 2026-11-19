@@ -75,13 +75,23 @@ def load_queries(paths: list[Path]) -> list[dict[str, Any]]:
                     raise ValueError(f"{p}: question {q.get('qid')!r}: kind {kind!r} not in {QUESTION_KINDS}")
             if not gt or q["text"] in out:
                 continue
-            out[q["text"]] = {"qid": q["qid"], "text": q["text"], "gt": gt, "kind": kind}
+            out[q["text"]] = {"qid": q["qid"], "text": q["text"], "gt": gt, "kind": kind,
+                              # RDR-134 Step 9: a generic key names a whole basename that other projects share
+                              # (CHANGELOG.md), so a generic question is graded on its owner's collections only
+                              # and on the exact basename.
+                              "owner": q.get("owner"), "exact": kind == "generic"}
     return list(out.values())
 
 
-def _grade(name: str, gt: dict[str, int]) -> int:
+def _grade(name: str, gt: dict[str, int], exact: bool = False) -> int:
     n = _norm(name)
-    return max((v for k, v in gt.items() if k and k in n), default=0)
+    return max((v for k, v in gt.items() if k and (k == n if exact else k in n)), default=0)
+
+
+def collection_owner(collection: str) -> str:
+    """The owner segment of a conformant ``<type>__<owner>__<model>__v<n>`` name, or ``""``."""
+    parts = collection.split("__")
+    return parts[1] if len(parts) >= 4 else ""
 
 
 def _ndcg(grades: list[int], gt: dict[str, int]) -> float:
@@ -93,22 +103,33 @@ def _ndcg(grades: list[int], gt: dict[str, int]) -> float:
 
 
 def score(rows: list[dict[str, Any]], gt: dict[str, int], catalog: Any,
-          with_colls: bool = False) -> dict[str, Any]:
-    """``with_colls`` adds ``top3_coll``: the collection of each ``top3`` document, in step."""
+          with_colls: bool = False, *, owner: str | None = None, exact: bool = False) -> dict[str, Any]:
+    """``with_colls`` adds ``top3_coll``: the collection of each ``top3`` document, in step.
+
+    *owner* (RDR-134 Step 9): a document from another owner's collection keeps its rank slot and grades 0, and is
+    told apart from this owner's file of the same name. *exact*: a key must equal the normalised basename.
+    """
     rows = rows[: FETCH * 3]
     paths = _resolve_paths_via_catalog(catalog, [r["chash"] for r in rows])
+    seen: set[tuple[str, bool]] = set()
     names: list[str] = []
+    credited: list[bool] = []
     colls: list[str] = []
     for r in rows:
         p = paths.get(r["chash"], "")
         n = Path(p).name if p else ""
-        if n and n not in names:
-            names.append(n)
-            colls.append(r.get("collection", ""))
-    grades = [_grade(n, gt) for n in names]
+        coll = r.get("collection", "")
+        ours = owner is None or collection_owner(coll) == owner
+        doc = (n if ours else f"{coll}/{n}", ours)
+        if n and doc not in seen:
+            seen.add(doc)
+            names.append(doc[0])
+            credited.append(ours)
+            colls.append(coll)
+    grades = [_grade(n, gt, exact) if ours else 0 for n, ours in zip(names, credited)]
     targets = [k for k, v in gt.items() if v >= 3]
-    top = [_norm(n) for n in names[:RECALL_K]]
-    hit = sum(1 for t in targets if any(t in n for n in top))
+    top = [_norm(n) for n, ours in zip(names[:RECALL_K], credited[:RECALL_K]) if ours]
+    hit = sum(1 for t in targets if any((t == n if exact else t in n) for n in top))
     out = {"ndcg3": _ndcg(grades, gt), "recall10": hit / len(targets) if targets else 0.0,
            "top3": names[:3]}
     if with_colls:
@@ -220,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", nargs="+", type=Path, default=[
         Path("bench/queries/spike_5q.yaml"), Path("bench/queries/golden_v1.yaml"),
-        Path("bench/queries/golden_heldout_v1.yaml"), Path("bench/queries/generic_docs_v1.yaml")])
+        Path("bench/queries/golden_heldout_v1.yaml"), Path("bench/queries/generic_docs_v2.yaml")])
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--gate-from", type=Path, default=None, metavar="COVERAGE_JSON",
