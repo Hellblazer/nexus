@@ -336,10 +336,10 @@ once that code is reviewed. The repository lists
 memberships by identity and by group, in the order they were created.
 RDR-253 Step 1 builds the add, remove and list routes for these rows
 (`nexus_rdr/252-research-7` F1), and RDR-253 Step 2 puts its ownership and
-generation check on them. This RDR's Step 1 adds two group rules to the add
+generation check on them. This RDR's Step 1 adds three group rules to the add
 and remove routes: adding a membership in a group that has a record requires
-a seat, and removing the current leader's membership is refused; the leader
-hands the group on first. `nx group join` and `leave` call those routes. It needs no re-pointing across `/clear`: the identity stays and only its session
+a seat, adding one to a disbanded group is refused, and removing the current
+leader's membership is refused; the leader hands the group on first. `nx group join` and `leave` call those routes. It needs no re-pointing across `/clear`: the identity stays and only its session
 id changes (Sam's answer on gate finding S3, "re-point and liveness", met by
 the identity). Keying it by identity makes "which groups am I in" one read at
 server start. A group is disbanded by setting `ended_at`; the record stays
@@ -392,7 +392,7 @@ writes.
 | Level | What the engine checks | Guards against | Cost |
 |---|---|---|---|
 | 0 (today) | Nothing on these subspaces; readers see the stamp as a label | Nothing; a reader may notice a mismatch | None |
-| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both, except the audited operator override on a group; RDR-253's `unleased` exception applies to memberships only | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
+| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, and for a re-form of a disbanded name (a first write too), the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both, except the audited operator override on a group; RDR-253's `unleased` exception applies to memberships only | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
 | 2 (met by level 1) | Only the current process of the leader identity may write | A session that is not the current leader, including a stale process of the leader; not a tenant-token holder who binds the leader's seat | Was "leadership as a claim with `claim_id`, needing a heartbeat"; RDR-253's binding renewal and generation check deliver it, so this RDR adds no separate mechanism for it (`nexus_rdr/252-research-4` F10) |
 | 3 (later) | Per-principal identity, host-attested Desktop sessions (JDR-002's own revisit list) | A second human principal or an agent class the tenant does not trust | Engine and auth work beyond this RDR |
 
