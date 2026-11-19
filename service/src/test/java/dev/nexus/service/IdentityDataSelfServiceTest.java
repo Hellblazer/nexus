@@ -370,6 +370,21 @@ class IdentityDataSelfServiceTest extends IdentityFenceHarness {
         }
     }
 
+    @Test
+    void anUnleasedOwnersTokenlessForkIsRefusedThoughItsOtherWritesStayOpen() {
+        // The boundary is a decision (folio/marginalia 2026-11-19): the fence lets a Desktop (unleased) owner write its
+        // families without a token, labelled unattested; the five routes that mint a token or make an identity
+        // (refresh, fork, promote, delegated and seat create) need the caller's own live token, unleased or not.
+        Seat desktop = bindSeat("desktop", 281, "unleased");
+        Resp fork = dataBind(null, desktop, "fork", Map.of("session_id", "sess-desktop-fork", "prior_session_id", desktop.sessionId()));
+        assertThat(fork.status()).as(fork.raw()).isEqualTo(403);
+        assertThat(fork.error()).isEqualTo("identity_token_required");
+        Resp join = call(DATA_TOKEN, null, null, "POST", "/v1/identity/" + desktop.id() + "/memberships",
+            Map.of("group", unique("crew"), "role", "member"));
+        assertThat(join.status()).as("an unleased owner's tokenless membership write stays open: " + join.raw()).isEqualTo(200);
+        assertThat(join.headers().firstValue("X-Nexus-Unattested")).as("labelled unattested").hasValue("true");
+    }
+
     // ── what stays as it was ─────────────────────────────────────────────────
 
     @Test
