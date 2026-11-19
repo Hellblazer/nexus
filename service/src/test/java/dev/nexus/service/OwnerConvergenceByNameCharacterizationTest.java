@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service;
 
+import dev.nexus.service.db.CatalogMoves;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import org.junit.jupiter.api.AfterAll;
@@ -247,5 +248,38 @@ class OwnerConvergenceByNameCharacterizationTest {
         assertThat(moved.tumbler()).isEqualTo("1.2.1");
         assertThat(sourceUri(t, moved.tumbler())).isEqualTo("file:///b/M/docs/x.md");
         assertThat(repo.getDocument(t, d1)).isNotNull();
+    }
+
+    /**
+     * RDR-254 (254-P1-S4): the renamed-move case above, then the move command. The state is the one the
+     * characterization pins (old owner 1.1 as N at /a/N with H1; new owner 1.2 as M at /b/M with H2, each with the file
+     * docs/x.md). {@code owners/move} of 1.1 to /b/M with H2 folds 1.2 into 1.1: one live owner, the OLD tumbler at the
+     * NEW path, the second owner deactivated with no repo hash. The cases above keep their assertions: they pin the
+     * engine's matching, which the move does not change.
+     */
+    @Test
+    void differentBasenameMove_thenTheMoveCommand_foldsTheNewOwnerIntoTheOldOne() throws Exception {
+        final String t = "owner-conv-rename-move";
+        repo.upsertOwner(t, ownerPayload("N", H1, "/a/N"));
+        String d1 = repo.registerDocument(t, "1.1", doc("x", "docs/x.md"));
+        repo.upsertOwner(t, ownerPayload("M", H2, "/b/M"));
+        String d2 = repo.registerDocument(t, "1.2", doc("x", "docs/x.md"));
+        assertThat(d2).isEqualTo("1.2.1");
+
+        var report = new CatalogMoves(repo).moveOwner(t, "1.1", "/b/M", H2, false).toMap();
+
+        assertThat(report).containsEntry("owners_folded", 1).containsEntry("absorbed", 1).containsEntry("repointed", 1);
+        var live = repo.listOwners(t);
+        assertThat(live).as("one live owner").hasSize(1);
+        assertThat(live.get(0)).containsEntry("tumbler_prefix", "1.1").containsEntry("name", "N")
+            .containsEntry("repo_root", "/b/M").containsEntry("repo_hash", H2);
+        assertThat(sourceUri(t, d1)).as("the old tumbler at the new path").isEqualTo("file:///b/M/docs/x.md");
+        assertThat(repo.getDocument(t, d2)).as("the absorbed row is trashed").isNull();
+        var all = repo.listOwners(t, true);
+        assertThat(all).hasSize(2);
+        var folded = all.stream().filter(o -> "1.2".equals(o.get("tumbler_prefix"))).findFirst().orElseThrow();
+        assertThat(folded.get("deactivated_at")).isNotNull();
+        assertThat((String) folded.get("repo_hash")).isNullOrEmpty();
+        assertThat(repo.ownerByRepoHash(t, H2).get("tumbler_prefix")).isEqualTo("1.1");
     }
 }

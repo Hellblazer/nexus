@@ -68,6 +68,8 @@ package dev.nexus.service.http;
  * <tr><td>GET /link_query</td><td>tumbler (query)</td><td>LOOKUP-ONLY</td></tr>
  * <tr><td>GET /resolve_chunk</td><td>tumbler (query)</td><td>LOOKUP-ONLY</td></tr>
  * <tr><td>POST /owners/deactivate</td><td>tumbler_prefix (body)</td><td>LOOKUP-ONLY</td></tr>
+ * <tr><td>POST /documents/move</td><td>tumbler (body: the document moved, an existing row)</td><td>VALIDATED (RDR-254: CatalogMoveRoutes answers a 400 for a shape that is not a document tumbler)</td></tr>
+ * <tr><td>POST /owners/move</td><td>owner (an owner prefix under another key, an existing row)</td><td>VALIDATED (RDR-254: CatalogMoveRoutes answers a 400 for a shape that is not an owner prefix)</td></tr>
  * <tr><td>POST /owners/reactivate</td><td>tumbler_prefix (body)</td><td>LOOKUP-ONLY</td></tr>
  * <tr><td>POST /owners/head_hash</td><td>tumbler_prefix (body)</td><td>LOOKUP-ONLY</td></tr>
  * <tr><td>GET /owners/show</td><td>tumbler_prefix (query)</td><td>LOOKUP-ONLY</td></tr>

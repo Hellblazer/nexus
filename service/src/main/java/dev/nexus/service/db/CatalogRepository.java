@@ -3736,7 +3736,7 @@ public final class CatalogRepository {
      * of two overlapping-endpoint calls acquires the lower tumbler's lock
      * first always tries for the higher one next, never the reverse.
      */
-    private static void lockDocumentRowsSorted(DSLContext ctx, String tenant, boolean exclusive, String... tumblers) {
+    static void lockDocumentRowsSorted(DSLContext ctx, String tenant, boolean exclusive, String... tumblers) {
         var distinct = new java.util.TreeSet<String>();
         for (String t : tumblers) {
             if (t != null && !t.isBlank()) distinct.add(t);
@@ -4654,7 +4654,7 @@ public final class CatalogRepository {
      * @return per-outcome counts: how many rows were plainly remapped,
      *         collapsed into an existing link, or dropped as a self-link
      */
-    private LinkRemapCounts remapLinksForMerge(
+    LinkRemapCounts remapLinksForMerge(
         DSLContext ctx, String tenant, String duplicateTumbler, String canonicalTumbler
     ) {
         // STEP 1: self-links -- identified purely by predicate (no read
@@ -13736,7 +13736,7 @@ public final class CatalogRepository {
      * transaction, and write one audit row per row actually raised (an already-sensitive row is a no-op and
      * writes nothing). Never lowers a flag.
      */
-    private static void raiseSensitivity(DSLContext ctx, String tenant,
+    static void raiseSensitivity(DSLContext ctx, String tenant,
                                          java.util.Collection<String> tumblers, String reason) {
         if (tumblers.isEmpty()) return;
         var raised = ctx.update(CATALOG_DOCUMENTS)
