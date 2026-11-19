@@ -419,3 +419,20 @@ def test_each_new_owner_row_rewrites_the_block_and_wakes_again() -> None:
     rt.offer(_TOPIC, [_row("t2")])
     _done(rt)
     assert writer.blocks["develop CI red"] == "handed" and len(notices) == 2
+
+
+def test_extend_takes_the_late_aura_and_the_identity_its_self_identity_argument_fills() -> None:
+    """nexus-igea9.7 round 2: the real AuraRuntime.extend, not a fake. A runtime built unbound for an ungated aura is
+    extended with a group-gated one and the identity the lease adopted; the gated aura fires with ``me`` filled."""
+    owner = _WAKE.replace('aura = "ci_develop_red"', 'aura = "owner"').replace("ci_red_notice", "owner_notice")
+    run, writer, notices = _Run({"show": True, "text": "x", "wake": True}), _Writer(), []
+    rt = _runtime(run, writer, notices=notices)                       # unbound: the plain aura only
+    assert rt.topics() == {"ci_develop_red": _TOPIC}
+    rt.extend([_aura(owner, name="owner")], "i7")
+    assert rt.topics() == {"ci_develop_red": _TOPIC, "owner": _TOPIC}
+    rt.offer(_TOPIC, [_row("t1")])
+    _done(rt)
+    [fired] = [args for name, args, _limits in run.calls if name == "owner_notice"]
+    assert fired["me"] == "i7", "extend set the identity the argument fills"
+    assert [name for name, _a, _l in run.calls].count("ci_red_notice") == 1, "the first aura still fires"
+    assert len(notices) == 2 and not rt.is_disabled("owner")

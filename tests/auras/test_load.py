@@ -682,6 +682,34 @@ def test_the_late_gate_after_a_first_bind_also_reads_off_the_loop() -> None:
     assert h is not None and h.loader.decisions["gated"].loaded
 
 
+def test_a_bind_the_lease_reports_while_a_load_that_saw_no_identity_runs_is_replayed_after_the_commit() -> None:
+    """nexus-igea9.7 round 2: the lease adopts the identity after the load read the token (none) and before the commit.
+    The note finds no state to re-gate (the commit has not run), so the loader keeps it and on_resolve_async replays it
+    once the commit is in; without the replay the gated aura stays 'unbound' for the server's life."""
+    import asyncio  # noqa: PLC0415
+
+    async def go():
+        h = _LateBind(auras=auras_mod_parse(_GATED, "gated"))
+        original = h.loader._gate  # noqa: SLF001
+        loop = asyncio.get_running_loop()
+
+        def gate_after_the_lease_binds(auras, identity):
+            # Runs on the load's worker thread, after the identity read: the lease's listener now fires on the loop.
+            if identity is None:  # the load's own gate; the replay's gate (with the identity) goes straight through
+                asyncio.run_coroutine_threadsafe(h.loader.note_identity_async("identity-a"), loop).result(10)
+            return original(auras, identity)
+
+        h.loader._gate = gate_after_the_lease_binds  # noqa: SLF001
+        await h.loader.on_resolve_async("tamsin")
+        return h
+
+    h = asyncio.run(go())
+    assert h.loader.decisions["gated"].loaded, "the replay gated again with the identity the lease reported"
+    assert h.membership_reads == ["identity-a"] and len(h.runtimes) == 1 and h.runtimes[0].auras == ["gated"]
+    assert h.loader.loaded_identity == "identity-a" and h.subs.aura_topics() == ["board/ci/nexus-develop--owner"]
+    assert h.states[-1][1].auras["gated"].loaded
+
+
 def test_the_state_sink_writes_on_one_worker_thread_in_order(tmp_path) -> None:
     import threading  # noqa: PLC0415
 
