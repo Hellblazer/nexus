@@ -109,15 +109,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 _cli_lookup = None
 _endpoint_resolve = None
 _session_facts = None
+_identity_lookup = None
 
 
 def _load_siblings() -> None:
-    global _cli_lookup, _endpoint_resolve, _session_facts
+    global _cli_lookup, _endpoint_resolve, _session_facts, _identity_lookup
     import _cli_lookup as cli_lookup  # noqa: PLC0415 -- must follow the sys.path insert
     import _endpoint_resolve as endpoint_resolve  # noqa: PLC0415
+    import _identity_lookup as identity_lookup  # noqa: PLC0415
     import _session_facts as session_facts  # noqa: PLC0415
 
     _cli_lookup, _endpoint_resolve, _session_facts = cli_lookup, endpoint_resolve, session_facts
+    _identity_lookup = identity_lookup
 
 
 #: Wall clock for ``nx command-context continuation`` (measured 5.4 s); hooks.json gives
@@ -504,11 +507,21 @@ def _board_by_title(
     return _run_nx(["memory", "get", entry_id, "--project", _BOARD_PROJECT], cwd, left)
 
 
+def _identity_line(body: str) -> str:
+    """The entry's fenced ``identity:`` line value, or ``""`` (RDR-253 Step 5)."""
+    m = re.search(r"(?m)^identity:[ \t]*(i[0-9]+)[ \t\r]*$", body)
+    return m.group(1) if m else ""
+
+
 def _board_entry(
-    session_id: str, name: str | None, cwd: str | None, timeout: float,
+    session_id: str, name: str | None, cwd: str | None, timeout: float, identity: str = "",
 ) -> tuple[str, str, str, str | None]:
-    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``session id`` or
+    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``identity``, ``session id`` or
     ``exact title`` (empty when nothing was found).
+
+    RDR-253 Step 5: with *identity* (from the token files) the search is for the identity first, and an entry whose
+    ``identity:`` line names it wins whatever its ``session:`` line says, so the entry is found after ``/clear``. An
+    entry whose identity line names another seat is never this session's, even with a matching session line.
 
     A Desktop session's handle differs from its name, and the board entry is filed under the
     handle (nexus-3lcda), so the name cannot find it. Board entries carry a ``session: <id>``
@@ -528,9 +541,28 @@ def _board_entry(
         return min(left(), _SESSION_PHASE_S - (_mono() - started))
 
     error: str | None = None
+    for query, how in (((identity, "identity"),) if identity else ()) + ((session_id, "session id"),):
+        found, error = _search_phase(query, how, session_id, identity, cwd, phase_left)
+        if found is not None:
+            return found
+    if not name:
+        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
+    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
+    body, title_error = _board_by_title(name, cwd, left(), missing)
+    if title_error and error:
+        title_error = f"{title_error} (the session-line search also failed: {error})"
+    return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
+
+
+def _search_phase(
+    query: str, how: str, session_id: str, identity: str, cwd: str | None, phase_left,
+) -> tuple[tuple[str, str, str, None] | None, str | None]:
+    """One full-text search of ``threads`` for *query*, its first hits fetched newest first; the first body that is
+    this session's wins. Returns ``(found, error)``."""
+    error: str | None = None
     if phase_left() >= _MIN_CALL_S:
         listing, error = _run_nx(
-            ["memory", "search", session_id, "--project", _BOARD_PROJECT], cwd,
+            ["memory", "search", query, "--project", _BOARD_PROJECT], cwd,
             min(_SEARCH_TIMEOUT_S, phase_left()),
         )
         if not error:
@@ -547,20 +579,18 @@ def _board_entry(
                 body, get_error = _run_nx(["memory", "get", row_id, "--project", _BOARD_PROJECT], cwd, phase_left())
                 if get_error:
                     unfetched.append(f"[{row_id}] {get_error}")
-                elif _has_session_line(body, session_id):
-                    return title, body, "session id", None
+                    continue
+                own = _identity_line(body)
+                if how == "identity" and own == identity:
+                    return (title, body, "identity", None), None
+                if how == "session id" and _has_session_line(body, session_id) and own in ("", identity):
+                    return (title, body, "session id", None), None
             if unfetched:
                 # Hits that were never read cannot be called absent (review r2 L2).
                 error = "the session-line search found hits that could not be fetched: " + "; ".join(unfetched)
     else:
         error = "the board lookup's time budget left no room for the session-line search"
-    if not name:
-        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
-    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
-    body, title_error = _board_by_title(name, cwd, left(), missing)
-    if title_error and error:
-        title_error = f"{title_error} (the session-line search also failed: {error})"
-    return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
+    return None, error
 
 
 def _git_worktrees(cwd: str | None, timeout: float) -> list[tuple[str, str]]:
@@ -953,7 +983,8 @@ def run_pre(payload: dict) -> str:
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     name = _session_name(session_id)
     # The board is read first: its ref: lines choose between the session's worktrees.
-    board_title, board, board_how, board_error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S)
+    identity = _identity_lookup.lookup(session_id, _config_dir())[0] if _identity_lookup is not None else ""
+    board_title, board, board_how, board_error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S, identity)
     if board_error and name:
         _log("WARNING", f"pre: board entry for {name!r}: {board_error}")
     elif board_error:
