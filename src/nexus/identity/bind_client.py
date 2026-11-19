@@ -55,6 +55,11 @@ def evidence_body(
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def _seg(value: str) -> str:
+    """One URL path segment: a ``/``, space or ``?`` in an id or a group name stays inside its segment."""
+    return quote(value, safe="")
+
+
 class IdentityClient:
     """``/v1/identity`` over httpx. *bearer* is the credential, or a callable resolved on every request so a data
     token that refreshes is never baked in."""
@@ -246,15 +251,15 @@ class IdentityClient:
     def put_work(self, identity: str, kind: str, ref: str, state: str = "running") -> dict[str, Any]:
         """Register work *identity* owns, or change its state in place (a label, not fenced: a lab run on another host
         has no token file). ``409 work_limit`` at 200 rows."""
-        return self._request("POST", f"/{identity}/work", json={"kind": kind, "ref": ref, "state": state})
+        return self._request("POST", f"/{_seg(identity)}/work", json={"kind": kind, "ref": ref, "state": state})
 
     def remove_work(self, identity: str, kind: str, ref: str) -> dict[str, Any]:
         """Forget the work; the answer's ``removed`` is 0 for work that was not there."""
-        return self._request("DELETE", f"/{identity}/work", params={"kind": kind, "ref": ref})
+        return self._request("DELETE", f"/{_seg(identity)}/work", params={"kind": kind, "ref": ref})
 
     def work_of(self, identity: str) -> list[dict[str, Any]]:
         """Every work row of *identity* (``kind``, ``ref``, ``state``, ``updated_at``), by kind and ref."""
-        return list(self._request("GET", f"/{identity}/work").get("work") or [])
+        return list(self._request("GET", f"/{_seg(identity)}/work").get("work") or [])
 
     def work_owners(self, kind: str, ref: str) -> list[dict[str, Any]]:
         """Every identity that registered the resource (*kind*, *ref*), one row each, with its state."""
@@ -263,12 +268,12 @@ class IdentityClient:
     def join_group(self, identity: str, group: str, role: str = "member") -> dict[str, Any]:
         """Join *group* as ``leader`` or ``member``, or change the role (the join time stays). Fenced: the caller's
         token must be *identity*'s."""
-        return self._request("POST", f"/{identity}/memberships", json={"group": group, "role": role}, fenced=True)
+        return self._request("POST", f"/{_seg(identity)}/memberships", json={"group": group, "role": role}, fenced=True)
 
     def leave_group(self, identity: str, group: str) -> dict[str, Any]:
         """Leave *group*; leaving one never joined removes nothing (``removed`` 0). Fenced."""
-        return self._request("DELETE", f"/{identity}/memberships/{group}", fenced=True)
+        return self._request("DELETE", f"/{_seg(identity)}/memberships/{_seg(group)}", fenced=True)
 
     def roster(self, group: str) -> list[dict[str, Any]]:
         """The members of *group* in join order."""
-        return list(self._request("GET", f"/groups/{group}").get("members") or [])
+        return list(self._request("GET", f"/groups/{_seg(group)}").get("members") or [])

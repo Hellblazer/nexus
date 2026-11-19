@@ -106,7 +106,16 @@ def test_an_owner_that_ended_or_whose_seat_was_released_is_not_alive(box: Box) -
     box.engine.put_work(i1, "worktree", P_REAL, "running")
     box.engine.records[i1].update(state="unheld", holder=None)         # released: no holder at all
     assert box.run("may-stop", "--kind", "worktree", "--ref", "/p").exit_code == 0
+
+
+def test_an_ended_identity_is_not_alive_even_while_its_holder_process_runs(box: Box) -> None:
+    """The state alone decides: the holder record and its running process stay, so only ``ended`` can free it (r1
+    item 5: the old test cleared the holder first, so the ended half passed on the released rule)."""
+    i1 = box.running_seat("alpha", 100)
+    box.engine.put_work(i1, "worktree", P_REAL, "running")
+    assert box.run("may-stop", "--kind", "worktree", "--ref", "/p").exit_code == 3, "control: live and held blocks"
     box.engine.records[i1].update(state="ended")
+    assert box.engine.records[i1]["holder"] is not None
     assert box.run("may-stop", "--kind", "worktree", "--ref", "/p").exit_code == 0
 
 
@@ -176,7 +185,7 @@ def test_the_two_hundred_row_limit_forgets_finished_work_once_and_retries(box: B
 
     i1 = box.running_seat("alpha", 100)
     for n in range(200):
-        box.engine.put_work(i1, "wait", f"w{n}", "done" if n < 150 else "running")
+        box.engine.put_work(i1, "labrun", f"w{n}", "done" if n < 150 else "running")
     row = work.register(box.engine, i1, "wait", "fresh")
     assert row.state == "running"
     left = {k[2] for k in box.engine.work if k[0] == i1}
@@ -206,7 +215,7 @@ def test_the_limit_with_nothing_finished_to_forget_is_the_engines_refusal(box: B
 
     i1 = box.running_seat("alpha", 100)
     for n in range(200):
-        box.engine.put_work(i1, "wait", f"w{n}", "running")
+        box.engine.put_work(i1, "labrun", f"w{n}", "running")
     with pytest.raises(IdentityApiError) as err:
         work.register(box.engine, i1, "wait", "fresh")
     assert err.value.code == "work_limit"
@@ -285,11 +294,11 @@ def test_list_by_session_and_json_carry_the_stale_flag(box: Box) -> None:
     import json
 
     i1 = box.running_seat("alpha", 100)
-    box.engine.put_work(i1, "wait", "w", "running")
+    box.engine.put_work(i1, "labrun", "w", "running")
     box.engine.sessions["sid-100"] = (i1, 1)
     live = json.loads(box.run("work", "list", "--session", "sid-100", "--running", "--json").stdout)
     assert live == {"identity": i1, "alive": True,
-                    "work": [{"kind": "wait", "ref": "w", "state": "running", "updated_at": 1000.0, "stale": False}]}
+                    "work": [{"kind": "labrun", "ref": "w", "state": "running", "updated_at": 1000.0, "stale": False}]}
     crash(box, 100)
     dead = json.loads(box.run("work", "list", "--session", "sid-100", "--json").stdout)
     assert dead["alive"] is False and dead["work"][0]["stale"] is True
@@ -499,3 +508,85 @@ def test_the_exit_statuses_are_the_contract_the_sandbox_keys_on(box: Box, monkey
     box.engine.work_owners = down                                      # type: ignore[method-assign]
     assert box.run("may-stop", "--kind", "tmux", "--ref", "owned").exit_code == 1, "an engine that does not answer is not an owner"
     assert box.run("may-stop", "--kind", "daemon", "--ref", "x").exit_code == 2, "a bad kind is a usage error"
+
+
+def test_running_lists_no_gone_worktree_and_no_wait_from_an_earlier_session(box: Box, tmp_path: Path) -> None:
+    """r1 items 3 and 4: ``list --running`` (the restart report and the checkpoint read it) leaves out a worktree whose
+    directory is gone and a wait for a session the identity no longer holds; the full list marks both stale and says why."""
+    import json
+
+    i1 = box.running_seat("alpha", 100)                                  # its holder's session is sid-100
+    live_wt, gone_wt = tmp_path / "live", tmp_path / "gone"
+    live_wt.mkdir()
+    for kind, ref in (("worktree", str(live_wt)), ("worktree", str(gone_wt)), ("wait", "sid-100"), ("wait", "sid-old")):
+        box.engine.put_work(i1, kind, ref, "running")
+    running = json.loads(box.run("work", "list", "i1", "--running", "--json").stdout)["work"]
+    assert sorted((r["kind"], r["ref"]) for r in running) == [("wait", "sid-100"), ("worktree", str(live_wt))]
+    full = box.run("work", "list", "i1")
+    assert full.exit_code == 0
+    assert f"{gone_wt}  (stale: the worktree is gone)" in full.output
+    assert "sid-old  (stale: a wait from an earlier session)" in full.output
+    assert "sid-100  (stale" not in full.output
+
+
+def test_the_limit_also_forgets_waits_from_an_earlier_session(box: Box) -> None:
+    """A wait killed by SIGKILL never writes its end; once the identity holds another session, the limit's purge drops
+    it and keeps the current session's wait (r1 item 3)."""
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.put_work(i1, "wait", "sid-100", "running")
+    for n in range(199):
+        box.engine.put_work(i1, "wait", f"sid-old-{n}", "running")
+    assert work.register(box.engine, i1, "labrun", "fresh").state == "running"
+    assert {k[2] for k in box.engine.work if k[0] == i1} == {"sid-100", "fresh"}
+
+
+def test_no_current_session_judges_no_wait_superseded() -> None:
+    from nexus.identity.work import wait_superseded
+
+    assert wait_superseded({"kind": "wait", "ref": "s-old"}, "s-new")
+    assert not wait_superseded({"kind": "wait", "ref": "s-old"}, None)
+    assert not wait_superseded({"kind": "wait", "ref": "s"}, "s")
+    assert not wait_superseded({"kind": "labrun", "ref": "s-old"}, "s-new")
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="POSIX signals")
+def test_work_run_holds_a_signal_sent_before_the_child_exists_and_never_forwards_sigint(monkeypatch) -> None:
+    """r1 item 5 (the r2 N5 ordering): TERM and INT arrive while Popen is still starting the child. The TERM is held and
+    sent once the child exists; the INT is caught and dropped, so this process lives on to mark the row done."""
+    import signal
+
+    from nexus.identity import work
+
+    sent: list[int] = []
+
+    class Child:
+        def send_signal(self, signum: int) -> None:
+            sent.append(signum)
+
+        def wait(self) -> int:
+            return 0
+
+    def popen(argv):                                                     # the signals land before Popen returns
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGINT)
+        return Child()
+
+    monkeypatch.setattr(work.subprocess, "Popen", popen)
+    before = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    assert work._spawn(["true"]) == 0
+    assert sent == [signal.SIGTERM], "TERM held and forwarded once the child existed; INT never forwarded"
+    assert {s: signal.getsignal(s) for s in before} == before, "every handler is put back"
+
+
+def test_a_command_that_cannot_be_executed_is_a_clean_error(monkeypatch) -> None:
+    from nexus.identity import work
+    from nexus.identity.ops import IdentityCommandError
+
+    def popen(argv):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(work.subprocess, "Popen", popen)
+    with pytest.raises(IdentityCommandError, match="not executable"):
+        work._spawn(["./not-x"])

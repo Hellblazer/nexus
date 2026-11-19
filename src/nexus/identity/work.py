@@ -74,18 +74,35 @@ class Work:
 
 def register(client: Any, identity: str, kind: str, ref: str, state: str = RUNNING) -> Work:
     """Register the work, or change its state in place. An identity holds at most 200 rows (``409 work_limit``): the
-    first refusal forgets this identity's own ``done`` rows (finished work has no further use) and its ``worktree`` rows
+    first refusal forgets this identity's own ``done`` rows (finished work has no further use), its ``worktree`` rows
     whose path no longer exists on this host (an agent's isolation worktree is removed by the harness, and nothing marks
-    its row done), and the call is repeated once."""
+    its row done), and its ``wait`` rows for a session it no longer holds (a wait killed by a hangup or SIGKILL never
+    wrote its end), and the call is repeated once."""
     try:
         return Work.of(client.put_work(identity, kind, ref, state))
     except IdentityApiError as exc:
         if exc.code != "work_limit":
             raise
+    session = current_session(client, identity)
     for row in client.work_of(identity):
-        if row.get("state") == DONE or worktree_gone(row):
+        if row.get("state") == DONE or worktree_gone(row) or wait_superseded(row, session):
             client.remove_work(identity, str(row["kind"]), str(row["ref"]))
     return Work.of(client.put_work(identity, kind, ref, state))
+
+
+def current_session(client: Any, identity: str) -> str | None:
+    """The session id of *identity*'s current holder, or None when it has none or the engine cannot say."""
+    try:
+        holder = client.show(identity).get("holder") or {}
+    except (IdentityApiError, IdentityUnavailableError):
+        return None
+    return str(holder["session_id"]) if isinstance(holder, Mapping) and holder.get("session_id") else None
+
+
+def wait_superseded(row: Mapping[str, Any], session: str | None) -> bool:
+    """A ``wait`` row for a session other than the identity's current one: that wait parked in an earlier session, which
+    has ended or moved, so the row is left over. With no current session known, nothing is judged superseded."""
+    return row.get("kind") == "wait" and session is not None and str(row.get("ref") or "") != session
 
 
 def worktree_gone(row: Mapping[str, Any]) -> bool:
@@ -219,8 +236,7 @@ class Label:
         self.identity: str | None = None
         self._started = False
         self._finished = False
-        self._previous: Any = None
-        self._armed = False
+        self._previous: dict[int, Any] = {}
 
     def start(self) -> bool:
         try:
@@ -235,24 +251,43 @@ class Label:
         if not self._started or self._finished:
             return
         self._finished = True
-        if self._armed:
-            self._armed = False
-            signal.signal(signal.SIGTERM, self._previous)
+        self._disarm()
         if not skip:
             finish_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout)
 
     def arm_sigterm(self) -> None:
-        """Mark the row done on SIGTERM, then let the TERM kill the process (no-op off the main thread)."""
+        """Mark the row done on SIGTERM or SIGHUP (a closed terminal), then let the signal do what it would have done: call
+        the handler that was there before, or die of it. A signal this process ignores (``nohup`` sets SIGHUP to SIG_IGN)
+        is left ignored, so arming never makes a process killable that was not. No-op off the main thread."""
         if not self._started or threading.current_thread() is not threading.main_thread():
             return
 
-        def on_term(signum: int, frame: Any) -> None:
-            self.finish()
+        def on_signal(signum: int, frame: Any) -> None:
+            before = self._previous.get(signum)
+            self.finish()                                                     # writes the end and restores every handler
+            if callable(before):
+                before(signum, frame)
+                return
             signal.signal(signum, signal.SIG_DFL)
             os.kill(os.getpid(), signum)
 
-        self._previous = signal.signal(signal.SIGTERM, on_term)
-        self._armed = True
+        for signum in _LABEL_SIGNALS:
+            current = signal.getsignal(signum)
+            if current == signal.SIG_IGN:
+                continue
+            self._previous[signum] = current
+            signal.signal(signum, on_signal)
+
+    def _disarm(self) -> None:
+        for signum, before in self._previous.items():
+            # None: a handler installed outside Python, which cannot be put back from here; the default is the honest
+            # stand-in (it is what the process had before that handler, and what a TERM or HUP does unhandled).
+            signal.signal(signum, before if before is not None else signal.SIG_DFL)
+        self._previous = {}
+
+
+#: The signals that end a :class:`Label`'s row before the process dies of them: TaskStop's TERM, a closed terminal's HUP.
+_LABEL_SIGNALS: tuple[int, ...] = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGHUP") if hasattr(signal, n))
 
 
 # ── what ``nx identity work`` prints ────────────────────────────────────────
@@ -323,13 +358,17 @@ def _target(env: IdentityEnv, seat: str | None, session: str | None, who: Callab
 
 def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = None, *, only_running: bool = False,
               who: Callable[[], str | None] | None = None) -> dict[str, Any]:
-    """``{"identity", "alive", "work": [row + "stale"]}``. A running row of an identity that is not alive is stale;
-    *only_running* keeps the rows that are ``running`` and not stale."""
+    """``{"identity", "alive", "work": [row + "stale"]}``. A running row is stale when its identity is not alive, when it
+    is a ``worktree`` whose path is not a directory on this host, or when it is a ``wait`` for a session the identity no
+    longer holds (none of those three can still be running work of this identity); *only_running* keeps the rows that are
+    ``running`` and not stale."""
     identity = _target(env, seat, session, who)
     alive = _call(is_alive, env, identity)
+    current = current_session(env.client, identity)
     rows = []
     for w in _call(of, env.client, identity):
-        stale = w.state == RUNNING and not alive
+        row = {"kind": w.kind, "ref": w.ref}
+        stale = w.state == RUNNING and (not alive or worktree_gone(row) or wait_superseded(row, current))
         if only_running and (w.state != RUNNING or stale):
             continue
         rows.append({"kind": w.kind, "ref": w.ref, "state": w.state, "updated_at": w.updated_at, "stale": stale})
@@ -342,8 +381,16 @@ def list_lines(report: Mapping[str, Any]) -> list[str]:
     if not rows:
         return [head + ", no work"]
     return [head] + [
-        f"  {r['state']:<7} {r['kind']:<9} {r['ref']}" + ("  (stale: the identity is not alive)" if r["stale"] else "")
+        f"  {r['state']:<7} {r['kind']:<9} {r['ref']}" + (f"  (stale: {_why_stale(report, r)})" if r["stale"] else "")
         for r in rows]
+
+
+def _why_stale(report: Mapping[str, Any], row: Mapping[str, Any]) -> str:
+    if not report["alive"]:
+        return "the identity is not alive"
+    if worktree_gone(row):
+        return "the worktree is gone"
+    return "a wait from an earlier session"
 
 
 def owners_lines(env: IdentityEnv, kind: str, ref: str) -> list[str]:
@@ -390,9 +437,10 @@ def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: st
     when it exits, and return its exit status unchanged (128 + n for a signal). A process with no identity just runs it.
 
     The label is best effort in every part: *env* may be a factory, called inside the same guard as the registration, so
-    an engine that cannot be reached, a refusal or an unexpected answer is logged and the command still runs. SIGTERM,
-    SIGINT and SIGHUP sent to this process are forwarded to the child (:func:`_spawn`), and the row is marked done after
-    the child ends."""
+    an engine that cannot be reached, a refusal or an unexpected answer is logged and the command still runs. SIGTERM and
+    SIGHUP sent to this process are forwarded to the child (:func:`_spawn`); SIGINT is not forwarded (a terminal's Ctrl-C
+    already reaches the child through the process group) but is caught, so this process outlives the child. The row is
+    marked done after the child ends."""
     _kind(kind)
     ref = norm_ref(kind, ref)
     if not argv:
@@ -422,9 +470,10 @@ _FORWARDED = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGINT", "SIGHUP") i
 
 
 def _spawn(argv: Sequence[str]) -> int:
-    """Run *argv* and return its status (128 + n for a child killed by signal n). SIGTERM, SIGINT and SIGHUP this process
-    receives are passed on to the child, so a stopped ``work run`` stops what it wraps, then returns normally and the caller
-    marks the row done. Handlers are installed on the main thread only, and put back afterwards."""
+    """Run *argv* and return its status (128 + n for a child killed by signal n). SIGTERM and SIGHUP this process receives
+    are passed on to the child, so a stopped ``work run`` stops what it wraps, then returns normally and the caller marks
+    the row done. SIGINT is caught and dropped (see below). Handlers are installed on the main thread only, and put back
+    afterwards."""
     from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415 — deferred: leaf import cost
 
     # Handlers go in BEFORE the spawn, so a signal in that window is held and passed on once the child exists, not
@@ -454,6 +503,8 @@ def _spawn(argv: Sequence[str]) -> int:
             child = subprocess.Popen(argv_off_cwd(argv))
         except FileNotFoundError:
             raise IdentityCommandError(f"command not found: {argv[0]}") from None
+        except PermissionError:
+            raise IdentityCommandError(f"command not executable: {argv[0]}") from None
         holder["child"] = child
         for signum in pending:
             forward(signum, None)

@@ -85,7 +85,6 @@ def _t1():
     """
     try:
         base = get_t1_database()
-        ctx = click.get_current_context(silent=True)
         if _identity_scope():
             from nexus.identity.scratch_scope import IdentityScopeError, identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 

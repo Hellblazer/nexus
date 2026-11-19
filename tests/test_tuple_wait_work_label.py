@@ -134,7 +134,7 @@ def test_sigterm_ends_the_row_then_dies_of_the_term(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("nexus.identity.work.caller_identity", lambda: "i1")
     killed: list[int] = []
     setattr_in(monkeypatch, "nexus.identity.work", "os.kill", lambda pid, sig: killed.append(sig))
-    before = signal.getsignal(signal.SIGTERM)
+    before = signal.signal(signal.SIGTERM, signal.SIG_DFL)              # an unhandled TERM, as a plain `nx tuple wait` has
     try:
         label = Label("wait", "s1")
         label.start()
@@ -188,3 +188,80 @@ def test_a_normal_finish_puts_the_previous_sigterm_handler_back(monkeypatch: pyt
     assert signal.getsignal(signal.SIGTERM) != before
     label.finish()
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+def _posix_label(monkeypatch: pytest.MonkeyPatch, written: list[str]):
+    import sys
+
+    from nexus.identity.work import Label
+
+    if sys.platform == "win32":
+        pytest.skip("POSIX signals")
+    monkeypatch.setattr("nexus.identity.work.register_own", lambda kind, ref, state="running", **k: written.append(state) or True)
+    monkeypatch.setattr("nexus.identity.work.caller_identity", lambda: "i1")
+    label = Label("wait", "s1")
+    label.start()
+    return label
+
+
+def test_a_hangup_ends_the_row_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """r1 item 3: a closed terminal sends HUP; a wait that died of it left its row running until the purge."""
+    import signal
+
+    written: list[str] = []
+    killed: list[int] = []
+    setattr_in(monkeypatch, "nexus.identity.work", "os.kill", lambda pid, sig: killed.append(sig))
+    before = signal.signal(signal.SIGHUP, signal.SIG_DFL)
+    try:
+        label = _posix_label(monkeypatch, written)
+        label.arm_sigterm()
+        signal.getsignal(signal.SIGHUP)(int(signal.SIGHUP), None)
+        assert written == ["running", "done"] and killed == [int(signal.SIGHUP)]
+    finally:
+        signal.signal(signal.SIGHUP, before)
+
+
+def test_an_ignored_hangup_stays_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nohup nx tuple wait``: HUP is SIG_IGN, and arming must not make the process killable by it."""
+    import signal
+
+    before = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        label = _posix_label(monkeypatch, [])
+        label.arm_sigterm()
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        label.finish()
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, before)
+
+
+def test_a_previous_python_handler_is_called_not_bypassed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    written: list[str] = []
+    calls: list[int] = []
+    before = signal.signal(signal.SIGTERM, lambda signum, frame: calls.append(signum))
+    try:
+        label = _posix_label(monkeypatch, written)
+        label.arm_sigterm()
+        signal.getsignal(signal.SIGTERM)(int(signal.SIGTERM), None)
+        assert written == ["running", "done"] and calls == [int(signal.SIGTERM)], "the row ended, then the old handler ran"
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def test_a_handler_python_cannot_restore_falls_back_to_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``signal.getsignal`` answers None for a handler installed outside Python; ``signal.signal(n, None)`` would raise."""
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(signal, "getsignal", lambda n: None)
+    try:
+        label = _posix_label(monkeypatch, [])
+        label.arm_sigterm()
+        label.finish()
+        monkeypatch.undo()
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, before if before is not None else signal.SIG_DFL)
