@@ -570,3 +570,48 @@ def test_the_command_is_registered_and_every_verb_has_help() -> None:
     for name, command in group_group.commands.items():
         assert command.help, f"nx group {name} has no help text"
     assert isinstance(group_group, click.Group)
+
+
+# -- a credential that cannot be had (RDR-252 Step 4 round 1, B2) -------------------------------------------------------
+
+
+def _dead_credential() -> str:
+    from nexus.db.data_token import DataTokenMintError  # noqa: PLC0415
+
+    raise DataTokenMintError("mint refused: the credential was revoked", status=401)
+
+
+def _dead_client(wire: Wire) -> GroupsClient:
+    return GroupsClient("http://engine", _dead_credential, http=httpx.Client(transport=httpx.MockTransport(wire)),
+                        identity_headers=lambda: dict(TOKEN), retry_headers=lambda sent, path: None)
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: c.read("push-train"),
+    lambda c: c.record("push-train"),
+    lambda c: c.roster("push-train"),
+    lambda c: c.form("push-train", "i3"),
+    lambda c: c.memberships("i3"),
+    lambda c: c.resolve("tamsin"),
+    lambda c: c.identity("i3"),
+], ids=["read", "record", "roster", "form", "memberships", "resolve", "identity"])
+def test_a_credential_that_cannot_be_minted_is_the_engine_being_unavailable(call: Callable[[GroupsClient], Any]) -> None:
+    """The engine could not be asked: ``GroupsUnavailableError``, whichever call it was, and nothing is sent."""
+    wire = Wire()
+    with pytest.raises(groups.GroupsUnavailableError, match="credential"):
+        call(_dead_client(wire))
+    assert wire.requests == []
+
+
+@pytest.mark.parametrize("argv", [
+    ("list", "push-train"), ("form", "push-train", "--serves", "nexus-develop"), ("join", "push-train"), ("leave", "push-train"),
+    ("disband", "push-train"), ("set", "push-train", "--ack-deadline", "30"),
+    ("override", "push-train", "--disband"),
+], ids=lambda a: a[0])
+def test_a_verb_with_a_dead_credential_prints_one_line_and_exits_one(argv: tuple[str, ...]) -> None:
+    wire = Wire()
+    res = _run(GroupEnv(client=_dead_client(wire), caller=lambda: "i3", tuples=lambda: None), *argv)
+    assert res.exit_code == 1, res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit), repr(res.exception)
+    assert "Traceback" not in res.output
+    assert len(res.output.strip().splitlines()) == 1 and "the engine is not answering" in res.output, res.output

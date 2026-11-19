@@ -509,6 +509,29 @@ def test_check_says_skipped_when_the_group_cannot_be_read(shipped: Path, monkeyp
     assert "warning" not in res.output.replace("with warnings", "")
 
 
+def test_check_says_skipped_when_the_credential_cannot_be_minted(shipped: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-252 Step 4 round 1 (B2): the real reader and the real groups client, over a bearer that raises the way a
+    cloud install with its engine down or its credential revoked does. One Skipped line, exit zero, no traceback."""
+    import httpx  # noqa: PLC0415
+    from nexus import groups  # noqa: PLC0415
+    from nexus.db.data_token import DataTokenMintError  # noqa: PLC0415
+
+    _owner_aura_file(shipped)
+    _registry(monkeypatch, None, "no engine")
+
+    def dead() -> str:
+        raise DataTokenMintError("mint refused: the credential was revoked", status=401)
+
+    sent: list[httpx.Request] = []
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: sent.append(r) or httpx.Response(500)))
+    monkeypatch.setattr(groups.GroupsClient, "from_config", classmethod(lambda cls, **_k: cls("http://engine", dead, http=http)))
+    res = _run("check")
+    assert res.exit_code == 0, res.output
+    assert res.exception is None, repr(res.exception)
+    assert "skipped serving_group: the group 'elsewhere' could not be read" in res.output
+    assert sent == []
+
+
 def test_check_is_quiet_about_the_serving_group_when_it_matches(shipped: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from nexus.auras.load_gate import GroupRecord  # noqa: PLC0415
 

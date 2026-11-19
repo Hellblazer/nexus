@@ -102,6 +102,21 @@ def own_identity_id() -> str:
     return record.identity
 
 
+def _unavailable_on_failure(bearer: Callable[[], str]) -> Callable[[], str]:
+    """*bearer* with every failure to get the credential (a data-token mint refused or unreachable, an endpoint or
+    token that does not resolve) raised as :class:`GroupsUnavailableError`: the engine could not be asked, the same
+    fact as a refused connection. The identity client built over it passes the error through unchanged."""
+    def get() -> str:
+        try:
+            return bearer()
+        except GroupsUnavailableError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- DataTokenMintError and its siblings: one fact, no credential
+            raise GroupsUnavailableError(f"no credential for the engine ({type(exc).__name__}: {exc})") from exc
+
+    return get
+
+
 class GroupsClient:
     """``/v1/group`` and the membership routes over httpx. *bearer* is the credential, or a callable resolved on every
     request. *identity_headers* and *retry_headers* are the token seams (:mod:`nexus.identity.token_header`'s by
@@ -114,7 +129,7 @@ class GroupsClient:
         retry_headers: Callable[[Mapping[str, str], str], dict[str, str] | None] = token_header.retry_headers_after_401,
     ) -> None:
         self._base = base_url.rstrip("/")
-        self._bearer = bearer if callable(bearer) else (lambda: bearer)
+        self._bearer = _unavailable_on_failure(bearer if callable(bearer) else (lambda: bearer))
         self._tenant = tenant
         self._http = http or httpx.Client(timeout=timeout)
         self._identity_headers = identity_headers
