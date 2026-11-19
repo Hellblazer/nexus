@@ -699,7 +699,12 @@ mailbox send and claim, T1, T3 round trip) and each route of THIS release's `## 
 (`docs/wire-contract-pending.md`, selected by `--release`) through the real client, once on a local engine and once
 through the public edge, and FAILS on any 4xx or 5xx the cloud run returns that the local run does not. It also fails on
 an unmapped ledger route (map it in `ROUTE_MAP`, or `--accept-skip "<route>:<reason>"`) and on zero ledger entries (a
-release with none says `--no-ledger-entries-ok "<reason>"`). A red blocks the tag. It refuses without the window marker
+release with none says `--no-ledger-entries-ok "<reason>"`). A route whose engine half the cloud does not run yet
+(read from `GET /version`) is SKIPPED, not driven, and the verdict reads `NOT A RELEASE PASS` (nexus-h4hge): that report
+does not clear the tag. The run that clears it passes `--require-deployed`, which fails on any such skip. When every
+paired entry is `[additive]` the engine deploys first and that run precedes the tag; when a non-additive entry holds
+the deploy for the client tag, the leg cannot drive those routes before the tag, so say so on the cut bead and run the
+`--require-deployed` leg right after the deploy. A red blocks the tag. It refuses without the window marker
 (`~/.config/nexus-cloud-windows/<id>.window`, mode 0600, at most 4 h, written by the releaser after announcing the window:
 it records an announcement and does not verify one), on any credential but the `release-test` tenant's (1Password item
 `nexus cloud test tenant (release-test)`, read with `op-auto`), and on any edge but `api.conexus-nexus.com`.

@@ -333,6 +333,26 @@ def _load_ledger_module() -> Any:
     return mod
 
 
+def _load_sibling(name: str) -> Any:
+    """A module beside this file, loaded by path (this file is run as a script and loaded by path in its tests)."""
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+_engine = _load_sibling("cloud_leg_engine")
+parse_engine_version, entry_engine, _ver = _engine.parse_engine_version, _engine.entry_engine, _engine.version_text
+
+
+def read_cloud_engine(service_url: str, timeout: float = 15.0) -> str:
+    """cloud_leg_engine.read_cloud_engine; an engine the leg cannot name refuses the run."""
+    try:
+        return _engine.read_cloud_engine(service_url, timeout)
+    except _engine.EngineUnreadable as exc:
+        raise Refusal(str(exc)) from None
+
+
 def ledger_entries(ledger: Path, release: str | None = None) -> list[Any]:
     """The `## Unshipped` entries of the wire ledger (docs/wire-contract-pending.md), or, with *release*, the
     `## Shipped` entries whose `shipped in` is that tag (the release skill's Step 4b has moved this release's
@@ -359,10 +379,13 @@ def entry_routes(entries: list[Any]) -> list[tuple[str, str]]:
     return out
 
 
-def release_steps(entries: list[Any], accept_skip: dict[str, str] | None = None) -> tuple[list[Step], list[tuple[str, str]], list[tuple[str, str]]]:
+def release_steps(entries: list[Any], accept_skip: dict[str, str] | None = None,
+                  cloud_engine: tuple[int, int, int] | None = None) -> tuple[list[Step], list[tuple[str, str]], list[tuple[str, str]]]:
     """(steps, skipped, unmapped). One step per distinct mapped route. *skipped* are entries that name no route (text-only
-    or a flag change) and routes named in *accept_skip* (with the reason). *unmapped* are routes with no mapped client
-    call and no accepted skip: each is a failure of the run."""
+    or a flag change), routes named in *accept_skip* (with the reason), and, given the engine release the cloud runs
+    (*cloud_engine*), the mapped or accepted routes only entries with a later engine tag name ("SKIPPED, engine tag ... not
+    deployed": the cloud would answer 404 for a route it does not have yet). *unmapped* are routes with no mapped client
+    call and no accepted skip, deployed or not: each is a failure of the run."""
     accept = dict(accept_skip or {})
     steps: list[Step] = []
     skipped: list[tuple[str, str]] = []
@@ -372,17 +395,33 @@ def release_steps(entries: list[Any], accept_skip: dict[str, str] | None = None)
         tag = f"{e.sha[:7]} {e.bead}"
         if tag not in routed_tags:
             skipped.append((tag, "no wire route named in the entry (text-only or a flag change)"))
-    for tag, r in entry_routes(entries):
+
+    def ahead(e: Any) -> bool:
+        need = entry_engine(e)
+        return cloud_engine is not None and need is not None and need > cloud_engine
+
+    live = [e for e in entries if not ahead(e)]
+    live_routes = {r for _t, r in entry_routes(live)}
+    behind: dict[str, str] = {}   # route -> why, for routes only entries ahead of the cloud name
+    for e in entries:
+        if ahead(e):
+            for m, p in _ROUTE_RE.findall(e.note):
+                r = f"{m} {p}"
+                if r not in live_routes and r not in behind:
+                    behind[r] = (f"SKIPPED, engine tag {e.engine_tag} not deployed "
+                                 f"(the cloud runs {_ver(cloud_engine)})")  # type: ignore[arg-type]
+    for tag, r in entry_routes(live) + [(t, r) for t, r in entry_routes(entries) if r in behind]:
         mapped = ROUTE_MAP.get(r)
-        if mapped is not None:
-            steps.append(Step(**{**asdict(mapped), "origin": f"{tag} {r}"}))
-            continue
         path = r.split(" ", 1)[1]
         reason = accept.get(r) or accept.get(path)
-        if reason:
-            skipped.append((f"{tag} {r}", f"accepted: {reason}"))
-        else:
+        if mapped is None and not reason:
             unmapped.append((f"{tag} {r}", "no client call is mapped to this route (map it in ROUTE_MAP or --accept-skip it)"))
+        elif r in behind:
+            skipped.append((f"{tag} {r}", behind[r]))
+        elif mapped is not None:
+            steps.append(Step(**{**asdict(mapped), "origin": f"{tag} {r}"}))
+        else:
+            skipped.append((f"{tag} {r}", f"accepted: {reason}"))
     return steps, skipped, unmapped
 
 
@@ -398,9 +437,21 @@ def parse_pairs(items: list[str], what: str) -> dict[str, str]:
 
 
 def build_plan(run: str, ledger: Path | None, release: str | None, *, core_only: bool = False,
-               accept_skip: dict[str, str] | None = None, no_ledger_ok: str = "") -> dict[str, Any]:
+               accept_skip: dict[str, str] | None = None, no_ledger_ok: str = "",
+               cloud_engine: str | None = None, require_deployed: bool = False) -> dict[str, Any]:
+    """The step plan. *cloud_engine* is the engine release the cloud runs (``X.Y.Z``, from :func:`read_cloud_engine`);
+    given, a ledger route whose engine tag is later is skipped rather than driven (nexus-h4hge), so a run before the
+    deploy needs no ``--core-only``. ``None`` (the local-vs-local self-test) drives every mapped route. *require_deployed*
+    (the gating rerun after the deploy) makes any such skip a failure of the plan."""
+    if require_deployed and (core_only or cloud_engine is None):
+        raise Refusal("--require-deployed needs a cloud run that drives the ledger (not --core-only, not --local-vs-local)")
     if not RUN_ID_RE.match(run):
         raise ValueError(f"run id {run!r} must match {RUN_ID_RE.pattern}")
+    deployed: tuple[int, int, int] | None = None
+    if cloud_engine is not None:
+        deployed = parse_engine_version(cloud_engine)
+        if deployed is None:
+            raise Refusal(f"the cloud engine {cloud_engine!r} is not X.Y.Z")
     entries: list[Any] = []
     if ledger is not None and (not core_only or Path(ledger).is_file()):
         entries = ledger_entries(ledger, release)
@@ -414,7 +465,7 @@ def build_plan(run: str, ledger: Path | None, release: str | None, *, core_only:
     if core_only:
         not_driven = len(entry_routes(entries))
     else:
-        rsteps, skipped, unmapped = release_steps(entries, accept_skip)
+        rsteps, skipped, unmapped = release_steps(entries, accept_skip, deployed)
         for key in (accept_skip or {}):
             if key not in {r for _t, r in entry_routes(entries)} | {r.split(" ", 1)[1] for _t, r in entry_routes(entries)}:
                 raise Refusal(f"--accept-skip names '{key}', which no ledger entry names")
@@ -422,6 +473,8 @@ def build_plan(run: str, ledger: Path | None, release: str | None, *, core_only:
             failures.append(f"the ledger selection ({'release ' + release if release else '## Unshipped'}) has zero entries, so no "
                             "release route was driven; pass --core-only, or --no-ledger-entries-ok \"<reason>\" if none is correct")
         failures += [f"unmapped ledger route {t}: {why}" for t, why in unmapped]
+        if require_deployed:
+            failures += [f"--require-deployed: {t} {why}" for t, why in skipped if why.startswith("SKIPPED, engine tag")]
     main = [s for s in core_steps() if not s.cleanup]
     cleanup = [s for s in core_steps() if s.cleanup]
     steps = main + rsteps + cleanup
@@ -430,6 +483,8 @@ def build_plan(run: str, ledger: Path | None, release: str | None, *, core_only:
             "skipped": [list(x) for x in skipped], "unmapped": [list(x) for x in unmapped], "failures": failures,
             "ledger_entries": len(entries), "ledger_driven": len(driven), "routes_driven": len(rsteps),
             "core_only": core_only, "release": release, "no_ledger_ok": no_ledger_ok, "not_driven_routes": not_driven,
+            "cloud_engine": _ver(deployed) if deployed else None, "require_deployed": require_deployed,
+            "not_deployed_routes": sum(1 for _k, why in skipped if why.startswith("SKIPPED, engine tag")),
             "floor": core_floor(steps)}
 
 
@@ -705,6 +760,7 @@ class Report:
     plan_failures: list[str] = field(default_factory=list)
     footer: list[str] = field(default_factory=list)
     red_names: list[str] = field(default_factory=list)
+    not_deployed: int = 0   # release routes the plan skipped: the cloud engine lacks them
 
     @property
     def ok(self) -> bool:
@@ -727,10 +783,13 @@ class Report:
             lines.append(f"NON-VACUITY FAILURE: {msg}")
         if not self.ok:
             lines.append("CLOUD LEG FAILED")
-        elif self.expected_red:
-            lines.append(f"CLOUD LEG PASSED WITH EXPECTED-RED {self.expected_red}: {', '.join(self.red_names)}")
         else:
-            lines.append("CLOUD LEG PASSED")
+            line = (f"CLOUD LEG PASSED WITH EXPECTED-RED {self.expected_red}: {', '.join(self.red_names)}"
+                    if self.expected_red else "CLOUD LEG PASSED")
+            if self.not_deployed:   # nexus-h4hge: never read as a pass of the release's routes
+                line += (f" (NOT A RELEASE PASS: {self.not_deployed} release routes not driven, engine tag not deployed; "
+                         "the gating rerun after the deploy passes --require-deployed)")
+            lines.append(line)
         return "\n".join(lines)
 
 
@@ -789,6 +848,10 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
         footer.append(f"no ledger entries accepted: {plan['no_ledger_ok']}")
     if plan.get("core_only"):
         footer.append(f"CORE-ONLY: {plan.get('not_driven_routes', 0)} ledger routes not driven")
+    if plan.get("cloud_engine"):
+        nd = plan.get("not_deployed_routes", 0)
+        footer.append(f"cloud engine {plan['cloud_engine']} (GET /version): " + (f"{nd} ledger routes skipped as not deployed"
+                      if nd else "every ledger route's engine tag is deployed") + ("; --require-deployed" if plan.get("require_deployed") else ""))
     if env.get(EDGE_OVERRIDE_ENV):
         footer.append(f"EDGE HOST OVERRIDE in effect: {EDGE_OVERRIDE_ENV}={env[EDGE_OVERRIDE_ENV]}")
     hosts = sorted({h for r in cloud for h in r.get("hosts", [])})
@@ -802,7 +865,8 @@ def compare(plan: dict[str, Any], local: list[dict[str, Any]], cloud: list[dict[
         nonv.append("every step was skipped or none ran; nothing was examined")
     elif core_ok < floor:
         nonv.append(f"only {core_ok} core steps passed or were expected-red; the floor is {floor} (the fixed core)")
-    return Report(rows, examined, skipped, failed, red, refused, nonv, list(plan.get("failures", [])), footer, red_names)
+    return Report(rows, examined, skipped, failed, red, refused, nonv, list(plan.get("failures", [])), footer, red_names,
+                  int(plan.get("not_deployed_routes", 0)))
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -822,6 +886,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("plan"); p.add_argument("--run", required=True); p.add_argument("--ledger"); p.add_argument("--release")
     p.add_argument("--core-only", action="store_true"); p.add_argument("--accept-skip", action="append", default=[])
     p.add_argument("--no-ledger-entries-ok", default=""); p.add_argument("--out", required=True)
+    p.add_argument("--cloud-engine")  # X.Y.Z from `cloud-engine`; unset = drive every mapped route (local-vs-local)
+    p.add_argument("--require-deployed", action="store_true")
+    ce = sub.add_parser("cloud-engine"); ce.add_argument("--cred-dir", required=True)  # prints the cloud's X.Y.Z
     r = sub.add_parser("run-slot"); r.add_argument("--plan", required=True); r.add_argument("--slot", required=True)
     r.add_argument("--sandbox", required=True); r.add_argument("--host", required=True); r.add_argument("--workdir", required=True)
     r.add_argument("--out", required=True)
@@ -852,11 +919,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if a.cmd == "plan":
             plan = build_plan(a.run, Path(a.ledger) if a.ledger else None, a.release, core_only=a.core_only,
-                              accept_skip=parse_pairs(a.accept_skip, "--accept-skip"), no_ledger_ok=a.no_ledger_entries_ok.strip())
+                              accept_skip=parse_pairs(a.accept_skip, "--accept-skip"), no_ledger_ok=a.no_ledger_entries_ok.strip(),
+                              cloud_engine=a.cloud_engine, require_deployed=a.require_deployed)
             Path(a.out).write_text(json.dumps(plan, indent=1), encoding="utf-8")
+            nd = (f", {plan['not_deployed_routes']} not deployed on the cloud engine {plan['cloud_engine']}"
+                  if plan["cloud_engine"] else "")
             print(f"plan: {len(plan['steps'])} steps ({plan['floor']} floor), {plan['ledger_entries']} ledger entries "
-                  f"({plan['routes_driven']} routes driven, {len(plan['unmapped'])} unmapped, {len(plan['skipped'])} skipped)"
+                  f"({plan['routes_driven']} routes driven, {len(plan['unmapped'])} unmapped, {len(plan['skipped'])} skipped{nd})"
                   + ("; CORE-ONLY" if plan["core_only"] else ""))
+            return 0
+        if a.cmd == "cloud-engine":
+            url = _read_file(Path(a.cred_dir) / "service_url")
+            if not url.startswith("https://"):
+                raise Refusal("service_url is not the public https edge (https:// required)")
+            print(read_cloud_engine(url))
             return 0
         if a.cmd == "run-slot":
             plan = json.loads(Path(a.plan).read_text(encoding="utf-8"))

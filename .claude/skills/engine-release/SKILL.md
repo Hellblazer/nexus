@@ -294,19 +294,24 @@ the full text):
 ```bash
 uv build --wheel -o dist-candidate/        # a candidate wheel of the tree you will tag, when only the engine is cut
 scripts/build-gate-jar.sh
-tests/e2e/cloud-leg.sh --core-only --wheel dist-candidate/conexus-*.whl --window <id> \
+tests/e2e/cloud-leg.sh --wheel dist-candidate/conexus-*.whl --window <id> \
     --expect-red identity-seat-create@403:"cloud self-seat ships in 0.1.197" \
     --expect-red identity-seat-show@404:"the seat was never created"
 ```
 
-`--core-only` because the cut's new routes answer 404 at the edge until the deploy; its report says how many ledger
-routes it did not drive. Each `--expect-red <step>@<status>:<reason>` pins the cloud-only status the step may show (a comma
+The cut's new routes answer 404 at the edge until the deploy, so the leg reads the engine release the cloud runs
+(`GET /version`) and skips each ledger route whose engine tag is later ("SKIPPED, engine tag ... not deployed",
+nexus-h4hge), so `--core-only` is no longer needed here. An unmapped route still fails, and a run with any such skip
+ends `CLOUD LEG PASSED (NOT A RELEASE PASS: ...)`: it is not the gating run.
+
+Each `--expect-red <step>@<status>:<reason>` pins the cloud-only status the step may show (a comma
 list such as `@401,403` pins several): that step is reported EXPECTED-RED with its status and reason and does not fail the
 run. Any other failure on it (another status, a blind tap, no HTTP, a route never called, a round-trip miss) stays FAIL, and a
 PASS on it fails the run ("expected red but passed": remove the flag). `nx identity show` of a missing seat answers 404 through
 the client (`GET /v1/identity/alias/<name>`), which is why the show step pins 404 when the create step is red. After Step 6's
-deploy relay confirms the tag is live, rerun it WITHOUT `--core-only` and without those flags (`--release vX.Y.Z` for the
-client's own ledger entries): that rerun is the real test, and it gates the client tag push. Paste both reports, from the
+deploy relay confirms the tag is live, rerun it without those flags and with `--require-deployed` (`--release vX.Y.Z`
+for the client's own ledger entries), which fails on any route the cloud still lacks: that rerun is the real test, and it
+gates the client tag push. Paste both reports, from the
 `examined` line to the verdict line, onto the cut bead.
 
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)

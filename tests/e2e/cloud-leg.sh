@@ -8,16 +8,21 @@
 # create seats). A red blocks the tag. Logic: tests/e2e/lib/cloud_leg.py; sandbox: lib/candidate_sandbox.sh.
 #
 # USAGE
-#   tests/e2e/cloud-leg.sh --wheel <candidate.whl> --window <id> [--release v<X.Y.Z>] [--core-only]
+#   tests/e2e/cloud-leg.sh --wheel <candidate.whl> --window <id> [--release v<X.Y.Z>] [--core-only | --require-deployed]
 #        [--expect-red <step>@<status>[,<status>]:<reason>]... [--accept-skip "<route>:<reason>"]... [--no-ledger-entries-ok "<reason>"]
 #        [--ledger <file>] [--op-item <title>] [--op-vault AI] [--work-dir <dir>] [--keep] [--plan-only]
 #   The release additions are the wire ledger's entries (docs/wire-contract-pending.md): `## Unshipped`, or with
 #   --release v<X.Y.Z> that release's `## Shipped` entries (the release skill's Step 4b has moved them there). Each
 #   route maps to a client call; an unmapped route FAILS unless --accept-skip names it. A full run with zero ledger
 #   entries FAILS unless --no-ledger-entries-ok gives a reason. --core-only runs the fixed core alone and reports how many
-#   ledger routes it did not drive. --expect-red <step>@<status>:<reason> turns that step's cloud-only failure into EXPECTED-RED
-#   only when the cloud returned exactly the pinned status (a step the cut itself fixes, e.g. identity-seat-create@403);
-#   any other failure on it stays FAIL, and a PASS on it fails the run. --plan-only prints the plan and stops.
+#   ledger routes it did not drive; it is not needed before a deploy: a cloud run reads the engine release the cloud runs
+#   (GET /version, after every local refusal) and SKIPS each ledger route whose engine tag is later ("engine tag not
+#   deployed"; the verdict then reads NOT A RELEASE PASS); the gating rerun after the deploy passes --require-deployed, which
+#   fails on any such skip. --expect-red
+#   <step>@<status>:<reason> turns that step's cloud-only failure into EXPECTED-RED only when the cloud returned exactly
+#   the pinned status (a step the cut itself fixes, e.g. identity-seat-create@403);
+#   any other failure on it stays FAIL, and a PASS on it fails the run. --plan-only prints the plan and stops (a cloud
+#   run has read GET /version for it, the only cloud contact).
 #   tests/e2e/cloud-leg.sh --local-vs-local --wheel <candidate.whl>     # plumbing self-test, no cloud, no window
 #
 # REFUSES (exit 2, nothing written, before any sandbox exists) unless
@@ -44,7 +49,7 @@ LEG="$REPO_ROOT/tests/e2e/lib/cloud_leg.py"
 CORE_ONLY=0 WHEEL="" WINDOW="" LEDGER="$REPO_ROOT/docs/wire-contract-pending.md" LEDGER_SET=0 RELEASE="" KEEP=0 LOCAL_VS_LOCAL=0
 PLAN_ONLY=0 NO_LEDGER_OK="" EXPECT_RED=() ACCEPT_SKIP=()
 OP_ITEM="${NX_CLOUDLEG_OP_ITEM:-nexus cloud test tenant (release-test)}" OP_VAULT="${NX_CLOUDLEG_OP_VAULT:-AI}"
-OP_BIN="${NX_CLOUDLEG_OP:-op-auto}" WORK="" RUN_ID="" WORK_AUTO=0
+OP_BIN="${NX_CLOUDLEG_OP:-op-auto}" WORK="" RUN_ID="" WORK_AUTO=0 CLOUD_ENGINE="" REQUIRE_DEPLOYED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --wheel) WHEEL="${2:?}"; shift 2 ;;
@@ -60,9 +65,10 @@ while [ $# -gt 0 ]; do
         --work-dir) WORK="${2:?}"; shift 2 ;;
         --run-id) RUN_ID="${2:?}"; shift 2 ;;
         --core-only) CORE_ONLY=1; shift ;;
+        --require-deployed) REQUIRE_DEPLOYED=1; shift ;;
         --keep) KEEP=1; shift ;;
         --local-vs-local) LOCAL_VS_LOCAL=1; shift ;;
-        -h|--help) sed -n 2,26p "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n 2,31p "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "cloud-leg: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -122,6 +128,10 @@ if [ "$LOCAL_VS_LOCAL" = 0 ]; then
     "$E2E_PYTHON" "$LEG" normalize-cred --cred-dir "$CREDD" || exit 2
     "$E2E_PYTHON" "$LEG" check-target --cred-dir "$CREDD" --item-title-file "$CREDD/_title" || exit 2
 fi
+if [ "$REQUIRE_DEPLOYED" = 1 ] && { [ "$LOCAL_VS_LOCAL" = 1 ] || [ "$CORE_ONLY" = 1 ]; }; then
+    echo "REFUSED: --require-deployed needs a cloud run that drives the ledger (not --local-vs-local, not --core-only)" >&2
+    exit 2
+fi
 if [ "$LEDGER_SET" = 1 ] && [ ! -f "$LEDGER" ]; then
     echo "REFUSED: --ledger $LEDGER does not exist" >&2
     exit 2
@@ -140,8 +150,17 @@ for x in ${ACCEPT_SKIP[@]+"${ACCEPT_SKIP[@]}"}; do PLAN_ARGS+=(--accept-skip "$x
 CHECK_ARGS=(--plan "$WORK/plan.json")
 for x in ${EXPECT_RED[@]+"${EXPECT_RED[@]}"}; do CHECK_ARGS+=(--expect-red "$x"); done
 "$E2E_PYTHON" "$LEG" check-plan "${CHECK_ARGS[@]}" || exit 2
+if [ "$PLAN_ONLY" = 0 ] && [ ! -f "$WHEEL" ]; then echo "REFUSED: --wheel <candidate wheel> is required and must exist" >&2; exit 2; fi
+if [ "$LOCAL_VS_LOCAL" = 0 ]; then
+    # every local refusal has run; the first cloud contact is the one unauthenticated read, GET /version. A ledger route
+    # whose engine tag is later than the cloud's engine is SKIPPED, not driven (nexus-h4hge); the plan is rebuilt with it.
+    CLOUD_ENGINE="$("$E2E_PYTHON" "$LEG" cloud-engine --cred-dir "$CREDD")" || exit 2
+    PLAN_ARGS+=(--cloud-engine "$CLOUD_ENGINE")
+    [ "$REQUIRE_DEPLOYED" = 0 ] || PLAN_ARGS+=(--require-deployed)
+    "$E2E_PYTHON" "$LEG" plan --run "$RUN_ID" "${PLAN_ARGS[@]}" --out "$WORK/plan.json" || exit 2
+    "$E2E_PYTHON" "$LEG" check-plan "${CHECK_ARGS[@]}" || exit 2
+fi
 if [ "$PLAN_ONLY" = 1 ]; then exit 0; fi
-[ -f "$WHEEL" ] || { echo "REFUSED: --wheel <candidate wheel> is required and must exist" >&2; exit 2; }
 
 tenants=1; [ "$LOCAL_VS_LOCAL" = 1 ] && tenants=2
 cand_engine_start "$REPO_ROOT" "$WORK/engine" "$tenants"
