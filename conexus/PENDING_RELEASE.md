@@ -47,4 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` -- a subagent may run one literal `git -C <absolute linked-worktree root> <verb> ...` command from the primary cwd, with the verb and every flag on an allowlist that runs no command, discards no uncommitted work and moves no shared ref; ships in 8.4.1 (Sam 2026-11-19).
+
 ## Deferred to the next client release
