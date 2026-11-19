@@ -92,6 +92,14 @@ class GroupRecord:
             raise GroupsError(200, "bad_response", f"the engine's group record is unreadable ({type(exc).__name__}: {exc})") from exc
 
 
+def _rows_naming(rows: list[Any], key: str, what: str) -> list[dict[str, Any]]:
+    """*rows* when every one is a map whose *key* is text, else ``bad_response``: a verb indexes its rows by that key, and a
+    malformed answer is one line and exit status 1, never a KeyError."""
+    if not all(isinstance(row, dict) and isinstance(row.get(key), str) for row in rows):
+        raise GroupsError(200, "bad_response", f"a {what} row from the engine names no {key}")
+    return rows
+
+
 def own_identity_id() -> str:
     """The identity this process holds: the one its token file names (a Bash child reads its Claude ancestor's)."""
     record = token_header.current()
@@ -219,14 +227,15 @@ class GroupsClient:
 
     def memberships(self, identity: str) -> list[dict[str, Any]]:
         """The groups of *identity*, in join order: ``{identity, group, role, joined_at}`` each."""
-        return self._call_identity(lambda: self._identities.memberships(identity))  # the one reader of the route
+        rows = self._call_identity(lambda: self._identities.memberships(identity))  # the one reader of the route
+        return _rows_naming(rows, "group", "membership")
 
     def roster(self, group: str) -> list[dict[str, Any]]:
         """The members of *group* in join order. An answer with no ``members`` list is an error, not an empty roster."""
         rows = self._request("GET", f"/v1/identity/groups/{quote(group, safe='')}").get("members")
         if not isinstance(rows, list):
             raise GroupsError(200, "bad_response", "the roster answer carries no members list")
-        return rows
+        return _rows_naming(rows, "identity", "roster")
 
     def join(self, identity: str, group: str, role: str = "member") -> dict[str, Any]:
         """Join *group* as *identity* (the caller's own: the engine checks the token against it), or change the role."""

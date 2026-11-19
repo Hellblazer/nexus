@@ -390,6 +390,31 @@ def test_leave_and_list_over_an_html_answer_exit_one_instead_of_not_a_member_or_
     assert shown.exit_code == 1 and "(none)" not in shown.output, shown.output
 
 
+_MALFORMED_ROWS = {
+    "a_row_that_is_not_a_map": ["i4"],
+    "a_row_with_no_identity": [{"group": "push-train", "role": "member"}],
+    "an_identity_that_is_not_text": [{"identity": 4, "group": "push-train", "role": "member"}],
+}
+
+
+@pytest.mark.parametrize("rows", list(_MALFORMED_ROWS.values()), ids=list(_MALFORMED_ROWS))
+def test_a_malformed_roster_is_one_line_and_exit_one_not_a_keyerror(rows: list[Any]) -> None:
+    """nexus-igea9.3 L6: ``list`` indexed the roster rows directly, so a row without ``identity`` was a KeyError traceback."""
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD).on("GET", "/v1/identity/groups/push-train", 200, {"members": rows})
+    result = _run(_env(wire), "list", "push-train")
+    assert isinstance(result.exception, SystemExit) and result.exit_code == 1, (result.exception, result.output)
+    assert "bad_response" in result.output and "Traceback" not in result.output, result.output
+
+
+def test_a_malformed_membership_row_is_one_line_and_exit_one_in_join() -> None:
+    """The same for ``join``, which looked each row's ``group`` up by index."""
+    wire = Wire().on("GET", "/v1/identity/i3", 200, _view("i3")) \
+                 .on("GET", "/v1/identity/i3/memberships", 200, {"identity": "i3", "memberships": [{"role": "member"}]})
+    result = _run(_env(wire), "join", "push-train")
+    assert isinstance(result.exception, SystemExit) and result.exit_code == 1, (result.exception, result.output)
+    assert "bad_response" in result.output and not wire.sent("POST", "/v1/identity/i3/memberships")
+
+
 _UNREADABLE = {
     "no_leader": {k: v for k, v in RECORD.items() if k != "leader"},              # KeyError
     "deadline_not_a_number": {**RECORD, "ack_deadline": "soon"},                  # ValueError
