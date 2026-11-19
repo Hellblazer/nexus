@@ -1119,8 +1119,8 @@ the collection's notes and queued tasks.
 `renameCollectionTxn` stops inserting, rewriting fourteen tables and
 tombstoning. It still rewrites the `nx-note://<label>/` source URIs of the
 collection's notes, as it does today; moving note identity off the label is
-a catalog-identity change outside this RDR. From P3.6, when a prefix-free
-label first becomes possible, `NoteUri.moveTo` itself rewrites only
+a catalog-identity change outside this RDR. From P2.10, a Phase 2 engine
+bead that P3.6 and P3.8 wait for, `NoteUri.moveTo` itself rewrites only
 `nx-note://` URIs that `isNote` classes as notes, and `namesCollection`
 selects exactly what `moveTo` rewrites. Today `moveTo` rewrites "{@code
 nx-note://<old>/} becomes {@code nx-note://<new>/} and {@code
@@ -1294,7 +1294,7 @@ list stays complete because of two facts and one rule:
   `229-research-40`).
 - `chroma://` residue exists only for names written before P3.6, which are
   prefixed.
-- From P3.6 `NoteUri.moveTo` moves no `chroma://` residue, and no
+- From P2.10 `NoteUri.moveTo` moves no `chroma://` residue, and no
   `nx-note://` value with a file-routed segment, on any caller: rename,
   re-home, the re-embed move or the collection update (item 7; T2
   `229-research-55`). Residue
@@ -1598,7 +1598,18 @@ its acceptance is that test green plus the census pin it lowers.
   chunk content type and the local-mode taxonomy exclusion. On the engine,
   the stale-note repair still tells file residue from notes. Blocks P3.6 and
   P3.8.
-- P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6 and P2.9; client
+- P2.10 Engine: `NoteUri.moveTo` rewrites only `nx-note://` URIs that
+  `isNote` classes as notes, and `namesCollection` selects only those, so
+  no caller moves `chroma://` residue or an `nx-note://<file-routed>`
+  value (item 7; T2 `229-research-55`, `229-research-56`). It changes no
+  schema and no caller. Test: moving the documents of a file-routed
+  collection that carry `chroma://` residue and an `nx-note://<file-routed>`
+  value onto a prefix-free label, by a rename, a re-home, a re-embed move
+  and a collection update, leaves both on their old segment, still classed
+  file-routed by `NoteUri.isNote` and `is_note_uri`, and skipped by the
+  stale-note repair; `NoteUriCorpusTest`'s `moveTo` assertions, which pin
+  the `chroma://` arm today, are inverted. Blocks P3.6 and P3.8.
+- P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6, P2.9 and P2.10; client
   floor bumps in the release that ships P2.3 onward.
 
 **Phase 3: the surrogate key and the label**
@@ -1702,7 +1713,7 @@ its acceptance is that test green plus the census pin it lowers.
     and the two upserts (`PgVectorRepository.java:1294`,
     `TaxonomyCentroidRepository.java:161`) take the id key as their
     conflict target, from gate 3 on the install (item 6).
-- P3.6 Label rule, after P2.9: partial UNIQUE on live `(tenant_id, name)`;
+- P3.6 Label rule, after P2.9 and P2.10: partial UNIQUE on live `(tenant_id, name)`;
   `validate_collection_name` becomes the label rule (item 7). Test: a
   100-character label and a non-conformant label are accepted, a control
   character is refused, a second live row with one label is refused, and a
@@ -1718,15 +1729,13 @@ its acceptance is that test green plus the census pin it lowers.
   completion check, which includes P3.4's index builds there, and until it
   passes the rename keeps its fourteen-table rewrite (item 6, "Readers during the stamp"). The rename, like every other `NoteUri.moveTo` caller, rewrites only
   `nx-note://` URIs that `isNote` classes as notes, never `chroma://`
-  residue, a rule in force from P3.6's cut (item 7). Test: a rename leaves
+  residue, the rule P2.10 ships (item 7). Test: a rename leaves
   chunk, manifest and taxonomy rows untouched and the per-collection index
   in place, and a task queued before the rename names the new label; and
-  moving the documents of a file-routed collection that carry `chroma://`
-  residue and an `nx-note://<file-routed>` value onto a prefix-free label,
-  by a rename, a re-home, a re-embed move and a collection update, leaves
-  both on their old segment, still classed file-routed by `NoteUri.isNote`
-  and `is_note_uri`, and skipped by the stale-note repair.
-- P3.8 Minting (item 8), after P2.9, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
+  the one-row rename of a file-routed collection that has `chroma://`
+  residue to a prefix-free label leaves the residue on its old segment
+  (P2.10's test covers the other three operations).
+- P3.8 Minting (item 8), after P2.9, P2.10, P3.6 and P3.9: the engine mints `c<id>` when no label is given;
   every client render-for-new-collection path registers by attributes
   instead; the strict conformant guard in `t3.py`, the rename gate and the
   indexer reroute are removed. Registration requires explicit attributes
@@ -1757,7 +1766,7 @@ its acceptance is that test green plus the census pin it lowers.
   collection delete` by label or id (it takes a name today,
   `commands/collection.py:547-550`). T2 `229-research-48`. Test: each
   surface on a fixture with a null id and a minted label.
-- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.5 and P3.11; client
+- P3.R Review gate for Phase 3. Engine cuts for P3.1, P3.3 to P3.8 and P3.11; client
   floor bumps in the release that first depends on each. One release may
   hold several of these cuts, and an install may skip releases, so the
   cut order does not decide when an install's readers switch; its own
@@ -1813,9 +1822,10 @@ P1.2 blocks all of Phase 2. P2.1 blocks P2.2 to P2.9. P3.1 waits for Phase
 2 and for P3.2; the first cloud run of its move waits for nexus-f3yqd.2.23
 (Prerequisites). P3.2 blocks P3.1, P3.3 and P3.4. P3.4 waits for P3.3. Within P3.3, P3.3c waits for P3.3b, whose
 indexes its verification requires. P3.12 waits for P3.5a and P3.6. P3.3a waits for P3.1. P3.3 blocks P3.5 and P3.7. P3.7 also waits
-for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P3.6 (which
+for P3.4 and P3.5 (item 7). P3.8 waits for P2.8, P2.9, P2.10 (the
+residue rule, item 7), P3.6 (which
 enforces the reserved minted form) and P3.9 (the recovery-bundle sites,
-item 8); P3.6 waits for P2.9. Phase 4 waits for every Phase 3 bead to be deployed on both
+item 8); P3.6 waits for P2.9 and P2.10. Phase 4 waits for every Phase 3 bead to be deployed on both
 production tenants; P4.4 waits for its release count. These are bead
 orders. At run time each install also passes the completion check's gates
 (item 6, "Readers during the stamp"): P3.3b's pass waits for the stamp and
