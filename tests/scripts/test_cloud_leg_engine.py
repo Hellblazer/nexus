@@ -205,14 +205,14 @@ def _sh(tmp_path: Path, *args: str, wheel: bool = False):
 
 
 @pytest.mark.parametrize("args,fragment", [
-    ((), "--wheel"),                                                   # no candidate wheel
+    (("--core-only",), "--wheel"),                                     # no candidate wheel (core-only: any live ledger)
     (("--ledger", "/nonexistent/wire.md"), "does not exist"),          # a named ledger that is not there
     (("--accept-skip", "POST /v1/typo:x"), "which no ledger entry names"),
     (("--core-only", "--expect-red", "no-such-step@403:x"), "not steps of this plan"),
     (("--core-only", "--require-deployed"), "--require-deployed needs a cloud run"),
 ])
 def test_sh_refuses_locally_before_reading_the_cloud_engine(tmp_path: Path, args: tuple[str, ...], fragment: str) -> None:
-    cp = _sh(tmp_path, *args, wheel=args != ())
+    cp = _sh(tmp_path, *args, wheel=fragment != "--wheel")
     assert cp.returncode == 2 and fragment in cp.stderr, (cp.returncode, cp.stderr)
     assert "cloud engine" not in cp.stderr, "the /version read ran before a local refusal"
 
