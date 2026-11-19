@@ -1574,9 +1574,10 @@ every script and note URI that names one.
   nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
   boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
   on Sam's go: cloud pg_background install and the first registered move")
-  open (T2 `229-research-32`). It gates the first cloud run of P3.1's move,
-  not P3.1's registration, so P3.1 can be the first registered move that
-  .2.23 waits for. A Phase 3 cut can still reach an install whose moves are
+  open (T2 `229-research-32`). It gates the first cloud run of P2.10's
+  repair moves and of P3.1's move, not their registration, so P2.10's can
+  be the first registered moves that .2.23 waits for (T2
+  `229-research-57`). A Phase 3 cut can still reach an install whose moves are
   blocked. There its readers stay on names (item 6, "A blocked move"). A
   BYO or `--no-pg-bundle` PostgreSQL "gets it from its DBA" (RDR-246 lines
   801-802); until then that install is such a case (Cross-Cutting, "BYO
