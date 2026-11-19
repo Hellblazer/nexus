@@ -421,8 +421,8 @@ def test_a_resume_of_a_different_measurement_is_refused() -> None:
 
 
 def test_an_engine_without_the_capability_is_refused_before_any_paid_call(monkeypatch, tmp_path) -> None:
-    import nexus.db
-    import nexus.mcp.core
+    import nexus.db  # noqa: PLC0415 — patched where main() imports it
+    import nexus.mcp.core  # noqa: PLC0415 — as above
 
     monkeypatch.setattr(nexus.db, "make_t3", lambda: SimpleNamespace(supports_topic_route=lambda: False))
     called: list = []
