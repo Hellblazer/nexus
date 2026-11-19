@@ -504,9 +504,11 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   read-only census on both tenants, before any reader moves).
 - [ ] The row cache (`mcp_infra.get_collection_row`) is populated for every
   collection a write path names, so a row-first read on the write path costs
-  no extra round trip. — **Status**: Unverified — **Method**: Source Search
-  of `get_collection_row`'s refresh path plus a test that counts HTTP calls
-  per indexed document before and after (Phase 2 Step 2).
+  no extra round trip. A collection with no row yet, or a failed read,
+  answers as item 1 says, not with an error. — **Status**: Unverified —
+  **Method**: Source Search of `get_collection_row`'s refresh path plus a
+  test that counts HTTP calls per indexed document before and after, on an
+  existing collection and a new one (P2.3).
 - [x] No code path needs a fact from the name that the row cannot carry,
   except the migration sources in Gap 5. — **Status**: Verified —
   **Method**: Source Search (the parse-site census: every extracted value is
@@ -560,9 +562,16 @@ name may still be parsed.
 
 ```text
 // Illustrative; verify against corpus.py and mcp_infra.py during implementation
-resolve_collection(ref: str | int) -> CollectionAttributes
+resolve_collection(ref: str | int) -> Row(CollectionAttributes) | NoRow | Unreadable
     # a label or a collection_id; reads the registry row (cached);
-    # raises CollectionNotRegisteredError
+    # three outcomes, as the write paths tell them apart today:
+    #   Row: the row answers;
+    #   NoRow: no row backs the name; a write answers with the mint-class
+    #     derivation, as embedding_model_row_preferred does;
+    #   Unreadable: the read failed; a write answers with the name too,
+    #     flagged, so the unchanged-content skip does not judge a stored
+    #     stamp against that guess (doc_indexer._target_model, nexus-s8r5o)
+    # a strict reader may turn NoRow into CollectionNotRegisteredError
 find_collection(content_type, owner_id, embedding_model) -> CollectionAttributes | None
     # by attributes, through GET /v1/catalog/collections/for_tuple
 CollectionAttributes: collection_id, label, content_type, owner_id,
@@ -1000,9 +1009,16 @@ every script and note URI that names one.
 
 ### Failure Modes
 
-- A write path reads a collection with no row: `CollectionNotRegisteredError`
+- A strict reader reads a collection with no row: `CollectionNotRegisteredError`
   names the collection and the register call that should have preceded the
-  write. Visible, not silent.
+  read. Visible, not silent. A write path that finds no row answers with the
+  mint-class derivation, as it does today (item 1).
+- A write path cannot read the row (a catalog or listing outage): it writes
+  with the name's model, flagged, and the unchanged-content skip does not
+  re-index a file on that guess. Today's behaviour is kept: "A row read
+  that FAILED answers the name too, flagged ``False``: the skip must not
+  judge a stored stamp against that guess" (`doc_indexer._target_model`;
+  T2 `229-research-36`).
 - A new parse site is added outside `legacy_names`: the client census fails
   with the file, line and shape.
 - The SQL live-body gate misresolves a function's last definer: the gate's
@@ -1078,8 +1094,11 @@ its acceptance is that test green plus the census pin it lowers.
 - P2.2 `resolve_collection`, `find_collection` and the `legacy_names`
   module; move the parsers; classify every remaining caller.
 - P2.3 Write paths: chunk metadata model and indexer target model from the
-  row (Gap 1). Includes the per-document HTTP call count test for Critical
-  Assumption 2.
+  row (Gap 1), keeping the three outcomes of item 1. Includes the
+  per-document HTTP call count test for Critical Assumption 2, on an
+  existing collection and on a new one that has no row yet. Test: a
+  listing outage during `nx index md` neither fails the write nor
+  re-indexes an unchanged file.
 - P2.4 Score calibration and taxonomy thresholds from the row.
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
