@@ -39,13 +39,17 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
  * <p><b>Order.</b> Rows come in the engine's text order of {@code tumbler} (the database's collation of a text column), not
  * in the integer order of a tumbler's segments: {@code 5.1.12} sorts before {@code 5.1.2}.
  *
- * <p><b>Author</b> ({@link #authorWhere}): {@code lower(author COLLATE "pg_c_utf8") LIKE '%' || lower(:text COLLATE
- * "pg_c_utf8") || '%' ESCAPE '\'}. Case folds with the {@code pg_c_utf8} collation's Unicode SIMPLE case mapping (PostgreSQL 17,
- * a builtin, so it needs neither ICU nor a locale), NOT with the database's own ctype: the local bundle is
- * {@code initdb --no-locale} (C ctype), where a bare {@code lower()} folds ASCII only and a capital O with diaeresis would
- * not match the small one. The oracle is Python's {@code needle.lower() in author.lower()}, which uses the FULL mapping; the
- * two differ only for U+0130 (Python lowers it to "i" plus U+0307, the engine to "i") and for a capital sigma at the end of
- * a word (Python's final sigma, the engine's medial one); {@code CatalogDocsByAuthorFoldBase} lists the pairs. No
+ * <p><b>Author</b> ({@link #authorWhere}): {@code fold(author) LIKE '%' || fold(:text) || '%' ESCAPE '\'}, where
+ * {@code fold(x)} is {@code replace(replace(lower(x COLLATE "pg_c_utf8"), 'ς', 'σ'), U+0307, '')}. Case folds with the
+ * {@code pg_c_utf8} collation's Unicode SIMPLE case mapping (PostgreSQL 17, a builtin, so it needs neither ICU nor a locale),
+ * NOT with the database's own ctype: the local bundle is {@code initdb --no-locale} (C ctype), where a bare {@code lower()}
+ * folds ASCII only and a capital O with diaeresis would not match the small one. The oracle is Python's
+ * {@code needle.lower() in author.lower()} (the client's final filter, {@code _keep}), which uses the FULL mapping. Simple and
+ * full lowercase differ only for U+0130 (Python "i" plus U+0307, the engine "i") and for a capital sigma at the end of a word
+ * (Python's final sigma, the engine's medial one); mapping the final sigma to the medial one and dropping U+0307 on both
+ * sides makes the two folds agree after that mapping, so the route returns every row Python keeps plus, rarely, rows the
+ * client's filter drops: a superset whose {@code count} is an upper bound (Sam 2026-11-19, T2
+ * nexus/sam-ruling-rdr241-author-fold-2026-11-19). {@code CatalogDocsByAuthorFoldBase} lists the extra pairs. No
  * normalization on either side, and {@code \}, {@code %} and {@code _} in the text are literal.
  *
  * <p><b>Metadata</b> ({@link #metaWhere}): the reading rules of {@code catalog/meta_filter.py}, the client's oracle.
@@ -149,7 +153,12 @@ public final class CatalogDocReads {
         Field<String> author = CATALOG_DOCUMENTS.AUTHOR.collate(FOLD_COLLATION);
         // the bound pattern is cast to a collatable type first: a bare ? carries no type for COLLATE to apply to
         Field<String> pattern = DSL.val(containsPattern(text)).cast(SQLDataType.VARCHAR).collate(FOLD_COLLATION);
-        return liveOfTenant(tenant).and(DSL.lower(author).like(DSL.lower(pattern), '\\'));
+        return liveOfTenant(tenant).and(fold(author).like(fold(pattern), '\\'));
+    }
+
+    /** The author fold: simple lowercase, final sigma read as the medial one, combining dot above (U+0307) dropped. */
+    private static Field<String> fold(Field<String> text) {
+        return DSL.replace(DSL.replace(DSL.lower(text), "\u03c2", "\u03c3"), "\u0307", "");
     }
 
     /** {@code metadata->>key}, the key bound (user input). NULL for an absent key and for a JSON null; a boolean reads true or false. */

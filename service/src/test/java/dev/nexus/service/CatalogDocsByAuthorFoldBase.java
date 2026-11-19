@@ -22,12 +22,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * shown independent of the cluster.
  *
  * <p>The oracle is Python's needle.lower() in author.lower() (the MCP _keep predicate), with the expected matches
- * COMPUTED WITH CPython 3 and written into PYTHON_MATCHES. The engine uses Unicode SIMPLE case mapping (one code point to
- * one), Python the FULL mapping, and they differ in exactly the pairs of DIVERGENCES: U+0130 (capital I with dot above)
- * lowers to "i" plus U+0307 in Python and to "i" in the engine, and a capital sigma lowers to a final sigma at the end of
- * a word in Python and always to the medial sigma in the engine. The test asserts that the engine's answers equal
- * Python's everywhere except those pairs, and that the pairs it finds are exactly the listed ones, so a new difference
- * and a silently closed one both fail. The listed pairs go to bead nexus-uwggq.2.6; none is excused here.
+ * COMPUTED WITH CPython 3 and written into PYTHON_MATCHES. The engine lowers with Unicode SIMPLE case mapping (one code
+ * point to one), then reads the final sigma as the medial one and drops U+0307 on both sides; Python uses the FULL mapping.
+ * Simple and full lowercase differ only for U+0130 (Python "i" plus U+0307, the engine "i") and for a word-final capital
+ * sigma, and the extra mapping makes the route a superset of Python's answer (Sam 2026-11-19, T2
+ * nexus/sam-ruling-rdr241-author-fold-2026-11-19): the client's _keep removes the rows it adds. The test asserts the
+ * engine's answers equal Python's everywhere except the pairs of DIVERGENCES, that each listed pair is a row the engine
+ * adds and never one it misses, and that the pairs it finds are exactly the listed ones, so a new difference and a
+ * silently closed one both fail.
  */
 abstract class CatalogDocsByAuthorFoldBase extends Rdr241RouteTestBase {
 
@@ -113,11 +115,9 @@ abstract class CatalogDocsByAuthorFoldBase extends Rdr241RouteTestBase {
         {7, 16},   // needle #25
     };
 
-    /** {needle index, author index, what the engine answers}: the pairs where pg_c_utf8 (simple case mapping) differs from CPython str.lower() (full mapping). */
+    /** {needle index, author index, what the engine answers}: the pairs where the engine's fold differs from CPython str.lower(); every one is a row the engine adds (answer 1), never one it misses. */
     static final int[][] DIVERGENCES = {
         {11, 8, 1},   // needle 'in\xf6n\xfc' vs author '\u0130smet \u0130n\xf6n\xfc': str.lower() says False, the engine says True
-        {12, 15, 0},   // needle '\u03c3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2' vs author '\u03a3\u038a\u03a3\u03a5\u03a6\u039f\u03a3': str.lower() says True, the engine says False
-        {21, 9, 0},   // needle '\u03a3\u038a\u03a3\u03a5\u03a6\u039f\u03a3' vs author '\u03a3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2': str.lower() says True, the engine says False
         {22, 0, 1},   // needle '\u0130' vs author 'Leslie Lamport': str.lower() says False, the engine says True
         {22, 6, 1},   // needle '\u0130' vs author 'Jan \u0141ukasiewicz': str.lower() says False, the engine says True
     };
@@ -167,6 +167,23 @@ abstract class CatalogDocsByAuthorFoldBase extends Rdr241RouteTestBase {
         long selecting = java.util.Arrays.stream(PYTHON_MATCHES).filter(m -> m.length > 0).count();
         assertThat(selecting).as("needles that select at least one author").isGreaterThanOrEqualTo(20);
         assertThat(DIVERGENCES.length).isLessThan(10);
+        for (int[] d : DIVERGENCES)
+            assertThat(d[2]).as("the route is a superset of str.lower(): a listed pair is a row it adds, never one it misses").isEqualTo(1);
+    }
+
+    @Test
+    void aGreekNameEndingInCapitalSigmaIsFoundByItsLowercaseFormAndTheReverse() throws Exception {
+        // Python lowers a word-final capital sigma to the final sigma; the engine reads both sigmas as the medial one,
+        // so neither form of the name is missed (Sam 2026-11-19, the superset ruling)
+        insert(Row.of("8.3.1").author("\u03a3\u038a\u03a3\u03a5\u03a6\u039f\u03a3"),
+               Row.of("8.3.2").author("\u03a3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2"),
+               Row.of("8.3.3").author("\u03c3\u03bf\u03c6\u03af\u03b1"));
+        assertThat(tumblers(ok("/v1/catalog/docs/by-author?author=" + enc("\u03c3\u03af\u03c3\u03c5\u03c6\u03bf\u03c2"))))
+            .containsExactly("8.3.1", "8.3.2");
+        assertThat(tumblers(ok("/v1/catalog/docs/by-author?author=" + enc("\u03a3\u038a\u03a3\u03a5\u03a6\u039f\u03a3"))))
+            .containsExactly("8.3.1", "8.3.2");
+        assertThat(tumblers(ok("/v1/catalog/docs/by-author?author=" + enc("\u03c3\u03bf\u03c6"))))
+            .as("a medial sigma still matches only where a sigma is").containsExactly("8.3.3");
     }
 
     @Test
