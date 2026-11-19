@@ -161,7 +161,12 @@ class _RealEmbedCache:
         return dot / (na * nb) if na and nb else 0.0
 
     def query(self, intent, n):
-        q = self._ef([intent])[0]
+        # Memoised by text: the embedder is deterministic, and the golden routing tests ask the same questions
+        # under several regimes (each one re-embedded per call took ~90 s a regime on a loaded CI shard).
+        memo = self.__dict__.setdefault("_query_vecs", {})
+        if intent not in memo:
+            memo[intent] = self._ef([intent])[0]
+        q = memo[intent]
         scored = [
             (pid, 1.0 - self._cosine(q, v))
             for pid, v in zip(self._ids, self._vecs, strict=True)
@@ -324,3 +329,15 @@ def test_mmfag_routing_guard(rows, cache, question, expected_name):
     assert top["name"] == expected_name, (
         f"{question!r} routed to {top['name']!r}, expected {expected_name!r}"
     )
+
+
+def test_the_real_embed_cache_embeds_each_distinct_question_once() -> None:
+    """The golden routing tests ask the same ~53 questions under four regimes; each is embedded once, not per call.
+    The embedder is deterministic, so a memoised vector is the vector (suite audit item 5, 2026-11-19)."""
+    cache = _RealEmbedCache.__new__(_RealEmbedCache)
+    calls: list[list[str]] = []
+    cache._ef = lambda texts: calls.append(list(texts)) or [[1.0, 0.0] for _ in texts]
+    cache._ids, cache._vecs = ["a", "b"], [[1.0, 0.0], [0.0, 1.0]]
+    first = cache.query("what is x", 2)
+    assert cache.query("what is x", 1) == first[:1] and cache.query("what is y", 2)
+    assert calls == [["what is x"], ["what is y"]]
