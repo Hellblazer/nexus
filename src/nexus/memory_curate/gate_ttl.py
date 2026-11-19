@@ -13,6 +13,7 @@ names the cause, if any check of Step 2 fails:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,13 +56,39 @@ def open_phase_reason(scope: gr.Scope, root: Path) -> str | None:
 
 # ── check 3: the verdict chain ───────────────────────────────────────────────────
 
-def chain(entries: list[dict[str, Any]], contents: dict[str, str]) -> tuple[str, list[dict[str, Any]]]:
-    """``(verdict, newest records)`` of one bead's records: the newest by header date, then title."""
-    def key(e: dict[str, Any]) -> tuple[str, str]:
-        return gr.header_fields(contents[e["title"]]).get("date", ""), e["title"]
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_ROUND = re.compile(r"-r(\d+)$")
 
-    newest = max(entries, key=key)
-    return newest["verdict"], [newest]
+
+def order_key(entry: dict[str, Any], content: str) -> tuple[str, int]:
+    """``(date, round)`` of a record, ascending is older.
+
+    The date is the header ``date:`` field; a record with no header is dated from the first ``YYYY-MM-DD`` in its
+    title, else from its timestamp's day. The round is the title's trailing ``-r<N>``, 0 when there is none (so a
+    record with no round sorts before ``-r1``). ``gate_record`` writes no round field, so the title is the only
+    place a round lives."""
+    head = gr.header_fields(content).get("date", "")
+    if _DATE.fullmatch(head):
+        date = head
+    elif (m := _DATE.search(entry["title"])) is not None:
+        date = m.group(0)
+    else:
+        date = (entry.get("timestamp") or "")[:10]
+    r = _ROUND.search(entry["title"])
+    return date, int(r.group(1)) if r else 0
+
+
+def chain(entries: list[dict[str, Any]], contents: dict[str, str]) -> tuple[str, list[dict[str, Any]]]:
+    """``(verdict, newest records)`` of one bead's records.
+
+    The newest are those sharing the greatest ``(date, round)`` (:func:`order_key`). When more than one does, the
+    worse verdict decides the chain (``not-justified`` over ``partial`` over ``justified``), because dates are
+    day-granular and the round is optional, so two records of one day can have no order. The newest records are
+    returned by title."""
+    keyed = [(order_key(e, contents[e["title"]]), e) for e in entries]
+    top = max(k for k, _ in keyed)
+    newest = sorted((e for k, e in keyed if k == top), key=lambda e: e["title"])
+    return max((e["verdict"] for e in newest), key=SEVERITY.__getitem__), newest
 
 
 def verdict_chains(sel: gr.Selection) -> dict[str, tuple[str, list[dict[str, Any]]]]:

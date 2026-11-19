@@ -23,6 +23,7 @@ from nexus.db.limits import QUOTAS
 from nexus.db.t2 import T2Database
 from nexus.mcp.core import store_get
 from nexus.memory_curate import gate_rollup as gr
+from nexus.memory_curate import gate_ttl as gt
 from tests._catalog_fixture_ops import documents_by_title
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 from tests._t2_fixture_ops import backdate_memory
@@ -640,3 +641,79 @@ def test_a_rerun_keeps_a_record_the_read_no_longer_lists_because_its_archive_is_
     assert gr.read_archive(make_t3(), REPO, reaped, 1) is not None    # the full text is still there
     _phase3("nexus-k1")                                              # and a third run keeps it too
     assert sorted(r["title"] for r in _pointer().listed) == sorted([kept, reaped])
+
+
+# ── Step 2.3 ordering (nexus-1gdv0.2.7) ──────────────────────────────────────────
+
+def _rec(title: str, verdict: str, *, date: str | None, stamp: str = "2026-11-01T00:00:00Z", bead: str = "nexus-ord") -> dict:
+    """A row as get_all returns it: headered when *date* is given (as gate_record writes it), headerless otherwise."""
+    head = f"kind: review\nbead: {bead}\nsha: abc1234\noutcome: {verdict}\ndate: {date}\n\nbody" if date else \
+        f"older record\n- **outcome**: {verdict}\n"
+    return {"id": 1, "project": REPO, "title": title, "tags": f"kind:gate,bead:{bead}", "content": head,
+            "timestamp": stamp, "ttl": None}
+
+
+def _chain(*rows: dict) -> tuple[str, list[str]]:
+    sel = gr.select_records(rows, project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
+    verdict, newest = gt.verdict_chains(sel)["nexus-ord"]
+    return verdict, [e["title"] for e in newest]
+
+
+def test_order_same_day_no_round_the_worse_verdict_wins_the_tiebreak() -> None:
+    a = _rec("review-aaa1111-nexus-ord-2026-11-10", "justified", date="2026-11-10")
+    b = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
+    c = _rec("confirm-ccc3333-nexus-ord-2026-11-10", "partial", date="2026-11-10")
+    assert _chain(a, b)[0] == "not-justified"
+    assert _chain(b, a)[0] == "not-justified"          # the order the rows arrive in decides nothing
+    assert _chain(a, c)[0] == "partial"
+    verdict, newest = _chain(a, b, c)
+    assert verdict == "not-justified" and newest == sorted(newest) and len(newest) == 3
+
+
+def test_order_a_later_round_is_newer_and_a_no_round_record_sorts_before_r1() -> None:
+    r1 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r1", "not-justified", date="2026-11-10")
+    r2 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r2", "justified", date="2026-11-10")
+    plain = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
+    assert _chain(r1, r2) == ("justified", [r2["title"]])
+    assert _chain(plain, r1)[0] == "not-justified" and _chain(plain, r1)[1] == [r1["title"]]
+    r1j = _rec("critique-bbb2222-nexus-ord-2026-11-10-r1", "justified", date="2026-11-10")
+    assert _chain(plain, r1j) == ("justified", [r1j["title"]])
+    r9 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r9", "not-justified", date="2026-11-10")
+    r10 = _rec("critique-bbb2222-nexus-ord-2026-11-10-r10", "justified", date="2026-11-10")
+    assert _chain(r9, r10) == ("justified", [r10["title"]])    # the round is a number: r10 is newer than r9
+
+
+def test_order_the_date_beats_the_round_and_the_round_beats_the_title() -> None:
+    late = _rec("a-nexus-ord-2026-11-12", "justified", date="2026-11-12")
+    early_r5 = _rec("z-nexus-ord-2026-11-09-r5", "not-justified", date="2026-11-09")
+    assert _chain(late, early_r5) == ("justified", [late["title"]])
+
+
+def test_headerless_record_is_dated_from_the_date_in_its_title() -> None:
+    old = _rec("review-aaa1111-nexus-ord-2026-11-12", "justified", date=None, stamp="2026-11-01T00:00:00Z")
+    head = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
+    old["tags"] = ""        # an older record: no tags, matched by its title
+    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
+    assert gt.verdict_chains(sel)["nexus-ord"][0] == "justified"     # 11-12 (title) is newer than 11-10 (header)
+    old["title"] = "review-aaa1111-nexus-ord-2026-11-08"
+    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
+    assert gt.verdict_chains(sel)["nexus-ord"][0] == "not-justified"
+
+
+def test_headerless_record_with_no_date_in_its_title_is_dated_from_its_timestamp() -> None:
+    old = _rec("review-nexus-ord-first-pass", "justified", date=None, stamp="2026-11-14T08:00:00Z")
+    old["tags"] = ""
+    head = _rec("critique-bbb2222-nexus-ord-2026-11-10", "not-justified", date="2026-11-10")
+    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
+    assert gt.verdict_chains(sel)["nexus-ord"][0] == "justified"     # the timestamp's day, 11-14, is newest
+    old["timestamp"] = "2026-11-05T08:00:00Z"
+    sel = gr.select_records([old, head], project=REPO, rdr=RDR, beads=("nexus-ord",), phase="3")
+    assert gt.verdict_chains(sel)["nexus-ord"][0] == "not-justified"
+
+
+def test_order_a_terminal_partial_stops_the_run_like_not_justified(db: T2Database) -> None:
+    _gate(db, "nexus-tp", kind="review", sha="aaa1111", outcome="justified", date="2026-11-08")
+    name = _gate(db, "nexus-tp", kind="confirm", sha="bbb2222", outcome="partial", date="2026-11-09")
+    out = _phase3("nexus-tp", expect=1)
+    assert "nexus-tp" in out and name in out and "partial" in out
+    assert "--accept-open" in out and documents_by_title(POINTER_P3) == []

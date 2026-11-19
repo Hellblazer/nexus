@@ -544,9 +544,18 @@ the cause if any of these fail:
    title and must list the same records, and every listed record's archive
    reads back whole and equal to the record, so no record gets a TTL until its
    full text reads back from T3. These reads do not stamp access (A8).
-3. For each listed bead, its newest record (by header date, then round) has
-   the verdict `justified`. A bead whose newest record is `partial` or
-   `not-justified` stops the run and is named, unless the run names it with
+3. For each listed bead, its newest record has the verdict `justified`. Newest
+   is by header date, then round, then title. A record with no field header
+   (an older one) is dated from the first `YYYY-MM-DD` in its title, else from
+   its timestamp's day; the round is the title's trailing `-r<N>` (a number,
+   so `-r10` follows `-r9`), 0 when there is none, because `gate_record`
+   writes no round field. Dates are day-granular and the round is optional, so
+   when more than one record shares the newest date and round the worse
+   verdict decides (`not-justified` over `partial` over `justified`). A
+   terminal `partial` is not a pass: it stops the run like `not-justified`
+   (whether a partial that states no ship-blocker may pass is Sam's call, not
+   this text's; the blocking rule is kept as designed). A bead whose newest
+   record is `partial` or `not-justified` stops the run and is named, unless the run names it with
    `--accept-open <bead>` (repeatable), which the pointer records in an
    `accepted-open:` header line; a name that matches no listed bead is
    refused. Every non-justified record of a listed bead is printed. A record
@@ -1196,3 +1205,4 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Gate finding S6, pointer half (nexus-1gdv0.2.4): the pointer now lists each record's timestamp exactly as `get_all` returned it, unmapped records included, because the pointer was the one place that would keep a record's date after the TTL write and the reap and did not carry it. The second half of S6, what a rerun does with a record a person restored (`nx memory restore` clears the TTL), belongs to Step 3 with the TTL write and is not settled here. |
 | 2026-11-19 | Gate finding S7 and Sam's ruling "Keep findings in full" (nexus-1gdv0.2.5): the claim that Steps 1 to 3 retire the gate records "without losing them", and the line "it keeps its sources by title and copies no body", overstated what survives, because after the TTL, quarantine, rollup and reap only the pointer and RDR-207's summary were left. The one-line excerpt default is withdrawn. Step 1 now writes each listed record's full text to T3 as a note of its own (subject `nexus-rdr-research`, `category=gate_record`, titled `<project>/<T2 title>`, split into titled parts when over 16,384 bytes), reads it back and compares it before the pointer is written, and the pointer names each archive and its part count; unmapped records are not archived. Step 2 reads every archive back before any TTL. Wording amended in Gap 6, the Approach, Step 1, Step 2, the test lists and the Day 2 table. The loss check's own read of the archive is Step 2 and is not built here. |
 | 2026-11-19 | Phase 3 Step 2, the loss check (nexus-1gdv0.2.6), built before any write. The run refuses an open phase before it writes anything, the archives and the pointer included, by the census flag's own rule (closed status, or the phase heading's close marker; `--all` needs the RDR closed). Check 2 gains a meaning the earlier text lacked, because a title taken from the read that listed it is present by construction: a record an earlier pointer listed that the read no longer lists is carried into the new pointer (`state: absent`) when its archive reads back whole, and an archive that does not stops the run naming the title; so a record the reap deleted never drops out of the listing. The pointer is read back with the same list. A not-justified or partial newest record stops the run unless `--accept-open <bead>` (repeatable, recorded in the pointer, refused when it names no listed bead). The command moved out of `commands/memory.py` (now back under its 800-line cap) into `memory_curate/gate_cli.py`, registered in `cli.py`; the loss check lives in `memory_curate/gate_ttl.py`. |
+| 2026-11-19 | Gate finding S5 (nexus-1gdv0.2.7): Step 2.3 said "newest record (by header date, then round)", but the round is optional, dates are day-granular and an older record has no header. The order is now written and built: header date, then round, then title; a headerless record is dated from the first date in its title, else its timestamp's day; the round is the title's `-r<N>` as a number, 0 when absent; when records tie on date and round the worse verdict decides. A terminal `partial` keeps the blocking rule as designed and says so; letting a partial that states no ship-blocker pass would change the design and is left to Sam. |
