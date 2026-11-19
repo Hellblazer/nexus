@@ -710,7 +710,7 @@ def test_read_memberships_returns_group_names_and_turns_engine_errors_into_unrea
 
     class Fake:
         closed = 0
-        rows: object = [{"group": "push-train"}, {"group": "review-pair"}, {"role": "no group field"}]
+        rows: object = [{"group": "push-train"}, {"group": "review-pair"}]
 
         def memberships(self, identity):
             if isinstance(self.rows, Exception):
@@ -735,3 +735,34 @@ def test_read_memberships_returns_group_names_and_turns_engine_errors_into_unrea
     )
     with pytest.raises(GroupUnreadable):
         session.read_memberships("id-a")
+
+
+def test_read_memberships_raises_unreadable_on_a_row_with_no_string_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """nexus-igea9.7 round 1 (S1): a row that names no group is a malformed answer, not a membership to skip."""
+    from nexus.auras import session  # noqa: PLC0415
+    from nexus.auras.load_gate import GroupUnreadable  # noqa: PLC0415
+    from nexus.identity import bind_client  # noqa: PLC0415
+
+    class Fake:
+        def memberships(self, _identity):
+            return [{"group": "push-train"}, {"role": "no group field"}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(bind_client.IdentityClient, "from_config", classmethod(lambda cls, **_k: Fake()))
+    with pytest.raises(GroupUnreadable):
+        session.read_memberships("id-a")
+
+
+def test_a_group_record_the_wire_cannot_build_is_unreadable_not_a_traceback() -> None:
+    from nexus.auras.load_gate import GroupUnreadable, group_reader_from  # noqa: PLC0415
+
+    class Broken:
+        def record(self, _name):
+            from nexus.groups import GroupRecord  # noqa: PLC0415
+
+            return GroupRecord.from_wire({"leader": "i1"})  # no name
+
+    with pytest.raises(GroupUnreadable):
+        group_reader_from(Broken())("push-train")

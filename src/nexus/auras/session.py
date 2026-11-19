@@ -396,7 +396,10 @@ def read_memberships(identity: str) -> list[str]:
     client = None
     try:
         client = IdentityClient.from_config()
-        return [r["group"] for r in client.memberships(identity) if isinstance(r.get("group"), str)]
+        rows = client.memberships(identity)
+        if not all(isinstance(r, dict) and isinstance(r.get("group"), str) for r in rows):
+            raise GroupUnreadable("a membership row names no group")
+        return [r["group"] for r in rows]
     except (IdentityApiError, IdentityUnavailableError) as exc:
         raise GroupUnreadable(f"{type(exc).__name__}: {exc}") from exc
     finally:

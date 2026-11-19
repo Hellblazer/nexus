@@ -143,14 +143,15 @@ class GroupsClient:
         try:
             body = resp.json() if resp.content else {}
         except ValueError:
-            body = {}
-        if not isinstance(body, dict):
-            body = {}
+            body = None
         if resp.status_code >= 400:
+            body = body if isinstance(body, dict) else {}
             if (stop := token_header.superseded_from_body(resp.status_code, body)) is not None:
                 raise stop
             code = body.get("error") if isinstance(body.get("error"), str) else None
             raise GroupsError(resp.status_code, code, str(body.get("message") or body.get("error") or resp.reason_phrase), body)
+        if not isinstance(body, dict):  # a 2xx that is not the engine's JSON object (a proxy page) is not an answer
+            raise GroupsError(resp.status_code, "bad_response", "the engine's answer was not a JSON object")
         return body
 
     # ── the group record ────────────────────────────────────────────────────
@@ -197,11 +198,14 @@ class GroupsClient:
 
     def memberships(self, identity: str) -> list[dict[str, Any]]:
         """The groups of *identity*, in join order: ``{identity, group, role, joined_at}`` each."""
-        return list(self._request("GET", f"/v1/identity/{quote(identity, safe='')}/memberships").get("memberships") or [])
+        return self._call_identity(lambda: self._identities.memberships(identity))  # the one reader of the route
 
     def roster(self, group: str) -> list[dict[str, Any]]:
-        """The members of *group* in join order."""
-        return list(self._request("GET", f"/v1/identity/groups/{quote(group, safe='')}").get("members") or [])
+        """The members of *group* in join order. An answer with no ``members`` list is an error, not an empty roster."""
+        rows = self._request("GET", f"/v1/identity/groups/{quote(group, safe='')}").get("members")
+        if not isinstance(rows, list):
+            raise GroupsError(200, "bad_response", "the roster answer carries no members list")
+        return rows
 
     def join(self, identity: str, group: str, role: str = "member") -> dict[str, Any]:
         """Join *group* as *identity* (the caller's own: the engine checks the token against it), or change the role."""
@@ -225,7 +229,7 @@ class GroupsClient:
         return str(self._call_identity(lambda: self._identities.alias(ref))["identity"])
 
     @staticmethod
-    def _call_identity(call: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    def _call_identity(call: Callable[[], Any]) -> Any:
         from nexus.identity.bind_client import IdentityApiError  # noqa: PLC0415 — only the failure path needs it
 
         try:

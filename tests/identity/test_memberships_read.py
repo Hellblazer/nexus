@@ -49,3 +49,26 @@ def test_an_engine_that_cannot_be_reached_is_unavailable() -> None:
 
     with pytest.raises(IdentityUnavailableError):
         _client(handler).memberships("id-a")
+
+
+def test_a_2xx_answer_that_is_not_a_json_object_is_an_error_never_no_memberships() -> None:
+    for body in ("<html>portal</html>", "[]", "null"):
+        with pytest.raises(IdentityApiError):
+            _client(lambda _r, b=body: httpx.Response(200, text=b)).memberships("id-a")
+
+
+def test_an_answer_with_no_memberships_list_is_an_error_not_an_empty_list() -> None:
+    for payload in ({"identity": "id-a"}, {"memberships": "x"}, {"memberships": None}):
+        with pytest.raises(IdentityApiError):
+            _client(lambda _r, p=payload: httpx.Response(200, json=p)).memberships("id-a")
+
+
+def test_the_identity_is_quoted_into_the_path() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req)
+        return httpx.Response(200, json={"memberships": []})
+
+    _client(handler).memberships("a/b c")
+    assert seen[0].url.raw_path.decode().split("?")[0] == "/v1/identity/a%2Fb%20c/memberships"
