@@ -1182,6 +1182,13 @@ Sam the command:
   and understood before the next restart. There is no sandbox run for it: the
   restart sandbox and its pass record were removed (Sam, 2026-11-19), and the
   script no longer checks for one.
+- Read the `SKIP` lines in the log and the "(M skipped: not on this tmux server)"
+  note on the script's last line and on the log's `=== done` line. A skipped session
+  was not restarted: the run reaches one tmux server and restarts only the sessions
+  that server hosts (a pane it has, with the session's process under it). A run
+  that reaches a server holding none of the sessions refuses (exit 6) before
+  anything is sent; with `TMUX` unset tmux used the default server, and the
+  message says so.
 
 Source: memory `feedback_release_and_develop_ci` § coordinated_upgrade_restart.
 The rest of this step is what that run does to this box, and the manual form

@@ -977,7 +977,7 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
     # No real tmux: every session lives on the one server the run reaches (tested in ..._plan.py); plans go in tmp.
     monkeypatch.setattr(crs, "PLAN_DIR", tmp_path / "plans")
-    monkeypatch.setattr(crs, "check_server", lambda found: (FAKE_SERVER, list(found), ""))
+    monkeypatch.setattr(crs, "check_server", lambda found, quiet=False: (FAKE_SERVER, list(found), ""))
     # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     monkeypatch.delenv("TMUX_PANE", raising=False)
@@ -1218,9 +1218,9 @@ def _run_main(crs, monkeypatch, argv: list[str]) -> tuple[int, list[list[str]]]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return real(cmd, **kw)
 
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)  # the plan's `created` is read against the same clock
     argv = _with_plan(crs, argv)  # before the fake: reading the sessions runs `ps`
     setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
-    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", *argv])
     return crs.main(), tmux_calls
 
@@ -1621,9 +1621,9 @@ def _child(crs, rd, monkeypatch, *argv: str) -> tuple[int, list[str]]:
     restarted: list[str] = []
     monkeypatch.setattr(crs, "restart", lambda s, handoff="": restarted.append(s["name"]) or True)
     monkeypatch.setattr(crs, "update_plugins", lambda: None)
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)  # the plan's `created` is read against the same clock
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--detached", "--no-update", "--wait", "1", *argv,
                                       "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))])
-    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     return crs.main(), restarted
 
 

@@ -26,12 +26,19 @@ It always runs detached inside the tmux server (tmux run-shell -b), so it can
 restart the session that started it. Progress goes to ~/.claude/restart-sessions.log.
 
 The foreground decides which sessions to restart and writes them to a plan file
-(~/.claude/restart-plans/, mode 0600), which the detached half is told to read: it restarts exactly those
-sessions, never enumerates any itself, and refuses (exit 6) when the plan is missing or unreadable. Both halves
-restart a session only when the tmux server they reach is the one it lives on (its pane answers to the session's
-tmux field and its process runs in that pane): with TMUX unset tmux falls back to the default server, so a run that
-reaches a server holding none of the sessions refuses before anything starts, naming the server and what each
-session records, and a session on another server is skipped and logged.
+(~/.claude/restart-plans/, mode 0600, pruned after a day), which the detached half is told to read: it restarts
+exactly those sessions, never enumerates any itself, deletes the plan when it ends, and refuses (exit 6) when the
+plan is missing, unreadable, not a regular file of the user's, over a day old or made on another tmux server. Just
+before the plan is written the foreground re-reads each planned session's own file, so a session that was cleared
+during the gates or the install is planned under its current id, and one that is gone is dropped. Every mode that
+sends keys or mail to a pane (the restart, --ask-ready and --status) first checks the tmux server it reaches: a
+session is on it when the server has the session's pane (its %N id) and the session's process runs in that pane (a
+pane's process belongs to exactly one server). The session and window names in a session's tmux field are not
+compared; a rename or a moved window changes them and proves nothing about the server. With TMUX unset tmux falls
+back to the default server, so a run that reaches a server holding none of the sessions refuses (exit 6) before
+anything is sent, naming the server and what each session records. A session that is not on the server is skipped
+and logged ("SKIP ..."), the rest go on, and the foreground's last line and the run's "=== done" line say how many
+were skipped: read the SKIP lines, those sessions were not restarted.
 
 With --nx X.Y.Z it first brings the whole box to one release, in the
 foreground, and restarts nothing unless every step holds:
@@ -134,8 +141,8 @@ session's exit: a session whose reply has gone stale or turned not ready, or tha
 skipped and logged. With --fresh that last check is against the ready reply as of the start of the
 background run, not idle: a session writing its handoff is busy by design. --force restarts anyway
 after printing the same list (and also restarts a session in status 'shell'); --no-ready-check
-skips the check alone. --dry-run prints the verdict (nothing goes to the log)
-and does not refuse.
+skips the check alone. --dry-run prints the verdict and what it would do and writes nothing to the log;
+it does not refuse for the ready round, but it refuses (exit 6) when no session is on the tmux server it reaches.
 
 Each restart run records its mode and options in ~/.claude/restart-last.json and prints the mode
 first: "fresh: each session writes a handoff, then starts fresh" or "resume: each session resumes
@@ -198,6 +205,12 @@ MARKER_NAME = re.compile(r"[^/]{8}-[0-9a-f]{12}")
 LAST_RUN = Path.home() / ".claude" / "restart-last.json"
 #: Where a run's plan goes: the sessions the foreground decided on, read back by the detached half (one file per run).
 PLAN_DIR = Path.home() / ".claude" / "restart-plans"
+#: A plan older than this by its own `created` field is refused, and a plan file older than this is pruned.
+PLAN_MAX_AGE_S = 24 * 3600.0
+#: A plan lists a few dozen sessions; a larger file is not one.
+PLAN_MAX_BYTES = 1 << 20
+#: Sessions the run left alone because the tmux server it reaches does not host them (the foreground's and this half's).
+SKIPPED_OFF_SERVER = 0
 #: Where the typed ready ask's instruction file goes (created per round, O_EXCL, mode 0600).
 ASK_DIR = Path("/tmp")
 
@@ -836,28 +849,29 @@ def _pane_problem(s: dict) -> str:
 
     A session's tmux field is `<session>:<window id>.<pane id>` and names no socket or server pid, and pane ids
     repeat from one server to the next, so the field alone cannot say which server it is on. The server hosts the
-    session when its pane answers to the same field and the session's process runs in that pane's process tree
-    (a pane's process belongs to exactly one server)."""
-    field, pid = str(s.get("tmux", "")), int(s.get("pid", 0))
-    r = tmux_run("display-message", "-p", "-t", s["pane"], "#{session_name}:#{window_id}.#{pane_id}\t#{pane_pid}")
-    if r.returncode != 0:
-        return f"it records {field}, and that server has no pane {s['pane']}"
-    where, _, pane_pid = r.stdout.strip().partition("\t")
-    if not pane_pid.isdigit():  # tmux answers a pane it does not have with an empty line on some versions
-        return f"it records {field}, and that server has no pane {s['pane']}"
-    if where != field:
-        return f"it records {field}, but that server's pane {s['pane']} is {where}"
+    session when it has the pane and the session's process runs in that pane's process tree (a pane's process
+    belongs to exactly one server). The session and window in the field are NOT compared: `rename-session`, a moved
+    window, `break-pane` and `join-pane` change them while the pane id and the process under it stay. The window id
+    is left out as well, for the same reason. The server's current name for the pane is reported for information."""
+    field, pid, pane = str(s.get("tmux", "")), int(s.get("pid", 0)), s["pane"]
+    r = tmux_run("display-message", "-p", "-t", pane, "#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_id}.#{pane_id}")
+    pane_id, _, rest = r.stdout.strip().partition("\t")
+    pane_pid, _, now = rest.partition("\t")
+    # A pane the server lacks is answered with exit 0 and an empty line by tmux 3.6a, so read the answer, not the status.
+    if r.returncode != 0 or pane_id != pane or not pane_pid.isdigit():
+        return f"it records {field}, and that server has no pane {pane}"
     if not _runs_in(pid, int(pane_pid)):
-        return f"it records {field}, but its process {pid} does not run in that server's pane {s['pane']}"
+        return f"it records {field}, but its process {pid} does not run in that server's pane {pane} (the server calls it {now})"
     return ""
 
 
-def check_server(found: list[dict]) -> tuple[tuple[str, int] | None, list[dict], str]:
+def check_server(found: list[dict], quiet: bool = False) -> tuple[tuple[str, int] | None, list[dict], str]:
     """(the tmux server this run reaches, the sessions of *found* it hosts, why the run must refuse or "").
 
-    A session the reached server does not host is left alone and logged as skipped; the run refuses (the third
+    A session the reached server does not host is left alone and reported as skipped; the run refuses (the third
     value) when that leaves none, or when no server answers. The refusal names the server reached and what each
-    session records, so a run that fell to the default server (TMUX unset) is never silent about it."""
+    session records, so a run that fell to the default server (TMUX unset) is never silent about it. *quiet* prints
+    the skip lines instead of logging them (a dry run writes nothing to the log)."""
     server = tmux_server()
     if server is None:
         return None, [], "no tmux server answers, so no session can be tied to one"
@@ -870,7 +884,7 @@ def check_server(found: list[dict]) -> tuple[tuple[str, int] | None, list[dict],
         why.append(f"{s.get('name') or s['sessionId'][:8]}: {problem}")
     if kept:
         for line in why:
-            log(f"SKIP {line}; this run reaches tmux server {server[0]} (pid {server[1]})")
+            (print if quiet else log)(f"SKIP {line}; this run reaches tmux server {server[0]} (pid {server[1]})")
         return server, kept, ""
     if not found:
         return server, [], ""
@@ -880,11 +894,44 @@ def check_server(found: list[dict]) -> tuple[tuple[str, int] | None, list[dict],
                         f"and none of the {len(found)} session(s) lives on it: " + "; ".join(why))
 
 
-def write_plan(found: list[dict], server: tuple[str, int]) -> Path:
-    """Write the sessions this run decided on, and the tmux server they live on, for the detached half (mode 0600)."""
+def refresh_planned(found: list[dict]) -> list[dict]:
+    """*found* as each session's own sessions/<pid>.json reads now: the current session id, status and name, with a
+    session dropped (and logged) when its pid changed, its process is gone, it is no longer an interactive session or
+    it moved to another pane. Not an enumeration: only the planned sessions' files are read. The gates and the install
+    before the plan is written can take half an hour, and a /clear in that time gives a session a new id."""
+    out = []
+    for s in found:
+        d = read(Path(s["file"]))
+        name = s.get("name") or s["sessionId"][:8]
+        if not d or d.get("kind") != "interactive":
+            why = "its session file is gone or is no longer an interactive session"
+        elif int(d.get("pid", 0) or 0) != s["pid"]:
+            why = f"its pid changed from {s['pid']} to {d.get('pid')}"
+        elif not alive(s["pid"]):
+            why = f"its process {s['pid']} has exited"
+        elif str(d.get("tmux") or "").rsplit(".", 1)[-1] != s["pane"]:
+            why = f"it moved from pane {s['pane']} to {d.get('tmux')}"
+        else:
+            why = ""
+        if why:
+            log(f"SKIP {name}: {why} since this run started; it is not in the plan")
+            continue
+        new = {**s}
+        for key in ("sessionId", "status", "name"):
+            if isinstance(d.get(key), str) and d[key]:
+                new[key] = d[key]
+        if new["sessionId"] != s["sessionId"]:
+            log(f"{name}: session id {s['sessionId']} is now {new['sessionId']} (cleared since this run started); planned under the new one")
+        out.append(new)
+    return out
+
+
+def write_plan(found: list[dict], server: tuple[str, int], skipped: int = 0) -> Path:
+    """Write the sessions this run decided on, the tmux server they live on and how many sessions it skipped, for the
+    detached half (mode 0600)."""
     PLAN_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = PLAN_DIR / f"plan-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}-{uuid.uuid4().hex[:8]}.json"
-    body = {"version": 1, "created": time.time(), "server": {"socket": server[0], "pid": server[1]},
+    body = {"version": 1, "created": time.time(), "server": {"socket": server[0], "pid": server[1]}, "skipped": skipped,
             "sessions": [{**s, "file": str(s.get("file", ""))} for s in found]}
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -892,19 +939,70 @@ def write_plan(found: list[dict], server: tuple[str, int]) -> Path:
     return path
 
 
-def load_plan(path: str) -> tuple[tuple[str, int], list[dict]]:
-    """The (tmux server, sessions) a foreground run planned; PlanError when the file is not given, missing or unusable."""
+def _my_uid() -> int:
+    return os.getuid()
+
+
+def _drop_plan(path: str) -> None:
+    """Delete the plan file *path* names, but only a regular file directly inside PLAN_DIR: a path given on a command
+    line is never trusted to name something else."""
+    if not path:
+        return
+    p = Path(path)
+    try:
+        if p.parent.resolve() == PLAN_DIR.resolve() and stat.S_ISREG(os.lstat(p).st_mode):
+            p.unlink()
+    except OSError:
+        pass
+
+
+def prune_plans(now: float | None = None) -> None:
+    """Remove plan-*.json files in PLAN_DIR older than a day (a run that died before its detached half could delete
+    its plan). Regular files only: a symlink is neither followed nor removed. Never raises."""
+    now = time.time() if now is None else now
+    try:
+        entries = list(os.scandir(PLAN_DIR))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if (e.name.startswith("plan-") and e.name.endswith(".json") and e.is_file(follow_symlinks=False)
+                    and now - e.stat(follow_symlinks=False).st_mtime > PLAN_MAX_AGE_S):
+                os.unlink(e.path)
+        except OSError:
+            pass
+
+
+def load_plan(path: str) -> tuple[tuple[str, int], list[dict], int]:
+    """The (tmux server, sessions, skipped count) a foreground run planned; PlanError when the plan is not given,
+    is not a regular file of this user's, is too large, is over a day old by its own `created` field, or is unusable."""
     if not path:
         raise PlanError("the detached run was given no plan; it never looks for sessions itself")
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        raise PlanError(f"the plan {path} cannot be read ({e})") from e
+    if not stat.S_ISREG(st.st_mode):
+        raise PlanError(f"the plan {path} is not a regular file")
+    if st.st_uid != _my_uid():
+        raise PlanError(f"the plan {path} is not owned by this user")
+    if st.st_size > PLAN_MAX_BYTES:
+        raise PlanError(f"the plan {path} is too large ({st.st_size} bytes)")
     try:
         body = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         raise PlanError(f"the plan {path} cannot be read ({e})") from e
     if not isinstance(body, dict) or body.get("version") != 1:
         raise PlanError(f"the plan {path} is not a version 1 plan")
+    created = body.get("created")
+    if not _number(created) or not -60 <= time.time() - created <= PLAN_MAX_AGE_S:
+        raise PlanError(f"the plan {path} is over a day old, or has no usable creation time; a stale plan is never run")
     srv = body.get("server")
     if not (isinstance(srv, dict) and isinstance(srv.get("socket"), str) and isinstance(srv.get("pid"), int)):
         raise PlanError(f"the plan {path} names no tmux server")
+    skipped = body.get("skipped", 0)
+    if not isinstance(skipped, int) or isinstance(skipped, bool) or skipped < 0:
+        raise PlanError(f"the plan {path} has a bad skipped count")
     planned = body.get("sessions")
     if not isinstance(planned, list) or not planned:
         raise PlanError(f"the plan {path} lists no session")
@@ -914,7 +1012,7 @@ def load_plan(path: str) -> tuple[tuple[str, int], list[dict]]:
                 and d["pane"].startswith("%") and isinstance(d.get("pid"), int) and isinstance(d.get("tmux"), str)):
             raise PlanError(f"the plan {path} has a session entry without its id, pane, pid and tmux field")
         out.append({**d, "file": Path(str(d.get("file", "")))})
-    return (srv["socket"], srv["pid"]), out
+    return (srv["socket"], srv["pid"]), out, skipped
 
 
 def pane_state(pane: str) -> tuple[int, bool, str] | None:
@@ -2971,6 +3069,12 @@ def record_last_run(a: argparse.Namespace) -> None:
     tmp.replace(LAST_RUN)
 
 
+def _skipped_note(n: int | None = None) -> str:
+    """" (M skipped: not on this tmux server)" when M sessions were left alone, else ""."""
+    n = SKIPPED_OFF_SERVER if n is None else n
+    return f" ({n} skipped: not on this tmux server)" if n else ""
+
+
 def exit_on_stop_signals() -> None:
     """Make TERM and HUP exit (128 + the signal) so finally blocks run: the asks' withdrawal, the
     round file, the footprint report. One-shot: the first signal sets both to ignored before it
@@ -3045,7 +3149,7 @@ def main() -> int:
     ap.add_argument("--caller-pane", default="", help=argparse.SUPPRESS)
     ap.add_argument("--plan", default="", help=argparse.SUPPRESS)
     a = ap.parse_args()
-    global FALLBACK_RESUME, KEEP_DEV_CHANNEL, NO_WAKE, NO_SLASH
+    global FALLBACK_RESUME, KEEP_DEV_CHANNEL, NO_WAKE, NO_SLASH, SKIPPED_OFF_SERVER
     FALLBACK_RESUME = a.fallback_resume
     NO_SLASH = a.no_slash_restart
     KEEP_DEV_CHANNEL = a.keep_dev_channel
@@ -3067,16 +3171,26 @@ def main() -> int:
         if not found:
             print("no interactive tmux Claude sessions found")
             return 1
-        return ready_round(a, listed, found)
+        # The ask is mailed, or typed into the session's pane: only where this server has that pane.
+        _server, hosted, problem = check_server(found)
+        if problem:
+            print(problem)
+            return EXIT_REFUSED
+        if len(hosted) < len(found):
+            off = {s["sessionId"] for s in found} - {s["sessionId"] for s in hosted}
+            listed = [s for s in listed if s["sessionId"] not in off]
+            print(f"{len(off)} session(s) skipped: not on this tmux server (see the SKIP lines in {LOG})")
+        return ready_round(a, listed, hosted)
     caller_pane = a.caller_pane if a.detached else os.environ.get("TMUX_PANE", "")
     if a.detached:
         # TERM or HUP (the tmux server going away) must still run the finally blocks: the asks'
         # withdrawal and the footprint report. By default they end the process with neither.
         exit_on_stop_signals()
         try:
-            plan_server, planned = load_plan(a.plan)
+            plan_server, planned, plan_skipped = load_plan(a.plan)
         except PlanError as e:
             log(f"ABORT: {e}")
+            _drop_plan(a.plan)
             return EXIT_REFUSED
         server, found, problem = check_server(planned)
         if not problem and server != plan_server:
@@ -3084,14 +3198,23 @@ def main() -> int:
                        f"{server[0]} (pid {server[1]})" if server else "no tmux server answers")
         if problem:
             log(f"ABORT: {problem}")
+            _drop_plan(a.plan)
             return EXIT_REFUSED
+        SKIPPED_OFF_SERVER = plan_skipped + len(planned) - len(found)
     if not a.detached:
-        server = None
+        server, skipped_n = None, 0
+        if not a.dry_run:
+            prune_plans()
         if found:  # none: the "no interactive tmux Claude sessions found" answer below stands
-            server, found, problem = check_server(found)
+            before = len(found)
+            server, found, problem = check_server(found, quiet=a.dry_run)
             if problem:
-                log(f"ABORT: {problem}")
+                if a.dry_run:
+                    print(problem)
+                else:
+                    log(f"ABORT: {problem}")
                 return EXIT_REFUSED
+            skipped_n = before - len(found)
         last = read(LAST_RUN)
         if not (a.fresh or a.resume) and isinstance(last, dict) and last.get("mode") == "fresh":
             print("the last restart was --fresh; pass --fresh or --resume")
@@ -3116,7 +3239,7 @@ def main() -> int:
             print(f"{s.get('name')}  pid={s['pid']}  pane={s['pane']}  status={s.get('status')}\n    {cmd}")
             if a.fresh:
                 print(f"    handoff -> {h}, asked by {'mail' if has_channel(s) else 'typing'}")
-        print(f"{len(found)} session(s); plugins {'not ' if a.no_update else ''}updated first")
+        print(f"{len(found)} session(s){_skipped_note(skipped_n)}; plugins {'not ' if a.no_update else ''}updated first")
         return 0
     if not found:
         print("no interactive tmux Claude sessions found")
@@ -3129,8 +3252,12 @@ def main() -> int:
             if gate:
                 return gate
         record_last_run(a)
+        found = refresh_planned(found)  # the gates and the install above can take long: re-read each session's own file
+        if not found:
+            log("ABORT: no planned session is still live, so there is nothing to restart")
+            return EXIT_REFUSED
         try:
-            plan = write_plan(found, server)
+            plan = write_plan(found, server, skipped_n)
         except OSError as e:
             log(f"ABORT: cannot write the plan the background run restarts from ({e})")
             return EXIT_REFUSED
@@ -3147,7 +3274,7 @@ def main() -> int:
         except BaseException:
             plan.unlink(missing_ok=True)
             raise
-        print(f"started in the background for {len(found)} session(s); progress in {LOG}")
+        print(f"started in the background for {len(found)} session(s){_skipped_note(skipped_n)}; progress in {LOG}")
         return 0
 
     t_ref = time.time()
@@ -3174,8 +3301,7 @@ def main() -> int:
     finally:
         withdraw_ready_asks(round_used)
         footprint_report(found, LAST_HANDOFFS, round_used)
-        if a.plan:
-            Path(a.plan).unlink(missing_ok=True)
+        _drop_plan(a.plan)
 
 
 #: The handoffs write_handoffs returned for this run, for the footprint report (empty until then).
@@ -3265,7 +3391,7 @@ def _roll(a: argparse.Namespace, found: list[dict], others: list[dict], callers:
     kinds = list(RESULTS.values())
     log(f"=== done: {ok} of {len(found)} restarted ({kinds.count('fresh')} fresh, {kinds.count('resumed')} resumed)"
         + (f"; resumed late: {', '.join(LATE)}" if LATE else "")
-        + (f"; never exited, not relaunched: {', '.join(STUCK)}" if STUCK else ""))
+        + (f"; never exited, not relaunched: {', '.join(STUCK)}" if STUCK else "") + _skipped_note())
     return 0 if ok == len(found) else 1
 
 
