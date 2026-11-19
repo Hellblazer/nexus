@@ -278,7 +278,8 @@ public final class IdentityRepository {
      * same transaction (RDR-253 B4b, Sam 2026-11-19: engine 0.1.198 on; before it the client did this, and only from
      * the session that owns the entry). Both routes reach here: the tenant credential's and the data credential's
      * self-service promote (the handler fenced the token first). An entry already titled {@code name} is never
-     * overwritten: the promote stands, the entry keeps its title, and {@code board_retitle} says {@code title_taken}.
+     * overwritten: the promote stands, the entry keeps its title, and {@code board_retitle} says {@code title_taken},
+     * also when a concurrent write takes the title between the check and the update (the update runs under a savepoint).
      * {@code board_entries_retitled} is always present, which is how a client tells this engine from an older one.
      */
     public Map<String, Object> promote(String tenant, String id, String name) {
@@ -857,14 +858,24 @@ public final class IdentityRepository {
         if (ids.isEmpty()) {
             return Map.of();
         }
-        return scope.withTenant(tenant, ctx -> {
-            Map<String, String> out = new LinkedHashMap<>();
-            ctx.select(IDENTITY_ALIASES.IDENTITY_ID, IDENTITY_ALIASES.NAME).from(IDENTITY_ALIASES)
-                .where(IDENTITY_ALIASES.TENANT_ID.eq(tenant)).and(IDENTITY_ALIASES.IDENTITY_ID.in(ids))
-                .and(IDENTITY_ALIASES.STATE.eq("live"))
-                .forEach(r -> out.put(r.value1(), r.value2()));
-            return out;
-        });
+        return scope.withTenant(tenant, ctx -> liveAliases(ctx, tenant, ids));
+    }
+
+    /**
+     * {@link #liveAliases(String, java.util.Collection)} on the caller's open, tenant-stamped context, so a caller
+     * already inside a transaction (the owner stamper's evaluation) reads through its own connection and does not
+     * borrow a second one from the pool while it holds the first.
+     */
+    public static Map<String, String> liveAliases(DSLContext ctx, String tenant, java.util.Collection<String> ids) {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        ctx.select(IDENTITY_ALIASES.IDENTITY_ID, IDENTITY_ALIASES.NAME).from(IDENTITY_ALIASES)
+            .where(IDENTITY_ALIASES.TENANT_ID.eq(tenant)).and(IDENTITY_ALIASES.IDENTITY_ID.in(ids))
+            .and(IDENTITY_ALIASES.STATE.eq("live"))
+            .forEach(r -> out.put(r.value1(), r.value2()));
+        return out;
     }
 
     /** The live and lapsed holders on {@code host} (optionally one pid), unleased ones included. */

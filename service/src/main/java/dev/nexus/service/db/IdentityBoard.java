@@ -56,18 +56,46 @@ final class IdentityBoard {
     /**
      * {@link #retitle} for a promote (RDR-253 B4b): an entry already titled {@code title} is never overwritten. When
      * another entry holds the title the identity's entry keeps its own, nothing is changed and the answer says
-     * {@code titleTaken}, so the promote itself stands: the entry stays findable by its {@code identity:} line. The
-     * title is checked first, not caught after the failed update, because a failed statement would abort the
-     * caller's whole transaction and take the promote with it.
+     * {@code titleTaken}, so the promote itself stands: the entry stays findable by its {@code identity:} line.
+     *
+     * <p>The title is checked first, and the update still runs under a savepoint: a concurrent write can take the title
+     * between the two, and a unique violation inside the caller's transaction would abort all of it, the promote
+     * included. With the savepoint that case rolls back to it and answers {@code titleTaken} too.
      */
     static Retitled retitleKeepingTaken(DSLContext ctx, String tenant, String id, String title) {
+        return retitleKeepingTaken(ctx, tenant, id, title, () -> { });
+    }
+
+    /** As above; {@code betweenCheckAndUpdate} runs after the title check and before the update (a test forces the race). */
+    static Retitled retitleKeepingTaken(DSLContext ctx, String tenant, String id, String title, Runnable betweenCheckAndUpdate) {
         Long entry = entryOf(ctx, tenant, id);
         if (entry == null) {
             return new Retitled(0, false);
         }
         boolean taken = ctx.fetchExists(ctx.selectOne().from(MEMORY).where(MEMORY.TENANT_ID.eq(tenant))
             .and(MEMORY.PROJECT.eq(PROJECT)).and(MEMORY.TITLE.eq(title)).and(MEMORY.ID.ne(entry)));
-        return taken ? new Retitled(0, true) : new Retitled(retitle(ctx, tenant, id, title), false);
+        if (taken) {
+            return new Retitled(0, true);
+        }
+        betweenCheckAndUpdate.run();
+        java.sql.Savepoint[] before = new java.sql.Savepoint[1];
+        ctx.connection(conn -> before[0] = conn.setSavepoint());
+        try {
+            int changed = setTitle(ctx, tenant, entry, title);
+            ctx.connection(conn -> conn.releaseSavepoint(before[0]));
+            return new Retitled(changed, false);
+        } catch (DataAccessException e) {
+            if (!"23505".equals(e.sqlState())) {
+                throw e;
+            }
+            ctx.connection(conn -> conn.rollback(before[0]));
+            return new Retitled(0, true);
+        }
+    }
+
+    private static int setTitle(DSLContext ctx, String tenant, long entry, String title) {
+        return ctx.update(MEMORY).set(MEMORY.TITLE, title)
+            .where(MEMORY.ID.eq(entry)).and(MEMORY.TENANT_ID.eq(tenant)).execute();
     }
 
     /**
@@ -81,8 +109,7 @@ final class IdentityBoard {
             return 0;
         }
         try {
-            return ctx.update(MEMORY).set(MEMORY.TITLE, title)
-                .where(MEMORY.ID.eq(entry)).and(MEMORY.TENANT_ID.eq(tenant)).execute();
+            return setTitle(ctx, tenant, entry, title);
         } catch (DataAccessException e) {
             if ("23505".equals(e.sqlState())) {
                 throw new IdentityException(409, "board_title_taken",

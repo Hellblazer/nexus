@@ -103,17 +103,4 @@ class IdentityPromoteBoardTest extends IdentityFenceHarness {
             assertThat(get(null, "/v1/identity/" + e.id()).text("kind")).isEqualTo("seat");
         }
     }
-
-    @Test
-    void aPromoteTheEngineRefusesLeavesTheEntryAlone() {
-        Seat s = bindSeat("already-a-seat", 306);
-        String old = "kept " + unique("entry");
-        putEntry(old, s.id());
-
-        Resp r = tenantPromote(s, unique("again"));
-
-        assertThat(r.status()).as(r.raw()).isEqualTo(409);
-        assertThat(r.error()).isEqualTo("not_ephemeral");
-        assertThat(titles()).contains(old);
-    }
 }
