@@ -31,7 +31,7 @@ AURA_SUFFIX: str = ".aura.toml"
 KINDS: tuple[str, ...] = (
     "bad_toml", "too_large", "unknown_key", "missing_key", "wrong_type", "invalid_name", "name_mismatch",
     "bad_subspace", "reserved_arg", "bad_source", "clear_equals_trigger", "bad_limit", "bad_threads",
-    "bad_summary", "bad_field",
+    "bad_summary", "bad_field", "bad_group",
 )
 
 #: The longest ``display.threads`` value: it becomes the heading ``## aura: <value>`` in a threads entry.
@@ -50,10 +50,15 @@ _DIMS_RE = re.compile(rf"dims\.({_FIELD})")
 _BODY_RE = re.compile(r"body\.([^/*\s.]+)")
 _FIELD_RE = re.compile(_FIELD)
 _LITERAL_RE = re.compile(r'= "([^"\n]*)"')
+#: A group name: the engine's address-segment pattern, at most 64 characters (``IdentityMemberships.GROUP``).
+_GROUP_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+#: The one argument source the host fills itself: the session's identity id at load (RDR-252).
+SELF_IDENTITY: str = "self.identity"
 
-_TOP_KEYS = frozenset({"aura", "summary", "procedure", "trigger", "args", "when", "clear", "display", "limits"})
+_TOP_KEYS = frozenset({"aura", "summary", "procedure", "trigger", "args", "when", "clear", "display", "limits", "load"})
 _TRIGGER_KEYS = frozenset({"subspace", "match"})
 _WHEN_KEYS = frozenset({"field"})
+_LOAD_KEYS = frozenset({"group"})
 _CLEAR_KEYS = frozenset({"match"})
 _DISPLAY_KEYS = frozenset({"threads", "channel"})
 _LIMIT_KEYS = frozenset(f.name for f in fields(Limits))
@@ -79,9 +84,10 @@ class AuraError(Exception):
 @dataclass(frozen=True)
 class ArgSource:
     """Where an argument's value comes from: ``dims.<field>`` or ``body.<field>`` (``value`` is the
-    field), the tuple ``id`` or ``subspace`` (``value`` empty), or a ``literal`` (``value`` is the text)."""
+    field), the tuple ``id`` or ``subspace`` (``value`` empty), a ``literal`` (``value`` is the text), or
+    ``self.identity`` (kind ``self``, ``value`` ``identity``): the host fills it at load, not the row."""
 
-    kind: Literal["dims", "body", "id", "subspace", "literal"]
+    kind: Literal["dims", "body", "id", "subspace", "literal", "self"]
     value: str = ""
 
 
@@ -98,8 +104,12 @@ class Aura:
     when_field: str | None
     clear_match: tuple[tuple[str, str], ...] | None
     threads: str
-    channel: bool
+    #: ``True`` sends the channel notice on every fire; a string is the name of a boolean field of the procedure's
+    #: result, and the notice goes out only when that field is ``True`` (RDR-252).
+    channel: bool | str
     limits: Limits
+    #: ``[load] group``: the aura loads only in a session whose identity is a member of that group (RDR-252).
+    load_group: str | None = None
 
 
 class _Reader:
@@ -148,6 +158,8 @@ class _Reader:
             return ArgSource("id")
         if text == "subspace":
             return ArgSource("subspace")
+        if text == SELF_IDENTITY:
+            return ArgSource("self", "identity")
         if m := _DIMS_RE.fullmatch(text):
             return ArgSource("dims", m.group(1))
         if m := _BODY_RE.fullmatch(text):
@@ -156,7 +168,7 @@ class _Reader:
             return ArgSource("literal", m.group(1))
         raise self.fail(
             "bad_source", key,
-            f"{text!r} is not dims.<field>, body.<field>, id, subspace or a literal written = \"value\"",
+            f"{text!r} is not dims.<field>, body.<field>, id, subspace, {SELF_IDENTITY} or a literal written = \"value\"",
         )
 
     def limits(self, raw: dict[str, object]) -> Limits:
@@ -250,11 +262,28 @@ def parse_aura(data: bytes, *, name: str) -> Aura:
     if not summary.strip() or not summary.isprintable():
         raise r.fail("bad_summary", "summary", "must be one printable line that is not blank")
     channel = display.get("channel", False)
-    if not isinstance(channel, bool):
-        raise r.fail("wrong_type", "display.channel", f"must be a boolean, got {type(channel).__name__}")
+    if isinstance(channel, str):
+        if _FIELD_RE.fullmatch(channel) is None:
+            raise r.fail("bad_field", "display.channel", f"{channel!r} is not a result field name {_FIELD}")
+    elif not isinstance(channel, bool):
+        raise r.fail(
+            "wrong_type", "display.channel",
+            f"must be a boolean or the name of a result field, got {type(channel).__name__}",
+        )
+
+    load_group: str | None = None
+    if "load" in top:
+        load = r.table(top["load"], "load", _LOAD_KEYS)
+        load_group = r.string(r.required(load, "group", "load."), "load.group")
+        if _GROUP_RE.fullmatch(load_group) is None:
+            raise r.fail(
+                "bad_group", "load.group",
+                f"{load_group!r} is not a group name: a letter or digit, then letters, digits, '.', '_' or '-', at most 64",
+            )
 
     limits = r.limits(r.table(top["limits"], "limits", _LIMIT_KEYS)) if "limits" in top else Limits()
     return Aura(
         name=aura, summary=summary, procedure=procedure, subspace=subspace, match=match, args=tuple(args),
         when_field=when_field, clear_match=clear_match, threads=threads, channel=channel, limits=limits,
+        load_group=load_group,
     )

@@ -172,7 +172,7 @@ def test_when_needs_its_field_and_clear_needs_its_match() -> None:
         (minimal().replace('summary = "does a thing"', "summary = 1"), "summary"),
         (minimal().replace('procedure = "some_proc"', "procedure = true"), "procedure"),
         (minimal().replace('aura = "mini"', "aura = 3"), "aura"),
-        (minimal().replace('threads = "a block"', 'threads = "a block"\nchannel = "yes"'), "display.channel"),
+        (minimal().replace('threads = "a block"', 'threads = "a block"\nchannel = 3'), "display.channel"),
         (minimal().replace('threads = "a block"', "threads = 5"), "display.threads"),
         (minimal().replace('subspace = "board/topic"', "subspace = 5"), "trigger.subspace"),
         (minimal().replace('subspace = "board/topic"', 'subspace = "board/topic"\nmatch = { kind = 1 }'), "trigger.match.kind"),
@@ -398,3 +398,64 @@ def test_a_body_field_may_carry_a_hyphen_or_a_digit_first() -> None:
 @pytest.mark.parametrize("source", ['= "x" trailing', '= "x"y', 'lead = "x"', '= "x""'])
 def test_a_literal_with_anything_after_its_closing_quote_is_refused(source: str) -> None:
     _refused(minimal(extra=f"\n[args]\nsha = '{source}'\n"), "bad_source", "args.sha")
+
+
+# -- RDR-252 Step 4 part A (nexus-igea9.7): [load], self.identity, display.channel as a field name -------------------
+
+
+def test_a_load_group_is_accepted_and_kept() -> None:
+    aura = _parse(minimal(extra='\n[load]\ngroup = "push-train"\n'))
+    assert aura.load_group == "push-train"
+    assert _parse(minimal()).load_group is None
+
+
+def test_a_load_table_with_an_unknown_key_is_refused() -> None:
+    _refused(minimal(extra='\n[load]\ngroup = "push-train"\nrole = "leader"\n'), "unknown_key", "load.role")
+
+
+def test_a_load_table_needs_its_group() -> None:
+    _refused(minimal(extra="\n[load]\n"), "missing_key", "load.group")
+
+
+def test_a_load_group_that_is_not_a_string_is_refused() -> None:
+    _refused(minimal(extra="\n[load]\ngroup = 4\n"), "wrong_type", "load.group")
+
+
+@pytest.mark.parametrize("group", ["", "-lead", "a b", "a/b", "a*", "x" * 65, "push train", ".dot"])
+def test_a_load_group_that_breaks_the_group_name_rule_is_refused(group: str) -> None:
+    _refused(minimal(extra=f'\n[load]\ngroup = "{group}"\n'), "bad_group", "load.group")
+
+
+@pytest.mark.parametrize("group", ["push-train", "review.pair_2", "A", "0a"])
+def test_a_group_name_in_the_address_segment_pattern_is_accepted(group: str) -> None:
+    assert _parse(minimal(extra=f'\n[load]\ngroup = "{group}"\n')).load_group == group
+
+
+def test_self_identity_is_an_argument_source() -> None:
+    aura = _parse(minimal(extra='\n[args]\nme = "self.identity"\n'))
+    assert dict(aura.args) == {"me": ArgSource("self", "identity")}
+
+
+@pytest.mark.parametrize("source", ["self", "self.", "self.session", "self.identity.x", "Self.identity", "self.Identity"])
+def test_a_self_source_other_than_identity_is_refused(source: str) -> None:
+    _refused(minimal(extra=f'\n[args]\nme = "{source}"\n'), "bad_source", "args.me")
+
+
+def test_the_bad_source_message_names_the_self_form() -> None:
+    err = _refused(minimal(extra='\n[args]\nme = "nope"\n'), "bad_source", "args.me")
+    assert "self.identity" in err.detail
+
+
+def test_display_channel_accepts_the_name_of_a_result_field() -> None:
+    aura = _parse(minimal().replace('threads = "a block"', 'threads = "a block"\nchannel = "wake"'))
+    assert aura.channel == "wake"
+
+
+@pytest.mark.parametrize("name", ["", "1wake", "wa ke", "wake!", "a.b"])
+def test_a_channel_field_name_that_is_not_a_field_name_is_refused(name: str) -> None:
+    _refused(minimal().replace('threads = "a block"', f'threads = "a block"\nchannel = "{name}"'), "bad_field", "display.channel")
+
+
+@pytest.mark.parametrize("value", ["3", "1.5", "[1]", "{ a = 1 }"])
+def test_a_channel_that_is_neither_a_bool_nor_a_string_is_refused(value: str) -> None:
+    _refused(minimal().replace('threads = "a block"', f'threads = "a block"\nchannel = {value}'), "wrong_type", "display.channel")
