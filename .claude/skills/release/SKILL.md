@@ -116,7 +116,10 @@ surfaces the whole fix list. The checks:
   engine with vectors-055, or every `nx_answer` search step is refused), and when it
   is below `RESOLVE_SENSITIVE_MIN_ENGINE_VERSION` (RDR-193 Step 6: a release must pin
   an engine whose `resolve_or_register` accepts `sensitive`, or every sensitive titled
-  put and curator register is refused with a 400);
+  put and curator register is refused with a 400), and when it is below
+  `CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION` (RDR-241 Phase 2: a release must pin an
+  engine with the catalog routes, or author search, `list --meta`, `gc` and
+  `--check-references` answer errors and operator dispatch drops its file tools);
 - `ci-evidence-contexts` -- the required-context drift tests, run with `-m ""` so
   the integration-marked live branch-protection check actually executes;
 - `mandatory-pins` -- the GitHub-backed `mandatory_regression_pin` tests under
@@ -678,6 +681,36 @@ GATE; a custom `--prepare-cmd` bypasses the cache.
 The plugin-only fast lane does not run it: the wheel and engine that lane ships are the
 base tag's, apart from the version, so there is nothing new to rehearse.
 
+### 6f. Cloud leg on the release candidate (BLOCKING; the cloud test tenant only)
+
+Sam, 2026-11-19: 8.5.0 shipped two faults only cloud mode showed (the CDN stripped `X-Nexus-Identity-Token`, so
+identity-line board writes answered 403; the laptop's data credential could not create seats), and every gate ran
+against a local engine. After Step 4b has moved this release's ledger entries to `## Shipped`, and before the tag, run
+`tests/e2e/cloud-leg.sh` on the release candidate, inside an announced cloud window, against the cloud test tenant only
+(run `scripts/build-gate-jar.sh` first: the local slot boots the gate jar):
+
+```bash
+uv build --wheel -o dist-candidate/
+tests/e2e/cloud-leg.sh --wheel dist-candidate/conexus-X.Y.Z-py3-none-any.whl --window <window-id> --release vX.Y.Z
+```
+
+It installs the wheel into a scratch HOME, drives the core write paths (identity-line T2 write, seat and identity,
+mailbox send and claim, T1, T3 round trip) and each route of THIS release's `## Shipped` wire-ledger entries
+(`docs/wire-contract-pending.md`, selected by `--release`) through the real client, once on a local engine and once
+through the public edge, and FAILS on any 4xx or 5xx the cloud run returns that the local run does not. It also fails on
+an unmapped ledger route (map it in `ROUTE_MAP`, or `--accept-skip "<route>:<reason>"`) and on zero ledger entries (a
+release with none says `--no-ledger-entries-ok "<reason>"`). A route whose engine half the cloud does not run yet
+(read from `GET /version`) is SKIPPED, not driven, and the verdict reads `NOT A RELEASE PASS` (nexus-h4hge): that report
+does not clear the tag. The run that clears it passes `--require-deployed`, which fails on any such skip. When every
+paired entry is `[additive]` the engine deploys first and that run precedes the tag; when a non-additive entry holds
+the deploy for the client tag, the leg cannot drive those routes before the tag, so say so on the cut bead and run the
+`--require-deployed` leg right after the deploy. A red blocks the tag. It refuses without the window marker
+(`~/.config/nexus-cloud-windows/<id>.window`, mode 0600, at most 4 h, written by the releaser after announcing the window:
+it records an announcement and does not verify one), on any credential but the `release-test` tenant's (1Password item
+`nexus cloud test tenant (release-test)`, read with `op-auto`), and on any edge but `api.conexus-nexus.com`.
+`--local-vs-local` proves the plumbing with no cloud. Run no other cloud walk outside a window. Paste the report, from the
+`examined` line to the verdict line (counts, `ledger entries driven`, window id, run id, `PASSED`), onto the cut bead.
+
 ### 7. Commit on a release branch + PR to main (nexus-mkj6u: replaces direct-to-main)
 
 **When this release pins a NEW engine tag, open the PR only after that tag is
@@ -1097,20 +1130,40 @@ refused while by id works, and anything keyed on the old id (its mailbox, its T1
 board subscriptions, unflagged scratch) is orphaned; the log names each old id
 for `claude --resume <id>` back-out. With `--nx` it runs the engine gate (re-reading `/version`
 every 30 s up to `--engine-wait`, default 1800 s, so a paired release's redeploy
-can land; `--skip-engine-gate` on a local-mode box), then `uv cache clean conexus`
-plus `reinstall-tool.sh conexus==X.Y.Z`, then the marketplace and plugin update,
-and restarts nothing unless every step holds. The pin and the cache clean exist
-because a bare `conexus` spec resolved from uv's cached index and built two
-generations of 7.69.0 minutes after 7.70.0 published (2026-10-04): read
-`nx --version`, never the "built generation" line. Before handing Sam the
-command:
+can land; `--skip-engine-gate` on a local-mode box), then
+`reinstall-tool.sh conexus==X.Y.Z`, then the marketplace and plugin update,
+and restarts nothing unless every step holds. The exact pin exists because a
+bare `conexus` spec resolved from uv's cached index and built two generations
+of 7.69.0 minutes after 7.70.0 published (2026-10-04): read `nx --version`,
+never the "built generation" line. The script does not run `uv cache clean`
+(Sam, 2026-11-19): it waits on `~/.cache/uv/.lock`, which every live session's
+MCP server holds, and stalled the first 8.5.0 restart until its ready replies
+timed out. The pin, the `nx --version` check and the plugin version check
+turn a stale index into an abort, never a silent wrong install. Before handing
+Sam the command:
 
 - Before `--ask-ready`, post the upgrade hold on the board and message every
-  live peer: hold, stop ALL background shells and agents with TaskStop
-  (finished agents' included, not only foreground runs), then reply READY.
-  The releaser cannot stop a peer's shells, and `--ask-ready` types only to an
-  idle session, so a session pinned at `shell` is never asked and is skipped
-  after `--wait` (kimi_nexus_edb, 2026-10-26).
+  live peer. The hold is a one-way announcement: it asks for no reply, and no
+  peer answers READY to it (Sam, 2026-11-19; two ready rounds cost every
+  session two turns). The script's file reply is the only readiness answer.
+  The ask the script sends names each session's own background tasks and tells
+  it to stop them with TaskStop, finished ones included, before it answers
+  ready. A session with the channel gets the ask as mail whatever its status;
+  one without it is typed to only when idle, so a session pinned at `shell`
+  is not typed to and is skipped after `--wait` (kimi_nexus_edb, 2026-10-26). A later `--ask-ready` round within `--ready-max-age` asks again
+  only the sessions whose last answer was not ready, missing, unreadable or
+  stale, or who have since gone busy or opened a shell, and keeps the others'
+  fresh ready answers; `--status` names the sessions it re-asked and the
+  answers it kept. Re-run it until `--status` shows every target ready. A
+  session `--status` lists as not asked (no channel, and not at its prompt)
+  never sees the ask: message it directly to stop its background shells and
+  agents with TaskStop, finished ones included, then re-run `--ask-ready`.
+  Start the restart soon after the round: a kept answer can be close to
+  `--ready-max-age` old, and the go gate and each session's guard refuse an
+  answer past it (nothing restarts; ask again). If the `--nx` install aborts
+  because the new version does not resolve yet (PyPI's index can lag a
+  publish by minutes), nothing was restarted: wait and run the same command
+  again.
 
 - Read the dry run's `-n` values against ListAgents. A restart keeps each
   session's CURRENT name (Sam, 2026-10-31); before the script dropped the launch
@@ -1126,10 +1179,14 @@ command:
   the sessions whose transcripts were written in the 30 minutes before boot.
 - A restart that misbehaved (a session not resumed, a pane closed, a missing
   wake, a busy session exited) gets a sandbox run, `tests/e2e/restart-sessions/run.sh`,
-  before the next restart, whatever the gate says. The gate only warns when the
-  last pass was on another Claude Code version (Sam, 2026-11-18), and
-  `scripts/restart-sandbox-weekly.sh` keeps the pass current from a weekly launchd
-  job (`--install` sets it up).
+  before the next restart, whatever the log says. The sandbox gate is advisory
+  (Sam, 2026-11-19): a missing or stale pass is a WARN line naming the last pass
+  and the weekly run's result, and the restart goes on; `--skip-sandbox-check`
+  is still accepted and only logs its reason. The regression check is
+  `scripts/restart-sandbox-weekly.sh` (a weekly launchd job, `--install` sets
+  it up). A change to the roll path (the restart, abort, gate or pane code)
+  runs `tests/e2e/restart-sessions/run.sh` in its own review before it lands;
+  that is where the sandbox is paid for, not at the release.
 
 Source: memory `feedback_release_and_develop_ci` § coordinated_upgrade_restart.
 The rest of this step is what that run does to this box, and the manual form
@@ -1404,7 +1461,9 @@ also adds the real GitHub marketplace and checks every plugin's version and
 auto-update. Then Step 12 (the `nx --version` check), and restart sessions
 together, as after any release: a plugin update says "Restart to apply" and only a
 restarted session loads it. Restart with `scripts/claude-restart-sessions`: ask
-first with `--ask-ready` and read the table with `--status`. The restart itself
+first with `--ask-ready` (a hold message to peers is one-way; the script's file reply
+is the only answer, and a later round re-asks only the sessions that were not ready) and
+read the table with `--status`. The restart itself
 needs that round: it refuses (exit 3) with no round, a malformed or old one, or
 any target without a fresh ready reply that is idle now (the session running the
 script is exempt from idle only), and checks again after the install and before

@@ -37,7 +37,7 @@ public final class OwnerlessLogLimiter {
     /** One line per key per this many milliseconds. */
     public static final long WINDOW_MS = 60_000L;
 
-    static final int MAX_KEYS = 10_000;
+    public static final int MAX_KEYS = 10_000;
 
     /** The expired-key sweep at the cap runs at most this often, so a full map of live keys is not rescanned per write. */
     static final long SWEEP_INTERVAL_MS = 1_000L;
@@ -48,13 +48,26 @@ public final class OwnerlessLogLimiter {
     }
 
     private final LongSupplier clockMs;
+    /** Called once for every request whose key had no slot and went to the shared bucket, logged or not. */
+    private final Runnable onOverflow;
     private final ConcurrentHashMap<String, State> states = new ConcurrentHashMap<>();
     /** Shared by every key that does not fit in {@link #states}; not counted in {@link #size()}. */
     private final State overflow = newState();
     private long lastSweepMs = Long.MIN_VALUE;   // guarded by this
 
     public OwnerlessLogLimiter(LongSupplier clockMs) {
+        this(clockMs, () -> { });
+    }
+
+    /**
+     * @param onOverflow run once per request that lands in the shared overflow bucket (RDR-236 Phase 4 Step 2b prep,
+     *                   nexus-6pfgb.66): the bucket's line names only its first key, so a caller that must know how
+     *                   many writers the log could not name counts them here. It runs on the request thread and must
+     *                   neither block nor throw.
+     */
+    public OwnerlessLogLimiter(LongSupplier clockMs, Runnable onOverflow) {
         this.clockMs = clockMs;
+        this.onOverflow = onOverflow;
     }
 
     /** The limiter the repository uses. */
@@ -104,6 +117,9 @@ public final class OwnerlessLogLimiter {
         State st = states.get(key);
         if (st == null) {
             st = admit(key, now);
+            if (st == overflow) {
+                onOverflow.run();
+            }
         }
         synchronized (st) {
             if (st.lastLoggedMs == Long.MIN_VALUE || now - st.lastLoggedMs >= WINDOW_MS) {

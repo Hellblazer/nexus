@@ -22,8 +22,12 @@ import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_COVERAGE_COUNTS_768;
  *
  * <p><b>Coverage</b> is {@code 1 - unassigned / chunks} over the collection's live chunks. A collection is routed only
  * when {@link Counts#routable} holds: it has centroids, it has chunks, and its coverage is at least
- * {@link #ROUTE_MIN_COVERAGE}. A collection with no chunks has no coverage (never 1) and an orphaned taxonomy (topics,
- * no chunks) is therefore never routed.
+ * {@link #ROUTE_MIN_COVERAGE} (the default; a request may set another, {@code topic_route.min_coverage}). A collection
+ * with no chunks has no coverage (never 1) and an orphaned taxonomy (topics, no chunks) is therefore never routed.
+ *
+ * <p>The count ignores {@code embedding_model} and counts sensitive chunks, so its ratio can read lower than what the
+ * search sees (a sensitive chunk the search excludes, a chunk of another model that the search does not reach): a
+ * collection can be refused or fall back that a search-side ratio would have routed, never routed wrongly.
  *
  * <p><b>Invalidation: option (a), the engine invalidates on a store.</b> The engine cannot see which assignments
  * the client deferred or lost ({@code taxonomy_deferral()} and the lost-chunk tripwire are client state), so it does
@@ -136,6 +140,17 @@ public final class TaxonomyCoverage {
      * collection unscoped.
      */
     public Optional<Counts> lookup(String tenant, String collection) {
+        return lookup(tenant, collection, 0);
+    }
+
+    /**
+     * As {@link #lookup(String, String)} with the count statement, if one has to run, bounded to at most
+     * {@code maxStatementMs} ({@code 0}: the default bound). A cached reading is served whatever the bound. A count cut
+     * short by it answers empty and caches nothing, like any other failed count, so a collection whose count never
+     * fits the bound is never read from the cache (RDR-134 Step 3: the routed arm passes its share of the arm's
+     * remaining budget, and degrades to the unscoped search on empty).
+     */
+    public Optional<Counts> lookup(String tenant, String collection, int maxStatementMs) {
         Key key = new Key(tenant, collection);
         Slot slot = slots.get(key);
         if (slot == null) {
@@ -154,7 +169,7 @@ public final class TaxonomyCoverage {
         }
         Counts counted;
         try {
-            counted = count(tenant, collection);
+            counted = count(tenant, collection, maxStatementMs);
         } catch (RuntimeException e) {
             log.warn("event=taxonomy_coverage_lookup_failed tenant={} collection={} error={}", tenant, collection,
                 e.toString());
@@ -209,11 +224,15 @@ public final class TaxonomyCoverage {
         return Math.max(0, before - slots.size());
     }
 
-    private Counts count(String tenant, String collection) {
+    private Counts count(String tenant, String collection, int maxStatementMs) {
         int dim = CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
         return tenantScope.withTenant(tenant, ctx -> {
             // The function takes no limit, so the read is bounded here, as TaxonomyRepository#unassignedChashes does.
-            PgSession.setTaxonomyAssignBounds(ctx);
+            if (maxStatementMs > 0) {
+                PgSession.setTaxonomyReadBounds(ctx, maxStatementMs);
+            } else {
+                PgSession.setTaxonomyAssignBounds(ctx);
+            }
             // Not named `fn`: HnswServingGucParityTest anchors on that name for a vector-ranked fetch, and this is a
             // plain count with no distance operator.
             Table<?> countsFn = switch (dim) {

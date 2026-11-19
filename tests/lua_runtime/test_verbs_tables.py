@@ -90,6 +90,10 @@ _EXCLUDED_TABLE_FILES: frozenset[str] = frozenset(
         # functions that walk the catalog, read by tests/test_walk_site_ratchet.py.
         # It is not a vocabulary a procedure decides with.
         "walk-sites.toml",
+        # RDR-134's topic_route statuses (nexus-7fku2.1.5): the engine's
+        # per_collection route statuses, read by nexus.tables.topic_route_status
+        # for the client's search event. No procedure decides with them.
+        "topic-route-status.toml",
     }
 )
 

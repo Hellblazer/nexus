@@ -29,9 +29,10 @@ Claude Code's own ``/restart`` in slash_restart.py, never part of a recorded pas
   so nx reports X and only the exit code can stop the roll. Both sessions write their
   handoff; the script must abort after the handoffs with nothing exited, no plugin update,
   X absent from the plugin cache, and the handoffs kept.
-- ``gate``: first the script's sandbox gate against a real process: with the HOME's pass record
-  removed a roll must exit 3 with the sandbox ABORT line, reading no engine and asking nothing;
-  with ``--skip-sandbox-check REASON`` it must log the reason and go on to the engine gate. Then
+- ``gate``: first the script's sandbox gate against a real process; it is advisory (Sam, 2026-11-19): with
+  the HOME's pass record removed a roll must log the ``WARN: sandbox pass: no sandbox pass recorded`` line
+  (naming the weekly run's status) and go on to the engine gate, never exit 3; with
+  ``--skip-sandbox-check REASON`` it must log the same warning with the reason and go on. Then
   the ``/version`` stand-in answers 502, then (a second run) a version below the
   floor, with ``--engine-wait 0``. Each run must exit 2 in the foreground with the gate's
   ABORT line for that case, after one read, before any handoff is asked or anything installed.
@@ -63,7 +64,26 @@ Shared by every scenario:
   one poll (the SessionEnd launcher's double fork) is not caught here. Sessions run with
   ``NX_UPGRADE_AUTO=0`` and without the operator's ``NX_TOOLS_DIR``. The
   sessions write to that service as the operator would: the restart mail expires with its
-  TTL, and nothing here asks a session to write anything permanent;
+  TTL, and nothing here asks a session to write anything permanent. They bind no identity there:
+  the copied credential reaches the operator's tenant, so the sessions run with
+  ``NX_IDENTITY_BIND=0`` (their SessionStart hook binds nothing and makes no engine call; their MCP
+  servers start no identity lease) and ``NX_IDENTITY_LEASE=0`` (the lease's own switch); with
+  neither, 8.5.0 sessions bound twelve ``rs_*`` identities in the operator's tenant (found
+  2026-11-19). Three checks in identity_census.py prove it, all read only and in the operator's
+  own environment. Before any session starts, the INSTALLED nx must honour ``NX_IDENTITY_BIND``
+  (its own interpreter is asked; one that predates it ends the run UNVERIFIED, exit 2, with no
+  session started). After each scenario, ``nx identity show --session <sid>`` for every session id
+  it ran must answer ``unknown_session`` (a binding in any state fails, an ended one included; an
+  unreadable answer fails too), and the list of live and lapsed identities on this host
+  (``nx identity show --all``) is read before the scenario's sessions start and after cleanup: a
+  new row whose name is one of the scenario's session names or whose pid is one the run recorded
+  FAILS the scenario ("the sandbox bound an identity on the operator's endpoint"); any other new
+  row is a note (the operator may start sessions meanwhile), a delegated one is ignored, and a
+  list that cannot be read fails. The sandbox's nx also refuses the ``nx identity`` verbs that
+  make or change an identity or seat (create, promote, claim, release, rename, purge, and the
+  ``work`` writes), logging each to nx-identity-refused.log. Because the sessions run unbound, this
+  gate does not exercise the restart's seat and identity paths (ensure_seat and promote, the NX_SEAT
+  carry-over, attested mail);
 - nx-mcp's own exit teardown, judged on the engine (nexus-iz8ub; needs an installed nx-mcp that
   carries 75e22da36, release 7.97.0 or later; with an older nx, or one whose version cannot be read, the
   teardown findings are skipped with a loud note and the run ends "unverified", exit 2, no pass
@@ -95,12 +115,13 @@ Shared by every scenario:
   PATH records every ``cache`` command and refuses ``tool install``, ``upgrade`` and
   ``uninstall`` (anything else goes to the real uv). X is the installed version's next
   patch that is not a tag in this checkout. The ``nx`` stand-in also records and refuses
-  ``nx upgrade`` (the version-lockstep hook's action would upgrade the operator's install).
+  ``nx upgrade`` (the version-lockstep hook's action would upgrade the operator's install) and the
+  ``nx identity`` writes named above.
   The marketplace and plugin updates are the real
   claude CLI's.
 
 Expected in ``roll``: alpha, draft and paste are asked by mail and nochan by typing; all four
-write a handoff; the install (uv cache clean, reinstall-tool.sh with ``conexus==X
+write a handoff; the install (reinstall-tool.sh with ``conexus==X
 --allow-registry-over-dev``, nx at X, both plugins updated to X) runs after the last handoff
 and before the first exit; alpha, draft and nochan restart with a new session id whose own
 argv carries ``-- cat <handoff>`` and whose MCP servers run X from the versioned cache (all
@@ -164,8 +185,8 @@ the token, claude or tmux is missing, or every scenario passed but nx-mcp's tear
 recorded for it. A failed scenario's scratch HOME is kept and named.
 
 A pass of all five scenarios is recorded in ~/.local/state/claude-restart-sessions/sandbox-pass.json
-(the script's sha256 and Claude Code's version), which the script's restart gate reads (nexus-8zdbu).
-Each sandbox HOME gets its own record for the script under test, so every roll passes that gate.
+(the script's sha256 and Claude Code's version), which the script's advisory restart gate reads (nexus-8zdbu).
+Each sandbox HOME gets its own record for the script under test, so every roll is let by it without a warning.
 """
 # ruff: noqa: T201 -- a gate harness: stdout carries its progress and verdict line
 from __future__ import annotations
@@ -442,18 +463,37 @@ def credentials_left(config_dir: Path) -> list[str]:
 REFUSED = 97
 
 
-def nx_shim_text(real_nx: str, marker: Path, refused_log: Path) -> str:
+#: ``nx identity`` verbs that make or change an identity or a seat: refused in the sandbox, which binds none.
+IDENTITY_WRITES = ("create", "promote", "claim", "release", "rename", "purge", "alive")
+#: ``nx identity work`` verbs that write (``list`` and ``owners`` read, and the restart script's ready check needs ``list``).
+WORK_WRITES = ("register", "done", "forget", "run")
+
+
+def nx_shim_text(real_nx: str, marker: Path, refused_log: Path, identity_log: Path | None = None) -> str:
     """The sandbox's nx: after the stand-in install, ``--version`` reports the installed release;
     ``nx upgrade`` (the version-lockstep hook's action, an ``--auto`` spawn) is recorded and
-    refused, since it would upgrade the operator's install; anything else runs the real nx."""
+    refused, since it would upgrade the operator's install; so is every ``nx identity`` verb that makes or changes
+    an identity or seat (``IDENTITY_WRITES``, ``WORK_WRITES``), recorded in *identity_log*: the sandbox's sessions
+    carry the operator's credential and bind nothing, and the restart script's seat creation (``ensure_seat``,
+    which logs one line when it is refused) must not add a seat the identity census cannot see; anything else
+    runs the real nx."""
     m, log = shlex.quote(str(marker)), shlex.quote(str(refused_log))
-    return ("#!/bin/sh\n# restart sandbox: nx --version reports the stand-in install; nx upgrade is refused\n"
+    ilog = shlex.quote(str(identity_log if identity_log is not None else refused_log))
+    return ("#!/bin/sh\n# restart sandbox: nx --version reports the stand-in install; nx upgrade and the nx identity writes are refused\n"
             f'if [ "$1" = "--version" ] && [ -f {m} ]; then echo "nx, version $(cat {m})"; exit 0; fi\n'
+            'all="$*"; cmd=""; sub=""; sub2=""\n'
             'for a in "$@"; do case "$a" in\n'
             "  -*) ;;\n"
-            f'  upgrade) echo "$*" >> {log}; exit {REFUSED} ;;\n'
-            "  *) break ;;\n"
+            '  *) if [ -z "$cmd" ]; then cmd=$a; elif [ -z "$sub" ]; then sub=$a; elif [ -z "$sub2" ]; then sub2=$a; break; fi ;;\n'
             "esac; done\n"
+            f'[ "$cmd" = upgrade ] && {{ echo "$all" >> {log}; exit {REFUSED}; }}\n'
+            'if [ "$cmd" = identity ]; then\n'
+            f'  refuse() {{ echo "$all" >> {ilog}; echo "restart sandbox: nx identity $1 is refused here (the sandbox binds no identity)" >&2; exit {REFUSED}; }}\n'
+            '  case "$sub" in\n'
+            f'    {"|".join(IDENTITY_WRITES)}) refuse "$sub" ;;\n'
+            f'    work) case "$sub2" in {"|".join(WORK_WRITES)}) refuse "work $sub2" ;; esac ;;\n'
+            "  esac\n"
+            "fi\n"
             f"exec {shlex.quote(real_nx)} \"$@\"\n")
 
 
@@ -659,6 +699,10 @@ class Sandbox:
                 "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
                 "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID",
                 "NX_SESSION_ID", "NX_T1_SESSION_ID", "NX_T1_SESSION",
+                # a harness started from a delegated child must not hand its identity (token, seat) to the sessions
+                "NX_IDENTITY_TOKEN", "NX_SEAT",
+                # the restart script runs this nx instead of PATH's, which would bypass the sandbox nx shim
+                "NX_RESTART_NX",
                 # the operator's generation root: hooks would resolve nx there, past the nx stand-in
                 "NX_TOOLS_DIR")
         self.env = {k: v for k, v in os.environ.items() if k not in drop}
@@ -673,7 +717,12 @@ class Sandbox:
                         DISABLE_AUTOUPDATER="1",  # the dim ghost prompt that broke 7.92.0
                         # nexus-75w5d's kill switch: a session's SessionStart must not spawn a detached
                         # nx upgrade --auto, which would act on the operator's install and outlive the run
-                        NX_UPGRADE_AUTO="0")
+                        NX_UPGRADE_AUTO="0",
+                        # The sessions carry a copy of the operator's engine credential (setup copies config.yml), so
+                        # since 8.5.0 their SessionStart hook and MCP identity lease bound RDR-253 identities in the
+                        # operator's tenant (rows i13-i23, names rs_*, found 2026-11-19). Both switches off; the
+                        # identity census in run_scenario proves none was bound.
+                        NX_IDENTITY_BIND="0", NX_IDENTITY_LEASE="0")
         # --nx installs a release: the sandbox's own stand-ins (setup_release) take its place.
         self.market = home / "market"
         self.cache = home / ".claude" / "plugins" / "cache" / MARKET
@@ -685,6 +734,7 @@ class Sandbox:
         self.uv_cleans = home / "uv-cache-clean.log"
         self.uv_refused = home / "uv-refused.log"
         self.nx_refused = home / "nx-refused.log"
+        self.nx_identity_refused = home / "nx-identity-refused.log"
         self.reinstall_argv = home / "reinstall-argv.txt"
         self.holds = {name: home / f"{name}.hold" for name in spec.busy}
         self.env["PATH"] = f"{self.bin}{os.pathsep}{self.env.get('PATH', '')}"
@@ -847,7 +897,7 @@ class Sandbox:
             raise RuntimeError("nx is not on PATH")
         self.bin.mkdir()
         shim = self.bin / "nx"
-        shim.write_text(nx_shim_text(self.real_nx, self.installed_marker, self.nx_refused), encoding="utf-8")
+        shim.write_text(nx_shim_text(self.real_nx, self.installed_marker, self.nx_refused, self.nx_identity_refused), encoding="utf-8")
         shim.chmod(0o755)
         # The script cleans uv's cached conexus before installing; in the detached child that runs
         # with the tmux server's environment, whose UV_CACHE_DIR is the operator's. Record it instead.
@@ -1117,16 +1167,16 @@ def check_left_running(sb: Sandbox, names: tuple[str, ...], before: dict[str, di
 
 
 def check_install(sb: Sandbox, lines: list[str], failures: list[str]) -> None:
-    """The reinstall stand-in's arguments, uv's cache clean, no uv tool install, and the whole install
-    between the last handoff and the first exit."""
+    """The reinstall stand-in's arguments, no uv cache command (B1, 2026-11-19: it waits on a lock the sessions'
+    MCP servers hold), no uv tool install, and the whole install between the last handoff and the first exit."""
     argv = sb.reinstall_argv.read_text(encoding="utf-8").split() if sb.reinstall_argv.exists() else []
     if argv != [f"conexus=={sb.to_version}", "--allow-registry-over-dev"]:
         failures.append(f"--nx: reinstall-tool.sh was called with {argv}")
     if sb.uv_refused.exists():
         failures.append(f"uv tool install refused in the sandbox: {sb.uv_refused.read_text(encoding='utf-8')[:200]!r}")
     cleans = sb.uv_cleans.read_text(encoding="utf-8").splitlines() if sb.uv_cleans.exists() else []
-    if "cache clean conexus" not in cleans:
-        failures.append(f"--nx: uv cache clean conexus was not run through the sandbox's uv ({cleans})")
+    if cleans:
+        failures.append(f"--nx: the script ran a uv cache command through the sandbox's uv ({cleans})")
     last_handoff = max((i for i, ln in enumerate(lines) if ln.startswith("handoff written by ")), default=-1)
     first_exit = min((i for i, ln in enumerate(lines) if ln.startswith("exit rs_")), default=len(lines))
     installs = [i for i, ln in enumerate(lines)
@@ -1684,36 +1734,29 @@ def run_roll(sb: Sandbox, tag: str, extra: str = "", timeout: float = 120) -> tu
 SKIP_REASON = "restart sandbox: the gate's escape hatch"
 
 
-def check_sandbox_refusal(sb: Sandbox, crs, failures: list[str]) -> None:
-    """The script's sandbox gate against a real process (nexus-wjlbk): with no pass record in the HOME
-    a roll exits 3 having done nothing (no engine read, no install, no ask); with --skip-sandbox-check
-    REASON it logs the reason and goes on to the engine gate. The record is put back after."""
+def check_sandbox_warning(sb: Sandbox, crs, failures: list[str]) -> None:
+    """The script's sandbox gate against a real process (nexus-wjlbk), advisory since 2026-11-19: with no pass
+    record in the HOME a roll logs a WARN line and goes on to the engine gate (which refuses its own way, exit 2),
+    and --skip-sandbox-check REASON only adds the reason to that line. The record is put back after."""
     assert sb.engine is not None
     record = sb.home / crs.SANDBOX_PASS.relative_to(OPERATOR_HOME)
     saved = record.read_bytes()
     record.unlink()
     try:
-        sb.engine.answers, sb.engine.reads = ["502"], 0
-        rc, log = run_roll(sb, "refuse")
-        lines = body_lines(log)
-        if rc != "3":
-            failures.append(f"sandbox refusal: the script exited {rc} with no sandbox pass, not 3")
-        if not any(ln.startswith("ABORT: sandbox pass: no sandbox pass recorded") for ln in lines):
-            failures.append("sandbox refusal: the log lacks the ABORT: sandbox pass line")
-        if extra := [ln for ln in lines if not ln.startswith("ABORT: sandbox pass:")]:
-            failures.append(f"sandbox refusal: the script went past the gate: {extra[0][:160]}")
-        if sb.engine.reads:
-            failures.append(f"sandbox refusal: the engine was read {sb.engine.reads} time(s) although the gate refused")
-        sb.engine.answers, sb.engine.reads = ["502"], 0
-        rc, log = run_roll(sb, "skip", extra=f"--skip-sandbox-check {shlex.quote(SKIP_REASON)}")
-        lines = body_lines(log)
-        if rc != "2":
-            failures.append(f"sandbox skip: the script exited {rc}, not 2 (the engine gate's refusal)")
-        if not any(ln.startswith("WARN: no sandbox pass recorded") and ln.endswith(f"(--skip-sandbox-check: {SKIP_REASON})")
-                   for ln in lines):
-            failures.append("sandbox skip: the log lacks the WARN line with the reason")
-        if sb.engine.reads != 1:
-            failures.append(f"sandbox skip: /version read {sb.engine.reads} time(s), not once: the skip did not reach the engine gate")
+        for tag, extra, tail in (("warn", "", "(advisory)"),
+                                 ("skip", f"--skip-sandbox-check {shlex.quote(SKIP_REASON)}", f"(--skip-sandbox-check: {SKIP_REASON})")):
+            sb.engine.answers, sb.engine.reads = ["502"], 0
+            rc, log = run_roll(sb, tag, extra=extra)
+            lines = body_lines(log)
+            if rc != "2":
+                failures.append(f"sandbox {tag}: the script exited {rc} with no sandbox pass, not 2 (the engine gate's refusal)")
+            if not any(ln.startswith("WARN: sandbox pass: no sandbox pass recorded") and "weekly sandbox run" in ln
+                       and ln.endswith(f"restarting anyway {tail}") for ln in lines):
+                failures.append(f"sandbox {tag}: the log lacks the WARN: sandbox pass line (restarting anyway {tail})")
+            if any(ln.startswith("ABORT: sandbox pass") for ln in lines):
+                failures.append(f"sandbox {tag}: the script refused on the sandbox pass")
+            if sb.engine.reads != 1:
+                failures.append(f"sandbox {tag}: /version read {sb.engine.reads} time(s), not once: the warning did not reach the engine gate")
     finally:
         record.write_bytes(saved)
 
@@ -1763,7 +1806,7 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
     if failures:
         return
     assert sb.engine is not None
-    check_sandbox_refusal(sb, crs, failures)
+    check_sandbox_warning(sb, crs, failures)
     check_real_withdrawal(sb, crs, failures, notes)
     runs = (("502", f"engine gate: read of {sb.engine.url}/version failed (",
              f"ABORT: could not read the cloud engine's version from {sb.engine.url}; nothing installed, nothing restarted."),
@@ -1796,7 +1839,7 @@ def scenario_gate(sb: Sandbox, crs, a, failures: list[str], notes: list[str]) ->
                 failures.append(f"gate run {i}: the script went past the gate: {ln[:160]}")
     for f, what in ((sb.reinstall_argv, "reinstall-tool.sh ran"), (sb.uv_cleans, "uv cache clean ran")):
         if f.exists():
-            failures.append(f"gate: {what} although the gate refused")
+            failures.append(f"gate: {what} although the engine gate refused")
     check_left_running(sb, spec.held, before, sb.read_log(), failures)
     if sb.events(before["rs_alpha"].get("sessionId", "")) and any(
             "nexus-continuation-restart" in json.dumps(e) for e in sb.events(before["rs_alpha"].get("sessionId", ""))):
@@ -2364,7 +2407,9 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
     failures: list[str] = []
     notes: list[str] = []
     ok = False
+    census_before: dict[str, str] | None = None
     try:
+        census_before = _load_slash("identity_census").read(sb.real_nx)  # before any session starts; unreadable is a failure
         sb.setup(crs)
         print(f"[sandbox:{name}] HOME {home}; watch: tmux -L {sb.sock} attach -t rs", flush=True)
         RUNNERS[name](sb, crs, a, failures, notes)
@@ -2383,6 +2428,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
         with signals_deferred() as pending:
             sids: set[str] = set()
             full: set[str] = set()
+            pids: set[int] = set()
             try:
                 for hold in sb.holds.values():
                     hold.unlink(missing_ok=True)
@@ -2390,6 +2436,7 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 full |= {str(d.get("sessionId", "")) for d in sb.before.values() if d}
                 full.discard("")
                 sids = {sid[:8] for sid in full}
+                pids = {int(d.get("pid", 0) or 0) for d in [*sb.entries(), *sb.before.values()] if d} - {0}
             except Exception as exc:  # noqa: BLE001 -- reported, and the token cleanup still runs
                 notes.append(f"session ids not collected: {type(exc).__name__}: {exc}")
             if not a.keep:
@@ -2404,6 +2451,18 @@ def run_scenario(name: str, claude: str, a, crs) -> tuple[bool, list[str], list[
                 sb.watch.stop()
                 # --keep skips cleanup(), the only place the teardown is judged: not a pass (nexus-iz8ub)
                 UNVERIFIED.append(f"{name}: --keep skips cleanup, which is where nx-mcp's teardown is judged")
+            if census_before is not None:  # after the sandbox is ended (read-only; --keep reads it with the sessions up)
+                bad, census_notes = _load_slash("identity_census").judge(
+                    sb.real_nx, census_before, sids=full, pids=pids | {p for p, _ in sb.watch.seen()},
+                    names=directory_names(sb), expect=bool(sb.before))
+                notes.extend(census_notes)
+                if sb.nx_identity_refused.exists():
+                    refused = sb.nx_identity_refused.read_text(encoding="utf-8").splitlines()
+                    notes.append(f"the nx shim refused {len(refused)} nx identity write(s) (the restart script's seat creation "
+                                 f"for a user-named session, as it does on every roll): {refused[:5]}")
+                if bad:
+                    failures.extend(bad)
+                    ok = False
             sb.close_servers()
             if not a.keep:
                 for f in claude_session_files(full):  # Claude Code's own per-session temp files
@@ -2705,6 +2764,11 @@ def main() -> int:
     claude = shutil.which("claude")
     if not claude or not shutil.which("tmux"):
         print("RESTART SANDBOX UNVERIFIED: claude or tmux not on PATH", flush=True)
+        return 2
+    # The sessions run the INSTALLED nx, which must honour NX_IDENTITY_BIND; if it does not, no session starts here
+    # (each would bind an identity on the operator's endpoint).
+    if gap := _load_slash("identity_census").bind_switch_gap(shutil.which("nx") or ""):
+        print(f"RESTART SANDBOX UNVERIFIED: {gap}; no session was started, nothing was recorded", flush=True)
         return 2
     # A SIGTERM must still reach each scenario's finally: the private tmux server holds the token in
     # its environment and must not outlive the run.

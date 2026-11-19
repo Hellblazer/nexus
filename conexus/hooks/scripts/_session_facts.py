@@ -606,7 +606,7 @@ def verify(board: str, facts: Facts, now: datetime) -> Verdict:
                 if when is not None and when <= now:
                     notes.append(f"due {value}: due now")
             elif key == "worktree":
-                path = os.path.expanduser(value)  # verbatim; a slug or a relative id is not checked
+                path = worktree_path(value)  # a slug or a relative id is not checked
                 if os.path.isabs(path) and not os.path.exists(path):
                     notes.append(f"worktree {value}: no such path")
         if notes:
@@ -615,13 +615,22 @@ def verify(board: str, facts: Facts, now: datetime) -> Verdict:
     return Verdict(out, checked, opaque, unresolved)
 
 
+_TRAILING_NOTE = re.compile(r"\s+\([^()]*\)\s*$")
+
+
+def worktree_path(value: str) -> str:
+    """The path a ``worktree:`` value names: the value as written (a path may hold spaces, marlowe), less a trailing
+    ``(...)`` note set off by a space, such as ``(branch feature/x)``, which sessions add and which is not part of it."""
+    return os.path.expanduser(_TRAILING_NOTE.sub("", value))
+
+
 def board_worktree(board: str) -> list[str]:
     """Absolute paths the board's ``worktree:`` lines name, in order."""
     paths = []
     for t in threads(board):
         for key, value in t.fields:
             if key == "worktree":
-                path = os.path.expanduser(value)  # verbatim (marlowe): a path may hold spaces
+                path = worktree_path(value)
                 if os.path.isabs(path):
                     paths.append(path)
     return paths

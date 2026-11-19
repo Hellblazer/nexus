@@ -25,6 +25,7 @@ import pytest
 
 from nexus.db.http_scratch_store import SESSION_UNAUTHORIZED_MARKER
 from tests._child_process import kill_group, popen_in_group
+from test_restart_sandbox_identity_census import stub_census
 from tests._module_seam import setattr_in
 
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
@@ -613,6 +614,7 @@ def _main_with(run, monkeypatch, *, bad: bool, unverified: bool):
     crs = types.SimpleNamespace(script_sha256=lambda _s: "s", claude_version=lambda _c: "1", tmux_version=lambda: "t",
                                 harness_sha256=lambda *a: "h")
     monkeypatch.setattr(run, "load_script", lambda: crs)
+    stub_census(run, monkeypatch)  # the installed nx honours NX_IDENTITY_BIND here; the real probe asks the real nx
     recorded = []
 
     def scenario(name, claude, a, crs):
@@ -649,6 +651,7 @@ def test_a_keep_run_is_unverified_not_a_pass(run, tmp_path, monkeypatch) -> None
     monkeypatch.setattr(run.Sandbox, "entries", lambda self: [])
     monkeypatch.setattr(run, "RUNNERS", {"gate": lambda sb, crs, a, failures, notes: None})
     monkeypatch.setattr(run, "footprint_before", lambda: {})
+    stub_census(run, monkeypatch)  # no engine here: the census reads two empty lists
     run.UNVERIFIED.clear()
     args = types.SimpleNamespace(keep=True, model="sonnet")
     ok, failures, _ = run.run_scenario("gate", "claude", args, None)

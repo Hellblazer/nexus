@@ -36,6 +36,14 @@ IDENTITY_TOKEN_HEADER: str = "X-Nexus-Identity-Token"
 #: The 409 code of a fenced write from a superseded generation: the client's stop-writing signal.
 SUPERSEDED_CODE: str = "generation_superseded"
 
+#: ``403`` code of a fenced write, or a data credential's refresh or fork, that sent no live identity token (engine
+#: 0.1.198 gives an expired token no grace). The one spelling the binder, the lease and the delegated child match.
+TOKEN_REQUIRED_CODE: str = "identity_token_required"
+
+#: The MCP server refreshes a token whose remaining life is under this many seconds (50 minutes of a one-hour token), so a
+#: token holds at least 50 minutes at any moment a sleep can begin, and a sleep under about 50 minutes never lapses it.
+REFRESH_BELOW_S: float = 3000.0
+
 #: ``409`` code of a fenced write for an identity nobody holds (Step 2).
 NOT_HELD_CODE: str = "identity_not_held"
 
@@ -78,6 +86,17 @@ def usable(token: str | None, expires: float | None, *, now: float | None = None
     if expires is None:
         return True
     return (time.time() if now is None else now) + EXPIRY_MARGIN_S < expires
+
+
+def refresh_below(lifetime_s: float) -> float:
+    """Remaining life under which a token of *lifetime_s* is refreshed: :data:`REFRESH_BELOW_S` for the hour the engine
+    issues, five sixths of a shorter life (an engine that issues one)."""
+    return min(REFRESH_BELOW_S, lifetime_s * REFRESH_BELOW_S / 3600.0)
+
+
+def is_token_required(status: int, code: str | None) -> bool:
+    """A refresh, fork or other fenced write the engine refused for want of a live identity token."""
+    return status == 403 and code == TOKEN_REQUIRED_CODE
 
 
 def is_expired(status: int) -> bool:

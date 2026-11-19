@@ -42,7 +42,7 @@ from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableErro
 from nexus.identity.holder import (
     GONE, Processes, RegistryEntry, check_holder, holder_process, read_registry_entry,
 )
-from nexus.identity.token_file import TokenFile, token_path, update_token_file
+from nexus.identity.token_file import TokenFile, read_token_file, token_path, update_token_file
 
 REGISTRY_WAIT_S: float = 5.0
 REGISTRY_POLL_S: float = 0.1
@@ -108,6 +108,14 @@ class BindOutcome:
     @property
     def handoff(self) -> bool:
         return self.identity is not None and self.token_file is not None and self.action in ("bound", "ephemeral", "unchanged")
+
+
+def _token_gone(exc: IdentityApiError) -> bool:
+    """Whether the engine refused a ``fork`` for want of a live identity token (engine 0.1.198: a data credential's fork
+    needs one, and a process whose token expired while the laptop slept has none). A ``start`` needs none, so the caller
+    starts the identity the process holds again (:meth:`SessionBinder._restart_own`). The code is matched, never the
+    message."""
+    return token_contract.is_token_required(exc.status, exc.code)
 
 
 class SessionBinder:
@@ -209,29 +217,62 @@ class SessionBinder:
                 return dict(view)
         return None
 
+    def _own_token(self, facts: LaunchFacts, own: Mapping[str, Any]) -> str | None:
+        """The live token a ``fork`` of *own* carries (engine 0.1.198): the one in this process's own token file
+        (``<claude pid>.<startedAt>``), when the file names *own* at its generation. None otherwise (no file, another
+        identity or generation, an expired token), and the engine's 403 then restarts the same identity. Never the
+        nearest Claude ancestor's file of the hook's own interpreter: the hook knows its process, and that file may be
+        another identity's."""
+        record = read_token_file(token_path(self._idir, facts.claude_pid, facts.started_at or 0))
+        if record is None or record.identity != own.get("id") or record.generation != int(own["generation"]):
+            return None
+        return record.token if token_contract.usable(record.token, record.expires_at, now=self._clock()) else None
+
     # ── rows ────────────────────────────────────────────────────────────────
 
     def _keep(self, facts: LaunchFacts, own: Mapping[str, Any]) -> BindOutcome | None:
         """``clear`` and ``fork``: same generation, new session id. None when the engine will not (the seat was
-        taken or ended meanwhile): the caller then binds the process as a new start. A credential that may not send
+        taken or ended meanwhile): the caller then binds the process as a new start. A fork refused for want of a live token
+        (an expired one) starts the same identity again instead (:meth:`_restart_own`). A credential that may not send
         ``clear`` (the data credential of a mint-only install) sends the same change as ``fork``, which it may."""
         if not self._privileged and facts.source == "clear":
             return None
         prior = (own.get("holder") or {}).get("session_id")
         event = facts.source
+        token = self._own_token(facts, own)   # a fork carries it; a clear never does
         try:
             try:
-                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior),
+                                         token=token if event == "fork" else None)
             except IdentityApiError as exc:
                 if exc.status != 403 or event != "clear":
                     raise
                 event = "fork"
-                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+                view = self._client.bind(own["id"], event, int(own["generation"]), self._evidence(facts, prior_session_id=prior),
+                                         token=token)
         except IdentityApiError as exc:
+            if _token_gone(exc):
+                return self._restart_own(facts, own, row=f"{facts.source}_restart_own")
             if exc.status == 409:
                 return None
             raise
         return self._finish(facts, view, event, row=f"{facts.source}_in_process", action="bound")
+
+    def _restart_own(self, facts: LaunchFacts, own: Mapping[str, Any], *, row: str) -> BindOutcome:
+        """The engine refused this process's ``fork`` for want of a live token (its token expired while the laptop slept):
+        start the SAME identity again, from the same process. A ``start`` needs no token, and the engine's acquire reads
+        the same host, pid and ``startedAt`` as the same process: no generation change, a fresh token in the answer. Not
+        :meth:`_startup`, which binds whatever the launch names or mints a new ephemeral and would orphan the held identity.
+
+        The evidence carries the NEW session id, because the fork this replaces indexed it and the next fenced write keyed
+        on that session reads the index.
+
+        This path relies on a data credential being able to ``start`` its own identity without a token. It breaks if
+        RDR-253 Phase 2 closes the start gap (Phase 2 open item 1: a data-credential ``start`` of a held identity needing
+        the caller's own live token): a session whose token lapsed would then have no way back but a new launch."""
+        prior = (own.get("holder") or {}).get("session_id")
+        view = self._client.bind(own["id"], "start", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+        return self._finish(facts, view, "start", row=row, action="bound")
 
     def _resume(self, facts: LaunchFacts, own: Mapping[str, Any] | None) -> BindOutcome | None:
         try:
@@ -309,7 +350,13 @@ class SessionBinder:
             outcome.switched_from = own["id"]
             return outcome
         prior = (own.get("holder") or {}).get("session_id")
-        view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior))
+        try:
+            view = self._client.bind(own["id"], "fork", int(own["generation"]), self._evidence(facts, prior_session_id=prior),
+                                     token=self._own_token(facts, own))
+        except IdentityApiError as exc:
+            if not _token_gone(exc):
+                raise
+            return self._restart_own(facts, own, row="resume_unindexed_restart_own")   # as _keep does
         return self._finish(facts, view, "fork", row="resume_unindexed_reuse", action="unchanged")
 
     def _startup(self, facts: LaunchFacts, *, rebind: bool) -> BindOutcome:

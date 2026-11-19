@@ -233,7 +233,9 @@ migration_wal_bytes_per_worker = 12143000
 # Measured: chas lab-m via lab-remote, 2026-11-18, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 344d67535 (base origin/develop 8958f349a; gate jar rebuilt), ddl: migration=2651. Commit: the nexus-hczdo.1.2 commit that bumps this ceiling for memory-006 and service-tokens-007.
 # 2651 -> 2656 (2026-11-18, nexus-igea9.5, RDR-252 Step 1): group-001 adds nexus.group_records (the permanent group record) with its ENABLE and FORCE row level security and tenant_isolation policy, and the runAlways grants loop adds its table grant: DDL only, nothing backfilled.
 # Measured: chas lab-s via lab-run, 2026-11-18, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 226c05298 (base 31c9d816a, the RDR-253 Step 2 tip; gate jar rebuilt), ddl: migration=2656. Commit: the nexus-igea9.5 commit that bumps this ceiling for group-001.
-migration_ddl_per_worker = 2656
+# 2656 -> 2658 (2026-11-19, RDR-253 amendment, Sam's option 2): identity-004 widens identity_records_creator_ck to admit identity:i<n>: one DROP CONSTRAINT and one ADD CONSTRAINT, DDL only, no row changed.
+# Measured: chas lab-m via lab-remote, 2026-11-19, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 0ccaeefab (base origin/develop 8721077c4; gate jar rebuilt), ddl: migration=2658. Commit: the RDR-253 self-seat commit that bumps this ceiling for identity-004.
+migration_ddl_per_worker = 2658
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]

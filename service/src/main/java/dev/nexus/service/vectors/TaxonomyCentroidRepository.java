@@ -184,6 +184,16 @@ public final class TaxonomyCentroidRepository {
      */
     public List<AnnHit> annQuery(String tenant, float[] embedding, String collection,
                                  boolean crossCollection, int nResults) {
+        return annQuery(tenant, embedding, collection, crossCollection, nResults, 0);
+    }
+
+    /**
+     * As {@link #annQuery(String, float[], String, boolean, int)} with the statement bounded to at most
+     * {@code maxStatementMs} ({@code 0}: the search bound). RDR-134 Step 3: the routed search arm ranks a collection's
+     * centroids inside its own budget and passes what it can spare.
+     */
+    public List<AnnHit> annQuery(String tenant, float[] embedding, String collection,
+                                 boolean crossCollection, int nResults, int maxStatementMs) {
         int dim = embedding.length;
         if (!VALID_DIMS.contains(dim)) {
             throw new IllegalArgumentException(
@@ -228,7 +238,9 @@ public final class TaxonomyCentroidRepository {
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours. First, so the
             // GUC round trips below run under its network bound too (nexus-u9zkn).
-            PgSession.setSearchStatementTimeout(ctx);
+            PgSession.setSearchStatementTimeout(ctx, maxStatementMs > 0
+                ? Math.min(maxStatementMs, PgSession.startupSearchStatementTimeoutMs())
+                : PgSession.startupSearchStatementTimeoutMs());
             // Filtered-ANN recall: the collection predicate + RLS narrow the candidate set;
             // keep HNSW scanning past ef_search so a narrow collection returns its full set
             // (RDR-156 — without this, filtered HNSW silently under-returns). SET LOCAL is

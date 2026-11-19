@@ -796,3 +796,4 @@ def curate_cmd(do_files: bool, do_t2: bool, do_agents: bool, do_cold: bool, days
     except Exception as exc:  # noqa: BLE001 — the report never blocks a release step; the store failing is one line
         _log.warning("curation_report_not_stored", error=str(exc))
         click.echo(f"report not stored: not available: {exc}")
+

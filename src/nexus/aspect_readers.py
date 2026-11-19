@@ -2127,6 +2127,11 @@ _STAT_HANDLERS: dict[str, Callable[..., StatResult]] = {
 }
 
 
+def registered_stat_schemes() -> tuple[str, ...]:
+    """The schemes ``stat_source`` has a handler for, in registry order (``file`` included)."""
+    return tuple(_STAT_HANDLERS)
+
+
 def stat_source(
     uri: str,
     *,

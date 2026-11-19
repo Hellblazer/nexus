@@ -14,7 +14,7 @@ Follow in order. The releaser is **Sam**: AI preps + validates; Sam pushes the t
 **Removed in cleanup step 11 (nexus-0r1uz), numbering left as it was:** Step 3
 (the local-candidate `--shakeout` gate and the `--candidate-migration` populated-store
 rehearsal) and Step 3c (the published-client write leg) went with the scripts and
-harness modes they ran. Steps that remain: 1, 2, 3b, 3e, 3f, 3g, 3h, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
+harness modes they ran. Steps that remain: 1, 1b, 2, 2b, 3b, 3e, 3f, 3g, 3h, 4, 5, 5b, 5c, 6, 6.1, 7, 8.
 
 ### 1. Decide whether a cut is needed (drift check)
 
@@ -27,20 +27,37 @@ Cut a fresh engine when `service/` has accumulated **cloud-relevant** work: pool
 
 **Size every open engine bead before recommending a cut.** A cut is about two hours of wall clock and three premium native builds. List `bd ready` plus the in-progress engine beads, size each in minutes, fold everything under a few hours into the cut, and say the sizing out loud; only a bead that genuinely needs design or measurement waits. v0.1.97 was cut for one bead while a twenty-line sibling was already filed and rode a second cut (Sam, 2026-09-03: "wtf did we do that for when we know we had more to do?"). Source: memory `feedback_release_and_develop_ci` § engine_cut_discipline.
 
+### 1b. Freeze the tag commit when the cut starts (Sam, 2026-11-19)
+
+Pick the commit you will tag when the cut starts, record it on the cut bead as `TAG_SHA`, and make a clean worktree at it (`TAG_TREE`). Every gate below runs on that one tree. A fix that lands on develop after the freeze goes to the next cut: do not move the tag commit to chase develop. Only a red gate on the frozen tree moves it, and then you freeze a new commit and every gate starts again on it, because a gate's result is about the tree it ran on. On 0.1.196 the Step 3h legs ran three times because the tag commit moved twice while they ran.
+
+```bash
+TAG_SHA=$(git rev-parse origin/develop)      # or the develop commit the cut is sized for (Step 1)
+git worktree add --detach ../nexus-wt/engine-cut-"$TAG_SHA" "$TAG_SHA"
+TAG_TREE=$(cd ../nexus-wt/engine-cut-"$TAG_SHA" && pwd)
+```
+
 ### 2. Verify the engine is green on the exact commit you'll tag
 
 The version is **tag-stamped** — there is NO manifest to bump (`release.properties` `release_version` is blank in source, stamped at native-build time from the tag; the Maven pom stays `1.0-SNAPSHOT`).
 
-Confirm the full Java suite + native build passed on the exact `service/` tree:
+Confirm the full Java suite (main and integration group) and the native build passed on the frozen `service/` tree. Service CI's `Java tests + jOOQ codegen drift guard` job runs both suites; when it concluded success on a commit whose `service/` tree equals `TAG_SHA`'s, that run is the gate and no chas suite runs (a second run of the same tree finds nothing the first did not). The job must have RUN: Service CI skips it when it decides `service/` did not change, and a skipped, cancelled or timed-out job covers nothing. The native build is CI's `engine-service native build (PR trip-wire)` check on a commit with the same `service/` tree, or the Step 3f dispatch run, which builds every native platform.
 
 ```bash
-# fast path: if service/ at HEAD is byte-identical to a green service-ci commit, that CI covers it
-git diff --stat <green-service-ci-sha> HEAD -- service/    # empty = covered
-# else run locally (needs Docker for Testcontainers pgvector + the bge ONNX model):
-scripts/mvnw-leased.sh -q test
+# the run that covers the frozen tree: Java tests job concluded success, not skipped
+git diff --stat <service-ci-sha> "$TAG_SHA" -- service/    # empty = same engine tree
+gh api "repos/Hellblazer/nexus/commits/<service-ci-sha>/check-runs" \
+  -q '.check_runs[] | select(.name=="Java tests + jOOQ codegen drift guard") | .conclusion'   # success
+# only when no such run exists: one chas run of both suites on TAG_TREE (needs Docker for Testcontainers)
+scripts/mvnw-leased.sh --lab-run lab-m -B test
+scripts/mvnw-leased.sh --lab-run lab-m -B test -Dnexus.ddl.suite=integration -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=4
 ```
 
 The Java CI (`service-ci.yml`) is a required check on `main`, but nothing gates a push to `develop` on it, and a develop run can be cancelled or time out — so verify it actually passed on this tree rather than assuming.
+
+### 2b. Start the pre-tag gates together on the frozen tree
+
+The gates that take machine time start at the same time on `TAG_SHA`, not one after another: the chas suite of Step 2 when one is needed, the Windows dispatch run of Step 3f, the three legs of Step 3h, and the cloud leg once it is part of the cut. Steps 3e and 3g are reads of the tree and take seconds. None of these gates reads another's result, so running them together changes when each finishes, not what it checks. The cut waits for all of them; any red stops it (see Step 1b for what a red means for the tag commit). On 0.1.196 the gates were about two hours of machine time, and the wall clock went to serial waits for a green develop and to reruns after the tree moved.
 
 When the cut changes the cut or release machinery itself (the engine release workflow, the promote and floor scripts, the rehearsal harness), rehearse the whole flow end to end in isolation first, as the `release` skill's Step 0c paragraph describes; build the missing rehearsal when you find the gap, do not file it.
 
@@ -108,6 +125,26 @@ absent on older engines stays absent") and record the conexus bead id on the
 nexus bead before the tag — the edge half must be live before Step 6.1 can
 pass, and Step 6.1 is what gates the paired client release.
 
+**Request headers too (2026-11-19).** The edge also filters what reaches the engine: CloudFront's origin request
+policy forwards an allowlist of request headers, and a header not on it is dropped silently. RDR-253's
+`X-Nexus-Identity-Token` shipped engine-green in 0.1.196 and client 8.5.0 and was never forwarded, so every fenced
+cloud write arrived with no token and was refused `403 identity_token_required` (a dropped header reads as "no token",
+never as an error at the edge). Before the tag, list the request headers the cut adds on either side:
+
+```bash
+git diff <last-engine-tag>..HEAD -U0 -- service/src/main/java | grep '^+' | grep -oE '"X-[A-Za-z0-9-]+"' | sort -u
+git diff <last-client-tag>..HEAD -U0 -- src/nexus conexus | grep '^+' | grep -oE '"X-[A-Za-z0-9-]+"' | sort -u
+```
+
+For each name that the engine reads from a request (`getRequestHeaders()`) or the client sends, and that the edge does
+not already forward (today, by name: `Authorization`, `X-Nexus-Tenant`, `X-Nexus-Client-Version`,
+`X-Nexus-Request-Deadline-Ms`, `X-Correlation-ID`, `X-Forwarded-For`, and `X-Nexus-Identity-Token` once bob's
+2026-11-19 change is live; confirm against the policy, not this list), raise the paired edge change with bob (a cloud
+change: Sam's go) and record it on the cut bead before the tag. Response headers (`X-Nexus-Export-*`,
+`X-Nexus-Usage-Tokens`, `X-Nexus-Skipped-Collections`, `X-Nexus-Deadline-Outcome`, `X-Nexus-Unattested`) go the other
+way and are governed by the edge's response policy: check a new one there the same way. Step 6.1's client-visibility
+gate does not catch a dropped request header unless a leg makes a fenced write, so this check is the gate.
+
 ### 3f. PRE-CUT check: the Windows switch, when the cut must carry Windows (RDR-224, nexus-f9bgu.28)
 
 A tag cut with the repo variable `NX_WINDOWS_RELEASE_LEGS` off publishes the 21
@@ -131,7 +168,14 @@ Two more things must hold, and neither can be read from the variable:
   switch on was GREEN on a commit whose Windows surface (the Windows jobs of that
   workflow and of `pg-bundle-cache-seed.yml`, `scripts/*windows*`,
   `scripts/windows_*.py`, `.github/actions/*windows*`, `service/pom.xml`) equals the
-  commit being tagged. A non-tag ref runs every Windows step except sign, upload and
+  commit being tagged. Start it when the cut starts (Step 2b), on `develop` while its
+  Windows surface still equals `TAG_SHA`'s
+  (`git diff --stat "$TAG_SHA" origin/develop -- <the Windows surface above>` is empty);
+  on develop the run also builds the POSIX native jobs. Do not dispatch on an
+  `engine-cut/*` branch pushed at `TAG_SHA`: the `apple-signing` environment's protection
+  rules refuse that branch, so the linux-amd64, linux-arm64 and mac-arm64 native jobs fail
+  in seconds with no steps run and only the Windows jobs' result can be read (0.1.197,
+  run 44528101260). A non-tag ref runs every Windows step except sign, upload and
   promote, so this is the only run that exercises the release workflow's own Windows
   jobs before the tag (the rehearsal cannot: it is not allowed to trigger release
   jobs). Read the run's conclusion once:
@@ -161,7 +205,8 @@ writes at most 64 MiB over its migrate and ready phases; on the normal upgrade, 
 plain same-version reboot writes at most 64 MiB over the same phases; and an
 engine restart during a background index build never throws the build away. Run
 the three legs of `scripts/upgrade_boot_writes.py` from INSIDE a clean worktree
-at the exact commit you will tag (`TAG_TREE`, as in Step 3g). Each leg builds the
+at the exact commit you will tag (`TAG_TREE`, frozen in Step 1b), all three legs
+started together (Step 2b). Each leg builds the
 gate jar in that tree and the harness boots it (`--new-jar` left at its default,
 the service jar the same tree just built), so the jar under test is
 the tag commit's. Run on chas, whose disk is real (the harness's work dir is
@@ -188,7 +233,13 @@ lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/
 ```
 
 Start each leg as a background command (`run_in_background`) with its output
-redirected to a file, as every `lab-remote` run is. `output/` is git-ignored, so
+redirected to a file, as every `lab-remote` run is. To run the three legs together
+(Step 2b), give each its own worktree at `TAG_SHA` (`git worktree add --detach
+../nexus-wt/engine-cut-<sha>-A "$TAG_SHA"`, and `-B`, `-C`) and start each leg from
+its own: a second `lab-remote` from the same worktree exits 98 while the first holds
+that worktree's copy. The three legs then share chas's build lease for
+`scripts/build-gate-jar.sh`, so their jar builds take turns; the legs themselves run
+together. `output/` is git-ignored, so
 the fetched reports leave the tag tree clean. The jar must come from
 `scripts/build-gate-jar.sh`, which stamps the build commit the engine serves on
 `/version`. The script reuses a cached jar while `service/` is unchanged, so the
@@ -232,6 +283,36 @@ then a rebuild); the 0.1.187 candidate (0c6f9e1c5) is green on Legs B and C. A
 red control in Leg A's shape from 7.72.1 (engine 0.1.149, before the vectors-030
 walk) exits 1 with `boot-over-ceiling`: 846,283,216 bytes over migrate, 12.6
 times the bound (marginalia, on nexus-f3yqd.1).
+
+### 3i. PRE-TAG: cloud leg on the client candidate (BLOCKING; the cloud test tenant only)
+
+Say it plainly: a pre-tag run tests the candidate CLIENT against the OLD cloud engine, because the tag is what arms the
+deploy. Anything this cut itself fixes (self-seat in 0.1.197, a new route, a new header the edge must pass) can only
+read red here. Run it inside an announced cloud window, against the cloud test tenant only (release skill Step 6f has
+the full text):
+
+```bash
+uv build --wheel -o dist-candidate/        # a candidate wheel of the tree you will tag, when only the engine is cut
+scripts/build-gate-jar.sh
+tests/e2e/cloud-leg.sh --wheel dist-candidate/conexus-*.whl --window <id> \
+    --expect-red identity-seat-create@403:"cloud self-seat ships in 0.1.197" \
+    --expect-red identity-seat-show@404:"the seat was never created"
+```
+
+The cut's new routes answer 404 at the edge until the deploy, so the leg reads the engine release the cloud runs
+(`GET /version`) and skips each ledger route whose engine tag is later ("SKIPPED, engine tag ... not deployed",
+nexus-h4hge), so `--core-only` is no longer needed here. An unmapped route still fails, and a run with any such skip
+ends `CLOUD LEG PASSED (NOT A RELEASE PASS: ...)`: it is not the gating run.
+
+Each `--expect-red <step>@<status>:<reason>` pins the cloud-only status the step may show (a comma
+list such as `@401,403` pins several): that step is reported EXPECTED-RED with its status and reason and does not fail the
+run. Any other failure on it (another status, a blind tap, no HTTP, a route never called, a round-trip miss) stays FAIL, and a
+PASS on it fails the run ("expected red but passed": remove the flag). `nx identity show` of a missing seat answers 404 through
+the client (`GET /v1/identity/alias/<name>`), which is why the show step pins 404 when the create step is red. After Step 6's
+deploy relay confirms the tag is live, rerun it without those flags and with `--require-deployed` (`--release vX.Y.Z`
+for the client's own ledger entries), which fails on any route the cloud still lacks: that rerun is the real test, and it
+gates the client tag push. Paste both reports, from the
+`examined` line to the verdict line, onto the cut bead.
 
 ### 4. Push the tag (Sam, or the AI on Sam's go for the release)
 
@@ -393,6 +474,8 @@ both directions). Say the deploy is theirs; do not say it is happening:
 For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
 
 ### 6.1. Post-deploy client-visibility gate (MANDATORY, run from a cloud-mode box)
+
+Leg A asserts the three RDR-241 route flags (`catalog_docs_by_author_supported`, `catalog_docs_by_meta_supported`, `catalog_sensitive_locators_supported`) read true through the edge (nexus-uwggq.2.8), so from the cut that carries the routes this gate proves the conexus edge allowlist lists them; before that deploy and allowlist change, Leg A is red against production by design.
 
 The flip from `log-only` to `enforce` is its own bead, nexus-z0o2p.40, and it FOLLOWS the cut: it needs the soak, a written disposition for every writer the log names, and Sam's confirmation (`docs/operations/ownerless-write-cutover.md`, Order of operations 3 to 4). So the `=enforce` form below is that bead's check after the flip redeploy; it is NOT a Step 6.1 or Step 7 precondition for this cut, and a cut's sign-off never waits on it. This cut's sign-off asserts `log-only`.
 

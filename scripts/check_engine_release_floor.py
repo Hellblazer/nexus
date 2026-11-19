@@ -61,7 +61,8 @@ ledger read, for release-branch PR CI.
 also fail when ``REQUIRED_ENGINE_VERSION`` is below ``NOTE_URI_MIN_ENGINE_VERSION``
 (:func:`check_note_uri_floor_vs_pin`), and when it is below ``SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION``
 (RDR-243 Phase 2, :func:`check_sensitivity_exclude_floor_vs_pin`), and when it is below
-``RESOLVE_SENSITIVE_MIN_ENGINE_VERSION`` (RDR-193 Step 6, :func:`check_resolve_sensitive_floor_vs_pin`). Develop pushes run
+``RESOLVE_SENSITIVE_MIN_ENGINE_VERSION`` (RDR-193 Step 6, :func:`check_resolve_sensitive_floor_vs_pin`), and when it is below
+``CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION`` (RDR-241 Phase 2, :func:`check_catalog_phase2_routes_floor_vs_pin`). Develop pushes run
 neither mode, so the floor leading the pin there is not flagged.
 
 **Client-precondition mode** (``--client-precondition [TAG]``, nexus-9ssih):
@@ -547,11 +548,29 @@ def check_resolve_sensitive_floor_vs_pin() -> int:
     )
 
 
+def check_catalog_phase2_routes_floor_vs_pin() -> int:
+    """A release must pin an engine that answers the RDR-241 Phase 2 catalog routes (nexus-uwggq.2.11, .2.18).
+
+    The client's catalog search by author, operator dispatch's file-tool deny rules, ``nx catalog list --meta``,
+    ``nx catalog gc`` and ``nx doctor --check-references`` read those routes and never walk the catalog in their place,
+    so on an older engine each answers an error and operator dispatch drops its file tools. Same shape and the same
+    callers as :func:`check_note_uri_floor_vs_pin`: the floor leads the pin on develop and only the release-gated modes
+    compare them. Returns ``0`` (unset floor, or pin >= floor) or ``1``.
+    """
+    return _floor_vs_pin(
+        "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION", _engine_version.CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION,
+        "catalog-routes", "CATALOG ROUTES",
+        "This client reads the RDR-241 catalog routes and never walks the catalog in their place, so a release pinning "
+        "v{pin} would converge every local install to an engine on which author search, list --meta, gc and "
+        "--check-references answer errors and operator dispatch drops Read, Grep and Glob.",
+    )
+
+
 def check_feature_floors_vs_pin() -> int:
-    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude, resolve-sensitive). Runs them
-    all, so one run names every failing floor; returns ``1`` when any fails."""
+    """Every feature floor a release pin must meet (note-URI, sensitivity-exclude, resolve-sensitive, catalog routes).
+    Runs them all, so one run names every failing floor; returns ``1`` when any fails."""
     rcs = [check_note_uri_floor_vs_pin(), check_sensitivity_exclude_floor_vs_pin(),
-           check_resolve_sensitive_floor_vs_pin()]
+           check_resolve_sensitive_floor_vs_pin(), check_catalog_phase2_routes_floor_vs_pin()]
     return 1 if any(rcs) else 0
 
 

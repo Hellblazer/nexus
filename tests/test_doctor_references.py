@@ -12,24 +12,26 @@ caller until this check. Covers:
                               stale/dangling classification through the
                               real run_check_references/staleness_signal
                               path via an injected stat_source result
-  real engine substrate     — a real catalog round-trip: all_documents(),
+  real engine substrate     — a real catalog round-trip through the engine's
+                              by-scheme route (RDR-241 Phase 2, nexus-uwggq.1.5),
                               source_uri, source_mtime and meta genuinely
                               reach stat_one() the way the real engine
-                              serves them, and a chroma:// reference (zero
-                              network, always fresh) proves the walk +
+                              serves them, and an HTTPS:// row in capitals
+                              (stat stubbed, zero network) proves the read +
                               report end to end.
 
 The real HTTP mechanics of the https:// stat (real HEAD, real
 Last-Modified/ETag header parsing, the bounded retry) are already covered
 by ``tests/test_aspect_readers_staleness.py`` against a real local server
 via the injectable ``http_client`` seam; this file does not re-prove them,
-it proves the CATALOG WALK and ORCHESTRATION around them.
+it proves the CATALOG READ and ORCHESTRATION around them.
 """
 from __future__ import annotations
 
 import threading
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 from click.testing import CliRunner
@@ -266,9 +268,25 @@ class _WiringFakeEntry:
     meta: dict = {}
 
 
-class _WiringFakeCat:
+class _BySchemeFakeCat:
+    """Answers ``documents_by_scheme`` the way the engine route does (``urlparse(source_uri).scheme`` equal to the
+    scheme lowercased, alias rows included) and refuses a walk, so a reintroduced ``all_documents`` fails loudly."""
+
+    def __init__(self, entries: list[Any]) -> None:
+        self._entries = entries
+        self.schemes: list[str] = []
+
+    def documents_by_scheme(self, scheme: str) -> list[Any]:
+        self.schemes.append(scheme)
+        return [e for e in self._entries if urlparse(e.source_uri).scheme == scheme.lower()]
+
     def all_documents(self, limit: int = 0) -> list[Any]:
-        return [_WiringFakeEntry()]
+        raise AssertionError("--check-references must not walk the catalog (RDR-241)")
+
+
+class _WiringFakeCat(_BySchemeFakeCat):
+    def __init__(self) -> None:
+        super().__init__([_WiringFakeEntry()])
 
 
 def test_check_references_calls_stat_source(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,12 +314,8 @@ def test_check_references_calls_stat_source(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_no_reference_only_documents_is_not_applicable(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    class _EmptyCat:
-        def all_documents(self, limit: int = 0) -> list[Any]:
-            return []
-
     monkeypatch.setattr(
-        "nexus.catalog.factory.make_catalog_reader", lambda: _EmptyCat(),
+        "nexus.catalog.factory.make_catalog_reader", lambda: _BySchemeFakeCat([]),
     )
     doctor_references.run_check_references(sample=50, seed=1)
     out = capsys.readouterr().out
@@ -327,12 +341,9 @@ def test_unreadable_catalog_is_a_hard_failure(monkeypatch: pytest.MonkeyPatch) -
 # (that mechanic is aspect_readers' own, covered in its test file).
 
 
-class _OneEntryCat:
+class _OneEntryCat(_BySchemeFakeCat):
     def __init__(self, entry: Any) -> None:
-        self._entry = entry
-
-    def all_documents(self, limit: int = 0) -> list[Any]:
-        return [self._entry]
+        super().__init__([entry])
 
 
 class _FakeEntry:
@@ -400,21 +411,32 @@ def test_recorded_etag_is_forwarded_from_entry_meta(monkeypatch: pytest.MonkeyPa
 #
 # The real HTTPS network mechanics are aspect_readers' own (already covered
 # against a real local server in tests/test_aspect_readers_staleness.py);
-# what needs a REAL engine is proving all_documents()/source_uri/
-# source_mtime/meta genuinely round-trip the way stat_one expects. chroma://
-# is content-addressed (always fresh, zero network), so it exercises that
-# round-trip without needing a fake TLS stack for https://.
+# what needs a REAL engine is proving the by-scheme route and source_uri/
+# source_mtime/meta genuinely round-trip the way stat_one expects. The https
+# stat handler is stubbed (zero network); the engine read, its case rule and
+# the unregistered-scheme exclusion are real.
 
 
 class TestRealCatalogRoundTrip:
-    def test_chroma_reference_reads_fresh_file_reference_excluded(self, t2_service_env) -> None:
-        cat = ActiveCatalog()
-        cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
+    def test_capital_https_reference_reads_fresh_unregistered_and_file_excluded(
+        self, t2_service_env, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from nexus import aspect_readers  # noqa: PLC0415 — test-local import, as the class's other tests
         from nexus.catalog.tumbler import Tumbler
 
+        monkeypatch.setitem(
+            aspect_readers._STAT_HANDLERS, "https", lambda uri, **_kw: StatOk(current_mtime=None),
+        )
+        cat = ActiveCatalog()
+        cat.register_owner("test-repo", "repo", repo_hash="abcd1234")
         ref_tumbler = cat.register(
-            Tumbler.parse("1.1"), "Chroma reference doc",
-            content_type="knowledge", source_uri="chroma://knowledge__thing/some-doc",
+            Tumbler.parse("1.1"), "Web reference doc",
+            content_type="knowledge", source_uri="HTTPS://example.invalid/some-doc",
+        )
+        # A scheme no reader stats; not chroma://knowledge__..., which the engine rewrites to nx-note:// on register.
+        cat.register(
+            Tumbler.parse("1.1"), "Gopher reference doc",
+            content_type="knowledge", source_uri="gopher://example.invalid/1/some-doc",
         )
         cat.register(
             Tumbler.parse("1.1"), "File-backed doc",
@@ -426,6 +448,7 @@ class TestRealCatalogRoundTrip:
         assert result.exit_code == 0, result.output
         assert "1 reference-only document(s) sampled (of 1 candidate(s))" in result.output
         assert "1 fresh, 0 stale" in result.output
+        assert "https: fresh=1" in result.output  # the HTTPS:// row, read through the engine's case rule
         assert str(ref_tumbler) not in result.output  # only stale/dangling rows are named
 
     def test_record_https_etag_merges_with_preexisting_meta(self, t2_service_env) -> None:

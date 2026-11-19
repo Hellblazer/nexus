@@ -19,8 +19,8 @@
 #   calls   how many all_documents calls the function holds (the scan counts ast.Call nodes
 #           whose callee is an attribute or a name `all_documents`; enumerate_all_documents is
 #           another name and is not counted).
-#   reason  one sentence: what the function does with the rows. The four wrappers
-#           (enumerate_all_documents, _all_entries, _entries_of_type, reference_only_candidates)
+#   reason  one sentence: what the function does with the rows. The three wrappers
+#           (enumerate_all_documents, _all_entries, _entries_of_type)
 #           are ordinary rows and name their callers here, because a new caller of a wrapper
 #           escapes the scan.
 #   next    optional: the bead that removes or lowers the row.
@@ -48,16 +48,12 @@ domain = [
   "commands/catalog_cmds/doctor.py::_run_store_put_integrity",
   "commands/catalog_cmds/integrity.py::_audit_membership_all",
   "commands/catalog_cmds/integrity.py::_verify_full",
-  "commands/catalog_cmds/maintenance.py::gc_cmd",
   "commands/catalog_cmds/reconcile_fences.py::reconcile_fences",
   "commands/catalog_cmds/reconcile_stale.py::_classify",
   "commands/catalog_cmds/remediation.py::prune_stale_cmd",
   "commands/catalog_cmds/remediation.py::remediate_paths_cmd",
   "commands/catalog_cmds/sensitivity.py::_targets",
-  "doctor_references.py::reference_only_candidates",
   "mcp/catalog.py::catalog_list",
-  "mcp/catalog.py::catalog_search",
-  "operators/sensitive_paths.py::file_tool_restriction",
   "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan",
   "upgrade_ladder/rungs/manifest_span_fill.py::ManifestSpanFillRung._scan",
 ]
@@ -85,7 +81,7 @@ emit = { class = "BULK JOB", calls = 1, reason = "The nx catalog recovery export
 [[row]]
 id = "commands/catalog.py::list_cmd"
 match = { site = "commands/catalog.py::list_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "The --meta mode and the bounded page read documents with all_documents; --sensitive without --owner no longer walks (it reads /sensitive, then resolve_many, nexus-uwggq.1.7); Phase 2 sends --meta through the metadata route, and the row then becomes BOUNDED.", next = "nexus-uwggq.2.14" }
+emit = { class = "BOUNDED", calls = 1, reason = "The one-page list (no --meta, --sensitive or --owner) reads limit + offset + 1 documents with all_documents; --meta asks the metadata route (nexus-uwggq.2.14) and --sensitive the sensitive list (nexus-uwggq.1.7), neither walks." }
 
 [[row]]
 id = "commands/catalog.py::reconcile_cmd"
@@ -106,11 +102,6 @@ emit = { class = "BULK JOB", calls = 1, reason = "Checks per-row collection memb
 id = "commands/catalog_cmds/integrity.py::_verify_full"
 match = { site = "commands/catalog_cmds/integrity.py::_verify_full" }
 emit = { class = "BULK JOB", calls = 1, reason = "Verifies every row, and the ghost rows feed the manifest attribution; stays." }
-
-[[row]]
-id = "commands/catalog_cmds/maintenance.py::gc_cmd"
-match = { site = "commands/catalog_cmds/maintenance.py::gc_cmd" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants only documents with miss_count >= 2; Phase 2 reads them through the metadata route with an integer lower bound.", next = "nexus-uwggq.2.15" }
 
 [[row]]
 id = "commands/catalog_cmds/reconcile_fences.py::reconcile_fences"
@@ -138,24 +129,9 @@ match = { site = "commands/catalog_cmds/sensitivity.py::_targets" }
 emit = { class = "BULK JOB", calls = 1, reason = "Serves nx catalog sensitive with no tumbler, --collection or --owner; stays." }
 
 [[row]]
-id = "doctor_references.py::reference_only_candidates"
-match = { site = "doctor_references.py::reference_only_candidates" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Wants the non-file:// rows; the wrapper's one caller is run_check_references (doctor_references.py:288), and Phase 2 reads registered schemes, in any case, through the scheme-prefix route.", next = "nexus-uwggq.1.5" }
-
-[[row]]
 id = "mcp/catalog.py::catalog_list"
 match = { site = "mcp/catalog.py::catalog_list" }
 emit = { class = "BOUNDED", calls = 2, reason = "Its all_documents calls read one page of limit + 1 documents and stay; its owner and content_type branches read the whole owner or type and slice, which this table does not count." }
-
-[[row]]
-id = "mcp/catalog.py::catalog_search"
-match = { site = "mcp/catalog.py::catalog_search" }
-emit = { class = "AGGREGATE", calls = 1, reason = "The author-alone branch, unattended (Gap 3); Phase 2 reads it through the author route.", next = "nexus-uwggq.2.12" }
-
-[[row]]
-id = "operators/sensitive_paths.py::file_tool_restriction"
-match = { site = "operators/sensitive_paths.py::file_tool_restriction" }
-emit = { class = "AGGREGATE", calls = 1, reason = "Runs per operator dispatch, unattended (Gap 3); Phase 2 reads it through the locator route.", next = "nexus-uwggq.2.13" }
 
 [[row]]
 id = "upgrade_ladder/rungs/manifest_section_labels.py::ManifestSectionLabelsRung._scan"

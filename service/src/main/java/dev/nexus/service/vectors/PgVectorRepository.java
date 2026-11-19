@@ -582,6 +582,16 @@ public final class PgVectorRepository {
     }
 
     /**
+     * RDR-134 (code review I1): true when the registry says {@code collection} is a code collection, which a
+     * {@code topic_route} never routes (it is searched unscoped and reads {@code skipped}). Read from the registered
+     * content type, not the name: the engine does not parse collection names. The fan-out has already looked every
+     * runnable collection up ({@link #dimForCollection}), so this is a cache read there.
+     */
+    private boolean isCodeCollection(String tenant, String collection) {
+        return "code".equals(CollectionRegistry.lookup(tenantScope, tenant, collection).contentType());
+    }
+
+    /**
      * Server-side embed + upsert into the dispatched {@code chunks_<dim>} table.
      *
      * <p>Semantics pinned by the contract suite:
@@ -2232,10 +2242,26 @@ public final class PgVectorRepository {
      * @param minDroppedDistance  smallest distance among the dropped rows, {@code null} if none
      * @param error               the failure text when the collection returned no rows, else {@code null}
      * @param errorKind           the stable failure kind (set exactly when {@code error} is), else {@code null}
+     * @param routeStatus         RDR-134 Step 3: the {@code topic_route} status of the collection ({@code routed},
+     *                            {@code no_topics}, {@code fallback} or {@code skipped}, see {@link TopicRoute.Status}),
+     *                            {@code null} when the request carried no {@code topic_route} naming a collection, and
+     *                            when the collection's arm ended with an {@code error} (it is never {@code skipped} then)
+     * @param routeError          a short text when the route degraded this collection (coverage, centroid ranking or
+     *                            topic search failed), else {@code null}
+     * @param routeCoverage       the coverage ratio the route read, where the collection had centroids and chunks
+     * @param routeTopics         the number of topics the route kept, where the centroid ranking ran
      */
     public record PerCollectionStat(String collection, int rawCount, int dropped,
                                     Double minRawDistance, Double minDroppedDistance,
-                                    String error, ArmErrorKind errorKind) {}
+                                    String error, ArmErrorKind errorKind, String routeStatus, String routeError,
+                                    Double routeCoverage, Integer routeTopics) {
+        /** A stat of a request without a topic route. */
+        public PerCollectionStat(String collection, int rawCount, int dropped, Double minRawDistance,
+                                 Double minDroppedDistance, String error, ArmErrorKind errorKind) {
+            this(collection, rawCount, dropped, minRawDistance, minDroppedDistance, error, errorKind, null, null, null,
+                 null);
+        }
+    }
 
     /**
      * Result of {@link #searchPerCollection}: the merged, enriched rows (at most {@code limit}),
@@ -2323,6 +2349,8 @@ public final class PgVectorRepository {
         private final int limit;
         private final PriorityQueue<Candidate> worstOnTop;
         private final PerCollectionStat[] stats;
+        /** RDR-134 Step 3: per slot, what the route decided, for a request that reports one; null when none reports. */
+        private TopicRouteArm.Attempt[] route;
         private int peak;
 
         FanoutMerger(int collections, int limit) {
@@ -2371,8 +2399,47 @@ public final class PgVectorRepository {
             peak = Math.max(peak, worstOnTop.size());
         }
 
+        /** The request reports the route's decision on every collection that has one. */
+        synchronized void reportRoute() {
+            route = new TopicRouteArm.Attempt[stats.length];
+        }
+
+        synchronized void route(int slot, TopicRouteArm.Attempt attempt) {
+            route[slot] = attempt;
+        }
+
+        /** The collections whose arm was routed (status {@code routed}). */
+        synchronized Set<String> routedCollections() {
+            Set<String> out = new HashSet<>();
+            if (route != null) {
+                for (int i = 0; i < stats.length; i++) {
+                    if (stats[i] != null && route[i] != null && route[i].status() == TopicRoute.Status.ROUTED) {
+                        out.add(stats[i].collection());
+                    }
+                }
+            }
+            return out;
+        }
+
+        /**
+         * The stats, with the route's decision on each when the request reports one. A collection whose arm ended with
+         * an error carries no status: its arm may have failed before the route decided, and "skipped" would be a claim
+         * about a collection that was never searched. Its other route keys, if the route got that far, stay.
+         */
         synchronized List<PerCollectionStat> stats() {
-            return List.of(stats);
+            if (route == null) {
+                return List.of(stats);
+            }
+            List<PerCollectionStat> out = new ArrayList<>(stats.length);
+            for (int i = 0; i < stats.length; i++) {
+                PerCollectionStat s = stats[i];
+                TopicRouteArm.Attempt a = route[i];
+                String status = a == null || s.error() != null ? null : a.status().wire();
+                out.add(a == null ? s : new PerCollectionStat(s.collection(), s.rawCount(), s.dropped(),
+                    s.minRawDistance(), s.minDroppedDistance(), s.error(), s.errorKind(), status, a.error(),
+                    a.coverage(), a.topics()));
+            }
+            return out;
         }
 
         synchronized int peakRetained() {
@@ -2488,7 +2555,7 @@ public final class PgVectorRepository {
     }
 
     /** Per-arm scratch: which limit set the arm's CURRENT statement bound, and the bound itself. */
-    private static final class ArmRun {
+    static final class ArmRun {
         volatile Limiter limiter = Limiter.SEARCH;
         volatile int boundMs;
         /** nexus-tao37 follow-up (RDR-226 Phase 0): where one arm's time goes. */
@@ -3025,6 +3092,57 @@ public final class PgVectorRepository {
                                                    FanoutSettings settings,
                                                    byte[][] chashAllow,
                                                    boolean excludeSensitive) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical, settings, chashAllow, excludeSensitive, null);
+    }
+
+    /**
+     * As {@link #searchPerCollection} with the default fan-out knobs and RDR-134 Step 3's {@code topic_route}
+     * ({@code null} = none: the search as it always was). The handler's entry.
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
+                                                   byte[][] chashAllow,
+                                                   boolean excludeSensitive,
+                                                   TopicRoute topicRoute) {
+        return searchPerCollection(tenant, queryText, collectionNames, perCollectionK, limit, thresholds, where,
+            includeSourceUri, includeEmbeddings, lexical,
+            new FanoutSettings(defaultFanoutParallelism(), defaultFanoutBudgetMs(),
+                               PgSession.startupSearchStatementTimeoutMs()), chashAllow, excludeSensitive, topicRoute);
+    }
+
+    /**
+     * As above with every fan-out knob explicit and the topic route (RDR-134 Step 3, nexus-7fku2.1.3).
+     *
+     * <p>A route that names a collection is applied per arm ({@link TopicRouteArm}): the collections it names are
+     * searched through their kept topics when the collection's coverage allows, every other collection is searched
+     * unscoped, and each {@code per_collection} entry reports {@link PerCollectionStat#routeStatus()}. A request with
+     * {@code chash_allow} or a {@code where} is not routed at all (every collection reports {@code skipped}). A route
+     * whose {@code collections} is present and empty is the search as it always was, with no status reported.
+     */
+    public PerCollectionResult searchPerCollection(String tenant, String queryText,
+                                                   List<String> collectionNames,
+                                                   int perCollectionK, int limit,
+                                                   Map<String, Double> thresholds,
+                                                   Map<String, Object> where,
+                                                   boolean includeSourceUri,
+                                                   boolean includeEmbeddings,
+                                                   boolean lexical,
+                                                   FanoutSettings settings,
+                                                   byte[][] chashAllow,
+                                                   boolean excludeSensitive,
+                                                   TopicRoute topicRoute) {
+        if (topicRoute != null && !topicRoute.reportsStatus()) {
+            topicRoute = null;
+        } else if (topicRoute != null && (chashAllow != null || (where != null && !where.isEmpty()))) {
+            topicRoute = topicRoute.skipRequest();
+        }
         var labelSplit = ManifestLabelStage.split(where);
         boolean validBounds = perCollectionK >= 1 && perCollectionK <= MAX_PER_COLLECTION_K
             && limit >= 1 && limit <= MAX_FANOUT_LIMIT;
@@ -3032,13 +3150,13 @@ public final class PgVectorRepository {
             // An out-of-range K or limit is refused by the fan-out itself, with its own wording.
             return searchPerCollectionUnlabelled(tenant, queryText, collectionNames, perCollectionK, limit,
                 thresholds, where, includeSourceUri, includeEmbeddings, lexical, settings, false, null, chashAllow,
-                excludeSensitive);
+                excludeSensitive, topicRoute);
         }
         var wide = searchPerCollectionUnlabelled(tenant, queryText, collectionNames,
             Math.min(MAX_PER_COLLECTION_K, ManifestLabelStage.widen(perCollectionK)),
             Math.min(MAX_FANOUT_LIMIT, ManifestLabelStage.widen(limit)),
             thresholds, labelSplit.rest(), includeSourceUri, includeEmbeddings, lexical, settings, true,
-            ManifestPushdown.of(labelSplit.labels()), chashAllow, excludeSensitive);
+            ManifestPushdown.of(labelSplit.labels()), chashAllow, excludeSensitive, topicRoute);
         var stage = labelStage();
         List<Map<String, Object>> rows = stage.apply(tenant, wide.rows(), labelSplit.labels(), limit);
         List<Map<String, Object>> lexicalRows = wide.lexicalRows().isEmpty()
@@ -3084,7 +3202,8 @@ public final class PgVectorRepository {
                                                               boolean labelStageFollows,
                                                               ManifestPushdown.Plan manifest,
                                                               byte[][] chashAllow,
-                                                              boolean excludeSensitive) {
+                                                              boolean excludeSensitive,
+                                                              TopicRoute topicRoute) {
         final int parallelism = settings.parallelism();
         final long fanoutBudgetMs = settings.fanoutBudgetMs();
         final int searchBoundMs = settings.searchBoundMs();
@@ -3136,6 +3255,11 @@ public final class PgVectorRepository {
 
         int n = cols.size();
         FanoutMerger merger = new FanoutMerger(n, limit);
+        // RDR-134 Step 3: a route that names collections reports a status on every one, and routes the ones it names.
+        final TopicRouteArm topicArm = topicRoute == null ? null : new TopicRouteArm(tenantScope);
+        if (topicArm != null) {
+            merger.reportRoute();
+        }
         int[] dims = new int[n];
         List<Integer> runnable = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
@@ -3221,10 +3345,24 @@ public final class PgVectorRepository {
                                 continue;
                             }
                             try {
-                                List<Candidate> rows = runArm(tenant, model, col, dims[i], queryVec, wherePlan,
-                                                              perCollectionK, requestDeadlineNanos,
-                                                              fanoutDeadlineNanos, searchBoundMs, armGate, run,
-                                                              chashAllow);
+                                List<Candidate> rows = null;
+                                if (topicArm != null) {
+                                    if (topicRoute.routes(col) && !isCodeCollection(tenant, col)) {
+                                        var attempt = topicArm.attempt(tenant, model, col, dims[i], qv, queryVec,
+                                            perCollectionK, excludeSensitive, topicRoute, requestDeadlineNanos,
+                                            fanoutDeadlineNanos, searchBoundMs, armGate, run);
+                                        merger.route(i, attempt);
+                                        rows = attempt.rows();
+                                    } else {
+                                        merger.route(i, TopicRouteArm.Attempt.SKIPPED);
+                                    }
+                                }
+                                if (rows == null) {
+                                    rows = runArm(tenant, model, col, dims[i], queryVec, wherePlan,
+                                                  perCollectionK, requestDeadlineNanos,
+                                                  fanoutDeadlineNanos, searchBoundMs, armGate, run,
+                                                  chashAllow);
+                                }
                                 merger.accept(i, col, thresholdMap.get(col), rows);
                             } catch (Throwable t) {
                                 settleArmFailure(t, col, run, fanoutBudgetMs,
@@ -3257,6 +3395,11 @@ public final class PgVectorRepository {
 
         List<Candidate> survivors = merger.drainBestFirst();
         List<Map<String, Object>> rows = rowsOf(survivors);
+        if (topicArm != null) {
+            // the topic function returns no metadata: put it on the routed survivors before enrichment reads the row
+            topicArm.attachMetadata(tenant, model, queryDim, rows, merger.routedCollections(), searchBoundMs,
+                                    requestDeadlineNanos);
+        }
         List<PerCollectionStat> stats = merger.stats();
         List<Map<String, Object>> lexicalRows = List.of();
         List<LexicalStat> lexicalStats = List.of();
@@ -3383,7 +3526,8 @@ public final class PgVectorRepository {
      * nexus-4lnn1.1.3 (RDR-230): the vector and the arm it may enter the recall canary's query ring of. A request
      * that searched one collection admits to it if its arm answered (an arm that failed may have had a vector of
      * the wrong width). A fan-out admits to the arm that returned the nearest row, by the arm's smallest RAW distance
-     * (before its threshold), so the choice does not move with a client's cut.
+     * (before its threshold), so the choice does not move with a client's cut. A routed arm (RDR-134 Step 3) is left out of
+     * that choice: its nearest row is the nearest of its topic subset.
      */
     private static QueryVector ringVector(String model, float[] vector, List<PerCollectionStat> stats) {
         if (stats.size() == 1) {
@@ -3395,7 +3539,10 @@ public final class PgVectorRepository {
         List<Double> distances = new ArrayList<>(stats.size());
         for (PerCollectionStat st : stats) {
             names.add(st.collection());
-            distances.add(st.errorKind() == null ? st.minRawDistance() : null);
+            // a routed arm's nearest row is the nearest of its topic subset, not of the collection: it must not
+            // outrank an arm that searched everything (RDR-134 Step 3), so it does not take part in the choice
+            distances.add(st.errorKind() == null && !TopicRoute.Status.ROUTED.wire().equals(st.routeStatus())
+                ? st.minRawDistance() : null);
         }
         return QueryVector.nearestOf(model, vector, names, distances);
     }
@@ -3504,7 +3651,7 @@ public final class PgVectorRepository {
     }
 
     /** The first SQLSTATE found walking a cause chain, or {@code null}. */
-    private static String firstSqlState(Throwable t) {
+    static String firstSqlState(Throwable t) {
         int depth = 0;
         for (Throwable c = t; c != null && depth < 32; c = c.getCause(), depth++) {
             if (c instanceof java.sql.SQLException sql && sql.getSQLState() != null) {
@@ -3632,7 +3779,7 @@ public final class PgVectorRepository {
      * (53100 disk full, 53200 out of memory, 53300 too many connections) and 55P03 (lock not
      * available).
      */
-    private static boolean isTransientSqlState(String state) {
+    static boolean isTransientSqlState(String state) {
         return state != null && (state.startsWith("57P") || state.startsWith("08") || state.startsWith("53")
             || state.equals("40001") || state.equals("40P01") || state.equals("55P03"));
     }
@@ -10207,7 +10354,7 @@ FROM scope s
 
     // ── JSON / SQL helpers ────────────────────────────────────────────────────
 
-    private static Map<String, Object> fromJson(String json) {
+    static Map<String, Object> fromJson(String json) {
         if (json == null || json.isBlank()) return Map.of();
         try {
             return MAPPER.readValue(json, MAP_TYPE);

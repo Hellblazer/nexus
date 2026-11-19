@@ -67,6 +67,7 @@ from nexus.hook_registry import HookRegistry as _HookRegistry, LockedHookRegistr
 from nexus.mcp._sdk_patches import apply_sdk_patches as _apply_sdk_patches
 from nexus.mcp._server_version import server_version as _server_version
 from nexus.mcp._tool_failure import fail as _fail
+from nexus.mcp.answer_chunks import cap_chunks, harvest_chunks  # GH #1667
 from nexus.lua_runtime import library as _procedure_library
 from nexus.lua_runtime.runner import (
     PROCEDURE_ERRORS as _PROCEDURE_ERRORS,
@@ -3552,9 +3553,15 @@ def _search_render(
 
         _allow = active_chash_allow()
         allow_key = None if _allow is None else hashlib.sha256("\n".join(sorted(_allow)).encode()).hexdigest()
+        # RDR-134 Step 7: a plan step's topic route changes which rows come back too, so a routed call and an
+        # unrouted one never share a page.
+        from nexus.plans.topic_route_scope import active_topic_route  # noqa: PLC0415 — leaf module, deferred like the one above
+
+        _route = active_topic_route()
+        route_key = None if _route is None else json.dumps(_route, sort_keys=True)
         cache_key = (
             query, tuple(target), where or "", cluster_by or "",
-            topic or "", threshold, lexical, boost_window, allow_key, sensitivity,
+            topic or "", threshold, lexical, boost_window, allow_key, route_key, sensitivity,
         )
         clustered = bool(cluster_by)
         # Always pass taxonomy for topic grouping + topic boost (RDR-070).
@@ -14294,9 +14301,12 @@ async def nx_answer(
         # request extraction), or None when neither is known — never a fabricated 0.0.
         _steps = step_records or []
         cost_usd = _run_cost_usd(_steps, _out_of_step_cost_usd(_out_of_step_usage_sink))
+        _capped_chunks, _chunks_truncated = cap_chunks(chunks)
         return {
             "final_text": _text,
-            "chunks": chunks if chunks is not None else [],
+            "chunks": _capped_chunks,
+            # GH #1667: distinct ids the 50-entry cap dropped; always present (0 when none).
+            "chunks_truncated": _chunks_truncated,
             "plan_id": plan_id,
             "step_count": step_count,
             # nexus-h33x8.6 a4 / RDR-196 marker convention: always present
@@ -14512,26 +14522,7 @@ async def nx_answer(
         # Harvest retrieved chunks the same way Step 5's structured path
         # does, so a partial answer still surfaces what was found. The
         # pre-Step-2 stand-in has no steps at all, so this is [].
-        partial_chunks: list[dict] = []
-        for step_out in result.steps:
-            if not isinstance(step_out, dict):
-                continue
-            ids = step_out.get("ids")
-            if not isinstance(ids, list) or not ids:
-                continue
-            hashes = step_out.get("chunk_text_hash", []) or []
-            per_chunk_colls = step_out.get("chunk_collections") or []
-            dedup_colls = step_out.get("collections", []) or []
-            dists = step_out.get("distances", []) or []
-            default_coll = dedup_colls[0] if dedup_colls else ""
-            for i, cid in enumerate(ids):
-                coll = per_chunk_colls[i] if i < len(per_chunk_colls) else default_coll
-                partial_chunks.append({
-                    "id": cid,
-                    "chash": hashes[i] if i < len(hashes) else "",
-                    "collection": coll,
-                    "distance": dists[i] if i < len(dists) else None,
-                })
+        partial_chunks: list[dict] = harvest_chunks(result.steps)
         # The terminal step is where plan_run puts the OperatorTimeoutError
         # sentinel (isolated path) or the bundle's terminal slot (bundle
         # path) — both carry partial_text when a3's stream-json capture
@@ -16052,30 +16043,7 @@ async def nx_answer(
     # the per-result ``chunk_collections`` list (Phase 3 fix) so every
     # chunk is tagged with its actual origin — not the first dedup'd
     # collection.
-    envelope_chunks: list[dict] = []
-    if structured:
-        for step_out in result.steps:
-            if not isinstance(step_out, dict):
-                continue
-            ids = step_out.get("ids")
-            if not isinstance(ids, list) or not ids:
-                continue
-            hashes = step_out.get("chunk_text_hash", []) or []
-            per_chunk_colls = step_out.get("chunk_collections") or []
-            dedup_colls = step_out.get("collections", []) or []
-            dists = step_out.get("distances", []) or []
-            default_coll = dedup_colls[0] if dedup_colls else ""
-            for i, cid in enumerate(ids):
-                if i < len(per_chunk_colls):
-                    coll = per_chunk_colls[i]
-                else:
-                    coll = default_coll
-                envelope_chunks.append({
-                    "id": cid,
-                    "chash": hashes[i] if i < len(hashes) else "",
-                    "collection": coll,
-                    "distance": dists[i] if i < len(dists) else None,
-                })
+    envelope_chunks: list[dict] = harvest_chunks(result.steps) if structured else []
 
     # RDR-137 followup (nexus-n1908): empty-retrieval guard. If the plan
     # had retrieval steps but they collectively returned zero evidence,

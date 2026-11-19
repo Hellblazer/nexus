@@ -636,6 +636,12 @@ class VectorSensitivityRouteParityTest {
             + "on, and RDR-243's census lists no pipeline staging read. It is not a corpus read: no search, get or "
             + "resolve route reaches it, and a sensitive document's text reaches pdf_chunks only through its own "
             + "indexing run");
+        // RDR-134 Step 3 (nexus-7fku2.1.3): the routed arm of /search-per-collection
+        OTHER_TEXT_READERS.put("TopicRouteArm.java#topicSearch", "the routed arm of POST /v1/vectors/search-per-collection: "
+            + "search_topic_set_<dim>, the topic-scoped twin of plain_search_<dim>, takes the request's sensitivity "
+            + "exclusion as its last argument (excludeSensitive, handler-parsed and passed on every call by "
+            + "VectorHandler#handleSearchPerCollection), and its rows then go through the same enrichSearchRows "
+            + "(attachSensitive) as the unrouted rows");
         OTHER_TEXT_READERS.put("StoreGetProjection.java#selectFields", "the select list of PgVectorRepository#get, "
             + "named there as a column handle (ch.chunkText()) so a metadata-only store-get can leave it out. It "
             + "reads nothing itself; the statement that runs it is PgVectorRepository#get's, whose WHERE applies "

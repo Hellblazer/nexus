@@ -11,7 +11,7 @@ this module holds the constants, the report, the query builder and the two affor
 
 **The queries are deterministic and cost no client model call.** A repair query is the facet's own text, which is
 what the request asked for and what the first assessment found nothing for (a lexical twin, below, is its key
-terms). The order is the RDR's: every
+terms or, for a facet with none, its content words). The order is the RDR's: every
 unsupported facet against the primary source's collections first (a named source is the strongest claim on
 the answer), then against the corpora the plan's own retrieval steps used, which are already narrowed to the
 caller's explicit scope. The targets are therefore never wider than the scope that governed the plan: a
@@ -54,6 +54,15 @@ that needs ``query`` (a subtree, ``author`` or ``content_type``) has no lexical 
 never widens the scope. Each twin gets an equal share of the query time left; one that fails or times out is
 skipped and is not, on its own, a failed retrieval (``CoverageBoundary.run``). The extraction is a starting point,
 not a measurement.
+
+**The content-word twin (GH #1667).** A facet with no key terms gets a lexical twin built from its own words instead
+(:func:`content_terms`: the first clause's last four content words), queued after every key-term twin. The case
+that motivated it asked for a "byte budget" whose answer is a constant (``CHAT_TOOL_RESULT_MAX_BYTES``) that no
+identifier in the question names; its code's comments use the question's words, and a lexical search for "tool
+result byte budget" returned budget code as all of its top ten, where every vector query had missed it (the chunk
+holding the default value itself was not among them). It cannot reach a fact
+written in words the question does not use: that wants a rewrite into the target's vocabulary, which this module
+does not do.
 
 Pure: stdlib and the RDR-232 value types.
 """
@@ -151,6 +160,20 @@ _STOPWORDS = frozenset(
 )
 
 
+#: Content words one content-word twin carries (GH #1667): ANDed by the full-text route, so few.
+_MAX_CONTENT_TERMS = 4
+#: A clause ends here; a content-word twin reads only the first clause, where a question puts what it asks about.
+_CLAUSE_END = re.compile(r"[,;:?!]|\.(?:\s|$)|\b(?:and|or|when|while|because|if|which|whose)\b", re.IGNORECASE)
+#: Verbs a question ends its clause on ("...byte budget work", "...where it is set"): never the thing asked about.
+_FRAMING_TAIL = frozenset(
+    "work works set configured defined decide decides issue issued run runs mean means happen happens use used "
+    "stored kept live lives located found come comes go goes behave behaves handled".split()
+)
+_CONTENT_STOPWORDS = _STOPWORDS | frozenset(
+    "per s do did can could should would will there that these those into about also its their whose".split()
+)
+
+
 #: Words that form slash alternations in prose (``client/server``, ``read/write/execute``), not paths.
 _ALTERNATIONS = frozenset(
     "and or not yes no maybe on off true false pass fail pros cons in out input output read write execute client "
@@ -226,6 +249,33 @@ def key_terms(text: str) -> tuple[str, ...]:
         if term.lower() not in (t.lower() for t in out):
             out.append(term)
     return tuple(out[:_MAX_KEY_TERMS])
+
+
+def content_terms(text: str) -> tuple[str, ...]:
+    """The content words of *text*'s first clause, for a lexical twin of a facet with no :func:`key_terms` (GH #1667).
+
+    The first clause ends at the first ``, ; : ? !``, a sentence's period, or ``and``, ``or``, ``when``, ``while``,
+    ``because``, ``if``, ``which`` or ``whose``. A framing verb that ends it (``work``, ``set``, ``configured``, ``run``
+    and the like) is dropped. Its words (Unicode letters and digits) are
+    split at hyphens, a possessive ``'s`` is dropped and any other word with an apostrophe (a contraction such as
+    ``don't``) is left out, then lowercased, and stopwords, single letters and bare numbers dropped; the LAST four are kept,
+    because a question names the thing it asks about (the head of its noun phrase) after the owner it belongs to
+    ("the alpha-svc's per-request-retry timeout window" keeps "request retry timeout window"). The engine's
+    full-text route ANDs every word, so a short, specific phrase in the code's likely words is what can match.
+    Empty when fewer than two content words remain: one word alone matches too much to be a twin."""
+    # a clause ends at the first end mark with words before it ("which port does ..." is not cut at its first word)
+    m = next((m for m in _CLAUSE_END.finditer(text) if re.search(r"\w", text[:m.start()])), None)
+    clause = text[:m.start()] if m else text
+    words = []
+    for w in re.findall(r"[^\W_]+(?:['’][^\W_]+)*", clause):
+        w = re.sub(r"['’][sS]$", "", w)
+        if "'" not in w and "’" not in w:
+            words.append(w.lower())
+    kept = [w for w in words if len(w) > 1 and not w.isdigit() and w not in _CONTENT_STOPWORDS]
+    while kept and kept[-1] in _FRAMING_TAIL:
+        kept.pop()
+    out = tuple(kept[-_MAX_CONTENT_TERMS:])
+    return out if len(out) >= 2 else ()
 
 
 #: Why a repair ran (:attr:`RepairReport.reason`): a facet was assessed and nothing held bears on it (``unsupported``),
@@ -526,8 +576,10 @@ def build_repair_queries(
 
     Lexical twins (nexus-0ihqj) follow every vector query: for each ``search`` of a facet with :func:`key_terms`,
     in the same order, the same target and filters with ``lexical=True`` and the key terms as the text, at most
-    *max_lexical* of them and only in the slots of *max_queries* the vector queries left. So the vector queries
-    are exactly the ones they were, and the total stays within *max_queries*. ``0`` (the default) emits none.
+    *max_lexical* of them and only in the slots of *max_queries* the vector queries left. A facet with no key terms
+    gets a content-word twin instead (:func:`content_terms`, GH #1667), after every key-term twin, so the more
+    precise twins keep the first slots. So the vector queries are exactly the ones they were, and the total stays
+    within *max_queries*. ``0`` (the default) emits none.
     """
     origin: Literal["primary", "plan"]
     targets: list[tuple[Literal["primary", "plan"], RepairTarget]] = [
@@ -535,6 +587,7 @@ def build_repair_queries(
     targets += [("plan", t) for t in plan_targets if t.corpus]
     out: list[RepairQuery] = []
     twins: list[RepairQuery] = []
+    content_twins: list[RepairQuery] = []
     seen: set[tuple[str, str, str, tuple[tuple[str, str], ...]]] = set()
     twin_seen: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
     for origin, target in targets:
@@ -555,11 +608,14 @@ def build_repair_queries(
             else:
                 out.append(RepairQuery(f.id, "search", {"query": text, "corpus": target.corpus, "limit": limit, **filters}, origin))
                 terms = key_terms(f.text) if max_lexical > 0 else ()
+                into = twins
+                if not terms and max_lexical > 0:
+                    terms, into = content_terms(f.text), content_twins
                 twin_key = (" ".join(terms).lower(), target.corpus, target.filters)
                 if terms and twin_key not in twin_seen:
                     twin_seen.add(twin_key)
-                    twins.append(RepairQuery(f.id, "search", {
+                    into.append(RepairQuery(f.id, "search", {
                         "query": " ".join(terms), "corpus": target.corpus, "limit": limit, "lexical": True, **filters,
                     }, origin))
     room = max(0, min(max_lexical, max_queries - len(out)))
-    return out + twins[:room]
+    return out + (twins + content_twins)[:room]

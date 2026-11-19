@@ -36,6 +36,7 @@ from nexus.plans.coverage_repair import (
     MAX_REPAIR_QUERIES,
     RepairTarget,
     build_repair_queries,
+    content_terms,
     key_terms,
 )
 from nexus.plans.evidence import ScopeConstraint
@@ -120,6 +121,7 @@ def test_the_twins_follow_every_vector_query_in_the_same_order() -> None:
         ("f3", "who set max_hops", False),
         ("f1", "retry_budget", True),
         ("f3", "max_hops", True),
+        ("f2", "ledger read", True),
     ]
     twin = qs[3]
     assert twin.tool == "search" and twin.origin == "plan"
@@ -336,3 +338,79 @@ async def test_a_confined_runs_twin_carries_the_document_filter_and_its_outside_
     twins = d.lexical_searches()
     assert len(twins) == 1 and twins[0]["chash_allow"] == sorted(allowed)
     assert all(a.content != LEXICAL_HIT for a in cov.ledger.anchors), "a hit outside the document never enters"
+
+
+# ── content-word twins (GH #1667) ───────────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    # the head noun phrase of the first clause, owner and framing dropped, at most four words, last ones kept
+    ("What is the alpha-svc's per-request-retry timeout window, and where is it configured?",
+     ("request", "retry", "timeout", "window")),
+    ("how the coverage repair reads the ledger", ("coverage", "repair", "reads", "ledger")),
+    ("which port does the beta gateway listen on", ("port", "beta", "gateway", "listen")),
+    ("the cache eviction policy; also its size", ("cache", "eviction", "policy")),
+    # Unicode words stay whole; a possessive keeps its word; a contraction is left out
+    ("the résumé parser's naïve loader", ("résumé", "parser", "naïve", "loader")),
+    ("why don't the retry workers restart", ("retry", "workers", "restart")),
+    # a trailing framing verb is dropped; a period, "when" or "which" ends the clause
+    ("how does the service's per-tool-result byte budget work", ("tool", "result", "byte", "budget")),
+    ("default timeout for the lexical search route when the engine is cold", ("timeout", "lexical", "search", "route")),
+    ("Explain the shard lease. Give its defaults.", ("explain", "shard", "lease")),
+    ("how the coverage repair picks which facets to query", ("coverage", "repair", "picks")),
+])
+def test_content_terms_are_the_first_clauses_last_four_content_words(text: str, expected: tuple[str, ...]) -> None:
+    assert content_terms(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", "what is it?", "where, and why", "12 34 2026", "the cache?", "where is the ledger"])
+def test_content_terms_need_two_content_words(text: str) -> None:
+    assert content_terms(text) == ()
+
+
+def test_a_facet_without_identifiers_gets_a_content_word_twin_after_the_identifier_twins() -> None:
+    """GH #1667: a facet whose text names no identifier still gets a lexical twin, from its own content words, so
+    a constant the code describes in the question's words ("byte budget") is reachable; identifier twins, the more
+    precise, keep the first spare slots."""
+    qs = build_repair_queries(
+        [_f("f1", "What is the alpha-svc's per-request-retry timeout window, and where is it set?"),
+         _f("f2", "what the retry_budget allows")],
+        primary_collections=[], plan_targets=[RepairTarget("code")], max_queries=6, limit=5, max_lexical=3,
+    )
+    assert [(q.facet_id, q.args["query"]) for q in qs if q.args.get("lexical")] == [
+        ("f2", "retry_budget"),
+        ("f1", "request retry timeout window"),
+    ]
+
+
+def test_a_facet_with_identifiers_gets_no_content_word_twin() -> None:
+    qs = build_repair_queries(
+        [_f("f1", "where the retry_budget timeout window is set")], primary_collections=[],
+        plan_targets=[RepairTarget("code")], max_queries=6, limit=5, max_lexical=3,
+    )
+    assert [q.args["query"] for q in qs if q.args.get("lexical")] == ["retry_budget"]
+
+
+def test_content_word_twins_stay_inside_the_spare_slots() -> None:
+    facets = [_f(f"f{i}", f"how the cache{i} eviction policy works") for i in range(1, 6)]
+    qs = build_repair_queries(facets, primary_collections=[], plan_targets=[RepairTarget("code")],
+                              max_queries=6, limit=5, max_lexical=3)
+    assert len(qs) == 6 and sum(1 for q in qs if q.args.get("lexical")) == 1, "five vector queries leave one slot"
+
+
+PROSE_FACET = "what the document says about the retry window length"
+
+
+@pytest.mark.asyncio
+async def test_a_hit_only_the_content_word_twin_finds_covers_a_prose_facet() -> None:
+    """GH #1667, end to end: a facet with no identifier gets a content-word twin, its hit enters the ledger as new
+    evidence and covers the facet, the same way a key-term twin's does."""
+    twin = " ".join(content_terms(PROSE_FACET))
+    assert twin == "says retry window length"
+    d = LexicalDispatcher({twin: [LEXICAL_HIT]})
+    cov = _cov(await _run(d, CoverageBoundary(request=_request(PROSE_FACET))))
+    assert twin in [a["query"] for a in d.lexical_searches()]
+    assert cov.repair.outcome == "completed"
+    f3 = cov.ledger.finding("f3")
+    new = next(a for a in cov.ledger.anchors if a.content == LEXICAL_HIT)
+    assert f3 is not None and f3.state == "covered" and f3.evidence_ids == (new.item_id,)

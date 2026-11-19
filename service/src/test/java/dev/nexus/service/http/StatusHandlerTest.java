@@ -284,6 +284,38 @@ class StatusHandlerTest {
     }
 
     @Test
+    void chunkMetadataKeyLogOverflowTotal_countsWritersTheLogLimiterHadNoSlotFor() throws Exception {
+        // RDR-236 Phase 4 Step 2b prep (nexus-6pfgb.66), [additive]: past the limiter's key cap new writers share one
+        // log line, so the 2b read cannot see them in the log; this engine-fixed count says how many there were.
+        dev.nexus.service.vectors.ChunkKeyAllowlistActivity.resetForTests();
+        start(new StatusHandler(null));
+        assertThat(get().get("chunk_metadata_key_log_overflow_total").asLong()).as("nothing overflowed yet").isZero();
+        var check = new dev.nexus.service.vectors.ChunkKeyAllowlistCheck();
+        var meta = java.util.Map.<String, Object>of("title", "t");
+        int cap = dev.nexus.service.vectors.OwnerlessLogLimiter.MAX_KEYS;
+        // Each of the cap distinct writers logs one WARN line; silence the check's logger so the loop stays well inside
+        // the limiter's one-minute window (past it, early slots expire and the late writers would find room).
+        var checkLogger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+            dev.nexus.service.vectors.ChunkKeyAllowlistCheck.class);
+        var before = checkLogger.getLevel();
+        checkLogger.setLevel(ch.qos.logback.classic.Level.OFF);
+        try {
+            for (int i = 0; i < cap; i++) {
+                check.observe("t", "knowledge-c" + i, "upsert-chunks", java.util.List.of(meta), 1, null, null);
+            }
+            assertThat(get().get("chunk_metadata_key_log_overflow_total").asLong()).as("every writer had a slot").isZero();
+            for (int i = 0; i < 3; i++) {
+                check.observe("t", "knowledge-late" + i, "upsert-chunks", java.util.List.of(meta), 1, null, null);
+            }
+        } finally {
+            checkLogger.setLevel(before);
+        }
+        var s = get();
+        assertThat(s.get("chunk_metadata_key_log_overflow_total").asLong()).as("three writers had no slot").isEqualTo(3);
+        assertThat(s.get("chunk_metadata_key_would_refuse_total").asLong()).as("all were still counted").isEqualTo(cap + 3L);
+    }
+
+    @Test
     void chunkMetadataKeyWouldRefuse_statusNeverCarriesAClientSuppliedKeyNameOrUserAgent() throws Exception {
         // GET /v1/status has no tenant scope: any caller sees the whole engine's status. A key name, a User-Agent or
         // a client version comes from one tenant's client, so it must not appear anywhere in the body, whatever the

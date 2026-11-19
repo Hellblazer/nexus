@@ -39,6 +39,11 @@ K = 3
 RECALL_K = 10
 K_PROD = 20  # a production per-collection k for n_results=10 (max(5, n*mult), mult 2)
 _RDR = re.compile(r"^RDR-(\d{3})$")
+#: The question kinds ``load_queries`` can return, and the buckets ``main`` summarises, in report order
+#: (``all`` last). ``generic`` is the answer-is-a-generic-document class of RDR-134 Step 8: a question
+#: names it with ``kind: generic`` in its YAML entry.
+QUESTION_KINDS = ("rdr", "title", "generic")
+SUMMARY_KINDS = (*QUESTION_KINDS, "all")
 
 
 def _norm(s: str) -> str:
@@ -64,15 +69,29 @@ def load_queries(paths: list[Path]) -> list[dict[str, Any]]:
                     else:
                         gt[_norm(s)[:30]] = 3
                         kind = "title"
+            if "kind" in q:
+                kind = str(q["kind"])
+                if kind not in QUESTION_KINDS:
+                    raise ValueError(f"{p}: question {q.get('qid')!r}: kind {kind!r} not in {QUESTION_KINDS}")
             if not gt or q["text"] in out:
                 continue
-            out[q["text"]] = {"qid": q["qid"], "text": q["text"], "gt": gt, "kind": kind}
+            out[q["text"]] = {"qid": q["qid"], "text": q["text"], "gt": gt, "kind": kind,
+                              # RDR-134 Step 9: a generic key names a whole basename that other projects share
+                              # (CHANGELOG.md), so a generic question is graded on its owner's collections only
+                              # and on the exact basename.
+                              "owner": q.get("owner"), "exact": kind == "generic"}
     return list(out.values())
 
 
-def _grade(name: str, gt: dict[str, int]) -> int:
+def _grade(name: str, gt: dict[str, int], exact: bool = False) -> int:
     n = _norm(name)
-    return max((v for k, v in gt.items() if k and k in n), default=0)
+    return max((v for k, v in gt.items() if k and (k == n if exact else k in n)), default=0)
+
+
+def collection_owner(collection: str) -> str:
+    """The owner segment of a conformant ``<type>__<owner>__<model>__v<n>`` name, or ``""``."""
+    parts = collection.split("__")
+    return parts[1] if len(parts) >= 4 else ""
 
 
 def _ndcg(grades: list[int], gt: dict[str, int]) -> float:
@@ -83,23 +102,39 @@ def _ndcg(grades: list[int], gt: dict[str, int]) -> float:
     return min(1.0, dcg / idcg) if idcg else 0.0
 
 
+def _grading(q: dict[str, Any]) -> dict[str, Any]:
+    """The owner and exact-basename grading a question asks for (generic questions, RDR-134 Step 9)."""
+    return {"owner": q.get("owner"), "exact": bool(q.get("exact"))}
+
+
 def score(rows: list[dict[str, Any]], gt: dict[str, int], catalog: Any,
-          with_colls: bool = False) -> dict[str, Any]:
-    """``with_colls`` adds ``top3_coll``: the collection of each ``top3`` document, in step."""
+          with_colls: bool = False, *, owner: str | None = None, exact: bool = False) -> dict[str, Any]:
+    """``with_colls`` adds ``top3_coll``: the collection of each ``top3`` document, in step.
+
+    *owner* (RDR-134 Step 9): a document from another owner's collection keeps its rank slot and grades 0, and is
+    told apart from this owner's file of the same name. *exact*: a key must equal the normalised basename.
+    """
     rows = rows[: FETCH * 3]
     paths = _resolve_paths_via_catalog(catalog, [r["chash"] for r in rows])
+    seen: set[tuple[str, bool]] = set()
     names: list[str] = []
+    credited: list[bool] = []
     colls: list[str] = []
     for r in rows:
         p = paths.get(r["chash"], "")
         n = Path(p).name if p else ""
-        if n and n not in names:
-            names.append(n)
-            colls.append(r.get("collection", ""))
-    grades = [_grade(n, gt) for n in names]
+        coll = r.get("collection", "")
+        ours = owner is None or collection_owner(coll) == owner
+        doc = (n if ours else f"{coll}/{n}", ours)
+        if n and doc not in seen:
+            seen.add(doc)
+            names.append(doc[0])
+            credited.append(ours)
+            colls.append(coll)
+    grades = [_grade(n, gt, exact) if ours else 0 for n, ours in zip(names, credited)]
     targets = [k for k, v in gt.items() if v >= 3]
-    top = [_norm(n) for n in names[:RECALL_K]]
-    hit = sum(1 for t in targets if any(t in n for n in top))
+    top = [_norm(n) for n, ours in zip(names[:RECALL_K], credited[:RECALL_K]) if ours]
+    hit = sum(1 for t in targets if any((t == n if exact else t in n) for n in top))
     out = {"ndcg3": _ndcg(grades, gt), "recall10": hit / len(targets) if targets else 0.0,
            "top3": names[:3]}
     if with_colls:
@@ -159,13 +194,13 @@ def measure_prod_query(q: dict[str, Any], prod: list[str], routed: list[str], t3
     p0 = p0_search(q["text"], prod, 30, t3, cluster_by=None, taxonomy=None, sensitivity="include")
     p0_rows = [{"chash": getattr(r, "id", ""), "distance": float(getattr(r, "distance", 1.0)),
                 "collection": getattr(r, "collection", "")} for r in p0]
-    row["P0"] = {**score(p0_rows, q["gt"], catalog), "s": time.monotonic() - t0}
-    row["P0s"] = score(merge(p0_rows), q["gt"], catalog)  # same rows, ordered by distance
+    row["P0"] = {**score(p0_rows, q["gt"], catalog, **_grading(q)), "s": time.monotonic() - t0}
+    row["P0s"] = score(merge(p0_rows), q["gt"], catalog, **_grading(q))  # same rows, ordered by distance
 
     t0 = time.monotonic()
     plain = {c: search_one(t3, q["text"], c) for c in prod}
     off_s = time.monotonic() - t0
-    row["OFF"] = {**score(merge([r for rs in plain.values() for r in rs]), q["gt"], catalog), "s": off_s}
+    row["OFF"] = {**score(merge([r for rs in plain.values() for r in rs]), q["gt"], catalog, **_grading(q)), "s": off_s}
 
     calls = {"search": 0, "embed": 0, "ann": 0, "topic_search": 0}
     ranked = rank_topics(t3, cstore, tax, q["text"], routed, calls, {})
@@ -179,7 +214,7 @@ def measure_prod_query(q: dict[str, Any], prod: list[str], routed: list[str], t3
                 rows += plain[c]
             else:
                 rows += tr
-        row[arm] = score(merge(rows), q["gt"], catalog)
+        row[arm] = score(merge(rows), q["gt"], catalog, **_grading(q))
         for label, gset in (gates or {}).items():
             grows: list[dict[str, Any]] = []
             for c in prod:
@@ -188,7 +223,7 @@ def measure_prod_query(q: dict[str, Any], prod: list[str], routed: list[str], t3
                     grows += plain[c]
                 else:
                     grows += tr
-            row[f"{arm}@g{label}"] = score(merge(grows), q["gt"], catalog, with_colls=True)
+            row[f"{arm}@g{label}"] = score(merge(grows), q["gt"], catalog, with_colls=True, **_grading(q))
     for tr in top1.values():
         stats["routed"] += 1
         if not tr:
@@ -211,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", nargs="+", type=Path, default=[
         Path("bench/queries/spike_5q.yaml"), Path("bench/queries/golden_v1.yaml"),
-        Path("bench/queries/golden_heldout_v1.yaml")])
+        Path("bench/queries/golden_heldout_v1.yaml"), Path("bench/queries/generic_docs_v2.yaml")])
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--gate-from", type=Path, default=None, metavar="COVERAGE_JSON",
@@ -253,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
     if gates is not None:
         arms += [f"{b}@g{label}" for label in gates for b in ("top1_F0", "top1_Fk")]
     summary: dict[str, Any] = {"n": len(results), "prod_collections": len(prod), "routed_collections": len(routed)}
-    for kind in ("rdr", "title", "all"):
+    for kind in SUMMARY_KINDS:
         sel = [r for r in results if kind == "all" or r["kind"] == kind]
         if not sel:
             continue

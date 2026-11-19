@@ -91,6 +91,14 @@ trap cleanup EXIT
 
 free_port() { python3 -c "import socket;s=socket.socket();s.bind(('127.0.0.1',0));print(s.getsockname()[1]);s.close()"; }
 
+# nexus-rc4pz: free_port closes its probe socket, so another process can take the port before the engine
+# or docker binds it. names_a_taken_port <file>: the file names that failure: the JDK's BindException and
+# docker's proxy say "Address already in use", Windows says "Only one usage of each socket address", docker
+# says "port is already allocated". Such a start gets one retry on a fresh port; every other failure is final.
+names_a_taken_port() {
+  grep -qiF -e 'Address already in use' -e 'only one usage of each socket address' -e 'port is already allocated' "$1"
+}
+
 if [ -z "$PGC" ]; then
   if [ -n "${NX_DB_URL:-}" ]; then
     echo "SKIP boot shapes: external NX_DB_URL cannot give each boot a clean database."
@@ -107,9 +115,20 @@ if [ -z "$PGC" ]; then
   PGC="nx-bootshapes-pg-$$"
   PGP=$(free_port)
   _bounded 60 docker rm -f "$PGC" >/dev/null 2>&1 || true
-  _bounded 600 docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
-    -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGP}:5432" pgvector/pgvector:pg17 >/dev/null \
-    || { echo "FAIL: cannot start the throwaway pgvector container"; exit 2; }
+  start_pg() {
+    _bounded 600 docker run -d --name "$PGC" -e POSTGRES_DB=nexus -e POSTGRES_USER=nexus \
+      -e POSTGRES_PASSWORD=nexus -p "127.0.0.1:${PGP}:5432" pgvector/pgvector:pg17 >/dev/null 2>"$SHAPES_TMP/pg-run.err"
+    local rc=$?
+    cat "$SHAPES_TMP/pg-run.err" >&2
+    return "$rc"
+  }
+  if ! start_pg; then
+    names_a_taken_port "$SHAPES_TMP/pg-run.err" || { echo "FAIL: cannot start the throwaway pgvector container"; exit 2; }
+    echo "retry: pgvector host port $PGP was taken before the container could bind it (port is already allocated); one more start on a fresh port"
+    _bounded 60 docker rm -f "$PGC" >/dev/null 2>&1
+    PGP=$(free_port)
+    start_pg || { echo "FAIL: cannot start the throwaway pgvector container"; exit 2; }
+  fi
   for _ in $(seq 1 60); do _bounded 10 docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 && break; sleep 1; done
   _bounded 10 docker exec "$PGC" pg_isready -U nexus >/dev/null 2>&1 || { echo "FAIL: pgvector never became ready"; exit 2; }
   sleep 2
@@ -127,7 +146,8 @@ boot_prepare() {
   BOOT_MODELS="$BOOT_DIR/onnx_models"
   BOOT_DB="bootshape_$(echo "$name" | tr -c 'a-zA-Z0-9' '_')"
   mkdir -p "$BOOT_DIR/jtmp" "$BOOT_DIR/home" "$BOOT_ORT" "$BOOT_MODELS"
-  _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "DROP DATABASE IF EXISTS $BOOT_DB;" >/dev/null 2>&1
+  # WITH (FORCE) (PG13+): a backend the killed engine of a retried boot left behind cannot block the drop.
+  _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "DROP DATABASE IF EXISTS $BOOT_DB WITH (FORCE);" >/dev/null 2>&1
   _bounded 60 docker exec "$PGC" psql -U nexus -d nexus -c "CREATE DATABASE $BOOT_DB;" >/dev/null 2>&1 \
     || { echo "FAIL: cannot create database $BOOT_DB in $PGC"; return 1; }
   BOOT_PORT=$(free_port)
@@ -157,6 +177,10 @@ wait_ready() {
   done
   return 1
 }
+
+# port_taken: the boot died at its bind because BOOT_PORT was taken after free_port probed it (the
+# JDK's uncaught BindException; develop run 44400504933, nexus-rc4pz). A live engine is never retried.
+port_taken() { ! kill -0 "$BOOT_PID" 2>/dev/null && names_a_taken_port "$BOOT_LOG"; }
 
 # wait_exit <seconds>: bounded wait for our own pid to exit. Sets EXIT_RC; on timeout kills it
 # (only the pid we started) and sets EXIT_RC=137. Returns 1 on timeout.
@@ -206,7 +230,19 @@ run_cloud_shape() {
   leg_ok=0
   boot_prepare cloud-shape || { leg_ok=1; verdict "cloud-shape"; return; }
   boot_start spike-dummy
-  if ! wait_ready; then
+  local ready=0
+  wait_ready && ready=1
+  # The only shape whose engine binds a port: a port taken after the probe gets one more boot, on a
+  # fresh database and port, with the first boot's files kept beside it. Any other failure is final.
+  if [ "$ready" = "0" ] && port_taken; then
+    echo "    retry: port $BOOT_PORT was taken before the engine bound it (Address already in use); one more boot on a fresh port"
+    kill_boot
+    mv "$BOOT_DIR" "$BOOT_DIR.port-taken"
+    boot_prepare cloud-shape || { leg_ok=1; verdict "cloud-shape"; return; }
+    boot_start spike-dummy
+    wait_ready && ready=1
+  fi
+  if [ "$ready" = "0" ]; then
     echo "    FAIL reaches service_ready: the engine exited or never became ready"; leg_ok=1
     kill_boot; verdict "cloud-shape"; return
   fi

@@ -58,7 +58,8 @@ class FakeEngine:
 
     def __init__(self, rows: list[dict[str, Any]], *, flag: bool | None = True, sensitive_status: int | None = None,
                  sensitive_body: Any = None, drop_from_resolve: tuple[str, ...] = (),
-                 unflag_in_resolve: tuple[str, ...] = (), probe_failed: bool = False) -> None:
+                 unflag_in_resolve: tuple[str, ...] = (), probe_failed: bool = False, by_meta: bool = False,
+                 by_meta_status: int | None = None, by_meta_inject: list[dict[str, Any]] | None = None) -> None:
         self.rows = rows
         self.flag = flag
         self.sensitive_status = sensitive_status
@@ -66,6 +67,9 @@ class FakeEngine:
         self.drop_from_resolve = drop_from_resolve
         self.unflag_in_resolve = unflag_in_resolve
         self.probe_failed = probe_failed
+        self.by_meta = by_meta  # the engine also advertises GET /docs/by-meta (RDR-241 Phase 2)
+        self.by_meta_status = by_meta_status
+        self.by_meta_inject = by_meta_inject or []  # wire rows the route answers on top of the matches: an engine fault
         self.calls: list[tuple] = []
 
     def live(self) -> list[dict[str, Any]]:
@@ -76,7 +80,10 @@ class FakeEngine:
         return {k: v for k, v in r.items() if k not in ("deleted", "tenant")}
 
     def flags(self) -> dict[str, Any]:
-        return {} if self.flag is None else {"catalog_sensitive_list_supported": self.flag, "release_version": "0.1.188"}
+        if self.flag is None:
+            return {}
+        return {"catalog_sensitive_list_supported": self.flag, "release_version": "0.1.188",
+                **({"catalog_docs_by_meta_supported": True} if self.by_meta else {})}
 
     def get(self, path: str, **kw: Any) -> Any:
         if path == "/list":
@@ -92,6 +99,17 @@ class FakeEngine:
                 limit, offset = kw.get("limit", 200), kw.get("offset", 0)
                 rows = rows[offset:offset + limit]
             return {"documents": [self.wire(r) for r in rows], "count": len(rows)}
+        if path == "/docs/by-meta":
+            self.calls.append(("GET", "/docs/by-meta", dict(kw)))
+            if self.by_meta_status is not None:
+                request = httpx.Request("GET", "http://engine/v1/catalog/docs/by-meta")
+                raise httpx.HTTPStatusError("x", request=request, response=httpx.Response(self.by_meta_status, request=request))
+            rows = [r for r in self.live() if (not kw.get("content_type") or r["content_type"] == kw["content_type"])
+                    and (kw.get("sensitive") != "true" or r["sensitive"])]
+            # an engine fault that keeps its envelope consistent: the injected rows count as matches after the real ones
+            answer = [self.wire(r) for r in rows] + self.by_meta_inject
+            page = answer[kw["offset"]:kw["offset"] + kw["limit"]]
+            return {"count": len(answer), "limit": kw["limit"], "offset": kw["offset"], "documents": page}
         assert path == "/sensitive", path
         self.calls.append(("GET", "/sensitive", {"limit": kw["limit"]}))
         if self.sensitive_status is not None:
@@ -180,11 +198,10 @@ _CASES = [
     pytest.param({"content_type": "knowledge"}, id="type"),
     pytest.param({"content_type": "knowledge", "limit": 1, "offset": 1}, id="type-paged"),
     pytest.param({"content_type": "paper"}, id="type-with-no-sensitive-row"),
-    pytest.param({"meta": ("extraction_method=mineru",)}, id="meta"),
-    pytest.param({"meta": ("extraction_method=mineru",), "limit": 1}, id="meta-paged"),
-    pytest.param({"meta": ("extraction_method=mineru", "quality_gate_overridden=true")}, id="meta-anded"),
-    pytest.param({"meta": ("extraction_method=mineru",), "content_type": "rdr"}, id="meta-and-type"),
 ]
+# --sensitive with --meta is not this route's: since nexus-uwggq.2.14 it is one by-meta request with the sensitive
+# clause (tests/commands/test_catalog_list_meta_route.py), so no case here carries --meta. The fake of these cases
+# advertises no by-meta flag, so --type here is the Phase 1 path on an engine older than the by-meta route.
 
 
 def _argv(case: dict, *, as_json: bool) -> list[str]:
@@ -243,11 +260,10 @@ def test_next_page_line_uses_the_routes_count(monkeypatch: pytest.MonkeyPatch) -
     assert engine.calls == [("GET", "/sensitive", {"limit": 2}), ("POST", "/resolve_many", ["1.1.10", "1.1.2"])]
 
 
-@pytest.mark.parametrize("argv", [["--type", "knowledge"], ["--meta", "extraction_method=mineru"]], ids=["type", "meta"])
-def test_request_sequence_with_a_filter_resolves_every_listed_tumbler(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
+def test_request_sequence_with_a_type_resolves_every_listed_tumbler(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = FakeEngine(_fixture_rows())
     engine.wired(monkeypatch)
-    result = _run(*argv, "-n", "1")
+    result = _run("--type", "knowledge", "-n", "1")
     assert result.exit_code == 0, result.stderr
     assert engine.calls == [
         ("GET", "/sensitive", {"limit": 10_000}),
@@ -356,18 +372,18 @@ def test_a_page_ending_at_ten_thousand_still_works_and_one_past_it_is_refused(mo
     assert refused.exit_code != 0
     assert "more than 10000 sensitive documents" in refused.stderr
     assert "reaches past the first 10000" in refused.stderr and "--owner" in refused.stderr
+    assert "no GET /v1/catalog/docs/by-meta either" in refused.stderr
     assert [c[1] for c in engine.calls] == ["/sensitive"], "refused before anything is resolved"
 
 
-@pytest.mark.parametrize("argv", [["--type", "knowledge"], ["--meta", "extraction_method=mineru"]], ids=["type", "meta"])
-def test_a_filter_on_a_capped_tenant_is_refused_naming_the_limit_and_owner(monkeypatch: pytest.MonkeyPatch,
-                                                                           argv: list[str]) -> None:
+def test_a_type_filter_on_a_capped_tenant_is_refused_naming_the_limit_and_owner(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _big_tenant()
     engine.wired(monkeypatch)
-    result = _run(*argv)
+    result = _run("--type", "knowledge")
     assert result.exit_code != 0
     assert "more than 10000 sensitive documents" in result.stderr
-    assert "--type and --meta need the whole list" in result.stderr and "--owner" in result.stderr
+    assert "--type needs the whole list" in result.stderr and "--owner" in result.stderr
+    assert "no GET /v1/catalog/docs/by-meta either" in result.stderr, "the refusal says the by-meta route is missing too"
     assert engine.calls == [("GET", "/sensitive", {"limit": 10_000})]
 
 
@@ -427,3 +443,117 @@ def test_the_nothing_flagged_answer_lists_nothing_and_resolves_nothing(monkeypat
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout) == []
     assert engine.calls == [("GET", "/sensitive", {"limit": 50})]
+
+
+# ---- RDR-241 Phase 2 (nexus-uwggq.2.14, round 1): --sensitive uses the by-meta route's sensitive clause where the
+# ---- sensitive list cannot answer (a page past its 10,000 cap, --type), and keeps the Phase 1 path where it can.
+
+def _by_meta_calls(engine: FakeEngine) -> list[dict]:
+    return [c[2] for c in engine.calls if c[1] == "/docs/by-meta"]
+
+
+def test_a_page_past_the_cap_answers_through_by_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _big_tenant()
+    engine.by_meta = True
+    engine.wired(monkeypatch)
+    result = _run("--offset", "10500", "-n", "3", "--json")
+    assert result.exit_code == 0, result.stderr
+    rows = json.loads(result.stdout)
+    assert len(rows) == 3 and all(r["tumbler"].startswith("4.1.") for r in rows)
+    assert [c[1] for c in engine.calls] == ["/sensitive", "/docs/by-meta"], "the list could not serve it; by-meta did"
+    [sent] = _by_meta_calls(engine)
+    assert sent["sensitive"] == "true" and not any(k.startswith("meta") for k in sent)
+    assert (sent["limit"], sent["offset"]) == (3, 10500)
+
+
+def test_a_page_the_list_can_serve_keeps_the_phase_one_path_when_the_engine_has_by_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _big_tenant()
+    engine.by_meta = True
+    engine.wired(monkeypatch)
+    result = _run("-n", "50", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert [c[1] for c in engine.calls] == ["/sensitive", "/resolve_many"]
+
+
+def test_sensitive_with_type_answers_through_by_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = FakeEngine(_fixture_rows(), by_meta=True)
+    engine.wired(monkeypatch)
+    result = _run("--type", "knowledge", "-n", "2", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert [r["tumbler"] for r in json.loads(result.stdout)] == ["1.1.10", "1.1.2"]
+    assert [c[1] for c in engine.calls] == ["/docs/by-meta"], "no sensitive list, no resolve_many"
+    [sent] = _by_meta_calls(engine)
+    assert sent["content_type"] == "knowledge" and sent["sensitive"] == "true"
+
+
+def test_sensitive_with_type_on_a_capped_tenant_answers_through_by_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _big_tenant()
+    engine.by_meta = True
+    engine.wired(monkeypatch)
+    result = _run("--type", "knowledge", "-n", "2", "--offset", "10001", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert len(json.loads(result.stdout)) == 2
+    assert [c[1] for c in engine.calls] == ["/docs/by-meta"]
+
+
+def test_an_engine_with_the_sensitive_route_but_no_by_meta_keeps_todays_answer_and_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    small = FakeEngine(_fixture_rows(), by_meta=False)
+    small.wired(monkeypatch)
+    ok = _run("--type", "knowledge", "--json")
+    assert ok.exit_code == 0, ok.stderr
+    assert [r["tumbler"] for r in json.loads(ok.stdout)] == ["1.1.10", "1.1.2", "1.4.1"]
+    assert [c[1] for c in small.calls] == ["/sensitive", "/resolve_many"]
+    big = _big_tenant()
+    big.wired(monkeypatch)
+    refused = _run("--offset", "10500", "-n", "3")
+    assert refused.exit_code != 0
+    assert "more than 10000 sensitive documents" in refused.stderr and "reaches past the first 10000" in refused.stderr
+    assert "no GET /v1/catalog/docs/by-meta either" in refused.stderr
+    assert [c[1] for c in big.calls] == ["/sensitive"]
+
+
+def test_a_negative_page_is_never_asked_of_by_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _big_tenant()
+    engine.by_meta = True
+    engine.wired(monkeypatch)
+    result = _run("-n", "-1")
+    assert result.exit_code != 0 and "needs the whole list" in result.stderr
+    assert "by-meta" not in result.stderr, "the route has no such page, so the refusal does not blame its absence"
+    assert [c[1] for c in engine.calls] == ["/sensitive"]
+
+
+def test_a_404_from_by_meta_is_the_same_as_no_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = FakeEngine(_fixture_rows(), by_meta=True, by_meta_status=404)
+    engine.wired(monkeypatch)
+    result = _run("--type", "knowledge", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert [c[1] for c in engine.calls] == ["/docs/by-meta", "/sensitive", "/resolve_many"]
+
+
+def test_a_503_from_by_meta_is_reported_not_papered_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = FakeEngine(_fixture_rows(), by_meta=True, by_meta_status=503)
+    engine.wired(monkeypatch)
+    result = _run("--type", "knowledge")
+    assert result.exit_code != 0
+    assert "GET /v1/catalog/docs/by-meta" in result.stderr and "in time" in result.stderr
+    assert [c[1] for c in engine.calls] == ["/docs/by-meta"]
+
+
+def test_by_meta_rows_that_are_unflagged_or_of_another_type_are_dropped_by_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    unflagged = FakeEngine.wire(_row("1.3.1", "plain"))
+    other_type = FakeEngine.wire(_row("1.1.3", "three", "rdr", sensitive=True))
+    engine = FakeEngine(_fixture_rows(), by_meta=True, by_meta_inject=[unflagged, other_type])
+    engine.wired(monkeypatch)
+    result = _run("--type", "knowledge", "--json")
+    assert result.exit_code == 0, result.stderr
+    assert [r["tumbler"] for r in json.loads(result.stdout)] == ["1.1.10", "1.1.2", "1.4.1"]
+    assert [c[1] for c in engine.calls] == ["/docs/by-meta"], "the injected rows came from the route"
+
+
+def test_a_malformed_tumbler_in_the_answer_is_the_routes_fault_not_a_usage_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    bad = {**FakeEngine.wire(_row("1.1.2", "two", sensitive=True)), "tumbler": "not.a.tumbler"}
+    engine = FakeEngine(_fixture_rows(), by_meta=True, by_meta_inject=[bad])
+    engine.wired(monkeypatch)
+    result = _run("--type", "knowledge")
+    assert result.exit_code == 1, "a ClickException, not exit 2 (usage)"
+    assert "GET /v1/catalog/docs/by-meta" in result.stderr and "--meta:" not in result.stderr and "Usage" not in result.stderr

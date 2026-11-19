@@ -41,6 +41,8 @@ def _note_uri_floor_at_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gate._engine_version, "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
     # RDR-193 Step 6 (nexus-u5m5g.7): the resolve_or_register `sensitive` floor leads the pin the same way.
     monkeypatch.setattr(gate._engine_version, "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
+    # RDR-241 Phase 2 (nexus-uwggq.2.11): the catalog-routes floor leads the pin the same way.
+    monkeypatch.setattr(gate._engine_version, "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION", REQUIRED_ENGINE_VERSION)
 
 
 @pytest.fixture(autouse=True)
@@ -694,14 +696,56 @@ def test_ledger_only_and_the_bare_form_both_run_the_resolve_sensitive_floor_chec
     probe.assert_not_called()
 
 
-def test_one_run_names_all_three_failing_feature_floors(monkeypatch, capsys) -> None:
+def test_one_run_names_all_four_failing_feature_floors(monkeypatch, capsys) -> None:
     for name in ("NOTE_URI_MIN_ENGINE_VERSION", "SENSITIVITY_EXCLUDE_MIN_ENGINE_VERSION",
-                 "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION"):
+                 "RESOLVE_SENSITIVE_MIN_ENGINE_VERSION", "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION"):
         monkeypatch.setattr(gate._engine_version, name, _PIN_BELOW_FLOOR)
     assert gate.check_feature_floors_vs_pin() == 1
     err = capsys.readouterr().err
     assert all(banner in err for banner in (
-        "NOTE URI FLOOR CHECK FAILED", "SENSITIVITY EXCLUDE FLOOR CHECK FAILED", "RESOLVE SENSITIVE FLOOR CHECK FAILED"))
+        "NOTE URI FLOOR CHECK FAILED", "SENSITIVITY EXCLUDE FLOOR CHECK FAILED", "RESOLVE SENSITIVE FLOOR CHECK FAILED",
+        "CATALOG ROUTES FLOOR CHECK FAILED"))
+
+
+# ── RDR-241 Phase 2 catalog-routes floor vs the pin (nexus-uwggq.2.11) ────
+
+def test_a_pin_below_the_catalog_routes_floor_fails_the_release_check(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(gate._engine_version, "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    assert gate.check_catalog_phase2_routes_floor_vs_pin() == 1
+    err = capsys.readouterr().err
+    assert "CATALOG ROUTES FLOOR CHECK FAILED" in err and "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION" in err
+    assert ".".join(map(str, _PIN_BELOW_FLOOR)) in err
+
+
+@pytest.mark.parametrize(
+    "floor",
+    [pytest.param((0, 0, 0), id="unset"), pytest.param(REQUIRED_ENGINE_VERSION, id="equal"),
+     pytest.param((0, 0, 1), id="below")],
+)
+def test_a_pin_at_or_above_the_catalog_routes_floor_passes(monkeypatch, floor) -> None:
+    monkeypatch.setattr(gate._engine_version, "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION", floor)
+    assert gate.check_catalog_phase2_routes_floor_vs_pin() == 0
+
+
+def test_ledger_only_and_the_bare_form_both_run_the_catalog_routes_floor_check(monkeypatch, tmp_path) -> None:
+    """The other floors at the pin, so only this floor can fail these; the network probe never runs."""
+    monkeypatch.setattr(gate._engine_version, "CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION", _PIN_BELOW_FLOOR)
+    with patch.object(gate._wire_ledger, "DEFAULT_LEDGER_PATH", _write_ledger(tmp_path, None)):
+        assert gate.main(["--ledger-only"]) == 1
+    with patch.object(gate, "probe_managed_service") as probe, \
+         patch.object(gate, "newest_published_engine", return_value=REQUIRED_ENGINE_VERSION):
+        assert gate.main(["--url", _TEST_URL]) == 1
+    probe.assert_not_called()
+
+
+def test_the_live_catalog_routes_floor_is_past_the_last_engine_without_the_routes() -> None:
+    """The tree's literal (the autouse fixture patches the attribute, so read the source): engine-service-v0.1.196
+    (cut 2026-11-18) answers none of the RDR-241 Phase 2 routes, so the floor is never at or below it, and never unset
+    while the client switches are in the tree."""
+    src = (REPO_ROOT / "src" / "nexus" / "engine_version.py").read_text(encoding="utf-8")
+    m = re.search(r"^CATALOG_PHASE2_ROUTES_MIN_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", src, re.M)
+    assert m is not None
+    assert tuple(int(g) for g in m.groups()) > (0, 1, 196)
 
 
 def test_the_live_resolve_sensitive_floor_is_the_engine_that_accepts_the_field() -> None:

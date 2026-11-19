@@ -58,6 +58,7 @@ from nexus.commands.identity_cmd import identity_group
 from nexus.commands.index import index
 from nexus.commands.init import init_cmd
 from nexus.commands.memory import memory
+from nexus.memory_curate.gate_cli import gate_rollup_cmd
 from nexus.commands.migration_cmd import migration_cmd
 from nexus.commands.mineru import mineru_group
 from nexus.commands.plan import plan as plan_group
@@ -352,6 +353,7 @@ main.add_command(identity_group, name="identity")
 main.add_command(index)
 main.add_command(init_cmd, name="init")
 main.add_command(memory)
+memory.add_command(gate_rollup_cmd)  # defined beside its logic, not in commands/memory.py (the size cap)
 main.add_command(migration_cmd, name="migration")
 main.add_command(mineru_group, name="mineru")
 main.add_command(plan_group, name="plan")

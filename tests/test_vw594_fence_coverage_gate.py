@@ -417,6 +417,7 @@ _PUT_NOTE_CALLERS = (
     ("commands/store.py", "put_cmd"),
     ("commands/memory.py", "promote_cmd"),
     ("catalog/recovery_bundle.py", "_default_import_doc"),
+    ("memory_curate/gate_rollup.py", "store_note"),  # RDR-209 Phase 3 (nexus-1gdv0.2)
 )
 
 
@@ -807,6 +808,8 @@ _STAMP_LAST_ENTRIES: tuple[_StampPath, ...] = (
     _StampPath("catalog/recovery_bundle.py", "_default_import_doc", ("stamp_note", 1),
                before=("fire_note_chains",), no_hook_after=False,
                before_in="function"),
+    _StampPath("memory_curate/gate_rollup.py", "store_note", ("stamp_note", 1), before=("fire_note_chains",),
+               no_hook_after=False, before_in="function"),
     # ── the .nxexp import: the writer defers, each page's stamps follow that page's chains ──
     _StampPath("exporter.py", "_ensure", ("complete_documents", 0),
                writes=("MultiDocumentImportWriter", "defer_completion", True, 1)),
@@ -925,7 +928,7 @@ def test_the_stamp_last_gate_lists_every_writer_path() -> None:
         ("indexer.py", "_index_pdf_file"), ("chunk_batcher.py", "_flush_batch"),
         ("mcp/core.py", "store_put"), ("commands/store.py", "put_cmd"),
         ("commands/memory.py", "promote_cmd"), ("catalog/recovery_bundle.py", "_default_import_doc"),
-        ("exporter.py", "flush"),
+        ("memory_curate/gate_rollup.py", "store_note"), ("exporter.py", "flush"),
     ):
         assert path in listed, f"the stamp-last gate does not list {path}"
     assert len(_STAMP_LAST_ENTRIES) >= 16
@@ -1075,6 +1078,7 @@ _MUTATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("commands/store.py", "put_cmd", "nx store put: stamp deleted", "outcome = stamp_note(outcome)", "pass"),
     ("commands/memory.py", "promote_cmd", "nx memory promote: stamp deleted", "outcome = stamp_note(outcome)", "pass"),
     ("catalog/recovery_bundle.py", "_default_import_doc", "recovery import: stamp deleted", "outcome = stamp_note(outcome)", "pass"),
+    ("memory_curate/gate_rollup.py", "store_note", "gate-rollup note: stamp deleted", "outcome = stamp_note(outcome)", "pass"),
     ("mcp/core.py", "store_put", "MCP store_put: stamp ahead of the chains",
      "fire_note_chains(outcome, content, hooks=_hooks)", "outcome = stamp_note(outcome)\n        fire_note_chains(outcome, content, hooks=_hooks)"),
     # the .nxexp import

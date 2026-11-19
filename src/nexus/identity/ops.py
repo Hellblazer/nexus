@@ -32,7 +32,10 @@ from pathlib import Path
 from typing import Any
 
 from nexus.identity import token_contract
-from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body
+from nexus.identity.bind_client import (
+    FILE_TOKEN_401_ADVICE, NO_TOKEN_ADVICE, OWN_TOKEN, OWN_TOKEN_401_ADVICE, SCOPE_DATA, IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
+    seat_refusal_message,
+)
 from nexus.identity.delegated import check_dispatcher, sweep_delegated
 from nexus.identity.holder import (
     GONE, INTERACTIVE_ENTRYPOINTS, OTHER_HOST, RUNNING, Processes, Verdict, check_holder, holder_process,
@@ -78,6 +81,14 @@ def _real_command_name(pid: int) -> str:
     return _command_name_of(pid)
 
 
+def _real_own_token() -> TokenFile | None:
+    """This process's live token, after the session check a fenced write makes: a Bash child started before a cross-seat
+    ``/resume`` raises the resolver's ``IdentityConflictError`` rather than send a token that is not its session's."""
+    from nexus.identity import token_header  # noqa: PLC0415 — deferred: CLI startup cost
+
+    return token_header.verified_current()
+
+
 @contextmanager
 def _real_board_memory():
     from nexus.commands._helpers import t2_handle  # noqa: PLC0415 — deferred: CLI startup cost
@@ -99,6 +110,9 @@ class IdentityEnv:
     command_name: Callable[[int], str] | None = None
     #: opens a T2 memory store (a context manager) for the threads board; None skips the board (a test with none).
     board_memory: Callable[[], AbstractContextManager[Any]] | None = None
+    #: this process's own identity token file when it holds a live token (None: it holds none). A data credential makes
+    #: and promotes seats through it (RDR-253 option 2); a tenant credential never reads it.
+    own_token: Callable[[], TokenFile | None] | None = None
 
     @property
     def host(self) -> str:
@@ -121,7 +135,7 @@ class IdentityEnv:
             client_version = None
         return cls(client=client, procs=Processes(), identity_dir=identity_dir(config.nexus_config_dir()),
                    environ=os.environ, caller=real_caller_facts, client_version=client_version,
-                   command_name=_real_command_name, board_memory=_real_board_memory)
+                   command_name=_real_command_name, board_memory=_real_board_memory, own_token=_real_own_token)
 
 
 # ── engine access ───────────────────────────────────────────────────────────
@@ -158,9 +172,69 @@ def _holder_line(view: Mapping[str, Any]) -> str:
 # ── create, promote, rename, purge ──────────────────────────────────────────
 
 
+#: What an engine's ``identity_token_required`` means for a create: a create names no identity, so no file can stand in.
+CREATE_NO_TOKEN = ("no identity token was sent, and in cloud mode a seat is made only through a live session's own identity "
+                   "token")
+
+
+def _seat_call(env: IdentityEnv, call: Callable[[], Any], identity: str | None, *, token_source: str = OWN_TOKEN,
+               no_token: str = NO_TOKEN_ADVICE, unauthorized: str = OWN_TOKEN_401_ADVICE) -> Any:
+    """:func:`_call` for the seat calls; a data credential's refusals are said in the words of
+    :func:`~nexus.identity.bind_client.seat_refusal_message`. A tenant credential's are _call's words, except
+    ``bad_created_by``, which is said in the same one line. *token_source*, *no_token* and *unauthorized* word the lines
+    that name the caller's token."""
+    if getattr(env.client, "scope", None) != SCOPE_DATA:
+        try:
+            return call()
+        except IdentityApiError as exc:
+            # bad_created_by is the one refusal a tenant credential's seat call earns for itself; the rest are _call's words
+            said = seat_refusal_message(exc, identity) if exc.code == "bad_created_by" else f"{exc.code or exc.status}: {exc.message}"
+            raise IdentityCommandError(said) from exc
+        except IdentityUnavailableError as exc:
+            raise IdentityCommandError(f"the engine is not answering ({exc})") from exc
+    try:
+        return call()
+    except IdentityApiError as exc:
+        raise IdentityCommandError(seat_refusal_message(exc, identity, token_source=token_source, no_token=no_token,
+                                                            unauthorized=unauthorized)) from exc
+    except IdentityUnavailableError as exc:
+        raise IdentityCommandError(f"the engine is not answering ({exc})") from exc
+
+
+def _seat_token(env: IdentityEnv, token_file: Path | None = None, *, required: bool = False) -> TokenFile | None:
+    """The identity token a seat call carries: none for a tenant credential (its calls are unchanged); for the data
+    credential the token file *token_file* names (a session that is not the caller; it wins over the caller's own),
+    else the caller's own, which the session check has passed. A file that holds no live token, or *required* with no
+    token at all, is refused before any call."""
+    if getattr(env.client, "scope", None) != SCOPE_DATA:
+        return None
+    if token_file is not None:
+        record = read_token_file(token_file)
+        if record is None or not token_contract.usable(record.token, record.expires_at, now=env.clock()):
+            raise IdentityCommandError(f"{token_file} holds no live identity token")
+        return record
+    from nexus.identity.resolver import IdentityConflictError  # noqa: PLC0415 — deferred, as in own_identity
+
+    try:
+        record = env.own_token() if env.own_token is not None else None
+    except IdentityConflictError as exc:
+        raise IdentityCommandError(str(exc)) from exc
+    if record is None and required:
+        raise IdentityCommandError("this process has no live identity token, and in cloud mode a seat is made only through "
+                                   "a live session's own identity token")
+    return record
+
+
+def _token_source(token_file: Path | None) -> str:
+    return f"the token in {token_file}" if token_file is not None else OWN_TOKEN
+
+
 def create(env: IdentityEnv, name: str, created_by: str = "sam") -> list[str]:
-    view = _call(env.client.create_seat, name, created_by=created_by)
-    return [f"created seat {name} ({view['id']}), created by {created_by}"]
+    token = _seat_token(env, required=True)
+    view = _seat_call(env, lambda: env.client.create_seat(name, created_by=created_by, token=token), None,
+                      no_token=CREATE_NO_TOKEN)
+    stamped = view.get("created_by") or created_by   # in cloud mode the engine stamps identity:<id> from the token
+    return [f"created seat {name} ({view['id']}), created by {stamped}"]
 
 
 def _reserved(name: str) -> None:
@@ -168,9 +242,12 @@ def _reserved(name: str) -> None:
         raise IdentityCommandError(f"{name!r} is reserved: names that look like identity ids (i<digits>) cannot be aliases")
 
 
-def promote(env: IdentityEnv, identity: str, name: str) -> list[str]:
+def promote(env: IdentityEnv, identity: str, name: str, token_file: Path | None = None) -> list[str]:
     _reserved(name)
-    view = _call(env.client.promote, identity, name)
+    token = _seat_token(env, token_file)
+    view = _seat_call(env, lambda: env.client.promote(identity, name, token=token), identity,
+                      token_source=_token_source(token_file),
+                      unauthorized=OWN_TOKEN_401_ADVICE if token_file is None else FILE_TOKEN_401_ADVICE)
     lines = [f"{view['id']} is now the seat {name}"]
     if env.board_memory is not None:
         from nexus.identity.board import retitle_entry  # noqa: PLC0415 — deferred: CLI startup cost

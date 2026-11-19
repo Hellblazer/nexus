@@ -96,7 +96,7 @@ class TestDoctorReferencesResidueRow:
 
     def test_chroma_residue_reads_unknown(self) -> None:
         uri = "chroma://knowledge__x/old-note"
-        assert is_reference_only(uri) is True  # still walked
+        assert is_reference_only(uri) is True  # a scheme, so the predicate accepts it
         r = stat_one(self._Entry(uri), http_client=None)
         assert r.error is None
         assert r.scheme == "chroma"

@@ -51,6 +51,8 @@ from nexus.errors import (
     SearchEmbeddingProfileMismatchError,
     is_embedding_profile_mismatch_error_text,
 )
+from nexus.topic_route import TopicRouteTally, is_prose, unrouted_reason
+from nexus.topic_route import validate as validate_topic_route
 from nexus.types import SearchResult
 
 _log = structlog.get_logger(__name__)
@@ -1443,6 +1445,7 @@ def search_cross_corpus(
     per_collection_k_cap: int | None = None,
     model_of_out: "list[Callable[[str], str | None]] | None" = None,
     *,
+    topic_route: dict | None = None,
     sensitivity: ReadSensitivity,
 ) -> list[SearchResult]:
     """Query each collection, returning combined raw results.
@@ -1584,13 +1587,31 @@ def search_cross_corpus(
     :func:`~nexus.plans.document_confinement.chash_allow_scope` restricts every engine call this function makes
     (search, hybrid-search, search-per-collection) to those chunk hashes. The value is read ONCE here, on the calling
     thread, because the worker threads below do not inherit the context. Absent, every request is byte-identical.
+
+    *topic_route* (RDR-134 Step 5a-i, nexus-7fku2.1.5), default off: ``{"mode": "top1"}`` or ``{"mode": "band",
+    "width": w}`` asks the engine's per-collection route to search each PROSE collection (knowledge, docs, rdr,
+    paper) inside the topic(s) nearest the query. Code collections never carry the field, so a ``corpus: all``
+    call routes only its prose names. It reaches a request only when the engine reports
+    ``vector_topic_route_supported`` and the request carries no ``chash_allow`` and no metadata ``where``; a call
+    that sets none of these sees a request and a result byte-identical to today's. A call that passes it logs ONE
+    ``search_topic_route`` event (:class:`nexus.topic_route.TopicRouteTally`): per-collection statuses, the counts
+    of ``routed``, ``no_topics``, ``fallback`` and ``skipped``, and ``unreported`` for a collection with no status.
+    A request left unrouted by ``chash_allow`` or ``where`` counts every prose collection ``skipped``. The batched
+    fallback path ignores the argument. A ``subtree`` or catalog-route query never reaches this function. When
+    the caller passes none, the plan runner's route for the step in progress is used
+    (:func:`nexus.plans.topic_route_scope.active_topic_route`, RDR-134 Step 7); outside a plan run it is ``None``.
     """
     from nexus.plans.document_confinement import active_chash_allow  # noqa: PLC0415 — leaf stdlib module; deferred like this function's other imports
+    from nexus.plans.topic_route_scope import active_topic_route  # noqa: PLC0415 — leaf module, deferred likewise
 
     _allow = active_chash_allow()
     chash_kw: dict[str, Any] = {"chash_allow": list(_allow)} if _allow is not None else {}
     _allow_set: frozenset[str] | None = frozenset(h.lower() for h in _allow) if _allow is not None else None
     chash_allow_dropped = 0
+    if topic_route is None:
+        topic_route = active_topic_route()
+    if topic_route is not None:
+        validate_topic_route(topic_route)  # a bad value raises here, before any request
     cfg = load_config()
     # Config can override: search.cluster_by in .nexus.yml
     cfg_cluster = cfg.get("search", {}).get("cluster_by")
@@ -1994,10 +2015,33 @@ def search_cross_corpus(
     # _search_batch; see _search_group_per_collection.
     # Opt-in (nexus-tu8wp.3): the route is used only when NX_SEARCH_PER_COLLECTION
     # is 1/true/on/yes; it measured ~2x slower than the batched path on the cloud.
+    # A call that asks for topic routing, and CAN be routed (a prose collection, no
+    # chash_allow, no metadata where, an engine that reports vector_topic_route_supported),
+    # takes it regardless (RDR-134 Step 7): the route is the only one that can route. One
+    # that cannot keeps the default path. The capability probe is cached and never raises.
+    _probe = getattr(t3, "supports_topic_route", None)
+    routable = (
+        topic_route is not None
+        and any(is_prose(c) for c in collections)
+        and unrouted_reason(where=effective_where, chash_allow=_allow) is None
+        and callable(_probe)
+        and _probe() is True
+    )
     per_collection_route = (
         getattr(t3, "supports_per_collection_search", False) is True
-        and per_collection_route_enabled()
+        and (per_collection_route_enabled() or routable)
     )
+
+    route_tally = (
+        TopicRouteTally(
+            topic_route, collections, where=effective_where, chash_allow=_allow,
+            per_collection_route=per_collection_route,
+        )
+        if topic_route is not None else None
+    )
+    #: The kwarg is passed only when a request can carry the field, so a call that asked for none, or one the
+    #: engine leaves unrouted (chash_allow, where), makes the same client call as before.
+    topic_kw: dict[str, Any] = {"topic_route": topic_route} if route_tally is not None and route_tally.sent else {}
 
     def _map_parallel(fn, items: list) -> list:
         """``[fn(i) for i in items]`` through a pool of at most 8 workers, the
@@ -2113,7 +2157,7 @@ def search_cross_corpus(
                 thresholds=thresholds or None, where=effective_where,
                 rerank=bool(server_rerank), rerank_meta_out=rerank_meta,
                 sensitivity=sensitivity,
-                **rerank_cap_kw, **chash_kw,
+                **rerank_cap_kw, **chash_kw, **topic_kw,
                 # nexus-tao37: only when the caller shows snippets; absent keeps the request byte-identical.
                 **({"content_chars": content_chars} if content_chars is not None else {}),
                 # nexus-xd2rc: the lexical arms can ride the same request; absent keeps it byte-identical.
@@ -2170,6 +2214,8 @@ def search_cross_corpus(
                 if row_embeddings is not None and row_embeddings[i] is not None:
                     emb_by_col[name][r["id"]] = row_embeddings[i]
         stats = {e["collection"]: e for e in envelope["per_collection"]}
+        if route_tally is not None:
+            route_tally.record(envelope["per_collection"])  # RDR-134 Step 5a-i: the topic_route_* keys the validator kept
         served_lexical = lexical and envelope.get("lexical") is True
         #: Collections whose lexical leg runs on /hybrid-search here: all of them
         #: against an engine that did not serve it, else those whose lexical arm
@@ -2366,6 +2412,8 @@ def search_cross_corpus(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_results = list(pool.map(_search_batch, batches))
     partials = pc_partials + [part for batch in batch_results for part in batch]
+    if route_tally is not None:
+        route_tally.emit(t3)  # exactly one search_topic_route event per call that asked for routing
     # nexus-5ezgn: a caller that has abandoned this call (nx_answer's
     # budget cut) stops it here and between the enrichment legs below,
     # rather than letting it run its remaining round trips for nothing.

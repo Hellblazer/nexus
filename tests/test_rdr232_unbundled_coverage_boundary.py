@@ -220,7 +220,10 @@ KNOWN = {_h(t): t for t in (*TEXTS, *TEXTS_B, REPAIR_TEXT)}
 def _retrieve_for(*, repair: bool):
     async def retrieve(**kw: Any) -> dict[str, Any]:
         text = str(kw.get("query") or kw.get("question") or "")
-        if text == "q-empty":
+        if text == "q-empty" or (kw.get("lexical") and text not in _PLAN_QUESTIONS):
+            # a lexical repair twin (GH #1667) finds nothing here: these tests pin the closure, not the twin.
+            # A plan's OWN search step may carry lexical: true too (none does after the 8.5.1 cloud timing
+            # reverted it, GH #1667), so only a lexical query that is not a plan's question is a twin.
             return _structured([])
         if repair and text.startswith(FACET_TEXT):
             return _structured([REPAIR_TEXT])
@@ -343,6 +346,8 @@ HYBRID = ("hybrid-factual-lookup", {
     "question": "what is the identity gap", "corpus": "rdr", "limit": 30, "depth": 1,
     "vector_budget_chunks": 5, "graph_budget_chunks": 5,
 })
+#: The questions the plans' own search steps run (the stub tells a repair twin from them).
+_PLAN_QUESTIONS = frozenset({HYBRID[1]["question"]})
 EXTRACT_GENERATE = ("extract-generate", {})
 CHECK_GENERATE = ("check-generate", {})
 PROBE = ("two-branch-probe", {})

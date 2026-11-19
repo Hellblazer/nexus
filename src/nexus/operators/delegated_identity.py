@@ -32,11 +32,21 @@ import threading
 import time
 from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
+if TYPE_CHECKING:
+    from nexus.identity.token_file import TokenFile
+
 _log = structlog.get_logger(__name__)
+
+#: An engine older than 0.1.197 refuses every data-credential delegation the same way: say so once per process, not once
+#: per dispatch (RDR-253 option 2).
+_SEATS_NEED_ENGINE_LOGGED = False
+
+#: What the engine's ``identity_token_required`` means to a dispatch: the parent's token was missing or past its expiry.
+NO_PARENT_TOKEN = "the dispatching session's identity token is missing or expired, and in cloud mode a delegated identity is made only through it"
 
 RENEW_INTERVAL_S: float = 60.0
 
@@ -44,23 +54,43 @@ RENEW_INTERVAL_S: float = 60.0
 END_TIMEOUT_S: float = 5.0
 
 
-def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> str | None:
-    """The identity this process dispatches for: the token file ``NX_IDENTITY_TOKEN`` names (this process is itself a
-    delegated child), else the token file of its nearest Claude ancestor. Local reads only."""
+def resolve_parent_record(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> "TokenFile | None":
+    """The token file of the identity this process dispatches for: the one ``NX_IDENTITY_TOKEN`` names (this process is
+    itself a delegated child), else its nearest Claude ancestor's; None when there is none. Local reads only."""
     from nexus.identity.token_file import ancestor_token_path, read_token_file  # noqa: PLC0415
 
     explicit = (environ.get("NX_IDENTITY_TOKEN") or "").strip()
     if explicit:
-        record = read_token_file(Path(explicit))
-        return record.identity if record is not None else None
+        return read_token_file(Path(explicit))
     from nexus.session import find_immediate_claude_pid  # noqa: PLC0415
 
     pid = find_immediate_claude_pid()
     if pid <= 0:
         return None
     path = ancestor_token_path(identity_dir, pid, procs.sessions_dir)
-    record = read_token_file(path) if path is not None else None
+    return read_token_file(path) if path is not None else None
+
+
+def resolve_parent(environ: Mapping[str, str], identity_dir: Path, procs: Any) -> str | None:
+    """The identity this process dispatches for (:func:`resolve_parent_record`'s), or None."""
+    record = resolve_parent_record(environ, identity_dir, procs)
     return record.identity if record is not None else None
+
+
+def _log_refusal(exc: Any, parent: str | None = None) -> None:
+    """One warning for the engine refusing a delegation. An engine older than 0.1.197 says the same thing for every
+    dispatch, so it is logged once per process; every other refusal is its mapped line, each time, naming *parent* (the
+    dispatching identity). The line never holds a token value."""
+    global _SEATS_NEED_ENGINE_LOGGED
+    from nexus.identity.bind_client import is_old_engine_seat_refusal, seat_refusal_message  # noqa: PLC0415
+
+    if is_old_engine_seat_refusal(exc):
+        if _SEATS_NEED_ENGINE_LOGGED:
+            return
+        _SEATS_NEED_ENGINE_LOGGED = True
+    _log.warning("delegated_identity_not_created", error=seat_refusal_message(
+        exc, parent, token_source="the dispatching session's token", no_token=NO_PARENT_TOKEN,
+        unauthorized="the dispatching session renews it while it runs"))
 
 
 class DelegatedIdentity:
@@ -82,6 +112,7 @@ class DelegatedIdentity:
         self._token = token
         self._lifetime = lifetime_s
         self._issued = clock()
+        self._refresh_stopped = False   # the engine refused a refresh for want of a live token: renewal goes on, refresh stops
         self._task: asyncio.Future[None] | None = None
 
     # ── begin ───────────────────────────────────────────────────────────────
@@ -94,21 +125,23 @@ class DelegatedIdentity:
         parent identity or the engine will not. Blocking: call it off the event loop."""
         from nexus.identity import token_contract  # noqa: PLC0415
         from nexus.identity.bind_client import (  # noqa: PLC0415
-            IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
+            SCOPE_DATA, IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body,
         )
         from nexus.identity.delegated import delegated_token_path  # noqa: PLC0415
         from nexus.identity.holder import Processes, epoch_seconds, normalise_instant  # noqa: PLC0415
         from nexus.identity.token_file import TokenFile, identity_dir as _identity_dir, write_token_file  # noqa: PLC0415
 
+        parent: str | None = None
         try:
             procs = procs if procs is not None else Processes()
             if identity_dir is None:
                 from nexus import config  # noqa: PLC0415
 
                 identity_dir = _identity_dir(config.nexus_config_dir())
-            parent = resolve_parent(os.environ if environ is None else environ, identity_dir, procs)
-            if parent is None:
+            parent_record = resolve_parent_record(os.environ if environ is None else environ, identity_dir, procs)
+            if parent_record is None:
                 return None
+            parent = parent_record.identity
             pid = os.getpid()
             proc_start = normalise_instant(procs.os_start(pid))
             started_at = epoch_seconds(proc_start) * 1000 if proc_start else int(clock() * 1000)
@@ -116,7 +149,12 @@ class DelegatedIdentity:
             owned = client is None
             engine = IdentityClient.from_config() if owned else client
             try:
-                view = engine.create_delegated(parent, display_name=label, evidence=evidence)
+                # RDR-253 option 2: the data credential delegates only from the caller's own identity, proved by the
+                # parent's token. A tenant credential's call is unchanged.
+                sends_token = (getattr(engine, "scope", None) == SCOPE_DATA
+                               and token_contract.usable(parent_record.token, parent_record.expires_at, now=clock()))
+                view = engine.create_delegated(parent, display_name=label, evidence=evidence,
+                                               token=parent_record if sends_token else None)
             except BaseException:
                 if owned:
                     engine.close()
@@ -141,7 +179,10 @@ class DelegatedIdentity:
                     except Exception:  # noqa: BLE001
                         pass
                 raise
-        except (IdentityApiError, IdentityUnavailableError) as exc:
+        except IdentityApiError as exc:
+            _log_refusal(exc, parent)
+            return None
+        except IdentityUnavailableError as exc:
             _log.warning("delegated_identity_not_created", error=f"{type(exc).__name__}: {exc}")
             return None
         except Exception as exc:  # noqa: BLE001 — a dispatch must never fail over identity
@@ -173,8 +214,10 @@ class DelegatedIdentity:
             return False
         try:
             self._client.renew(self.identity, self._generation)
-            if self._lifetime is not None and self._clock() >= self._issued + self._lifetime / 2:
-                view = self._client.bind(self.identity, "refresh", self._generation, self._evidence)
+            if (self._lifetime is not None and not self._refresh_stopped
+                    and self._clock() >= self._issued + self._lifetime / 2):
+                # its own token, the one being refreshed: the process's file names the dispatcher's identity, not this one's
+                view = self._client.bind(self.identity, "refresh", self._generation, self._evidence, token=self._token)
                 token, lifetime = token_contract.token_from_response(view)
                 if token:
                     with self._lock:  # only the file write is under the lock: finish() takes it for an instant, never behind HTTP
@@ -192,6 +235,13 @@ class DelegatedIdentity:
             if exc.status == 409 or exc.status == 404:
                 _log.warning("delegated_identity_not_ours", identity=self.identity, code=exc.code)
                 return False
+            if token_contract.is_token_required(exc.status, exc.code):
+                # the child's own token expired (engine 0.1.198 gives it no grace): it cannot be refreshed again, so stop
+                # asking; the renewal goes on and the child keeps its binding until it ends. Logged once, never the token.
+                self._refresh_stopped = True
+                _log.warning("delegated_identity_token_lapsed", identity=self.identity,
+                             consequence="the identity token expired; it is not refreshed again, and the renewal continues")
+                return True
             _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))
         except IdentityUnavailableError as exc:
             _log.warning("delegated_identity_renew_failed", identity=self.identity, error=str(exc))

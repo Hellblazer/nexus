@@ -259,7 +259,9 @@ SUITES = [
     # cut's prose said 17 and 9; the counts were 19 and 7). nexus-69be4: the probe judge calls a 403, 400 or 503
     # REGISTERED only on the engine's own body text and INCONCLUSIVE on an edge-shaped body, and the 404 ok line
     # prints the body head: 24 N2 cases (13 more), so 32 verdict cases, 4 wiring checks and 7 negatives, 193 in all.
-    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 195),
+    # nexus-uwggq.2.8: leg A's /version contract moves into _version_contract_verdict: 11 cases (all true, each of the
+    # three RDR-241 route flags absent, false and the string "true", the older steps flag) and 2 wiring checks, 220 in all.
+    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 220),
     # nexus-u67ow: lib/python.sh, the one-interpreter resolver the e2e harness uses in place of a
     # bare python3 (hellmini's is 3.9.6). Stub interpreters on a PATH of their own; 37 measured.
     _Suite("tests/e2e/lib/python_test.sh", 37),

@@ -1,0 +1,45 @@
+# RDR-134 Step 5a-i (nexus-7fku2.1.5): the closed vocabulary of a `per_collection[].topic_route_status`
+# the engine reports on search-per-collection. The engine's enum is
+# service/src/main/java/dev/nexus/service/vectors/TopicRoute.java (Status); the client's
+# `search_topic_route` event counts exactly these, and tests/tables/test_topic_route_status.py
+# holds the two lists equal. Python reads it through nexus.tables.topic_route_status.
+#
+# A collection whose arm ended with an error carries NO status (its `error` says why), and an
+# engine that does not route reports none anywhere; the client counts both as `unreported`,
+# which is not a status.
+#
+#   routed     the search ran inside the nearest topic(s) and returned rows
+#   no_topics  no usable topic set (no centroids, no chunks, coverage under 0.9, or the coverage
+#              reading or the centroid ranking was unavailable); searched unscoped
+#   fallback   a topic set was established and the routed search returned nothing or failed;
+#              searched unscoped
+#   skipped    not routed by design: the whole request carried chash_allow or a metadata where,
+#              or the collection was not named in topic_route.collections; searched unscoped
+
+[table]
+id = "topic-route-status"
+kind = "decision-table"
+version = 1
+
+[dimensions.status]
+domain = ["routed", "no_topics", "fallback", "skipped"]
+
+[[row]]
+id = "routed"
+guard = { status = "routed" }
+emit = { meaning = "searched inside the nearest topic(s), rows returned" }
+
+[[row]]
+id = "no_topics"
+guard = { status = "no_topics" }
+emit = { meaning = "no usable topic set; searched unscoped" }
+
+[[row]]
+id = "fallback"
+guard = { status = "fallback" }
+emit = { meaning = "topic set established, routed search delivered nothing; searched unscoped" }
+
+[[row]]
+id = "skipped"
+guard = { status = "skipped" }
+emit = { meaning = "not routed by design; searched unscoped" }

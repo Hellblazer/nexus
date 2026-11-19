@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from test_restart_sandbox_identity_census import stub_census
 from tests._module_seam import setattr_in
 
 RUN_PY = Path(__file__).resolve().parents[1] / "e2e" / "restart-sessions" / "run.py"
@@ -459,6 +460,7 @@ def scenario(run, monkeypatch):
         return dict(state["left"])
 
     monkeypatch.setattr(run, "footprint_after", footprint)
+    stub_census(run, monkeypatch)  # no engine here: the census reads two empty lists
     return state
 
 
@@ -578,7 +580,7 @@ def test_the_withdrawal_probe(run, tmp_path, kw, stats, want) -> None:
 
 def test_the_gate_scenario_runs_the_withdrawal_probe() -> None:
     calls = [ast.unparse(c.func) for c in ast.walk(_function("scenario_gate")) if isinstance(c, ast.Call)]
-    assert "check_real_withdrawal" in calls and "check_sandbox_refusal" in calls
+    assert "check_real_withdrawal" in calls and "check_sandbox_warning" in calls
 
 
 def test_harness_under_test_is_the_harness_beside_the_script_under_test(run, tmp_path, monkeypatch) -> None:

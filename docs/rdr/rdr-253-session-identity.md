@@ -246,7 +246,8 @@ code (research 3); lane D, outside systems (research 4).
    `user`), in place or by relaunch, the script keeps a seat the session
    already holds (the relaunch carries `NX_SEAT`), else promotes the session's
    ephemeral identity to a seat of that name, else creates one
-   (`created_by: restart`); a launch that names no seat, or gives `-n`
+   (`created_by: restart`; a cloud install's script holds only the data credential, so it promotes with the
+   session's own token and creates none); a launch that names no seat, or gives `-n`
    a name that is not a seat's, gets an ephemeral identity that can be
    promoted to a seat (Sam, 2026-11-16).
 2. **A binding log.** Each time a session takes, keeps or loses a seat
@@ -281,7 +282,7 @@ Only the mailbox's `address_kind` gains `identity`.
 
 ```
 identity_records      id  kind=seat|ephemeral|delegated  parent=<id or none>  generation=<n>  state=unheld|live|lapsed|ended
-                      display_name=<name or null>  created_by=<sam|restart|session|dispatch>  created_at=<UTC>  ended_at=<UTC or null>
+                      display_name=<name or null>  created_by=<sam|restart|session|dispatch|identity:i<n>>  created_at=<UTC>  ended_at=<UTC or null>
 identity_aliases      name  identity=<id>  state=live|retired  since=<UTC>  retired_at=<UTC or null>  renamed_to=<name or null>
 identity_bindings     identity=<id>  seq  event=start|clear|resume|fork|takeover|release|rename|end|lapse|revive|gone  generation=<n>  lease=leased|unleased
                       session_id=<uuid>  host=<hostname>  pid=<n>  started_at=<ms>  proc_start=<UTC, to the second>  pane=<tmux pane or null>
@@ -349,11 +350,10 @@ Retention and `purge` read these recorded verdicts. The callers of `bind` are
 the SessionStart hook, the `nx identity` commands, the MCP server (renewal,
 refresh, `end`, the `/branch` fork row and the pending bind below) and the `nx` operator dispatcher (a delegated identity's
 `start`, renewal and `end`); the hook and the commands authenticate with the
-tenant credential the `nx` CLI already uses, the MCP server with the data
+tenant credential the `nx` CLI already uses (in local mode; a cloud install's CLI holds the data credential, which the self-service rules above serve), the MCP server with the data
 credential it holds. The data credential may start, resume, fork, refresh and
 end a binding and create an ephemeral identity; it may not take over, release
-or clear. Seat create, promote, rename, `gone`, delegated create and purge
-take the tenant credential (the root token counts as one) only. Any holder of
+or clear. Seat create, promote, rename, `gone`, delegated create and purge take the tenant credential (the root token counts as one). The data credential may make three of them for the identity its own identity token names, and for no other: it may promote the ephemeral identity the token names (the token must name that identity at its current generation, and the identity must be held and ephemeral); it may create a delegated identity whose parent is the identity the token names (same check, on the parent); and it may create a seat when it carries a live identity token, the new seat starting unheld and its `created_by` set by the engine to `identity:<the token's id>` whatever the request says. A data-credential call of any of the three with no token is 403 `identity_token_required`; with a token for another identity, 403 `not_owner`; with a superseded generation or a seat let go, the fence's 409s. Rename, `gone` and purge stay tenant-only. This is what lets a cloud install, whose laptop holds only the data credential, keep seats (Sam 2026-11-19, no tenant credential on the laptop): the restart script promotes a session's ephemeral by sending that session's own token, read from its token file, and the `nx` dispatcher delegates a `claude -p` child by sending its parent's token. A session holding no live identity cannot create a seat with the data credential; the restart script skips it with one line. `/version` carries `identity_self_seat_supported: true` on an engine that admits these; the edge does not forward it yet, so a client detects an older engine from the data-credential refusal's wording (`a 'data' credential may not call ...`) and says so once. Any holder of
 the data credential can still bind any seat with those events, as any can mint a session token today
 (`SessionTokenHandler.java:97-118`): the bind guards against a confused
 session, not a hostile one, as JDR-002 says. Some installs give the hook only
@@ -591,7 +591,7 @@ Claude ancestor, runs no lease.
 60 seconds on its lease's heartbeat. The identity
 token lives one hour, the ceiling for a token minted under the data
 credential the MCP server holds (`nexus_rdr/253-research-8` (c)); the server
-refreshes it at half life through `bind` with the same generation (a refresh,
+refreshes it once it has under 50 minutes of life left, through `bind` with the same generation (a refresh,
 not a new binding) and rewrites its process's one token file. A renewal or refresh from a superseded generation is answered 409
 `generation_superseded`, and the server stops writing identity state and says so. The engine marks a seat
 `lapsed`, without changing the generation, when it reads a binding whose last
@@ -604,8 +604,13 @@ the last renewal, not when it is first read), then is free. So a laptop that sle
 process revives its own within a minute, with no generation change; a stray
 launch on the same laptop finds the holder running and gets an ephemeral
 identity, however long the sleep. The identity token, which lives one hour,
-may expire during a long sleep; the server refreshes it on its first wake
-heartbeat. A Bash `nx` in that window does not send a token its file records as
+is refreshed whenever it has under 50 minutes left, so it holds at least 50
+minutes when a sleep begins and a sleep under about 50 minutes never lapses it;
+a sleep longer than about 50 minutes may. The server refreshes a token that is
+still live on its first wake heartbeat. One that has expired cannot be refreshed
+with the data credential (engine 0.1.198): the server stops refreshing until a
+SessionStart bind writes a fresh token into the file, and the hook's `fork`
+refused for want of a live token starts the identity the process holds again. A Bash `nx` in that window does not send a token its file records as
 expired, since the engine would answer 401 to every request carrying it, reads
 included. A fenced write then gets the engine's 403 `identity_token_required`,
 and the next call reads the refreshed file. A Desktop binding is `lease=unleased`: its MCP
@@ -938,8 +943,8 @@ Self-certifying identifiers, signed binding events, witnesses.
   lapse, or for a person's `nx identity release`.
 - **A child takes its parent's seat**: no inherited variable carries
   take-over authority, and a delegated child's hook does not bind.
-- **A token outlives its lifetime**: the MCP server refreshes it at half of
-  its one-hour life and rewrites its process's one token file; the CLI
+- **A token outlives its lifetime**: the MCP server refreshes it under 50
+  minutes of its one-hour life and rewrites its process's one token file; the CLI
   tells an expired token (401, re-read) from a superseded one (409
   `generation_superseded`, stop).
 - **Desktop MCP writes are unattested** (Critical Assumption 4): a Desktop
@@ -1094,7 +1099,8 @@ check on the holder's host and the lease check for a holder on another host,
 and runs from a plain shell; the restart script's seats: a session that holds a
 seat keeps it (the relaunch carries `NX_SEAT`), and for a name the user set (the
 registry `nameSource` is `user`) with no seat, the session's ephemeral identity
-is promoted, else a seat is created with `created_by=restart`, before an in-place
+is promoted, else a seat is created with `created_by=restart` (local mode; in a cloud install the data credential
+promotes only, and a seat it creates is stamped `created_by=identity:<id>`), before an in-place
 `/restart` or a relaunch alike, while a derived name is not passed back as `-n`;
 delegated identities, their renewal and their token file for a `claude -p`
 dispatch that grants tools, and a `gone` row for a dead dispatcher.
@@ -1309,3 +1315,6 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-17: wording amended to match the reviewed Step 3 code (grant 3), bead nexus-hczdo.1.4: the identity lease on its own thread and `end` only after Claude exits; a notice, not a seat list, for an `NX_SEAT` naming no seat; the cases where the hook binds nothing; the resolver's fourth input and the token file's fields; which requests carry the token and the client-side session check; the holder check's registry-directory rule, unknown holders and Windows start time; data-credential degradation; `NX_IDENTITY_LEASE=0`; the pending bind logging its notices; the unindexed-resume reuse row; the Step 3 plan entry; the Desktop pending bind and the in-process `/resume` registry timing stated as unverified.
 - 2026-11-18: wording amended to match the reviewed Step 4 code (grant 3), bead nexus-hczdo.1.5: delegated identities for tool-granting dispatches only, their binding naming the dispatcher process and the sweep that records `gone` for a dead one and removes its token files (not after a 403); `nx identity show --all` scoped to bindings on this host and live processes without one, `claude -p` children left out; the restart script keeps a held seat through `NX_SEAT`, promotes an ephemeral or creates a seat for a `nameSource` `user` name, before an in-place `/restart` too, and passes no derived name back as `-n`; the take-over ancestor guard exempts the caller's own Claude process; Test Plan lines for these.
 - 2026-11-19: wording amended to match the reviewed Step 5 code (grant 3), beads nexus-hczdo.1.7 and nexus-hczdo.1.8: a named send goes to the single live `directory/<name>` holder's session mailbox, `mailbox/<id>` only when nobody holds the name, two holders refused; in Phase 1 named mail does not survive `/clear`, and the identity mailbox that does follows in a later step (Sam 2026-11-19, T2 `nexus/sam-ruling-named-mail-phase1-2026-11-19`).
+- 2026-11-19: amended for cloud installs (Sam's ruling "go with option 2, no bridge", T2 `nexus/sam-ruling-rdr253-cloud-seats-option2-2026-11-19`; wording approved as drafted, T2 `nexus/sam-ruling-rdr253-amendment-self-seat-wording-2026-11-19`): the data credential may promote the ephemeral its own identity token names, create a delegated identity from its token's identity, and create an unheld seat stamped `created_by identity:<token id>`; rename, `gone` and purge stay tenant-only; `/version` gains `identity_self_seat_supported`.
+- 2026-11-19: wording amended to match the reviewed cloud-seats client (grant 3), bead nexus-hczdo: the client detects an older engine from the data-credential refusal's wording and says so once, not by reading `/version`. No design change.
+- 2026-11-19: wording amended to match the reviewed 0.1.198 client, round 1 (grant 3), bead nexus-hczdo: the server refreshes under 50 minutes of token life, so a sleep under about 50 minutes never lapses it and a longer one may; after a lapse refreshing stops until a SessionStart bind writes a fresh token; the hook's refused `fork` starts the same identity again, not a new ephemeral.

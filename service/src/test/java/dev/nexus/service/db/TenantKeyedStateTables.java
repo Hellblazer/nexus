@@ -164,6 +164,11 @@ final class TenantKeyedStateTables {
                 + "with its response; nothing keeps it between requests");
         }
         notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
+        // nexus-uwggq.2.3-.2.5, .1.5: the RDR-241 Phase 2 catalog read routes, one page or one parsed filter per request
+        notKeyed.put("CatalogDocReads.Page.documents", RESULT);
+        notKeyed.put("CatalogDocReads.MetaFilter.equalities", RESULT);
+        notKeyed.put("CatalogDocReads.MetaFilter.bounds", RESULT);
+        notKeyed.put("CatalogSensitiveLocatorReads.Page.documents", RESULT);
         notKeyed.put("PdfStubMetadataReads.Page.collections", RESULT);   // nexus-f3yqd: one stub-metadata call's collections
         notKeyed.put("MemorySearchPage.Page.rows", RESULT);   // nexus-1gdv0.1.1: one memory-search call's page of rows
         // nexus-f3yqd.2.13 (RDR-246): the data-move worker. The registry it works is global, with no tenant column.

@@ -81,6 +81,7 @@ from __future__ import annotations
 import contextlib
 import os
 from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -285,6 +286,8 @@ STUB_METADATA_TIMED_OUT = object()
 #: the engine's per-collection ``timed_out`` rows arrive instead of a client-side timeout, and under the public edge's
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
+from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
+from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators
 from nexus.catalog.doctor_route_wire import (  # noqa: F401 — the constants are re-exported: callers import them here
     INDEX_RUN_CENSUS_MAX_LIMIT,
     INDEX_RUN_CENSUS_RULES_DIFFER,
@@ -1289,6 +1292,41 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         """The owners whose ``next_seq`` trails their highest child (``GET /v1/catalog/owners/next_seq_drift``, engine
         0.1.189): see :func:`nexus.catalog.doctor_route_wire.read_next_seq_drift`. ``None`` is "cannot say"."""
         return read_next_seq_drift(self._get, self._version_flags(), limit)
+
+    def documents_by_scheme(self, scheme: str) -> list[CatalogEntry] | None:
+        """Every live document whose ``urlparse(source_uri).scheme`` is *scheme* lowercased (``GET /docs/by-scheme``,
+        nexus-uwggq.1.5), all pages, in tumbler order: see :func:`nexus.catalog.engine_reads.by_scheme.read_docs_by_scheme`.
+        ``None`` when the engine answered ``/version`` without the flag (no request is sent). A ``/version`` probe that
+        failed says nothing about the route and raises, as an error, a malformed body or a row with no tumbler do; a
+        row repeated across pages (offset paging under concurrent inserts) is kept once."""
+        flags = self._version_flags()
+        if flags.get("catalog_docs_by_scheme_supported") is not True and self._version_probe_failed:
+            raise RuntimeError("GET /version failed, so whether the engine answers /docs/by-scheme is unknown")
+        rows = read_docs_by_scheme(self._get, flags, scheme)
+        if rows is None:
+            return None
+        if any(not d.get("tumbler") for d in rows):
+            raise ValueError("docs/by-scheme returned a document with no tumbler")
+        first: dict[str, dict] = {}
+        for d in rows:
+            first.setdefault(d["tumbler"], d)
+        return [_to_entry(d) for d in first.values()]
+
+    def documents_by_author(self, author: str, *, limit: int = 1000, offset: int = 0) -> tuple[list[CatalogEntry], int]:
+        """One page of ``GET /docs/by-author`` as ``(entries, count)`` (nexus-uwggq.2.6): a SUPERSET of ``needle.lower() in
+        (author or "").lower()`` (no normalization, ``%`` and ``_`` literal), ``count`` an upper bound; the caller applies
+        that rule to every page (``engine_reads.by_author``)."""
+        rows, count = _by_author.read_docs_by_author(self, author, limit=limit, offset=offset)
+        return [_to_entry(d) for d in rows], count
+
+    def documents_by_meta(self, *, content_type: str | None = None, meta: Sequence[tuple[str, str]] = (), meta_min: Sequence[tuple[str, int]] = (), sensitive: bool = False, limit: int = 1000, offset: int = 0) -> tuple[list[CatalogEntry], int]:
+        """One page of ``GET /docs/by-meta`` as ``(entries, count)`` (nexus-uwggq.2.7): see ``engine_reads.by_meta``."""
+        rows, count = _by_meta.read_docs_by_meta(self, content_type=content_type, meta=meta, meta_min=meta_min, sensitive=sensitive, limit=limit, offset=offset)
+        return [_to_entry(d) for d in rows], count
+
+    def sensitive_locators(self, limit: int = 10_000) -> dict:
+        """``GET /sensitive/locators`` (nexus-uwggq.2.13): see ``engine_reads.sensitive_locators``."""
+        return _locators.read_sensitive_locators(self, limit)
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead

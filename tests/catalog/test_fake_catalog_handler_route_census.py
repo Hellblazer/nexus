@@ -418,6 +418,34 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "shared-surface parity gate by construction; the engine route "
         "retires with RDR-187 .11"
     ),
+    "/docs/by-scheme": (
+        "nexus-uwggq.1.5 (RDR-241 Phase 2). It HAS a client consumer "
+        "(HttpCatalogClient.documents_by_scheme, called by `nx doctor "
+        "--check-references`); it is excluded here only because no "
+        "start_fake_server() test reaches it. The consumer is exercised against "
+        "a local HTTP server (tests/test_doctor_references_by_scheme.py::"
+        "test_client_method_round_trip) and against the real engine substrate "
+        "(tests/test_doctor_references.py::TestRealCatalogRoundTrip). Delete this "
+        "entry if a FakeCatalogHandler branch for it is ever added"
+    ),
+    "/docs/by-author": (
+        "nexus-uwggq.2.3 (RDR-241 Phase 2): the client reader HttpCatalogClient.documents_by_author "
+        "is tested against a stubbed transport (tests/catalog/test_engine_reads_phase2_clients.py) "
+        "and the route by its engine tests; no start_fake_server test reaches it. "
+        "REMOVE THIS ENTRY when a FakeCatalogHandler branch is added"
+    ),
+    "/docs/by-meta": (
+        "nexus-uwggq.2.4 (RDR-241 Phase 2): the client reader HttpCatalogClient.documents_by_meta "
+        "is tested against a stubbed transport (tests/catalog/test_engine_reads_phase2_clients.py) "
+        "and the route by its engine tests; no start_fake_server test reaches it. "
+        "REMOVE THIS ENTRY when a FakeCatalogHandler branch is added"
+    ),
+    "/sensitive/locators": (
+        "nexus-uwggq.2.5 (RDR-241 Phase 2): the client reader HttpCatalogClient.sensitive_locators "
+        "is tested against a stubbed transport (tests/catalog/test_engine_reads_phase2_clients.py) "
+        "and the route by its engine tests; no start_fake_server test reaches it. "
+        "REMOVE THIS ENTRY when a FakeCatalogHandler branch is added"
+    ),
     "/gc_audit/record": (
         "nexus-jqvzk, an engine surface with no client caller. `nx t3 gc` "
         "emitted through it (nexus-fduai) until nexus-wbfpw.18 moved the verb "

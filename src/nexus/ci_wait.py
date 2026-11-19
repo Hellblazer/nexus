@@ -34,6 +34,10 @@ The board wake is best effort (a dropped fold or deadline posts nothing), so at
 the deadline the command reads GitHub's push runs for the sha once, to tell a
 dropped wake from CI still running.
 
+``--latest-attempt`` (:func:`wait_latest_attempt`) follows a re-run instead of
+returning the replaced attempt's row: a row counts only when GitHub's push runs
+show no newer attempt of any run in it.
+
 A branch the board does not watch (anything but :data:`BOARD_BRANCHES`: a
 release branch, a feature branch) has no ``--done`` topic, and its CI runs on
 ``pull_request`` events the push-run reads above never see. For those, and for
@@ -363,6 +367,93 @@ def find_done_row(
     return found
 
 
+def behind_latest(row: DoneRow, listed: list[Run]) -> list[Run]:
+    """The runs GitHub's *listed* push runs show at a newer attempt than *row* knows: a re-run started
+    after the row was written. A run of the row GitHub does not list is taken at the attempt the row
+    names. For a capped row (:attr:`DoneRow.capped`), a listed run above the row's highest id on an
+    attempt after the first is behind too: the cap dropped it, and a later attempt is a re-run."""
+    newest: dict[int, Run] = {}
+    for r in listed:
+        if r.run_id not in newest or r.attempt > newest[r.run_id].attempt:
+            newest[r.run_id] = r
+    behind = [newest[r.run_id] for r in row.runs if r.run_id in newest and newest[r.run_id].attempt > r.attempt]
+    if row.capped:
+        top = max((r.run_id for r in row.runs), default=0)
+        behind += [r for i, r in sorted(newest.items()) if i > top and r.attempt > 1]
+    return behind
+
+
+@dataclass(frozen=True)
+class LatestAttempt:
+    """What :func:`wait_latest_attempt` found. ``row``: the row to report, every run at its latest
+    attempt (or, with ``unchecked``, a row GitHub was never readable to confirm). With no ``row``,
+    ``stale`` is the newest row seen that a newer attempt replaced (None when no row came) and
+    ``listed`` the last GitHub listing; ``settled`` says that listing showed every run finished on two
+    consecutive reads, so the newer attempt's board row was dropped and GitHub stands for it."""
+
+    row: DoneRow | None
+    listed: list[Run] | None = None
+    stale: DoneRow | None = None
+    settled: bool = False
+    unchecked: bool = False
+
+
+def wait_latest_attempt(
+    store: _Reader, subspace: str, sha: str, gh_repo: str, branch: str, *, timeout_s: float,
+    park_s: int = PARK_CAP_S, clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    runs: Callable[[str, str, str], list[Run] | None] | None = None,
+) -> LatestAttempt:
+    """``nx ci wait --latest-attempt``: the ``--done`` row for *sha* whose every run is at its latest
+    attempt, as GitHub's push runs for the sha on *branch* list them.
+
+    :func:`find_done_row` gives the newest row already on the topic, or the first to arrive; after a
+    re-run starts that is the replaced attempt's row. Each candidate is checked against GitHub, read
+    by the row's full sha (so a prefix works) and never more often than :data:`GITHUB_POLL_S`:
+
+    - no run behind (:func:`behind_latest`): the row is returned;
+    - a run behind: the wait goes on, reading the board again (the newest row wins). When two reads
+      in a row show every listed run finished, the newer attempt's board row was dropped and the
+      result is ``settled`` (the caller reports from GitHub). At the deadline it is unsettled;
+    - GitHub unreadable: retried at the next poll; a failed read never accepts a row. If no read
+      worked by the deadline, the row comes back ``unchecked`` (the caller never reports it green);
+      if a read already showed a newer attempt, the row is never returned (and a later read that lags
+      back to an earlier attempt does not undo it: the highest attempt seen per run is kept).
+
+    A GitHub listing that lags a re-run requested a moment ago still shows the earlier attempt, and
+    its row is accepted: start the wait once GitHub shows the re-run (``gh run view``)."""
+    fetch = runs or gh_push_runs
+    deadline = clock() + timeout_s
+    listed: list[Run] | None = None
+    stale: DoneRow | None = None
+    finished_reads = 0
+    seen: dict[int, Run] = {}    # the highest attempt any read showed per run id: a lagging read cannot undo it
+    while True:
+        row = find_done_row(store, subspace, sha, timeout_s=max(0.0, deadline - clock()), park_s=park_s,
+                            clock=clock, sleep=sleep)
+        if row is None:
+            return LatestAttempt(None, listed, stale)
+        got = fetch(gh_repo, row.sha, branch)
+        if got is not None:
+            for r in got:
+                if r.run_id not in seen or r.attempt >= seen[r.run_id].attempt:
+                    seen[r.run_id] = r
+            got = list(seen.values()) if seen else got
+            listed = got
+            if not behind_latest(row, got):
+                return LatestAttempt(row, got)
+            stale = row
+            finished_reads = finished_reads + 1 if all(r.conclusion is not None for r in got) else 0
+            if finished_reads >= 2:
+                return LatestAttempt(None, got, row, settled=True)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            if stale is None and listed is None:
+                return LatestAttempt(row, None, unchecked=True)
+            return LatestAttempt(None, listed, stale or row)
+        sleep(min(GITHUB_POLL_S, remaining))
+
+
 def result_line(row: DoneRow, outcome: str | None) -> str:
     runs = ", ".join(
         f"{r.workflow or 'run'} {r.conclusion or 'unknown'} (run {r.run_id}"
@@ -539,6 +630,7 @@ __all__: list[str] = [
     "BOARD_BRANCHES", "BoardSubspaceUnknownError", "BoardUnreadableError", "CheckRun", "GITHUB_POLL_S",
     "CHECK_RUNS_JQ", "GhReadError", "gh_check_runs", "wait_on_github", "DoneRow", "Run", "complete_runs", "done_subspace", "fill_conclusions", "find_done_row",
     "gh_push_runs", "gh_run_conclusion", "parse_done_row", "reduce_outcome", "result_line",
+    "LatestAttempt", "behind_latest", "wait_latest_attempt",
     "summarize", "wait_exit_code",
     "EXIT_CANCELLED", "EXIT_FAILURE", "EXIT_SUCCESS", "EXIT_TIMEOUT", "EXIT_UNKNOWN", "EXIT_UNUSABLE",
 ]

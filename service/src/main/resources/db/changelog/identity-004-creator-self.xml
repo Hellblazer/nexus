@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-253 amendment (Sam 2026-11-19, "go with option 2, no bridge"; wording approved as drafted, T2
+    nexus/sam-ruling-rdr253-amendment-self-seat-wording-2026-11-19): a seat the data credential creates is stamped
+    created_by identity:<the token's id>. identity_records_creator_ck allowed only the four fixed creators, so it is
+    widened to also admit identity:i<digits>.
+
+    DDL only: the constraint is dropped and re-added with a wider predicate; no existing row is mutated (every stored
+    creator already satisfies the old, narrower predicate), so no DATA EFFECT line applies per
+    scripts/data_effect_lint.py's own scope. A separate file because identity-001 may already be applied, and a
+    changeset's content is never edited after that.
+
+    Rollback: re-adding the narrow CHECK fails once any seat carries an identity:i<n> creator; such rows must be
+    restamped (or the seats purged) before a rollback.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="identity-004-1" author="rdr-253-amendment-2026-11-19">
+        <comment>identity_records.creator also admits identity:i&lt;n&gt;, the creator of a seat the data credential made (RDR-253 amendment).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.identity_records DROP CONSTRAINT identity_records_creator_ck;
+ALTER TABLE nexus.identity_records ADD CONSTRAINT identity_records_creator_ck
+    CHECK (creator IN ('sam', 'restart', 'session', 'dispatch') OR creator ~ '^identity:i[0-9]+$');
+        </sql>
+        <rollback>
+ALTER TABLE nexus.identity_records DROP CONSTRAINT identity_records_creator_ck;
+ALTER TABLE nexus.identity_records ADD CONSTRAINT identity_records_creator_ck
+    CHECK (creator IN ('sam', 'restart', 'session', 'dispatch'));
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

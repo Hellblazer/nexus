@@ -142,8 +142,9 @@ of the reads whose title carries a date, 91% came within two days and 27 came
 after a week (memory survey, 2026-10-31). The papers warn against rolling them
 up without a check: memory construction loses information (Memory Tax), and
 a compaction nobody checks can fall below the no-context baseline (Agentic
-Context Management). The fix delivers a phase-close rollup that keeps its
-sources, and a TTL on the records it covers.
+Context Management). The fix delivers a phase-close rollup that keeps each
+record's full text in T3 and lists the records in a pointer, and a TTL on the
+records it covers.
 
 ## Relationship to Prior RDRs
 
@@ -351,8 +352,8 @@ is what the heat-weighted TTL has been using, and the census records what it
 meant. A wire-ledger entry records the change.
 
 **Phase 3 Steps 1 to 3, retire the gate records without losing them.** At a
-phase close, `nx memory gate-rollup` lists the phase's gate records in a
-pointer record in T3, checks that nothing the records say is lost, and only
+phase close, `nx memory gate-rollup` keeps each of the phase's gate records in
+full in T3, lists them in a pointer record, checks that nothing the records say is lost, and only
 then gives the listed T2 records a 30-day TTL, so RDR-207's quarantine,
 rollup and reap retire them on the path it already built. A missing close step
 stays visible through Step 4's census.
@@ -449,12 +450,30 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   `rdr:<NNN>`. That match is exact by construction (research-11), so the
   engine needs no tag filter and Phase 3 adds no wire change. An
   untagged record whose body mentions `kind:gate` is never matched, because
-  only the tags are read. Older records carry no tags; the same read lets the
-  command match them by a listed bead id in their title, the 72% the title
-  mapping reaches (research-2). Records that map to no listed bead are not
-  touched. A record with no bead, whether a `kind:gate` record with no
-  `bead:` tag or a title that names none, is listed under "unmapped" in the
-  pointer and takes no part in Step 2.3 or Step 3, because both work per bead.
+  only the tags are read. Older records carry no tags; with `--phase` the same
+  read lets the command match them by a listed bead id in their title, the 72%
+  the title mapping reaches (research-2). The match is always on (the fix round
+  dropped `--include-titled`) and has one predicate. The row has no tags at all
+  (`split_tags` is empty: a tagged row that is not a gate record is never read,
+  and a `kind:gate` row with no bead is unmapped, never title-matched), and its
+  title holds the listed bead id as a whole token: not preceded by a character
+  of `[A-Za-z0-9.]`, and not followed by one of `[A-Za-z0-9]` or by a `.` and
+  one, that is `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive because
+  bead ids are lower case. So `nexus-1` is not found in `nexus-12` or
+  `nexus-1.2`, a parent bead is not found in its child's id, and `nexus-abc` is
+  not found in `conexus-abc`; a trailing sentence period still matches. A
+  hyphen is not an id character, because gate titles join words with it
+  (`review-<sha>-<bead>-<date>`). A title that names two listed beads is
+  unmapped. `--all` has no bead list, so it matches no untagged row. Records
+  that map to no listed bead are not touched. The "unmapped" list in the pointer holds the records the run can
+  select but cannot tie to a bead: a `kind:gate` record that carries
+  `rdr:<NNN>` and has no `bead:` tag (with `--phase P` only when its title also
+  names phase P by the `-p<N>` / `-phase-<N>` rule of Step 4, a sub-phase such
+  as 3a counting toward phase 3; with `--all` whenever it carries the RDR's
+  tag), and a listed record whose verdict cannot be read. A `kind:gate` record
+  with neither a `bead:` nor an `rdr:` tag is in no run's scope and is left
+  alone; the census counts it as its own unmapped number. Unmapped records take
+  no part in Step 2.3 or Step 3, because both work per bead.
   The cost is one read of the whole project per run, as the census pays; the
   nexus project held 3,158 rows on 2026-09-14 (research-1), and its size today
   is not measured.
@@ -472,11 +491,45 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   Rule 1: reuse a subject, and RDR postmortems already live in a subject under a
   category), `category=gate_pointer`, titled `gate-records-rdr-<NNN>-phase-<P>`
   or `-all`, so a rerun replaces it. It lists, for each record, its project,
-  title, kind, bead, the sha it reviewed and its verdict, taken from the
-  field header `gate_record` writes (`gate_record.lua:79-88`) or, for an older
-  record, from its last `outcome` line. It is a pointer: it keeps its sources
-  by title and copies no body. Records whose verdict or bead cannot be read
-  are listed under "unmapped" and keep no TTL.
+  title, kind, bead, the sha it reviewed, its verdict and its timestamp, the
+  verdict and sha taken from the field header `gate_record` writes
+  (`gate_record.lua:79-88`) or, for an older record, the verdict from its last
+  `outcome` line. The timestamp is the row's, exactly as `get_all` returned it
+  (to the second): the creation date a record has, which Step 3's import keeps
+  and which the pointer therefore still shows after the TTL write and the reap.
+  An unmapped record carries its timestamp too. The pointer also names each
+  listed record's archive and its part count (below), whether a run gave it a
+  TTL (`ttl_set`), whether a person restored it (`restored`) and, for a record
+  the read no longer lists, its `state` (Step 2.2, Step 3). Records whose verdict or
+  bead cannot be read are listed under "unmapped" and keep no TTL. A pointer
+  over the store_put cap
+  (`QUOTAS.MAX_DOCUMENT_BYTES`, 16,384 bytes) is written in parts, split at line
+  boundaries: the first keeps the title, the rest are titled `<title> (part 2)`
+  and so on, and a `parts: k` header line in the first names how many, so a
+  reader never guesses. A rerun that needs fewer parts names the older trailing
+  ones as stale and does not delete them (a T3 delete is a catalog tombstone
+  path, not part of this command). A run that lists nothing writes no pointer.
+  `--project` defaults to the current repository and must be it: a name ending
+  `_rdr` is refused (the RDR gate flow's project is never read or changed), and
+  so is any project that is not the working directory's repository. The
+  open-phase check reads that checkout's RDR files, there is no mapping from a
+  project name to another checkout, and a project that did not match would be
+  checked against the wrong RDR. The choice is to refuse, not to look the
+  repository up, because the command runs from the checkout it rolls up.
+- *The archive.* Sam, 2026-11-16: "Keep findings in full". The pointer is a
+  pointer, and each listed record's full text is kept beside it as a T3 note of
+  its own in the same subject, `category=gate_record`, titled
+  `<project>/<T2 title>` (the project, because the subject is shared and two
+  repositories' titles can be equal), with the content exactly as `get_all`
+  returned it, header and body. A record over the store_put cap is split at
+  line boundaries into `<title>`, `<title> (part 2)` and so on, and the
+  pointer's `parts` field says how many. The run writes each archive through the
+  same writer, reads it back and compares it with the record, and writes the
+  pointer only after every archive reads back whole; an archive that already
+  reads back whole is not rewritten, so a rerun costs no embedding. Unmapped
+  records are not archived: they get no TTL, so nothing retires them. What
+  survives RDR-207's reap is therefore each record's full text, not a title that
+  points at nothing.
 - *The trigger.* The `phase-review-gate` skill's close step (`SKILL.md:24`) and
   the `rdr-close` skill name the command. Nothing blocks a close without it;
   Step 4's census is what shows a missed run.
@@ -486,16 +539,53 @@ the cause if any of these fail:
 
 1. The phase is closed: the RDR's frontmatter status is `closed`, or every
    phase heading it names carries the close marker (the rule Step 4 uses,
-   `memory_curate/__init__.py:516-521`, `:646`). A record for an open phase is
-   never touched.
-2. Every listed title is present in the read that listed it, and the pointer
-   record reads back from T3 by its title with the same list. These reads do
-   not stamp access (A8).
-3. For each listed bead, its newest record (by header date, then round) has
-   the verdict `justified`. A bead whose newest record is `partial` or
-   `not-justified` stops the TTL step and is named, unless the run names it
-   with `--accept-open <bead>`, which the pointer records. A record with no
-   bead has no chain to check; it is "unmapped" and gets no TTL.
+   `memory_curate/__init__.py:516-521`, `:646`; `--all` needs the RDR itself
+   closed). A record for an open phase is never touched: the refusal comes
+   before anything is written, the archives and the pointer included.
+2. Every title the run lists resolves. A record of this read resolves by being
+   in it. A record an earlier pointer (same title) listed that this read no
+   longer lists is carried into the new pointer, so no record an earlier run
+   listed drops out of it. One the expire sweep quarantined (found in the
+   quarantined listing, which `get_all` hides) is marked `state: quarantined`;
+   its row is restorable, so it is carried whatever its archive. One that is
+   neither live nor quarantined, because the reap deleted its row, is marked
+   `state: absent` provided its archive still reads back whole; if it does not,
+   the run stops and names the title, because that record's full text would be
+   lost. Carried records take no part in Step 2.3 or the TTL step: they
+   already have one. After the pointer is written it is read back from T3 by its
+   title and must list the same records with the same marks (`ttl_set`,
+   `restored`, `state`: the next run decides from them), and every listed record's archive
+   reads back whole and equal to the record, so no record gets a TTL until its
+   full text reads back from T3. These reads do not stamp access (A8).
+3. For each listed bead, its newest record has the verdict `justified`. Newest
+   is by header date, then round. A record with no field header
+   (an older one) is dated from the first `YYYY-MM-DD` in its title, else from
+   its timestamp's day; the round is the title's last `-r<N>` followed by `-` or
+   the end, read with the record's own bead id removed from the title (a number,
+   so `-r10` follows `-r9`; live titles put it before the date,
+   `confirm-<bead>-r2-2026-11-15`, and an id whose suffix is `r` and digits is no round),
+   0 when there is none, because `gate_record` writes no round field. Dates are
+   day-granular and the round is optional, so when more than one record shares
+   the newest date and round the worse verdict decides (`not-justified` over
+   `partial` over `justified`); the row's timestamp is not used to order records
+   within a day and round, because a re-put re-stamps a row and would let an
+   edited older record pass. A terminal
+   `partial` is not a pass: it stops the run like `not-justified`, and a bead
+   whose newest record is `partial` rolls up only with Sam's per-bead stamp,
+   given with `--accept-open` (Sam 2026-11-19, T2
+   `nexus/sam-ruling-token-sequencing-and-rollup-bar-2026-11-19`). A bead whose newest
+   record is `partial` or `not-justified` stops the run and is named, unless the run names it with
+   `--accept-open <bead>` (repeatable), which the pointer records in an
+   `accepted-open:` header line; a name that matches no listed bead is
+   refused. Every non-justified record of a listed bead is printed. A record
+   with no bead has no chain to check; it is "unmapped" and gets no TTL.
+
+`--dry-run` applies checks 1 and 3 and the earlier-pointer half of check 2 (it
+reads the earlier pointer and the quarantined listing, and writes nothing), and
+refuses exactly as the real run does. It skips the archives, the pointer write
+and its read-back, and says so in its output. Its candidate set is the listed
+records that pass those checks and have no TTL, minus unmapped and restored
+records, and it never stamps access: it reads with `get_all`.
 
 This is narrower than Amendment A1's wording, "each ship-blocker named in a
 gate record is either fixed by a listed sha or names its bead". A ship-blocker
@@ -506,13 +596,29 @@ what the text says.
 
 **Step 3, the TTL.** For each listed record that passed Step 2 and has no TTL,
 write it through the verbatim import route (`HttpMemoryStore.import_entry`,
-`POST /v1/memory/import`; research-10) with `ttl=30` and every other field as
-`get_all` returned it: project, title, content, tags, agent, session,
-`access_count`, `last_accessed` and timestamp. A null agent or session is sent
-as absent, so it stays NULL, and a `last_accessed` of `""` is sent as `None`.
-Then read the row back through `get_all` and compare every field. A mismatch is
-reported with the title and the field, and the original row's values are
-printed so a person can write them back; the command does not undo it.
+`POST /v1/memory/import`; research-10) with `ttl=30` and the values `get_all`
+returned for project, title, content, tags, agent, session, `access_count`,
+`last_accessed` and timestamp. A null agent or session is sent as absent, so it
+stays NULL, and a `last_accessed` of `""` is sent as `None`. The route is not
+a pure copy: it also clears `quarantined_at` and `rolled_up_at`, re-stamps the
+row's identity with the caller, and truncates the timestamp to the second (which
+`get_all` already returns).
+The values come from one `get_all` taken right before the writes, after the
+pointer is written and read back, so a reader's access that landed after the
+listing keeps its count (a per-row `get` would stamp access, A8); a row that now
+has a TTL, or is gone, is skipped. Then read the rows back through one
+`get_all` and compare every field. The import keeps the row's own timestamp,
+so an old row can be quarantined by the sweep before it is read back, and
+`get_all` hides it: a row missing from that read is looked up in the
+quarantined listing before it is called missing, reported as `quarantined
+(restorable: nx memory restore <id>)`, and still compared field by field. A
+mismatch is reported with the title and the field, and the original row's
+values are printed so a person can write them back; the command does not undo
+it, and exits nonzero. The read cost per run is one `get_all` before the writes
+and one after, on top of the listing's, plus up to two quarantined listings
+(one for the carry, one made afresh for the read-back, because the carry's
+predates the writes) and one read of the earlier pointer from T3, each made
+once and only when needed; it does not grow with the number of records.
 
 - *Why import and not put.* A `put` fills a missing agent or session from the
   writer's environment and the engine stores that, so it would give a record
@@ -536,7 +642,8 @@ printed so a person can write them back; the command does not undo it.
   30 days in a closed phase is the one A1 asks to retire. How many records are
   already past their effective TTL: not measured. Sam chose this on 2026-11-16
   (by dialog in halcyon's session, relayed by halcyon: "Keep timestamps, count
-  first"), with a count step before the first real run (Step 3, Count first).
+  first"), with a count step before the first real run (Implementation Plan,
+  Phase 3 Step 3, the 30-day TTL: Count first).
 - *What expiry does.* Quarantine only, as RDR-207 built it: the record is
   hidden, restorable, and deleted only after an attended `nx memory rollup`
   marks it and `nx memory reap` runs. A record's heat lengthens its life by
@@ -544,15 +651,53 @@ printed so a person can write them back; the command does not undo it.
   the existing formula, not a change.
 - *Census.* `census_projects` is `{repo, f"{repo}_rdr"}`
   (`memory_curate/__init__.py:558`). The rows left alone in `<repo>_rdr` would
-  be flagged for ever, so this step removes `<repo>_rdr` from it.
+  be flagged for ever, so this step removes `<repo>_rdr` from it, deletes the
+  census's `<repo>_rdr` title-number branch and `_RDR_TITLE`, and narrows its
+  predicate from the tags `gate` or `kind:gate` to `kind:gate`, the one tag the
+  rollup lists (a row tagged only `gate` is neither listed nor flagged). Three
+  shipped census tests pinned `<repo>_rdr` rows as flagged and change with it:
+  `<repo>_rdr` rows are still seeded and asserted not flagged, the test that
+  read "only the repo and repo_rdr projects" is renamed to say it reads only
+  `<repo>`, and the sub-phase rule (3a counts as closed when phase 3 is) is now
+  pinned on a `<repo>` row, so its coverage is kept.
 - *Rerun.* The command is idempotent: the pointer is replaced, records that
-  already have a TTL are skipped.
+  already have a TTL are skipped, and records an earlier pointer listed that
+  the read no longer lists are carried (Step 2.2). A person's restore is not
+  undone. `nx memory restore` makes a row permanent (`ttl` NULL), which looks
+  exactly like a record never given a TTL, and the restore also clears the
+  rollup mark, so the earlier pointer is the only evidence. Each listed record
+  therefore carries `ttl_set`: the first pointer is written before the TTL
+  writes, with the mark false, and once the writes and their read-back are done
+  the pointer is written again with the mark true for each record a run gave a
+  TTL (a record that already had a TTL and was listed before counts as ours). A
+  rerun that finds a listed record with `ttl_set` true and no TTL leaves it
+  alone, prints `restored, left alone: <title>` and keeps it in the pointer
+  marked `restored`, so the next rerun skips it too. A record the earlier
+  pointer listed with the mark false whose TTL write stopped part way is not
+  a restore: it is a candidate again. A missing or unreadable earlier pointer
+  reads as a first run, which gives a record nobody listed before a TTL. If the
+  second pointer write fails after the TTLs were written the run says so and a
+  rerun writes the marks. The limit: the marks live in one pointer, so they are
+  per scope. A record restored after a `--phase` run is not protected from a
+  later `--all` run of the same RDR, whose pointer has no mark for it, so that
+  run gives it a TTL again (the archive keeps its text either way, and a
+  restore is one command). The close step runs the phase rollup before the
+  `--all` one, so restore after the last run that lists the record.
 - *Residual race.* The write sends the content read a moment earlier. A
   reviewer who rewrote the same title in that moment would be overwritten, and
   a row quarantined in that moment would be restored, because the import clears
   both quarantine stamps (research-10). The phase is closed and its reviewers
   are done, and the engine offers no compare-and-set, so this is accepted and
-  stated.
+  stated. The fresh read narrows the same race for `access_count`: a read that
+  lands between that read and a record's import loses its count, a window the
+  length of the write loop; closing it needs a compare-and-set, which the
+  engine does not have. A rewrite that lands before the fresh read is caught:
+  the archive and the pointer hold the text of the listing, so a candidate whose
+  fresh content or timestamp differs from it is skipped, named
+  (`changed since it was archived, no TTL`), and left without a TTL, because
+  retiring it would retire text that has no archive; a rerun archives the new
+  text and then gives it the TTL. Only a rewrite inside the write loop is left
+  to the race above.
 
 ### Existing Infrastructure Audit
 
@@ -691,7 +836,9 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
 - A gate record given its TTL keeps its own timestamp, so one already older than
   its effective TTL is quarantined at the next expire sweep (hidden, restorable
   with `nx memory restore`). It drops out of Step 4's census because it now has
-  a TTL.
+  a TTL. A record a person restores has no TTL again, so the census flags it
+  again; the rerun leaves it alone (Step 3, Rerun), and the flag is the
+  reminder that a person decided to keep it.
 - The counter's history is mixed: before the deploy it counts matches, after
   it counts receipts. Only a delta since the baseline has the new meaning.
 - Phases 1 and 2 are not built, so nothing graduates and bead nexus-2k66t.1
@@ -722,7 +869,7 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
 
 A pointer write that fails sets no TTL. A loss-check failure sets no TTL and
 names the title or bead. A TTL write that fails part way leaves some records
-with the TTL and some without; a rerun finishes the rest. The silent failure to
+with the TTL and some without; a fresh `--dry-run` and a rerun with its count finish the rest (the guard recounts the remaining candidates, so the earlier count no longer matches). The silent failure to
 guard is a TTL set without a pointer: the pointer is written and read back
 first, in that order, and the test plan forces the pointer write to fail and
 asserts no record gets a TTL. On the counter side, the visible failure is an
@@ -814,8 +961,9 @@ Reviewer and developer write-backs carry `kind:gate`, `bead:<id>` and
 `rdr:<NNN>` tags (`rdr:` dropped when the bead serves no RDR), shipped by
 nexus-qo7ie.1 and pinned by `tests/test_gate_record_tags_lint.py`, so new gate
 records map to a phase without parsing the title. Older records are mapped by
-title; the ones that do not map are listed as unmapped in the pointer record
-and keep no TTL. The lookup is an exact tag match, not a search: `memory_search`
+title; a tagged gate record that carries the RDR but no bead is listed as
+unmapped in the pointer record and keeps no TTL (Step 1 says which rows reach
+that list). The lookup is an exact tag match, not a search: `memory_search`
 tokenizes, and a search for `kind:gate` on 2026-10-31 returned 273 hits, the
 first five untagged critiques matched on words in their bodies (the
 nexus-qo7ie.1 critique). That is why Step 1 reads whole tags with `split_tags` and does not search.
@@ -828,18 +976,38 @@ the pointer record in T3, and the one-line change to the two skills that name
 the command. Tests: only whole-tag matches are listed, and an untagged record
 that mentions `kind:gate` in its body is not; `bead:nexus-1` does not match
 `bead:nexus-12`; a stored value `kind:gate, bead:x` (a space after the comma)
-matches; an older untagged record whose title names a listed bead is listed; a
-record with no bead is listed as unmapped; a quarantined record is not listed;
+matches; an older untagged record whose title names a listed bead is listed,
+`nexus-1` is not found in a title naming `nexus-12`, a parent id is not found in
+its child's, a hyphen-joined title and a trailing period match, a tagged row is
+never title-matched and a title naming two listed beads is unmapped; a
+`kind:gate` record with `rdr:<NNN>` and no `bead:` tag is listed as unmapped
+under `--all`, and under `--phase P` only when its title names phase P (`-p3-`
+and `-p3a-` for phase 3, not `-p2-` or `-p13-`); a record with neither tag is
+not listed; an unmapped record gets no TTL; a quarantined record is not listed;
 another tenant's rows are not listed; the `<repo>_rdr` rows are neither listed
 nor changed; a seeded closed phase yields one pointer listing its three
-records.
+records, each with its timestamp as `get_all` returned it; a pointer over the
+cap is split and still lists every record, and a
+rerun that needs fewer parts names the stale ones; a rerun replaces the pointer;
+each listed record's full text is a T3 note of its own that reads back equal to
+the record (header and body), with a body over 16,384 bytes split into titled
+parts that join exactly, in the `gate_record` category, while an unmapped
+record is not archived; a rerun rewrites no archive that already reads back
+whole; `--dry-run` writes no TTL and no T3 note, and its one T2 write is the
+count row (Step 3, Count first); no run changes a gate record's text, tags or
+timestamp, and the TTL write is the only run that changes a gate record's row.
 
 #### Step 2: The loss check
 
 As designed. Tests: an open phase is refused; a planted unresolvable title
 stops the run and names it; a bead whose newest record is `not-justified`
 stops the run and is named, and `--accept-open` lets it through and appears in
-the pointer; a record with no bead takes no part in the chain and gets no TTL;
+the pointer, while an older not-justified record under a justified newest one
+does not stop it; a record with no bead takes no part in the chain and gets no
+TTL; a record an earlier pointer listed that the read no longer lists stays in
+the new pointer when its archive is whole; the pointer reads back with the same
+list; a phase with the close marker passes in an open RDR and a sub-phase
+follows its phase, and `--dry-run` refuses an open phase as the real run does;
 the check leaves every record's `access_count` unchanged (A8).
 
 #### Step 3: The 30-day TTL
@@ -852,18 +1020,76 @@ nothing and reports one number: how many of those records the next expire
 sweep would quarantine. That number goes to Sam (through the session that
 coordinates the work) before any TTL is written, and the real run waits for
 his word. The dry run is the command with `--dry-run`; it reads with the same
-`get_all` as Step 1 and computes the same effective TTL as the engine.
+`get_all` as Step 1 and computes the same rule as the engine's expire sweep
+(`MemoryRepository.java:686-701`), with an injected clock: a row with no
+timestamp is skipped (`:695`; the import route cannot store one, so it only
+arises from a hand-made row); the age is whole seconds over 86,400 (`:698`);
+the effective TTL is `ttl * (1 + ln(access_count + 1))` with the natural log
+(`:697`); and the row is quarantined only when the age is strictly greater
+(`:699`). It prints
+each candidate as `candidate  <timestamp>  access_count=N  effective TTL X d
+past|within its effective TTL  <title>` and ends with `would be quarantined by
+the next expire sweep: N of K candidate record(s)`.
 
-As designed. Tests: the dry run writes nothing and reports the count, with one
-seeded record past its effective TTL and one not, counting exactly one; three seeded records each get `ttl=30` with content, tags,
+Sam's word before the real run is a process step, which the two skills state;
+the code cannot hear it. What the code requires (nexus-1gdv0.2.13) is a current,
+recorded count, and it is keyed per RDR and phase (Sam, 2026-11-16:
+"Per RDR and phase"): every batch, each `--rdr`/`--phase` or `--all`, reports
+its own count before its real run. The dry run records its count as one T2 row
+in `<repo>` (never `<repo>_rdr`, never SQLite), titled
+`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all` like the pointer, with the
+count, the candidate titles, the date and the commit; a later dry run replaces
+it. The row carries the tag `gate-rollup-count`, neither `kind:gate` nor `gate`,
+so the rollup never lists it and the census never flags it. A real run that
+would write a TTL refuses, writing nothing, unless (a) that row exists, (b) the
+run passes `--counted N` and N equals the recorded count, the number that was
+reported to Sam, (c) every candidate is a title the row lists, so a record
+that appeared after the dry run needs a new one, and (d) the count still holds:
+the run recomputes how many candidates the engine's rule has past their
+effective TTL at the time of the real run and refuses when that differs from
+the recorded count, because the count is a snapshot and a record that crossed
+its effective TTL since the dry run would otherwise be quarantined without
+Sam having been told. The flag is evidence that the
+caller has the number, not that Sam said yes; his word stays outside the code,
+and the skills tell the session to wait for it. A run with no candidate writes
+no TTL and needs no count, so a rerun that finishes after everything has its TTL
+passes. This changes "the dry run writes nothing" to what is true: it writes no
+TTL and no T3 note, and one count row.
+
+As designed. Tests: the dry run writes no TTL and no T3 note and reports the count, with one
+seeded record past its effective TTL and one not, counting exactly one; a record
+with `access_count` 3 that is 40 days old (inside its 71.6-day effective TTL) is
+not counted and one at 72 days is, a record exactly at its effective TTL is not
+counted and one second older is, an age is whole seconds, and a row with no
+timestamp is not counted (the heat term, the strict comparison and the
+truncation each fail their test when removed); three seeded records each get `ttl=30` with content, tags,
 agent, session, timestamp, `access_count` and `last_accessed` unchanged; a
 record seeded with a null agent and a null session still has both null after the
-step, and a `put`-based write would not (the test fails for that reason when the
-step is switched to `put`); a seeded record with a never-accessed
+step, with `NX_AGENT` and a resolvable session (`NX_SESSION_ID`) set so the
+control is real: the test first asserts that a `put` under those settings writes
+both non-null, because in a bare test process neither resolves and a `put` would
+also leave them null (the test fails for that reason when the step is switched
+to `put`, and refuses to pass when the control writes nothing); a seeded record with a never-accessed
 `last_accessed` stays never-accessed; a rerun changes nothing; a forced
 pointer-write failure leaves no TTL; the `<repo>_rdr` rows (gate-latest,
 critique, fix-check) get no TTL and `_census` no longer flags them; a planted
-record without a readable verdict is unmapped and keeps no TTL.
+record without a readable verdict is unmapped and keeps no TTL; a pointer that
+does not read back leaves no TTL; an access that lands between the listing and
+the import keeps its count; a field that does not read back is named with the
+original row and the run exits nonzero; a row the sweep quarantined right after
+the write is reported as quarantined, not as a mismatch, and a rerun carries it
+marked `quarantined`; a record a person restored (no TTL again, listed with
+`ttl_set` by an earlier run) is not given a TTL again, is named and stays marked
+`restored`, while a record no earlier pointer lists still gets one; a rerun
+after a TTL write that stopped part way finishes the rest and does not call them
+restored; the pointer still lists each timestamp after the TTL write. The guard:
+a real run with no recorded count refuses, writes nothing and names the dry run;
+a dry run writes exactly one count row in `<repo>` and none in `<repo>_rdr`, and
+the real run then proceeds with `--counted N`; a missing or different `--counted`
+refuses; a count recorded for another phase, or for `--all`, does not unlock
+this scope; a record the dry run did not count refuses; a run with nothing to
+write needs no count; the count row is never listed and never flagged by the
+census.
 
 #### Step 4 (shipped): the census flag
 
@@ -923,6 +1149,8 @@ kinds of row, tenant isolation) stay in the Test Plan, marked deferred.
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | gate-record pointer (T3) | `nx store list` on `nexus-rdr-research`, `gate_pointer` | `nx store get` by title | a rerun replaces it; removal is a person's `nx store` call | the loss check reads it back at write time | T3 backup |
+| dry-run count (T2) | `nx memory list` in `<repo>`, titles `gate-rollup-count-rdr-<NNN>-...` | `nx memory get` | a later dry run replaces it; removal is `nx memory delete` | the real run reads it, `--counted` must equal it | PG backup |
+| gate-record archive (T3) | `nx store list` on `nexus-rdr-research`, `gate_record` | `nx store get` by `<project>/<T2 title>` | a rerun rewrites none that reads back whole; removal is a person's `nx store` call | the run and the loss check read each back and compare it with the record | T3 backup |
 | records given a 30-day TTL (T2) | `nx memory list` before expiry; `nx memory list --quarantined` after | `nx memory get` | RDR-207's reap, after an attended rollup | Step 4's census flag lists any still without a TTL | PG backup |
 | read counter | not a new resource | `nx memory get` shows the count | not applicable | the MVV test | PG backup |
 | promotion marks (deferred) | `nx memory list --promoted` | on the row | clearing a mark is `nx memory update`, in scope when built | count in `nx doctor` | PG backup |
@@ -953,20 +1181,36 @@ In scope:
 - **Scenario**: gate-record listing; **Verify**: only whole-tag matches are
   listed; an untagged record mentioning `kind:gate` is not; `bead:nexus-1` is
   not `bead:nexus-12`; a stored `kind:gate, bead:x` matches; an older untagged
-  record whose title names a listed bead is listed; a record with no bead is
-  unmapped; quarantined rows are not listed; the `<repo>_rdr` rows are neither
+  record whose title names a listed bead is listed; a bead-less `kind:gate`
+  record of the RDR is unmapped (under `--phase`, when its title names the
+  phase); quarantined rows are not listed; the `<repo>_rdr` rows are neither
   listed nor changed.
 - **Scenario**: pointer and loss check; **Verify**: closed phase with three
-  records gets one pointer; all three titles resolve from it; an open phase is
+  records gets one pointer; all three titles resolve from it and each record's
+  full text reads back from T3, a body over 16,384 bytes included; an open phase is
   refused; an unresolvable title stops the TTL step and names it; a
   not-justified newest record stops it; `--accept-open` passes and is recorded;
   a record with no bead takes no part in the chain and gets no TTL.
 - **Scenario**: TTL; **Verify**: three records get `ttl=30` with every other
   field, `access_count` and timestamp unchanged; a record seeded with a null
   agent and session keeps both null, and the test fails when the step is
-  switched to `put`; a never-accessed record stays never-accessed; rerun is a
-  no-op; a forced pointer failure leaves no TTL; the `<repo>_rdr` rows get none
-  and the census no longer flags them.
+  switched to `put`, with `NX_AGENT` and a session set so a `put` control
+  writes both; a never-accessed record stays never-accessed; rerun is a no-op;
+  a forced pointer failure leaves no TTL; the `<repo>_rdr` rows get none and the
+  census no longer flags them (`<repo>` only, `kind:gate` only); a row the sweep
+  quarantined right after the write reads back as quarantined, not as a
+  mismatch, and a rerun keeps it in the pointer; a record a person restored is
+  not given a TTL again.
+- **Scenario**: dry run and count-first guard; **Verify**: the dry run applies
+  the closed-phase check, the verdict chain and the earlier-pointer check, writes
+  no TTL and no T3 note, stamps no access, and says it skipped the pointer write
+  and read-back; it reports exactly the number of candidates past `ttl_days * (1
+  + ln(access_count + 1))`, the engine's rule, with a heat record inside its
+  effective TTL not counted, a record exactly at it not counted (strictly
+  greater), and a row with no timestamp not counted; a real run with no recorded
+  count, a missing or different `--counted`, or a candidate the dry run did not
+  count refuses and writes nothing; a count recorded for another phase or for
+  `--all` does not unlock it.
 - **Scenario**: tenant isolation; **Verify**: another tenant's rows are
   neither stamped, listed nor given a TTL.
 
@@ -994,9 +1238,21 @@ removed from the engine (the 25 outside rows then show a count of 1). The
 pointer-before-TTL leg must fail for its stated reason when the ordering guard
 is deleted. The listing tests include the untagged-body record, which is
 the case that motivated reading whole tags. The null-attribution TTL test must
-fail for its stated reason when the step is switched to `put`. A new check (the
+fail for its stated reason when the step is switched to `put`. The dry-run count
+test must fail when the dry run stops matching the engine's rule: when the heat
+term is dropped, when the comparison becomes non-strict or when the age is not
+truncated to seconds. The count-first guard test must fail when the guard is
+deleted. A new check (the
 loss check) is run live once and its first run, with the counts examined
-and skipped, goes in its bead before close.
+and skipped, goes in its bead before close. The first live run is the first run
+without `--dry-run` that passes the loss check: it is the one that writes the
+pointer and reads it back, so checks 1 to 3 all run (the dry run skips the
+pointer write and read-back). Its counts are the records examined (the run
+prints `examined N row(s) of <repo>, G with the tag kind:gate` first, and a
+note when none of the gate rows is in the run, so a wrong `--beads` or
+`--project` reading "0 listed" is visibly not a pass), those skipped by cause
+(open phase, unresolvable title, verdict chain, unmapped, restored, changed since
+archived) and those given a TTL; in the plan that run is nexus-1gdv0.2.17.
 
 ### Performance Expectations
 
@@ -1113,3 +1369,27 @@ heavy; it is kept because it was a design input Sam was to weigh.
 - 2026-11-16: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); blob `43b12b69464f`; critique `nexus_rdr/209-gate-critique-2026-11-16-r1`.
 | 2026-11-16 | Accepted (Sam, by dialog in halcyon's session: "Keep timestamps, count first"), with the Count first step (fix check `nexus_rdr/209-fix-check-78cc9b0e4776` PASS). Epic nexus-1gdv0. Residual dispositions: gate S3 nexus-1gdv0.1.2, S5 nexus-1gdv0.2.7, S6 nexus-1gdv0.2.4, S7 nexus-1gdv0.2.5, S8 nexus-1gdv0.3; fix check d021: nexus-1gdv0.2.2, .2.3, .2.9, .2.10, .2.11; fix check 78cc: nexus-1gdv0.2.12, .2.13, .2.14, .2.15. |
 | 2026-11-18 | Gate finding S3 closed with the engine search page (nexus-1gdv0.1.1, nexus-1gdv0.1.2): the total is one statement (a CTE, a one-row count and the page left-joined), not a window count, so a page past the end still carries it and the page and the total share one snapshot; `limit` is clamped to 10,000 as `/v1/memory/list` clamps it and a bad `offset` is a 400. Wording amended under standing grant 3 to match the code reviewed at the nexus-1gdv0.1.3 gate (`MemorySearchPage`, tests in `MemorySearchPageTest`, `MemorySearchPageStatementsTest` and `MemoryRepositoryQuarantineReadPathTest`). |
+| 2026-11-19 | Phase 3 Step 1, the command (nexus-1gdv0.2.1). `nx memory gate-rollup` is built with the pointer record as designed. The size question the gate left to the implementation (critique observation 4) is settled as split, not refuse: a pointer over 16,384 bytes is written in titled parts that the first part counts, and a rerun that needs fewer parts names the stale ones (a T3 delete is a catalog tombstone path, so none is deleted). A run that lists nothing writes no pointer. Wording only; the design is unchanged. |
+| 2026-11-19 | Gate finding d021dc53c85b, first half (nexus-1gdv0.2.2): the "unmapped" list was unreachable, because under `--phase` a record was selected by a bead and under `--all` by `rdr:<NNN>`, so a record with no bead was never selected. The rule is now written in Step 1 and built: a `kind:gate` record that carries `rdr:<NNN>` and has no `bead:` tag is unmapped under `--all`, and under `--phase P` when its title also names phase P by the `-p<N>` / `-phase-<N>` rule (sub-phase 3a counts toward 3); a listed record with no readable verdict is unmapped; a `kind:gate` record with neither tag is in no run's scope. An untagged record whose title names no listed bead is not unmapped, because it has no `rdr:` tag to put it in scope, so the earlier wording "or a title that names none" is narrowed to match. Unmapped records get no TTL. |
+| 2026-11-19 | Gate finding d021dc53c85b, second half (nexus-1gdv0.2.3): the fix round dropped `--include-titled`, so title matching became unconditional, and no predicate for "a title that names a listed bead" was written. It is now named in Step 1 and built (`title_names_bead`): the row has no tags at all, and its title holds the bead id as a whole token, `(?<![A-Za-z0-9.])<id>(?!\.?[A-Za-z0-9])`, case-sensitive, with a hyphen not counted as an id character because gate titles join words with it. It is on only under `--phase` (`--all` has no bead list), and a title naming two listed beads is unmapped. The Step 1 test list gains the negative cases. The predicate was checked on the live store: 628 of the 646 untagged gate-shaped titles that carry a bead-shaped id match each id they carry (the other 18 are an id cut short by the checking pattern, not by the predicate). |
+| 2026-11-19 | Gate finding S6, pointer half (nexus-1gdv0.2.4): the pointer now lists each record's timestamp exactly as `get_all` returned it, unmapped records included, because the pointer was the one place that would keep a record's date after the TTL write and the reap and did not carry it. The second half of S6, what a rerun does with a record a person restored (`nx memory restore` clears the TTL), belongs to Step 3 with the TTL write and is not settled here. |
+| 2026-11-19 | Gate finding S7 and Sam's ruling "Keep findings in full" (nexus-1gdv0.2.5): the claim that Steps 1 to 3 retire the gate records "without losing them", and the line "it keeps its sources by title and copies no body", overstated what survives, because after the TTL, quarantine, rollup and reap only the pointer and RDR-207's summary were left. The one-line excerpt default is withdrawn. Step 1 now writes each listed record's full text to T3 as a note of its own (subject `nexus-rdr-research`, `category=gate_record`, titled `<project>/<T2 title>`, split into titled parts when over 16,384 bytes), reads it back and compares it before the pointer is written, and the pointer names each archive and its part count; unmapped records are not archived. Step 2 reads every archive back before any TTL. Wording amended in Gap 6, the Approach, Step 1, Step 2, the test lists and the Day 2 table. The loss check's own read of the archive is Step 2 and is not built here. |
+| 2026-11-19 | Phase 3 Step 2, the loss check (nexus-1gdv0.2.6), built before any write. The run refuses an open phase before it writes anything, the archives and the pointer included, by the census flag's own rule (closed status, or the phase heading's close marker; `--all` needs the RDR closed). Check 2 gains a meaning the earlier text lacked, because a title taken from the read that listed it is present by construction: a record an earlier pointer listed that the read no longer lists is carried into the new pointer (`state: absent`) when its archive reads back whole, and an archive that does not stops the run naming the title; so a record the reap deleted never drops out of the listing. The pointer is read back with the same list. A not-justified or partial newest record stops the run unless `--accept-open <bead>` (repeatable, recorded in the pointer, refused when it names no listed bead). The command moved out of `commands/memory.py` (now back under its 800-line cap) into `memory_curate/gate_cli.py`, registered in `cli.py`; the loss check lives in `memory_curate/gate_ttl.py`. |
+| 2026-11-19 | Gate finding S5 (nexus-1gdv0.2.7): Step 2.3 said "newest record (by header date, then round)", but the round is optional, dates are day-granular and an older record has no header. The order is now written and built: header date, then round, then title; a headerless record is dated from the first date in its title, else its timestamp's day; the round is the title's `-r<N>` as a number, 0 when absent; when records tie on date and round the worse verdict decides. A terminal `partial` keeps the blocking rule as designed and says so; letting a partial that states no ship-blocker pass would change the design and is left to Sam. |
+| 2026-11-19 | Phase 3 Step 3, the TTL write (nexus-1gdv0.2.8), built. A real run writes `ttl=30` through `import_entry` on each record that passed Step 2 and has no TTL, after the pointer is written and read back; every other field goes as `get_all` returned it, and a read-back compares each field and names a mismatch with the original row (exit nonzero, no undo). The values come from one `get_all` taken right before the writes, not one per record: a per-row `get` stamps access (A8) and a filtered `get_all` does not exist, so audit residual (2) is narrowed to the length of the write loop and stated beside the residual race rather than closed. `--dry-run` prints each candidate with its timestamp, `access_count` and whether the engine rule has it past its effective TTL, and one count. The census change is nexus-1gdv0.2.9. |
+| 2026-11-19 | Fix check d021dc53c85b, defects B and C (nexus-1gdv0.2.9) and audit residual (4): the census change of Step 3 is built. `_census` reads only `<repo>`, its `<repo>_rdr` title-number branch and `_RDR_TITLE` are deleted, and its predicate is `kind:gate` only (a row tagged only `gate` is neither listed by the rollup nor flagged). The three census tests that pinned `<repo>_rdr` rows as flagged now seed them and assert they are not flagged; one is renamed; the sub-phase case moves to a `<repo>` row so its coverage is kept. Step 3 names the change. |
+| 2026-11-19 | Fix check d021dc53c85b, defects A and C (nexus-1gdv0.2.10): the null-attribution test of Step 3 could not tell `put` from import, because in a bare test process `NX_AGENT` and the session both resolve to None and a `put` would also leave them null. The test now sets `NX_AGENT` and `NX_SESSION_ID` (and stops the config file leaking in), asserts first that a `put` under those settings writes both non-null, then asserts the import keeps both null; it refuses to pass when the control writes nothing. |
+| 2026-11-19 | Fix check d021dc53c85b, defects B and C, A on cost (nexus-1gdv0.2.11): keeping the row's own timestamp means the expire sweep can quarantine an old record before it is read back, and `get_all` hides a quarantined row. The read-back now looks a missing row up in the quarantined listing before calling it missing and reports it as quarantined, restorable with `nx memory restore <id>`, still comparing its fields. A rerun carries a record an earlier pointer listed that the read no longer lists: `state: quarantined` when it is in the quarantined listing (whatever its archive, its row is restorable), `state: absent` when it is neither live nor quarantined and its archive reads back whole (the reaped-record rule of nexus-1gdv0.2.6), and stops naming it when that archive is gone. A run whose read lists nothing still refreshes an earlier pointer. The read cost per run is stated in Step 3: one `get_all` before and one after the writes, one quarantined listing and one pointer read, none per record. |
+| 2026-11-19 | Gate finding S6, second half (nexus-1gdv0.2.4): `nx memory restore` makes a row permanent again (`ttl` NULL) and clears the rollup mark, so a restored gate record looks exactly like one never given a TTL, and a rerun would have given it a TTL again, undoing a person's decision. The rule is written in Step 3 (Rerun) and built, in the form the bead recommended (skip and name): each listed record in the pointer carries `ttl_set`, written false before the TTL writes and true after them for each record a run gave a TTL (the pointer is written a second time for that), so a rerun that finds a listed record with `ttl_set` and no TTL leaves it alone, prints `restored, left alone: <title>` and keeps it marked `restored`. A record the earlier pointer lists unmarked, whose write stopped part way, stays a candidate, so a partial write is not mistaken for a restore. The Consequences bullet now says Step 4's census flags a restored record again and why that is left as the reminder. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect B and observations A and C (nexus-1gdv0.2.12): the RDR did not say which Step 2 checks the dry run applies, though it writes no pointer, nor which run is the loss check's first live run. Step 2 now says: `--dry-run` applies the closed-phase check, the verdict chain and the earlier-pointer half of check 2 (reading the earlier pointer and the quarantined listing), refuses exactly as the real run does, skips the archives, the pointer write and its read-back and says so, and counts the listed records that pass and have no TTL, minus unmapped and restored ones. The Testing Strategy defines the first live run as the first run without `--dry-run` that passes the loss check, with its counts (examined, skipped by cause, given a TTL) recorded in its bead. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect A and observations B and C (nexus-1gdv0.2.13), with Sam's 2026-11-16 ruling "Per RDR and phase": "the real run waits for his word" had no mechanism, and the `phase-review-gate` and `rdr-close` skills name the command at close, so a session could run the real thing first. The dry run now records its count as one T2 row in `<repo>` (`gate-rollup-count-rdr-<NNN>-phase-<P>` or `-all`, tag `gate-rollup-count`, never `kind:gate` or `gate`), and a real run that would write a TTL refuses, writing nothing, unless the row exists, `--counted N` equals its count and every candidate is a title it lists; a run with no candidate needs none. The scope of "first run" is per RDR and phase, keyed like the pointer. The `--counted` flag was an open choice for Sam in the plan; the default taken here is that it is required, as evidence the caller has the number, and the RDR says it is not Sam's yes. "The dry run writes nothing" is corrected to no TTL, no T3 note and one count row. Both skills say to run `--dry-run` first, tell Sam its count and wait for his word. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect C and observations A and B (nexus-1gdv0.2.14): the dry-run test seeded "one past and one not", which pinned neither the heat term nor the boundary, so a dry run that dropped `ln(access_count + 1)` or used `>=` would pass. Step 3 now states the engine rule the dry run computes (null timestamp skipped, age in whole seconds over 86,400, `ttl * (1 + ln(access_count + 1))`, strict comparison) and the test list pins it with a fixed clock: a heat record inside its effective TTL is not counted, a record exactly at it is not and one second older is, truncation to seconds, a null timestamp, and a mixed set. Each fails when its term is removed. |
+| 2026-11-19 | Fix check 78cc9b0e4776, defect B (nexus-1gdv0.2.15), doc only: the dry-run test appeared only in the Implementation Plan, not in the Test Plan or the Testing Strategy. The Test Plan gains the dry-run and count-first-guard scenario and extends the TTL and loss-check scenarios to what was built (the real put control, the census narrowing, the quarantine read-back, the restored record); the Testing Strategy names the two legs that must fail when their code is changed (the dry-run count against the engine rule, the guard when deleted); and the reference "(Step 3, Count first)" in the timestamp bullet, which read as Technical Design's own Step 3, now points at the Implementation Plan, Phase 3 Step 3. The wording was copied from the merged code and tests of nexus-1gdv0.2.12 to .14, not from the beads. |
+| 2026-11-19 | Review round 1 (nexus-1gdv0.2.16), blocker 1: the TTL write imported the fresh read's content while the archive and the pointer held the listing's, so a record rewritten between them got a TTL with no archive of its new text. A candidate whose fresh content or timestamp differs from the listing's is now skipped, named and left without a TTL, and a rerun archives its new text first; the residual-race paragraph says so. |
+| 2026-11-19 | Review round 1, blocker 2: the quarantined listing the carry reads before the writes was reused by the read-back, so a row the sweep quarantined after its import (not in that older listing) read as "not in the read after the write". The read-back now makes its own listing; Step 3's read cost says up to two. |
+| 2026-11-19 | Review round 1, blocker 4: the count guard compared only the recorded number, so time passing (a record crossing its effective TTL after the dry run) left the count Sam was told stale while the guard still passed. The real run now recomputes the engine rule over its candidates at its own clock and refuses when the number differs from the recorded count; the guard paragraph says so. |
+| 2026-11-19 | Review round 1, blocker 5: `--project` accepted `<repo>_rdr` and any other project, so the open-phase check could read one repository's RDR files for another repository's records. A project ending `_rdr` is refused, and so is a project that is not the working directory's repository (the check reads that checkout's RDR files and nothing maps a project name to another checkout; refusing was chosen over a lookup because the command runs from the checkout it rolls up). |
+| 2026-11-19 | Review round 1, blocker 6: the pointer read-back compared only (project, title), so a pointer that came back with different `ttl_set`, `restored` or `state` marks, the ones the next run decides from, passed. It now compares those too. |
+| 2026-11-19 | Review round 1, blocker 7: a wrong `--beads` or `--project` printed "0 listed", which read as a pass. The output now starts with the rows examined and the `kind:gate` rows seen, and says so when none of the gate rows is in the run; the first live run's counts (nexus-1gdv0.2.17) come from these lines. |
+| 2026-11-19 | Review round 1, wording (nexus-1gdv0.2.16): the Step 1 test-list sentence "no run writes anything to T2" is corrected (the dry run writes one count row; no run changes a gate record's text, tags or timestamp); the count row is in the Day 2 table; "is a mechanism, not a process rule" now says what the code requires (a current, recorded count) and that Sam's word is a process step the skills state; "every other field" is narrowed, because the import route also clears the quarantine stamps, re-stamps the row's identity with the caller and truncates the timestamp to the second; and the cross-scope limit of the restore rule is stated (a restore after a `--phase` run is not protected from a later `--all` run). |
+| 2026-11-19 | First live dry run (nexus-1gdv0.2.17, RDR-249, refused before any write): titles carry the round mid-title, so the trailing-only round read an `-r1` partial and an `-r2` justified of one day as a tie and the partial won. Step 2.3 now reads the round wherever a `-` or the end follows it, with the record's own bead id removed first; the tie rule is unchanged (worse verdict), and the text says the row timestamp is not used. It also records Sam's ruling that a terminal partial rolls up only with his per-bead `--accept-open` stamp. Wording matches the reviewed fix (grant 3). |

@@ -1,7 +1,5 @@
 [i] Reference staleness: worst case for this run (sample=50, concurrency=8) is ~570s if every sampled document is https:// and every one exhausts its retries
-[✗] Reference staleness: 8 reference-only document(s) sampled (of 8 candidate(s)), sample 50, seed 1; 3 fresh, 2 stale, 1 dangling, 2 unknown, 0 not stattable
-      c: fresh=0 stale=0 dangling=0 unknown=1 error=0
-      chroma: fresh=0 stale=0 dangling=0 unknown=1 error=0
+[✗] Reference staleness: 6 reference-only document(s) sampled (of 6 candidate(s)), sample 50, seed 1; 3 fresh, 2 stale, 1 dangling, 0 unknown, 0 not stattable
       https: fresh=1 stale=1 dangling=0 unknown=0 error=0
       nx-note: fresh=1 stale=0 dangling=0 unknown=0 error=0
       nx-scratch: fresh=1 stale=0 dangling=0 unknown=0 error=0

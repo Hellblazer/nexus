@@ -159,6 +159,12 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
         1,
         "READ-ONLY: the match is docstring prose naming the `nx collection list` read; the script writes nothing",
     ),
+    # nexus-7fku2.2.3: the RDR-134 Step 9 A/B calls nx_answer in-process on
+    # each question; its results go to a local file under --out.
+    "scripts/bench/topic_route_nx_answer_ab.py": (
+        1,
+        "READ-ONLY: imports nexus.mcp.core for nx_answer, whose only write is a T2 nx_answer_runs telemetry row",
+    ),
     "scripts/agent_error_probes.py": (
         4,
         "NX_LOCAL: capture refuses anything but a local loopback engine; probes are reads or refused writes; "

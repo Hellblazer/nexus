@@ -1,0 +1,181 @@
+# RDR-134 Step 8 generic-document question set v2 (nexus-7fku2.2.2).
+#
+# v2 (2026-11-19) = v1's 15 questions and labels unchanged, plus `owner: "1-1"` on every question.
+# Why: the Phase 2 critique found that the grader runs over the whole store, where other projects
+# carry files with the same basename (seven other owners have a CHANGELOG.md), so v1's basename keys
+# credited them grade 3. taxonomy_ab2 now grades a generic question only on its owner's collections
+# (owner segment of the collection name; 1-1 holds nexus's docs__ and rdr__ collections) and on the
+# exact normalised basename. Still no routed or Step 9 result has been looked at.
+#
+# Purpose: 15 questions whose grade-3 answer is a GENERIC DOCUMENT (a changelog, a CLI reference, an
+# architecture or reference page under docs/) rather than an RDR or a paper title. With the 8 title
+# questions of golden_heldout_v1.yaml they are the OUT-OF-SAMPLE data for RDR-134 Step 9, the nx_answer
+# A/B that decides whether search.topic_route_nx_answer defaults to on (gate round 2, Significant 1: the
+# production set's 25 RDR questions are already among leg 1's 26, so they are in-sample).
+# scripts/bench/taxonomy_ab2.py reports them as their own class: every entry carries `kind: generic`,
+# and the summary has a `generic` bucket beside `rdr`, `title` and `all`.
+#
+# Labelling method
+#   Date: 2026-11-19. Author: the conexus developer agent, dispatched for nexus-7fku2.2.2.
+#   1. Each question was written from a document in the worktree, not from a search result. The source
+#      file was opened and the line that states the answer was found BEFORE the label was written; the
+#      inline comment on each grade-3 key names that line. Line numbers are those of the worktree at
+#      the time (feature/nexus-7fku2.2.1-topic-route-runner).
+#   2. Grade 3 = the document that answers the question. Grade 2 = a document that states part of the
+#      answer. Grade 1 = a document that touches the topic without the answer. A grade 1-2 entry exists
+#      only for a document that was also opened; no document was graded from its name.
+#   3. Keys are file BASENAMES. taxonomy_ab2 normalises a key (lowercase, [^a-z0-9] stripped). In v2 a
+#      generic question's key must EQUAL the normalised basename of the result's catalog path, and the
+#      result must come from a collection of the question's owner (1-1); a document from another owner
+#      keeps its rank slot and grades 0. One collision remains inside owner 1-1: CHANGELOG.md is also
+#      conexus/CHANGELOG.md, the plugin changelog with the same version headings, which does state the
+#      same release's changes. (v1's substring match also credited rdr-004-four-store-architecture.md
+#      for architecture.md; exact matching ends that.)
+#   4. Spread: 9 distinct documents, no more than 2 questions per document. README.md and SKILL.md
+#      were NOT used: their basenames match dozens of unrelated files, so a grade-3 key for either
+#      would credit any README or any skill.
+#   5. No search, nx_answer, routed run or Step 9 run was made against these questions. The labels were
+#      fixed before any routed or Step 9 result was looked at, and are not to be changed after one is:
+#      a relabel or an added question is a new file version (generic_docs_v2.yaml), not an edit.
+#
+# Schema: loads under scripts/bench/schema.py::load_queries (qid, category, text, ground_truth; the extra
+# `kind` key is ignored there) and under scripts/bench/taxonomy_ab2.py::load_queries
+# (tests/test_rdr134_generic_questions.py pins both and that no question is dropped).
+queries:
+  # ---- CHANGELOG.md -------------------------------------------------------------------------------
+  - qid: GD01-changelog-8-3-0
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "What changed in conexus 8.3.0?"
+    ground_truth:
+      "CHANGELOG.md": 3   # CHANGELOG.md l.118-174: the [8.3.0] section (also conexus/CHANGELOG.md, plugin side, same key)
+
+  - qid: GD02-changelog-8-3-1
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "What did the conexus 8.3.1 patch release fix?"
+    ground_truth:
+      "CHANGELOG.md": 3   # CHANGELOG.md l.109-116: [8.3.1], the GH #1661 reasoning_extraction fix (also conexus/CHANGELOG.md, same key)
+
+  # ---- docs/cli-reference.md ----------------------------------------------------------------------
+  - qid: GD03-cli-purge-trash-defaults
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "What are the defaults of nx catalog purge-trash, and which flags does it need before it deletes anything?"
+    ground_truth:
+      "cli-reference.md": 3   # docs/cli-reference.md l.2026, 2031, 2035: --older-than-days default 30, dry-run default, --no-dry-run AND --confirm to mutate
+
+  - qid: GD04-cli-restore-deleted-document
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "How do I bring back a catalog document that was deleted with nx catalog delete?"
+    ground_truth:
+      "cli-reference.md": 3   # docs/cli-reference.md l.1992-2011: nx catalog trash lists, nx catalog restore takes a tumbler or a title
+
+  # ---- docs/storage-tiers.md ----------------------------------------------------------------------
+  - qid: GD05-storage-nxexp-format
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "What is the file format of an nx store export (.nxexp), and how are the embeddings stored in it?"
+    ground_truth:
+      "storage-tiers.md": 3   # docs/storage-tiers.md l.313: JSON header line + gzip msgpack stream, embeddings as raw float32 bytes
+      "architecture.md": 1    # docs/architecture.md l.1352: names the .nxexp export format in the module map, no layout (key also matches rdr-004-four-store-architecture.md)
+      "cli-reference.md": 1   # docs/cli-reference.md l.2644: lists the export verb as a portable .nxexp backup, no layout
+
+  - qid: GD06-storage-t1-session-resolution
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "Which environment variables decide which session's T1 scratch a process uses, and in what order are they tried?"
+    ground_truth:
+      "storage-tiers.md": 3        # docs/storage-tiers.md l.90-102: NX_SESSION_ID, then CLAUDE_CODE_SESSION_ID, then the flat file current_session
+      "desktop-deployment.md": 1   # docs/desktop-deployment.md l.123: a Desktop chat has no session id, so no T1; no resolution order
+
+  # ---- docs/architecture.md -----------------------------------------------------------------------
+  # Key "architecture.md" is also a substring of rdr-004-four-store-architecture.md (basename-only grader).
+  - qid: GD07-arch-post-store-hooks
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "How many post-store hook contracts does nexus have, and what shape is each?"
+    ground_truth:
+      "architecture.md": 3   # docs/architecture.md l.788-796: three contracts, single-document, batch, document-grain (HookRegistry)
+
+  - qid: GD08-arch-taxonomy-centroid-lifecycle
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "Do manual topic labels survive a taxonomy rebuild, and what do the discover, rebuild and split operations each do to the centroids?"
+    ground_truth:
+      "architecture.md": 3   # docs/architecture.md l.741-750: centroid lifecycle table; labels survive rebuild via _merge_labels
+
+  # ---- docs/collections.md ------------------------------------------------------------------------
+  - qid: GD09-collections-who-creates
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "Can I create a code, docs or rdr collection by hand, or who creates them?"
+    ground_truth:
+      "collections.md": 3      # docs/collections.md l.14-26: nx index repo creates them, never by hand; only knowledge is named by a person
+      "repo-indexing.md": 2    # docs/repo-indexing.md l.55-60, 71-72: each indexed repo yields the code and docs collections, and RDR paths an rdr collection
+      "storage-tiers.md": 1    # docs/storage-tiers.md l.264-269: the four collection name patterns and their contents, not who creates them
+
+  - qid: GD10-collections-one-document
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "Why is a knowledge collection that holds only one document a bad idea?"
+    ground_truth:
+      "collections.md": 3   # docs/collections.md l.126-137: Rule 4, no cross-document ranking, one more shard per fan-out, thin collections dropped from search
+
+  # ---- docs/benchmarking.md -----------------------------------------------------------------------
+  - qid: GD11-bench-pairs
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "How does the retrieval bench runner time an A/B comparison with the --pairs option?"
+    ground_truth:
+      "benchmarking.md": 3   # docs/benchmarking.md l.44-50: paired alternating ABBA runs, median per arm and of the per-pair differences, outliers counted not dropped
+
+  - qid: GD12-bench-compare-refusal
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "When does the bench runner refuse to compare two reports with --compare?"
+    ground_truth:
+      "benchmarking.md": 3   # docs/benchmarking.md l.38-40: differing host class, CPU model or engine build; a report with no manifest; a --pairs report
+
+  # ---- docs/repo-indexing.md ----------------------------------------------------------------------
+  - qid: GD13-repo-indexing-frecency
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "What formula does nexus use for git frecency, and how is frecency blended into hybrid search for code collections?"
+    ground_truth:
+      "repo-indexing.md": 3   # docs/repo-indexing.md l.180-198: sum(exp(-0.01 * days)) per commit; hybrid = 0.7 vector + 0.3 frecency, code__ only
+
+  # ---- docs/querying-guide.md ---------------------------------------------------------------------
+  - qid: GD14-querying-distance-thresholds
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "What distance thresholds does nexus use to filter noisy search results for each kind of corpus?"
+    ground_truth:
+      "querying-guide.md": 3   # docs/querying-guide.md l.199-207: code 0.45, knowledge/docs/rdr 0.65, cross-corpus default 0.55
+      "configuration.md": 2    # docs/configuration.md l.178-181: the per-corpus settings (0.45 and 0.65), not the cross-corpus 0.55 (key also matches rdr-006-chunk-size-configuration.md)
+
+  # ---- docs/plan-centric-retrieval.md -------------------------------------------------------------
+  - qid: GD15-plans-builtin-template-count
+    category: factual
+    kind: generic
+    owner: "1-1"
+    text: "How many builtin scenario plan templates ship with nexus, and which command seeds them?"
+    ground_truth:
+      "plan-centric-retrieval.md": 3   # docs/plan-centric-retrieval.md l.165-171: 13, one per conexus/plans/builtin/*.yml, seeded by nx plan reseed
+      "storage-tiers.md": 2            # docs/storage-tiers.md l.149: thirteen builtin templates seeded via nx plan reseed, no per-template list
+      "architecture.md": 2             # docs/architecture.md l.1371: thirteen builtin templates, seed loader upserts them (key also matches rdr-004-four-store-architecture.md)

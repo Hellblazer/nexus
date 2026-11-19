@@ -15,12 +15,14 @@ import structlog
 from typing import TYPE_CHECKING, Any
 
 from nexus.aspect_readers import NOTE_URI_SCHEME
+from nexus.catalog.engine_reads.route_unavailable import PHASE2_ROUTES_ENGINE
 from nexus.catalog.tombstones import (
     TombstoneGuardUnavailable,
     has_live_document,
     read_tombstones,
 )
 from nexus.catalog.tumbler import Tumbler
+from nexus.commands.catalog_cmds.meta_listing import meta_page
 from nexus.commands.catalog_cmds.sensitive_listing import sensitive_page
 
 if TYPE_CHECKING:
@@ -441,11 +443,13 @@ def _echo_document_rows(presented: "DocumentRows") -> None:
               help="Keep documents whose own catalog meta has KEY equal to VALUE (repeatable, ANDed): "
                    "`--meta quality_gate_overridden=true`, `--meta extraction_method=mineru`. "
                    "An absent key matches nothing, except extraction_source, which is `file` when absent. "
-                   "Scans the catalog's documents (nexus-6pfgb.16).")
+                   f"Asks the engine's metadata route (engine-service {PHASE2_ROUTES_ENGINE} or later), one page at a time (nexus-uwggq.2.14).")
 @click.option("--sensitive", "only_sensitive", is_flag=True,
               help="Keep only documents flagged sensitive (RDR-243): the list to review before a clear. "
                    "Reads the engine's sensitive list (engine-service 0.1.188 or later), not the catalog's documents; "
-                   "paging applies to the matches. Refuses, and does not scan, on an engine without the list.")
+                   "paging applies to the matches. With --meta, or with --type or a page past the list's 10000 when the "
+                   "engine has the metadata route, it asks that route for the sensitive matches. "
+                   "Refuses, and does not scan, on an engine without the route.")
 @click.option("--json", "as_json", is_flag=True)
 def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filters: tuple[str, ...], only_sensitive: bool, as_json: bool) -> None:
     """List catalog entries."""
@@ -456,7 +460,7 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
     cat = _get_catalog()
-    paged = False  # True: the rows are already the requested page (sensitive_page cuts it itself)
+    paged = False  # True: the rows are already the requested page (meta_page and sensitive_page cut it themselves)
     if owner:
         # Resolve --owner to a Tumbler. Try the dotted-tumbler form first
         # (the canonical input), then fall back to looking up by owner
@@ -471,10 +475,15 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         # safe). Apply the type filter here too if provided.
         if content_type:
             entries = [e for e in entries if e.content_type == content_type]
+    elif meta_wanted:
+        # RDR-241 Phase 2 (nexus-uwggq.2.14): the engine's metadata route, with --sensitive as its own clause; the
+        # engine applied the offset and the limit, so the page is not sliced again.
+        entries, total = meta_page(
+            cat, content_type=content_type, meta_wanted=meta_wanted, sensitive=only_sensitive, offset=offset, limit=limit)
+        paged = True
     elif only_sensitive:
         # RDR-241 Phase 1 (nexus-uwggq.1.7): the engine's sensitive list, then resolve_many; never a walk.
-        entries, total = sensitive_page(
-            cat, content_type=content_type, meta_wanted=meta_wanted, offset=offset, limit=limit)
+        entries, total = sensitive_page(cat, content_type=content_type, offset=offset, limit=limit)
         paged = True
     else:
         # GH #568: push --type into SQL so pagination on a small-
@@ -482,11 +491,10 @@ def list_cmd(owner: str, content_type: str, limit: int, offset: int, meta_filter
         # filter ran Python-side AFTER LIMIT/OFFSET; a 15K-entry
         # catalog with only 2 rdr rows had ``--type rdr -n 3`` return
         # 0. Mirrors PR #533's fix for the MCP catalog_list surface.
-        # nexus-6pfgb.16: a meta filter cannot be pushed into SQL, so it scans every document of the type
-        # (0 is the unbounded read) and pages the matches.
-        entries = cat.all_documents(limit=0 if meta_wanted else limit + offset + 1, content_type=content_type)
+        # The one-page list: --meta and --sensitive never reach here (they ask the engine's routes).
+        entries = cat.all_documents(limit=limit + offset + 1, content_type=content_type)
     if not paged:
-        if only_sensitive:  # --owner only: the no-owner read is sensitive_page's
+        if only_sensitive:  # --owner only: the no-owner reads are the routes'
             entries = [e for e in entries if e.sensitive]
         if meta_wanted:
             entries = documents_with_meta(entries, meta_wanted)

@@ -914,5 +914,42 @@ neg_case "a client write call added to leg N" "a client write call in leg N" \
 uv run python -c '"'store.put(1)'"'
 '
 
+# ── Leg A's /version contract (nexus-uwggq.2.8): the three RDR-241 route flags must read true through the edge ──
+sed -n '/^_version_contract_verdict() {/,/^}/p' "$GATE" > "$TMP/vfn.sh"
+if [ "$(head -n 1 "$TMP/vfn.sh")" = '_version_contract_verdict() {' ] && [ "$(tail -n 1 "$TMP/vfn.sh")" = '}' ]; then
+  PASS=$((PASS+1))
+else
+  echo "[FAIL] _version_contract_verdict not found or not closed in $GATE"; FAIL=$((FAIL+1))
+fi
+if grep -q '^_version_contract_verdict "\$VERSION_BODY" || _leg_fail "A: ' "$GATE"; then
+  PASS=$((PASS+1))
+else
+  echo "[FAIL] leg A does not call _version_contract_verdict"; FAIL=$((FAIL+1))
+fi
+_vbody() {  # <python dict updates>
+  "$E2E_PYTHON" -c 'import json,sys
+b={"release_version":"0.1.250","embedding_mode":"voyage","embedding_models":["voyage-context-3"],
+   "nx_answer_steps_supported":True,"catalog_docs_by_author_supported":True,
+   "catalog_docs_by_meta_supported":True,"catalog_sensitive_locators_supported":True}
+exec(sys.argv[1]); print(json.dumps(b))' "$1"
+}
+vcase() {  # <label> <want-rc> <want-text> <python update>
+  local out rc
+  # shellcheck disable=SC1091
+  out="$(cd "$HERE/../.." && source "$TMP/vfn.sh" && _version_contract_verdict "$(_vbody "$4")" 2>&1)"; rc=$?
+  if [ "$rc" = "$2" ] && [[ "$out" == *"$3"* ]]; then
+    PASS=$((PASS+1))
+  else
+    echo "[FAIL] version contract: $1 (rc $rc, want $2 with '$3'): $out"; FAIL=$((FAIL+1))
+  fi
+}
+vcase "all flags true" 0 "catalog_sensitive_locators_supported=True" "pass"
+for f in catalog_docs_by_author_supported catalog_docs_by_meta_supported catalog_sensitive_locators_supported; do
+  vcase "$f absent" 1 "VIOLATION: $f missing/false" "del b['$f']"
+  vcase "$f false" 1 "VIOLATION: $f missing/false" "b['$f']=False"
+  vcase "$f the string true" 1 "VIOLATION: $f missing/false" "b['$f']='true'"
+done
+vcase "the older nx_answer_steps check still holds" 1 "VIOLATION: nx_answer_steps_supported" "del b['nx_answer_steps_supported']"
+
 echo "$NAME: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

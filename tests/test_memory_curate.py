@@ -844,7 +844,7 @@ def test_t2_only_the_repos_own_projects_are_read(db: T2Database) -> None:
 def test_t2_census_flags_old_ttl_free_gate_records_of_a_closed_phase(db: T2Database) -> None:
     gate_tags = "kind:gate,bead:b1,rdr:238"
     _put(db, "planted-gate", tags=gate_tags, age_days=40)
-    _put(db, "238-gate-critique-x", tags="rdr,gate,critique", project=f"{REPO}_rdr", age_days=40)
+    _put(db, "238-gate-critique-x", tags="rdr,gate,critique", project=f"{REPO}_rdr", age_days=40)   # in <repo>_rdr: never read by the census
     # the clean cases, one per way a record is not flagged
     _put(db, "recent-gate", tags=gate_tags, age_days=10)                              # newer than 30 days
     _put(db, "has-ttl-gate", tags=gate_tags, age_days=40, ttl=30)                     # already on the TTL path
@@ -852,10 +852,10 @@ def test_t2_census_flags_old_ttl_free_gate_records_of_a_closed_phase(db: T2Datab
     _put(db, "no-rdr-gate", tags="kind:gate,bead:b3", age_days=40)                    # cannot be mapped
     _put(db, "mentions-gate", "kind:gate in the body only", tags="notes,rdr:238", age_days=40)
     _put(db, "near-miss-tags", tags="gates,kind:gate-x,rdr:238", age_days=40)          # not whole tags
-    _put(db, "333-open-gate", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)    # RDR 333 not closed
+    _put(db, "bare-gate-tag", tags="gate,rdr:238", age_days=40)                       # the bare 'gate' tag is not kind:gate
     got = _t2(db, closed={"238"})
     flagged = sorted((c.project, c.title) for c in got.census)
-    assert flagged == [(REPO, "planted-gate"), (f"{REPO}_rdr", "238-gate-critique-x")]
+    assert flagged == [(REPO, "planted-gate")]
     assert got.census_unmapped == 1  # no-rdr-gate: counted, never flagged
 
 
@@ -912,14 +912,14 @@ def test_t2_skips_bare_number_titles_and_rows_already_tagged_superseded(db: T2Da
 
 
 @pytest.mark.t2_tenant
-def test_t2_census_reads_only_the_repo_and_repo_rdr_projects(db: T2Database) -> None:
+def test_t2_census_reads_only_the_repo_project_not_repo_rdr_or_repo_active(db: T2Database) -> None:
     gate = "kind:gate,bead:b1,rdr:238"
     _put(db, "in-repo-gate", tags=gate, age_days=40)
-    _put(db, "in-rdr-gate", tags=gate, project=f"{REPO}_rdr", age_days=40)
+    _put(db, "in-rdr-gate", tags=gate, project=f"{REPO}_rdr", age_days=40)       # carries rdr:238: flagged if <repo>_rdr were read
     _put(db, "in-active-gate", tags=gate, project=f"{REPO}_active", age_days=40)  # a repo project, not a census one
     got = _t2(db, closed={"238"})
-    assert sorted((c.project, c.title) for c in got.census) == [(REPO, "in-repo-gate"), (f"{REPO}_rdr", "in-rdr-gate")]
-    assert f"{REPO}_active" in got.projects  # it was read (for replaced candidates), just not for the census
+    assert sorted((c.project, c.title) for c in got.census) == [(REPO, "in-repo-gate")]
+    assert {f"{REPO}_active", f"{REPO}_rdr"} <= set(got.projects)  # both were read (for replaced candidates), not for the census
 
 
 def _snapshot(db: T2Database) -> list[tuple[object, ...]]:
@@ -1058,14 +1058,16 @@ def test_t2_census_flags_a_closed_phase_of_an_open_rdr(db: T2Database) -> None:
     _put(db, "planted-gate", tags="kind:gate,bead:b1,rdr:238", age_days=40)
     assert _t2(db, closed=set()).census == []
     _put(db, "rdr-245-p3-critique", tags="kind:gate,rdr:245", age_days=40)                # phase 3 closed
-    _put(db, "245-p3a-fix-check", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)    # sub-phase of 3
-    _put(db, "245-p4-gate", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)           # phase 4 open
-    _put(db, "245-gate-no-phase", tags="rdr,gate", project=f"{REPO}_rdr", age_days=40)     # names no phase
+    _put(db, "rdr-245-p3a-fix-check", tags="kind:gate,rdr:245", age_days=40)               # sub-phase of 3: flagged
+    _put(db, "rdr-245-p4-gate", tags="kind:gate,rdr:245", age_days=40)                      # phase 4 open
+    _put(db, "rdr-245-gate-no-phase", tags="kind:gate,rdr:245", age_days=40)                # names no phase
+    for title in ("245-p3a-fix-check", "245-p3-gate", "245-gate-no-phase"):               # <repo>_rdr: never read
+        _put(db, title, tags="rdr,gate,kind:gate,rdr:245", project=f"{REPO}_rdr", age_days=40)
     _put(db, "rdr-245-p3-recent", tags="kind:gate,rdr:245", age_days=10)                   # too new
     got = mc.t2_findings(db, REPO, closed_rdrs={"238"}, closed_phases={"245": {"3"}}, now=datetime.now(UTC))
     flagged = sorted((c.title, c.rdr, c.phase) for c in got.census)
-    assert flagged == [("245-p3a-fix-check", "245", "3a"), ("planted-gate", "238", None),
-                       ("rdr-245-p3-critique", "245", "3")]
+    assert flagged == [("planted-gate", "238", None), ("rdr-245-p3-critique", "245", "3"),
+                       ("rdr-245-p3a-fix-check", "245", "3a")]
     text = "\n".join(mc.t2_section(db, REPO, closed_rdrs={"238"}, closed_phases={"245": {"3"}},
                                    now=datetime.now(UTC)))
     assert "rdr-245-p3-critique (RDR-245 Phase 3, " in text

@@ -1,23 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-uwggq.1.4 (RDR-241 Phase 1): the ``nx doctor --check-references`` report, pinned.
 
-``reference_only_candidates`` walks the whole catalog today (``all_documents(limit=0)``); nexus-uwggq.1.5
-replaces that walk with one ``list_scoped(source_uri_prefix=...)`` read per registered scheme. RDR-241
-allows the report to differ only by rows whose scheme has no stat handler (T2 nexus_rdr/241-research-5).
-This test pins today's report, byte for byte, on one fixture, so that diff is visible in .1.5.
+``reference_only_candidates`` walked the whole catalog (``all_documents(limit=0)``) when this golden was
+first written; nexus-uwggq.1.5 replaced that walk with one read of the engine's by-scheme route per
+registered non-file scheme (RDR-241 Phase 2; Sam 2026-11-16, ask uwggq15-scheme-case option C). RDR-241
+allows the report to differ only by rows whose scheme has no stat handler (T2 nexus_rdr/241-research-5),
+and the .1.5 regeneration differs from the walk's report by exactly those two rows (``chroma://`` and the
+drive path), with the upper-case ``HTTPS://`` row kept.
 
 The golden (``tests/fixtures/doctor_references_check_report.golden.txt``) is the real output of
 ``run_check_references`` plus its exit code, generated from the code with
 ``NX_REGEN_DOCTOR_REFERENCES_GOLDEN=1 uv run pytest tests/test_doctor_references_golden.py``, never typed.
 
-Fixture rows (one fake catalog; ``FixtureCatalog.list_scoped`` is the prefix read .1.5 will call, case
-sensitive like the engine's ``startswith``, so .1.5 can reuse the same fake unchanged):
+Fixture rows (one fake catalog; ``FixtureCatalog.documents_by_scheme`` answers as the engine route does,
+``urlparse(source_uri).scheme`` equal to the scheme lowercased, alias rows included):
 
 * one row per registered non-file scheme: obsidian, x-devonthink-item, nx-scratch, nx-note, https;
 * a ``chroma://`` row (scheme registered nowhere);
 * a Windows drive path ``C:\\Users\\a\\x.md`` (``urlparse`` reads scheme ``c``, registered nowhere);
 * an upper-case registered scheme ``HTTPS://example.org/x`` (``urlparse`` lower-cases it to ``https``);
-* a ``file://`` row and an alias row (both excluded today).
+* a ``file://`` row and an alias row (both excluded).
 
 I/O handlers are stubbed through ``_STAT_HANDLERS`` (https: network, x-devonthink-item: osascript,
 obsidian and nx-scratch: vault and scratch context), so ``stat_source`` itself stays real and the
@@ -60,17 +62,17 @@ class FixtureEntry:
 
 
 class FixtureCatalog:
-    """Serves the fixture rows through ``all_documents`` (today's walk) and ``list_scoped``
-    (the per-scheme prefix read of nexus-uwggq.1.5), one list behind both."""
+    """Serves the fixture rows through ``documents_by_scheme``, the engine's by-scheme route as the client
+    reads it (nexus-uwggq.1.5), and refuses a walk."""
 
     def __init__(self, entries: list[FixtureEntry]) -> None:
         self._entries = entries
 
     def all_documents(self, limit: int = 0) -> list[FixtureEntry]:
-        return list(self._entries)
+        raise AssertionError("--check-references must not walk the catalog (RDR-241)")
 
-    def list_scoped(self, *, source_uri_prefix: str = "", **_kw: Any) -> list[FixtureEntry]:
-        return [e for e in self._entries if e.source_uri.startswith(source_uri_prefix)]
+    def documents_by_scheme(self, scheme: str) -> list[FixtureEntry]:
+        return [e for e in self._entries if urlparse(e.source_uri).scheme == scheme.lower()]
 
 
 def fixture_entries() -> list[FixtureEntry]:

@@ -314,6 +314,34 @@ class VersionHandlerReleaseVersionTest {
         assertThat(body.toString()).isEqualTo(",\"catalog_next_seq_drift_read_supported\":true");
     }
 
+    @Test
+    void versionAdvertisesTheRdr241Route_CatalogDocsBySchemeCapabilityField_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogDocsBySchemeCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_docs_by_scheme_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheRdr241Route_CatalogDocsByAuthorCapabilityField_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogDocsByAuthorCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_docs_by_author_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheRdr241Route_CatalogDocsByMetaCapabilityField_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogDocsByMetaCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_docs_by_meta_supported\":true");
+    }
+
+    @Test
+    void versionAdvertisesTheRdr241Route_CatalogSensitiveLocators_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogSensitiveLocatorsCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_sensitive_locators_supported\":true");
+    }
+
     // ── nexus-jypmj (RDR-232): the chash_allow restriction on the vector search routes ──
 
     @Test
@@ -321,6 +349,15 @@ class VersionHandlerReleaseVersionTest {
         var body = new StringBuilder();
         VersionHandler.appendVectorSearchChashAllowCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"vector_search_chash_allow_supported\":true");
+    }
+
+    // ── nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection ──
+
+    @Test
+    void versionAdvertisesTheTopicRouteAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendVectorTopicRouteCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"vector_topic_route_supported\":true");
     }
 
     // ── nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route ──
