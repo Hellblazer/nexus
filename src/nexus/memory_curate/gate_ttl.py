@@ -74,16 +74,18 @@ def open_phase_reason(scope: gr.Scope, root: Path) -> str | None:
 # ── check 3: the verdict chain ───────────────────────────────────────────────────
 
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
-_ROUND = re.compile(r"-r(\d+)$")
+_ROUND = re.compile(r"-r(\d+)(?=-|$)")
 
 
-def order_key(entry: dict[str, Any], content: str) -> tuple[str, int]:
-    """``(date, round)`` of a record, ascending is older.
+def order_key(entry: dict[str, Any], content: str) -> tuple[str, int, str]:
+    """``(date, round, timestamp)`` of a record, ascending is older.
 
     The date is the header ``date:`` field; a record with no header is dated from the first ``YYYY-MM-DD`` in its
-    title, else from its timestamp's day. The round is the title's trailing ``-r<N>``, 0 when there is none (so a
-    record with no round sorts before ``-r1``). ``gate_record`` writes no round field, so the title is the only
-    place a round lives."""
+    title, else from its timestamp's day. The round is the title's last ``-r<N>`` followed by ``-`` or the end
+    (live titles put it before the date, ``confirm-<bead>-r2-2026-11-15``, and a bead id such as ``nexus-r0tui`` is
+    no round), 0 when there is none, so a record with no round sorts before ``-r1``. ``gate_record`` writes no round
+    field, so the title is the only place a round lives. Within one day and round, the row's write time orders the
+    records (first live dry run, nexus-1gdv0.2.17: a justified confirm written after a partial review lost to it)."""
     head = gr.header_fields(content).get("date", "")
     if _DATE.fullmatch(head):
         date = head
@@ -91,17 +93,16 @@ def order_key(entry: dict[str, Any], content: str) -> tuple[str, int]:
         date = m.group(0)
     else:
         date = (entry.get("timestamp") or "")[:10]
-    r = _ROUND.search(entry["title"])
-    return date, int(r.group(1)) if r else 0
+    rounds = _ROUND.findall(entry["title"])
+    return date, int(rounds[-1]) if rounds else 0, entry.get("timestamp") or ""
 
 
 def chain(entries: list[dict[str, Any]], contents: dict[str, str]) -> tuple[str, list[dict[str, Any]]]:
     """``(verdict, newest records)`` of one bead's records.
 
-    The newest are those sharing the greatest ``(date, round)`` (:func:`order_key`). When more than one does, the
-    worse verdict decides the chain (``not-justified`` over ``partial`` over ``justified``), because dates are
-    day-granular and the round is optional, so two records of one day can have no order. The newest records are
-    returned by title."""
+    The newest are those sharing the greatest ``(date, round, timestamp)`` (:func:`order_key`). When more than one
+    does (an exact tie, or rows with no timestamp), the worse verdict decides the chain (``not-justified`` over
+    ``partial`` over ``justified``). The newest records are returned by title."""
     keyed = [(order_key(e, contents[e["title"]]), e) for e in entries]
     top = max(k for k, _ in keyed)
     newest = sorted((e for k, e in keyed if k == top), key=lambda e: e["title"])

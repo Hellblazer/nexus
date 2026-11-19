@@ -97,6 +97,32 @@ def test_order_a_later_round_is_newer_and_a_no_round_record_sorts_before_r1() ->
     assert _chain(r9, r10) == ("justified", [r10["title"]])    # the round is a number: r10 is newer than r9
 
 
+def test_order_reads_a_round_in_the_middle_of_the_title() -> None:
+    """Live titles put the round before the date (confirm-nexus-mdbds.11.1-r2-2026-11-15); the first live dry run
+    (bead nexus-1gdv0.2.17, RDR-249) read both as round 0 and let the earlier partial review win the tie."""
+    review = _rec("review-nexus-ord-r1-2026-11-15", "partial", date="2026-11-15")
+    confirm = _rec("confirm-nexus-ord-r2-2026-11-15", "justified", date="2026-11-15")
+    assert _chain(review, confirm) == ("justified", [confirm["title"]])
+    assert _chain(confirm, review) == ("justified", [confirm["title"]])
+
+
+def test_order_a_bead_id_with_r_and_digits_is_not_a_round() -> None:
+    """``-r<N>`` counts only when a ``-`` or the end follows the digits, so ``nexus-r0tui`` is no round 0."""
+    assert gt.order_key({"title": "review-nexus-r0tui-2026-11-15", "timestamp": ""}, "")[1] == 0
+    assert gt.order_key({"title": "critique-abc-nexus-x-r3", "timestamp": ""}, "")[1] == 3
+    assert gt.order_key({"title": "critique-abc-r2-nexus-x-r7-2026-11-15", "timestamp": ""}, "")[1] == 7
+
+
+def test_order_same_day_and_round_the_later_timestamp_is_newer() -> None:
+    """Dates are day-granular and the round is optional, but every row carries its write time: within one day and
+    round, the later write is the newer record, and the worse verdict decides only an exact tie."""
+    review = _rec("review-aaa1111-nexus-ord-2026-11-15", "partial", date="2026-11-15", stamp="2026-11-15T21:57:49Z")
+    confirm = _rec("confirm-ccc3333-nexus-ord-2026-11-15", "justified", date="2026-11-15", stamp="2026-11-15T22:15:35Z")
+    assert _chain(review, confirm) == ("justified", [confirm["title"]])
+    late_partial = _rec("critique-ddd4444-nexus-ord-2026-11-15", "partial", date="2026-11-15", stamp="2026-11-15T23:00:00Z")
+    assert _chain(confirm, late_partial) == ("partial", [late_partial["title"]])
+
+
 def test_order_the_date_beats_the_round_and_the_round_beats_the_title() -> None:
     late = _rec("a-nexus-ord-2026-11-12", "justified", date="2026-11-12")
     early_r5 = _rec("z-nexus-ord-2026-11-09-r5", "not-justified", date="2026-11-09")
