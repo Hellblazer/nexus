@@ -672,9 +672,10 @@ _request_key_capture = threading.local()
 
 #: Response headers the keyed-request protocol reads (nexus-zxgld gap 3), captured on every
 #: response, 2xx or not: a keyed method reads ``Retry-After`` off a 409 or a 503, which reach it
-#: as an exception.
+#: as an exception. ``X-Correlation-ID`` rides along for ``nx doctor --probe-edge`` (RDR-167 Phase 2),
+#: which compares the engine's echo with the id it sent.
 _IDEMPOTENCY_RESPONSE_HEADERS: tuple[str, ...] = (
-    "Idempotency-Key", "Idempotency-Replayed", "Retry-After",
+    "Idempotency-Key", "Idempotency-Replayed", "Retry-After", "X-Correlation-ID",
 )
 
 
@@ -707,7 +708,7 @@ def _stash_response_headers(headers: object) -> None:
     capture is a caller-visibility nicety, not a correctness requirement,
     and must never be the reason a real read fails. Captures
     ``X-Nexus-Skipped-Collections`` (:func:`_pop_response_headers`) and the
-    three request-identity headers (:func:`_pop_idempotency_response_headers`);
+    request-identity headers (:func:`_pop_idempotency_response_headers`);
     each call overwrites all of them, so none is ever stale."""
     try:
         value = headers.get("X-Nexus-Skipped-Collections")  # type: ignore[attr-defined]
@@ -723,7 +724,7 @@ def _stash_response_headers(headers: object) -> None:
 
 def _pop_idempotency_response_headers() -> dict[str, str]:
     """The request-identity headers (``Idempotency-Key``, ``Idempotency-Replayed``,
-    ``Retry-After``) of this thread's MOST RECENT response, then clear -- a pop, like
+    ``Retry-After``, ``X-Correlation-ID``) of this thread's MOST RECENT response, then clear -- a pop, like
     :func:`_pop_response_headers`. Every response replaces the capture, so a response carrying none
     leaves it empty; a request that got no response (a socket timeout) leaves the previous one in
     place, which is why a keyed method pops once before each attempt to clear it, then reads after."""

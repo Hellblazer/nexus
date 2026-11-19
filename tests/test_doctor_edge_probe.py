@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import re
 import threading
 import uuid
 
@@ -27,6 +28,7 @@ from nexus.db import http_vector_client as hvc
 from nexus.db import service_endpoint
 
 _EXPIRE = "/v1/vectors/gc/expire-quarantine"
+_CORRELATION = "X-Correlation-ID"
 _HOST = "127.0.0.1"
 _COLLECTIONS = [
     {"name": "code__1-27__bge-base__v1", "lifecycle_state": "live"},
@@ -37,8 +39,13 @@ _COLLECTIONS = [
 class _Engine:
     """A fake engine behind a fake edge. ``mode`` picks the defect; the lists record what arrived."""
 
-    def __init__(self, mode: str) -> None:
+    def __init__(self, mode: str, corr: str = "pass") -> None:
         self.mode = mode
+        #: RDR-167 Phase 2: what the path does to ``X-Correlation-ID``. ``pass`` keeps it both ways;
+        #: ``strip_in`` is an edge that removes it before the engine, which then generates its own;
+        #: ``overwrite`` is an edge that replaces the echo; ``strip_out`` removes the echo on the way back.
+        self.corr = corr
+        self.correlation_received: list[str | None] = []
         self.keys_received: list[str | None] = []
         self.bodies: list[dict] = []
         self.ledger: dict[str, dict] = {}
@@ -53,12 +60,29 @@ class _Engine:
                 self.send_response_only(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
+                echo = self._correlation_echo()
+                if echo is not None:
+                    self.send_header(_CORRELATION, echo)
                 for k, v in (headers or {}).items():
                     self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(payload)
 
+            def _correlation_echo(self) -> str | None:
+                """What the engine's AuthFilter echoes on every response, after the path's defect. The engine
+                keeps a valid inbound id and otherwise generates ``nxe-`` plus 32 hex (CorrelationId.java)."""
+                inbound = None if outer.corr == "strip_in" else self.headers.get(_CORRELATION)
+                valid = inbound is not None and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", inbound) is not None
+                # Only an id that passed the accept pattern is echoed (no CR/LF can reach a header).
+                echoed = inbound if valid and inbound else "nxe-" + uuid.uuid4().hex
+                if outer.corr == "overwrite":
+                    return "edge-replaced-id"
+                return None if outer.corr == "strip_out" else echoed
+
             def do_POST(self) -> None:  # noqa: N802 — stdlib callback name
+                outer.correlation_received.append(
+                    None if outer.corr == "strip_in" else self.headers.get(_CORRELATION)
+                )
                 raw = self.rfile.read(int(self.headers.get("Content-Length", "0")))
                 outer.posts += 1
                 outer.bodies.append(json.loads(raw or b"{}"))
@@ -115,8 +139,8 @@ class _Engine:
 def engine_for(monkeypatch):
     started: list[_Engine] = []
 
-    def _start(mode: str) -> _Engine:
-        eng = _Engine(mode)
+    def _start(mode: str, corr: str = "pass") -> _Engine:
+        eng = _Engine(mode, corr)
         started.append(eng)
         monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: (eng.url, "tok"))
         monkeypatch.setattr(probe, "_list_collections", lambda: list(_COLLECTIONS))
@@ -287,6 +311,80 @@ def test_sends_nothing_when_the_production_write_guard_refuses(engine_for, monke
     assert not result.ok
     assert "production-write guard" in result.detail
     assert eng.posts == 0
+
+
+class TestCorrelationOutcome:
+    """RDR-167 Phase 2 (nexus-dngtz.2): the probe sends a known X-Correlation-ID and names one of four
+    outcomes from the echo. The outcome is reported beside the idempotency verdict and never changes it."""
+
+    @pytest.mark.parametrize("corr, outcome", [
+        ("pass", probe.CORRELATION_PASS_THROUGH),
+        ("strip_in", probe.CORRELATION_INBOUND_STRIP),
+        ("overwrite", probe.CORRELATION_OVERWRITE),
+        ("strip_out", probe.CORRELATION_RESPONSE_STRIP),
+    ])
+    def test_each_path_defect_is_named(self, engine_for, corr: str, outcome: str) -> None:
+        eng = engine_for("echo", corr)
+        result = _run()
+        assert result.correlation == outcome
+        assert result.ok and result.exit_code == 0, "the correlation outcome never changes the idempotency verdict"
+        out = probe.render(result)
+        assert f"correlation: {outcome}" in out
+        assert result.correlation_sent in out
+        # On the wire: the engine got the id the result reports, except where the edge removed it.
+        expect_received = None if corr == "strip_in" else result.correlation_sent
+        assert eng.correlation_received == [expect_received]
+
+    def test_the_sent_id_is_valid_and_never_carries_the_engine_marker(self, engine_for) -> None:
+        """Without this the nxe- prefix would not prove an engine origin (CorrelationId.java)."""
+        engine_for("echo")
+        sent = _run().correlation_sent
+        assert sent is not None and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", sent)
+        assert not sent.startswith("nxe-")
+
+    def test_the_probe_restores_the_invocations_own_id(self, engine_for) -> None:
+        from nexus import correlation  # noqa: PLC0415
+
+        engine_for("echo")
+        token = correlation.bind("outer-invocation-id")
+        try:
+            result = _run()
+            assert correlation.current_correlation_id() == "outer-invocation-id"
+        finally:
+            correlation.reset(token)
+        assert result.correlation_sent != "outer-invocation-id"
+
+    def test_an_idempotency_failure_still_reports_the_correlation_outcome(self, engine_for) -> None:
+        engine_for("drop", "overwrite")
+        result = _run()
+        assert result.hop == probe.HOP_KEY_DROPPED
+        assert result.correlation == probe.CORRELATION_OVERWRITE
+
+    def test_an_engine_error_response_is_still_read(self, engine_for) -> None:
+        """The engine echoes on every response, an error included."""
+        engine_for("unsupported", "strip_in")
+        result = _run()
+        assert result.hop == probe.HOP_ENGINE
+        assert result.correlation == probe.CORRELATION_INBOUND_STRIP
+
+    def test_no_http_answer_reports_no_correlation_outcome(self, monkeypatch) -> None:
+        monkeypatch.setattr(hvc, "_resolve_endpoint", lambda: ("http://127.0.0.1:1", "tok"))
+        monkeypatch.setattr(probe, "_list_collections", lambda: list(_COLLECTIONS))
+        monkeypatch.setenv("NX_ALLOW_PROD_WRITE", "test: loopback fake engine for nexus-dngtz.2")
+        result = _run()
+        assert result.hop == probe.HOP_NETWORK
+        assert result.correlation is None
+        assert "correlation:" not in probe.render(result)
+
+    @pytest.mark.parametrize("echo, outcome", [
+        ("abc123", probe.CORRELATION_PASS_THROUGH),
+        ("nxe-" + "0" * 32, probe.CORRELATION_INBOUND_STRIP),
+        ("something-else", probe.CORRELATION_OVERWRITE),
+        (None, probe.CORRELATION_RESPONSE_STRIP),
+        ("", probe.CORRELATION_RESPONSE_STRIP),
+    ])
+    def test_classify(self, echo: str | None, outcome: str) -> None:
+        assert probe.classify_correlation_echo("abc123", echo) == outcome
 
 
 class TestEndpointHost:
