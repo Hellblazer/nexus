@@ -2667,7 +2667,9 @@ def search_cross_corpus(
                 assignments = _topic_assignments
                 coverage = len(assignments) / len(all_results) if all_results else 0
                 if coverage > 0.5:
-                    all_results = _apply_topic_grouping(all_results, assignments, taxonomy)
+                    all_results = _apply_topic_grouping(
+                        all_results, assignments, taxonomy, model_of=model_of,
+                    )
                     topic_grouped = True
                 else:
                     _log.debug(
@@ -3029,6 +3031,9 @@ def _cap_enrichment_pool(
     built. A raw-distance cut over a pool spanning voyage-code-3 and
     voyage-context-3 kept only code, whose distances run tighter, and dropped
     the prose rows the calibrated ordering after it would have ranked first.
+    One exception: when some embedding family has no scored row while another has (a degraded
+    rerank over a mixed pool), every row is ranked by calibrated distance and the scores are ignored,
+    so the scored family cannot fill the cut and drop the other.
     A lexical row is always kept: it is threshold-exempt because its vector distance is usually the worst in the window, so a
     distance cut would drop exactly what that leg exists to find. Kept rows
     stay in their input order, so every step after this sees the same
@@ -3052,11 +3057,26 @@ def _cap_enrichment_pool(
         return results
     factors = _resolve_calibration_factors(results, model_of=model_of)
 
+    # A pool whose calibration-factor groups are not all scored, with at least one scored, is a
+    # degraded rerank over several models: score-first would fill the cut with the scored family and
+    # drop the other before calibration runs. Core's render keeps every row in calibrated order for
+    # that case (partial_rerank), so the cut keys every row on calibrated distance, scores ignored.
+    # Single-model pools (local mode's partial scoring past rerank_max_candidates) and fully scored
+    # ones are one group or all-scored, and keep score-first.
+    scored_by_group: dict[float, bool] = {}
+    for i in ranked:
+        group = factors.get(results[i].collection, 1.0)
+        scored_by_group[group] = scored_by_group.get(group, False) or (
+            results[i].metadata.get("rerank_score") is not None
+        )
+    calibrated_only = any(scored_by_group.values()) and not all(scored_by_group.values())
+
     def _key(i: int) -> tuple[int, float]:
+        calibrated = results[i].distance * factors.get(results[i].collection, 1.0)
         score = results[i].metadata.get("rerank_score")
-        if score is not None:
+        if score is not None and not calibrated_only:
             return (0, -float(score))
-        return (1, results[i].distance * factors.get(results[i].collection, 1.0))
+        return (1, calibrated)
 
     keep = set(sorted(ranked, key=_key)[:limit])
     _log.debug(
@@ -3508,12 +3528,27 @@ def _apply_topic_grouping(
     results: list[SearchResult],
     assignments: dict[str, int],
     taxonomy: Any,
+    *,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Group results by T2 topic assignment, sorted by topic then distance.
 
     Results with assignments get a ``_topic_label`` metadata key.
     Unassigned results are appended at the end.
+
+    "Distance" is the calibrated one (GH #1667 follow-up C): raw distance times the per-model
+    factor :func:`nexus.scoring.order_by_calibrated_distance` uses, resolved with *model_of*, the
+    row-preferred resolver the search built. A raw sort over code and prose put voyage-code-3's
+    tighter scale ahead of the prose rows the ranking after it puts first. Over one model every
+    factor is 1.0 and the order is the raw one. The reported distances are not rescaled.
     """
+    from nexus.scoring import _resolve_calibration_factors  # noqa: PLC0415 — branch-local search helper import
+
+    factors = _resolve_calibration_factors(results, model_of=model_of)
+
+    def _calibrated(r: SearchResult) -> float:
+        return r.distance * factors.get(r.collection, 1.0)
+
     # Build topic_id → label map (scoped query, not full table scan)
     topic_ids = set(assignments.values())
     id_to_label = taxonomy.get_labels_for_ids(list(topic_ids))
@@ -3530,9 +3565,9 @@ def _apply_topic_grouping(
 
     # Sort groups by best (lowest) distance, within group by distance
     out: list[SearchResult] = []
-    for tid, group in sorted(grouped.items(), key=lambda kv: min(r.distance for r in kv[1])):
+    for tid, group in sorted(grouped.items(), key=lambda kv: min(_calibrated(r) for r in kv[1])):
         label = id_to_label[tid]
-        for r in sorted(group, key=lambda r: r.distance):
+        for r in sorted(group, key=_calibrated):
             meta = dict(r.metadata)
             meta["_topic_label"] = label
             out.append(SearchResult(
@@ -3541,8 +3576,8 @@ def _apply_topic_grouping(
                 hybrid_score=r.hybrid_score, topic_boost=r.topic_boost,
             ))
 
-    # Unassigned at the end, sorted by distance
-    for r in sorted(unassigned, key=lambda r: r.distance):
+    # Unassigned at the end, sorted by calibrated distance
+    for r in sorted(unassigned, key=_calibrated):
         out.append(r)
 
     return out

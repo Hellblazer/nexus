@@ -4894,7 +4894,6 @@ def search_topic_scoped(
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
-        merged: list[dict] = []
         # nexus-vply6 fix round 2, point 3: this loop is ALL-OR-NOTHING
         # exactly like _grouped_combined_query (no per-iteration recovery,
         # the SAME shape that function's own docstring compares itself
@@ -4902,15 +4901,26 @@ def search_topic_scoped(
         # SAME named error every other combined-query tool now raises for
         # this engine 422, rather than letting it propagate raw.
         sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
+        # GH #1667 follow-up C: the merge sorts and cuts on the calibrated scale, as
+        # _grouped_combined_query does, so a model whose distances run tighter (voyage-code-3)
+        # cannot crowd out the rest. One factor per collection, from its model group, applied
+        # only when the target spans more than one group; the reported distances stay raw.
+        groups = _group_collections_by_model(target)
+        factor_of = (
+            {col: _group_calibration_factor(g) for g in groups for col in g} if len(groups) > 1 else {}
+        )
+        keyed: list[tuple[float, dict]] = []
         for col in target:
             try:
-                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit, sensitivity=sensitivity))
+                col_rows = t3.search_topic_scoped(query, topic, col, n_results=limit, sensitivity=sensitivity)
             except VectorServiceError as exc:
                 raise classify_vector_service_error(
                     exc, collections=[col], t3=t3,
                 ) from exc
-        merged.sort(key=_distance_key)
-        merged = merged[:limit]
+            factor = factor_of.get(col, 1.0)
+            keyed.extend((_distance_key(r) * factor, r) for r in col_rows)
+        keyed.sort(key=lambda kr: kr[0])
+        merged = [r for _, r in keyed][:limit]
         # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over these rows (chunk-level: the id is the chash).
         posture = _OutputPosture.for_facts([_row_facts(r) for r in merged])
         if structured:
