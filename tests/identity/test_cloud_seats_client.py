@@ -391,3 +391,46 @@ def test_no_token_value_reaches_the_output_on_the_token_file_path(engine: Engine
 def test_no_parent_token_value_reaches_a_delegation_log(engine: Engine, tmp_path: Path, monkeypatch) -> None:
     for refusal in (_OLD_ENGINE, (403, {"error": "not_owner", "message": "m"}), (401, {"error": "identity_token_expired", "message": "m"})):
         assert "parent-tok" not in str(_dispatch_refused(engine, tmp_path, monkeypatch, refusal, times=1))
+
+
+# ── engine half, reviewed (8f226497f): session_held and bad_created_by ─────
+
+
+def test_the_delegated_bind_carries_no_session_id(engine: Engine, tmp_path: Path, monkeypatch) -> None:
+    """The engine refuses (409 session_held) a data-credential delegated create whose bind names a session id that is
+    already indexed; the dispatcher has no session of its own for the child, so it sends none."""
+    for scope in (SCOPE_DATA, SCOPE_TENANT):
+        engine.requests.clear()
+        assert _begin(engine, tmp_path, monkeypatch, scope) is not None
+        assert "session_id" not in json.loads(engine.requests[0].content)["bind"]
+
+
+def test_session_held_is_one_clear_line_for_a_delegation_and_a_cli_call(engine: Engine, tmp_path: Path, monkeypatch) -> None:
+    refusal = (409, {"error": "session_held", "message": "m"})
+    logs = _dispatch_refused(engine, tmp_path, monkeypatch, refusal, times=1)
+    assert len(logs) == 1 and "session" in logs[0]["error"] and "identity engine" not in logs[0]["error"], logs
+    engine.answers[("POST", "/v1/identity/i7/promote")] = refusal
+    with pytest.raises(IdentityCommandError, match="session") as raised:
+        ops.promote(_env(tmp_path, engine.client(), own=_record()), "i7", "tamsin")
+    assert "session_held" not in str(raised.value) and "\n" not in str(raised.value)
+
+
+@pytest.mark.parametrize("scope", [SCOPE_TENANT, SCOPE_DATA])
+def test_bad_created_by_is_one_clear_line(engine: Engine, tmp_path: Path, scope: str) -> None:
+    """Only a data credential's token may stamp ``identity:<id>`` as the creator; the engine refuses it from a tenant
+    credential with 400 bad_created_by, which both scopes say in one line."""
+    engine.answers[("POST", "/v1/identity")] = (400, {"error": "bad_created_by", "message": "m"})
+    with pytest.raises(IdentityCommandError, match="created_by") as raised:
+        ops.create(_env(tmp_path, engine.client(scope), own=_record()), "tamsin", "identity:i7")
+    assert "bad_created_by:" not in str(raised.value) and "\n" not in str(raised.value)
+
+
+def test_a_tenant_credential_never_sends_an_identity_prefixed_created_by(engine: Engine, tmp_path: Path) -> None:
+    """ops sends the plain value its caller gave (``sam``, ``restart``); the ``identity:`` stamp is the engine's, from a
+    token, and a tenant credential's request for one is refused (400 bad_created_by)."""
+    env = _env(tmp_path, engine.client(SCOPE_TENANT), own=_record())
+    ops.create(env, "a")
+    ops.create(env, "b", "restart")
+    ops.create(env, "c", "sam")
+    assert [json.loads(r.content)["created_by"] for r in engine.requests] == ["sam", "restart", "sam"]
+    assert not any(json.loads(r.content)["created_by"].startswith("identity:") for r in engine.requests)

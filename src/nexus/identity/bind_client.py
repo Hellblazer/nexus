@@ -97,6 +97,10 @@ def seat_refusal_message(exc: IdentityApiError, identity: str | None = None, *, 
     if code == "identity_token_expired":
         return (f"{token_source} has expired: a session's server renews it while the session runs, so run this from a "
                 f"live session (or restart this one)")
+    if code == "session_held":
+        return "the engine already indexes that session id under another identity, so a delegated identity cannot be bound to it"
+    if code == "bad_created_by":
+        return "created_by may not name an identity (identity:<id>): the engine stamps that itself, from the token of a live session"
     if code == "cross_tenant_identity_token":
         return f"{token_source} belongs to another tenant than this credential's"
     if code in _SEAT_REFUSALS:

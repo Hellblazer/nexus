@@ -183,7 +183,14 @@ def _seat_call(env: IdentityEnv, call: Callable[[], Any], identity: str | None, 
     :func:`~nexus.identity.bind_client.seat_refusal_message` (a tenant credential's are not touched). *token_source*
     and *no_token* word the lines that name the caller's token."""
     if getattr(env.client, "scope", None) != SCOPE_DATA:
-        return _call(call)
+        try:
+            return call()
+        except IdentityApiError as exc:
+            # bad_created_by is the one refusal a tenant credential's seat call earns for itself; the rest are _call's words
+            said = seat_refusal_message(exc, identity) if exc.code == "bad_created_by" else f"{exc.code or exc.status}: {exc.message}"
+            raise IdentityCommandError(said) from exc
+        except IdentityUnavailableError as exc:
+            raise IdentityCommandError(f"the engine is not answering ({exc})") from exc
     try:
         return call()
     except IdentityApiError as exc:
