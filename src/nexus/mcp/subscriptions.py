@@ -454,6 +454,8 @@ class SubscriptionSet:
     _lease_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
     #: Times the lease thread's polls and resolve interval (nexus-3ceda.11).
     clock: Clock = field(default=SYSTEM, repr=False, compare=False)
+    #: The identity listener :func:`_follow_identity` registered for this set, so :func:`reset_cache` can remove it.
+    _identity_listener: Callable[[str | None], None] | None = field(default=None, repr=False, compare=False)
 
     @property
     def session_mailbox(self) -> str:
@@ -1038,7 +1040,11 @@ def _follow_identity(subs: SubscriptionSet) -> None:
     try:
         from nexus.mcp.identity_lease import add_identity_listener  # noqa: PLC0415 -- deferred: MCP import cost
 
-        add_identity_listener(lambda identity: subs.set_identity(_valid_identity(identity)))
+        def follow(identity: str | None) -> None:
+            subs.set_identity(_valid_identity(identity))
+
+        subs._identity_listener = follow  # noqa: SLF001 -- the set owns its listener, reset_cache removes it
+        add_identity_listener(follow)
     except Exception as exc:  # noqa: BLE001 -- no lease module path: the session mailbox alone, as before Step 5
         _log.debug("identity_follow_unavailable", error=str(exc))
 
@@ -1060,3 +1066,11 @@ def reset_cache(session_id: str | None = None) -> None:
             targets = [obj] if obj is not None else []
     for obj in targets:
         obj.shutdown()
+        if obj._identity_listener is not None:  # noqa: SLF001
+            try:
+                from nexus.mcp.identity_lease import remove_identity_listener  # noqa: PLC0415 -- deferred: MCP import cost
+
+                remove_identity_listener(obj._identity_listener)  # noqa: SLF001
+            except Exception as exc:  # noqa: BLE001 -- teardown never fails on the lease module
+                _log.debug("identity_unfollow_unavailable", error=str(exc))
+            obj._identity_listener = None  # noqa: SLF001

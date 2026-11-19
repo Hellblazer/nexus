@@ -86,6 +86,14 @@ def add_identity_listener(callback: Callable[[str | None], None]) -> None:
         callback(identity)
 
 
+def remove_identity_listener(callback: Callable[[str | None], None]) -> None:
+    """Drop *callback* (a no-op when it is not registered): a torn-down subscription set stops being told."""
+    try:
+        _IDENTITY_LISTENERS.remove(callback)
+    except ValueError:
+        pass
+
+
 def _notify_identity(identity: str | None) -> None:
     for callback in list(_IDENTITY_LISTENERS):
         try:

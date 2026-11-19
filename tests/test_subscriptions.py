@@ -1261,3 +1261,22 @@ def test_load_gives_a_new_set_and_a_restored_one_the_identity_of_the_token_file(
     assert [e["subspace"] for e in subscriptions.load(_T1WithSet([stored]), sid, store_factory=lambda: None).entries()] == [
         f"mailbox/{sid}"
     ]
+
+
+def test_reset_cache_removes_the_identity_listener_the_set_registered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.mcp import identity_lease, subscriptions  # noqa: PLC0415
+
+    monkeypatch.setattr(identity_lease, "_IDENTITY_LISTENERS", [])
+    monkeypatch.setattr(identity_lease, "_LEASE", None)
+    _bound_to(monkeypatch, None)
+    sid = "11111111-2222-4333-8444-555555555555"
+    subscriptions.reset_cache()
+    try:
+        subs = subscriptions.get_or_load(_T1WithSet([]), sid, store_factory=lambda: None)
+        assert len(identity_lease._IDENTITY_LISTENERS) == 1  # noqa: SLF001
+        subscriptions.reset_cache(sid)
+        assert identity_lease._IDENTITY_LISTENERS == []  # noqa: SLF001 -- a torn-down set is no longer told
+        identity_lease._notify_identity("i12")  # noqa: SLF001
+        assert subs.identity is None, "and a late identity does not reach it"
+    finally:
+        subscriptions.reset_cache()
