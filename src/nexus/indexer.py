@@ -961,8 +961,9 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
-
+                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+                    ensure_collection_registered,
+                )
                 # nexus-aotql: routed through the registration seam
                 # (ensure_collection_registered) instead of a direct
                 # writer.register_collection call -- gets the seam's early
@@ -989,19 +990,21 @@ def _migrate_legacy_collections(
                 # (removed at RDR-229 P2.3, nexus-p2m1x.8; the arm's old
                 # defect, a bare register_collection(conformant) that fell
                 # back to name-parsing, was closed by nexus-aotql).
-                register_kwargs = {
-                    "content_type": conformant_name.content_type,
-                    "owner_id": conformant_name.owner_id,
-                    "embedding_model": conformant_name.embedding_model,
+                if conformant_name.model_version is None:
                     # A registered row with no readable version (engine 0.1.200, RDR-229
-                    # P2.8) has none to carry over: register it blank, never "vNone".
-                    "model_version": (
-                        "" if conformant_name.model_version is None else f"v{conformant_name.model_version}"
-                    ),
-                }
-                ensure_collection_registered(
-                    conformant, registrar=lambda: w, kwargs=register_kwargs,
-                )
+                    # P2.8): the row exists, so there is nothing to register, and a blank
+                    # model_version is refused for a new row (P2.5, D1).
+                    _log.debug("phase4_register_skipped_row_has_no_version", new=conformant)
+                else:
+                    register_kwargs = {
+                        "content_type": conformant_name.content_type,
+                        "owner_id": conformant_name.owner_id,
+                        "embedding_model": conformant_name.embedding_model,
+                        "model_version": f"v{conformant_name.model_version}",
+                    }
+                    ensure_collection_registered(
+                        conformant, registrar=lambda: w, kwargs=register_kwargs,
+                    )
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",

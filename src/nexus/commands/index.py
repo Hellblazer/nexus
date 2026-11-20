@@ -3612,7 +3612,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     # for_write=True (nexus-35ok4): indexing WRITES new content — raises
     # loud if local.embed_model is voyage-shaped with no key configured.
     if collection is not None:
-        collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
+        # A dry run writes nothing, so it needs no readable registry (no row read).
+        collection = t3_collection_name(
+            collection, for_write=True, subject_finder=None if dry_run else catalog_subject_finder(),
+        )
     if sensitive and not dry_run:
         # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
         collection = _route_sensitive_index(

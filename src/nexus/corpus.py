@@ -352,6 +352,14 @@ class CollectionRegistryUnreadableError(click.ClickException, RuntimeError):
     """
 
 
+class CollectionStoreUnreadableError(CollectionRegistryUnreadableError):
+    """A write could not probe the vector store for the collection it names (RDR-229 P2.8).
+
+    A read falls back to the rendered name; a write must not guess it, since the subject's data
+    may sit under another name. Same exit as the registry error, a message naming the probe.
+    """
+
+
 class CatalogReaderUnavailableError(RuntimeError):
     """:func:`nexus.catalog.factory.make_catalog_reader` returned
     ``None`` instead of a reader (RDR-204 Phase 3, nexus-ft04v.26,
@@ -1735,12 +1743,17 @@ def t3_collection_name(
         # A write that cannot read the subject's row refuses; the best-effort probe
         # below must not swallow it into a rendered name.
         raise
-    except Exception:  # noqa: BLE001 — best-effort collection_exists probe; falls through to auto-promoted shape on any backend failure
-        # collection_exists probe is best-effort. On failure (cloud
-        # quota error, transient network) fall through to the
-        # auto-promoted shape; legacy reads still work via T3's
-        # existing-collection bypass on read paths.
+    except LocalVoyageCredentialMissingError:
+        # Raised by the write-model resolution inside the probe: the strict recompute below
+        # raises it again, so the caller sees one raise of the same type.
         pass
+    except Exception as exc:  # noqa: BLE001 — best-effort probe: a READ falls through to the auto-promoted shape on any backend failure
+        # A WRITE must not guess the rendered name when it could not look (RDR-229 P2.8).
+        if for_write:
+            raise CollectionStoreUnreadableError(
+                f"cannot probe the vector store for the collection of {user_arg!r}; "
+                f"refusing to write under the rendered name {promoted!r}: {exc}"
+            ) from exc
     if for_write:
         # Nothing pre-existing to grandfather onto: this IS a brand-new
         # mint. Recompute strictly — raises loud if local.embed_model is
