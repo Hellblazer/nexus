@@ -287,7 +287,8 @@ which reads the row first, is mint (the NoRow outcome). ``scripts/`` (10 raw sit
 ``SRC`` and so outside this gate. Phase 2 lowers the pins by deleting ledger
 entries.
 
-RDR-229 P1.R fix round (2026-11-20, nexus-p2m1x.5) re-pinned it at 265. The
+RDR-229 P1.R fix round (2026-11-20, nexus-p2m1x.5) re-pinned it at 265; P2.5
+(nexus-p2m1x.10) lowered it to 255 and P2.3 (nexus-p2m1x.8) to 245. The
 review found eight call sites the helper set could not see: five callers of
 ``corpus.resolve_corpus`` (its parse is ``startswith(f"{corpus}__")``, a shape
 the P1.1 roots, which were regexes and raw ``"__"`` tests, did not include) and
@@ -362,14 +363,20 @@ for _site in LEDGER:
 #: whose two name tests are the only sites left: the ``taxonomy__`` half (routing, P2.9) and the quarantine
 #: fallback for a name no row backs (migration-source). routing 36 -> 25, migration-source 17 -> 18,
 #: const_prefix 31 -> 21.
-PARSE_SITE_PIN: int = 255
+#:
+#: P2.3 (nexus-p2m1x.8, 2026-11-20), re-measured on the tree rebased onto P2.5's ac84addc3: 255 -> 245. The repo
+#: indexer's target models became row reads (nine holdovers went), two t3 holdovers were relabelled diagnostic, the
+#: post-rename conformance check and its else arm went (two migration-source), and the legacy-name fallback of the
+#: NoRow/Unreadable outcome is one new mint. holdover 45 -> 34, diagnostic 40 -> 42, mint 111 -> 112,
+#: migration-source 18 -> 16, primitive_call 192 -> 182.
+PARSE_SITE_PIN: int = 245
 CLASS_PIN: dict[str, int] = {
-    "mint": 111, "holdover": 45, "diagnostic": 40, "routing": 25,
-    "migration-source": 18, "label-pattern": 9, "file-path": 5,
+    "mint": 112, "holdover": 34, "diagnostic": 42, "routing": 25,
+    "migration-source": 16, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 192, "const_prefix": 21, "fnmatch": 14,
+    "primitive_call": 182, "const_prefix": 21, "fnmatch": 14,
     "loop_prefix": 7, "strip_prefix": 4, "startswith": 4, "split": 2,
     "fstring_prefix": 2, "hash_suffix": 2, "regex_prefix": 1, "in": 1,
     "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -786,11 +793,14 @@ def test_pin_matches_documented_total() -> None:
     made the census a per-site ledger, see the module docstring; then 243 -- 265
     on 2026-11-20 when the P1.R fix round (nexus-p2m1x.5) derived cross-module
     parser roots: +1 for the P1.2 one-off census parse, +21 for the callers of
-    ``resolve_corpus``, ``CollectionName.parse`` and the other roots) is derived
+    ``resolve_corpus``, ``CollectionName.parse`` and the other roots; then
+    265 -- 255 at P2.5, nexus-p2m1x.10, when twelve bypass-schema prefix tests
+    became one helper; then 255 -- 245 at P2.3, nexus-p2m1x.8, when the repo
+    indexer's target models became row reads) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 255
+    assert PARSE_SITE_PIN == 245
 
 
 # ---------------------------------------------------------------------------
