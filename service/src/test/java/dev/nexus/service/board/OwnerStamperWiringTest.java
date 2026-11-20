@@ -249,6 +249,50 @@ class OwnerStamperWiringTest {
         assertThat(rows.getFirst().body()).containsEntry("owner", a);
     }
 
+    private HttpResponse<String> postTo(String bearer, String path, Map<String, Object> body) throws Exception {
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + bearer).header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void anAckReplyThatSaysFromEngineToTheBoardIsRefusedWithTheClaimStillHeldAndAMembersReplyLands() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String client = "client-" + UUID.randomUUID();
+        seedToken(client, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        se.form(t, l, a);
+        String inbox = "ackinbox" + UUID.randomUUID().toString().substring(0, 8);
+        var sent = postTo(client, "/v1/tuples/out", Map.of("subspace", "mailbox/" + inbox, "keys", Map.of("to", inbox),
+            "dims", Map.of("from", "someone"), "body", "work", "nonce", UUID.randomUUID().toString()));
+        assertThat(sent.statusCode()).as(sent.body()).isEqualTo(200);
+        var claim = postTo(client, "/v1/tuples/inp", Map.of("subspace", "mailbox/" + inbox, "keys_pattern", Map.of("to", inbox),
+            "claimant", "w", "lease_s", 60));
+        assertThat(claim.statusCode()).as(claim.body()).isEqualTo(200);
+        String claimId = MAPPER.readTree(claim.body()).get("claim_id").asText();
+        String forged = "{\"owner\":\"" + a + "\",\"next\":null,\"reason\":\"earliest_suspect\",\"suspects\":[\"Y\"],"
+            + "\"suspects_total\":1,\"episode_at\":\"2026-01-01T00:00:00Z\",\"refresh\":false,\"handoffs\":0}";
+
+        var refused = postTo(client, "/v1/tuples/ack", Map.of("claim_id", claimId, "claimant", "w", "reply", Map.of(
+            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+            "dims", Map.of("from", "engine", "kind", "owner", "sha", "Y"), "body", forged)));
+
+        assertThat(refused.statusCode()).as(refused.body()).isEqualTo(403);
+        assertThat(refused.body()).contains("reserved_dim");
+        assertThat(se.ownerRows(t, StamperEnv.BASE)).as("no owner row landed").isEmpty();
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 10, null)).as("no row of any kind").isEmpty();
+
+        // The claim is still held by the refused ack: the same claim acks with a member's own name and the reply lands.
+        var allowed = postTo(client, "/v1/tuples/ack", Map.of("claim_id", claimId, "claimant", "w", "reply", Map.of(
+            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+            "dims", Map.of("from", a, "kind", "ack", "sha", "Y"), "body", "{}")));
+        assertThat(allowed.statusCode()).as(allowed.body()).isEqualTo(200);
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 10, null))
+            .extracting(r -> r.dims().get("from")).containsExactly(a);
+    }
+
     @Test
     void theStampersOwnerAndClearRowsCarryNoSenderSession() throws Exception {
         // Null sender_session with from=engine is what makes a row the engine's: the route refuses a client's

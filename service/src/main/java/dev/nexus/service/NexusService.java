@@ -905,7 +905,7 @@ public final class NexusService {
                 t.setDaemon(true);
                 return t;
             });
-        if (boardOwner != null) { boardOwner.start(this.sweepScheduler, this::reaperTenants); }   // RDR-252 Step 3: deadline timer and its rebuild
+        if (boardOwner != null) { boardOwner.start(this.sweepScheduler, this::boardOwnerTenants); }   // RDR-252 Step 3: deadline timer and its rebuild
         // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple sweep's
         // sibling): with a six-hour first delay an engine that lives less than six hours never expires T1 rows.
         this.t1SweepTask = surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC)));
@@ -1127,6 +1127,20 @@ public final class NexusService {
         var out = new java.util.LinkedHashSet<String>();
         out.add(DEFAULT_TENANT);
         out.addAll(tokenStore.listKnownTenants(SweepBounds.STATEMENT_TIMEOUT));
+        return List.copyOf(out);
+    }
+
+    /**
+     * The tenants the owner deadline rebuild visits (RDR-252): {@link #reaperTenants()} together with every tenant in
+     * {@code nexus.tuple_tenants}, the tenants that hold tuple rows, so a tenant whose tokens are gone but whose
+     * {@code board/ci} owner rows remain still has its deadline re-armed. If either read throws, the rebuild's census is
+     * not full and the rebuild retries.
+     */
+    List<String> boardOwnerTenants() {
+        var out = new java.util.LinkedHashSet<String>(reaperTenants());
+        for (TupleTenantCursor c : listTupleSweepTenants(SweepBounds.STATEMENT_TIMEOUT)) {
+            out.add(c.tenantId());
+        }
         return List.copyOf(out);
     }
 

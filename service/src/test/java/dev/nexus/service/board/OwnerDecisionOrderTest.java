@@ -146,6 +146,19 @@ class OwnerDecisionOrderTest {
     }
 
     @Test
+    void aBlankSessionStampIsAStampAndTheRowIsNotState() {
+        // The aura reads sender_session with `is None`, so the engine must agree: only null is the engine's.
+        for (String blank : List.of("", " ")) {
+            OwnerFixture f = base();
+            f.done("P2", "failure");
+            f.recordNow(f.decide());
+            f.owners.add(stamped("engine", "clear", "P2", "{}", blank));
+
+            assertThat(f.decide().post()).as("a clear row stamped '" + blank + "' does not clear the live red").isNull();
+        }
+    }
+
+    @Test
     void aForgedEngineRowAloneIsNotAnOpenRed() {
         OwnerFixture f = base();
         f.done("P2", "failure");

@@ -292,7 +292,7 @@ public final class TupleHandler implements HttpHandler {
         if (BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(subspace))) {
             String reserved = BoardCiGuard.reservedDimRefusal(dims);
             if (reserved != null) {
-                log.debug("event=tuples_out_denied subspace={} reason=reserved_dim", subspace);
+                log.info("event=tuples_out_denied subspace={} reason=reserved_dim", subspace);
                 HttpUtil.send(ex, 403, "{\"error\":" + HttpUtil.jsonString(reserved) + ",\"code\":\"reserved_dim\"}");
                 return;
             }
@@ -513,7 +513,7 @@ public final class TupleHandler implements HttpHandler {
         if (reply != null && BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(reply.subspace()))) {
             String reserved = BoardCiGuard.reservedDimRefusal(reply.dims());   // a reply is a client write too
             if (reserved != null) {
-                log.debug("event=tuples_ack_denied subspace={} reason=reserved_dim", reply.subspace());
+                log.info("event=tuples_ack_denied subspace={} reason=reserved_dim", reply.subspace());
                 HttpUtil.send(ex, 403, "{\"error\":" + HttpUtil.jsonString(reserved) + ",\"code\":\"reserved_dim\"}");
                 return;
             }

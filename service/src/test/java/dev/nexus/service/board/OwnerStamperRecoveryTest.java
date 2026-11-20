@@ -110,7 +110,8 @@ class OwnerStamperRecoveryTest {
         assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("a stamper_error row runs the 20-minute deadline, as every owner row")
             .isEqualTo(episode.plus(Duration.ofMinutes(20)));
 
-        // The deadline passes with no ack: the engine's own stamper (the fault was transient) hands the red on.
+        // The deadline passes with no ack: the engine's own stamper (the fault was transient) escalates the red. The
+        // row showed no next up, so nobody receives a hand-off: the leader missed it and the escalation follows.
         se.env.ids.clock.advance(Duration.ofMinutes(21));
         for (int i = 1; i < f.length; i++) {
             se.env.renew(f[0], f[i]);
@@ -118,7 +119,80 @@ class OwnerStamperRecoveryTest {
         se.stamper.onDeadline(f[0], StamperEnv.BASE);
 
         assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason"))
-            .as("the stamper_error owner was handed on at its deadline").containsExactly("stamper_error", "handoff");
+            .as("the stamper_error owner's deadline escalates").containsExactly("stamper_error", "escalated");
+    }
+
+    /** A stamper whose decision throws on every trigger: a deterministic fault, not a transient one. */
+    private OwnerStamper alwaysFaulty() {
+        return new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            (in, trigger) -> { throw new IllegalStateException("deterministic boom on " + trigger); });
+    }
+
+    private void renewSeats(String[] f) {
+        for (int i = 1; i < f.length; i++) {
+            se.env.renew(f[0], f[i]);
+        }
+    }
+
+    @Test
+    void aDeterministicFaultOnEveryTriggerStillEscalatesAtTheDeadlineFromTheCurrentRow() throws Exception {
+        String[] f = redOnY();
+        var faulty = alwaysFaulty();
+        var timer = new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline);
+        faulty.bind(timer);
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+        faulty.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason")).containsExactly("stamper_error");
+
+        faulty.onDeadline(f[0], StamperEnv.BASE);   // the timer fires early: nothing is posted, the deadline stays armed
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).hasSize(1);
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("an early firing re-arms at the row's deadline").isNotNull();
+
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        renewSeats(f);
+        faulty.onDeadline(f[0], StamperEnv.BASE);   // the evaluation throws; the fail-safe row still lands
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
+        assertThat(rows.getLast().body()).containsEntry("owner", f[1]).containsEntry("handoffs", 1);
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("an escalated row runs no deadline").isNull();
+        faulty.onDeadline(f[0], StamperEnv.BASE);
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).as("no second escalated row").hasSize(2);
+    }
+
+    @Test
+    void aRestartOverAStamperErrorRowWithAFaultingDecisionStillArmsTheDeadlineFromTheRow() throws Exception {
+        String[] f = redOnY();
+        var faulty = alwaysFaulty();
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+        faulty.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error");
+        Instant episode = Instant.parse((String) rows.getFirst().get("episode_at"));
+        se.env.ids.clock.advance(Duration.ofMinutes(5));
+
+        // What an engine start does with a stamper whose decision still throws: the census completes from the row.
+        var wiring = new BoardOwnerWiring(se.tuples, faulty, faulty::rearm, se.env.ids.clock);
+        wiring.start(new RecordingScheduler(), () -> List.of(f[0]));
+        boolean full = wiring.rebuild(List.of(f[0]));
+
+        assertThat(full).as("the topic was re-armed from its row, so the census is full").isTrue();
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+    }
+
+    @Test
+    void aRestartRearmOfATopicWithNoOpenRowAndAFaultingDecisionFails() {
+        String[] f = redOnY();
+        var faulty = alwaysFaulty();
+        faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.done(f[0], StamperEnv.BASE, "Z", "success");   // the clear row: nothing open to arm
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> faulty.rearm(f[0], StamperEnv.BASE))
+            .as("nothing to arm from, so the failure is the census's to retry").hasMessageContaining("deterministic boom");
     }
 
     @Test
