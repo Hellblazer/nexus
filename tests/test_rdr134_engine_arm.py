@@ -98,6 +98,23 @@ def test_every_arm_is_scored_in_distance_order_as_134_research_13_scored_it() ->
     assert row["P0"]["top3"][0] == row["ENG"]["top3"][0] == row["ENG_gate_off"]["top3"][0] == "rdr-001-x.md"
 
 
+def test_only_routed_collections_count_short_and_never_past_the_exact_scan() -> None:
+    # DOCS returned 0 rows but is unrouted; RDR's exact scan has 1 row, so its 1 routed row is not short
+    event = {"routed": 1, "statuses": {RDR: "routed", DOCS: "no_topics"}, "raw_counts": {RDR: 1, DOCS: 0},
+             "coverage": {RDR: 0.95}}
+    plain = {RDR: [{"chash": "good", "distance": 0.3, "collection": RDR}],
+             DOCS: [{"chash": "bad", "distance": 0.2, "collection": DOCS}] * 2}
+    by = {None: [_hit("good", RDR, 0.1)], "default": [_hit("good", RDR, 0.1)], 0.0: [_hit("good", RDR, 0.1)]}
+    row = _measure(by, {**event, "raw_counts": {RDR: 1, DOCS: 0, "k": 3}}, plain)
+    assert row["ENG"]["route"]["short"] == []
+
+
+def test_a_routed_call_whose_event_routed_nothing_is_vacuous() -> None:
+    event = {"routed": 0, "unrouted_reason": "capability_absent", "statuses": {}}
+    with pytest.raises(arm.Vacuous):
+        _measure({None: [], "default": [_hit("good", RDR, 0.1)], 0.0: [_hit("good", RDR, 0.1)]}, event)
+
+
 def test_a_routed_call_that_logs_no_event_is_vacuous_not_a_pass() -> None:
     def silent(query, collections, n, t3, **kw):
         return [_hit("good", RDR, 0.1)]

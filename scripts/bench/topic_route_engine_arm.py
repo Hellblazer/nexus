@@ -90,6 +90,9 @@ def measure(q: dict[str, Any], prod: list[str], t3: Any, catalog: Any, *, search
         events = [e for e in logs if e.get("event") == EVENT]
         if not events:
             raise Vacuous(f"{q['qid']} {name}: the routed call logged no {EVENT} event")
+        if not events[-1].get("routed"):
+            raise Vacuous(f"{q['qid']} {name}: the routed call routed no collection "
+                          f"(unrouted_reason {events[-1].get('unrouted_reason')!r})")
         row[name] = {**score(merge(_rows(hits)), q["gt"], catalog, **grade), "s": elapsed,
                      "route": _route(events[-1], plain)}
     return row
