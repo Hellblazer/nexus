@@ -550,6 +550,7 @@ jobs:
   # TWICE (this job's full -O2 build + pgvector smoke, PLUS ci.yml's
   # engine-service-build -Ob reachability trip-wire on the same events). The
   # reachability-regression class is covered by ci.yml's trip-wire on every
-  # push/PR; the full-optimization build + boot smoke still runs where the
+  # push/PR that changes its inputs (job-gated since suite audit item 8,
+  # scripts/native_trip_wire_svc.py); the full-optimization build + boot smoke still runs where the
   # artifact is actually produced (engine-service-release.yml, on every
   # engine-service-v* tag, before anything is published or deployed).

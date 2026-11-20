@@ -14,7 +14,9 @@ the ``changes`` job, and the trip-wire's job-level ``if:`` skips the whole job o
    ``skipped``, or is still ``queued`` or ``in_progress`` (that run's verdict stands for its commits). develop runs two
    CI runs at a time and a newer push REPLACES a pending one, so the replaced run's commits sit in no later
    ``before..HEAD`` range; its trip-wire shows as cancelled or absent, the base reads uncovered, and this run builds.
-   A ``skipped`` base is covered because its own decision required the same two proofs, back to a built commit.
+   A ``skipped`` base is covered because its own decision required the same two proofs, back to a built commit:
+   the job's ``if:`` builds whenever the ``changes`` job did not succeed, so ``skipped`` comes only from this script
+   answering ``false``, never from a failed ``needs``. A base that also carries a failed run is uncovered.
 
 An unusable base (all zeros, empty, not in the checkout), a failed check-run read, or a base whose run failed,
 timed out or was cancelled answers ``true``. An empty changed-file list between two good commits is a broken range,
@@ -36,12 +38,14 @@ from typing import Callable, Iterable
 
 #: The trip-wire's inputs: what its native build reads, plus this gate. A path matches when it starts with one.
 INPUT_PREFIXES: tuple[str, ...] = ("service/", ".github/workflows/ci.yml", ".github/actions/maven-cache/",
-                                   "scripts/native_trip_wire_svc.py")
+                                   "scripts/native_trip_wire_svc.py", "scripts/check_native_embedded_resources.py")
 #: The check-run name of the job this gates (ci.yml ``engine-service-build``'s ``name:``).
 TRIP_WIRE_CHECK: str = "engine-service native build (PR trip-wire)"
 ZERO_SHA: str = "0" * 40
 #: A base run counts as covering its commits when it reached one of these, or is still running.
 _COVERED_CONCLUSIONS = frozenset({"success", "skipped"})
+#: A base run that reached one of these leaves its commits uncovered, whatever another run on the same sha says.
+_FAILED_CONCLUSIONS = frozenset({"failure", "timed_out", "action_required", "startup_failure", "stale"})
 _RUNNING = frozenset({"queued", "in_progress", "waiting", "pending", "requested"})
 
 Lookup = Callable[[str], Iterable[tuple[str, "str | None"]]]
@@ -97,7 +101,8 @@ def decide(*, repo: Path, event: str, before: str = "", base: str = "", lookup: 
         runs = list(lookup(before)) if lookup is not None else []
     except Exception as exc:  # noqa: BLE001 - any failure to read coverage answers "run"
         return True, f"could not read the base's {TRIP_WIRE_CHECK!r} check run ({type(exc).__name__}); building"
-    if any(c in _COVERED_CONCLUSIONS or s in _RUNNING for s, c in runs):
+    failed = [c for _s, c in runs if c in _FAILED_CONCLUSIONS]
+    if not failed and any(c in _COVERED_CONCLUSIONS or s in _RUNNING for s, c in runs):
         return False, (f"no build input among {len(changed)} changed file(s), and the base {before[:12]}'s trip-wire "
                        "covers its own commits")
     seen = ", ".join(f"{s}/{c}" for s, c in runs) or "no run"

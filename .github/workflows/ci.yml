@@ -211,7 +211,7 @@ jobs:
     #
     # OTHER dorny/paths-filter USAGES IN THIS REPO ARE UNCHANGED BY DESIGN.
     # CA-3/write-seam-gate below KEEP dorny (engine-service-build's `svc`
-    # predicate left it for this job's own svc step, suite audit item 8): their own comments document a DIFFERENT risk profile —
+    # predicate moved to this job's svc step at suite audit item 8): their own comments document a DIFFERENT risk profile —
     # "always true on a develop push" as a deliberate safety net, where an
     # empty/malformed file list resolving toward true just spends extra CI
     # cost and never skips something that needed to run. THIS job is the one
@@ -2759,7 +2759,9 @@ jobs:
     # for branch protection. Keep the name: release evidence fixtures and history read it verbatim.
     name: engine-service native build (PR trip-wire)
     needs: changes
-    if: needs.changes.outputs.svc == 'true'
+    # A changes job that did not succeed BUILDS rather than skipping, so `skipped` comes only from the gate's
+    # own decision (which is what lets the next push read a skipped base as covered).
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.svc == 'true')"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:

@@ -72,7 +72,8 @@ def test_a_push_outside_the_inputs_with_a_covered_base_skips(repo: Path) -> None
 
 
 @pytest.mark.parametrize("path", ["service/src/Main.java", ".github/workflows/ci.yml",
-                                  ".github/actions/maven-cache/action.yml", "scripts/native_trip_wire_svc.py"])
+                                  ".github/actions/maven-cache/action.yml", "scripts/native_trip_wire_svc.py",
+                                  "scripts/check_native_embedded_resources.py"])
 def test_a_push_touching_an_input_runs(repo: Path, path: str) -> None:
     before = _git(repo, "rev-parse", "HEAD")
     _commit(repo, "docs/x.md")
@@ -82,7 +83,8 @@ def test_a_push_touching_an_input_runs(repo: Path, path: str) -> None:
 
 
 @pytest.mark.parametrize("conclusions", [(), ("cancelled",), ("cancelled", "cancelled"), ("failure",),
-                                         ("timed_out",), ("neutral",)])
+                                         ("timed_out",), ("neutral",), ("failure", "success"),
+                                         ("skipped", "failure")])
 def test_an_uncovered_base_runs_even_when_the_range_is_clean(repo: Path, conclusions: tuple[str, ...]) -> None:
     """The superseded-run hole: a replaced pending run never built its own commits, so its successor must."""
     before = _git(repo, "rev-parse", "HEAD")
@@ -161,7 +163,10 @@ def test_the_trip_wire_job_is_gated_at_job_level_on_the_changes_output() -> None
     job = _ci()["jobs"]["engine-service-build"]
     needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
     assert "changes" in needs
-    assert job["if"].strip() == "needs.changes.outputs.svc == 'true'"
+    # a changes job that did not succeed BUILDS (never a skip): only the script's own decision can produce
+    # `skipped`, which is what lets a later push read a skipped base as covered
+    assert job["if"].strip() == ("!cancelled() && (needs.changes.result != 'success' "
+                                 "|| needs.changes.outputs.svc == 'true')")
     steps = job["steps"]
     assert not any("paths-filter" in str(s.get("uses", "")) for s in steps), "the dorny step-level gate is gone"
     assert not any("steps.changes.outputs.svc" in str(s.get("if", "")) for s in steps)
@@ -187,4 +192,9 @@ def test_the_gate_and_the_trip_wire_name_the_same_inputs() -> None:
     """The script's input list is the trip-wire's input list; the check name it reads is the job's name."""
     assert gate.TRIP_WIRE_CHECK == _ci()["jobs"]["engine-service-build"]["name"]
     assert set(gate.INPUT_PREFIXES) == {"service/", ".github/workflows/ci.yml", ".github/actions/maven-cache/",
-                                        "scripts/native_trip_wire_svc.py"}
+                                        "scripts/native_trip_wire_svc.py",
+                                        "scripts/check_native_embedded_resources.py"}
+    # every script the job runs is an input, so editing one runs the job
+    ran = " ".join(str(st.get("run", "")) for st in _ci()["jobs"]["engine-service-build"]["steps"])
+    for script in ("scripts/check_native_embedded_resources.py",):
+        assert script in ran and script in gate.INPUT_PREFIXES
