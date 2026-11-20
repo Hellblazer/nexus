@@ -699,7 +699,7 @@ def owners_cmd(
       --execute move --document <tumbler> --new-path <file>
       --execute move --owner <prefix> --new-root <dir>
           RDR-254: keep an identity when a path moves. A dry run by default; it prints the counts and the
-          exact command that writes. See docs/cli-reference.md, `nx catalog owners --execute move`.
+          exact command that writes.
     """
     if action == "deactivate" and not do_census:
         raise click.ClickException(
