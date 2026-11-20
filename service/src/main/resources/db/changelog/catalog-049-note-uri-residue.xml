@@ -43,23 +43,22 @@
     THE OWNER-READ POLICIES are the next include (catalog-050-note-uri-residue-owner-read.xml): the three driving tables
     carry only tenant_isolation, and the worker's verification needs the migrating role to read every tenant's rows.
 
-    SIZING IS PROVISIONAL (local-store measurement, PITR-fork sizing pending Sam). RDR-246 gives no default to borrow, and
-    P3.2 times Phase 3's moves only (T2 229-research-66), so P2.10 sizes its own three moves. The production timing wants a
-    PITR fork of the larger production tenant, which is cloud spend and waits for Sam's go; it has NOT run. What was
-    measured is a local store (a Postgres testcontainer, 200,000 catalog_documents of one tenant, a tenth carrying
-    residue, an aspect row for every second document and a highlight row for every fourth, sleep_ms 0, the worker running
-    each shipped move; the harness is NoteUriResidueMovesSizingIntegrationTest, -Dnexus.p210.sizing=<rows>):
-      catalog_documents   chunk_size 1000: 8.8 s for 200 chunks (44 ms a chunk); 5000: 2.8 s (70 ms); 20000: 1.4 s
-      document_aspects    chunk_size 1000: 1.05 s (about 5 ms a chunk over 100,000 rows); highlights 0.59 s (50,000 rows)
-    The first sweep of that run, at chunk_size 500, took 68.7 s for the documents move on a freshly bulk-loaded table with
-    no planner statistics yet; a production table has them. The cost follows the size of the driving table, not the
-    residue count: dml_utils walks every row whatever the template matches (T2 229-research-66, inferred). At those
-    figures a table of a million documents takes about 45 s of chunk time at chunk_size 1000; sleep_ms 100 (documents) and
-    50 (satellites, whose chunks are cheaper) keep the move to about a third of the wall clock, and the cloud
-    sleep_ms RDR-246's validation set is not in the tree to start from. statement_timeout_ms 300000 bounds the
-    table-wide verification (a join of the table with the registry and a probe of the live source_uri index) and
-    on_complete with about two orders of magnitude of headroom over what a local scan of 200,000 rows takes.
-    A resized move is a new changeset that supersedes this one (RDR-246, Fixing a move); a template is never edited.
+    SIZING: measured on a production PITR fork 2026-11-20 (T2 nexus/engine-cut-0.1.200; bob's run of
+    scripts/spikes/rdr229-p210-fork-timing/run.sh, Sam's ruling T2 nexus/sam-ruling-p210-moves-on-spike-fork-2026-11-20).
+    RDR-246 gives no default to borrow and P3.2 times Phase 3's moves only (T2 229-research-66), so P2.10 sizes its own
+    three moves. Fork figures:
+      catalog_documents   chunk_size 1000, sleep_ms 100, statement_timeout_ms 30000: 50,075 rows, 51 chunks, p50 4.8 ms,
+                          max 52 ms; the cold first chunk is 1404 ms at sleep 0; a concurrent plain_search_1024 p99 is +4%
+                          over idle at sleep_ms 100, +11% at sleep 0 (and at chunk 5000)
+      document_aspects    chunk_size 1000, sleep_ms 50, statement_timeout_ms 30000: 2,877 rows, 3 chunks, max 31 ms
+      document_highlights chunk_size 1000, sleep_ms 50, statement_timeout_ms 30000: 0 rows on the fork
+    THE FORK CARRIED 0 chroma:// URIS, so the moves changed 0 rows there and the timing is the walk alone: dml_utils walks
+    every row of the driving table whatever the template matches, so the cost follows the table's size, not the residue
+    count (T2 229-research-66, inferred), and the walk is what the fork measured. A local store (a Postgres testcontainer,
+    200,000 catalog_documents, a tenth carrying residue, sleep_ms 0, NoteUriResidueMovesSizingIntegrationTest with
+    -Dnexus.p210.sizing=<rows>) gave 44 ms a chunk at chunk_size 1000 for the documents move including its rewrites, and
+    about 5 ms a chunk for the satellites. A resized move is a new changeset that supersedes this one (RDR-246, Fixing a
+    move); a template is never edited.
 
     Placed after the last include before grants-nexus-svc.xml, which runs LAST. Function definition and one INSERT; the
     INSERT's template, verification and on_complete are string values, which DataMoveChangesetGateTest masks.
@@ -1454,7 +1453,7 @@ GRANT EXECUTE ON FUNCTION nexus.catalog_reconcile_commit(text, text) TO nexus_sv
     </changeSet>
 
     <changeSet id="catalog-049-2" author="nexus-p2m1x.15">
-        <comment>Register the data move rdr229-residue-catalog-documents over nexus.catalog_documents (RDR-229 P2.10, nexus-p2m1x.15): one INSERT into nexus.data_moves, and nothing else. Its on_complete registers the two satellite moves rdr229-residue-document-aspects and rdr229-residue-document-highlights with changeset_id catalog-049-2, the changeset whose text holds their INSERT. Sizing is PROVISIONAL (local-store measurement; the PITR-fork sizing awaits Sam's go): see the file header.</comment>
+        <comment>Register the data move rdr229-residue-catalog-documents over nexus.catalog_documents (RDR-229 P2.10, nexus-p2m1x.15): one INSERT into nexus.data_moves, and nothing else. Its on_complete registers the two satellite moves rdr229-residue-document-aspects and rdr229-residue-document-highlights with changeset_id catalog-049-2, the changeset whose text holds their INSERT. Sizing was measured on a production PITR fork 2026-11-20 (T2 nexus/engine-cut-0.1.200; the fork carried 0 chroma:// URIs, so the timing is the walk alone): see the file header.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
                               statement_timeout_ms, verification, on_complete, changeset_id)
@@ -1472,7 +1471,7 @@ $t$UPDATE <driving_table>
    AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents h
                    WHERE h.tenant_id = t.tenant_id AND h.deleted_at IS NULL AND h.tumbler <> t.tumbler
                      AND h.source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10))$t$,
-'nexus', 'catalog_documents', 1000, 100, 300000,
+'nexus', 'catalog_documents', 1000, 100, 30000,
 $v$SELECT 1
   FROM nexus.catalog_documents t
   JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.physical_collection
@@ -1502,7 +1501,7 @@ $t$UPDATE <driving_table>
    AND c.content_type IN ('code', 'docs', 'rdr')
    AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
    AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$t$,
-'nexus', 'document_aspects', 1000, 50, 300000,
+'nexus', 'document_aspects', 1000, 50, 30000,
 $v$SELECT 1
   FROM nexus.document_aspects t
   JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.collection
@@ -1531,7 +1530,7 @@ $t$UPDATE <driving_table>
    AND c.content_type IN ('code', 'docs', 'rdr')
    AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
    AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$t$,
-'nexus', 'document_highlights', 1000, 50, 300000,
+'nexus', 'document_highlights', 1000, 50, 30000,
 $v$SELECT 1
   FROM nexus.document_highlights t
   JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.collection

@@ -9,6 +9,9 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.NoteUri;
+import dev.nexus.service.db.TenantScope;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -259,6 +262,88 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
                 .fetchOne(0, String.class)).as(m + " changeset_id").isEqualTo(CHANGESET);
         }
         assertThat(w.runCycle()).as("nothing is open: the held row does not keep a move open").isZero();
+    }
+
+    /**
+     * An install WITH residue (linda's case a): the moves change rows, the file-routed segment is restored, so
+     * {@code NoteUri.isNote} classes each repaired value as residue again, and the engine's stale-note repair, which skips
+     * what {@code isNote} rejects, finds nothing to rewrite, merge or refuse.
+     */
+    @Test
+    void anInstallWithResidue_theSegmentIsRestored_isNoteClassesItAsResidue_andTheStaleNoteRepairSkipsIt() {
+        plant(TENANT_A);
+        // the rows the rule covers, before: prefix-free residue, a note by the classifier
+        for (String t : List.of("d1", "d2", "d3")) {
+            assertThat(NoteUri.isNote(uri(TENANT_A, t))).as(t + " before").isTrue();
+        }
+
+        workUntilIdle(finishingWorker(new CopyOnWriteArrayList<>()));
+
+        for (String t : List.of("d1", "d2", "d3", "d6", "d7")) {
+            String after = uri(TENANT_A, t);
+            assertThat(after).as(t).startsWith("chroma://");
+            assertThat(NoteUri.isNote(after)).as(t + " after: file-routed residue, not a note").isFalse();
+        }
+        for (String after : List.of(aspectUri(TENANT_A, "d1"), highlightUri(TENANT_A, "d1"), aspectUri(TENANT_A, "d2"))) {
+            assertThat(NoteUri.isNote(after)).as("satellite " + after).isFalse();
+        }
+        var repo = new CatalogRepository(new TenantScope(adminPool));
+        var census = repo.repairStaleNoteUris(TENANT_A, false, 1000, 100);
+        List<String> listed = new ArrayList<>();
+        for (Object bucket : ((Map<?, ?>) census.get("sample")).values()) {
+            for (Object row : (List<?>) bucket) {
+                listed.add((String) ((Map<?, ?>) row).get("tumbler"));
+            }
+        }
+        // the census does see the planted stale notes (o1 names another collection, o5 sits in one it does not name),
+        // so it is not vacuous, and it lists none of the rows the moves repaired
+        assertThat(listed).as("non-vacuity: the census lists the genuinely stale notes").contains("o1", "o5");
+        assertThat(listed).as("the stale-note repair skips every repaired residue row")
+            .doesNotContain("d1", "d2", "d3", "d6", "d7");
+    }
+
+    /**
+     * An install with NO {@code chroma://} residue (linda's case b, the cloud's expected path): all three moves complete,
+     * change no row, and their verification is empty. Pinned, not assumed.
+     */
+    @Test
+    void anInstallWithNoChromaResidue_allThreeMovesCompleteChangingNothing_withAnEmptyVerification() {
+        collection(TENANT_A, "plain-docs", "docs");
+        collection(TENANT_A, "docs__prefixed__minilm-l6-v2-384__v1", "docs");
+        collection(TENANT_A, "plain-know", "knowledge");
+        doc(TENANT_A, "f1", "plain-docs", "file:///repo/a.md", false);
+        satellites(TENANT_A, "f1", "plain-docs", "file:///repo/a.md");
+        doc(TENANT_A, "n1", "plain-know", "nx-note://plain-know/a-note", false);
+        satellites(TENANT_A, "n1", "plain-know", "nx-note://plain-know/a-note");
+        doc(TENANT_A, "p1", "docs__prefixed__minilm-l6-v2-384__v1",
+            "chroma://docs__prefixed__minilm-l6-v2-384__v1/p.md", false);
+        satellites(TENANT_A, "p1", "docs__prefixed__minilm-l6-v2-384__v1",
+            "chroma://docs__prefixed__minilm-l6-v2-384__v1/p.md");
+        var before = snapshot(TENANT_A);
+        var seen = new CopyOnWriteArrayList<FailureHandler.Failure>();
+
+        workUntilIdle(finishingWorker(seen));
+
+        assertThat(seen).as("no failure, no blocked verification").isEmpty();
+        for (String m : List.of(DOCS_MOVE, ASPECTS_MOVE, HIGHLIGHTS_MOVE)) {
+            assertThat(completedAt(m)).as(m + " completed").isNotNull();
+            assertThat(ctx().select(DSL.field(DSL.name("failed_at"), OffsetDateTime.class)).from(MOVES)
+                .where(LABEL_F.eq(m)).fetchOne(0)).as(m + " not failed").isNull();
+            String verification = ctx().select(DSL.field(DSL.name("verification"), String.class)).from(MOVES)
+                .where(LABEL_F.eq(m)).fetchOne(0, String.class);
+            assertThat(verifyRows(verification)).as(m + " verification").isZero();
+        }
+        assertThat(snapshot(TENANT_A)).as("zero rows changed, in any of the three tables").isEqualTo(before);
+    }
+
+    /** Every source_uri of the tenant's three tables, as one comparable text. */
+    private String snapshot(String tenant) {
+        return ctx().select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).orderBy(CATALOG_DOCUMENTS.TUMBLER).fetch().formatCSV()
+            + ctx().select(DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI).from(DOCUMENT_ASPECTS)
+                .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant)).orderBy(DOCUMENT_ASPECTS.DOC_ID).fetch().formatCSV()
+            + ctx().select(DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.SOURCE_URI).from(DOCUMENT_HIGHLIGHTS)
+                .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant)).orderBy(DOCUMENT_HIGHLIGHTS.DOC_ID).fetch().formatCSV();
     }
 
     @Test

@@ -104,7 +104,7 @@ def emit(moves: dict[str, dict[str, str]], names: list[str], tenants: list[str],
         chunk = chunk_size if chunk_size is not None else int(m["chunk"])
         sleep = sleep_ms if sleep_ms is not None else int(m["sleep"])
         out.append(f"\n-- ===== {name}: {m['schema']}.{m['table']} chunk_size {chunk} sleep_ms {sleep} "
-                   f"(shipped sizing is PROVISIONAL) =====")
+                   f"(shipped sizing: measured on a PITR fork) =====")
         for tenant in tenants:
             label = f"{name}/{tenant}"
             out += [
