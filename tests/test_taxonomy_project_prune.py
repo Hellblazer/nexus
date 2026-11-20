@@ -17,6 +17,7 @@ def _wire(
     *, rows: dict[str, str] | None = None, distinct: list[str] | None = None,
     unreadable: bool = False, exact: bool = False, exact_log: list[bool] | None = None,
     unreadable_names: tuple[str, ...] = (), projection_counts: dict[str, int] | None = None,
+    probe: bool = True,
 ) -> None:
     """*rows* maps collection name -> catalog content_type (the live listing).
     *unreadable* makes the listing and every row read raise, as an outage does;
@@ -26,7 +27,8 @@ def _wire(
     *exact* is what the engine's exact-name prune capability probe answers; *exact_log*
     collects the ``exact`` flag of each prune call."""
     rows = rows or {}
-    monkeypatch.setattr("nexus.commands.taxonomy_cmd.prune_supports_exact", lambda: exact, raising=False)
+    if probe:  # False: the test installs its own catalog reader, so the real probe runs
+        monkeypatch.setattr("nexus.commands.taxonomy_cmd.prune_supports_exact", lambda: exact, raising=False)
 
     class _Taxonomy:
         def get_distinct_collections(self) -> list[str]:
@@ -359,7 +361,69 @@ def test_prune_keeps_the_guard_and_the_prefix_mode_against_an_engine_without_exa
     assert "1 skipped" in result.output
 
 
-def test_prune_supports_exact_is_false_until_the_engine_flag_is_known() -> None:
+class _Reader:
+    """A catalog reader whose ``supports_taxonomy_prune_exact`` answers *answer*, or raises it."""
+
+    def __init__(self, answer) -> None:
+        self.answer = answer
+        self.asked = 0
+
+    def supports_taxonomy_prune_exact(self) -> bool:
+        self.asked += 1
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+def _use_reader(monkeypatch, reader) -> None:
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda **_kw: reader)
+
+
+def test_prune_supports_exact_reads_the_version_flag_through_the_catalog_reader(monkeypatch) -> None:
     from nexus.commands.taxonomy_cmd import prune_supports_exact
 
+    _use_reader(monkeypatch, _Reader(True))
+    assert prune_supports_exact() is True
+    for not_true in (False, None, RuntimeError("version unreadable")):
+        _use_reader(monkeypatch, _Reader(not_true))
+        assert prune_supports_exact() is False, repr(not_true)
+
+
+def test_prune_supports_exact_is_false_when_the_reader_has_no_probe(monkeypatch) -> None:
+    from nexus.commands.taxonomy_cmd import prune_supports_exact
+
+    _use_reader(monkeypatch, object())
     assert prune_supports_exact() is False
+
+
+@pytest.mark.parametrize("answer", [False, RuntimeError("version unreadable")], ids=["absent-or-false", "unreadable"])
+def test_prune_keeps_the_guard_when_the_version_flag_is_absent_false_or_unreadable(monkeypatch, answer) -> None:
+    pruned: list[tuple[str, float]] = []
+    exact_log: list[bool] = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact_log=exact_log, probe=False,
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge"},
+    )
+    _use_reader(monkeypatch, _Reader(answer))
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert exact_log == [False, False]
+    assert pruned == [("code__1-1__m__v1", 0.5), ("code__1-1__m__v10", 0.5)]
+    assert "1 skipped" in result.output
+
+
+def test_prune_sends_match_exact_with_no_floor_when_the_version_flag_is_true_and_probes_once(monkeypatch) -> None:
+    pruned: list[tuple[str, float]] = []
+    exact_log: list[bool] = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact_log=exact_log, probe=False,
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "docs__z": "docs"},
+    )
+    reader = _Reader(True)
+    _use_reader(monkeypatch, reader)
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert pruned == [("code__1-1__m__v1", 0.7), ("code__1-1__m__v10", 0.5), ("docs__z", 0.55)]
+    assert exact_log == [True, True, True]
+    assert "skipped" not in result.output
+    assert reader.asked == 1, "one probe per command, never one per collection"
