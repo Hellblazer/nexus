@@ -6,6 +6,7 @@ walk is per full collection name and never per name prefix)."""
 
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.commands.taxonomy_cmd import taxonomy
@@ -15,9 +16,13 @@ def _wire(
     monkeypatch, pruned: list[tuple[str, float]], removed: int,
     *, rows: dict[str, str] | None = None, distinct: list[str] | None = None,
     unreadable: bool = False, exact: bool = False, exact_log: list[bool] | None = None,
+    unreadable_names: tuple[str, ...] = (), projection_counts: dict[str, int] | None = None,
 ) -> None:
     """*rows* maps collection name -> catalog content_type (the live listing).
-    *unreadable* makes the listing and every row read raise, as an outage does.
+    *unreadable* makes the listing and every row read raise, as an outage does;
+    *unreadable_names* makes the row read raise for those names only.
+    *projection_counts* is what the store answers for the distinct ``source_collection``
+    values of the projection rows.
     *exact* is what the engine's exact-name prune capability probe answers; *exact_log*
     collects the ``exact`` flag of each prune call."""
     rows = rows or {}
@@ -26,6 +31,9 @@ def _wire(
     class _Taxonomy:
         def get_distinct_collections(self) -> list[str]:
             return list(distinct or [])
+
+        def get_projection_counts_by_collection(self) -> dict[str, int]:
+            return dict(projection_counts or {})
 
         def prune_projection_below(self, prefix: str, thr: float, *, exact: bool = False) -> int:
             pruned.append((prefix, round(thr, 2)))
@@ -54,7 +62,7 @@ def _wire(
         return sorted(rows)
 
     def _row(name, *, refresh=True, strict=False):
-        if unreadable:
+        if unreadable or name in unreadable_names:
             raise RuntimeError("listing unreadable")
         return {"content_type": rows[name]} if name in rows else None
 
@@ -230,6 +238,82 @@ def test_prune_single_collection_uses_the_explicit_threshold(monkeypatch) -> Non
     )
     assert result.exit_code == 0, result.output
     assert pruned == [("code__1-61__bge-base-en-v15-768__v1", 0.8)]
+
+
+@pytest.mark.parametrize(
+    "rows, skipped",
+    [
+        # The lowest extension comes FIRST in name order, a higher one after it: a plan that lets
+        # the last hit under the collection's own threshold win (`< thr`) ends at 0.55, not 0.50.
+        ({"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "code__1-1__m__v100": "docs"}, 1),
+        # The lowest extension comes LAST: a plan that stops at the first hit ends at 0.55, not 0.50.
+        # (v10 is a skip too here: its own 0.55 is above v100's 0.50.)
+        ({"code__2-2__m__v1": "code", "code__2-2__m__v10": "docs", "code__2-2__m__v100": "knowledge"}, 2),
+    ],
+    ids=["lowest-extension-first", "lowest-extension-last"],
+)
+def test_prune_a_prefix_chain_of_three_takes_the_first_name_to_the_lowest_threshold(monkeypatch, rows, skipped) -> None:
+    """``v1`` prefixes ``v10`` which prefixes ``v100``: ``v1`` goes to the minimum over BOTH
+    extensions, ``v10`` to the minimum over its own one, and only ``v1`` is a skip."""
+    pruned: list[tuple[str, float]] = []
+    _wire(monkeypatch, pruned, removed=1, rows=rows)
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    v1, v10, v100 = sorted(rows)
+    thresholds = {"code": 0.7, "docs": 0.55, "knowledge": 0.5}
+    assert pruned == [
+        (v1, 0.5), (v10, min(thresholds[rows[v10]], thresholds[rows[v100]])), (v100, thresholds[rows[v100]]),
+    ]
+    assert f"{skipped} skipped" in result.output
+
+
+def test_prune_refuses_a_name_when_an_extension_row_is_unreadable(monkeypatch) -> None:
+    """The floor of ``v1`` would be taken from ``v10``'s guessed threshold: refuse both, prune the rest,
+    and exit non-zero because the recovery is incomplete."""
+    pruned: list[tuple[str, float]] = []
+    _wire(
+        monkeypatch, pruned, removed=1, unreadable_names=("code__1-1__m__v10",),
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "docs__z": "docs"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert pruned == [("docs__z", 0.55)]
+    assert "code__1-1__m__v1: refused" in result.output
+    assert "code__1-1__m__v10: refused" in result.output
+    assert "2 refused" in result.output
+    assert result.exit_code != 0, "any refused collection means the recovery is incomplete"
+
+
+def test_prune_sweep_with_some_refused_exits_nonzero_and_a_clean_sweep_exits_zero(monkeypatch) -> None:
+    pruned: list[tuple[str, float]] = []
+    _wire(
+        monkeypatch, pruned, removed=1, unreadable_names=("knowledge__b",),
+        rows={"code__a": "code", "knowledge__b": "knowledge"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert pruned == [("code__a", 0.7)]
+    assert "1 refused" in result.output
+    assert result.exit_code != 0
+    pruned.clear()
+    _wire(monkeypatch, pruned, removed=1, rows={"code__a": "code", "knowledge__b": "knowledge"})
+    clean = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert clean.exit_code == 0, clean.output
+    assert "refused" not in clean.output
+
+
+def test_prune_plan_reaches_collections_only_the_projection_rows_name(monkeypatch) -> None:
+    """A collection with projection rows but no topics and no live row is in neither listing, yet the engine's
+    prefix match reaches its rows from a shorter name: the plan takes the distinct ``source_collection``
+    values of the projection rows into its universe (review r2 S-e)."""
+    pruned: list[tuple[str, float]] = []
+    _wire(
+        monkeypatch, pruned, removed=1, rows={"knowledge__a": "code"},
+        projection_counts={"knowledge__a": 4, "knowledge__a2": 3},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    # knowledge__a2 has no row: the name says knowledge, 0.50, below knowledge__a's own 0.70.
+    assert pruned == [("knowledge__a", 0.5), ("knowledge__a2", 0.5)]
+    assert "1 skipped" in result.output
 
 
 # ── the engine's exact-name prune mode (linda's ruling on nexus-p2m1x.9) ─────
