@@ -58,7 +58,9 @@ BATCH_WORDS_MAX = 2000
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CANONICAL_UUID = re.compile(_UUID)
-_ANSWER_TITLE = re.compile(rf"({_UUID})/([a-z0-9-]{{1,40}})/([0-9a-f]{{16}})")
+#: An answer record's title: ``<asker>/<ask id>/<version>``, the asker an identity id (RDR-253 Step 5, when the entry has an
+#: ``identity:`` line) or a session id (an entry without one, or a pre-Step-5 writer). See ``threads.answer_title``.
+_ANSWER_TITLE = re.compile(rf"({_UUID}|i[0-9]+)/([a-z0-9-]{{1,40}})/([0-9a-f]{{16}})")
 _NUMBER = re.compile(r"[0-9]+")
 _GROUPS = ("interrupt", "batch", "quiet", "conditional", "answered")
 

@@ -188,7 +188,8 @@ filling in a form per ask.
 | RDR | Relationship |
 |---|---|
 | RDR-064 nx console | The Threads panel counts and lists structured asks in its Needs-you list, folds them into needs-sam beads, and shows an "answered, awaiting pickup" count. It has no answer surface and no ask cards (`src/nexus/console/routes/threads.py:121-127`, `src/nexus/console/templates/threads/_board.html:28-51`). |
-| RDR-208 session-id mail addressing | Answers are addressed by the session id on the board entry's `session:` line, which the board rule already tells sessions to rewrite after `/clear`. RDR-208's cleared record (a file `<config>/tuple-watch/cleared.<new session id>` naming the previous id, so the drain also empties the old mailbox after a `/clear`) covers mail already in flight. |
+| RDR-208 session-id mail addressing | Before RDR-253 Step 5, answers were addressed by the session id on the board entry's `session:` line, and they still are for an entry with no `identity:` line, which the board rule already tells sessions to rewrite after `/clear`. RDR-208's cleared record (a file `<config>/tuple-watch/cleared.<new session id>` naming the previous id, so the drain also empties the old mailbox after a `/clear`) covers mail already in flight. |
+| RDR-253 session identity | Since its Step 5 (2026-11-18), an entry's `identity: i<n>` line routes answers: `nx ask answer` sends to `mailbox/<identity>` with `address_kind=identity` and keys the record `<identity>/<ask>/<version>`, falling back to the `session:` line when there is no identity line; the identity outlives `/clear`, the session id does not (`ask.py:880-892,991-997`, `threads.py` `answer_title`). |
 | RDR-211 board/queue/lock templates | Not used in phase 1. An `ask/<id>` tuple template is named as phase 2. |
 | RDR-212 ORB cockpit (draft) | No dependency. RDR-212 drafts cockpit panels over tuple-space claims and hook events, some rendered by palinex (a separate repository that renders structured A2UI surfaces, per RDR-127). Nothing here reads claim events, hook projections or palinex. |
 | RDR-213, RDR-233 push paths | Used as they are. No new push. |
@@ -215,8 +216,8 @@ told apart by repo or working directory.
 - `threads.py` is a pure, tolerant line parser: it strips every line;
   `#`/`##`/`###` start a thread; known keys are `ref`/`refs`, `state`,
   `waiting_on`, `needs_sam`; as drafted `session:` and `updated:` were both
-  ignored, and now only `updated:` is (`_IGNORED_KEYS`, line 48): `session:` is
-  read for routing (line 436). A key mentioning "sam" or "needs", free text
+  ignored, and now only `updated:` and `identity:` are thread-ignored (`_IGNORED_KEYS`): `session:` and
+  `identity:` are read for routing. A key mentioning "sam" or "needs", free text
   naming Sam, and a `waiting_on:` naming Sam are appended to `needs_sam` as an
   ask (`_is_ask_key` line 258, `_mentions_sam` line 263, `free_ask` line 485).
   An entry older than `STALE_AFTER = timedelta(hours=24)` (line 45) is greyed.
@@ -324,9 +325,11 @@ in the subsections below.
 
 ### The ask record
 
-Entry-level line (once per entry, at the top): `session:`, already required
-by the board rule. The asker's current session id; answers are routed here and
-the answer record is keyed by it.
+Entry-level lines (once per entry, at the top): `identity: i<n>` when the
+session is bound to an identity (RDR-253), and `session:`, already required by
+the board rule. Answers are routed to the identity when the entry has the
+line, else to the current session id, and the answer record is keyed by the
+same one.
 
 Ask-level lines:
 
@@ -591,8 +594,9 @@ and refused otherwise.
 
 `answer` refuses (`ask.py:844-1011`) when `--expect` differs from the current
 version (and prints the current text), when the ask has `after:`, when the
-entry has no `session:` line, when its `session:` is not a lower-case
-canonical UUID, when two or more entries carry the asker's `session:` id, when
+entry has neither an `identity:` nor a `session:` line, when (with no identity
+line) its `session:` is not a lower-case canonical UUID, when two or more
+entries carry the asker's identity, or (with no identity line) its `session:` id, when
 a numeric reply is outside 1..n options, when a record for that version
 already exists and is a `sent` record or one the command did not write and
 `--replace` was not given, or is a `sending` record under 10 minutes old (refused
@@ -624,7 +628,7 @@ even with `--replace`), and per `via`:
    `via` (`cli` | `mediator:<session id>`), the ask's `asked:` and
    `blocking:`, the client tty for `cli` (recorded, not evidence), time and
    status.
-4. It posts one tuple to `mailbox/<asker session id>` with raw `tuple_out`,
+4. It posts one tuple to `mailbox/<asker identity>`, or `mailbox/<asker session id>` for an entry with no identity line, with raw `tuple_out`,
    because `mailbox_send`'s own-`from` check (`tuple_directory.py:228`) would
    refuse the CLI's sender id. `from` is the mediator's own session id, or
    for `cli` a UUID minted once in the nexus config dir. Both writes are
@@ -632,7 +636,7 @@ even with `--replace`), and per `via`:
    frame says so (hook step 4). There is no
    reply-to: an asker that needs more from Sam puts a new or changed ask on
    its board. Dims: `kind=reply`, `correlation_id=ask:<ask id>@<version>`,
-   `address_kind=session`. The body is a closed grammar:
+   `address_kind=identity` or `session` to match. The body is a closed grammar:
 
    ```
    nx-ask-answer v1
@@ -690,7 +694,7 @@ For a row whose `correlation_id` starts `ask:`:
    the peer frame with "not an answer in the expected form".
 2. **Record.** One `GET /v1/memory/get` on project `asks`, title
    `<address>/<ask>/<version>`, where `<address>` is the mailbox being
-   drained (the session's own id, or a previous id from its RDR-208 cleared
+   drained (the session's own identity, its own session id, or a previous id from its RDR-208 cleared
    record). The call is capped at 2.0 s and the drain's remaining budget; with
    under 0.9 s left (0.5 s minimum plus 0.4 s kept back for the ack), or on any
    error, the peer frame with "answer not checked".
@@ -989,7 +993,7 @@ A decision only Sam can make goes in an `ask:` block in its thread: ask (id, [a-
 The paragraph opens, before that text, with:
 
 ```
-Each session keeps one T2 entry in project `threads`, titled with its session name (from ListAgents), updated with `memory_put` (no ttl) at phase boundaries (a thread starts, a push, a wait on someone, done), not per step. One `## <the work in plain words>` block per open thread, with `ref:`, `state:`, `waiting_on:` and `needs_sam:` lines; delete the block when the work is done. Each field is one line. The entry's first line is `session: <your session id>`, the id from the SessionStart line `Nexus ready (session: <id>)` that the conexus plugin prints (one line per entry, not per block; rewrite it when the id changes, as after a `/clear`): the compaction-checkpoint hook finds the entry by it, because a Claude Desktop session is filed under a handle that is not its session name, and falls back to the exact-title match only when no entry carries the line.
+Each session keeps one T2 entry in project `threads`, titled with its session name (from ListAgents), updated with `memory_put` (no ttl) at phase boundaries (a thread starts, a push, a wait on someone, done), not per step. One `## <the work in plain words>` block per open thread, with `ref:`, `state:`, `waiting_on:` and `needs_sam:` lines; delete the block when the work is done. Each field is one line. A thread may also carry `due:` (ISO date or datetime; SessionStart prints it once due) and `worktree:` (where its work lives); field reference [threads-board](docs/agents/threads-board.md). The entry's first line is `session: <your session id>`, the id from the SessionStart line `Nexus ready (session: <id>)` that the conexus plugin prints (one line per entry, not per block; rewrite it when the id changes, as after a `/clear`): the compaction-checkpoint hook finds the entry by it, because a Claude Desktop session is filed under a handle that is not its session name, and falls back to the exact-title match only when no entry carries the line. A session bound to an identity (RDR-253) also writes `identity: i<n>` on its own line beside `session:`, the id `nx identity show` names; the identity outlives `/clear` and restart and the session id does not, so the checkpoint, `nx ask` answer routing, the console, the due-date hook and the aura threads block find the entry by `identity:` first and use `session:` only for an entry without that line, and the engine refuses a write that removes or changes the line or names another identity; keep `session:` too until RDR-253 Phase 2 drops it.
 ```
 
 and continues, after it, with:
@@ -1253,3 +1257,4 @@ dependency, no new surface, no second parser.
 - 2026-11-07: wording amendment to match reviewed code (`nexus-wc4jj.13`). Parser precedence rule 2 and the Step 5 convention text: an `ask:` line opens a block only when an ask-level line follows it; a lone `ask:` is legacy prose; a bad-id or split block is an unopened ask shown on the board.
 - 2026-11-07: wording amendment to match reviewed code (`nexus-2egi7`, `nexus-wc4jj.15`): per-block end-line code, ask GET headroom, choice range.
 - 2026-11-11: Wording amended to the running code (standing grant 3; drift check against develop 54d356f2a): `after:` conditional only on a real value; no `nx ask lint` (findings print in `nx ask list`) and the full lint rules and fail-safe reads; greyed entries with no usable time, `answered` display; RDR-064 console and bead-fold behaviour; Step 5 now quotes the shipped AGENTS.md paragraph, and the separate Decision 1 CLAUDE.md line was declined; line cites updated to the current files; answer refusals, `show`, digest, `list --json` and batch-record shape; version whitespace rule and `[irreversible]` marker; example version; tmux `held` state and the `after:`-less blocking ask; mediator contract additions; drain-hook match needs `sam_words` and the `(ask answer: <reason>)` line. Sam's decisions U1-U3 recorded (Step 0 cloud only, baseline dropped, metrics by hand query ~2026-11-23).
+- 2026-11-20: wording matched to the running code at close (grant 3; close critique S2): answers route by the entry's `identity:` line when present (RDR-253 Step 5), else by `session:`; the record title, mailbox address, `address_kind` and refusals follow; RDR-253 added to the relationship table; the AGENTS.md opening piece re-quoted from AGENTS.md as it stands. `nx ask digest` now reads identity-keyed records too (close critique S1).
