@@ -175,6 +175,52 @@ class TestWrite:
             assert "401 unauthorized" in got[0][1] and "SECRET-THREAD-TEXT" not in got[0][1], got
             assert nx.verbs() == (["list"] if failing == "list" else ["list", "put"]), "no fallback write anywhere"
 
+    def test_a_backtick_in_the_pointer_line_does_not_move_the_error_tail_cut(self, rp) -> None:
+        """Round 2 blocker: ``_run_nx`` echoes the whole command, the pointer line included, and a board ``state:`` line
+        with inline code puts "` " inside that echo. The cut is at the last ``exited N`` / ``timed out after`` /
+        ``failed to start``, so the reason survives and none of the line's text reaches hook.log."""
+        line = "resume X | thread: t | state: ran `uv run pytest` then FILLER-TEXT-FROM-THE-BOARD"
+        nx = FakeNx(fail={"put": f"`nx scratch --scope identity put {line} --tags resume-pointer` exited 1: HTTP 401 unauthorized"})
+        got, log = logs()
+        assert rp.write(line, nx, None, log) == "none"
+        assert got[0][1].endswith("(exited 1: HTTP 401 unauthorized)"), got
+        assert "FILLER-TEXT" not in got[0][1] and "uv run pytest" not in got[0][1], got
+        for err, tail in (
+            ("`nx scratch --scope identity list` timed out after 3s", "timed out after 3s"),
+            ("`nx scratch --scope identity put a `b` c` failed to start: OSError: boom", "failed to start: OSError: boom"),
+            ("no command echo at all", "no command echo at all"),
+        ):
+            assert rp.error_tail(err) == tail, err
+
+    def test_at_the_pointer_cap_the_writer_prunes_its_listed_pointers_and_retries_once(self, rp) -> None:
+        """Round 2 minor 2: with 20 pointers held the put is refused and nothing was deleted, so the scope would stay stuck.
+        On that refusal the writer deletes the pointers it listed and puts once more."""
+        held = [self.old(f"{i:08x}") for i in range(20)]
+
+        class CapThenOk(FakeNx):
+            puts = 0
+
+            def __call__(self, args, cwd, timeout):
+                if args[3] == "put":
+                    CapThenOk.puts += 1
+                    if CapThenOk.puts == 1:
+                        self.calls.append((list(args), timeout))
+                        return "", ("`nx scratch --scope identity put ...` exited 1: the identity scratch scope holds 20 "
+                                    "resume pointers, the cap is 20; delete one first (nothing is evicted for you)")
+                return super().__call__(args, cwd, timeout)
+
+        nx = CapThenOk(entries=held)
+        got, log = logs()
+        assert rp.write("resume X | thread: t", nx, None, log, budget=60) == "identity"
+        assert nx.verbs() == ["list", "put", *(["delete"] * 20), "put"], nx.verbs()
+        assert got[-1][0] == "INFO" and "outcome=identity" in got[-1][1]
+
+    def test_a_cap_refusal_on_entries_not_pointers_is_not_retried(self, rp) -> None:
+        nx = FakeNx(entries=[self.old()], fail={"put": "`nx scratch ...` exited 1: the identity scratch scope holds 20 entries, the cap is 20; delete one first (nothing is evicted for you)"})
+        got, log = logs()
+        assert rp.write("resume X | thread: t", nx, None, log) == "none"
+        assert nx.verbs() == ["list", "put"], "only the pointer cap is the writer's own to clear"
+
     def test_a_timeout_names_the_timeout(self, rp) -> None:
         nx = FakeNx(fail={"list": "`nx scratch --scope identity list` timed out after 3s"})
         got, log = logs()

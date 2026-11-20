@@ -1250,8 +1250,8 @@ None.
   (tests/hooks/test_resume_pointer.py); the reader prints one line of at most 400 bytes on `clear` only, drops a
   pointer over 48 hours old, and logs one `resume_line` event per `clear` start (hit, empty, error or timeout, with
   `age_s`; tests/hooks/test_resume_line.py); and a journey row writes through the real `nx scratch` commands, binds a
-  `clear`, and reads the line back through the reader's real opener, with and without a T1 session for the new session id
-  (tests/identity/test_work_engine_rows.py).
+  `clear`, and reads the line back through the reader's real opener when the new session id has a T1 session; without
+  one the reader prints nothing and creates no session (tests/identity/test_work_engine_rows.py).
 - Each restart mode (exit and relaunch, in-place `/restart`, `--revive` after a
   reboot) finds the old holder gone and binds the next generation, with no
   release step.

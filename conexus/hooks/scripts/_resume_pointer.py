@@ -135,11 +135,20 @@ def resume_ids(listing: str) -> list[str]:
     return ids
 
 
+#: The cause markers ``_run_nx`` writes after the echoed command (compact_checkpoint.py ``_run_nx``).
+_CAUSE = re.compile(r"(exited \d+|timed out after|failed to start)")
+
+#: The pointer-cap refusal ``HttpScratchStore.put`` raises (identity scope; the size cap and the note cap do not match).
+_POINTER_CAP = re.compile(r"holds \d+ resume pointers, the cap is")
+
+
 def error_tail(error: str) -> str:
     """The cause part of ``_run_nx``'s error (``exited 1: 401 unauthorized``, ``timed out after 3s``), without the
-    echoed command line: that carries the entry's own text."""
-    if error.startswith("`") and "` " in error:
-        error = error.split("` ", 1)[1]
+    echoed command line: that carries the entry's own text, which may itself hold a backtick, so the cut is at the LAST
+    cause marker, never the first "` "."""
+    causes = list(_CAUSE.finditer(error))
+    if causes:
+        error = error[causes[-1].start():]
     return _clean(error, 160)
 
 
@@ -177,6 +186,18 @@ def write(line: str, run_nx: Runner, cwd: str | None, log: Callable[[str, str], 
                 reason = "the time budget ran out after the list"
             else:
                 _out, error = _put(run_nx, line, cwd, min(CALL_TIMEOUT_S, left()))
+                if error and _POINTER_CAP.search(error_tail(error)):
+                    # the scope holds the pointer cap: these are this identity's own pointers, so clear the listed
+                    # ones and put once more (nothing else is touched; a second refusal is logged as any failure)
+                    for entry_id in resume_ids(listing):
+                        if left() < _MIN_CALL_S:
+                            break
+                        _delete(run_nx, entry_id, cwd, min(CALL_TIMEOUT_S, left()))
+                    listing = ""
+                    if left() < _MIN_CALL_S:
+                        error = "the time budget ran out after pruning at the pointer cap"
+                    else:
+                        _out, error = _put(run_nx, line, cwd, min(CALL_TIMEOUT_S, left()))
                 if error:
                     reason = error_tail(error)
                 else:
