@@ -67,7 +67,7 @@ $concept` passed free text where a real topic label is required, matched
 nothing, and the topic filter returned no results
 (`conexus/plans/builtin/research-default.yml:29-35`). The plan runner can
 still forward a topic (`_apply_scope_to_args`,
-`src/nexus/plans/runner.py:1525`), but nothing chooses one from the
+`src/nexus/plans/runner.py:1526`), but nothing chooses one from the
 question.
 
 #### Gap 2: no query-time topic selection, and the existing topic filter loses recall
@@ -77,10 +77,11 @@ topic centroids against a vector (`HttpCentroidStore.ann_query`,
 `src/nexus/db/t2/http_centroid_store.py:249`; ANN is approximate nearest
 neighbour search; nothing on the query path calls it). The engine can search
 inside one topic of one collection (`search_topic_scoped`,
-`src/nexus/db/http_vector_client.py:4960`). The client-side `topic=` argument
-of `search_cross_corpus` is different: it filters the results after an
-unscoped search (`src/nexus/search_engine.py:2548-2550`), so it can only
-remove hits, never reach chunks the unscoped search missed.
+`src/nexus/db/http_vector_client.py:5025`). The client-side `topic=` argument
+of `search_cross_corpus` is different: it builds a set of the topic's document
+ids (`src/nexus/search_engine.py:1623-1636`) and filters the results with it
+after an unscoped search (`:2603-2605`), so it can only remove hits, never
+reach chunks the unscoped search missed.
 
 ### Terms used below
 
@@ -90,7 +91,7 @@ remove hits, never reach chunks the unscoped search missed.
   topic whose similarity is within a width (a similarity difference, 0.03 in
   the measurements) of that collection's nearest topic.
 - **Per-collection k**: how many rows the engine takes from each collection
-  before merging (`search_engine.py:1195-1226`).
+  before merging (`search_engine.py:1196-1228`).
 - **Coverage**: one minus the share of a collection's live chunks that have
   no assignment to that collection's own topics (projection rows from other
   collections do not count), as `taxonomy_coverage_counts_<dim>` counts them.
@@ -124,11 +125,16 @@ remove hits, never reach chunks the unscoped search missed.
 - RDR-232 (closed) narrows `nx_answer` by owner, corpus and subtree before
   search, and can confine a search with `chash_allow`. Routing runs inside
   the collections that narrowing leaves; a confined search is not routed.
-- RDR-193 (accepted) moves taxonomy discovery onto the engine. That keeps
-  topics fresher; it does not change the routes used here.
-- RDR-229 (draft) stops using the collection name as the taxonomy key. This
-  RDR's new code keys by collection name in five places, so whichever RDR
-  lands second adjusts all five: the six SQL functions take a collection name
+- RDR-193 (closed 2026-11-16, `docs/rdr/rdr-193*.md` frontmatter) moves
+  taxonomy discovery onto the engine. That keeps topics fresher; it does not
+  change the routes used here.
+- RDR-229 (accepted 2026-11-19, `docs/rdr/rdr-229*.md` frontmatter) retires the
+  collection name as the key: its revision gives each collection a surrogate
+  `collection_id` and turns the name into a label
+  (`docs/rdr/rdr-229-*.md:58`; accepted in commit d38ed9b2a). It does not mention this RDR (a text search of its file for
+  `RDR-134`, `topic_route`, `search_topic_set` and `taxonomy_coverage` found
+  nothing). This RDR's new code keys by collection name in five places, so
+  whichever RDR lands second adjusts all five: the six SQL functions take a collection name
   (`taxonomy_coverage_counts_<dim>(p_collection text)`,
   `taxonomy-023-coverage-counts-set-based.xml:33`, with `ct.collection = p_collection` at `:41`;
   `search_topic_set_<dim>(... p_collection text ...)`, `vectors-062-topic-set-search.xml:74`,
@@ -136,8 +142,10 @@ remove hits, never reach chunks the unscoped search missed.
   key is `(tenant, collection)` (`TaxonomyCoverage.java:103`); the centroid ranking is
   asked for by collection name (`TopicRouteArm.java:154`, `annQuery(tenant, qv, collection, ...)`); the
   request's `topic_route.collections` lists collection names (`TopicRoute.java:20-23`); and the
-  engine's statuses are reported by collection (`VectorHandler.java:817-818`). The server-side
-  sequencing between the two RDRs is not decided here (inferred, not read: RDR-229 is draft).
+  engine's statuses are reported by collection (`VectorHandler.java:817-818`). The order in which
+  the two land is not decided here: RDR-229 does not name this RDR, so the
+  engine route's keys and the surrogate-key phases have no recorded
+  sequencing (inferred from the text search above, not read in a decision).
 
 ## Context
 
@@ -146,7 +154,7 @@ remove hits, never reach chunks the unscoped search missed.
 The 2026-05-27 stub came from an `nx_answer` question about RDR-070 that
 returned a summary of the session's startup text instead (nexus-n1908). That
 honesty bug is fixed: `_nx_answer_is_empty_retrieval`
-(`src/nexus/mcp/core.py:11116`) returns an explicit no-match when the
+(`src/nexus/mcp/core.py:11202`) returns an explicit no-match when the
 retrieval steps found nothing.
 
 Sam's decisions, 2026-11-16 (T2 `nexus_rdr/134`): "would truly love to get
@@ -168,15 +176,17 @@ round 1, "Fix all 7, fix check, re-gate".
   `nx taxonomy drain` assigns them later, 134-research-14); discovery runs
   after `nx index`.
 - The prose search path: `search` and `query` tools → `search_cross_corpus` →
-  `HttpVectorClient.search_per_collection` (`src/nexus/search_engine.py:2111`)
+  `HttpVectorClient.search_per_collection` (called at `src/nexus/search_engine.py:2157`)
   → `POST /v1/vectors/search-per-collection`
-  (`service/.../http/VectorHandler.java:279`). One request covers a group of
+  (`service/.../http/VectorHandler.java:319`, handler at `:916`). One request covers a group of
   collections that share an embedding model; the engine embeds the query once
   (`PgVectorRepository.java:3241`) with the query-type embedder for prose
   (voyage-context-3); the code and other Voyage models are embedded without
   an input type (134-research-11). It searches each collection and merges.
 - `search-topic-scoped` refuses a `chash_allow` list
-  (`VectorHandler.java:1058-1063`) and takes no metadata `where`.
+  (`VectorHandler.java:1177`, `:3093-3098`) and takes no metadata `where`
+  (its handler reads `query`, `topic`, `collection` and `n_results`,
+  `:1172-1187`).
 
 ## Research Findings
 
@@ -213,7 +223,15 @@ graded by paper or note title (other projects' RDRs skipped). NDCG capped at
 
 ### Key Discoveries
 
-- **Verified** (`-13`): on the production set, top-1 routing raises NDCG@3 on
+These are findings of the client-side spike (`taxonomy_ab.py`,
+`taxonomy_ab2.py`: the client ranks the centroids and calls the topic search
+itself, collection by collection) on the cloud engine 0.1.194. They are
+in-sample: the 25 RDR questions are among leg 1's 26, and the design was chosen
+on them. The engine route did not reproduce the gain (`-18`) and the
+`nx_answer` A/B failed (`-17`); see Results. Read "Measured" below as
+measured in the spike, not as established for the shipped route.
+
+- **Measured** (`-13`): on the production set, top-1 routing raises NDCG@3 on
   the RDR questions from 0.335 to 0.470 (+0.135; 9 better, 0 worse) with
   recall@10 (share of the grade-3 sources among the top ten documents) 0.817
   to 0.823. Title questions: 0.500 to 0.538 (1 better, 0 worse). All 33:
@@ -225,9 +243,12 @@ graded by paper or note title (other projects' RDRs skipped). NDCG capped at
   (`search_engine.py:2342-2351`). Callers re-sort by `hybrid_score`
   (`search_engine.py:2831-2833`), which adds boosts, so OFF is the
   production baseline without boosts; Step 9 measures the full path.
-- **Verified** (`-10`): leg 1 found the same effect on the 38 collections with
-  topics: 0.322 to 0.488 (top-1, 10 better, 0 worse) and 0.486 (own band, 10
-  better, 1 worse). Capped at 1, the top-1 gain is 0.155. The own band was
+- **Measured** (`-10`): leg 1, also client-side and in-sample, saw the same
+  effect on the 38 collections with topics: 0.322 to 0.488 (top-1, 10 better, 0 worse) and 0.486 (own band, 10
+  better, 1 worse). `-10` and `-16` report the uncapped top-1 gain, +0.166; with each question's
+  NDCG capped at 1 it is 0.155 (0.322 to 0.477), recomputed from the question
+  scores in `bench/results/rdr134-taxonomy-ab-leg1-2026-11-16.json` (`-10`
+  says only that NDCG can exceed 1). The own band was
   measured at width 0.03 only, and in leg 1 only (the production-set arms were
   P0, OFF and top-1); in the gated rerun (`-16`) its worst question fell
   0.3066. The engine's `band` mode (`TopicRouteArm.java:199-202`) was not run
@@ -235,10 +256,13 @@ graded by paper or note title (other projects' RDRs skipped). NDCG capped at
   Validation sent `top1` (`scripts/bench/topic_route_engine_arm.py:48`) and the
   Step 9 arms are `off` and `top1` (`scripts/bench/topic_route_nx_answer_ab.py:63`).
   Band mode is unvalidated.
-- **Verified**: the gain comes from removing generic documents. In most
-  improved questions (8 of 10) the OFF top three held CHANGELOG.md, cli-reference.md,
+- **Measured** (client-side, in-sample): the gain comes from removing generic
+  documents. In most improved questions (8 of 10) the OFF top three held CHANGELOG.md, cli-reference.md,
   architecture.md, README.md or SKILL.md and the routed top three held the
-  answer.
+  answer. The same mechanism cuts the other way when the answer is a generic
+  document: in Step 9, routing in `nx_answer` pushed the labelled generic
+  document out of the top three on three of the 15 generic questions (GD01,
+  GD12, GD14; see Results).
 - **Verified** (`-10`): centroid similarity cannot be compared across
   collections. The global band scored 0.140 and 0.205 (−0.18 and −0.12) and
   lost about half the recall: generic topics of one collection (0.60) outrank
@@ -250,12 +274,12 @@ graded by paper or note title (other projects' RDRs skipped). NDCG capped at
 - **Verified** (`-10`): inside the single RDR collection (S1) routing gains
   only +0.021 to +0.030. The value is in the wide fan-out. Inferred, not
   measured: a request narrowed to a few collections gains less.
-- **Verified** (`-13`): falling back on short rows did not erode the gain.
+- **Measured** (`-13`, client-side): falling back on short rows did not erode the gain.
   No kept topic returned zero rows, so the zero-row fallback (F0) never
   fired; falling back when a topic returned fewer than 20 rows (Fk) fired on
   about 11 of 36 routed collections per question and gave identical scores.
   Production's per-collection k for prose is 40 at ten results
-  (`search_engine.py:899-908`), so 20 is a looser bound than production's.
+  (`search_engine.py:901-909`, `:1196-1228`), so 20 is a looser bound than production's.
 - **Verified** (`-12`): a taxonomy can outlive its chunks.
   `knowledge__1-1` holds 0 chunks (its rows were quarantined and then
   expired, `-14`) but keeps 21 topics, their centroids and assignments, so every
@@ -276,26 +300,35 @@ graded by paper or note title (other projects' RDRs skipped). NDCG capped at
   measured). This applies to prose; code collections embed without an input
   type and are not routed. The spike ranked them
   with a document-type vector, because the only client embedding route
-  (`embed_for_collection`, `http_vector_client.py:6736`) embeds as a
+  (`embed_for_collection`, `http_vector_client.py:6801`) embeds as a
   document.
 
 ### Critical Assumptions
 
-- [x] Topic routing improves cross-collection retrieval — **Status**:
-  Verified (`-10`, `-13`) — **Method**: Spike.
-- [x] Per-topic centroids are enough; no per-collection summary embedding is
-  needed — **Status**: Verified (`-10`, `-13`) — **Method**: Spike.
+Status as of the close-out (2026-11-19). At the gate the first two were
+ticked as verified and the other three were open; the measurements in Results
+changed all five.
+
+- [ ] Topic routing improves cross-collection retrieval — **Status**: held in
+  the client-side spike only, and in-sample (the 25 RDR questions are among
+  leg 1's 26; `-10`, `-13`). The engine route did not reproduce it: 0.385
+  against the 0.44 bar (`-18`). The `nx_answer` A/B failed (`-17`). —
+  **Method**: Spike, then the Minimum Viable Validation and Step 9.
+- [ ] Per-topic centroids are enough; no per-collection summary embedding is
+  needed — **Status**: held in the client-side spike only, in-sample (`-10`,
+  `-13`); the engine route's shortfall against the spike is unexplained (see
+  Results). — **Method**: Spike.
 - [ ] Ranking centroids with the query-type vector does at least as well as
   the document-type vector the spike used — **Status**: Documented (`-11`),
-  not measured — **Method**: the Minimum Viable Validation, which runs the
-  engine route.
+  not measured; Step 6, which would have measured it, was not run.
 - [ ] One routed engine request costs at most 1.5 times the latency of the
-  same request unrouted — **Status**: Unverified; 1.5 is a target, not an
-  estimate (the route adds a centroid query and a joined search per routed
-  collection) — **Method**: Minimum Viable Validation.
+  same request unrouted — **Status**: measured, not met as measured: 1.66
+  times (`-18`), a figure that does not isolate the cost of routing (see
+  Results). — **Method**: Minimum Viable Validation.
 - [ ] The gain carries through to `nx_answer`'s answers and holds for
-  questions whose answer is a generic document — **Status**: Unverified —
-  **Method**: Steps 8 and 9.
+  questions whose answer is a generic document — **Status**: measured, not
+  met: the 15 generic questions lost 0.158 NDCG@3 on a partial run that Sam
+  accepted as a FAIL (`-17`). — **Method**: Steps 8 and 9.
 
 ## Proposed Solution
 
@@ -306,9 +339,11 @@ field. For each collection in the request that has enough topic coverage, the
 engine ranks that collection's topic centroids against the query vector it
 already computed, keeps the nearest topic (or an own band), searches only
 inside the kept topics, and falls back to the collection's unscoped search
-when they return nothing. Results merge exactly as today. `nx_answer`'s
-`search` and `query` steps send the field, except steps scoped to another
-domain or a topic; nothing else does until it is measured.
+when they return nothing. Results merge exactly as today. With
+`search.topic_route_nx_answer` on, `nx_answer`'s `search` and `query` steps
+send the field, except steps scoped to another domain or a topic; nothing else
+does until it is measured. The setting is off and stays off (see Results), so
+as shipped nothing sends the field.
 
 ### Technical Design
 
@@ -361,10 +396,10 @@ and `width` only; as built, the field has two more members:
    assignments or centroids; the `CatalogHandler` routes that write manifest
    rows, documents or collections; and the two catalog background jobs
    (reconcile commit, manifest fill), which drop the whole tenant when they
-   end (`TaxonomyCoverage.java:40-44`; this list is the class's own comment:
-   I confirmed that `VectorHandler`, `TaxonomyHandler`, `CatalogHandler` and
-   `CatalogManifestFillRoutes` use `CoverageInvalidation`, and did not trace
-   each route). Not dropping, and left to the
+   end (`TaxonomyCoverage.java:40-44`; this list is the class's own comment. A search of the engine source found
+   `CoverageInvalidation` used in `VectorHandler`, `TaxonomyHandler`,
+   `CatalogHandler` and `CatalogManifestFillRoutes`; each route in the list
+   was not traced). Not dropping, and left to the
    ten-minute ceiling alone: `/rename_collection`, the tenant import commit,
    the re-embed jobs, and the engine's own writers (the reaper, gc expiry)
    (`TaxonomyCoverage.java:45-47`); `/store-delete` does not drop either,
@@ -409,7 +444,7 @@ of each collection.
 | `rerank` | Reranks the merged rows, routed and unscoped alike |
 | `include_embeddings`, `content_chars`, `include_source_uri`, `embeddings_limit` | Apply to every returned row |
 | `rerank_top_k`, `rerank_max_candidates`, `limit` | Apply to the merged rows as today |
-| `exclude_sensitive` | Applied inside the routed search as in the unscoped one |
+| `sensitivity` (the wire field; its one accepted value is `"exclude"`, `ChunkSensitivity.java:34-44`) | Applied inside the routed search as in the unscoped one: the handler turns it into the engine's `excludeSensitive` flag (`VectorHandler.java:3100-3107`) and the routed arm passes that flag to `search_topic_set_<dim>` (`TopicRouteArm.java:261-263`); the client sends `"sensitivity": "exclude"` (`http_vector_client.py:2955`, `:4324`) |
 
 **Capability.** The engine reports `vector_topic_route_supported` in
 `GET /version`, and the public cloud edge adds it to its `/version`
@@ -434,7 +469,7 @@ routed: most plans carry no scope, and only three builtin templates declare
 `prose`, so a prose-only rule left routing almost unreachable; Step 9 probe,
 `134-research-17`), carried the way `chash_allow` is: popped from the
 step's args and held in a context variable that the `search` and `query`
-tools read when they call `search_cross_corpus` (`runner.py:3562-3567`,
+tools read when they call `search_cross_corpus` (`runner.py:3565-3573`,
 `-14`), so the dispatcher never drops it. Only collections of the prose
 prefixes are routed, even when a step's corpus is `all`. A `query` step
 that takes the catalog route (`author`, `content_type`, `follow_links`,
@@ -533,7 +568,12 @@ collection.
 
 ### Consequences
 
-- `nx_answer`'s prose search ranks specific documents above generic ones.
+The design intended `nx_answer`'s prose search to rank specific documents
+above generic ones. That held in the client-side spike on in-sample RDR
+questions; it did not hold on the engine route (0.385 against the 0.44 bar)
+and in `nx_answer` the generic-answer questions lost 0.158 NDCG@3 (see
+Results), so routing is off. If routing were on:
+
 - Topic coverage becomes part of retrieval quality for routed collections:
   below 0.9 a collection is searched as today, and above it up to a tenth of
   its chunks are outside the routed search.
@@ -544,11 +584,16 @@ collection.
 
 - **Risk**: a question whose answer is a generic document (for example "what
   changed in 8.3.0", answered by CHANGELOG.md) gets worse. **Mitigation**:
-  Step 8 adds such questions; the default turns on only if they hold (Step 9).
+  Step 8 added such questions and Step 9 ran them: they did not hold (3 of
+  15 worse, mean -0.158), so the default stays off.
 - **Risk**: the kept topic is the wrong one and still returns rows, so the
   answer is hidden. **Mitigation**: the coverage check, top-1 per collection
-  rather than across collections, and the measured rate: 0 of 33 questions
-  got worse, and recall rose. Accepted as a residual risk, watched by Step 9.
+  rather than across collections. The risk was realised. The client-side
+  spike found 0 of 33 questions worse (`-13`, in-sample). The engine route
+  had 3 of the 25 RDR questions worse than OFF, 2 of them by more than 0.1
+  (G15, H01), and RDR recall@10 fell from 0.777 to 0.737 (`-18`). In the Step 9
+  partial run 4 of 26 paired questions were worse (GD01, GD12, GD14, G15) and
+  1 better (`-17`). Routing stays off.
 - **Risk**: in a routed collection above 0.9 coverage, unassigned chunks
   (up to a tenth) are not searched. **Mitigation**: the cache drop on the
   engine routes listed under engine step 1 (a store through `/upsert-chunks`,
@@ -635,9 +680,11 @@ The router does not choose the `pci_` index; the planner does. So the
 short-row exposure equals the single-topic function's, and Step 5a measures
 it. A direct call forgoes the router's exact-scan route for small sets, the
 widest `ef_search` when a collection has no `pci_` index, and the
-empty-result exact re-run. Step 3 decides whether the topic arm needs any of
-them, and needs its own arm method, since the existing direct call
-(`runCombinedQuery`) is not a fan-out arm.
+empty-result exact re-run. Step 3 decided that the topic arm adopts none of
+them (`TopicRouteArm.java:75-77`; the zero-row fallback covers the empty
+case, and short pages were measured in Step 5a-ii, see Results), and gave the
+topic arm its own method, `TopicRouteArm.attempt` (`:123`), since the
+existing direct call (`runCombinedQuery`) is not a fan-out arm.
 
 #### Step 2: Coverage
 
@@ -656,7 +703,17 @@ stored batch whose assignment is deferred lowers the cached ratio.
 #### Step 3: `topic_route` on search-per-collection
 
 Engine steps 1 to 6 above and the per-collection status in the response.
-Tests: routed; `no_topics` (no centroids; low coverage); `fallback` (zero
+As built, the two reads that come before the topic search, the coverage count
+(when it is not cached) and the centroid ranking, are each limited to half of
+what the arm's time budget has left, so a slow cold read cannot use up the
+budget the unscoped search needs; a read cut by that share degrades the
+collection to `no_topics` with a `topic_route_error`
+(`TopicRouteArm.java:61-69`, `:243-245`). Besides `topic_route_status`, each
+`per_collection` entry can carry `topic_route_min_coverage`,
+`topic_route_error`, `topic_route_coverage` (the coverage ratio read, when the
+collection has centroids and chunks) and `topic_route_topics` (the number of
+topics kept, when the centroid ranking ran) (`VectorHandler.java:857-863`;
+`TopicRouteArm.java:98-104`). Tests: routed; `no_topics` (no centroids; low coverage); `fallback` (zero
 rows); absent field gives today's response byte for byte.
 
 #### Step 4: Field interactions and capability
@@ -673,8 +730,11 @@ allowlist (the conexus edge). Test: the cloud client reads the flag.
 
 `topic_route` on `search_per_collection` and `search_cross_corpus`, read only
 when the engine reports the capability; the client logs each response's
-per-collection statuses as the structlog event `search_topic_route` (test:
-one event per routed request); a benchmark arm that calls the engine route
+per-collection statuses as the structlog event `search_topic_route`: one event
+per `search_cross_corpus` call that asked for routing, including a call that
+went out unrouted, where the event names the reason
+(`src/nexus/search_engine.py:2417-2418`, `src/nexus/topic_route.py:197-235`); a
+benchmark arm that calls the engine route
 and records latency, statuses, coverage values and short-row counts against
 an exact scan. Run the Minimum Viable Validation.
 
@@ -740,23 +800,26 @@ stated as refuted in Key Discoveries and Alternative 2; the design ranks
 topics only within a collection. The stub's Gap 3 (the `cluster_by`
 docstring) is dropped: the tool's own description already says the default
 is off, the one stale sentence is in `_search_render`
-(`src/nexus/mcp/core.py:3451`), and it is unrelated to recall.
+(`src/nexus/mcp/core.py:3474`), and it is unrelated to recall.
 
 ### Assumption Verification
 
-Two critical assumptions are verified (`-10`, `-13`). Three are open, each
-with the step that measures it: query-type ranking and latency (Minimum
-Viable Validation, Step 5a), answer-level gain and generic-answer questions
-(Steps 8 and 9).
+At the gate, two critical assumptions were verified in the client-side spike
+(`-10`, `-13`) and three were open, each with the step that measures it. Since
+then: the spike's gain is in-sample and the engine route did not reproduce it
+(`-18`); latency was measured and not met as measured (`-18`); answer-level
+gain and generic-answer questions were measured and not met (`-17`);
+query-type ranking is still unmeasured because Step 6 was not run. See the
+Critical Assumptions list for each one's status and Results for the numbers.
 
 #### API Verification
 
 | API call | Library | Verification |
 | --- | --- | --- |
 | `HttpCentroidStore.ann_query` | nexus | Source read, `http_centroid_store.py:249`; exercised by the spike |
-| `HttpVectorClient.search_topic_scoped` | nexus | Source read, `http_vector_client.py:4960`; exercised by the spike |
-| `search_cross_corpus` | nexus | Source read, `search_engine.py:1423`; exercised as the production baseline (`-13`) |
-| `/v1/vectors/search-per-collection` | nexus engine | Source read, `VectorHandler.java:279`; query embedder `PgVectorRepository.java:3241` |
+| `HttpVectorClient.search_topic_scoped` | nexus | Source read, `http_vector_client.py:5025`; exercised by the spike |
+| `search_cross_corpus` | nexus | Source read, `search_engine.py:1425`; exercised as the production baseline (`-13`) |
+| `/v1/vectors/search-per-collection` | nexus engine | Source read, `VectorHandler.java:319` and `:916`; query embedder `PgVectorRepository.java:3241` |
 | Voyage `input_type` | Voyage AI | Documentation (`-11`) |
 
 ### Scope Verification
@@ -774,8 +837,9 @@ deferred.
   sends the field only to an engine that reports it, through the edge
   allowlist (Step 5).
 - **IDE compatibility**: none.
-- **Incremental adoption**: off by default; on only for `nx_answer` steps
-  not scoped to another domain or a topic, after Step 9.
+- **Incremental adoption**: off by default, and it stays off: Step 9 failed,
+  so the setting is not turned on (see Results). Were it on, it would apply
+  to `nx_answer` steps not scoped to another domain or a topic.
 - **Secret/credential lifecycle**: none.
 - **Memory management**: one cached coverage ratio per collection.
 
@@ -817,6 +881,21 @@ search-per-collection, the topic-set and coverage functions, the
 `vector_topic_route_supported` flag) and the client option stay in the code,
 and nothing uses them by default.
 
+### Run order and approval
+
+The subsections below follow the order the runs happened, which is not the
+order of the Implementation Plan. The Step 9 `nx_answer` A/B (Phase 2) ran
+first: its probes began at 15:48Z and its rerun ran from 17:28Z to 18:40Z. The
+Minimum Viable Validation (Step 5a-ii, Phase 1) ran after it, from 19:58Z to
+20:24Z. Bead nexus-7fku2.1.9 says "If the validation fails and is not recovered,
+Phase 2 does not start" (`bd show nexus-7fku2.1.9`). The push-train
+coordinator (halcyon) scheduled the A/B to run once engine 0.1.197 was
+deployed, before the validation had run (its messages to this session on
+2026-11-19). Sam approved the A/B run and its spend, up to 100 USD
+(`134-research-17`). He did not separately approve running it before the
+validation. The validation later failed on its own, so the early A/B did not
+change the outcome, but the order was not the plan's.
+
 ### What was in the sample
 
 Read the numbers below with this in mind.
@@ -836,6 +915,58 @@ Read the numbers below with this in mind.
   so (`scripts/bench/topic_route_nx_answer_ab.py:94-97`). GD09 to GD15 were
   not seen then (inferred from that run stopping after 8 of 73 questions, not
   read per question).
+- In the Step 9 rerun exactly one title question ran (the rerun file's
+  summary, `by_kind.title.n` = 1, in `rdr134-step9-ab-rerun.json`). It scored
+  NDCG@3 0.0 in both arms, so it says nothing either way.
+
+### Step 9, nx_answer A/B (`134-research-17`)
+
+Cloud engine 0.1.197, driver `scripts/bench/topic_route_nx_answer_ab.py`.
+The rerun used develop 5b366f0d5, which holds the client's calibrated pool cut
+(GH #1667), and the calibrated-primary driver (4a7bb89d6), 2026-11-19 17:28:06Z
+to 18:40:17Z. It cost 18.31 USD (about 0.68 USD a question) and stopped at 27
+of 73 questions because one envelope had a step without `cost_usd`, and the
+driver does not run past a cost it cannot read. An earlier partial run (8 of 73
+questions, 2.41 USD) was stopped when raw-distance ordering put every code row
+ahead of every prose row on the plan-473 questions (see Revision History,
+2026-11-19).
+
+Spend over the whole A/B, from `-17`: a probe at 0.22 USD, the partial run at
+2.41 USD, a probe at 0.35 USD and the rerun at 18.31 USD, about 21 USD in all
+(21.29 USD by that sum), against the 100 USD cap Sam approved. Two more runs
+have no recorded cost: a probe whose three calls the write guard refused, and a
+full run stopped with at most one call in flight.
+
+The rule: the default becomes `top1` only if NDCG@3 over all questions rises
+by at least 0.03 with more questions better than worse, and the generic-answer
+questions lose no more than 0.02 on average. The driver wants a complete run,
+and its own verdict on this file reads "incomplete: no verdict". Sam accepted a
+FAIL on the partial run instead of paying about 31 USD to finish. On the 26
+paired questions the rule's three checks all read false.
+
+| Measure (partial run) | Off | Top1 | Change |
+| --- | --- | --- | --- |
+| First clause: the 26 paired questions, NDCG@3, calibrated order | | | -0.089 (1 better, 4 worse, 21 tied) |
+| Generic questions, NDCG@3, calibrated order (15 of 15 done) | 0.654 | 0.496 | -0.158 (0 better, 3 worse; CI95 -0.334 to 0.0) |
+| Generic questions, recall@10 | 1.0 | 0.733 | -0.267 |
+| RDR questions, in-sample (10) | 0.318 | 0.325 | +0.007 (1 better, 1 worse) |
+| Title questions (1) | 0.0 | 0.0 | 0.0 |
+| Routed questions only (24) | | | -0.096 (1 better, 4 worse, 19 tied) |
+| Envelope order, secondary (26 paired) | | | -0.093 |
+| Raw distance order (26 paired) | | | -0.056 |
+
+The first clause asks for at least +0.03 over all questions; the 26 paired
+questions read -0.089. That is not the whole 73 questions, and the other 46
+were not run. The generic clause allows -0.02, and the measured -0.158 is far
+below it, with 15 questions (the rule needs at least 10). The three generic
+losses were GD01 1.0 to 0.0, GD12 0.631 to 0.0 and GD14 0.956 to 0.213; the
+other loss was G15 (RDR), 0.613 to 0.387, and the one win was H02, 0.704 to 1.0.
+One question (G07) errored with no chunks, and GD08's two arms ran different
+plans. The NDCG figure with calibrated order is the pre-declared primary after
+Sam's change; the other orders are printed, not decided on. Mean elapsed time
+per question was 81.6 s off and 72.6 s top1. Reading: on the plans these
+questions match, routing in `nx_answer` pushes the labelled generic document
+out of the top three.
 
 ### Step 5a-ii, Minimum Viable Validation (`134-research-18`)
 
@@ -858,9 +989,10 @@ figure, where the production call (P0) and the exact per-collection scan
 (OFF) scored the same. In this run P0 scored 0.335 and OFF, the exact scan,
 scored 0.315. The engine route's 0.385 is above both and below the bar, which
 is the client spike's 0.470 less 0.03. Against OFF, 6 questions were better
-and 3 worse (counted from the results file, engine route against OFF). Recall@10 on the RDR questions fell, from 0.777 (P0 and
-OFF) to 0.737 (from the results file). The 8 title questions scored 0.500 in
-every arm.
+and 3 worse (counted from the results file, engine route against OFF). Recall@10
+on the RDR questions fell, from 0.777 (P0 and OFF) to 0.737 (from the results
+file). The 8 title questions scored NDCG@3 0.500 in every arm, and their
+recall@10 fell from 0.667 (P0 and OFF) to 0.542 (from the results file).
 
 The latency figure is soft. It is one run with the arms in a fixed order (P0,
 then the routed arm, then the gate-off arm), and the gate-off arm, which
@@ -898,50 +1030,18 @@ centroid ranking of Step 6.
 ### Step 6 was not run
 
 Step 6 (rank centroids with a second, document-type query embedding) was not
-run, by Sam's decision on 2026-11-19. The Minimum Viable Validation text sends
-a quality miss to Step 6. It was not run because its extra embedding per
-model group could only add latency, and the latency bar had already failed.
-The Critical Assumption that query-type ranking does at least as well as the
+run. The Minimum Viable Validation text sends a quality miss to Step 6. The
+decision recorded for this close-out (session marlowe, 2026-11-19) is to stop
+and close the RDR; the words recorded are "Step 6 NOT run, stop and close the
+RDR" (the close-out note in T1 scratch; `134-research-17` and `-18` record the
+two failed checks, not Step 6's decision). The reasons in this paragraph are
+the recorder's reading of the evidence, not Sam's words (inferred, not read):
+both checks had failed on quality (0.385 against 0.44, and Step 9's generic
+loss); Step 6 targets quality; but the gate-off arm already matched the gated
+one, and the `nx_answer` A/B had failed with the centroid ranking as built,
+so the choice was not to fund an engine change and another measurement cut. The
+Critical Assumption that query-type ranking does at least as well as the
 document-type ranking is therefore still unmeasured.
-
-### Step 9, nx_answer A/B (`134-research-17`)
-
-Cloud engine 0.1.197, driver `scripts/bench/topic_route_nx_answer_ab.py`.
-The rerun used develop 5b366f0d5, which holds the client's calibrated pool cut
-(GH #1667), and the calibrated-primary driver (4a7bb89d6), 2026-11-19 17:28:06Z
-to 18:40:17Z. Sam approved up to 100 USD. The rerun cost 18.31 USD (about 0.68
-USD a question) and stopped at 27 of 73 questions because one envelope had a
-step without `cost_usd`, and the driver does not run past a cost it cannot
-read. An earlier partial run (8 of 73 questions, 2.41 USD) was stopped when
-raw-distance ordering put every code row ahead of every prose row on the
-plan-473 questions (see Revision History, 2026-11-19).
-
-The rule: the default becomes `top1` only if NDCG@3 over all questions rises
-by at least 0.03 with more questions better than worse, and the generic-answer
-questions lose no more than 0.02 on average. The driver wants a complete run.
-Sam accepted a FAIL on the partial run instead of paying about 31 USD to
-finish, because the generic clause fails whatever the other 46 questions show.
-
-| Measure (partial run) | Off | Top1 | Change |
-| --- | --- | --- | --- |
-| Generic questions, NDCG@3, calibrated order (15 of 15 done) | 0.654 | 0.496 | -0.158 (0 better, 3 worse; CI95 -0.334 to 0.0) |
-| Generic questions, recall@10 | 1.0 | 0.733 | -0.267 |
-| RDR questions, in-sample (10) | | | +0.007 (1 better, 1 worse) |
-| Routed questions only (24) | | | -0.096 (1 better, 4 worse, 19 tied) |
-| Envelope order, secondary (26 paired) | | | -0.093 |
-| Raw distance order (26 paired) | | | -0.056 |
-
-The generic clause allows -0.02, and the measured -0.158 is far below it, with
-15 questions (the rule needs at least 10). The three generic losses were
-GD01 1.0 to 0.0, GD12 0.631 to 0.0 and GD14 0.956 to 0.213; the other loss was
-G15 (RDR), 0.613 to 0.387, and the one win was H02, 0.704 to 1.0. The first
-clause, the rise over all questions, was not evaluated: the run is partial. One
-question (G07) errored with no chunks, and GD08's two arms ran different plans.
-The NDCG figure with calibrated order is the pre-declared primary after Sam's
-change; the other orders are printed, not decided on. Mean elapsed time per
-question was 81.6 s off and 72.6 s top1. Reading: on the plans these
-questions match, routing in `nx_answer` pushes the labelled generic document
-out of the top three.
 
 ### Band mode
 
@@ -950,13 +1050,12 @@ and no engine run used it (see Key Discoveries).
 
 ### Effect on the Critical Assumptions
 
-The Critical Assumptions above are left as written at the gate. Their
-state now: the 1.5 times latency bound is not met as measured (1.66 times,
-and the figure does not isolate routing); the carry-through to `nx_answer`
-and to generic-answer questions is not met (generic -0.158); query-type
-ranking is unmeasured (Step 6 not run). The Risks entry that reports "0 of 33
-questions got worse" is the client-side measurement of `-13`; the engine route
-had two questions worse by more than 0.1.
+The Critical Assumptions list above now carries each one's status. In short:
+the 1.5 times latency bound is not met as measured (1.66 times, and the figure
+does not isolate routing); the carry-through to `nx_answer` and to
+generic-answer questions is not met (generic -0.158); query-type ranking is
+unmeasured (Step 6 not run); the client-side gain is in-sample and the engine
+route did not reproduce it.
 
 ## Revision History
 
@@ -1008,3 +1107,14 @@ had two questions worse by more than 0.1.
   probe, the six SQL functions, the RDR-229 key sites, and the leftovers (the
   2.5 s client figure, the router cite, the band figure, merge versus
   `hybrid_score` order).
+- 2026-11-20: Close-out fix round (critique `nexus/critique-1421c17d4-nexus-7fku2.1.12-2026-11-20-r1`):
+  statements outside Results that the results contradict are rewritten in
+  place (Consequences, the Risks entry on a wrong topic, the Critical
+  Assumptions, Assumption Verification, Incremental adoption, the Key
+  Discoveries labels); the Results subsections follow run order and record that
+  Step 9 ran before the Minimum Viable Validation; figures omitted before are
+  added (title recall, the 26-question first clause, one title question, total
+  Step 9 spend); the Step 6 reason no longer rests on latency; the event count,
+  the sensitivity field, the Step 1 router decision, the clamp and the
+  `topic_route_*` keys, and the stale line cites are corrected; RDR-229 is
+  accepted and RDR-193 closed.
