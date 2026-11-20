@@ -265,13 +265,13 @@ Topic taxonomy improves search through three mechanisms:
 
 `nx taxonomy project` maps chunks from one collection against topic centroids in other collections, creating `assigned_by='projection'` rows that surface cross-domain connections (e.g., RDR docs matching the code that implements them). Each projection row stores the raw cosine similarity plus `source_collection` and `assigned_at`.
 
-Default thresholds when `--threshold` is omitted:
+Default thresholds when `--threshold` is omitted, by the source collection's catalog content type (its name's prefix only when no catalog row backs it or the row read fails):
 
-| Source prefix | Default |
+| Content type | Default |
 |---|---|
-| `code__*` | 0.70 |
-| `knowledge__*` | 0.50 |
-| `docs__*`, `rdr__*` | 0.55 |
+| `code` | 0.70 |
+| `knowledge` | 0.50 |
+| `docs`, `rdr` | 0.55 |
 
 `--use-icf` computes Inverse Collection Frequency per target topic and suppresses hubs (topics appearing in nearly every source) before threshold filtering. For the operator guide, calibration loop, and troubleshooting, see [taxonomy-projection-tuning](exploration/taxonomy-projection-tuning.md).
 

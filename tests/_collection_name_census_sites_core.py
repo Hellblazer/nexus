@@ -315,7 +315,7 @@ SITES: tuple[S, ...] = (
       ('from nexus.corpus import index_model_for_collection  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)', 'return index_model_for_collection(collection)'),
       'primitive_call', 'holdover', WM_P22),
     S('src/nexus/projection_threshold.py',
-      ('return threshold_for_content_type(row["content_type"])', 'return default_projection_threshold(collection_name)'),
+      ('return ProjectionThreshold(', 'default_projection_threshold(collection_name),'),
       'primitive_call', 'mint', MINT_NOROW),
     S('src/nexus/reembed_job.py',
       ('name = f"{content_type}__{owner.replace(\'.\', \'-\')}__{target_model}__v1"', 'if not is_conformant_collection_name(name):'),
