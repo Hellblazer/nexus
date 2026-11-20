@@ -100,8 +100,9 @@ def test_index_md_fails_loudly_when_the_registry_cannot_be_read(runner, fake_md,
     _install_finder(monkeypatch, finder)
     with patch("nexus.doc_indexer.index_markdown", return_value=_MD_RESULT) as m:
         result = runner.invoke(main, ["index", "md", str(fake_md), "--collection", "field-notes"])
-    assert result.exit_code != 0
-    assert isinstance(result.exception, CollectionRegistryUnreadableError), result.output
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), "a click error, not a traceback"
+    assert "cannot read the catalog row for knowledge subject 'field-notes'" in result.output
     assert not m.called, "a write must not proceed under the rendered name"
 
 
@@ -137,8 +138,9 @@ def test_index_pdf_fails_loudly_when_the_registry_cannot_be_read(runner, fake_pd
     _install_finder(monkeypatch, MagicMock(side_effect=RuntimeError("engine down")))
     with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_RESULT) as m:
         result = runner.invoke(main, ["index", "pdf", str(fake_pdf), "--collection", "field-notes"])
-    assert result.exit_code != 0
-    assert isinstance(result.exception, CollectionRegistryUnreadableError), result.output
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), "a click error, not a traceback"
+    assert "cannot read the catalog row for knowledge subject 'field-notes'" in result.output
     assert not m.called
 
 
@@ -160,8 +162,9 @@ def test_index_pdf_dir_fails_loudly_when_the_registry_cannot_be_read(runner, hom
     _install_finder(monkeypatch, MagicMock(side_effect=RuntimeError("engine down")))
     with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_RESULT) as m:
         result = runner.invoke(main, ["index", "pdf", "--dir", str(d), "--collection", "field-notes"])
-    assert result.exit_code != 0
-    assert isinstance(result.exception, CollectionRegistryUnreadableError), result.output
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), "a click error, not a traceback"
+    assert "cannot read the catalog row for knowledge subject 'field-notes'" in result.output
     assert not m.called
 
 
