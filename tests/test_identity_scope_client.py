@@ -256,12 +256,16 @@ def test_the_mcp_tool_refuses_persist_and_flag_for_identity_scratch_and_closes_t
     assert "unknown scope" in core.scratch_manage(action="promote", entry_id="e", scope="galaxy")
 
 
-def test_mine_for_a_delegated_child_is_its_parents_project(monkeypatch, db) -> None:
-    """The child's notes live where its identity scratch lives, so they do not orphan when the child ends."""
+def test_mine_for_a_delegated_child_reads_its_parents_project_and_never_writes_it(monkeypatch, db) -> None:
+    """Reads follow the child's identity scratch to the parent. Its WRITES are refused (RDR-253 Step 6 part 3,
+    nexus-hczdo): a delegated identity keeps no identity notes, so none orphan when the child ends."""
     holds(monkeypatch, "i9")
     monkeypatch.setenv("NX_IDENTITY_TOKEN", "/some/token/file")
     closed: list[bool] = []
     client = SimpleNamespace(show=lambda i: {"id": i, "kind": "delegated", "parent": "i7"}, close=lambda: closed.append(True))
     monkeypatch.setattr("nexus.identity.bind_client.IdentityClient.from_config", classmethod(lambda cls, **k: client))
-    assert CliRunner().invoke(memory, ["put", "body", "--mine", "-t", "plan"]).exit_code == 0
+    assert CliRunner().invoke(memory, ["list", "--mine"]).exit_code == 0
     assert db.calls[0][1]["project"] == "identity/i7" and closed == [True]
+    out = CliRunner().invoke(memory, ["put", "body", "--mine", "-t", "plan"])
+    assert out.exit_code == 1 and "delegated" in out.output and "Traceback" not in out.output
+    assert [verb for verb, _ in db.calls] == ["list"], "the refused put reached no store"

@@ -61,6 +61,16 @@ def identity_project(identity_id: str) -> str:
     """The T2 project of one identity's own notes. Keyed by the identity id, never by a name, so a rename moves nothing."""
     return f"{IDENTITY_PROJECT_PREFIX}{identity_id}"
 
+
+def _check_identity_notes_write(project: str) -> None:
+    """Refuse a write to ``identity/<id>`` from an ephemeral or delegated identity (RDR-253 Step 6 part 3, nexus-hczdo).
+    Costs nothing for any other project."""
+    if project.startswith(IDENTITY_PROJECT_PREFIX):
+        from nexus.identity.notes import check_write  # noqa: PLC0415 — deferred: only an identity project pays
+
+        check_write(project)
+
+
 #: Stopwords shared with MemoryStore for Jaccard overlap computation.
 _STOPWORDS: frozenset[str] = frozenset({
     "the", "a", "an", "in", "of", "for", "to", "and", "or", "is", "are", "was",
@@ -267,6 +277,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         both columns to NULL in service mode, undoing nexus-9clx — see
         :mod:`nexus.db.t2._attribution`.
         """
+        _check_identity_notes_write(project)
         agent, session = resolve_attribution(agent, session)
         payload: dict[str, Any] = {
             "project": project,
@@ -314,6 +325,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not replaces or not replaces.strip():
             raise ValueError("replaces must name the exact title of the row to replace.")
+        _check_identity_notes_write(project)
         sent = with_lineage_line(content, replaces)
         agent, session = resolve_attribution(agent, session)
         payload: dict[str, Any] = {
@@ -1121,6 +1133,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Returns ``(row_id, action)`` where ``action`` is ``"inserted"`` or
         ``"merged"``.
         """
+        _check_identity_notes_write(project)
         payload: dict[str, Any] = {
             "project": project,
             "title": title,

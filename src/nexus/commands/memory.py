@@ -37,10 +37,11 @@ def _needs_quarantine_routes(verb: str) -> Generator[None, None, None]:
         raise
 
 
-def _mine(project: str | None, mine: bool, *, required: bool = False) -> str | None:
+def _mine(project: str | None, mine: bool, *, required: bool = False, write: bool = False) -> str | None:
     """The project a command works in: *project*, or with ``--mine`` the caller's own identity project (RDR-253:
     ``identity/<id>``, keyed by id so a rename moves nothing). Both at once is a usage error, and so is ``--mine`` from a
-    process that holds no identity."""
+    process that holds no identity. A delegated child may read its parent's notes (``--mine``) but never write them
+    (*write*: RDR-253 Step 6 part 3, nexus-hczdo); the store refuses the same write for an ephemeral identity."""
     if mine and project:
         raise click.UsageError("give --project or --mine, not both")
     if mine:
@@ -52,6 +53,10 @@ def _mine(project: str | None, mine: bool, *, required: bool = False) -> str | N
             raise click.ClickException("--mine needs an identity, and no identity is bound to this process")
         owner = record.identity
         if os.environ.get("NX_IDENTITY_TOKEN", "").strip():
+            if write:
+                raise click.ClickException(
+                    "--mine is refused for a delegated identity: it keeps no identity notes (they would orphan when "
+                    "the child ends); write the note in project T2 with --project")
             # A delegated child (``claude -p``) keeps its notes where identity scratch keeps them: under its parent, so
             # they do not orphan when the child ends.
             from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415
@@ -126,25 +131,30 @@ def put_cmd(
     is nothing for the caller to start by hand. ``--help`` advertised
     a deleted T2 daemon start verb until that sub-stage's review.
     """
-    project = _mine(project, mine, required=True)
+    project = _mine(project, mine, required=True, write=True)
     if content == "-":
         content = read_stdin_utf8()
     try:
         ttl_days = parse_ttl(ttl)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    with t2_handle() as db:
-        if merge:
-            row_id, action = db.memory.put_or_merge(
-                project=project, title=title, content=content, tags=tags,
-                ttl=ttl_days, min_similarity=merge_threshold,
-            )
-        else:
-            row_id = db.memory.put(
-                project=project, title=title, content=content, tags=tags,
-                ttl=ttl_days,
-            )
-            action = "inserted"
+    from nexus.identity.notes import IdentityNotesRefused  # noqa: PLC0415 — deferred: keeps CLI startup light
+
+    try:
+        with t2_handle() as db:
+            if merge:
+                row_id, action = db.memory.put_or_merge(
+                    project=project, title=title, content=content, tags=tags,
+                    ttl=ttl_days, min_similarity=merge_threshold,
+                )
+            else:
+                row_id = db.memory.put(
+                    project=project, title=title, content=content, tags=tags,
+                    ttl=ttl_days,
+                )
+                action = "inserted"
+    except IdentityNotesRefused as exc:
+        raise click.ClickException(str(exc)) from exc
     verb = "Merged into" if action == "merged" else "Stored"
     click.echo(f"{verb}: {project}/{title} (id={row_id})")
 
