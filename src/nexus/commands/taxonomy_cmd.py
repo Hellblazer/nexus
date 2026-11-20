@@ -3146,15 +3146,23 @@ def _without_superseded(collections: list[str]) -> list[str]:
 
 
 def prune_supports_exact() -> bool:
-    """Whether the engine's taxonomy prune route has the exact-name mode (a request
-    field ``match: "exact"``, advertised by a ``/version`` capability flag; the engine
-    half is nexus-p2m1x.9's follow-up for engine 0.1.200).
+    """Whether the engine's taxonomy prune route has the exact-name mode (the request
+    field ``match: "exact"``, against the default ``"prefix"``), read from ``GET /version``'s
+    ``taxonomy_prune_exact_supported`` through the shared catalog client's cached probe: one
+    ``/version`` read per cache window, never one per collection.
 
-    ``False`` until the flag's key is known: with it, :func:`_prune_plan` keeps the
-    prefix-collision guard and the prune runs in the engine's prefix mode, as it
-    does against an engine that predates the mode.
+    Only a JSON ``true`` counts. An absent key, ``false`` or an unreadable ``/version`` is
+    ``False``: :func:`_prune_plan` then keeps the prefix-collision guard and the prune runs in
+    the engine's prefix mode, as it does against an engine that predates the mode.
     """
-    return False
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    try:
+        probe = getattr(make_catalog_reader(), "supports_taxonomy_prune_exact", None)
+        return callable(probe) and probe() is True
+    except Exception:  # noqa: BLE001 - a capability probe never fails a prune; unknown keeps the guard
+        _log.warning("taxonomy_prune_exact_probe_failed", exc_info=True)
+        return False
 
 
 class _PrunePlan(NamedTuple):

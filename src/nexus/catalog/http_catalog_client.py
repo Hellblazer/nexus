@@ -3547,6 +3547,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         version = flags.get("release_version") or flags.get("app_version") or ""
         return flags.get("catalog_sensitivity_supported") is True, str(version) if flags else ""
 
+    def supports_taxonomy_prune_exact(self) -> bool:
+        """Does the taxonomy prune route take ``match: "exact"`` (``GET /version``'s ``taxonomy_prune_exact_supported``,
+        nexus-p2m1x.9)? Only a JSON ``true`` counts; a failed or edge-trimmed answer reads False (the prefix guard stays)."""
+        return self._version_flags().get("taxonomy_prune_exact_supported") is True
+
     def supports_catalog_move(self) -> bool:
         """Does the engine answer ``POST /documents/move`` and ``/owners/move`` (``GET /version``'s
         ``catalog_move_supported``, RDR-254)? Only a JSON ``true`` counts; a failed or edge-trimmed answer reads False."""
