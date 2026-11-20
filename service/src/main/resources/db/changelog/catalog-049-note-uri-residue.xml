@@ -24,24 +24,41 @@
 
     HELD VALUES. A row whose new value a LIVE document already holds (catalog-016's partial unique index on live
     (tenant_id, source_uri)) is skipped by the template and is not counted by the verification, so the verification can
-    reach empty. Only documents can meet a held value: highlights are unique on (tenant_id, doc_id) and aspects on
-    (tenant_id, collection, source_path), neither on source_uri. So a satellite row is repaired only where its document
-    was: its template and verification require the row's document (tenant_id, doc_id = tumbler) to already carry
-    chroma://<content_type>__S/ (S = the satellite's collection). A document skipped for a held value still carries the
-    prefix-free segment, so its satellites are skipped too. The verification of each move is the rows that still match
-    the rule with a free new value (a satellite: with its document repaired).
+    reach empty. THE MOVE COUNTS NOTHING: a held row is neither repaired nor reported by the move. "Skipped and counted"
+    in RDR-229 item 12 is the P1.2 census, the `uri-residue` row of `nx catalog doctor` (uri_residue_doctor, the nx doctor row
+    uri-residue): re-run it after the moves complete, and what it still counts is what they did not clear. A held row stays
+    on a prefix-free segment, which NoteUri.isNote classes as a note, so the stale-note repair may rewrite it to
+    nx-note://<label>/; that is the RDR's accepted outcome for that shape. Only documents can meet a held value:
+    highlights are unique on (tenant_id, doc_id) and aspects on (tenant_id, collection, source_path), neither on
+    source_uri. So a satellite row is repaired only where its document was: its template and verification require the
+    row's document (tenant_id, doc_id = tumbler) to already carry chroma://<content_type>__S/ (S = the satellite's
+    collection). A document skipped for a held value still carries the prefix-free segment, so its satellites are skipped
+    too. The verification of each move is the rows that still match the rule with a free new value (a satellite: with its
+    document repaired).
 
     ORDER AND runtime changeset_id. The catalog_documents move runs first; its on_complete runs in the transaction that
-    sets completed_at, and registers the two satellite moves. data_moves.changeset_id is NOT NULL (datamoves-001-1), so a
-    runtime-registered move needs a value. DECISION (residual S-3 point 3, nexus-p2m1x.41): a move registered at run time
-    carries the id of the changeset whose TEXT holds its registering INSERT, here catalog-049-2 (the bare changeset id,
-    not the file::id::author key), because that is what the column means ("the changeset that registered the move") and
-    it keeps the move traceable to a file of the tree. It is a literal in the on_complete text, so the satellite moves
-    share the parent's changeset_id. P3.3b, P3.3c, P3.7 and P4.1 reuse the rule: the child's changeset_id is the
-    changeset that ships the on_complete which registers it.
+    sets completed_at, and registers the two satellite moves with ONE INSERT that has no ON CONFLICT, on purpose: a
+    satellite label already in the registry (hand-registered, or another definition under the name) makes the INSERT
+    fail, on_complete and completed_at roll back together, and the parent reports an ON_COMPLETE failure (a permanent
+    one, fixed by a superseding move). ON CONFLICT DO NOTHING would keep the other row silently and report the parent done,
+    and a template that is not the shipped one would then run unseen; NoteUriResidueRepairMovesIntegrationTest pins the
+    loud failure.
+    data_moves.changeset_id is NOT NULL (datamoves-001-1), so a move registered at run time needs a value. DECISION
+    (residual S-3 point 3, nexus-p2m1x.41), TWO RULES. (1) A move registered by another move's on_complete takes the
+    bare id of the changeset whose TEXT holds its registering INSERT, here catalog-049-2 (not the file::id::author key):
+    the column means "the changeset that registered the move", and the INSERT is in that file. It is a literal in the
+    on_complete text, so the two satellites share their parent's changeset_id. (2) A move registered by the engine itself,
+    with no on_complete text anywhere to name a changeset (P3.3b's pass registering the swap moves, P3.7's completion
+    check registering the drop move, the engine-registered parts of P3.3c and P4.1), takes `engine:<pass>:<engine
+    version>`. A row alone does not say a child was registered at run time; `engine:` rows are the ones the engine wrote,
+    and the other rows are Liquibase's or, for a satellite, a parent's on_complete.
 
     THE OWNER-READ POLICIES are the next include (catalog-050-note-uri-residue-owner-read.xml): the three driving tables
-    carry only tenant_isolation, and the worker's verification needs the migrating role to read every tenant's rows.
+    carry only tenant_isolation, and the worker's verification needs the migrating role to read every tenant's rows. A
+    fourth, nexus.catalog_collections (catalog-050-4), is not a driving table but every verification joins it for the
+    content type, and the table-wide verification runs as the migrating role with no tenant: without the policy the join is
+    empty and the backstop reads a table with residue as clean. DrivingTableIsolationCheck asks the isolation question of
+    that table too while a rdr229-residue-* move is registered.
 
     SIZING: measured on a production PITR fork 2026-11-20 (T2 nexus/engine-cut-0.1.200; bob's run of
     scripts/spikes/rdr229-p210-fork-timing/run.sh, Sam's ruling T2 nexus/sam-ruling-p210-moves-on-spike-fork-2026-11-20).

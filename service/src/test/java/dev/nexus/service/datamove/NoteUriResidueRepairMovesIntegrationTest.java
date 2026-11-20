@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.DrivingTableIsolationCheck;
 import dev.nexus.service.db.NoteUri;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.Field;
@@ -98,6 +99,10 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
         assertThat(shipped.get("driving_table", String.class)).isEqualTo("catalog_documents");
         assertThat(shipped.get("changeset_id", String.class)).isEqualTo(CHANGESET);
         assertThat(shipped.get("supersedes", String.class)).isNull();
+        assertThat(List.of(shipped.get("chunk_size", Integer.class), shipped.get("sleep_ms", Integer.class),
+            shipped.get("statement_timeout_ms", Integer.class)))
+            .as("the sizing measured on the production PITR fork 2026-11-20: chunk_size, sleep_ms, statement_timeout_ms")
+            .containsExactly(1000, 100, 30_000);
         assertThat(shipped.get("on_complete", String.class)).contains(ASPECTS_MOVE).contains(HIGHLIGHTS_MOVE)
             .contains("'" + CHANGESET + "'");
         assertThat(shipped.get("completed_at")).as("open: the worker has not run it").isNull();
@@ -186,10 +191,14 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
             .fetchOne(DOCUMENT_HIGHLIGHTS.SOURCE_URI);
     }
 
-    /** The rows a verification text returns table-wide, run as the worker runs it (MoveSql, tenant NULL). */
+    /**
+     * The rows a verification text returns table-wide, as the worker's table-wide run reads them: the admin role (the
+     * migrating role, bound by FORCE row-level security) with NO nexus.tenant set. Reading through the superuser would
+     * hide a table the admin role cannot see.
+     */
     private long verifyRows(String verification) {
-        try {
-            return MoveSql.countRows(su, verification, null, 1000);
+        try (var c = adminPool.getConnection()) {
+            return MoveSql.countRows(c, verification, null, 1000);
         } catch (java.sql.SQLException e) {
             throw new IllegalStateException(e);
         }
@@ -211,14 +220,6 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
     }
 
     // ── the repair ───────────────────────────────────────────────────────────────────────────────────────
-
-    @Test
-    void theMigrationRewritesNothing_theWorkerDoes() {
-        plant(TENANT_A);
-        // the registering INSERT is the whole of what the changeset did: a row planted afterwards is as planted
-        assertThat(uri(TENANT_A, "d1")).isEqualTo("chroma://plain-docs/a.md");
-        assertThat(completedAt(DOCS_MOVE)).isNull();
-    }
 
     @Test
     void aRenamedDocsCollectionsResidueGoesToADocsSegment_aKnowledgeNoteStaysPut_aHeldValueIsSkippedWithItsSatellites() {
@@ -336,6 +337,72 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
         assertThat(snapshot(TENANT_A)).as("zero rows changed, in any of the three tables").isEqualTo(before);
     }
 
+    /**
+     * The worker's table-wide verification runs as the admin role with no nexus.tenant, bound by FORCE row-level security:
+     * it must SEE planted residue, for every move. It joins nexus.catalog_collections, so that table needs the same
+     * owner-read policy as the three driving tables (catalog-050-4); without it the join is empty and the backstop
+     * reports a table with residue clean.
+     */
+    @Test
+    void theShippedVerificationsRunAsTheAdminRoleWithNoTenant_seePlantedResidue() {
+        plant(TENANT_A);
+        String docs = ctx().select(DSL.field(DSL.name("verification"), String.class)).from(MOVES)
+            .where(LABEL_F.eq(DOCS_MOVE)).fetchOne(0, String.class);
+        assertThat(verifyRows(docs)).as("documents: d1, d2, d3, d6, d7 are repairable").isEqualTo(5);
+
+        workUntilIdle(finishingWorker(new ArrayList<>()));
+        assertThat(verifyRows(docs)).as("after the repair").isZero();
+        // a satellite left in the old shape beside its repaired document, for each satellite move
+        ctx().update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.SOURCE_URI, "chroma://plain-docs/a.md")
+            .where(DOCUMENT_ASPECTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_ASPECTS.DOC_ID.eq("d1")).execute();
+        ctx().update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "chroma://plain-docs/a.md")
+            .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT_A)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq("d1")).execute();
+        for (String satellite : List.of(ASPECTS_MOVE, HIGHLIGHTS_MOVE)) {
+            String verification = ctx().select(DSL.field(DSL.name("verification"), String.class)).from(MOVES)
+                .where(LABEL_F.eq(satellite)).fetchOne(0, String.class);
+            assertThat(verifyRows(verification)).as(satellite).isEqualTo(1);
+        }
+    }
+
+    /**
+     * catalog_collections carries an owner-read policy for the verifications, so the boot isolation check asks about it
+     * too while a residue move is registered: it is listed beside the driving tables, and the policy engine's own question
+     * (does a permissive policy other than tenant_isolation apply to the connected role?) finds the policy there.
+     */
+    @Test
+    void theIsolationCheckAsksAboutTheRegistryTheVerificationsReadAsWellAsTheDrivingTables() throws Exception {
+        var tables = DrivingTableIsolationCheck.registeredDrivingTables(ctx());
+        assertThat(tables).extracting(DrivingTableIsolationCheck.Table::name)
+            .containsExactlyInAnyOrder("catalog_documents", "catalog_collections");
+        try (var c = adminPool.getConnection()) {
+            var found = DrivingTableIsolationCheck.violations(DSL.using(c, org.jooq.SQLDialect.POSTGRES), tables);
+            assertThat(found).as("non-vacuity: the admin role is the one the owner-read policies are for")
+                .extracting(v -> v.table().name() + "." + v.policy())
+                .contains("catalog_documents.catalog_documents_owner_read", "catalog_collections.catalog_collections_owner_read");
+        }
+    }
+
+    /**
+     * on_complete INSERTs the satellites with no ON CONFLICT, on purpose: a label already in the registry (hand-registered,
+     * or another definition under the name) would otherwise be silently kept while the parent reports done, and a move
+     * template that is not the shipped one would run unseen. The INSERT fails, on_complete and completed_at roll back
+     * together, and the parent reports a loud ON_COMPLETE failure with the other row untouched.
+     */
+    @Test
+    void aSatelliteLabelAlreadyRegistered_failsTheParentLoudly_andIsLeftUntouched() {
+        plant(TENANT_A);
+        DataMoveTestFixtures.register(ctx(), ASPECTS_MOVE, "tenant_plain", 50, 0);
+        var seen = new CopyOnWriteArrayList<FailureHandler.Failure>();
+        var w = finishingWorker(seen);
+
+        assertThat(w.runCycle()).isGreaterThanOrEqualTo(1);
+
+        assertThat(seen).extracting(FailureHandler.Failure::stage).contains(FailureHandler.Stage.ON_COMPLETE);
+        assertThat(completedAt(DOCS_MOVE)).as("on_complete and completed_at roll back together").isNull();
+        assertThat(ctx().select(DSL.field(DSL.name("driving_table"), String.class)).from(MOVES)
+            .where(LABEL_F.eq(ASPECTS_MOVE)).fetchOne(0, String.class)).as("the other row is untouched").isEqualTo("tenant_plain");
+    }
+
     /** Every source_uri of the tenant's three tables, as one comparable text. */
     private String snapshot(String tenant) {
         return ctx().select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.SOURCE_URI).from(CATALOG_DOCUMENTS)
@@ -389,9 +456,14 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
         ctx().select().from(MOVES).fetch().forEach(r -> rows.put(r.get("label", String.class), r));
         assertThat(rows.keySet()).containsExactly(DOCS_MOVE, ASPECTS_MOVE, HIGHLIGHTS_MOVE);
         for (Record r : rows.values()) {
-            assertThat(r.get("chunk_size", Integer.class)).isBetween(1, 1_000_000);
-            assertThat(r.get("statement_timeout_ms", Integer.class)).isPositive();
             assertThat(r.get("supersedes", String.class)).isNull();
+            assertThat(r.get("changeset_id", String.class)).isEqualTo(CHANGESET);
+        }
+        for (String satellite : List.of(ASPECTS_MOVE, HIGHLIGHTS_MOVE)) {
+            Record r = rows.get(satellite);
+            assertThat(List.of(r.get("chunk_size", Integer.class), r.get("sleep_ms", Integer.class),
+                r.get("statement_timeout_ms", Integer.class)))
+                .as(satellite + " sizing (the PITR-fork measurement)").containsExactly(1000, 50, 30_000);
         }
         assertThat(rows.get(ASPECTS_MOVE).get("on_complete", String.class)).isNull();
         assertThat(rows.get(HIGHLIGHTS_MOVE).get("on_complete", String.class)).isNull();

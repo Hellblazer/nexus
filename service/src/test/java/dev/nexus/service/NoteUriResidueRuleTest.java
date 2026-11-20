@@ -32,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * and an {@code nx-note://<file-routed>} value. Moving them onto a prefix-free label by a rename, a re-home or a
  * collection update leaves both values, in all three tables, on their old segment. Both are still classed file-routed
  * by {@link NoteUri#isNote}, and the stale-note repair counts nothing. (The re-embed move and the reconcile commit
- * have the same case in {@code DocumentMoveTest} and {@code CatalogReconcileCommitBehaviourTest}, which own their
+ * have the same case in {@code DocumentMoveTest} and {@code CatalogReconcileCommitNoteUriRuleTest}, which own their
  * fixtures.)
  *
  * <p>Each test plants its own tenant: the repair's census counts the whole tenant, so a count is exact only when
