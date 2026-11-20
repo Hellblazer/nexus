@@ -1,0 +1,5089 @@
+{
+ "run": {
+  "window": "2026-11-19T19:58:40Z..20:24:59Z",
+  "engine": "0.1.197 cloud",
+  "code": "arm as of 635c5a653 on develop (run from local commit 8e3a8a432, same content)",
+  "note": "compact copy: per-collection status and raw-count maps dropped; counts, short lists and routed coverage kept"
+ },
+ "rows": [
+  {
+   "qid": "Q1-factual-tumblers",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "s": 1.304
+   },
+   "OFF": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "s": 1.873,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-049-git-backed-catalog.md",
+     "rdr-052-catalog-first-query-routing.md"
+    ],
+    "s": 1.809,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "Q2-factual-chash",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "180-content-address-chash-binary-32byte.md",
+     "rdr-236-chunk-row-metadata-normalization.md"
+    ],
+    "s": 2.0
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "180-content-address-chash-binary-32byte.md",
+     "rdr-236-chunk-row-metadata-normalization.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-236-chunk-row-metadata-normalization.md",
+     "rdr-180-content-address-chash-binary-32byte.md"
+    ],
+    "s": 1.686,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-053-xanadu-fidelity.md",
+     "rdr-236-chunk-row-metadata-normalization.md",
+     "rdr-180-content-address-chash-binary-32byte.md"
+    ],
+    "s": 1.779,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "Q3-factual-taxonomy",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "s": 1.13
+   },
+   "OFF": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "s": 2.125,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-070-incremental-taxonomy-clustered-search.md",
+     "cli-reference.md",
+     "rdr-075-cross-collection-topic-projection.md"
+    ],
+    "s": 2.29,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "Q4-comparative-hooks",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 1.662
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 1.551,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "architecture.md",
+     "AGENTS.md"
+    ],
+    "s": 1.529,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "Q5-compositional-retrieval",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ],
+    "s": 1.122
+   },
+   "OFF": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ],
+    "s": 1.735,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-098-abstract-question-plan-template.md",
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "rdr-080-retrieval-layer-consolidation.md"
+    ],
+    "s": 1.791,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "G04-lookup-min-confidence",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "s": 1.211
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "s": 1.6,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-079-calibration.md",
+     "rdr-088-agenticscholar-operator-completion.md",
+     "rdr-092-plan-match-text-from-dimensional-identity.md"
+    ],
+    "s": 1.571,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "G05-lookup-hybridrag-cap",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ],
+    "s": 1.06
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ],
+    "s": 1.89,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-097-hybrid-retrieval-plan-template.md",
+     "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+     "rdr-098-abstract-question-plan-template.md"
+    ],
+    "s": 1.75,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "G07-synthesis-rdr155",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md"
+    ],
+    "s": 1.19
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-152-catalog-git-note.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "ROLLBACK.md",
+     "rdr-038-local-t3-backend.md",
+     "rdr-120-storage-substrate-split.md"
+    ],
+    "s": 2.461,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "ROLLBACK.md",
+     "rdr-038-local-t3-backend.md",
+     "rdr-120-storage-substrate-split.md"
+    ],
+    "s": 2.363,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "G15-comparison-harnesses",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "benchmarking.md",
+     "cli-reference.md"
+    ],
+    "s": 1.143
+   },
+   "OFF": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-196-cost-aware-nx-answer.md",
+     "benchmarking.md",
+     "cli-reference.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 0.5,
+    "top3": [
+     "benchmarking.md",
+     "rdr-196-cost-aware-nx-answer.md",
+     "results.md"
+    ],
+    "s": 1.655,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 0.5,
+    "top3": [
+     "benchmarking.md",
+     "rdr-196-cost-aware-nx-answer.md",
+     "results.md"
+    ],
+    "s": 1.588,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "G16-audit-rdr210",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ],
+    "s": 1.208
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "persona-2-implementer.md",
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ],
+    "s": 1.915,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "142-migration-completeness-vs-version-row.md",
+     "rdr-179-self-correction-machinery-remediation.md",
+     "rdr-145-note-backed-document-identity-aspect-pipeline.md"
+    ],
+    "s": 1.854,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H01",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.225
+   },
+   "OFF": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "cli-reference.md",
+     "rdr-064-nx-console-embedded-web-ui.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "a2ui-summary.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "127-substrate-decoupled-surface-rendering.md"
+    ],
+    "s": 2.186,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "a2ui-summary.md",
+     "rdr-119-cockpit-ui-fabric.md",
+     "127-substrate-decoupled-surface-rendering.md"
+    ],
+    "s": 1.516,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H02",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+    ],
+    "s": 1.183
+   },
+   "OFF": {
+    "ndcg3": 0.5307212739772436,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.4692787260227565,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "architecture.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.825,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.4692787260227565,
+    "recall10": 0.6666666666666666,
+    "top3": [
+     "rdr-211-board-queue-and-lock-tuple-templates.md",
+     "architecture.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.745,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H03",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "s": 1.124
+   },
+   "OFF": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "s": 1.723,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.25,
+    "top3": [
+     "RDR-016-pdf-text-normalization.md",
+     "RDR-010-pdf-fulltext-indexing.md",
+     "rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md"
+    ],
+    "s": 2.449,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H04",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ],
+    "s": 1.637
+   },
+   "OFF": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-205-linda-tuple-space-over-postgres.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-110-semantic-tuple-space.md"
+    ],
+    "s": 2.627,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "linda-in-nexus.md",
+     "agentic-cockpit.md",
+     "rdr-110-semantic-tuple-space.md"
+    ],
+    "s": 1.617,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H05",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "configuration.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.396
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-235-aspect-queue-onto-tuple-queue-template.md",
+     "configuration.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "migration-runbook.md",
+     "CHANGELOG.md",
+     "rdr-138-rename-cascade-aspect-worker-coordination.md"
+    ],
+    "s": 2.134,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-84__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-46__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "migration-runbook.md",
+     "CHANGELOG.md",
+     "rdr-138-rename-cascade-aspect-worker-coordination.md"
+    ],
+    "s": 1.454,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-84__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-46__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H06",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "README.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md"
+    ],
+    "s": 1.164
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "README.md",
+     "grounding-checks.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-241-no-client-walks-of-the-managed-catalog.md"
+    ],
+    "s": 2.567,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-94__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0,
+    "top3": [
+     "201-closed-vocabularies-as-checked-tables.md",
+     "rdr-201-closed-vocabularies-as-checked-tables.md",
+     "rdr-241-no-client-walks-of-the-managed-catalog.md"
+    ],
+    "s": 1.81,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-94__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H07",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "wire-contract-pending.md"
+    ],
+    "s": 0.997
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "wire-contract-pending.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "graph-augmented-retrieval.md"
+    ],
+    "s": 2.433,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-188-server-side-rerank.md",
+     "rdr-200-phase1c-questions.md",
+     "rdr-038-local-t3-backend.md"
+    ],
+    "s": 1.827,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H09",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "s": 1.074
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RESEARCH.md",
+     "2604.15583.pdf"
+    ],
+    "s": 4.291,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "2604.15583.pdf",
+     "PRISM - Agentic Retrieval Multi-Hop QA (arXiv 2510.14278).pdf"
+    ],
+    "s": 2.509,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H10",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ],
+    "s": 1.148
+   },
+   "OFF": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-158-retire-sqlite-t2-backend.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-176-survivable-managed-migration-readiness.md"
+    ],
+    "s": 1.655,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5,
+    "top3": [
+     "rdr-158-retire-sqlite-t2-backend.md",
+     "CHANGELOG.md",
+     "rdr-176-survivable-managed-migration-readiness.md"
+    ],
+    "s": 1.667,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H11",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "s": 1.017
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "s": 1.981,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.3333333333333333,
+    "top3": [
+     "Directory-Aware Query and Maintenance in Vector Databases.pdf",
+     "Stop Indexing at Full Precision- Revisiting Clustering for Vector Embeddings.pdf",
+     "GateANN- I-O-Efficient Filtered Vector Search on SSDs.pdf"
+    ],
+    "s": 1.77,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H13",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-048-streaming-pdf-pipeline.md"
+    ],
+    "s": 1.059
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-048-streaming-pdf-pipeline.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-027-search-results-ux.md"
+    ],
+    "s": 1.918,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-054-chunk-boundary-equation-splitting.md",
+     "rdr-027-search-results-ux.md"
+    ],
+    "s": 1.576,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H14",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "ROLLBACK.md"
+    ],
+    "s": 1.372
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-207-summarization-at-the-t2-expiry-boundary.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "ROLLBACK.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ],
+    "s": 1.859,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "rdr-155-pgvector-t3-consolidation.md",
+     "rdr-174-unified-nx-init-service-lifecycle.md",
+     "rdr-013-remove-nx-pm-layer.md"
+    ],
+    "s": 1.642,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-75__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H16",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "s": 0.944
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "s": 1.99,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-200-phase1-questions.md",
+     "cli-reference.md"
+    ],
+    "s": 2.166,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H17",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ],
+    "s": 1.224
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "CHANGELOG.md",
+     "cli-reference.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ],
+    "s": 1.582,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.3065735963827292,
+    "recall10": 1.0,
+    "top3": [
+     "143-plugin-cli-version-lockstep.md",
+     "cli-reference.md",
+     "rdr-143-plugin-cli-version-lockstep.md"
+    ],
+    "s": 1.508,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H18",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "windows-install.md",
+     "CHANGELOG.md"
+    ],
+    "s": 1.249
+   },
+   "OFF": {
+    "ndcg3": 0.6131471927654584,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "windows-install.md",
+     "CHANGELOG.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "rdr-228-plugin-installs-the-cli.md"
+    ],
+    "s": 1.902,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-1__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-224-native-windows-support.md",
+     "rdr-218-windows-platform-support.md",
+     "157-end-user-distribution.md"
+    ],
+    "s": 1.832,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-1__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H20",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "s": 1.09
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "s": 1.825,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "The Compliance Gap- Why AI Systems Promise to Follow Process Instructions but Don't.pdf"
+    ],
+    "s": 1.763,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1",
+      "rdr__1-86__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H21",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ],
+    "s": 1.164
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "plugin-release-channel.md",
+     "contributing.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "008-agentic-dispatch-executor.md",
+     "rdr-218-windows-platform-support.md"
+    ],
+    "s": 1.929,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "127-substrate-decoupled-surface-rendering.md",
+     "008-agentic-dispatch-executor.md",
+     "rdr-218-windows-platform-support.md"
+    ],
+    "s": 1.781,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H22",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "s": 1.059
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "s": 1.839,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "RDR-023-markdown-chunk-coalescing.md"
+    ],
+    "s": 1.656,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H23",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf"
+    ],
+    "s": 1.271
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "beyond-similarity-search-application.md",
+     "rdr-155-pgvector-t3-consolidation.md",
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "DESIGN.md"
+    ],
+    "s": 1.629,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.0,
+    "recall10": 0.0,
+    "top3": [
+     "Don't Be a Pot Stirrer! Authorized Vector Data Retrieval via Access-Aware Indexing.pdf",
+     "HRNN- A Hybrid Graph Index for Approximate Reverse \ud835\udc58-Nearest Neighbor Search on High-Dimensional Vectors.pdf",
+     "DESIGN.md"
+    ],
+    "s": 1.572,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-92__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H24",
+   "kind": "title",
+   "P0": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "s": 1.021
+   },
+   "OFF": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "s": 2.549,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 1.0,
+    "recall10": 1.0,
+    "top3": [
+     "Lost in the Middle- How Language Models Use Long Contexts.pdf",
+     "Context Length Alone Hurts LLM Performance Despite Perfect Retrieval.pdf",
+     "2604.15583.pdf"
+    ],
+    "s": 2.34,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 0.9994587907839803,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H26",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "s": 1.177
+   },
+   "OFF": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "s": 2.171,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-84__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-46__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "CHANGELOG.md",
+     "rdr-151-daemon-event-loop-selector-spin-write-contention.md",
+     "151-daemon-event-loop-selector-spin-write-contention.md"
+    ],
+    "s": 1.47,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-15__voyage-context-3__v1",
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-84__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-46__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H28",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-146-catalog-store-behind-daemon.md",
+     "rdr-229-collection-name-becomes-a-label.md"
+    ],
+    "s": 1.302
+   },
+   "OFF": {
+    "ndcg3": 0.38685280723454163,
+    "recall10": 1.0,
+    "top3": [
+     "architecture.md",
+     "rdr-146-catalog-store-behind-daemon.md",
+     "rdr-229-collection-name-becomes-a-label.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ],
+    "s": 1.795,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.9197207891481876,
+    "recall10": 1.0,
+    "top3": [
+     "rdr-146-catalog-store-behind-daemon.md",
+     "168-service-mode-catalog-interface-conformance.md",
+     "rdr-168-service-mode-catalog-interface-conformance.md"
+    ],
+    "s": 1.768,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-27__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-91__voyage-context-3__v1",
+      "docs__1-93__voyage-context-3__v1",
+      "docs__1-95__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  },
+  {
+   "qid": "H30",
+   "kind": "rdr",
+   "P0": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "rdr-239-doc-blocks.md"
+    ],
+    "s": 1.117
+   },
+   "OFF": {
+    "ndcg3": 0.0,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "tuple-space.md",
+     "rdr-239-doc-blocks.md"
+    ]
+   },
+   "ENG": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md"
+    ],
+    "s": 1.61,
+    "route": {
+     "counts": {
+      "routed": 25,
+      "no_topics": 101,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-46__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   },
+   "ENG_gate_off": {
+    "ndcg3": 0.5,
+    "recall10": 1.0,
+    "top3": [
+     "SKILL.md",
+     "rdr-239-doc-blocks.md",
+     "rdr-208-session-id-mail-addressing.md"
+    ],
+    "s": 1.54,
+    "route": {
+     "counts": {
+      "routed": 36,
+      "no_topics": 90,
+      "fallback": 0,
+      "skipped": 0
+     },
+     "short": [
+      "docs__1-28__voyage-context-3__v1",
+      "docs__1-41__voyage-context-3__v1",
+      "docs__1-46__voyage-context-3__v1",
+      "docs__1-77__voyage-context-3__v1",
+      "docs__1-78__voyage-context-3__v1",
+      "docs__1-79__voyage-context-3__v1",
+      "docs__1-80__voyage-context-3__v1",
+      "docs__1-81__voyage-context-3__v1",
+      "docs__1-83__voyage-context-3__v1",
+      "docs__1-86__voyage-context-3__v1",
+      "knowledge__distributed-systems__voyage-context-3__v1",
+      "knowledge__semantic-operators__voyage-context-3__v1",
+      "rdr__1-20__voyage-context-3__v1",
+      "rdr__1-41__voyage-context-3__v1",
+      "rdr__1-46__voyage-context-3__v1",
+      "rdr__1-78__voyage-context-3__v1"
+     ],
+     "errors": {},
+     "coverage_routed": {
+      "docs__1-15__voyage-context-3__v1": 0.997946611909651,
+      "docs__1-1__voyage-context-3__v1": 1.0,
+      "docs__1-27__voyage-context-3__v1": 0.9961928934010152,
+      "docs__1-28__voyage-context-3__v1": 0.8008474576271186,
+      "docs__1-41__voyage-context-3__v1": 0.09482758620689655,
+      "docs__1-46__voyage-context-3__v1": 1.0,
+      "docs__1-70__voyage-context-3__v1": 0.9836065573770492,
+      "docs__1-72__voyage-context-3__v1": 0.9754129850172878,
+      "docs__1-75__voyage-context-3__v1": 0.2987551867219917,
+      "docs__1-77__voyage-context-3__v1": 0.30662020905923343,
+      "docs__1-78__voyage-context-3__v1": 0.45,
+      "docs__1-79__voyage-context-3__v1": 0.3849056603773585,
+      "docs__1-80__voyage-context-3__v1": 0.1720183486238532,
+      "docs__1-81__voyage-context-3__v1": 0.35714285714285715,
+      "docs__1-83__voyage-context-3__v1": 1.0,
+      "docs__1-84__voyage-context-3__v1": 1.0,
+      "docs__1-86__voyage-context-3__v1": 1.0,
+      "docs__1-87__voyage-context-3__v1": 1.0,
+      "docs__1-91__voyage-context-3__v1": 1.0,
+      "docs__1-92__voyage-context-3__v1": 1.0,
+      "docs__1-93__voyage-context-3__v1": 1.0,
+      "docs__1-94__voyage-context-3__v1": 1.0,
+      "docs__1-95__voyage-context-3__v1": 1.0,
+      "docs__1-9__voyage-context-3__v1": 0.9739583333333334,
+      "knowledge__art-papers__voyage-context-3__v1": 1.0,
+      "knowledge__distributed-systems__voyage-context-3__v1": 0.9953874538745388,
+      "knowledge__dt-papers__voyage-context-3__v1": 0.9541461962185499,
+      "knowledge__semantic-operators__voyage-context-3__v1": 1.0,
+      "rdr__1-1__voyage-context-3__v1": 1.0,
+      "rdr__1-20__voyage-context-3__v1": 0.5091575091575091,
+      "rdr__1-27__voyage-context-3__v1": 0.9897032101756511,
+      "rdr__1-41__voyage-context-3__v1": 0.19402985074626866,
+      "rdr__1-46__voyage-context-3__v1": 1.0,
+      "rdr__1-78__voyage-context-3__v1": 0.04081632653061224,
+      "rdr__1-79__voyage-context-3__v1": 0.9504195804195804,
+      "rdr__1-86__voyage-context-3__v1": 1.0
+     }
+    }
+   }
+  }
+ ],
+ "summary": {
+  "n": 33,
+  "by_kind": {
+   "rdr": {
+    "P0": {
+     "ndcg3": 0.33484824401786956,
+     "recall10": 0.7766666666666666
+    },
+    "OFF": {
+     "ndcg3": 0.31484824401786954,
+     "recall10": 0.7766666666666666
+    },
+    "ENG": {
+     "ndcg3": 0.3846534859549992,
+     "recall10": 0.7366666666666667
+    },
+    "ENG_gate_off": {
+     "ndcg3": 0.3846534859549992,
+     "recall10": 0.7366666666666667
+    },
+    "n": 25
+   },
+   "title": {
+    "P0": {
+     "ndcg3": 0.5,
+     "recall10": 0.6666666666666666
+    },
+    "OFF": {
+     "ndcg3": 0.5,
+     "recall10": 0.6666666666666666
+    },
+    "ENG": {
+     "ndcg3": 0.5,
+     "recall10": 0.5416666666666666
+    },
+    "ENG_gate_off": {
+     "ndcg3": 0.5,
+     "recall10": 0.5416666666666666
+    },
+    "n": 8
+   }
+  },
+  "bars": {
+   "n_rdr": 25,
+   "ndcg3_rdr": 0.3846534859549992,
+   "worse_than_off": [
+    "G15-comparison-harnesses",
+    "H01"
+   ],
+   "latency_ratio": 1.6608743887158834,
+   "checks": {
+    "ndcg3": false,
+    "no_question_worse_than_off_by_more_than_0.1": false,
+    "latency": false
+   },
+   "passed": false,
+   "gate_off": {
+    "n_rdr": 25,
+    "ndcg3_rdr": 0.3846534859549992,
+    "worse_than_off": [
+     "G15-comparison-harnesses",
+     "H01"
+    ],
+    "latency_ratio": 1.480826639404197,
+    "checks": {
+     "ndcg3": false,
+     "no_question_worse_than_off_by_more_than_0.1": false,
+     "latency": true
+    },
+    "passed": false
+   },
+   "gate_note": "threshold rule (fixed before the run): if gate-off reaches 0.44 and the 0.9 gate does not, lower the threshold to the highest recorded coverage value at which the arm reaches 0.44 and re-run; if both reach it, keep 0.9; if gate-off also misses, the gate is not the cause",
+   "off_rdr_ndcg3_this_run": 0.31484824401786954,
+   "research_13": {
+    "off_rdr_ndcg3": 0.335,
+    "spike_rdr_ndcg3": 0.47
+   }
+  },
+  "short_rows": {
+   "ENG": 203,
+   "ENG_gate_off": 479
+  },
+  "coverage_values": [
+   0.04081632653061224,
+   0.09482758620689655,
+   0.1720183486238532,
+   0.19402985074626866,
+   0.2987551867219917,
+   0.30662020905923343,
+   0.35714285714285715,
+   0.3849056603773585,
+   0.45,
+   0.5091575091575091,
+   0.8008474576271186,
+   0.9504195804195804,
+   0.9541461962185499,
+   0.9739583333333334,
+   0.9754129850172878,
+   0.9836065573770492,
+   0.9897032101756511,
+   0.9953874538745388,
+   0.9961928934010152,
+   0.997946611909651,
+   1.0
+  ],
+  "scope_note": "Checks the engine route against the production-set result of 134-research-13; not a generalisation test (the 25 RDR questions are among leg 1's 26; only the 8 title questions are out of sample)."
+ }
+}

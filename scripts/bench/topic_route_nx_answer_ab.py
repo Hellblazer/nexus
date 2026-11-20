@@ -12,10 +12,16 @@ class the rule's third clause needs. The arm is switched in-process by replacing
 takes the per-collection route by itself (no ``NX_SEARCH_PER_COLLECTION`` needed); the off arm takes the default
 path, so the pair compares what ships.
 
-Ordering (pre-declared, 2026-11-19, before any run): the PRIMARY statistic, the one the pass rule reads, sorts the
-envelope's chunks by their carried ``distance`` (ascending, chunks with none last): one absolute scale across steps,
-and the ordering 134-research-13 used. The SECONDARY statistic is the envelope order (each step's own ranking, steps
-in plan order); it is printed, never decided on. Each chunk is resolved to a file path through the catalog and graded
+Ordering: the PRIMARY statistic, the one the pass rule reads, sorts the envelope's chunks by CALIBRATED distance
+(each chunk's carried ``distance`` times its collection's model factor, ``scoring._calibration_factor_for_model``,
+applied only when the chunks that carry a distance span more than one model; each collection's model is the catalog
+row's when one backs it, else the name's, as search resolves it, and is recorded per arm in ``calibration_models``;
+ties keep envelope order; chunks with none last). It was raw
+carried distance when pre-declared; Sam changed it on 2026-11-19 after the first partial run, where raw distance put
+every voyage-code-3 row ahead of every voyage-context-3 row on the plan-473 questions (134-research-17). The calibrated
+scores had not been computed when he chose it. Raw distance (the
+ordering 134-research-13 used) and the SECONDARY envelope order (each step's own ranking, steps in plan order) are
+printed, never decided on. Each chunk is resolved to a file path through the catalog and graded
 with ``taxonomy_ab2.score``: NDCG@3 (gain 2^g-1), recall@10, dedupe by file name, a generic question graded on its
 owner's collections and the exact basename.
 
@@ -55,11 +61,15 @@ from bench.paths import _resolve_paths_via_catalog
 from bench.taxonomy_ab2 import load_queries, score
 
 ARMS: tuple[str, ...] = ("off", "top1")
-PRIMARY = "distance"
+PRIMARY = "calibrated"
 SECONDARY = "envelope"
+RAW = "distance"
 ORDERINGS = {
-    PRIMARY: "envelope chunks sorted by carried distance, ascending, none last (the ordering of 134-research-13)",
+    PRIMARY: "envelope chunks sorted by calibrated distance (carried distance x model factor when the chunks span "
+             "more than one model), ascending, none last; changed from raw distance, the pre-declared primary, after the "
+             "first partial run (Sam 2026-11-19, 134-research-17)",
     SECONDARY: "envelope order: each retrieval step's own ranking, steps in plan order (printed, not decided on)",
+    RAW: "envelope chunks sorted by raw carried distance (the ordering of 134-research-13; printed, not decided on)",
 }
 #: The RDR's rule (Step 9). Changing it is Sam's decision.
 MIN_MEAN_DELTA_ALL = 0.03
@@ -78,10 +88,13 @@ EARLY_VACUITY_QUESTIONS = 3
 BOOTSTRAP_SEED = 1340
 BOOTSTRAP_N = 2000
 SCOPE_NOTES = (
-    "A pass licenses the default for nx_answer's prose-scoped plan steps, on this corpus, judged on retrieved "
-    "chunks; it says nothing about answer quality.",
+    "A pass licenses the default for nx_answer's search and query steps whose scope names no other domain and no "
+    "topic, on this corpus, over the plans the questions matched (plan_id per arm), judged on retrieved chunks; "
+    "it says nothing about answer quality.",
     "The 25 RDR questions are in-sample (all among leg 1's 26). 'Out-of-sample' (title + generic) means not used to "
-    "choose the design; the title questions were measured before (134-research-13), so they are not unseen.",
+    "choose the design; the title questions were measured before (134-research-13), so they are not unseen. The "
+    "primary ordering was changed after the first partial run's generic questions (GD01-GD08) had been seen, on "
+    "their raw-distance and envelope scores; their calibrated scores had not been computed.",
     "The off arm can grow a plan that the top1 arm then matches (nx_answer saves ad-hoc plans); pairs that ran "
     "different plans are flagged. The run writes those plans to the T2 plan library.",
 )
@@ -139,6 +152,34 @@ def _route_counts(events: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+ModelResolver = Callable[[list[str]], Callable[[str], "str | None"]]
+
+
+def chunk_models(chunks: list[dict[str, Any]], model_of: Callable[[str], str | None] | None = None) -> dict[str, str]:
+    """``{collection: model}`` for the chunks that carry a distance: *model_of* first (search's row-preferred
+    resolver, nexus-ml9vu), else the model the name derives, as search falls back."""
+    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — heavy; only at scoring
+
+    out: dict[str, str] = {}
+    for coll in dict.fromkeys(c.get("collection", "") for c in chunks if c.get("distance") is not None):
+        out[coll] = (model_of(coll) if model_of is not None else None) or embedding_model_for_collection_calibrated(coll)
+    return out
+
+
+def calibrated_order(chunks: list[dict[str, Any]], models: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Ascending by calibrated distance: search's own per-model factor, applied only when the chunks span more than
+    one embedding model (one model keeps the raw order, as in search); chunks with none keep envelope order after.
+    *models* is :func:`chunk_models`' result; by default the models derive from the names."""
+    from nexus.scoring import _calibration_factor_for_model  # noqa: PLC0415 — heavy; only at scoring
+
+    models = chunk_models(chunks) if models is None else models
+    factor = ({coll: _calibration_factor_for_model(m) for coll, m in models.items()}
+              if len(set(models.values())) > 1 else {})
+    keyed = [(c.get("distance") is None, (c.get("distance") or 0.0) * factor.get(c.get("collection", ""), 1.0), i)
+             for i, c in enumerate(chunks)]
+    return [chunks[i] for _none, _d, i in sorted(keyed)]
+
+
 def distance_order(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Ascending by ``distance``; chunks with none keep their envelope order after the rest."""
     keyed = [(c.get("distance") is None, c.get("distance") or 0.0, i) for i, c in enumerate(chunks)]
@@ -146,7 +187,7 @@ def distance_order(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _answer_arm(q: dict[str, Any], arm: str, *, answer_fn: Callable, catalog: Any, scope: str | None,
-                call_budget_usd: float) -> dict[str, Any]:
+                call_budget_usd: float, model_resolver: ModelResolver | None = None) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"budget_usd": call_budget_usd}
     if scope:
         kwargs["scope"] = scope
@@ -165,13 +206,13 @@ def _answer_arm(q: dict[str, Any], arm: str, *, answer_fn: Callable, catalog: An
         raise _Stop("cost_unknown", f"{q['qid']} {arm}: the envelope or one of its steps has no cost_usd",
                     cost_usd=float(cost) if cost is not None else 0.0)
     try:
-        return _score_arm(q, envelope, float(cost), elapsed, logs, catalog)
+        return _score_arm(q, envelope, float(cost), elapsed, logs, catalog, model_resolver)
     except Exception as e:  # noqa: BLE001 — the call was paid for: stop, and count it
         raise _Stop("driver_error", f"{q['qid']} {arm}: {type(e).__name__}: {e}", cost_usd=float(cost)) from e
 
 
 def _score_arm(q: dict[str, Any], envelope: dict[str, Any], cost: float, elapsed: float, logs: list[dict[str, Any]],
-               catalog: Any) -> dict[str, Any]:
+               catalog: Any, model_resolver: ModelResolver | None = None) -> dict[str, Any]:
     chunks = [c for c in envelope.get("chunks") or [] if isinstance(c, dict)]
     out: dict[str, Any] = {
         "cost_usd": cost, "chunk_count": len(chunks), "error": None, "elapsed_s": elapsed,
@@ -193,8 +234,11 @@ def _score_arm(q: dict[str, Any], envelope: dict[str, Any], cost: float, elapsed
             out["error"] = "vacuous: every chunk resolved to an empty path"
             return out
     grade = {"owner": q.get("owner"), "exact": bool(q.get("exact"))}
-    out[PRIMARY] = score(distance_order(rows), q["gt"], catalog, **grade)
+    colls = sorted({r["collection"] for r in rows})
+    out["calibration_models"] = chunk_models(rows, model_resolver(colls) if model_resolver is not None else None)
+    out[PRIMARY] = score(calibrated_order(rows, out["calibration_models"]), q["gt"], catalog, **grade)
     out[SECONDARY] = score(rows, q["gt"], catalog, **grade)
+    out[RAW] = score(distance_order(rows), q["gt"], catalog, **grade)
     out["ndcg3"], out["recall10"] = out[PRIMARY]["ndcg3"], out[PRIMARY]["recall10"]
     return out
 
@@ -206,7 +250,8 @@ def ordered(queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def run(queries: list[dict[str, Any]], *, answer_fn: Callable, catalog: Any, cap_usd: float, scope: str | None,
         call_budget_usd: float = 1.0, done: list[dict[str, Any]] | None = None, spent_usd: float = 0.0,
-        checkpoint: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        checkpoint: Callable[[dict[str, Any]], None] | None = None,
+        model_resolver: ModelResolver | None = None) -> dict[str, Any]:
     # a resumed run keeps its paired rows and runs an unpaired question again
     rows: list[dict[str, Any]] = [r for r in (done or []) if r.get("paired")]
     finished = {r["qid"] for r in rows}
@@ -230,7 +275,7 @@ def run(queries: list[dict[str, Any]], *, answer_fn: Callable, catalog: Any, cap
             row: dict[str, Any] = {"qid": q["qid"], "kind": q["kind"], "order": list(arms)}
             for arm in arms:
                 res = _answer_arm(q, arm, answer_fn=answer_fn, catalog=catalog, scope=scope,
-                                  call_budget_usd=call_budget_usd)
+                                  call_budget_usd=call_budget_usd, model_resolver=model_resolver)
                 spent += res["cost_usd"]
                 largest = max(largest, res["cost_usd"])
                 row[arm] = res
@@ -311,6 +356,7 @@ def summarize(rows: list[dict[str, Any]], *, stopped: str | None = None) -> dict
         "verdict": verdict,
         "informational": {
             "secondary_ordering_rule": pass_rule(_rule_rows(paired, SECONDARY)),
+            "raw_ordering_rule": pass_rule(_rule_rows(paired, RAW)),
             "routed_questions_only_rule": pass_rule(_rule_rows(routed, PRIMARY)),
             "elapsed_s_mean": {a: statistics.mean(r[a]["elapsed_s"] for r in paired) for a in ARMS} if paired else {},
         },
@@ -324,6 +370,12 @@ def resume_mismatch(prior: dict[str, Any], head: dict[str, Any]) -> str:
         return "the question files differ from the recorded run (names or sha256)"
     if prior.get("scope") != head["scope"]:
         return "the scope differs from the recorded run"
+    if prior.get("primary") != head["primary"]:
+        return f"the primary ordering differs ({prior.get('primary')!r} recorded, {head['primary']!r} now)"
+    if prior.get("per_collection_env") != head.get("per_collection_env"):
+        # the off arm's default path reads it: another value is another measurement
+        return (f"NX_SEARCH_PER_COLLECTION differs ({prior.get('per_collection_env')!r} recorded, "
+                f"{head.get('per_collection_env')!r} now)")
     pm, hm = prior.get("manifest") or {}, head["manifest"]
     for key in ("git_sha", "host_class", "engine_build"):
         if key in hm and pm.get(key) != hm.get(key):
@@ -356,10 +408,12 @@ def main(argv: list[str] | None = None) -> int:
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415
     from nexus.db import make_t3  # noqa: PLC0415
     from nexus.mcp.core import nx_answer  # noqa: PLC0415
+    from nexus.search_engine import _collection_model_resolver  # noqa: PLC0415
 
     # the search_topic_route event is info-level; capture_logs sees only what the level filter lets through
     structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
-    if not make_t3().supports_topic_route():
+    t3 = make_t3()
+    if not t3.supports_topic_route():
         print("refused before any paid call: the engine does not report vector_topic_route_supported",  # noqa: T201
               file=sys.stderr)
         return 2
@@ -371,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     head = {
         "manifest": build_manifest(Path.cwd()), "scope": a.scope,
         "queries": {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in a.queries},
-        "per_collection_env": os.environ.get("NX_SEARCH_PER_COLLECTION"),
+        "per_collection_env": os.environ.get("NX_SEARCH_PER_COLLECTION"), "primary": PRIMARY,
     }
     if a.resume:
         prior = json.loads(a.out.read_text())
@@ -385,7 +439,8 @@ def main(argv: list[str] | None = None) -> int:
         _write(a.out, {**head, **state, "summary": summarize(state["rows"], stopped="running")})
 
     result = run(queries, answer_fn=nx_answer, catalog=make_catalog_reader(), cap_usd=a.cap_usd, scope=a.scope,
-                 call_budget_usd=a.call_budget_usd, done=done, spent_usd=spent, checkpoint=checkpoint)
+                 call_budget_usd=a.call_budget_usd, done=done, spent_usd=spent, checkpoint=checkpoint,
+                 model_resolver=lambda colls: _collection_model_resolver(t3, colls))
     summary = summarize(result["rows"], stopped=result["stopped"])
     _write(a.out, {**head, **result, "summary": summary})
     print(json.dumps({"summary": summary, **{k: result[k] for k in ("spent_usd", "cap_usd", "stopped",  # noqa: T201

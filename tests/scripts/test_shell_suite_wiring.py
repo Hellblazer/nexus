@@ -273,22 +273,12 @@ SUITES = [
 ]
 
 
-#: The lease variables a suite must never inherit. CI's lease step exports
-#: NX_BUILD_LEASE_ROOT to every later step, and an nxtest hand run sets it by
-#: design; each suite assumes the lease root is its own fake repo's.
+#: The lease variables a suite must neither depend on nor be harmed by inheriting. CI's lease step
+#: exports NX_BUILD_LEASE_ROOT to every later step, and an nxtest hand run sets it by design; each
+#: suite unsets them and assumes the lease root is its own fake repo's. The base env drops the
+#: operator's values; TestSuitesAreGreen then exports a peer-held root of its own.
 _LEASE_ENV_PREFIXES = ("NX_BUILD_LEASE_ROOT", "NX_SUITE_LEASE_")
 
-#: EVERY suite, not a hand-kept list of the ones known to be sensitive. Measured on
-#: the qwentescence host (nxtest exports NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease,
-#: where another run holds the leases): six suites fail or hang there and the other
-#: five pass. Three of them (build-lease, mvnw-leased, and a since-deleted run.sh guard suite) failed against
-#: an EMPTY inherited root; the other three (release-props-lease,
-#: local_service_gate_guard, build-gate-jar; nexus-mntbl) only fail when the shared
-#: root carries a live holder, which the test below pre-holds. A list of "the
-#: sensitive ones" went stale exactly this way, so a new suite is covered by being
-#: in SUITES.
-_LEASE_SENSITIVE = tuple(str(s.path.relative_to(REPO_ROOT)) for s in SUITES)
-_TIMEOUT_BY_RELPATH = {str(s.path.relative_to(REPO_ROOT)): s.timeout_s for s in SUITES}
 
 
 def _env_without_lease_vars() -> dict[str, str]:
@@ -325,11 +315,47 @@ class TestSuitesExist:
         assert suite.path.is_file(), f"missing: {suite.path}"
 
 
+#: EVERY suite, not a hand-kept list of the ones known to be sensitive. Measured on
+#: the qwentescence host (nxtest exports NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease,
+#: where another run holds the leases): six suites fail or hang there and the other
+#: five pass. Three of them (build-lease, mvnw-leased, and a since-deleted run.sh guard suite) failed against
+#: an EMPTY inherited root; the other three (release-props-lease,
+#: local_service_gate_guard, build-gate-jar; nexus-mntbl) only fail when the shared
+#: root carries a live holder, which _held_shared_lease_root below pre-holds. A list of "the
+#: sensitive ones" went stale exactly this way, so a new suite is covered by being
+#: in SUITES (TestSuitesAreGreen runs every one of them with the root exported).
+def _held_shared_lease_root(tmp_path: Path) -> tuple[Path, dict[str, list[str]]]:
+    """A shared lease root where a live peer holds both leases, as another run does on the shared
+    qwentescence host. A suite that inherits the root queues behind this holder and fails; a suite that
+    unsets it never sees it. This process is alive for the whole test, so its pid is a live holder."""
+    shared = tmp_path / "shared-lease-root"
+    shared.mkdir()
+    held: dict[str, list[str]] = {}
+    for resource in ("service", "suite"):
+        lease = shared / resource
+        lease.mkdir()
+        (lease / "pid").write_text(f"{os.getpid()}\n")
+        (lease / "label").write_text("a peer run holding the shared lease\n")
+        held[resource] = sorted(p.name for p in lease.iterdir())
+    return shared, held
+
+
 class TestSuitesAreGreen:
+    """Each suite runs ONCE, with the documented lease export inherited (suite audit item 6: it used to
+    run twice, scrubbed here and exported in a second class; the second runs were about 218 s of
+    recorded test time per full suite, about 36 s per CI shard). The suites' own ``unset``
+    is what makes an inherited root harmless, so one run with the root exported, and a live peer holding
+    its leases, proves both that the suite is green and that it neither fails on nor writes into the
+    shared root."""
+
     @pytest.mark.parametrize("suite", SUITES, ids=lambda s: s.id)
-    def test_suite_runs_clean(self, suite: _Suite) -> None:
+    def test_suite_runs_clean(self, suite: _Suite, tmp_path: Path) -> None:
+        shared, held = _held_shared_lease_root(tmp_path)
+        env = _env_without_lease_vars()
+        env["NX_BUILD_LEASE_ROOT"] = str(shared)
+        env["NX_SUITE_LEASE_WAIT"] = "1"
         start = time.monotonic()
-        result = run_suite(suite.path, cwd=REPO_ROOT, env=_env_without_lease_vars(), timeout=suite.timeout_s)
+        result = run_suite(suite.path, cwd=REPO_ROOT, env=env, timeout=suite.timeout_s)
         elapsed = time.monotonic() - start
 
         summary_re = re.compile(_SUMMARY_RE_TEMPLATE.format(name=re.escape(suite.id)))
@@ -345,7 +371,8 @@ class TestSuitesAreGreen:
         passed, failed = int(match.group(1)), int(match.group(2))
 
         assert result.returncode == 0, (
-            f"{suite.id} exited {result.returncode} (reported passed={passed} "
+            f"{suite.id} exited {result.returncode} with NX_BUILD_LEASE_ROOT exported to a peer-held root "
+            f"(reported passed={passed} "
             f"failed={failed}) -- the process exit code is the load-bearing "
             "signal here, not stdout content.\n"
             f"--- stdout ---\n{result.stdout}\n"
@@ -374,6 +401,13 @@ class TestSuitesAreGreen:
                     f"{suite.id} skipped {skipped.group(1)} probe(s) outside a child PID namespace\n"
                     f"--- stdout ---\n{result.stdout}"
                 )
+        assert sorted(p.name for p in shared.iterdir()) == ["service", "suite"], (
+            f"{suite.id} wrote into the inherited lease root: {sorted(p.name for p in shared.iterdir())}"
+        )
+        for resource, files in held.items():
+            lease = shared / resource
+            assert sorted(p.name for p in lease.iterdir()) == files, f"{suite.id} touched the peer's {resource} lease"
+            assert (lease / "pid").read_text().strip() == str(os.getpid()), f"{suite.id} took over the peer's {resource} lease"
 
 
 _INIT_PID_NAMESPACE: str = "pid:[4026531836]"  # PROC_PID_INIT_INO, 0xEFFFFFFC
@@ -385,47 +419,3 @@ def _in_child_pid_namespace() -> bool:
         return os.readlink("/proc/self/ns/pid") != _INIT_PID_NAMESPACE
     except OSError:
         return False
-
-
-class TestSuitesIgnoreAnInheritedLeaseRoot:
-    """A hand run with the documented export must neither fail nor write fixtures into the shared root.
-
-    The wrapper above scrubs the variables, so it cannot see this: the suites'
-    own ``unset`` is what is under test, and a run that inherits the variable
-    is the only way to reach it.
-    """
-
-    @pytest.mark.parametrize("relpath", _LEASE_SENSITIVE, ids=lambda p: Path(p).name)
-    def test_suite_passes_with_the_lease_root_exported_and_leaves_it_untouched(
-        self, relpath: str, tmp_path: Path
-    ) -> None:
-        shared = tmp_path / "shared-lease-root"
-        shared.mkdir()
-        # A live peer holds both leases in the shared root, as another run does on
-        # the shared qwentescence host. A suite that inherits the root queues behind
-        # this holder and fails; a suite that unsets it never sees it. This process
-        # is alive for the whole test, so its pid is a live holder.
-        held = {}
-        for resource in ("service", "suite"):
-            lease = shared / resource
-            lease.mkdir()
-            (lease / "pid").write_text(f"{os.getpid()}\n")
-            (lease / "label").write_text("a peer run holding the shared lease\n")
-            held[resource] = sorted(p.name for p in lease.iterdir())
-        env = _env_without_lease_vars()
-        env["NX_BUILD_LEASE_ROOT"] = str(shared)
-        env["NX_SUITE_LEASE_WAIT"] = "1"
-        path = REPO_ROOT / relpath
-        result = run_suite(path, cwd=REPO_ROOT, env=env, timeout=_TIMEOUT_BY_RELPATH[relpath])
-        assert result.returncode == 0, (
-            f"{path.name} failed with NX_BUILD_LEASE_ROOT exported\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
-        )
-        assert sorted(p.name for p in shared.iterdir()) == ["service", "suite"], (
-            f"{path.name} wrote into the inherited lease root: "
-            f"{sorted(p.name for p in shared.iterdir())}"
-        )
-        for resource, files in held.items():
-            lease = shared / resource
-            assert sorted(p.name for p in lease.iterdir()) == files, f"{path.name} touched the peer's {resource} lease"
-            assert (lease / "pid").read_text().strip() == str(os.getpid()), f"{path.name} took over the peer's {resource} lease"

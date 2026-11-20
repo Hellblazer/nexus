@@ -348,3 +348,35 @@ class TestEndSnapshotUnusableReason:
 
     def test_no_recorded_start_directory_falls_back_to_the_diff(self, tmp_path: Path) -> None:
         assert _end_snapshot_unusable_reason(None, tmp_path, self._BASE, {"a.json": (1, 1)}) is None
+
+
+class TestLiveSessionIdentityFilesAreAllowlisted:
+    """nexus-hczdo: live sessions renew their RDR-253 identity tokens mid-run (the lease refreshes under 50 minutes
+    left), so a long local run saw 12 ``identity/<pid>.<startedAt>.token`` files MODIFIED by other sessions' pids
+    (marlowe 2026-11-19). Only the exact names the token writers produce are exempt, never the identity/ dir."""
+
+    def test_the_names_the_token_writers_produce_are_exempt(self) -> None:
+        for rel in (
+            "identity/8275.1763560000123.token",
+            "identity/8275.1763560000123.token.lock",
+            "identity/8275.1763560000123.token.8275.0123456789abcdef0123456789abcdef.tmp",
+            "identity/delegated/i12.token",
+            "identity/delegated/i12.token.lock",
+            "identity/pending.8275.1763560000",
+        ):
+            assert _is_allowlisted_config_dir_path(rel), rel
+
+    def test_anything_else_under_identity_is_still_reported(self) -> None:
+        for rel in (
+            "identity/",
+            "identity/registry.json",
+            "identity/8275.token",
+            "identity/abc.123.token",
+            "identity/8275.1763560000123.token.bak",
+            "identity/delegated/alpha.token",
+            "identity/delegated/i12.token.tmp",
+            "identity/sub/8275.1763560000123.token",
+            "identity/pending.8275",
+            "xidentity/8275.1763560000123.token",
+        ):
+            assert not _is_allowlisted_config_dir_path(rel), rel

@@ -2,10 +2,11 @@
 """RDR-253 Step 5 open items (nexus-hczdo.1.7's DISCOVER notes): the board title rule, and ``nx identity promote``
 moving the entry's title to the new alias.
 
-The engine's ``promote`` does not retitle the board entry (only ``rename`` does, in its own transaction; a change
-there is an engine release), so the client does it after the promote, through ``put_replacing`` under the fence:
-the owning session's write lands, an operator's shell is refused (``403 identity_token_required``) and the command
-says so while still reporting the promote.
+From engine 0.1.198 the engine's ``promote`` retitles the entry itself, in the promote's own transaction, and says so in
+its answer (``board_entries_retitled``), whoever runs the command. An older engine's answer has no such key: the client
+then does it after the promote, through ``put_replacing`` under the fence, as before: the owning session's write lands, an
+operator's shell is refused (``403 identity_token_required``) and the command says so while still reporting the promote.
+The tests without ``promote_board`` below are that older engine; the ones with it are 0.1.198.
 """
 from __future__ import annotations
 
@@ -148,3 +149,44 @@ def test_promote_with_no_board_entry_says_nothing_about_the_board(tmp_path: Path
 def test_retitle_entry_ignores_an_entry_that_names_another_identity() -> None:
     memory = _Memory({"other (i2)": ENTRY.replace("i1", "i2")})
     assert retitle_entry(memory, "i1", "gamma") == "" and list(memory.entries) == ["other (i2)"]
+
+
+# ── an engine that retitles (0.1.198 on): the client writes nothing and reports the engine's answer ─────────────
+
+
+def test_promote_on_an_engine_that_retitles_leaves_the_entry_to_the_engine(tmp_path: Path) -> None:
+    """The fence would refuse this memory (403), so a client write would print a "keeps its title" line: it must not try."""
+    memory = _Memory({"scratch42 (i1)": ENTRY}, refuse=403)
+    machine = _Machine(tmp_path, memory)
+    machine.engine.promote_board = {"board_entries_retitled": 1}
+    result = machine.run("promote", _ephemeral(machine), "gamma")
+    assert result.exit_code == 0, result.output
+    assert "i1 is now the seat gamma" in result.output and "board entry retitled to 'gamma'" in result.output
+    assert "keeps its title" not in result.output
+    assert list(memory.entries) == ["scratch42 (i1)"] and memory.quarantined == [], "the client wrote nothing"
+
+
+def test_promote_on_an_engine_that_retitles_needs_no_board_handle_and_no_owning_session(tmp_path: Path) -> None:
+    machine = _Machine(tmp_path, None)
+    machine.engine.promote_board = {"board_entries_retitled": 1}
+    result = machine.run("promote", _ephemeral(machine), "gamma")
+    assert result.exit_code == 0 and "board entry retitled to 'gamma'" in result.output
+
+
+def test_promote_on_an_engine_that_finds_the_alias_title_taken_says_the_entry_keeps_its_title(tmp_path: Path) -> None:
+    memory = _Memory({"scratch42 (i1)": ENTRY, "gamma": "## someone else's notes\n"})
+    machine = _Machine(tmp_path, memory)
+    machine.engine.promote_board = {"board_entries_retitled": 0, "board_retitle": "title_taken"}
+    result = machine.run("promote", _ephemeral(machine), "gamma")
+    assert result.exit_code == 0, result.output
+    assert "board entry keeps its title: an entry titled 'gamma' already exists" in result.output
+    assert memory.entries["gamma"] == "## someone else's notes\n" and memory.quarantined == []
+
+
+def test_promote_on_an_engine_that_found_no_entry_says_nothing_about_the_board_and_does_not_look(tmp_path: Path) -> None:
+    memory = _Memory({"scratch42 (i1)": ENTRY})
+    machine = _Machine(tmp_path, memory)
+    machine.engine.promote_board = {"board_entries_retitled": 0}
+    result = machine.run("promote", _ephemeral(machine), "gamma")
+    assert result.exit_code == 0 and "board" not in result.output
+    assert list(memory.entries) == ["scratch42 (i1)"], "an engine that answered is not second-guessed by a client write"

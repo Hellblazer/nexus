@@ -1,0 +1,3316 @@
+{
+ "manifest": {
+  "git_sha": "5b366f0d5fe889c173d81335a7d7c93511aab93a",
+  "git_dirty": false,
+  "host_class": "unmanaged 16c darwin-arm64",
+  "cpu_model": "Apple M4 Max",
+  "engine_build": "release 0.1.197",
+  "python": "3.13.5",
+  "measured_at": "2026-11-19T17:28:07+00:00"
+ },
+ "scope": null,
+ "queries": {
+  "bench/queries/spike_5q.yaml": "940093aa52b74d56cbd5814004221f7e23fa5596236a2887318c42f9265a4eed",
+  "bench/queries/golden_v1.yaml": "1176935f45b75bcd65dbc98c4745e4a731e9a082a7f8a55a2c54e9530f4e287d",
+  "bench/queries/golden_heldout_v1.yaml": "ce2cf2dbe43e05f878b0adcebac4479c7bbaea844ee36670083e8d2e8c0aeb76",
+  "bench/queries/generic_docs_v2.yaml": "0f2615e39776341786ccf7ec4318b15f2c6ca75d31f0f18578cdee9fc75b4d3a"
+ },
+ "per_collection_env": null,
+ "primary": "calibrated",
+ "rows": [
+  {
+   "qid": "GD01-changelog-8-3-0",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.17155488,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 48.80273820809089,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "code__1-77__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "test_engine_version.py",
+      "code__1-77__voyage-code-3__v1/phpantom.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "test_engine_version.py",
+      "engine_version.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_engine_version.py",
+      "code__1-77__voyage-code-3__v1/phpantom.py",
+      "engine_version.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.20223507,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 70.45545520889573,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "code__1-77__voyage-code-3__v1": "voyage-code-3",
+     "code__1-15__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_engine_version.py",
+      "code__1-77__voyage-code-3__v1/phpantom.py",
+      "engine_version.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_engine_version.py",
+      "code__1-77__voyage-code-3__v1/phpantom.py",
+      "engine_version.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_engine_version.py",
+      "code__1-77__voyage-code-3__v1/phpantom.py",
+      "engine_version.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD02-changelog-8-3-1",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.16371667,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 70.71657850011252,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-87__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-213-channel-delivery-without-a-proof-gate.md",
+      "docs__1-87__voyage-context-3__v1/ChangeHistory.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-213-channel-delivery-without-a-proof-gate.md",
+      "docs__1-87__voyage-context-3__v1/ChangeHistory.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "test_engine_version.py",
+      "CHANGELOG.md",
+      "rdr-213-channel-delivery-without-a-proof-gate.md"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.12906128,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 43.81204212503508,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-87__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-213-channel-delivery-without-a-proof-gate.md",
+      "docs__1-87__voyage-context-3__v1/ChangeHistory.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-213-channel-delivery-without-a-proof-gate.md",
+      "docs__1-87__voyage-context-3__v1/ChangeHistory.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "rdr-213-channel-delivery-without-a-proof-gate.md",
+      "docs__1-87__voyage-context-3__v1/ChangeHistory.md"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD03-cli-purge-trash-defaults",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.1571516,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 56.34715608297847,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-46__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "cli-reference.md",
+      "purge_trash.py",
+      "CatalogHandler.java"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "purge_trash.py",
+      "cli-reference.md",
+      "CatalogHandler.java"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "purge_trash.py",
+      "CatalogHandler.java",
+      "http_catalog_client.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.15387120999999998,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 52.30432024993934,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-46__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "cli-reference.md",
+      "purge_trash.py",
+      "CatalogHandler.java"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "purge_trash.py",
+      "CatalogHandler.java",
+      "cli-reference.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "purge_trash.py",
+      "CatalogHandler.java",
+      "http_catalog_client.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD04-cli-restore-deleted-document",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.18083319999999997,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 49.12141133309342,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "trash.py",
+      "cli-reference.md",
+      "http_catalog_client.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "trash.py",
+      "http_catalog_client.py",
+      "cli-reference.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "trash.py",
+      "http_catalog_client.py",
+      "test_wbfpw35_maintenance_readers.py"
+     ]
+    },
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.17871747999999998,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 50.456652167020366,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "trash.py",
+      "cli-reference.md",
+      "http_catalog_client.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "trash.py",
+      "http_catalog_client.py",
+      "cli-reference.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "trash.py",
+      "http_catalog_client.py",
+      "test_wbfpw35_maintenance_readers.py"
+     ]
+    },
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD05-storage-nxexp-format",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.16892499,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 53.710520499851555,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-27__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-2__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-031-collection-portability.md",
+      "test_exporter.py",
+      "exporter.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-031-collection-portability.md",
+      "test_exporter.py",
+      "exporter.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_exporter.py",
+      "exporter.py",
+      "test_z0o2p19_nxexp_import_combined_write.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.18606067,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 47.15053983288817,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-27__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-2__voyage-context-3__v1": "voyage-context-3",
+     "code__1-46__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_exporter.py",
+      "exporter.py",
+      "test_z0o2p19_nxexp_import_combined_write.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_exporter.py",
+      "exporter.py",
+      "test_z0o2p19_nxexp_import_combined_write.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_exporter.py",
+      "exporter.py",
+      "test_z0o2p19_nxexp_import_combined_write.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD06-storage-t1-session-resolution",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.1966616,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 54.7471515419893,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "storage-tiers.md",
+      "t1.py",
+      "JDR-001-t1-three-scopes.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "storage-tiers.md",
+      "t1.py",
+      "JDR-001-t1-three-scopes.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "t1.py",
+      "session.py",
+      "tuple_directory.py"
+     ]
+    },
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.19466581,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 73.58631291706115,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "storage-tiers.md",
+      "t1.py",
+      "JDR-001-t1-three-scopes.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "storage-tiers.md",
+      "t1.py",
+      "JDR-001-t1-three-scopes.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "t1.py",
+      "session.py",
+      "tuple_directory.py"
+     ]
+    },
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD07-arch-post-store-hooks",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.0010088200000000001,
+    "chunk_count": 10,
+    "error": null,
+    "elapsed_s": 21.590849083848298,
+    "plan_id": 471,
+    "step_count": 1,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "AGENTS.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "AGENTS.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "AGENTS.md"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.00034347,
+    "chunk_count": 10,
+    "error": null,
+    "elapsed_s": 10.922383667202666,
+    "plan_id": 471,
+    "step_count": 1,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "AGENTS.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "AGENTS.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "CHANGELOG.md",
+      "AGENTS.md"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD08-arch-taxonomy-centroid-lifecycle",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.2386368,
+    "chunk_count": 30,
+    "error": null,
+    "elapsed_s": 67.66453454107977,
+    "plan_id": 465,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 108,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": [
+      "where"
+     ]
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "test_taxonomy.py",
+      "http_taxonomy_store.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "test_taxonomy.py",
+      "http_taxonomy_store.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_taxonomy.py",
+      "http_taxonomy_store.py",
+      "test_taxonomy_e2e.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.17974756,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 56.96140170795843,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "test_taxonomy.py",
+      "http_taxonomy_store.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "architecture.md",
+      "test_taxonomy.py",
+      "http_taxonomy_store.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_taxonomy.py",
+      "http_taxonomy_store.py",
+      "test_taxonomy_e2e.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": false
+  },
+  {
+   "qid": "GD09-collections-who-creates",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.31376750999999997,
+    "chunk_count": 20,
+    "error": null,
+    "elapsed_s": 59.669131458038464,
+    "plan_id": 655,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_indexer_e2e.py",
+      "indexer.py",
+      "index.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.47020199776783905,
+     "recall10": 1.0,
+     "top3": [
+      "cli-reference.md",
+      "collections.md",
+      "CHANGELOG.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_indexer_e2e.py",
+      "indexer.py",
+      "index.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.30151166999999995,
+    "chunk_count": 28,
+    "error": null,
+    "elapsed_s": 74.98153779190034,
+    "plan_id": 655,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 21,
+     "no_topics": 30,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 3,
+     "unrouted_reasons": [
+      "no_prose_collections"
+     ]
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-27__voyage-code-3__v1": "voyage-code-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-103-catalog-collection-name-authority.md",
+      "code__1-27__voyage-code-3__v1/main.py",
+      "test_catalog_rename_collection.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.7452525342261976,
+     "recall10": 1.0,
+     "top3": [
+      "collections.md",
+      "2026-03-24-pdf-index-fix-not-applied.md",
+      "cli-reference.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "code__1-27__voyage-code-3__v1/main.py",
+      "test_catalog_rename_collection.py",
+      "code__1-27__voyage-code-3__v1/export_import.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD10-collections-one-document",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.25739781,
+    "chunk_count": 17,
+    "error": null,
+    "elapsed_s": 78.47972404188477,
+    "plan_id": 657,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 50,
+     "no_topics": 166,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 2,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-46__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "VectorHandler.java",
+      "core.py",
+      "TopicRouteArm.java"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.5,
+     "recall10": 1.0,
+     "top3": [
+      "core.py",
+      "test_mcp_server.py",
+      "collections.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "VectorHandler.java",
+      "core.py",
+      "TopicRouteArm.java"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.17400465,
+    "chunk_count": 20,
+    "error": null,
+    "elapsed_s": 73.20195495802909,
+    "plan_id": 657,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-27__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-3__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "taxonomy_compute.py",
+      "test_taxonomy.py",
+      "test_retrieval_drift_gate.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "collections.md",
+      "rdr-204-embedding-profile-and-collection-authority.md",
+      "rdr-037-t3-database-consolidation.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "taxonomy_compute.py",
+      "test_taxonomy.py",
+      "test_retrieval_drift_gate.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD11-bench-pairs",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.27279261,
+    "chunk_count": 18,
+    "error": null,
+    "elapsed_s": 86.71624887501821,
+    "plan_id": 659,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-20__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-2__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-86__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-94__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "paired.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "paired.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "paired.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.203798,
+    "chunk_count": 18,
+    "error": null,
+    "elapsed_s": 82.2918429998681,
+    "plan_id": 659,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 21,
+     "no_topics": 30,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 2,
+     "unrouted_reasons": [
+      "no_prose_collections"
+     ]
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "code__1-94__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-2__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-94__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-3__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-20__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "paired.py",
+      "test_bench_manifest_and_paired.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "paired.py",
+      "test_bench_manifest_and_paired.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "paired.py",
+      "test_bench_manifest_and_paired.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD12-bench-compare-refusal",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.9285158299999999,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 133.364182083169,
+    "plan_id": 475,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "code__1-95__voyage-code-3__v1": "voyage-code-3",
+     "code__1-27__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "test_agent_error_probes.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "test_agent_error_probes.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "test_agent_error_probes.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "off": {
+    "cost_usd": 1.68545763,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 215.81761412485503,
+    "plan_id": 475,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "code__1-95__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.6309297535714575,
+     "recall10": 1.0,
+     "top3": [
+      "CHANGELOG.md",
+      "benchmarking.md",
+      "runner.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "test_agent_error_probes.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "runner.py",
+      "test_bench_manifest_and_paired.py",
+      "test_agent_error_probes.py"
+     ]
+    },
+    "ndcg3": 0.6309297535714575,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD13-repo-indexing-frecency",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 1.2792422,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 83.51262262486853,
+    "plan_id": 467,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "repo-indexing.md",
+      "rdr-217-client-lexical-retrieval-leg.md",
+      "frecency.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "repo-indexing.md",
+      "frecency.py",
+      "scoring.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "repo-indexing.md",
+      "frecency.py",
+      "scoring.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.5911685999999999,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 54.26614979212172,
+    "plan_id": 467,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "repo-indexing.md",
+      "rdr-217-client-lexical-retrieval-leg.md",
+      "frecency.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "repo-indexing.md",
+      "frecency.py",
+      "scoring.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "repo-indexing.md",
+      "frecency.py",
+      "scoring.py"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD14-querying-distance-thresholds",
+   "kind": "generic",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.1615896,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 55.86731354193762,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.2128453970090281,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-056-search-robustness-result-clustering.md",
+      "configuration.md",
+      "test_distance_thresholds.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.2128453970090281,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-056-search-robustness-result-clustering.md",
+      "configuration.md",
+      "test_distance_thresholds.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_distance_thresholds.py",
+      "search_engine.py",
+      "dual-embedder-gate.sh"
+     ]
+    },
+    "ndcg3": 0.2128453970090281,
+    "recall10": 0.0
+   },
+   "off": {
+    "cost_usd": 0.15460181,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 58.50017695920542,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.95583058934618,
+     "recall10": 1.0,
+     "top3": [
+      "querying-guide.md",
+      "rdr-056-search-robustness-result-clustering.md",
+      "configuration.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.95583058934618,
+     "recall10": 1.0,
+     "top3": [
+      "querying-guide.md",
+      "rdr-056-search-robustness-result-clustering.md",
+      "configuration.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.7871546029909718,
+     "recall10": 1.0,
+     "top3": [
+      "querying-guide.md",
+      "test_distance_thresholds.py",
+      "search_engine.py"
+     ]
+    },
+    "ndcg3": 0.95583058934618,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "GD15-plans-builtin-template-count",
+   "kind": "generic",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.14122071,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 55.887573749991134,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.6735439182299785,
+     "recall10": 1.0,
+     "top3": [
+      "plan-centric-retrieval.md",
+      "querying-guide.md",
+      "test_catalog_cli.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.6735439182299785,
+     "recall10": 1.0,
+     "top3": [
+      "plan-centric-retrieval.md",
+      "querying-guide.md",
+      "test_catalog_cli.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.42495889834839423,
+     "recall10": 1.0,
+     "top3": [
+      "test_catalog_cli.py",
+      "plan-centric-retrieval.md",
+      "_rdr232_golden.py"
+     ]
+    },
+    "ndcg3": 0.6735439182299785,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.13864140000000003,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 67.01536333281547,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.6735439182299785,
+     "recall10": 1.0,
+     "top3": [
+      "plan-centric-retrieval.md",
+      "querying-guide.md",
+      "test_catalog_cli.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.6735439182299785,
+     "recall10": 1.0,
+     "top3": [
+      "plan-centric-retrieval.md",
+      "querying-guide.md",
+      "test_catalog_cli.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.42495889834839423,
+     "recall10": 1.0,
+     "top3": [
+      "test_catalog_cli.py",
+      "plan-centric-retrieval.md",
+      "_rdr232_golden.py"
+     ]
+    },
+    "ndcg3": 0.6735439182299785,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "Q1-factual-tumblers",
+   "kind": "rdr",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.14899867,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 39.51449266704731,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-41__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr_canonical.py",
+      "spike_rdr090_5q.py",
+      "t3.py"
+     ]
+    },
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.16011017,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 69.9048695419915,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-41__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.7098097413968655,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md",
+      "rdr-052-catalog-first-query-routing.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.5413402936435214,
+     "recall10": 1.0,
+     "top3": [
+      "rdr_canonical.py",
+      "rdr-053-xanadu-fidelity.md",
+      "rdr-049-git-backed-catalog.md"
+     ]
+    },
+    "ndcg3": 0.7098097413968655,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "Q2-factual-chash",
+   "kind": "rdr",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.17588858,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 40.38711545895785,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-27__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "test_catalog_e2e.py",
+      "chunk_identity.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_catalog_e2e.py",
+      "rdr-053-xanadu-fidelity.md",
+      "chunk_identity.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_catalog_e2e.py",
+      "chunk_identity.py",
+      "doc_indexer.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "top1": {
+    "cost_usd": 0.17572854,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 41.682738499948755,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-27__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-053-xanadu-fidelity.md",
+      "test_catalog_e2e.py",
+      "chunk_identity.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_catalog_e2e.py",
+      "chunk_identity.py",
+      "rdr-053-xanadu-fidelity.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_catalog_e2e.py",
+      "chunk_identity.py",
+      "doc_indexer.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "Q3-factual-taxonomy",
+   "kind": "rdr",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.16331158,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 40.71268862509169,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agentic-scholar-papers__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "knowledge__nexus__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agent-tool-use__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__semantic-operators__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "search_engine.py",
+      "taxonomy_compute.py",
+      "test_taxonomy.py"
+     ]
+    },
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0
+   },
+   "off": {
+    "cost_usd": 0.15485898,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 50.378935707965866,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agentic-scholar-papers__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "knowledge__semantic-operators__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__nexus__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agent-tool-use__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.9173194127129571,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-070-incremental-taxonomy-clustered-search.md",
+      "cli-reference.md",
+      "rdr-075-cross-collection-topic-projection.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "search_engine.py",
+      "taxonomy_compute.py",
+      "test_taxonomy.py"
+     ]
+    },
+    "ndcg3": 0.9173194127129571,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "Q4-comparative-hooks",
+   "kind": "rdr",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 1.6663950299999999,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 241.82313308282755,
+    "plan_id": 475,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "indexer.py",
+      "CHANGELOG.md",
+      "architecture.md"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666
+   },
+   "top1": {
+    "cost_usd": 0.24561515,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 236.57134112506174,
+    "plan_id": 475,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "CHANGELOG.md",
+      "architecture.md",
+      "AGENTS.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.6666666666666666,
+     "top3": [
+      "indexer.py",
+      "CHANGELOG.md",
+      "architecture.md"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.6666666666666666
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "Q5-compositional-retrieval",
+   "kind": "rdr",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.41971343,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 62.76943787490018,
+    "plan_id": 467,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "spike_rdr090_5q.py",
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md"
+     ]
+    },
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5
+   },
+   "off": {
+    "cost_usd": 0.410076,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 73.35940058389679,
+    "plan_id": 467,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.23463936301137825,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-098-abstract-question-plan-template.md",
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "rdr-080-retrieval-layer-consolidation.md"
+     ]
+    },
+    "ndcg3": 0.23463936301137825,
+    "recall10": 0.5
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "G04-lookup-min-confidence",
+   "kind": "rdr",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.18428087999999998,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 44.36930550006218,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_nx_answer.py",
+      "core.py",
+      "test_plan_match.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_nx_answer.py",
+      "core.py",
+      "test_plan_match.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_nx_answer.py",
+      "core.py",
+      "test_plan_match.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.1788341,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 37.66911341599189,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_nx_answer.py",
+      "core.py",
+      "test_plan_match.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 1.0,
+     "top3": [
+      "test_nx_answer.py",
+      "core.py",
+      "test_plan_match.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "test_nx_answer.py",
+      "core.py",
+      "test_plan_match.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "G05-lookup-hybridrag-cap",
+   "kind": "title",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.1910129,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 49.630190584110096,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agent-tool-use__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__dt-papers__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__vector-search__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agentic-scholar-papers__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agent-memory__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-27__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+      "rdr-098-abstract-question-plan-template.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+      "rdr-098-abstract-question-plan-template.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+      "rdr-098-abstract-question-plan-template.md"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "off": {
+    "cost_usd": 0.18464106,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 52.23533899988979,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agent-tool-use__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__dt-papers__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__vector-search__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__knowledge__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agentic-scholar-papers__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__agent-memory__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__semantic-operators__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-27__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+      "rdr-098-abstract-question-plan-template.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+      "rdr-098-abstract-question-plan-template.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "rdr-097-hybrid-retrieval-plan-template.md",
+      "RAG Deserves an Index- Why Ingest-Time Compilation Beats Query-Time Interpretation.pdf",
+      "rdr-098-abstract-question-plan-template.md"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "G07-synthesis-rdr155",
+   "kind": "rdr",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.27144708,
+    "chunk_count": 0,
+    "error": "no chunks: the plan retrieved nothing (a failed run is not scored as a loss)",
+    "elapsed_s": 63.73394949990325,
+    "plan_id": 0,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    }
+   },
+   "top1": {
+    "cost_usd": 0.24268001999999997,
+    "chunk_count": 2,
+    "error": null,
+    "elapsed_s": 77.45576949999668,
+    "plan_id": 661,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 2,
+     "unreported": 0,
+     "events": 2,
+     "unrouted_reasons": [
+      "chash_allow"
+     ]
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-155-pgvector-t3-consolidation.md"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": false,
+   "same_plan": false
+  },
+  {
+   "qid": "G15-comparison-harnesses",
+   "kind": "rdr",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.47324243,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 56.90662500006147,
+    "plan_id": 467,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__nexus__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__nexus-rdr-research__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 0.5,
+     "top3": [
+      "benchmarking.md",
+      "rdr-196-cost-aware-nx-answer.md",
+      "results.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.5,
+     "top3": [
+      "benchmarking.md",
+      "results.md",
+      "rdr-179-self-correction-machinery-remediation.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.38685280723454163,
+     "recall10": 0.5,
+     "top3": [
+      "benchmarking.md",
+      "rdr-196-cost-aware-nx-answer.md",
+      "results.md"
+     ]
+    },
+    "ndcg3": 0.38685280723454163,
+    "recall10": 0.5
+   },
+   "off": {
+    "cost_usd": 0.38812315999999997,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 58.1132950829342,
+    "plan_id": 467,
+    "step_count": 4,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "knowledge__nexus__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "benchmarking.md",
+      "cli-reference.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "benchmarking.md",
+      "cli-reference.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.6131471927654584,
+     "recall10": 0.5,
+     "top3": [
+      "rdr-196-cost-aware-nx-answer.md",
+      "benchmarking.md",
+      "cli-reference.md"
+     ]
+    },
+    "ndcg3": 0.6131471927654584,
+    "recall10": 0.5
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "G16-audit-rdr210",
+   "kind": "rdr",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 1.14763843,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 274.9474702908192,
+    "plan_id": 662,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-79__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-3__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "001-rdr-process-validation.md",
+      "persona-2-implementer.md",
+      "pairwise-0007-0006.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "001-rdr-process-validation.md",
+      "persona-2-implementer.md",
+      "pairwise-0007-0006.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "001-rdr-process-validation.md",
+      "persona-2-implementer.md",
+      "pairwise-0007-0006.md"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "top1": {
+    "cost_usd": 1.10357922,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 169.94121850002557,
+    "plan_id": 662,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 5,
+     "no_topics": 7,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-3__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-79__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-20__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-2__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "001-rdr-process-validation.md",
+      "RDR-003-subdomain-lifecycle-api.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "001-rdr-process-validation.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md",
+      "RDR-003-subdomain-lifecycle-api.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "001-rdr-process-validation.md",
+      "RDR-003-subdomain-lifecycle-api.md",
+      "rdr-201-closed-vocabularies-as-checked-tables.md"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "H01",
+   "kind": "rdr",
+   "order": [
+    "top1",
+    "off"
+   ],
+   "top1": {
+    "cost_usd": 0.15857938,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 33.452688709134236,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 25,
+     "no_topics": 83,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 1,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "knowledge__agent-cockpit__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "git-push-develop.sh",
+      "aspect_readers.py",
+      "config.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "git-push-develop.sh",
+      "aspect_readers.py",
+      "config.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "git-push-develop.sh",
+      "aspect_readers.py",
+      "config.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "off": {
+    "cost_usd": 0.15378076000000002,
+    "chunk_count": 50,
+    "error": null,
+    "elapsed_s": 59.27936395816505,
+    "plan_id": 473,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "code__1-1__voyage-code-3__v1": "voyage-code-3",
+     "knowledge__agent-cockpit__voyage-context-3__v1": "voyage-context-3",
+     "docs__1-1__voyage-context-3__v1": "voyage-context-3",
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "git-push-develop.sh",
+      "aspect_readers.py",
+      "config.py"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "git-push-develop.sh",
+      "aspect_readers.py",
+      "config.py"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.0,
+     "recall10": 0.0,
+     "top3": [
+      "git-push-develop.sh",
+      "aspect_readers.py",
+      "config.py"
+     ]
+    },
+    "ndcg3": 0.0,
+    "recall10": 0.0
+   },
+   "paired": true,
+   "same_plan": true
+  },
+  {
+   "qid": "H02",
+   "kind": "rdr",
+   "order": [
+    "off",
+    "top1"
+   ],
+   "off": {
+    "cost_usd": 0.4018199,
+    "chunk_count": 26,
+    "error": null,
+    "elapsed_s": 119.30932816700079,
+    "plan_id": 664,
+    "step_count": 6,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 0,
+     "no_topics": 0,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 0,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3",
+     "code__1-1__voyage-code-3__v1": "voyage-code-3"
+    },
+    "calibrated": {
+     "ndcg3": 0.7039180890341348,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "test_mcp_tuple_tools.py",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.4692787260227565,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-111-orb-agentic-cockpit-substrate.md",
+      "rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 0.2960819109658653,
+     "recall10": 1.0,
+     "top3": [
+      "test_mcp_tuple_tools.py",
+      "test_rdr206_mvv_engine_direct.py",
+      "test_http_tuple_store.py"
+     ]
+    },
+    "ndcg3": 0.7039180890341348,
+    "recall10": 1.0
+   },
+   "top1": {
+    "cost_usd": 0.40052724,
+    "chunk_count": 23,
+    "error": null,
+    "elapsed_s": 149.25492991600186,
+    "plan_id": 664,
+    "step_count": 5,
+    "budget_exhausted_at_step": null,
+    "route": {
+     "routed": 15,
+     "no_topics": 21,
+     "fallback": 0,
+     "skipped": 0,
+     "unreported": 0,
+     "events": 3,
+     "unrouted_reasons": []
+    },
+    "calibration_models": {
+     "rdr__1-1__voyage-context-3__v1": "voyage-context-3"
+    },
+    "calibrated": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+      "rdr-205-linda-tuple-space-over-postgres.md"
+     ]
+    },
+    "envelope": {
+     "ndcg3": 0.7653606369886218,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-205-linda-tuple-space-over-postgres.md",
+      "rdr-110-semantic-tuple-space.md"
+     ]
+    },
+    "distance": {
+     "ndcg3": 1.0,
+     "recall10": 1.0,
+     "top3": [
+      "rdr-211-board-queue-and-lock-tuple-templates.md",
+      "rdr-206-tuple-claim-renew-and-reply-in-ack.md",
+      "rdr-205-linda-tuple-space-over-postgres.md"
+     ]
+    },
+    "ndcg3": 1.0,
+    "recall10": 1.0
+   },
+   "paired": true,
+   "same_plan": true
+  }
+ ],
+ "spent_usd": 18.307783829999998,
+ "cap_usd": 100.0,
+ "call_budget_usd": 1.0,
+ "stopped": "cost_unknown",
+ "stop_detail": "H03 top1: the envelope or one of its steps has no cost_usd",
+ "summary": {
+  "orderings": {
+   "calibrated": "envelope chunks sorted by calibrated distance (carried distance x model factor when the chunks span more than one model), ascending, none last; changed from raw distance, the pre-declared primary, after the first partial run (Sam 2026-11-19, 134-research-17)",
+   "envelope": "envelope order: each retrieval step's own ranking, steps in plan order (printed, not decided on)",
+   "distance": "envelope chunks sorted by raw carried distance (the ordering of 134-research-13; printed, not decided on)"
+  },
+  "primary": "calibrated",
+  "n": 27,
+  "paired": 26,
+  "errors": 1,
+  "error_qids": [
+   "G07-synthesis-rdr155"
+  ],
+  "n_routed_questions": 24,
+  "top1_routed_collections": 587,
+  "vacuous": false,
+  "plan_mismatch_qids": [
+   "GD08-arch-taxonomy-centroid-lifecycle"
+  ],
+  "by_kind": {
+   "generic": {
+    "n": 15,
+    "off": {
+     "ndcg3": 0.653903561828802,
+     "recall10": 1.0
+    },
+    "top1": {
+     "ndcg3": 0.49564256543489477,
+     "recall10": 0.7333333333333333
+    },
+    "mean_delta_ndcg3": -0.1582609963939073,
+    "ci95_mean_delta": [
+     -0.3336563132986711,
+     0.0
+    ],
+    "wins": 0,
+    "losses": 3
+   },
+   "rdr": {
+    "n": 10,
+    "off": {
+     "ndcg3": 0.3178833798920794,
+     "recall10": 0.5666666666666667
+    },
+    "top1": {
+     "ndcg3": 0.32486213243557427,
+     "recall10": 0.5666666666666667
+    },
+    "mean_delta_ndcg3": 0.0069787525434948485,
+    "ci95_mean_delta": [
+     -0.06788831565927503,
+     0.08882457328975957
+    ],
+    "wins": 1,
+    "losses": 1
+   },
+   "title": {
+    "n": 1,
+    "off": {
+     "ndcg3": 0.0,
+     "recall10": 0.0
+    },
+    "top1": {
+     "ndcg3": 0.0,
+     "recall10": 0.0
+    },
+    "mean_delta_ndcg3": 0.0,
+    "ci95_mean_delta": null,
+    "wins": 0,
+    "losses": 0
+   }
+  },
+  "in_sample": {
+   "n": 10,
+   "off": {
+    "ndcg3": 0.3178833798920794,
+    "recall10": 0.5666666666666667
+   },
+   "top1": {
+    "ndcg3": 0.32486213243557427,
+    "recall10": 0.5666666666666667
+   },
+   "mean_delta_ndcg3": 0.0069787525434948485,
+   "ci95_mean_delta": [
+    -0.06788831565927503,
+    0.08882457328975957
+   ],
+   "wins": 1,
+   "losses": 1
+  },
+  "out_of_sample": {
+   "n": 16,
+   "off": {
+    "ndcg3": 0.6130345892145019,
+    "recall10": 0.9375
+   },
+   "top1": {
+    "ndcg3": 0.46466490509521385,
+    "recall10": 0.6875
+   },
+   "mean_delta_ndcg3": -0.14836968411928808,
+   "ci95_mean_delta": [
+    -0.3198062586403601,
+    0.0
+   ],
+   "wins": 0,
+   "losses": 3
+  },
+  "pass_rule": {
+   "n": 26,
+   "mean_delta_all": -0.08862028540283312,
+   "wins": 1,
+   "losses": 4,
+   "ties": 21,
+   "n_generic": 15,
+   "mean_delta_generic": -0.1582609963939073,
+   "generic_note": "",
+   "checks": {
+    "mean_delta_all": false,
+    "more_better_than_worse": false,
+    "generic_loss": false
+   },
+   "passed": false,
+   "rule": {
+    "min_mean_delta_all": 0.03,
+    "min_mean_delta_generic": -0.02,
+    "min_generic": 10
+   }
+  },
+  "routed_fraction": "24 of 26",
+  "min_routed_questions": 10,
+  "verdict": "incomplete: no verdict",
+  "informational": {
+   "secondary_ordering_rule": {
+    "n": 26,
+    "mean_delta_all": -0.09292037274037862,
+    "wins": 2,
+    "losses": 5,
+    "ties": 19,
+    "n_generic": 15,
+    "mean_delta_generic": -0.13992429396335007,
+    "generic_note": "",
+    "checks": {
+     "mean_delta_all": false,
+     "more_better_than_worse": false,
+     "generic_loss": false
+    },
+    "passed": false,
+    "rule": {
+     "min_mean_delta_all": 0.03,
+     "min_mean_delta_generic": -0.02,
+     "min_generic": 10
+    }
+   },
+   "raw_ordering_rule": {
+    "n": 26,
+    "mean_delta_all": -0.05594541548350754,
+    "wins": 1,
+    "losses": 5,
+    "ties": 20,
+    "n_generic": 15,
+    "mean_delta_generic": -0.07708165662796762,
+    "generic_note": "",
+    "checks": {
+     "mean_delta_all": false,
+     "more_better_than_worse": false,
+     "generic_loss": false
+    },
+    "passed": false,
+    "rule": {
+     "min_mean_delta_all": 0.03,
+     "min_mean_delta_generic": -0.02,
+     "min_generic": 10
+    }
+   },
+   "routed_questions_only_rule": {
+    "n": 24,
+    "mean_delta_all": -0.09600530918640254,
+    "wins": 1,
+    "losses": 4,
+    "ties": 19,
+    "n_generic": 13,
+    "mean_delta_generic": -0.18260884199296995,
+    "generic_note": "",
+    "checks": {
+     "mean_delta_all": false,
+     "more_better_than_worse": false,
+     "generic_loss": false
+    },
+    "passed": false,
+    "rule": {
+     "min_mean_delta_all": 0.03,
+     "min_mean_delta_generic": -0.02,
+     "min_generic": 10
+    }
+   },
+   "elapsed_s_mean": {
+    "off": 81.6415596890908,
+    "top1": 72.59438282216433
+   }
+  },
+  "scope_notes": [
+   "A pass licenses the default for nx_answer's search and query steps whose scope names no other domain and no topic, on this corpus, over the plans the questions matched (plan_id per arm), judged on retrieved chunks; it says nothing about answer quality.",
+   "The 25 RDR questions are in-sample (all among leg 1's 26). 'Out-of-sample' (title + generic) means not used to choose the design; the title questions were measured before (134-research-13), so they are not unseen. The primary ordering was changed after the first partial run's generic questions (GD01-GD08) had been seen, on their raw-distance and envelope scores; their calibrated scores had not been computed.",
+   "The off arm can grow a plan that the top1 arm then matches (nx_answer saves ad-hoc plans); pairs that ran different plans are flagged. The run writes those plans to the T2 plan library."
+  ]
+ }
+}

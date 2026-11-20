@@ -402,9 +402,24 @@ class TestParsing:
         ("zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval 'ENC=$(printf '\"'\"'%s'\"'\"' x)\\012echo $ENC' < /dev/null",
          "ENC=$(printf '%s' x) echo $ENC"),
         ("plain  command", "plain command"),
+        # the Bash tool's real wrapper, quoted body, with its cwd-capture tail (live ps, 2026-11-19)
+        ("/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval 'sleep 60 && echo done' "
+         "< /dev/null && pwd -P >| /tmp/claude-4f2a-cwd", "sleep 60 && echo done"),
+        # a ONE-WORD command comes out of zsh unquoted: `eval ./watcher.sh < /dev/null && ...`, which the quoted-only pattern
+        # missed, so the running-process row showed the whole wrapper (critique r1, H1)
+        ("/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval ./watcher.sh < /dev/null "
+         "&& pwd -P >| /tmp/claude-4f2a-cwd", "./watcher.sh"),
+        ("/bin/zsh -c source /h/.claude/shell-snapshots/snapshot-zsh-1.sh && eval pytest < /dev/null", "pytest"),
+        # an unquoted eval word that is not the snapshot wrapper's own shape is left alone
+        ("sh -c eval ./watcher.sh", "sh -c eval ./watcher.sh"),
     ])
     def test_the_eval_body_is_the_task_command(self, sf, line, want) -> None:
         assert sf.task_command(line) == want
+
+    def test_an_unquoted_one_word_task_is_listed_by_its_command_not_the_wrapper(self, sf) -> None:
+        wrapper = ("/bin/zsh -c source /Users/x/.claude/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && eval ./watcher.sh "
+                   "< /dev/null && pwd -P >| /tmp/claude-4f2a-cwd")
+        assert "snapshot" not in sf.task_command(wrapper) and "pwd -P" not in sf.task_command(wrapper)
 
     def test_ps_rows_parse(self, sf) -> None:
         out = ("  501   1 Fri Nov 13 19:33:02 2026     /usr/bin/claude --resume\n"

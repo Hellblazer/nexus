@@ -1057,6 +1057,8 @@ def _resolve_value(
                 resolved.extend(r)
             else:
                 resolved.append(r)
+        if value and not resolved and all(_is_zero_evidence_ref(item, step_outputs) for item in value):
+            return _ZeroEvidenceRef()
         return resolved
 
     if not isinstance(value, str):
@@ -1096,6 +1098,13 @@ def _resolve_value(
                     "to plan_run to disable bundling for this invocation."
                 ),
             )
+        if field_name not in prior and _is_zero_evidence_output(prior):
+            # GH #1667 follow-up C: the step short-circuited on empty evidence, so it has only the marker
+            # ``text`` and none of its operator's fields (a rank has no ``ranked``). A reference to such a field
+            # reads as empty, so the consuming operator short-circuits on zero evidence too and the run ends in
+            # the classifiable marker instead of a ref error. The marked list tells the dispatcher so, whatever
+            # the argument (``groups``, ``items``, ``context`` take no short-circuit of their own on ``[]``).
+            return _ZeroEvidenceRef()
         if field_name not in prior:
             raise PlanRunStepRefError(
                 ref=value,
@@ -2362,6 +2371,31 @@ def _zero_evidence_witness(resolved_tool: str, text: str) -> dict[str, Any]:
     return {**_bind_witness(reply, None, verb), "text": text}
 
 
+def _is_zero_evidence_output(output: dict[str, Any]) -> bool:
+    """True for a step that short-circuited on empty evidence: its ``text`` is the zero-evidence marker
+    (``_no_evidence_result_text``), whether the bare ``{"text": ...}`` or the witness payload."""
+    text = output.get("text")
+    return isinstance(text, str) and text.startswith(_NO_EVIDENCE_RESULT_PREFIX)
+
+
+class _ZeroEvidenceRef(list):
+    """The empty value a ``$stepN.<field>`` reference resolves to when step N short-circuited on zero evidence and
+    has no such field (GH #1667 follow-up C). A plain ``[]`` reaching ``groups`` or ``items`` would dispatch the
+    operator on nothing; this type lets the dispatcher short-circuit the consuming step to the marker instead."""
+
+
+def _is_zero_evidence_ref(item: Any, step_outputs: list[dict[str, Any]]) -> bool:
+    """True when *item* is a ``$stepN.<field>`` reference into a zero-evidence step that lacks the field."""
+    m = _STEPREF_RE.match(item) if isinstance(item, str) else None
+    if m is None:
+        return False
+    idx = int(m.group(1)) - 1
+    if not 0 <= idx < len(step_outputs):
+        return False
+    prior = step_outputs[idx]
+    return m.group(2) not in prior and _is_zero_evidence_output(prior)
+
+
 def _refuse_sensitive_tumblers(tumbler_ids: list[str], cat: Any) -> set[str]:
     """The tumblers of *tumbler_ids* hydration refuses under ``exclude``, each with a skip line.
 
@@ -3017,6 +3051,13 @@ def _hydrate_operator_args(
     # hydration below as an argument. ``llm_bound`` (the nx_answer scope) is ``exclude``.
     sensitivity: ReadSensitivity = _sensitivity.read_sensitivity()
     resolved_tool = _OPERATOR_TOOL_MAP.get(tool, tool)
+    # GH #1667 follow-up C: an operator handed a reference into a step that already short-circuited on zero
+    # evidence has nothing to work on, whichever argument carries it (``groups``, ``items``, ``context`` take
+    # no short-circuit of their own on ``[]``). Marked here, the one place every path hydrates through (the
+    # dispatcher, the coverage boundary's prehydration, the bundle composer), before the args are rewritten
+    # into plain lists and strings and the type is lost.
+    if resolved_tool in _OPERATOR_RESOLVED_TOOLS and any(isinstance(v, _ZeroEvidenceRef) for v in args.values()):
+        args = {**args, "_zero_evidence_text": _no_evidence_result_text(tool=tool, filtered_count=0)}
     evidence_source = args.get(_EVIDENCE_SOURCE_KEY)
     if _EVIDENCE_SOURCE_KEY in args:
         args = {k: v for k, v in args.items() if k != _EVIDENCE_SOURCE_KEY}

@@ -31,8 +31,10 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from nexus.registry import RepoRegistry
 from tests.conftest import fake_credentials, make_vector_test_client
+from tests._mineru_cache import shared_mineru_extraction  # noqa: F401 - the fixture, opted into below
 
-pytestmark = pytest.mark.t2_tenant
+# shared_mineru_extraction: one real MinerU run per distinct PDF per session (suite audit item 4, tests/_mineru_cache.py).
+pytestmark = [pytest.mark.t2_tenant, pytest.mark.usefixtures("shared_mineru_extraction")]
 
 
 def _git(repo: Path, *args: str) -> None:

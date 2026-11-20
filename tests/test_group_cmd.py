@@ -390,6 +390,44 @@ def test_leave_and_list_over_an_html_answer_exit_one_instead_of_not_a_member_or_
     assert shown.exit_code == 1 and "(none)" not in shown.output, shown.output
 
 
+_MALFORMED_ROWS = {
+    "a_row_that_is_not_a_map": ["i4"],
+    "a_row_with_no_identity": [{"group": "push-train", "role": "member"}],
+    "an_identity_that_is_not_text": [{"identity": 4, "group": "push-train", "role": "member"}],
+    "a_row_with_no_role": [{"identity": "i4", "group": "push-train"}],    # list formats the role: None would be a TypeError
+}
+
+
+@pytest.mark.parametrize("rows", list(_MALFORMED_ROWS.values()), ids=list(_MALFORMED_ROWS))
+def test_a_malformed_roster_is_one_line_and_exit_one_not_a_keyerror(rows: list[Any]) -> None:
+    """nexus-igea9.3 L6: ``list`` indexed the roster rows directly, so a row without ``identity`` was a KeyError traceback."""
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD).on("GET", "/v1/identity/groups/push-train", 200, {"members": rows})
+    result = _run(_env(wire), "list", "push-train")
+    assert isinstance(result.exception, SystemExit) and result.exit_code == 1, (result.exception, result.output)
+    assert "bad_response" in result.output and "Traceback" not in result.output, result.output
+
+
+def test_a_malformed_membership_row_is_one_line_and_exit_one_in_join() -> None:
+    """The same for ``join``, which looked each row's ``group`` up by index."""
+    wire = Wire().on("GET", "/v1/identity/i3", 200, _view("i3")) \
+                 .on("GET", "/v1/identity/i3/memberships", 200, {"identity": "i3", "memberships": [{"role": "member"}]})
+    result = _run(_env(wire), "join", "push-train")
+    assert isinstance(result.exception, SystemExit) and result.exit_code == 1, (result.exception, result.output)
+    assert "bad_response" in result.output and not wire.sent("POST", "/v1/identity/i3/memberships")
+
+
+def test_a_record_with_no_live_field_is_not_read_as_disbanded() -> None:
+    """The engine always sends ``live`` today, but an absent key is no verdict: ``live`` is None (the aura gate then uses its
+    local rule) and ``list`` shows the group live while ``ended_at`` is unset, never "disbanded"."""
+    bare = {k: v for k, v in RECORD.items() if k != "live"}
+    assert GroupRecord.from_wire(bare).live is None
+    assert GroupRecord.from_wire({**bare, "live": None}).live is None
+    assert GroupRecord.from_wire({**bare, "live": False}).live is False
+    wire = Wire().on("GET", "/v1/group/push-train", 200, bare).on("GET", "/v1/identity/groups/push-train", 200, {"members": []})
+    result = _run(_env(wire), "list", "push-train")
+    assert result.exit_code == 0 and "push-train: live;" in result.output and "disbanded" not in result.output, result.output
+
+
 _UNREADABLE = {
     "no_leader": {k: v for k, v in RECORD.items() if k != "leader"},              # KeyError
     "deadline_not_a_number": {**RECORD, "ack_deadline": "soon"},                  # ValueError
@@ -470,6 +508,23 @@ def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> Non
         (SHA3, "2026-11-19T14:00:00Z", None, None, None)]
     assert [r["handoffs"] for r in reds] == [0, 1, 0]
     assert set(tuples.reads) == {"board/ci/nexus-develop--owner"}, "the topics of the group's serves, on their --owner subspace"
+
+
+def test_ack_times_names_the_owner_by_alias_and_falls_back_to_the_id() -> None:
+    """RDR-252, Sam 2026-11-19: engine 0.1.198 stamps owner_alias beside owner; a row with none (an older engine, or an
+    identity with no live alias) is shown by its id, and the JSON carries null for the alias."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, owner="i4", owner_alias="halcyon", next="i5", next_alias="tamsin", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _row("owner", "2026-11-19T12:00:05Z", SHA2, owner="i6", next=None, reason="earliest_suspect", episode_at="2026-11-19T12:00:00Z", refresh=False),
+        _row("ack", "2026-11-19T12:09:00Z", SHA2, who="i6"),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
+    assert [(r["owner"], r["owner_alias"], r["acked_by"], r["acked_by_alias"]) for r in reds] == [
+        ("i4", "halcyon", "i4", "halcyon"), ("i6", None, "i6", None)]
+    text = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train").output
+    assert "acked by halcyon at" in text and "acked by i6 at" in text and "acked by i4" not in text
 
 
 def test_ack_times_text_names_an_unacknowledged_red_and_a_group_serving_nothing_is_an_error() -> None:

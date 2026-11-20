@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from tests._module_seam import setattr_in
+from tests._restart_fake_clock import fake_clock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 P = "plugin:conexus@nexus-plugins"
@@ -35,7 +36,7 @@ def crs(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     monkeypatch.setattr(module, "LOG", tmp_path / "restart.log")
-    setattr_in(monkeypatch, module, "time.sleep", lambda _s: None)
+    fake_clock(module, monkeypatch)
     # The exit-and-resume path under test here; /restart has its own tests (test_claude_restart_sessions_slash.py).
     monkeypatch.setattr(module, "NO_SLASH", True)
     # RDR-253 Step 4: restart() makes or keeps a seat through `nx identity`, which reaches the engine; the seat
@@ -255,7 +256,7 @@ def test_the_wake_mail_carries_the_origin_note_and_marker_and_leaves_the_handoff
     outcome, tid, marker = crs._mail_wake(s, "WAKE TEXT")
     assert (outcome, tid) == ("sent", "tid-wake") and marker is not None and marker.is_file()
     # the footprint report removes every marker in MADE_MARKERS at the end of the run, before the woken session
-    # checks it (a live sandbox session found it gone and declined): the wake's marker expires by its own stamp
+    # checks it (a live session found it gone and declined): the wake's marker expires by its own stamp
     assert marker not in crs.MADE_MARKERS and marker.stat().st_mtime > time.time() + crs.WAKE_TTL - 60
     argv = sent[0]
     body = argv[argv.index("--body") + 1]
@@ -271,7 +272,7 @@ def test_no_wake_is_parsed_and_carried_to_the_rerun_command(crs, monkeypatch) ->
     crs.main()
     assert crs.NO_WAKE is True
     a = argparse.Namespace(fresh=False, wait=600, handoff_timeout=900, fallback_resume=False, keep_dev_channel=False,
-                           force=False, no_ready_check=False, no_wake=True, skip_sandbox_check=None, only=[], skip=[])
+                           force=False, no_ready_check=False, no_wake=True, only=[], skip=[])
     assert "--no-wake" in shlex.split(crs.rerun_command(a, []))
 
 

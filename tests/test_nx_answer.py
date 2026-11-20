@@ -2567,8 +2567,8 @@ class TestNxAnswerCostAccounting:
     @pytest.mark.t2_tenant
     def test_cost_usd_none_when_no_steps_at_all(self, tmp_path):
         """The call sites that never produce a StepRecord at all (planner
-        failure before any dispatch, a binding refusal before plan_run,
-        the single-step fast path which bypasses the runner) get None —
+        failure before any dispatch, a binding refusal before plan_run; the
+        single-step fast path no longer, it records a sql step) get None —
         sum-of-nothing is honestly 'unknown', not zero."""
         from nexus.db.t2 import T2Database
 
@@ -4595,14 +4595,15 @@ class TestStructuredEnvelopeStepBreakdown:
         assert result["steps"][1]["model"] == "claude-sonnet-5-20260101"
 
     @pytest.mark.asyncio
-    async def test_no_steps_executed_envelope_carries_empty_list_and_none_cost(
+    async def test_the_single_step_fast_path_envelope_carries_its_sql_step_and_a_zero_cost(
         self, tmp_path,
     ):
-        """The single-step fast path (and any pre-plan_run error/miss)
-        bypasses plan_run entirely — no StepRecord is ever produced.
-        ``steps`` must be ``[]`` and ``cost_usd`` must be ``None`` (never
-        a fabricated ``0.0``), matching ``_nx_answer_record_run``'s own
-        blanket rule."""
+        """The single-step fast path bypasses plan_run, so it records its one
+        query itself, as a ``sql`` StepRecord at the known zero a step that
+        runs no prompt records (nexus-7fku2.2.3). It used to record none and
+        report ``None``, which a spend guard read as an unknown cost. A path
+        that truly ran no step keeps ``[]`` and ``None``
+        (``test_cost_usd_none_when_no_steps_at_all``)."""
         import nexus.mcp_infra as _infra
         from nexus.plans.match import Match
 
@@ -4629,8 +4630,8 @@ class TestStructuredEnvelopeStepBreakdown:
             from nexus.mcp.core import nx_answer
             result = await nx_answer("q", structured=True)
 
-        assert result["steps"] == []
-        assert result["cost_usd"] is None
+        assert [(s["operator"], s["source"], s["cost_usd"]) for s in result["steps"]] == [("query", "sql", 0.0)]
+        assert result["cost_usd"] == 0.0
 
     @pytest.mark.asyncio
     async def test_plan_run_failure_records_and_returns_partial_step_records(

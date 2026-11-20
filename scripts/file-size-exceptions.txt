@@ -144,7 +144,6 @@ tests/db/test_refreshable_client.py 3535
 tests/db/test_t1_cli_dedicated_session.py 2866
 tests/e2e/lib/plugin_out_of_repo.py 1179
 tests/e2e/lib/setup_journey.py 1226
-tests/e2e/restart-sessions/run.py 2827
 tests/fixtures/hal_git_policy_hook.py 1442
 tests/hooks/test_compact_checkpoint.py 1616
 tests/hooks/test_mailbox_drain_hook.py 3270

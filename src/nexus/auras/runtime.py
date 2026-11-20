@@ -80,6 +80,9 @@ def _matches(pairs: Sequence[tuple[str, str]] | None, dims: Mapping[str, str]) -
     return pairs is not None and all(dims.get(k) == v for k, v in pairs)
 
 
+_ABSENT = object()
+
+
 def _arg(spec: ArgSource, row: Any, name: str, identity: str | None = None) -> Any:
     if spec.kind == "self":
         if identity is None:
@@ -99,9 +102,11 @@ def _arg(spec: ArgSource, row: Any, name: str, identity: str | None = None) -> A
         body = json.loads(row.body) if row.body else None
     except ValueError:
         body = None
-    if not isinstance(body, dict) or spec.value not in body:
+    if not isinstance(body, dict):
         raise _Failure("args", f"{name}: the tuple body has no top-level {spec.value!r}")
-    return body[spec.value]
+    # A field the row lacks is left out, not a failure: an older engine's row, or an optional field the engine omits
+    # (RDR-252 owner_alias for an identity with no alias). The procedure's header still refuses a missing required one.
+    return body.get(spec.value, _ABSENT)
 
 
 def _error_kind(exc: ScriptRunError) -> str:
@@ -240,7 +245,8 @@ class AuraRuntime:
     def _fire(self, lane: _Lane, item: _Item) -> None:
         aura, row = lane.aura, item.row
         try:
-            args = {name: _arg(spec, row, name, self._identity) for name, spec in aura.args}
+            args = {name: value for name, spec in aura.args
+                    if (value := _arg(spec, row, name, self._identity)) is not _ABSENT}
             try:
                 result = self._run(aura.procedure, args, dataclasses.asdict(aura.limits))
             except ScriptBusyError:

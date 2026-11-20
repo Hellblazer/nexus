@@ -7,6 +7,8 @@ Each test names the finding it holds. They run ``nx_answer`` itself on the stric
 
 from __future__ import annotations
 
+import re
+import types
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -165,8 +167,6 @@ async def test_the_planner_prompt_is_never_logged(debug_logs) -> None:
 
 # ── critique S5: a title written anywhere after the id reaches the veto ──────────────────────────────────
 
-import time  # noqa: E402
-
 from nexus.plans.request_coverage import (  # noqa: E402
     MAX_LISTED_SOURCES,
     MAX_SCAN_CHARS,
@@ -223,34 +223,68 @@ def test_a_title_after_the_id_vetoes_an_inference_from_a_nexus_session(tmp_path:
 HUGE = "".join(f"Compare RDR-{i % 900:03d} to RDR-{(i + 1) % 900:03d} in the nexus project. " for i in range(16_000))[:750_000]
 
 
-def _scan_seconds(question: str) -> float:
-    started = time.perf_counter()
-    derive_request_coverage(question, scope="rdr")
-    project_name_candidates(question)
-    return time.perf_counter() - started
+_REGEX_METHODS = ("search", "match", "fullmatch", "finditer", "findall", "sub", "subn", "split")
 
 
-def _best_scan_seconds_interleaved(a: str, b: str, rounds: int = 5) -> tuple[float, float]:
-    """Best-of-``rounds`` for each question, measured alternately so a burst of load on a busy xdist host lands
-    on both series instead of inflating only one (a sequential best-of-3 failed once under 15 workers on chas)."""
-    best_a = best_b = float("inf")
-    for _ in range(rounds):
-        best_a = min(best_a, _scan_seconds(a))
-        best_b = min(best_b, _scan_seconds(b))
-    return best_a, best_b
+class _CountingPattern:
+    """A compiled pattern that records the length of every string it is asked to scan."""
+
+    def __init__(self, pattern: re.Pattern, seen: list[int]) -> None:
+        self._pattern, self._seen = pattern, seen
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._pattern, name)
+        if name not in _REGEX_METHODS:
+            return attr
+
+        def counted(string: str, *a: Any, **k: Any) -> Any:
+            self._seen.append(len(string))
+            return attr(string, *a, **k)
+
+        return counted
 
 
-def test_a_750_kb_question_is_scanned_in_bounded_time() -> None:
-    """The scan cost stops growing at MAX_SCAN_CHARS. Measured against the same question cut to the limit,
-    on the same host and load, rather than against a wall-clock bound: an unbounded scan costs about 12x
-    the cut one at 750 KB, a bounded one about the same, and a fixed 1.0 s ceiling failed at 1.02 s on a
-    busy CI runner (develop 2bb124e98, shard 6)."""
+def _scanned_lengths(monkeypatch: pytest.MonkeyPatch, question: str) -> list[int]:
+    """The length of the text every regex call in request_coverage received while scanning *question*: each
+    module-level compiled pattern and each ``re.<function>`` call goes through a counting seam."""
+    import nexus.plans.request_coverage as rc  # noqa: PLC0415
+
+    seen: list[int] = []
+    for name, value in list(vars(rc).items()):
+        if isinstance(value, re.Pattern):
+            monkeypatch.setattr(rc, name, _CountingPattern(value, seen))
+    shim = types.SimpleNamespace(**{n: getattr(re, n) for n in dir(re) if not n.startswith("__")})
+    for name in _REGEX_METHODS:
+        real = getattr(re, name)
+
+        def counted(pattern: Any, string: str, *a: Any, _real: Any = real, **k: Any) -> Any:
+            seen.append(len(string))
+            return _real(pattern, string, *a, **k)
+
+        setattr(shim, name, counted)
+    monkeypatch.setattr(rc, "re", shim)
+    rc.derive_request_coverage(question, scope="rdr")
+    rc.project_name_candidates(question)
+    return seen
+
+
+def test_a_750_kb_question_is_scanned_in_bounded_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scan stops at MAX_SCAN_CHARS: no regex call in request_coverage is handed more than that many
+    characters, and doubling a question already past the limit adds no regex call. Counted through a seam on
+    the module's patterns and its ``re`` calls, not timed: the old wall-clock ratio (3x the cut question
+    + 0.05 s) failed on loaded runners at 0.857 s against 0.200 s (release PR #1676, Python 3.13 shard 2)
+    and, before that, a 1.0 s ceiling at 1.02 s (develop 2bb124e98)."""
     assert len(HUGE) == 750_000
-    capped = HUGE[:MAX_SCAN_CHARS]
-    huge_s, capped_s = _best_scan_seconds_interleaved(HUGE, capped)
-    assert huge_s < 3 * capped_s + 0.05, (
-        f"{huge_s:.3f}s against {capped_s:.3f}s at the limit: the scans must not grow with the question "
-        f"past {MAX_SCAN_CHARS} characters")
+    huge = _scanned_lengths(monkeypatch, HUGE)
+    monkeypatch.undo()
+    double = _scanned_lengths(monkeypatch, HUGE + " " + HUGE)
+    monkeypatch.undo()
+    assert huge, "the seam saw no regex call, so it checked nothing"
+    assert max(huge) <= MAX_SCAN_CHARS, (
+        f"a regex call read {max(huge)} characters of a {len(HUGE)}-character question; the scan must stop at "
+        f"{MAX_SCAN_CHARS}")
+    assert len(double) == len(huge) and max(double) <= MAX_SCAN_CHARS, (
+        f"{len(huge)} regex calls at 750 KB, {len(double)} at 1.5 MB: the scan grows past the limit")
     cov = derive_request_coverage(HUGE, scope="rdr")
     assert project_name_candidates(HUGE) and cov.named_sources
     assert "scan_limit" in {a.code for a in cov.ambiguities}, "the unread tail is disclosed"

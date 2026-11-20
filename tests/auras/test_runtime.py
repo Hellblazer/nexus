@@ -201,6 +201,19 @@ def test_a_missing_argument_source_is_a_strike_and_runs_nothing() -> None:
     assert writer.blocks["develop CI red"] == "aura error: args on tuple t1"
 
 
+def test_a_body_object_without_a_mapped_field_omits_that_argument_and_still_runs() -> None:
+    """RDR-252: a row an older engine stamped, or one for an identity with no alias, lacks body.owner_alias. The
+    argument is left out and the procedure's header decides whether it was required (an absent optional one is fine);
+    it is not a strike. A body that is not a JSON object at all is still one (the test above)."""
+    run, writer = _Run({"show": True, "text": "x"}), _Writer()
+    rt = _runtime(run, writer)
+    rt.offer(_TOPIC, [_row("t1", body="{}")])
+    _done(rt)
+    [(_, args, _)] = run.calls
+    assert "note" not in args and args["sha"] == "abc1234"
+    assert writer.blocks["develop CI red"] == "x"
+
+
 def test_a_display_error_is_a_strike() -> None:
     run, writer = _Run({"show": True, "text": "x"}), _Writer()
     writer.fail = True

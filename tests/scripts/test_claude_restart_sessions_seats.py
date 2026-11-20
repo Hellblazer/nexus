@@ -24,6 +24,7 @@ import pytest
 
 from nexus.identity.token_file import TokenFile, identity_dir, token_path, write_token_file
 from tests._module_seam import setattr_in
+from tests._restart_fake_clock import fake_clock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 
@@ -253,7 +254,7 @@ def test_restart_makes_the_seat_before_it_relaunches_under_the_name(crs, nx, mon
     monkeypatch.setattr(crs, "tmux", lambda *a: typed.append((a, list(nx.seats))))
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
     monkeypatch.setattr(crs, "alive", lambda _pid: False)
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    fake_clock(crs, monkeypatch)
     s = session(sessionId="old-sid", argv="claude -n tamsin")
     with pytest.raises(crs.RelaunchStalled):
         crs.restart(s, str(handoff))
@@ -270,7 +271,7 @@ def _restart_stand_ins(crs, monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(crs, "MANAGED_SETTINGS", (tmp_path / "managed" / "managed-settings.json",))
     monkeypatch.setattr(crs, "USER_SETTINGS", tmp_path / "user-settings.json")
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    fake_clock(crs, monkeypatch)
 
 
 def test_the_in_place_slash_restart_path_makes_the_seat_too(crs, nx, monkeypatch, tmp_path) -> None:

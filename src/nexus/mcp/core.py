@@ -150,6 +150,7 @@ from nexus.mcp import subscriptions as _subscriptions
 # announces mail references and never claims them -- imported as a module
 # for the same reason as `_subscriptions` just above.
 from nexus.mcp import channel as _channel
+from nexus.mcp import identity_seam  # RDR-253 Step 3: the guarded seam to the identity lease (an import failure never reaches the server)
 
 if TYPE_CHECKING:
     from nexus.db.t2 import T2Database
@@ -1098,9 +1099,7 @@ def _start_t1_handoff_watch_task() -> None:
 
     global _T1_HANDOFF_WATCH_TASK
     _T1_HANDOFF_WATCH_TASK = asyncio.create_task(_t1_handoff_watch_loop())
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: server start cost (RDR-253 Step 3)
-
-    identity_lease.start_safely()
+    identity_seam.start()
 
 
 async def _cancel_t1_handoff_watch_task() -> None:
@@ -1463,9 +1462,7 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # later to compare-then-delete its lease rather than blindly unlink
     # it -- see `clear_t1_session_lease_if_matches`'s docstring.
     old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or None
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: rare/branch-local path (RDR-253 Step 3)
-
-    await identity_lease.follow_marker(marker, log)
+    await identity_seam.follow_marker(marker, log)
     if old_session_id == new_session_id:
         # Nothing to do (e.g. a re-tick that raced the previous one's own
         # consume, or a resume that lands back on the id already active).
@@ -2800,9 +2797,7 @@ def _start_session_name_release() -> threading.Thread | None:
     (resource exhaustion): the caller's exit goes on and the rows lapse
     by TTL."""
     global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
-
-    identity_lease.start_shutdown()
+    identity_seam.start_shutdown()
     running = _NAME_RELEASE_THREAD
     if running is not None and running.is_alive():
         return running
@@ -2821,9 +2816,7 @@ def _start_session_name_release() -> threading.Thread | None:
 
 def _await_session_name_release(thread: threading.Thread | None) -> None:
     """Wait for *thread* until the release's shared deadline, then give up; and for the identity shutdown until its own."""
-    from nexus.mcp import identity_lease  # noqa: PLC0415 — deferred: exit path (RDR-253 Step 3)
-
-    identity_lease.await_shutdown()
+    identity_seam.await_shutdown()
     if thread is None:
         return
     thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
@@ -2898,8 +2891,8 @@ def _install_exit_handlers(
     hangs up the session's pty, and the kernel sends SIGHUP to its
     foreground process group, this server included. Its default action
     ends the process with no teardown, so the T1 token, its lease file and
-    the peer-directory name were left behind until they lapsed (measured in
-    the restart sandbox, nexus-xwijj). An inherited ignore is kept: a
+    the peer-directory name were left behind until they lapsed (measured on
+    a scratch-HOME session, nexus-xwijj). An inherited ignore is kept: a
     session started under ``nohup`` ignores SIGHUP, and this server, its
     child, must outlive a hangup with it rather than die alone.
     *register* and *set_signal* default to ``atexit.register`` and
@@ -4901,7 +4894,6 @@ def search_topic_scoped(
         target = _resolve_corpus_target(corpus, t3)
         if not target:
             return f"No collections match corpus {corpus!r}"
-        merged: list[dict] = []
         # nexus-vply6 fix round 2, point 3: this loop is ALL-OR-NOTHING
         # exactly like _grouped_combined_query (no per-iteration recovery,
         # the SAME shape that function's own docstring compares itself
@@ -4909,15 +4901,22 @@ def search_topic_scoped(
         # SAME named error every other combined-query tool now raises for
         # this engine 422, rather than letting it propagate raw.
         sensitivity = _sensitivity.read_sensitivity()  # RDR-243 Phase 2: once, on the tool's thread
-        for col in target:
-            try:
-                merged.extend(t3.search_topic_scoped(query, topic, col, n_results=limit, sensitivity=sensitivity))
-            except VectorServiceError as exc:
-                raise classify_vector_service_error(
-                    exc, collections=[col], t3=t3,
-                ) from exc
-        merged.sort(key=_distance_key)
-        merged = merged[:limit]
+        # GH #1667 follow-up C: the merge goes through _grouped_combined_query, which orders rows
+        # across model groups on the calibrated scale (a model whose distances run tighter,
+        # voyage-code-3, cannot crowd out the rest; single-model targets keep raw order, and the
+        # reported distances stay raw). The per-collection call stays the topic tool's own shape.
+        def _topic_rows(group: list[str]) -> list[dict]:
+            rows: list[dict] = []
+            for col in group:
+                try:
+                    rows.extend(t3.search_topic_scoped(query, topic, col, n_results=limit, sensitivity=sensitivity))
+                except VectorServiceError as exc:
+                    raise classify_vector_service_error(
+                        exc, collections=[col], t3=t3,
+                    ) from exc
+            return rows
+
+        merged = _grouped_combined_query(target, _topic_rows, t3=t3)[:limit]
         # RDR-243 Phase 3 (nexus-rfvyy.8.2): the output posture over these rows (chunk-level: the id is the chash).
         posture = _OutputPosture.for_facts([_row_facts(r) for r in merged])
         if structured:
@@ -11603,6 +11602,15 @@ def _nx_answer_is_single_query(match: Any) -> bool:
     return _nx_answer_classify_plan(match) == "single_query"
 
 
+def _fast_path_step_record(elapsed_ms: int, *, ok: bool) -> Any:
+    """The single-query fast path's one ``query`` call as a ``sql`` StepRecord: no prompt ran, so its cost is the
+    known zero ``plan_run`` records for a ``sql`` step (0 tokens, 0.0 USD, no cache dimension)."""
+    from nexus.plans.runner import StepRecord  # noqa: PLC0415 — core imports the runner lazily
+
+    return StepRecord(step_index=0, operator="query", source="sql", model=None, input_tokens=0, output_tokens=0,
+                      cost_usd=0.0, elapsed_ms=elapsed_ms, ok=ok)
+
+
 def _nx_answer_needs_operators(match: Any) -> bool:
     """Does this plan contain a genuine operator (``claude -p``) step?
 
@@ -11768,14 +11776,12 @@ def _nx_answer_record_run(
     out-of-step cost trivially falls into the latter
     (sum of nothing is "unknown", never a fabricated zero). This is
     deliberately a BLANKET rule, not case-by-case: a call site with
-    genuinely zero steps (e.g. the single-step fast path, which bypasses
-    ``plan_run`` and therefore never produces a ``StepRecord`` at all,
-    even though it IS a real, free T3-only call) still gets ``None`` here
-    rather than an invented ``0.0`` — see this bead's dev-notes writeback
-    for the documented trade-off (a real but unmeasured cost reads
-    identically to "we don't know", which is honest, if not maximally
-    informative; a follow-up teaching the fast path to emit its own
-    ``sql``-source StepRecord is future work, not fabricated here).
+    genuinely zero steps still gets ``None`` here rather than an invented
+    ``0.0``. The single-step fast path, which bypasses ``plan_run``, used to
+    be one; it now records its one ``query`` as a ``sql``-source StepRecord
+    (:func:`_fast_path_step_record`, the known zero a ``sql`` step records),
+    so its run cost reads ``0.0`` plus any out-of-step cost (nexus-7fku2.2.3:
+    the unknown cost stopped the RDR-134 A/B's spend guard).
     """
     q = question if trace else "[redacted]"
     text = final_text if trace else "[redacted]"
@@ -14293,8 +14299,8 @@ async def nx_answer(
         # _step_record_to_wire — the exact dict TelemetryHandler's
         # nx_answer_steps route expects, so a caller sees one shape
         # whether it reads the envelope or `nx answer-runs --json`).
-        # ``[]`` when no plan_run steps executed (single-step fast path,
-        # or any error/miss path before plan_run ever ran).
+        # ``[]`` when no step executed (an error/miss path before plan_run ever ran, or a fast-path scope
+        # conflict); the single-step fast path records its one query as a ``sql`` step (nexus-7fku2.2.3).
         # ``cost_usd`` comes from _run_cost_usd, the function
         # _nx_answer_record_run uses too: every step's non-None cost plus
         # the run's out-of-step dispatch cost (inline planner on a plan miss,
@@ -15126,6 +15132,7 @@ async def nx_answer(
     # ── Step 2: single-step guard ────────────────────────────────────────
     if plan_class == "single_query":
         _log.info("nx_answer_single_step_guard", plan_id=best.plan_id, confidence=conf_str)
+        _fast_query_t0 = time.monotonic()  # reset just before the query: the step's own elapsed time
         try:
             from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred; matches this module's convention
             from nexus.plans.runner import (  # noqa: PLC0415 — deferred; matches this module's convention
@@ -15342,6 +15349,7 @@ async def nx_answer(
             # ``result_text`` (doubling the T3 round-trip) even though
             # the structured envelope already contains enough to
             # synthesize a result summary.
+            _fast_query_t0 = time.monotonic()
             if _fast_conflict:
                 chunks = []
                 result_text = no_match
@@ -15400,6 +15408,11 @@ async def nx_answer(
                 chunks = []
 
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            # The fast path bypasses plan_run, so it records its one query here: a T3-only "sql" step, a known
+            # zero cost (runner's convention), so the run's cost reads 0.0 rather than unknown. A scope conflict
+            # ran nothing and records no step.
+            _fast_steps = [] if _fast_conflict else [
+                _fast_path_step_record(int((time.monotonic() - _fast_query_t0) * 1000), ok=True)]
             try:
                 with _t2_ctx() as db:
                     # nexus-yg49g: outcome must reflect whether the run
@@ -15410,7 +15423,7 @@ async def nx_answer(
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=str(result_text)[:2000], answer_text=str(result_text), step_records=[],
+                        final_text=str(result_text)[:2000], answer_text=str(result_text), step_records=_fast_steps,
                         duration_ms=elapsed_ms, trace=trace,
                         # a scope conflict is the caller's error: the run counts no outcome
                         success=None if _fast_conflict else not _nx_answer_text_is_empty(str(result_text)),
@@ -15450,15 +15463,18 @@ async def nx_answer(
                 plan_id=best.plan_id,
                 step_count=1,
                 chunks=chunks,
+                step_records=_fast_steps,
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            # the envelope and the telemetry row carry the same failed step, so neither reads its cost as unknown
+            _failed_steps = [_fast_path_step_record(int((time.monotonic() - _fast_query_t0) * 1000), ok=False)]
             try:
                 with _t2_ctx() as db:
                     _nx_answer_record_complete(
                         db, question=question, plan_id=best.plan_id,
                         matched_confidence=best.confidence, step_count=1,
-                        final_text=f"Error: {exc}", step_records=[],
+                        final_text=f"Error: {exc}", step_records=_failed_steps,
                         duration_ms=elapsed_ms, trace=trace, success=False,
                         composite_supported_at_start=composite_supported_at_start,
                         early_bump_fired=early_bump_fired,
@@ -15471,6 +15487,7 @@ async def nx_answer(
                 f"Error in single-step query: {exc}",
                 plan_id=best.plan_id,
                 step_count=1,
+                step_records=_failed_steps,
             )
 
     # ── Step 3: seed link-context ────────────────────────────────────────

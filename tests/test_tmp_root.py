@@ -973,6 +973,24 @@ _NOT_NEXUS_TEST_CODE = (
     "the child is a shell or python tool that never imports tests.* nor runs tests/conftest.py, "
     "the only readers of NX_TEST_TMP_ORIG"
 )
+
+
+def _unexplained_tmpdir_message(unexplained: dict[str, int]) -> str:
+    """The failure for TMPDIR overrides that neither use the helper nor carry an exempt entry: where each one
+    is, the fix (the helper), and, only when the child cannot run nexus test code, the exact ledger line."""
+    sites = "\n".join(f"  {k.split('::')[0]}:{line} ({k.split('::', 1)[1]})" for k, line in sorted(unexplained.items()))
+    lines = "\n".join(f'    "{k}": "<why the child needs no ORIG_ENV drop>",' for k in sorted(unexplained))
+    return (
+        "a TMPDIR override outside tests._tmp_root.child_env_with_tmpdir, with no _TMPDIR_OVERRIDE_EXEMPT entry:\n"
+        f"{sites}\n"
+        "Fix (almost always): build the child's environment with the helper, e.g.\n"
+        "    env = child_env_with_tmpdir(os.environ, tmp_path)   # from tests._tmp_root\n"
+        "Only if the child never runs nexus test code (a bash runner, a stub CLI), add to _TMPDIR_OVERRIDE_EXEMPT "
+        "in tests/test_tmp_root.py, with the real reason:\n"
+        f"{lines}"
+    )
+
+
 #: Every place under ``tests/`` that writes a ``TMPDIR`` into an environment mapping and
 #: does NOT go through :func:`tests._tmp_root.child_env_with_tmpdir`, with the reason it
 #: is safe. A new site is a failure until it uses the helper or is added here with a
@@ -1102,12 +1120,11 @@ class TestChildEnvWithTmpdir:
         assert scanned > 100, f"scanned only {scanned} files; the lint saw nothing"
         assert len(found) >= len(_TMPDIR_OVERRIDE_EXEMPT) // 2, f"the scan found only {len(found)} sites"
         unexplained = {k: v for k, v in found.items() if k not in _TMPDIR_OVERRIDE_EXEMPT}
-        assert not unexplained, (
-            "a TMPDIR override outside tests._tmp_root.child_env_with_tmpdir, with no entry in "
-            f"_TMPDIR_OVERRIDE_EXEMPT (site: line): {unexplained}"
-        )
+        assert not unexplained, _unexplained_tmpdir_message(unexplained)
         stale = sorted(set(_TMPDIR_OVERRIDE_EXEMPT) - set(found))
         assert not stale, f"_TMPDIR_OVERRIDE_EXEMPT names sites that no longer exist: {stale}"
+        unfilled = sorted(k for k, why in _TMPDIR_OVERRIDE_EXEMPT.items() if why.lstrip().startswith("<"))
+        assert not unfilled, f"_TMPDIR_OVERRIDE_EXEMPT entries whose pasted placeholder reason was never filled in: {unfilled}"
 
     def test_a_child_that_re_resolves_its_tempdir_sees_the_given_one_even_with_a_marker_outside(
         self, tmp_path, monkeypatch,
@@ -1782,3 +1799,17 @@ def test_the_controller_does_not_sweep_through_a_symlink_planted_as_the_tmp_root
     plugin._begin()
     assert swept == [] and stale.exists()
     assert plugin.run is None, "make_run_dir refuses the symlink too, so the run stays on disk"
+
+
+def test_the_unexplained_tmpdir_override_message_names_the_fix_and_the_exact_exempt_line() -> None:
+    """A new site's failure says how to fix it, helper first, and gives the exact ledger line to paste
+    (suite audit item 9, 2026-11-19: this guard was the most frequent develop red, 9 runs in two weeks)."""
+    msg = _unexplained_tmpdir_message({"tests/x/test_y.py::_run": 42})
+    assert "child_env_with_tmpdir(os.environ, tmp_path)" in msg
+    assert '    "tests/x/test_y.py::_run": "<why the child needs no ORIG_ENV drop>",' in msg
+    assert "tests/x/test_y.py:42" in msg
+    assert msg.index("child_env_with_tmpdir(os.environ") < msg.index("add to _TMPDIR_OVERRIDE_EXEMPT")
+    import inspect  # noqa: PLC0415
+
+    guard = TestChildEnvWithTmpdir.test_every_tmpdir_override_in_the_tests_goes_through_the_helper_or_is_exempt_with_a_reason
+    assert "_unexplained_tmpdir_message(unexplained)" in inspect.getsource(guard)

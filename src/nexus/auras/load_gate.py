@@ -34,6 +34,7 @@ class GroupRecord:
     ended_at: str | None = None
     ends: str | None = None
     leader: str | None = None
+    live: bool | None = None  # the engine's verdict on the whole rule, when the record came from it; None for a hand-built one
 
 
 #: Reads one group's record by name: the record, ``None`` when the name has no record, or raises
@@ -55,7 +56,7 @@ def group_reader_from(client: Any) -> GroupReader:
         if record is None:
             return None
         return GroupRecord(name=record.name, serves=tuple(record.serves), ended_at=record.ended_at,
-                           ends=record.ends, leader=record.leader)
+                           ends=record.ends, leader=record.leader, live=record.live)
 
     return read
 
@@ -89,9 +90,10 @@ def _instant(text: str) -> datetime | None:
 
 
 def group_is_live(record: GroupRecord | None, now: datetime) -> bool:
-    """Whether *record* is a live group at *now*. A missing record is not live. An ``ends`` value that is not an
-    instant (``open``, blank) never ends the group."""
-    if record is None or record.ended_at:
+    """Whether *record* is a live group at *now*. A missing record is not live, and neither is one the engine says is not
+    live (:attr:`GroupRecord.live`, which also covers an ``ends`` this client cannot parse). Otherwise the local rule: an
+    ``ends`` value that is not an instant (``open``, blank) never ends the group."""
+    if record is None or record.ended_at or record.live is False:
         return False
     if record.ends:
         ends = _instant(record.ends)

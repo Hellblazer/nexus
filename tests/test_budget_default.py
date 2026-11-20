@@ -139,6 +139,18 @@ class TestDerivation:
         assert d.n_executed_ok == 1  # only the pre-.p1f row with no steps list
         assert d.n_excluded_no_steps == 1
 
+    def test_a_fast_path_run_stays_out_of_the_population(self) -> None:
+        # nexus-7fku2.2.3: the single-query fast path now records its query as a sql step at 0.0. Those rows
+        # used to carry no steps and were excluded; recording the step must not pull the percentiles to zero.
+        fast = _run([_step("query", None, 0.0, source="sql")])
+        d = derive_budget_default(_store([fast] * 5))
+        assert d.n_runs == 0 and d.costs == () and d.n_excluded_fast_path == 5
+
+    def test_a_multi_step_prompt_free_plan_run_is_still_counted(self) -> None:
+        retrieval = _run([_step("search", None, 0.0, source="sql"), _step("traverse", None, 0.0, source="sql")])
+        d = derive_budget_default(_store([retrieval] * 3))
+        assert d.costs == (0.0, 0.0, 0.0) and d.n_excluded_fast_path == 0
+
     def test_continuation_handoff_and_report_rows_are_excluded(self) -> None:
         """RDR-200 (nexus-4e75w.5 fold): a handed-off row's step_count is
         > 0 and it is not `_row_is_failed` -- without an EXPLICIT marker

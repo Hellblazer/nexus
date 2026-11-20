@@ -66,6 +66,8 @@ public final class IdentityRepository {
     static final Set<String> CREATED_BY = Set.of("sam", "restart", "session", "dispatch");
     /** The creator a data-credential seat create is stamped with (RDR-253 amendment, Sam 2026-11-19): the token's identity. */
     static final java.util.regex.Pattern SELF_CREATOR = java.util.regex.Pattern.compile("^identity:i[0-9]+$");
+    /** The most seats one identity may create through the data credential (Sam 2026-11-19, "cap 5"). */
+    static final int SELF_SEAT_CAP = 5;
     static final int ALIAS_GRACE_DAYS = 7;
 
     private static final Pattern NAME = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$");
@@ -197,18 +199,33 @@ public final class IdentityRepository {
         if (!SELF_CREATOR.matcher(creator).matches()) {
             throw new IdentityException(400, "bad_created_by", "not an identity id: " + identityId);
         }
-        return insertSeat(tenant, name, displayName, creator);
+        return scope.withTenant(tenant, ctx -> {
+            // Sam 2026-11-19 ("cap 5", engine 0.1.198): an identity creates at most SELF_SEAT_CAP seats through the data
+            // credential, counted in every state. The caller's own row is locked first, so two concurrent creates of one
+            // identity are counted one after the other and cannot both see room for the last seat.
+            IdentityRows.lock(ctx, tenant, identityId);
+            int made = ctx.fetchCount(IDENTITY_RECORDS, IDENTITY_RECORDS.TENANT_ID.eq(tenant)
+                .and(IDENTITY_RECORDS.KIND.eq("seat")).and(IDENTITY_RECORDS.CREATOR.eq(creator)));
+            if (made >= SELF_SEAT_CAP) {
+                throw new IdentityException(409, "seat_limit", identityId + " has created " + made
+                    + " seats with the data credential, the most it may (" + SELF_SEAT_CAP + "); the tenant credential is not capped",
+                    Map.of("identity", identityId, "seats_created", made, "cap", SELF_SEAT_CAP));
+            }
+            return insertSeat(ctx, tenant, name, displayName, creator);
+        });
     }
 
     private Map<String, Object> insertSeat(String tenant, String name, String displayName, String createdBy) {
-        return scope.withTenant(tenant, ctx -> {
-            OffsetDateTime now = now();
-            String id = nextId(ctx, tenant);
-            IdentityRecordsRecord rec = insertRecord(ctx, tenant, id, "seat", null, displayName, createdBy, now);
-            insertAlias(ctx, tenant, id, name, now);
-            log.info("event=identity_created tenant={} id={} kind=seat name={} created_by={}", tenant, id, name, createdBy);
-            return IdentityRows.view(rec, name);
-        });
+        return scope.withTenant(tenant, ctx -> insertSeat(ctx, tenant, name, displayName, createdBy));
+    }
+
+    private Map<String, Object> insertSeat(DSLContext ctx, String tenant, String name, String displayName, String createdBy) {
+        OffsetDateTime now = now();
+        String id = nextId(ctx, tenant);
+        IdentityRecordsRecord rec = insertRecord(ctx, tenant, id, "seat", null, displayName, createdBy, now);
+        insertAlias(ctx, tenant, id, name, now);
+        log.info("event=identity_created tenant={} id={} kind=seat name={} created_by={}", tenant, id, name, createdBy);
+        return IdentityRows.view(rec, name);
     }
 
     /** Creates an ephemeral identity already bound to the launching process: generation 1, live, a {@code start} row. */
@@ -256,7 +273,15 @@ public final class IdentityRepository {
         IdentityRows.indexSession(ctx, rec.getTenantId(), ev.sessionId(), rec.getId(), 1, now);
     }
 
-    /** Makes an ephemeral identity a seat with {@code name} as its alias. */
+    /**
+     * Makes an ephemeral identity a seat with {@code name} as its alias, and moves its board entry to that title in the
+     * same transaction (RDR-253 B4b, Sam 2026-11-19: engine 0.1.198 on; before it the client did this, and only from
+     * the session that owns the entry). Both routes reach here: the tenant credential's and the data credential's
+     * self-service promote (the handler fenced the token first). An entry already titled {@code name} is never
+     * overwritten: the promote stands, the entry keeps its title, and {@code board_retitle} says {@code title_taken},
+     * also when a concurrent write takes the title between the check and the update (the update runs under a savepoint).
+     * {@code board_entries_retitled} is always present, which is how a client tells this engine from an older one.
+     */
     public Map<String, Object> promote(String tenant, String id, String name) {
         requireId(id);
         requireAliasName(name);
@@ -269,7 +294,13 @@ public final class IdentityRepository {
             insertAlias(ctx, tenant, id, name, now);
             rec.setKind("seat");
             rec.update();
-            return IdentityRows.view(rec, name);
+            IdentityBoard.Retitled board = IdentityBoard.retitleKeepingTaken(ctx, tenant, id, name);
+            Map<String, Object> out = new LinkedHashMap<>(IdentityRows.view(rec, name));
+            out.put("board_entries_retitled", board.count());
+            if (board.titleTaken()) {
+                out.put("board_retitle", "title_taken");
+            }
+            return out;
         });
     }
 
@@ -816,6 +847,35 @@ public final class IdentityRepository {
 
     public java.util.Optional<Liveness> liveness(String tenant, String id) {
         return java.util.Optional.ofNullable(liveness(tenant, List.of(id)).get(id));
+    }
+
+    /**
+     * The live alias of each of these identities, read-only like {@link #liveness}: it takes no row lock and writes
+     * nothing, so a caller may use it under another lock (RDR-252: the owner stamper names the owner and next up by
+     * alias). An identity with no live alias (an ephemeral or delegated one, or one with no record) is absent.
+     */
+    public Map<String, String> liveAliases(String tenant, java.util.Collection<String> ids) {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        return scope.withTenant(tenant, ctx -> liveAliases(ctx, tenant, ids));
+    }
+
+    /**
+     * {@link #liveAliases(String, java.util.Collection)} on the caller's open, tenant-stamped context, so a caller
+     * already inside a transaction (the owner stamper's evaluation) reads through its own connection and does not
+     * borrow a second one from the pool while it holds the first.
+     */
+    public static Map<String, String> liveAliases(DSLContext ctx, String tenant, java.util.Collection<String> ids) {
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        ctx.select(IDENTITY_ALIASES.IDENTITY_ID, IDENTITY_ALIASES.NAME).from(IDENTITY_ALIASES)
+            .where(IDENTITY_ALIASES.TENANT_ID.eq(tenant)).and(IDENTITY_ALIASES.IDENTITY_ID.in(ids))
+            .and(IDENTITY_ALIASES.STATE.eq("live"))
+            .forEach(r -> out.put(r.value1(), r.value2()));
+        return out;
     }
 
     /** The live and lapsed holders on {@code host} (optionally one pid), unleased ones included. */

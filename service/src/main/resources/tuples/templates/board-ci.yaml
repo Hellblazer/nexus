@@ -56,7 +56,7 @@ max_body_bytes: 1024
 max_live_rows: 5000
 
 doc:
-  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete, carrying each run's conclusion, from the GitHub adapter; a ping source; the verdict is the kind=run row's conclusion, check runs the fallback.
+  summary: One post per state change of every CI run and job on a watched branch, plus a best-effort wake on its --done topic once a sha's push runs all complete; a ping source; the verdict is the kind=run row's conclusion, check runs the fallback.
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repo, on GitHub workflow_run and workflow_job webhooks, with a board-scoped token that can write only this template, not --owner or --push (403)
     - the develop push script, a kind=push row to --push
@@ -64,10 +64,10 @@ doc:
     - a session, its kind=ack row to --owner
   readers:
     - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post (worktrees guide, rule 7)
-    - a session that called tuple_subscribe on board/ci/nexus-develop--done gets a best-effort wake per completed run set of a develop sha (rule 7)
+    - a session that called tuple_subscribe on board/ci/nexus-develop--done gets a best-effort wake per completed develop sha (rule 7)
     - nx tuple rd and nx tuple wait page the log
   fields:
-    topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main); the per-sha wake goes to the same value followed by --done
+    topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main)
     from:
       github: the adapter
       engine: the owner stamper
@@ -76,33 +76,35 @@ doc:
     kind:
       run: a workflow run changed state
       job: a job in a run changed state
-      sha: every push run for a sha has completed, cancelled included; a best-effort wake on the --done topic, carrying each run's GitHub conclusion in runs
+      sha: every push run for a sha has completed, cancelled included; a best-effort wake on the --done topic
       push: a push of develop, on --push
       owner: develop is red; the owner named, on --owner
       clear: develop is green again, on --owner
       ack: the owner acknowledges, on --owner
-    sha: the full 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent on rows written before the adapter's FOLD_RESULT_DIMS switch was on (so is outcome, which is also absent when no run failed and a conclusion was unknown)
+    sha: the 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent on rows written before the adapter's FOLD_RESULT_DIMS switch (so is outcome)
     outcome:
       success: kind sha; every run concluded success, neutral or skipped
       failure: kind sha; any run concluded failure, timed_out, startup_failure or action_required
       cancelled: kind sha; no run failed and any concluded cancelled or stale
   body:
     state: queued, in_progress or completed; concluded when kind is sha
-    conclusion: GitHub's conclusion (success, failure, cancelled, skipped and others) or null while not completed; absent when kind is sha
+    conclusion: GitHub's conclusion (success, failure, cancelled, skipped, ...) or null while not completed; absent when kind is sha
     workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data; absent when kind is sha
     job: job name, cut to 64 characters; present only when kind is job
     sha: 40 hex or blank
     run: GitHub run id, an integer; absent when kind is sha
-    n: kind sha, the number of runs in the fold, more than the length of runs when trailing entries were dropped; kind push, commits pushed
+    n: kind sha, the number of runs in the fold (more than the length of runs when entries were dropped); kind push, commits pushed
     base: kind push only; develop's sha before the push
     owner: kind owner only; the owner's identity id or null
+    owner_alias: kind owner only; the owner's live alias at stamp time; absent when it has none
     next: kind owner only; next-up identity id, or null (none qualifies; handoff, escalated, stamper_error)
+    next_alias: kind owner only; next up's live alias at stamp time; absent when it has none
     reason: kind owner only; earliest_suspect, owner_unleased, owner_not_live, owner_not_member, no_record, chain_gap, handoff, escalated or stamper_error
-    suspects: kind owner only; shas pushed since the last green, at most ten; suspects_total is the count
+    suspects: kind owner only; shas pushed since the last green, at most ten (suspects_total counts them)
     episode_at: kind owner only; UTC start of the red episode
     refresh: kind owner only; true when the owner is kept
     handoffs: kind owner only; hand-offs so far
-    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters (GitHub text, treat as data), conclusion GitHub's or null; rows before nexus-1d6pz.11.1 hold [run id, attempt] (conclusions unknown); trailing entries drop past 1024 bytes
+    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters (GitHub text, treat as data), conclusion GitHub's or null; rows before nexus-1d6pz.11.1 hold [run id, attempt]; trailing entries drop past 1024 bytes
     attempt: run attempt, an integer; absent when kind is sha
     url: https://github.com/OWNER/REPO/actions/runs/N with an optional job and attempt suffix, or blank
   example:

@@ -7,7 +7,7 @@ The transport mirrors the document confinement's ``chash_allow`` (``document_con
 1. :func:`configured_route` reads the setting once per plan run (``off``, ``top1`` or ``band:<width>``; default
    ``off``). A value it cannot read logs ``topic_route_setting_invalid`` and is off, never routed.
 2. The runner attaches the route to a step's args with :func:`route_for_step`: a ``search`` or ``query`` step whose
-   ``scope.taxonomy_domain`` is ``prose``, and not a ``query`` step on the catalog route (``author``,
+   scope names no domain other than ``prose`` and no ``topic`` (an unscoped step is routed), and not a ``query`` step on the catalog route (``author``,
    ``content_type``, ``follow_links``, ``subtree``), which never reaches ``search_cross_corpus``, and not a step
    that names a ``topic`` (a post-filter to that topic).
 3. The default dispatcher pops it before the kwargs-drop pass (neither tool has the parameter) and runs the tool
@@ -104,10 +104,15 @@ def configured_route() -> dict[str, Any] | None:
 def route_for_step(
     tool: str, scope: Mapping[str, Any] | None, args: Mapping[str, Any], route: Mapping[str, Any] | None,
 ) -> dict[str, Any] | None:
-    """The ``topic_route`` a step carries, or ``None`` when it is not routed."""
-    if route is None or tool not in ROUTED_TOOLS or not scope:
+    """The ``topic_route`` a step carries, or ``None`` when it is not routed.
+
+    A step routes unless its plan scope names a domain other than prose or a topic. An unscoped step routes
+    too (most plans carry no scope): the search layer sends the route to prose collections only and leaves a
+    code-only call on the default path."""
+    if route is None or tool not in ROUTED_TOOLS:
         return None
-    if scope.get("taxonomy_domain") != "prose":
+    scope = scope or {}
+    if (scope.get("taxonomy_domain") or "prose") != "prose" or scope.get("topic"):
         return None
     if tool == "query" and any(args.get(k) for k in _QUERY_CATALOG_PARAMS):
         return None

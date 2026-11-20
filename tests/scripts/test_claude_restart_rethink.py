@@ -2,8 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """claude-restart-sessions after Sam's 2026-11-19 restart rethink (T2 nexus/sam-ruling-restart-sandbox-gate-2026-11-19):
 B1 the --nx install never runs `uv cache clean`; C1 a repeated --ask-ready round re-asks only the sessions whose last
-answer was not a fresh ready, and keeps the others' answers; D1 the ask tells a session to stop its background shells.
-A1 (the sandbox gate warns and never refuses) is pinned in test_claude_restart_sessions_sandbox.py."""
+answer was not a fresh ready, and keeps the others' answers; D1 the ask tells a session to stop its background shells."""
 
 from __future__ import annotations
 

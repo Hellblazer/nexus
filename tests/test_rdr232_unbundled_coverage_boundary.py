@@ -933,3 +933,64 @@ def test_the_merge_target_is_the_last_evidence_reader_of_the_closure(plan: str, 
         steps, run, extract_tool=runner._extract_tool_name, is_witness_tool=runner._is_witness_tool,
     )
     assert runner._merge_targets(steps, run, closure) == frozenset(expected)
+
+
+@pytest.mark.asyncio
+async def test_plan_10_with_no_evidence_declines_instead_of_a_ref_error() -> None:
+    """GH #1667 follow-up C: a search that returns nothing empties the rank's evidence, so the rank short-circuits to
+    the zero-evidence marker and has no ``ranked``. The generate's ``$step5.ranked`` used to raise PlanRunStepRefError;
+    it now reads as a zero-evidence ref, so the generate short-circuits too and the run ends in the marker
+    (``answer_text_class`` reads it as ``empty_hydration``). No operator runs on empty evidence. Unbundled only, the path
+    ``nx_answer`` never takes: a fused rank+generate bundle never raised here, and is dispatched on empty evidence
+    (``nx_answer_zero_evidence_in_bundle_not_short_circuited``), a separate gap recorded on GH #1667."""
+    _, bindings = HYBRID
+    result, calls = await _run(HYBRID[0], {**bindings, "question": "q-empty"}, bundled=False)
+    final = result.final
+    assert isinstance(final, dict) and str(final.get("text", "")).startswith(runner._NO_EVIDENCE_RESULT_PREFIX), final
+    assert "rank" not in calls.ran and "generate" not in calls.ran, calls.ran
+
+
+@pytest.mark.asyncio
+async def test_abstract_themes_with_no_evidence_runs_no_operator_on_the_empty_groups() -> None:
+    """GH #1667 follow-up C, review round: the groupby short-circuits on empty evidence, so ``$step2.groups`` reads as
+    a zero-evidence ref. A plain ``[]`` there would reach ``operator_aggregate(groups='[]')`` and then ``summarize``,
+    two model calls on nothing; the ref makes each consuming operator short-circuit to the marker instead."""
+    _, bindings = THEMES
+    result, calls = await _run(THEMES[0], {**bindings, "intent": "q-empty"}, bundled=False)
+    final = result.final
+    assert isinstance(final, dict) and str(final.get("text", "")).startswith(runner._NO_EVIDENCE_RESULT_PREFIX), final
+    assert not {"groupby", "aggregate", "summarize"} & set(calls.ran), calls.ran
+
+
+#: A rank that short-circuits on empty evidence, a non-operator step, then the consumer: the consumer is the first
+#: step of the trailing operator run, so the coverage boundary prehydrates it before the dispatcher sees its args.
+_SEPARATED_CONSUMERS = [
+    pytest.param("generate", {"context": "$step3.ranked", "question": "q"}, id="generate-context"),
+    pytest.param("summarize", {"content": "$step3.ranked"}, id="summarize-content"),
+    pytest.param("rank", {"items": "$step3.ranked", "criterion": "relevance"}, id="rank-items"),
+    pytest.param("aggregate", {"groups": "$step3.ranked", "reducer": "count"}, id="aggregate-groups"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundled", [False, True], ids=["unbundled", "bundled"])
+@pytest.mark.parametrize(("consumer", "consumer_args"), _SEPARATED_CONSUMERS)
+async def test_a_zero_evidence_ref_survives_the_boundary_prehydration(
+    consumer: str, consumer_args: dict[str, Any], bundled: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GH #1667 follow-up C, review round 2: the boundary's prehydration rewrites the consumer's args into plain
+    lists before the dispatcher sees them, so the zero-evidence ref is marked inside ``_hydrate_operator_args``, the
+    one place every path goes through. The consumer must not run on the empty ``context``/``content``/``items``/
+    ``groups``; the run ends in the marker."""
+    name = f"separated-{consumer}"
+    monkeypatch.setitem(INLINE_PLANS, name, {"steps": [
+        {"tool": "search", "args": {"query": "q-empty", "corpus": "rdr"}},
+        {"tool": "store_get_many", "args": {"ids": "$step1.ids", "collections": "$step1.collections"}},
+        {"tool": "rank", "args": {"inputs": ["$step2.contents"], "criterion": "relevance"}},
+        {"tool": "search", "args": {"query": "q-empty", "corpus": "rdr"}},
+        {"tool": consumer, "args": consumer_args},
+    ]})
+    result, calls = await _run(name, {}, bundled=bundled)
+    final = result.final
+    assert isinstance(final, dict) and str(final.get("text", "")).startswith(runner._NO_EVIDENCE_RESULT_PREFIX), final
+    assert calls.ran == [], calls.ran

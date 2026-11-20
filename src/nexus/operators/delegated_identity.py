@@ -16,8 +16,8 @@ identity-owned state and writes only its own. This module is the dispatcher's ha
 * the token goes to ``<config>/identity/delegated/<id>.token`` (mode 0600) and the child's environment names that file in
   ``NX_IDENTITY_TOKEN``, in place of the parent's (:func:`nexus.claude_child_env.apply_delegated_identity`); the child
   reads the token from the file, never from the variable.
-* while the child runs a task renews the binding every minute and rewrites the file when it refreshes the token at half
-  life; on every exit the dispatcher stops renewing, deletes the file and appends ``end`` (:meth:`finish`).
+* while the child runs a task renews the binding every minute and rewrites the file when it refreshes the token (once it has under 50 minutes of
+  life left, the line the session's own lease uses); on every exit the dispatcher stops renewing, deletes the file and appends ``end`` (:meth:`finish`).
 
 It is best effort by design: an engine that is down, or a credential that may not create a delegated identity, is one
 warning, and the dispatch runs as it did before this step. A dispatch that grants the child no tools (no
@@ -204,7 +204,7 @@ class DelegatedIdentity:
                 return
 
     def tick(self) -> bool:
-        """One renewal, and a refresh at half life (the token file is rewritten). False when the engine says the
+        """One renewal, and a refresh once the token has under :func:`~nexus.identity.token_contract.refresh_below` seconds left (the token file is rewritten). False when the engine says the
         binding is no longer ours, or it was closed: the loop stops. A failed call is logged and tried again."""
         from nexus.identity import token_contract  # noqa: PLC0415
         from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError  # noqa: PLC0415
@@ -215,7 +215,7 @@ class DelegatedIdentity:
         try:
             self._client.renew(self.identity, self._generation)
             if (self._lifetime is not None and not self._refresh_stopped
-                    and self._clock() >= self._issued + self._lifetime / 2):
+                    and self._issued + self._lifetime - self._clock() < token_contract.refresh_below(self._lifetime)):
                 # its own token, the one being refreshed: the process's file names the dispatcher's identity, not this one's
                 view = self._client.bind(self.identity, "refresh", self._generation, self._evidence, token=self._token)
                 token, lifetime = token_contract.token_from_response(view)

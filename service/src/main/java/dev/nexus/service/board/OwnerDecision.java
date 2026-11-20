@@ -328,6 +328,32 @@ public final class OwnerDecision {
         }
     }
 
+    /**
+     * The post with {@code owner_alias} and {@code next_alias} beside the ids they name (RDR-252, Sam 2026-11-19). The
+     * decision is a pure function of ids; the stamper reads each id's live alias and adds it here, at stamp time. A
+     * null alias leaves its field out, so a reader falls back to the id. The suspects are cut again, as in
+     * {@link #body}, when the aliases would carry the body past 1024 bytes.
+     */
+    static Post withAliases(Post post, String ownerAlias, String nextAlias) {
+        if (ownerAlias == null && nextAlias == null) {
+            return post;
+        }
+        Map<String, Object> m = new LinkedHashMap<>();
+        post.body().forEach((k, v) -> {
+            m.put(k, v);
+            if ("owner".equals(k) && ownerAlias != null) {
+                m.put("owner_alias", ownerAlias);
+            } else if ("next".equals(k) && nextAlias != null) {
+                m.put("next_alias", nextAlias);
+            }
+        });
+        while (json(m).getBytes(java.nio.charset.StandardCharsets.UTF_8).length > MAX_BODY_BYTES
+            && m.get("suspects") instanceof List<?> l && l.size() > 1) {
+            m.put("suspects", List.copyOf(l.subList(0, l.size() - 1)));
+        }
+        return new Post(post.kind(), post.sha(), m);
+    }
+
     static String json(Map<String, Object> m) {
         try {
             return MAPPER.writeValueAsString(m);

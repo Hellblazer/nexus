@@ -225,22 +225,22 @@ else
   # The stamped jar (release_version + a build_ref nonce), shared lease, gate-jar cache.
   # An assignment, then the parse: build_ref is how the version check proves the served
   # process is the jar this run was given and not the pinned release (nexus-308ph).
-  if ! DG_BUILD_OUT="$("$REPO_ROOT/scripts/build-gate-jar.sh" ${DG_BUILD_ARGS[@]+"${DG_BUILD_ARGS[@]}"} 2>&1)"; then
+  # --copy-to: the boot copy is taken under build-gate-jar.sh's lease and checked for the printed build_ref. The
+  # battery's gate group runs this leg beside local-service-gate.sh in one worktree, and that leg rebuilds
+  # service/target/ (nexus-i5mbq, 7.84.0: the second boot found its NEXUS_SERVICE_JAR missing); a copy taken after
+  # the lease was released could still catch that rebuild (release/v8.5.1 battery, 2026-11-19, the mirror case).
+  if ! DG_BUILD_OUT="$("$REPO_ROOT/scripts/build-gate-jar.sh" ${DG_BUILD_ARGS[@]+"${DG_BUILD_ARGS[@]}"} --copy-to "$SCRATCH/engine.jar" 2>&1)"; then
     printf '%s\n' "$DG_BUILD_OUT" >&2
     echo "[dual-gate] ERROR: scripts/build-gate-jar.sh failed -- fix the Maven build and run again" >&2
     exit 2
   fi
   printf '%s\n' "$DG_BUILD_OUT" | sed 's/^/[dual-gate]   build: /'
   DG_BUILD_REF="$(awk -F= '/^stamped build_ref=/ { v = $2 } END { print v }' <<<"$DG_BUILD_OUT")"
-  if [ -z "$DG_BUILD_REF" ] || [ ! -f "$DG_JAR" ]; then
-    echo "[dual-gate] ERROR: no build_ref in the build output, or $DG_JAR is missing" >&2
+  DG_JAR="$SCRATCH/engine.jar"
+  if [ -z "$DG_BUILD_REF" ] || [ ! -f "$DG_JAR" ] || [[ "$DG_BUILD_OUT" != *"copied $DG_JAR"* ]]; then
+    echo "[dual-gate] ERROR: no build_ref in the build output, or the private boot copy $DG_JAR was not made" >&2
     exit 2
   fi
-  # Boot from a private copy. The battery's gate group runs this leg beside local-service-gate.sh in one
-  # worktree, and that leg rebuilds service/target/ between this leg's two boots (nexus-i5mbq, 7.84.0 battery:
-  # the second boot found its NEXUS_SERVICE_JAR missing). The copy carries the stamp the version check reads.
-  cp "$DG_JAR" "$SCRATCH/engine.jar"
-  DG_JAR="$SCRATCH/engine.jar"
 fi
 
 # ── Engine start, stop and lease ─────────────────────────────────────────────

@@ -5,7 +5,7 @@
 ``<config>/identity/<claude pid>.<startedAt>.token``, mode 0600, one file per process start: two processes that
 resume one session id never share one, and a superseded process's children never read the new holder's token.
 The hook writes it after a bind; the MCP server reads it at start, re-reads it on every heartbeat, and rewrites it
-when it refreshes the token at half life; every ``nx`` in a Bash child of the session reads the nearest Claude
+when it refreshes the token (under 50 minutes of life left); every ``nx`` in a Bash child of the session reads the nearest Claude
 ancestor's. It holds the identity and generation as well as the token, so the resolver can compare the file with
 the session index (a Bash child started before a cross-seat ``/resume``) and a Step 1 engine, which sends no token,
 still leaves the file that says who the process is.

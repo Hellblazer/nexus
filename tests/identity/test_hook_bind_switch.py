@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""``NX_IDENTITY_BIND=0``: the hook's identity leg binds nothing and makes no engine call (the restart sandbox sets it
-so its Claude sessions, which carry the operator's endpoint and credential, never bind an identity in the operator's
-tenant). Tenant-free: the client is never built, so there is nothing to talk to."""
+"""``NX_IDENTITY_BIND=0``: the hook's identity leg binds nothing and makes no engine call (a process that carries an
+engine endpoint and credential it must not bind with sets it). Tenant-free: the client is never built, so there is
+nothing to talk to."""
 from __future__ import annotations
 
 from pathlib import Path

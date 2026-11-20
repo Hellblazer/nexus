@@ -1178,15 +1178,17 @@ Sam the command:
   (it needs live pids); `claude-restart-sessions --revive [--dry-run]` resumes
   the sessions whose transcripts were written in the 30 minutes before boot.
 - A restart that misbehaved (a session not resumed, a pane closed, a missing
-  wake, a busy session exited) gets a sandbox run, `tests/e2e/restart-sessions/run.sh`,
-  before the next restart, whatever the log says. The sandbox gate is advisory
-  (Sam, 2026-11-19): a missing or stale pass is a WARN line naming the last pass
-  and the weekly run's result, and the restart goes on; `--skip-sandbox-check`
-  is still accepted and only logs its reason. The regression check is
-  `scripts/restart-sandbox-weekly.sh` (a weekly launchd job, `--install` sets
-  it up). A change to the roll path (the restart, abort, gate or pane code)
-  runs `tests/e2e/restart-sessions/run.sh` in its own review before it lands;
-  that is where the sandbox is paid for, not at the release.
+  wake, a busy session exited) is read from `~/.claude/restart-sessions.log`
+  and understood before the next restart. There is no sandbox run for it: the
+  restart sandbox and its pass record were removed (Sam, 2026-11-19), and the
+  script no longer checks for one.
+- Read the `SKIP` lines in the log and the "(M skipped: not on this tmux server)"
+  note on the script's last line and on the log's `=== done` line. A skipped session
+  was not restarted: the run reaches one tmux server and restarts only the sessions
+  that server hosts (a pane it has, with the session's process under it). A run
+  that reaches a server holding none of the sessions refuses (exit 6) before
+  anything is sent; with `TMUX` unset tmux used the default server, and the
+  message says so.
 
 Source: memory `feedback_release_and_develop_ci` § coordinated_upgrade_restart.
 The rest of this step is what that run does to this box, and the manual form

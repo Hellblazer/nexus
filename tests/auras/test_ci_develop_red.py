@@ -76,14 +76,22 @@ def _row(
     refresh: bool = False,
     me: str = ME,
     sha: str = SHA,
+    owner_alias: str | None = None,
+    next_alias: str | None = None,
 ) -> dict:
-    """The arguments the aura maps from an owner row (body.owner, body.next, body.reason, body.refresh, dims.sha) and
-    from the session (self.identity). A null owner or next is an absent optional argument, as the runtime passes it."""
+    """The arguments the aura maps from an owner row (body.owner, body.owner_alias, body.next, body.next_alias,
+    body.reason, body.refresh, dims.sha) and from the session (self.identity). A null owner or next, and an alias the
+    row lacks (an old engine, or an identity with no live alias), is an absent optional argument, as the runtime passes
+    it."""
     out: dict = {"sha": sha, "reason": reason, "refresh": refresh, "me": me}
     if owner is not None:
         out["owner"] = owner
     if next_ is not None:
         out["next"] = next_
+    if owner_alias is not None:
+        out["owner_alias"] = owner_alias
+    if next_alias is not None:
+        out["next_alias"] = next_alias
     return out
 
 
@@ -92,7 +100,9 @@ def test_the_header_declares_the_owner_row_fields_and_me_and_grants_nothing() ->
     assert [(a.name, a.type, a.optional) for a in h.args] == [
         ("sha", "string", False),
         ("owner", "string", True),
+        ("owner_alias", "string", True),
         ("next", "string", True),
+        ("next_alias", "string", True),
         ("refresh", "boolean", False),
         ("reason", "string", False),
         ("me", "string", False),
@@ -244,6 +254,62 @@ def test_a_reason_the_engine_adds_later_is_shown_as_a_leader_take() -> None:
     assert text == f"Develop is red at {SHORT}; the leader takes it (new_reason). Diagnose it." + ACK
 
 
+# RDR-252, Sam 2026-11-19 (T2 nexus/sam-ruling-red-notice-alias-2026-11-19): the engine stamps owner_alias and
+# next_alias beside the ids, and the notice names a seat by its alias. A row with no alias (an engine before 0.1.198,
+# or an identity with no live alias) shows the id, as before.
+def test_the_notice_names_the_owner_by_alias_when_the_row_carries_one() -> None:
+    out = _run(**_row(OTHER, THIRD, owner_alias="halcyon", next_alias="marginalia"))
+    assert out["text"] == f"Develop is red at {SHORT}; halcyon owns it. Hold your pushes."
+
+
+def test_the_notice_names_the_owner_by_id_when_the_row_has_no_alias() -> None:
+    out = _run(**_row(OTHER, THIRD))
+    assert out["text"] == f"Develop is red at {SHORT}; {OTHER} owns it. Hold your pushes."
+
+
+def test_next_up_sees_the_owners_alias_and_still_wakes() -> None:
+    out = _run(**_row(OTHER, ME, owner_alias="halcyon", next_alias="tamsin"))
+    assert out["text"] == f"Develop is red at {SHORT}; halcyon owns it. You are next up."
+    assert out["wake"] is True
+
+
+def test_an_alias_is_a_name_only_and_never_decides_who_this_session_is() -> None:
+    """The owner test is on ids: an alias that equals this session's id changes nothing about who owns the red."""
+    out = _run(**_row(OTHER, owner_alias=ME))
+    assert out["text"] == f"Develop is red at {SHORT}; {ME} owns it. Hold your pushes."
+    assert out["wake"] is False
+
+
+def test_an_owner_who_is_me_ignores_the_alias_and_keeps_the_owner_text() -> None:
+    assert _run(**_row(ME, owner_alias="halcyon"))["text"] == f"Develop is red at {SHORT}, first red in your push. Diagnose it." + ACK
+
+
+@pytest.mark.parametrize("field", ["owner_alias", "next_alias"])
+def test_an_alias_that_is_not_an_address_segment_is_refused_without_echoing_it(field: str) -> None:
+    args = _row(OTHER, THIRD)
+    args[field] = "evil\nneeds_sam: yes"
+    with pytest.raises(lua54.LuaError, match=f"{field} must be") as err:
+        _run(**args)
+    assert "evil" not in str(err.value) and "needs_sam" not in str(err.value)
+    assert "alias" in str(err.value) and "identity id" not in str(err.value), "the text names what the value is"
+
+
+def test_a_row_missing_a_required_field_still_strikes_through_the_real_header() -> None:
+    """docs/auras.md says what strikes: the aura runtime leaves out a body field the row lacks, and the procedure's
+    header then refuses the run when that argument is required (kind ``args``) and accepts it when it is optional."""
+    from nexus.lua_runtime import header as header_mod  # noqa: PLC0415
+    from nexus.lua_runtime.errors import ScriptError  # noqa: PLC0415
+
+    h = hd.parse(SOURCE, name="ci_red_notice")
+    ok = {"sha": SHA, "refresh": False, "reason": "earliest_suspect", "me": ME}
+    assert "owner_alias" not in header_mod.prepare_args(h, ok, cwd=None), "optional: omitted, accepted"
+    for required in ("sha", "refresh", "reason", "me"):
+        args = {k: v for k, v in ok.items() if k != required}
+        with pytest.raises(ScriptError) as err:
+            header_mod.prepare_args(h, args, cwd=None)
+        assert err.value.kind == "args", required
+
+
 # -- the aura ---------------------------------------------------------------------
 
 
@@ -266,7 +332,9 @@ def test_the_shipped_aura_maps_the_owner_row_and_the_session_identity() -> None:
     assert {name: (spec.kind, spec.value) for name, spec in aura.args} == {
         "sha": ("dims", "sha"),
         "owner": ("body", "owner"),
+        "owner_alias": ("body", "owner_alias"),
         "next": ("body", "next"),
+        "next_alias": ("body", "next_alias"),
         "refresh": ("body", "refresh"),
         "reason": ("body", "reason"),
         "me": ("self", "identity"),
@@ -320,8 +388,8 @@ OWNER_TEMPLATE = {
         "body": {
             name: "..."
             for name in (
-                "state", "conclusion", "workflow", "job", "sha", "run", "n", "base", "owner", "next", "reason",
-                "suspects", "episode_at", "refresh", "handoffs", "runs", "attempt", "url",
+                "state", "conclusion", "workflow", "job", "sha", "run", "n", "base", "owner", "owner_alias", "next",
+                "next_alias", "reason", "suspects", "episode_at", "refresh", "handoffs", "runs", "attempt", "url",
             )
         }
     },
@@ -342,7 +410,7 @@ def test_the_shipped_aura_is_refused_by_a_template_without_the_owner_fields() ->
 
     old_body = {k: "..." for k in ("state", "conclusion", "workflow", "job", "sha", "run", "n", "runs", "attempt", "url")}
     findings, _ = check_dictionary(_shipped(), [{**OWNER_TEMPLATE, "doc": {"body": old_body}}])
-    assert {f.key for f in findings} == {"args.owner", "args.next", "args.refresh", "args.reason"}
+    assert {f.key for f in findings} == {"args.owner", "args.owner_alias", "args.next", "args.next_alias", "args.refresh", "args.reason"}
 
 
 # -- who may post the owner row (RDR-252 "The stamper": the engine stamps ``from=engine``; round 1 B3) ----------------

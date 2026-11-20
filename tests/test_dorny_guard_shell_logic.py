@@ -105,15 +105,15 @@ VALID_INPUTS = ("true", "false")
 
 
 class TestEngineServiceBuildSvcGuard:
-    """ci.yml, job `engine-service-build`, step 'Verify the svc predicate
-    is usable' -- gates the native-build trip-wire, ci.yml's own comment
-    says this job is a REQUIRED check (nexus-a5rj8)."""
+    """ci.yml, job `changes`, step 'Verify the svc predicate is usable' --
+    the native-build trip-wire's job-level gate (suite audit item 8 moved it
+    there from `engine-service-build`): a malformed `svc` would skip the job."""
 
     @staticmethod
     def _script(svc: str) -> str:
         doc = _load(CI_YML)
-        step = _find_step(doc, "engine-service-build", "Verify the svc predicate")
-        return _render(step["run"], {"steps.changes.outputs.svc": svc})
+        step = _find_step(doc, "changes", "Verify the svc predicate")
+        return _render(step["run"], {"steps.svc.outputs.svc": svc})
 
     @pytest.mark.parametrize("bad", MALFORMED_INPUTS)
     def test_rejects_malformed_svc(self, bad: str) -> None:

@@ -971,3 +971,12 @@ def test_new_scripts_pass_shellcheck() -> None:
 def test_cloud_leg_names_no_bare_python3() -> None:
     for p in (LEG_SH, SANDBOX_SH):
         assert "python3 " not in p.read_text().replace("# ", "#"), p
+
+
+def test_the_left_behind_line_says_why_the_seat_stays_and_why_the_cap_cannot_fill() -> None:
+    """RDR-253 retention keeps seats; the 0.1.198 cap counts per creating identity (a fresh one per run)."""
+    line = next(ln for ln in LEG_SH.read_text().splitlines() if "left behind" in ln)
+    for fact in ("permanent by RDR-253 retention", "per creating identity", "fresh ephemeral identity each run",
+                 "tombstones after 30 days", "one collection every run reuses"):
+        assert fact in line, (fact, line)
+    assert "cannot delete" not in line

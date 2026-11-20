@@ -1909,7 +1909,7 @@ That figure is derived from the docstring number, not run. A batch that meets
 
 The second pass found several places where the first draft's text disagreed with
 the source; each is fixed in the body and listed in the Revision History. The
-fix check of `97baf5a3e` found seven more, each fixed in the body: the batch
+fix check of `91fa39a28` found seven more, each fixed in the body: the batch
 claim (F25), the lease premise of E5, the engine census, the readers of the old
 table, the aspect route's error mapping, the dead-on-request path, and the
 template's literal shape (research-30). No other contradiction is recorded in
@@ -2015,7 +2015,7 @@ so the question is not reopened without new evidence.
     15,552,000 s claim-log ceiling and the template classpath list.
   - A2 held only for notes, and `document_text` has no caller today (F17).
 - 2026-10-26: Gate round 1 — BLOCKED (1 Critical, 6 Significant, 1 ship-blocker(s)); commit `609c8501f` (the develop twin of the gated branch commit, byte-identical RDR); critique `nexus_rdr/235-gate-critique-2026-10-26-r1`.
-- 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `798dd7b75`; critique `nexus_rdr/235-gate-critique-2026-10-27-r2`.
+- 2026-10-27: Gate round 2 — PASSED (0 Critical, 5 Significant, 0 ship-blocker(s)); commit `d91161f88`; critique `nexus_rdr/235-gate-critique-2026-10-27-r2`.
 - 2026-10-27: A1 settled by the EXPLAIN spike (nexus-5r2sc.1.1): F26 added, A1 marked verified, E1 ships no index.
 - 2026-10-27: A4b settled by the busy-hour park-slot reading (nexus-5r2sc.1.2): F27 added, A4 (b) marked verified, no park-cap change before activation.
 - 2026-10-27: A2 settled by the two-way extraction sample (nexus-5r2sc.1.4): F28 added, A2 marked verified, the identity-only body stands.

@@ -152,7 +152,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-131](rdr-131-t2-session-rollup-summaries.md) | T2 Session Rollup Summaries (MemTree-Lite): Recency-Windowed Memory Consolidation for Compact Context Injection | Architecture | Abandoned | 2026-05-27 |
 | [RDR-132](rdr-132-scope-routed-t1-t2-promotion.md) | Scope-Routed T1 to T2 Promotion: Entity / Session / Project Scopes for Targeted Memory Retrieval | Architecture | Abandoned | 2026-05-27 |
 | [RDR-133](rdr-133-entity-cluster-cross-tier-aggregation.md) | Entity-Cluster Cross-Tier Aggregation: A First-Class Entity Handle Unifying T2 Memory, T3 Catalog, and T3 Chunks | Architecture | Abandoned | 2026-05-27 |
-| [RDR-134](rdr-134-taxonomy-aware-recall-in-nx-answer.md) | RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has | Architecture | Accepted | 2026-05-27 |
+| [RDR-134](rdr-134-taxonomy-aware-recall-in-nx-answer.md) | RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has | Architecture | Abandoned | 2026-05-27 |
 | [RDR-135](rdr-135-windowed-aspect-extraction.md) | Windowed Aspect Extraction with Cross-Window Merge: Stop Whole-Paper Single-Shot Extraction from Degrading on Long Inputs | Architecture | Deferred | 2026-05-27 |
 | [RDR-136](rdr-136-messagedisplay-projection-substrate.md) | Display Projection via the MessageDisplay Hook: One-Way Output Mirroring and Routing-Marker Hiding | Architecture | Deferred | 2026-05-27 |
 | [RDR-137](rdr-137-eliminate-repos-json.md) | Eliminate repos.json: Catalog as the Canonical Repo→Collection Source of Truth | Architecture | Closed | 2026-05-28 |
@@ -246,7 +246,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-226](rdr-226-one-statement-per-leaf-search.md) | Per-Collection Search in One Statement per Leaf | Architecture | Abandoned | 2026-10-08 |
 | [RDR-227](rdr-227-per-collection-hnsw-above-the-router-threshold.md) | Per-Collection HNSW Indexes Above the Router Threshold | Architecture | Closed | 2026-10-09 |
 | [RDR-228](rdr-228-plugin-installs-the-cli.md) | The Plugin Installs the CLI | Feature | Closed | 2026-10-12 |
-| [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Draft | 2026-10-17 |
+| [RDR-229](rdr-229-collection-name-becomes-a-label.md) | The Collection Name Becomes a Label: Retiring What RDR-204 Left Reading the Name | Architecture | Accepted | 2026-10-17 |
 | [RDR-230](rdr-230-event-keyed-reindex-and-recall-canary.md) | Event-Keyed REINDEX and a Recall Canary for Per-Collection HNSW Indexes | Architecture | Closed | 2026-10-18 |
 | [RDR-231](rdr-231-note-source-uri-scheme.md) | Note source_uri scheme: replace chroma:// with nx-note:// | Technical Debt | Closed | 2026-10-23 |
 | [RDR-232](rdr-232-nx-answer-shape-eligibility-and-evidence-sufficiency.md) | nx_answer Answer-Shape Eligibility and Evidence Sufficiency | Architecture | Closed | 2026-10-23 |
@@ -257,7 +257,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Accepted | 2026-10-31 |
 | [RDR-239](rdr-239-tuple-space-dictionary.md) | The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates | Feature | Closed | 2026-10-31 |
 | [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Closed | 2026-11-01 |
-| [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Accepted | 2026-11-02 |
+| [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Closed | 2026-11-02 |
 | [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Closed | 2026-11-02 |
 | [RDR-243](rdr-243-first-class-document-sensitivity.md) | First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface | Feature | Closed | 2026-11-03 |
 | [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Closed | 2026-11-03 |

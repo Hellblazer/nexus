@@ -80,7 +80,11 @@ public final class AuthFilter extends Filter {
     /** RDR-253 Step 2: the header an identity token travels in, beside the session token's. */
     public static final String IDENTITY_HEADER = "X-Nexus-Identity-Token";
 
-    /** The routes that mint or keep a binding: they do not read the identity token, so an expired one is ignored there. */
+    /**
+     * The routes that mint or keep a binding: an expired identity token is ignored there (treated as absent), not a 401.
+     * The tenant credential's binds never use it; a data-credential {@code refresh} or {@code fork} does (RDR-253, Sam
+     * 2026-11-19, option A), and with the expired token ignored the fence answers 403 {@code identity_token_required}.
+     */
     private static final java.util.regex.Pattern IDENTITY_BIND_ROUTE =
         java.util.regex.Pattern.compile("^/v1/identity/i[0-9]+/(bind|renew)$");
 
@@ -414,8 +418,9 @@ public final class AuthFilter extends Filter {
                 identity = ip.get().identityId();
                 identityGeneration = ip.get().generation();
             } else if (IDENTITY_BIND_ROUTE.matcher(exchange.getRequestURI().getPath()).matches()) {
-                // The route that mints the replacement does not use the token, so an expired one must not stand in
-                // its way: a client woken from a long sleep refreshes through bind with whatever header it holds.
+                // An expired token is treated as absent here rather than 401: the tenant credential's binds never need
+                // it, and a data-credential refresh or fork, which does (RDR-253 option A, no grace), is then refused by
+                // the fence with 403 identity_token_required; that session rebinds on its next start.
                 log.debug("event=identity_token_ignored path={} reason=expired_on_bind_route",
                           LogText.escapeControl(exchange.getRequestURI().getPath()));
             } else {

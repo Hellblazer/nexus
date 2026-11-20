@@ -60,7 +60,8 @@ import java.util.Set;
  * makes in a running session. Each route admits exactly the scopes that need it, in {@link #admit}; purge, rename
  * and the {@code gone} verdict are tenant-only; seat creation, promotion and delegated creation take the tenant
  * credential, or the data credential for the identity its own identity token names only ({@link #selfService}; RDR-253
- * amendment, Sam 2026-11-19), and a data credential binds only the events {@link #DATA_EVENTS}. Any other scope is a
+ * amendment, Sam 2026-11-19), and a data credential binds only the events {@link #DATA_EVENTS}, a {@code refresh} or
+ * {@code fork} only with the identity's own live token ({@link #TOKEN_GUARDED_DATA_EVENTS}). Any other scope is a
  * 403, as is a scope not listed. Reads admit both.
  */
 public final class IdentityHandler implements HttpHandler {
@@ -76,6 +77,8 @@ public final class IdentityHandler implements HttpHandler {
 
     /** The bind events after which the caller holds the identity, so the response carries a token for the binding. */
     static final Set<String> TOKEN_EVENTS = Set.of("start", "resume", "takeover", "clear", "fork", "refresh");
+    /** The data events that mint a token for an identity already held, and so need its own live token (RDR-253, Sam 2026-11-19). */
+    static final Set<String> TOKEN_GUARDED_DATA_EVENTS = Set.of("refresh", "fork");
 
     private final IdentityRepository repo;
     private final IdentityTokenStore tokens;
@@ -177,7 +180,8 @@ public final class IdentityHandler implements HttpHandler {
         String tokenIdentity = RequestContext.identity();
         if (tokenIdentity == null) {
             throw new IdentityException(403, "identity_token_required",
-                "the data credential may do this only for the identity its own identity token names; send that token");
+                "the data credential may do this only for the identity its own live identity token names; send that token"
+                    + " (an expired token counts as none: the session rebinds on its next start)");
         }
         fence.requireOwner(ex, tenant, owner == null ? tokenIdentity : owner);
         return tokenIdentity;
@@ -376,6 +380,12 @@ public final class IdentityHandler implements HttpHandler {
                 if (!tenantScope(scope) && !DATA_EVENTS.contains(event)) {
                     throw new IdentityException(403, "forbidden",
                         "a '" + scope + "' credential may not send the '" + event + "' event");
+                }
+                if (TOKEN_GUARDED_DATA_EVENTS.contains(event)) {
+                    // RDR-253 (Sam 2026-11-19, option A): a data-credential refresh or fork mints a token for a held
+                    // identity, so it needs that identity's own live token. Naming the holder's process is not enough:
+                    // the holder is readable by the same credential. The tenant credential is not fenced here.
+                    selfService(ex, tenant, scope, id);
                 }
                 Map<String, Object> bound = repo.bind(tenant, id, event, integer(body, "expected_generation"), evidence(body));
                 return TOKEN_EVENTS.contains(event) ? withToken(tenant, bound) : bound;

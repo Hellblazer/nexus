@@ -517,7 +517,7 @@ jobs:
         # which does run here (nexus-ggonw); re-selecting the formula twin
         # is still nexus-jy4hd's decision to revisit, not a side effect.
         #
-        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints exactly 7 (floor=7); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
+        # FIRST-NIGHTLY-RUN VERIFICATION (manual, once, after this merges): confirm this step exits 0; the non-vacuity step below prints at least 10 (floor=10; 20 ran on the dispatched run 44646083564, 2026-11-19); slow-s6dei.xml contains no test_mineru_path_preserves_formulas testcase; and -rs prints no unexpected skip lines beyond legitimately-conditional ones.
         run: |
           set -euo pipefail
           uv run pytest \
@@ -528,27 +528,42 @@ jobs:
       - name: Non-vacuity — slow tests actually ran (nexus-s6dei)
         # Same shape as the nexus-5opzu guard above: a gate that skip-passes
         # on a missing prerequisite reads as a broken gate, not a pass.
-        # Floor pinned to the currently slow-marked, non-MinerU tests; bump
+        # Floor pinned to the currently slow-marked tests that run here (the formula test is deselected); bump
         # consciously (same change that adds the new slow test) if it ever
         # needs to move. 6 -> 7 for nexus-utpuw.3's flip-window measurement
         # (tests/scripts/test_flip_current.py), which is slow-marked because it
         # cannot calibrate on every machine and starves neighbouring shards.
         # RG-A caught that the floor was NOT bumped in the commit that added
         # it, which would have left this guard silent about that test's
-        # deletion -- the exact thing it exists to notice.
+        # deletion -- the exact thing it exists to notice. 7 -> 10 (2026-11-19, suite audit items 2 and 3):
+        # the two full sigterm-during-bge-init sweeps and the real MinerU PDF e2e moved here from every push.
         run: |
           uv run python - <<'PY'
           import sys
           import xml.etree.ElementTree as ET
 
-          FLOOR = 7
+          FLOOR = 10
+          # Moved off every push to this leg (Sam 2026-11-19, T2 nexus/sam-ruling-suite-audit-and-cleanup-2026-11-19):
+          # each must run here, not skip, or the move dropped its proof.
+          REQUIRED = (
+              "test_sigterm_during_bge_init_exits_143_and_never_crashes[init-fits-the-bound]",
+              "test_sigterm_during_bge_init_exits_143_and_never_crashes[bound-expires]",
+              "test_e2e_simple_pdf_queryable",
+          )
           root = ET.parse("slow-s6dei.xml").getroot()
           ran = 0
+          ran_names = set()
           for case in root.iter("testcase"):
               if case.find("skipped") is None:
                   ran += 1
+                  ran_names.add(case.get("name", ""))
           print(f"non-skipped slow testcases: {ran} (floor={FLOOR})")
           if ran < FLOOR:
               print(f"VACUOUS: only {ran} non-skipped slow testcases ran, floor is {FLOOR} — prereq skip sweep, gate is broken", file=sys.stderr)
               sys.exit(1)
+          missing = [n for n in REQUIRED if n not in ran_names]
+          if missing:
+              print(f"MOVED TESTS DID NOT RUN (absent or skipped): {missing}", file=sys.stderr)
+              sys.exit(1)
+          print(f"moved tests ran: {list(REQUIRED)}")
           PY

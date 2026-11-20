@@ -186,6 +186,6 @@ CMP_ARGS=(--window "${WINDOW:--}" --edge-host "$CLOUD_HOST")
 for x in ${EXPECT_RED[@]+"${EXPECT_RED[@]}"}; do CMP_ARGS+=(--expect-red "$x"); done
 rc=0
 "$E2E_PYTHON" "$LEG" compare --plan "$WORK/plan.json" --local "$WORK/local.json" --cloud "$WORK/cloud.json" "${CMP_ARGS[@]}" | tee "$WORK/report.txt" || rc=${PIPESTATUS[0]}
-echo "cloud-leg: left behind (the client cannot delete these): seat cloudleg-$RUN_ID-seat, and the now-empty collection knowledge__cloud-leg-probe__* in the tenant. The ephemeral identity cloudleg-$RUN_ID was ended."
+echo "cloud-leg: left behind: seat cloudleg-$RUN_ID-seat, permanent by RDR-253 retention (no route removes a seat; one per run). The 5-seat cap counts per creating identity and this leg binds a fresh ephemeral identity each run, so it never fills. The ephemeral identity cloudleg-$RUN_ID was ended and tombstones after 30 days. knowledge__cloud-leg-probe__* is one collection every run reuses, now empty."
 echo "cloud-leg: paste the report from the 'examined' line to the verdict line onto the cut bead."
 exit "$rc"

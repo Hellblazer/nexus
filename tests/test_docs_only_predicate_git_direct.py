@@ -16,8 +16,9 @@ Two test families:
   dorny at all, its outputs contract (`code`) is untouched, and every
   downstream consumer (service-jar, test, test-lint, test-mode-census,
   pytest-gate) still reads `needs.changes.outputs.code` the same way. The
-  OTHER dorny usages (CA-3 x2, engine-service-build, write-seam-gate) must
-  still use dorny -- that family is deliberately unchanged.
+  OTHER dorny usages (CA-3 x2, write-seam-gate) must still use dorny --
+  that family is deliberately unchanged (engine-service-build left it at
+  suite audit item 8 for the changes job's svc step).
 * Behavioural tests -- extract the `gate` step's literal `run:` block (same
   discipline as test_dorny_guard_shell_logic.py: the ACTUAL text a runner
   would execute, not a hand-copied duplicate that could drift), substitute
@@ -92,6 +93,9 @@ def test_changes_job_outputs_contract_unchanged() -> None:
         "integration_files": "${{ steps.integration.outputs.integration_files }}",
         "integration_any": "${{ steps.integration.outputs.integration_any }}",
         "integration_shards": "${{ steps.integration.outputs.integration_shards }}",
+        # Suite audit item 8 (Sam 2026-11-19): the native-build trip-wire's job gate, from its own step
+        # (scripts/native_trip_wire_svc.py; tests/scripts/test_native_trip_wire_svc.py).
+        "svc": "${{ steps.svc.outputs.svc }}",
     }
 
 
@@ -112,7 +116,11 @@ def test_checkout_still_fetch_depth_zero() -> None:
 
 @pytest.mark.parametrize(
     "job_name",
-    ["ca3-pgvector-bundle", "ca3-pgvector-bundle-macos", "engine-service-build", "write-seam-gate"],
+    # engine-service-build left this family at suite audit item 8 (Sam 2026-11-19, T2
+    # nexus/sam-ruling-suite-audit-and-cleanup-2026-11-19): its dorny gate compared a develop push with main and was
+    # always true; it is now gated at job level on the changes job's svc output, whose script proves a skip is never
+    # wrongful (tests/scripts/test_native_trip_wire_svc.py, the superseded-run case included).
+    ["ca3-pgvector-bundle", "ca3-pgvector-bundle-macos", "write-seam-gate"],
 )
 def test_conservative_family_still_uses_dorny(job_name: str) -> None:
     """The 'always true on a develop push' safety-net family is a DIFFERENT
@@ -368,6 +376,21 @@ def test_push_mixed_diff_resolves_false(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     before = _commit(repo, {"seed.txt": "x"}, "seed")
     _commit(repo, {"docs/rdr/117-thing.md": "hi", "src/nexus/foo.py": "code"}, "mixed update")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "true"
+
+
+def test_push_rename_of_code_into_docs_is_code_not_docs_only(tmp_path: Path) -> None:
+    """A rename lists only its destination under git's default rename detection, so moving src/ into docs/
+    read as docs-only and skipped the matrix (code review of suite audit item 8). The source path counts."""
+    repo = _init_repo(tmp_path)
+    _commit(repo, {"src/nexus/foo.py": "a module body long enough to be detected as the same file\n" * 4}, "seed")
+    before = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "docs").mkdir(exist_ok=True)
+    _git(repo, "mv", "src/nexus/foo.py", "docs/foo.py")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "move")
     script = _render(_gate_script(), _values("push", before_sha=before))
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)

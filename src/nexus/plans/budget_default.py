@@ -134,8 +134,14 @@ CANDIDATE_PERCENTILES: Final[tuple[int, ...]] = (50, 75, 90, 95)
 MIN_DERIVATION_RUNS: Final[int] = 30
 
 #: Step sources whose ``cost_usd`` is attributable to this run's spend.
-#: ``sql`` fast-path steps cost nothing and carry ``None`` legitimately.
+#: A ``sql`` step (a retrieval call, the single-query fast path's one query included) runs no prompt and
+#: records the known zero ``0.0``; it is never billable.
 _BILLABLE_SOURCES: Final[frozenset[str]] = frozenset({"llm", "bundle"})
+
+
+def _is_fast_path_run(steps: list[dict]) -> bool:
+    """The single-query fast path's record: exactly one ``sql`` ``query`` step (``nexus.mcp.core._fast_path_step_record``)."""
+    return len(steps) == 1 and steps[0].get("source") == "sql" and steps[0].get("operator") == "query"
 
 
 @dataclass(frozen=True)
@@ -172,6 +178,10 @@ class BudgetDerivation:
     #: cheap dispatch records, every run lands in ``pre_flip`` and THIS
     #: line names the id that did it.
     flipped_step_models: dict[str, int]
+    #: executed-ok single-query fast-path runs: one ``sql`` ``query`` step at 0.0 (nexus-7fku2.2.3). Before
+    #: that change these rows carried no steps and fell under ``n_excluded_no_steps``; they stay out of the
+    #: population. A multi-step prompt-free plan run is still counted, as before.
+    n_excluded_fast_path: int = 0
 
     @property
     def sufficient(self) -> bool:
@@ -279,7 +289,7 @@ def derive_budget_default(
         return empty
 
     rows = result.get("rows") or []
-    n_executed_ok = n_no_steps = n_pre_flip = n_unknown = n_continuation = 0
+    n_executed_ok = n_no_steps = n_pre_flip = n_unknown = n_continuation = n_fast_path = 0
     costs: list[float] = []
     flipped_models: dict[str, int] = {}
     for row in rows:
@@ -307,6 +317,9 @@ def derive_budget_default(
             if step.get("source") == "llm" and _resolved(str(step.get("operator") or "")) in FLIPPED_OPERATORS:
                 key = str(step.get("model") or "<unknown>")
                 flipped_models[key] = flipped_models.get(key, 0) + 1
+        if _is_fast_path_run(steps):
+            n_fast_path += 1  # the population is unchanged: these rows used to carry no steps at all
+            continue
         if not is_post_flip_run(steps):
             n_pre_flip += 1
             continue
@@ -338,4 +351,5 @@ def derive_budget_default(
         percentiles=percentiles,
         would_refuse=would_refuse,
         flipped_step_models=flipped_models,
+        n_excluded_fast_path=n_fast_path,
     )

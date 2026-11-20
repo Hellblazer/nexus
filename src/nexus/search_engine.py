@@ -10,7 +10,7 @@ import re
 import contextvars
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1680,6 +1680,8 @@ def search_cross_corpus(
     prefetched_embeddings: dict[tuple[str, str], bytes] = {}
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     diag_kept: dict[str, int] = {}
+    #: Every collection's rerank state, whether or not the caller asked for ``rerank_meta_out``.
+    rerank_meta_by_col: dict[str, dict] = {}
     failed_collections: dict[str, str] = {}
     total_dropped = 0
     total_raw = 0
@@ -2491,6 +2493,8 @@ def search_cross_corpus(
         min_raw_per_collection[col] = part["min_raw_distance"]
         if rerank_meta_out is not None and part.get("rerank_meta"):
             rerank_meta_out[col] = part["rerank_meta"]
+        if part.get("rerank_meta"):
+            rerank_meta_by_col[col] = part["rerank_meta"]
         total_raw += part["raw_count"]
         total_dropped += part["dropped"]
         if part["dropped"]:
@@ -2606,9 +2610,18 @@ def search_cross_corpus(
     # answer (plan 473's threshold=2.0 over knowledge,code,docs,rdr: 80
     # collections, 54 s of enrichment even with the embedding fetch
     # parallel). No caller can show more than MAX_QUERY_RESULTS.
+    # GH #1667 follow-up C: the collections whose rerank DEGRADED, read as core's partial_rerank branch
+    # reads them (the engine's "degraded" flag, the benign all-sensitive case left out); a collection
+    # whose rows merely run past rerank_max_candidates reports none.
+    benign_degrades = benign_held_degrades(rerank_meta_by_col, all_results)
+    degraded_collections = frozenset(
+        c for c, m in rerank_meta_by_col.items() if m.get("degraded") and c not in benign_degrades
+    )
     all_results = _cap_enrichment_pool(
         all_results, pool_lexical_ids,
         cap=max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
+        model_of=model_of,
+        degraded_collections=degraded_collections,
     )
     call_deadline.check("search_cross_corpus:before_doc_ids")
 
@@ -2666,7 +2679,9 @@ def search_cross_corpus(
                 assignments = _topic_assignments
                 coverage = len(assignments) / len(all_results) if all_results else 0
                 if coverage > 0.5:
-                    all_results = _apply_topic_grouping(all_results, assignments, taxonomy)
+                    all_results = _apply_topic_grouping(
+                        all_results, assignments, taxonomy, model_of=model_of,
+                    )
                     topic_grouped = True
                 else:
                     _log.debug(
@@ -2693,7 +2708,7 @@ def search_cross_corpus(
             call_deadline.check("search_cross_corpus:after_embeddings")
         if not topic_grouped and fetched_embeddings is not None:
             if not failed_indices:
-                all_results = _apply_clustering(all_results, fetched_embeddings)
+                all_results = _apply_clustering(all_results, fetched_embeddings, model_of=model_of)
             else:
                 _log.warning(
                     "clustering_skipped_partial_failure",
@@ -3013,6 +3028,9 @@ def _cap_enrichment_pool(
     results: list[SearchResult],
     lexical_ids: set[str],
     cap: int | None = None,
+    *,
+    model_of: "Callable[[str], str | None] | None" = None,
+    degraded_collections: Collection[str] = frozenset(),
 ) -> list[SearchResult]:
     """Keep at most *cap* non-lexical rows of *results*, best first.
 
@@ -3020,8 +3038,20 @@ def _cap_enrichment_pool(
     passes ``max(MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM)``.
     "Best" is the order a caller ranks by: rows carrying a server
     ``rerank_score`` by that score, ahead of unscored rows, which go by
-    vector distance. A lexical row is always kept: it is threshold-exempt
-    because its vector distance is usually the worst in the window, so a
+    vector distance on the calibrated scale (GH #1667 follow-up C): raw
+    distance times the per-model factor :func:`nexus.scoring.order_by_calibrated_distance`
+    uses, resolved with *model_of*, the row-preferred resolver the search
+    built. A raw-distance cut over a pool spanning voyage-code-3 and
+    voyage-context-3 kept only code, whose distances run tighter, and dropped
+    the prose rows the calibrated ordering after it would have ranked first.
+    One exception: when some embedding family has no scored row while another has (a degraded
+    rerank over a mixed pool), every row is ranked by calibrated distance and the scores are ignored,
+    so the scored family cannot fill the cut and drop the other. So does a pool holding a non-lexical
+    row of a collection in *degraded_collections* (the collections whose rerank reported a degrade,
+    benign all-sensitive ones left out, as core's ``partial_rerank`` reads them): one collection can
+    degrade inside a family that was otherwise scored. Unscored rows past local mode's
+    ``rerank_max_candidates`` are not a degrade and keep score-first.
+    A lexical row is always kept: it is threshold-exempt because its vector distance is usually the worst in the window, so a
     distance cut would drop exactly what that leg exists to find. Kept rows
     stay in their input order, so every step after this sees the same
     sequence it did before, minus the dropped rows.
@@ -3036,17 +3066,36 @@ def _cap_enrichment_pool(
     70).
     """
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local search helper import
+    from nexus.scoring import _resolve_calibration_factors  # noqa: PLC0415 — as above
 
     limit = QUOTAS.MAX_QUERY_RESULTS if cap is None else cap
     ranked = [i for i, r in enumerate(results) if r.id not in lexical_ids]
     if len(ranked) <= limit:
         return results
+    factors = _resolve_calibration_factors(results, model_of=model_of)
+
+    # A pool whose calibration-factor groups are not all scored, with at least one scored, is a
+    # degraded rerank over several models: score-first would fill the cut with the scored family and
+    # drop the other before calibration runs. Core's render keeps every row in calibrated order for
+    # that case (partial_rerank), so the cut keys every row on calibrated distance, scores ignored.
+    # Single-model pools (local mode's partial scoring past rerank_max_candidates) and fully scored
+    # ones are one group or all-scored, and keep score-first.
+    scored_by_group: dict[float, bool] = {}
+    for i in ranked:
+        group = factors.get(results[i].collection, 1.0)
+        scored_by_group[group] = scored_by_group.get(group, False) or (
+            results[i].metadata.get("rerank_score") is not None
+        )
+    calibrated_only = (any(scored_by_group.values()) and not all(scored_by_group.values())) or any(
+        results[i].collection in degraded_collections for i in ranked
+    )
 
     def _key(i: int) -> tuple[int, float]:
+        calibrated = results[i].distance * factors.get(results[i].collection, 1.0)
         score = results[i].metadata.get("rerank_score")
-        if score is not None:
+        if score is not None and not calibrated_only:
             return (0, -float(score))
-        return (1, results[i].distance)
+        return (1, calibrated)
 
     keep = set(sorted(ranked, key=_key)[:limit])
     _log.debug(
@@ -3455,12 +3504,19 @@ def _relabel_clusters(results: list[SearchResult]) -> None:
 def _apply_clustering(
     results: list[SearchResult],
     embeddings: "np.ndarray",
+    *,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Cluster results using pre-fetched embeddings, returning flat list with labels.
 
     Takes pre-fetched embeddings (see _fetch_embeddings_for_results) to avoid
     a second embedding fetch.
+
+    Clusters and the rows inside them are ordered by calibrated distance (GH #1667 follow-up C),
+    with the factors :func:`nexus.scoring._resolve_calibration_factors` resolves from *model_of*,
+    the row-preferred resolver the search built. Over one model every factor is 1.0.
     """
+    from nexus.scoring import _resolve_calibration_factors  # noqa: PLC0415 — branch-local search helper import
     from nexus.search_clusterer import cluster_results  # noqa: PLC0415 — branch-local; only when clustering applied
 
     # Convert SearchResults to dicts for cluster_results API
@@ -3471,7 +3527,10 @@ def _apply_clustering(
         for r in results
     ]
 
-    clusters = cluster_results(result_dicts, embeddings)
+    clusters = cluster_results(
+        result_dicts, embeddings,
+        calibration_factors=_resolve_calibration_factors(results, model_of=model_of),
+    )
 
     # Flatten clusters back to SearchResult list, preserving cluster labels
     out: list[SearchResult] = []
@@ -3498,12 +3557,27 @@ def _apply_topic_grouping(
     results: list[SearchResult],
     assignments: dict[str, int],
     taxonomy: Any,
+    *,
+    model_of: "Callable[[str], str | None] | None" = None,
 ) -> list[SearchResult]:
     """Group results by T2 topic assignment, sorted by topic then distance.
 
     Results with assignments get a ``_topic_label`` metadata key.
     Unassigned results are appended at the end.
+
+    "Distance" is the calibrated one (GH #1667 follow-up C): raw distance times the per-model
+    factor :func:`nexus.scoring.order_by_calibrated_distance` uses, resolved with *model_of*, the
+    row-preferred resolver the search built. A raw sort over code and prose put voyage-code-3's
+    tighter scale ahead of the prose rows the ranking after it puts first. Over one model every
+    factor is 1.0 and the order is the raw one. The reported distances are not rescaled.
     """
+    from nexus.scoring import _resolve_calibration_factors  # noqa: PLC0415 — branch-local search helper import
+
+    factors = _resolve_calibration_factors(results, model_of=model_of)
+
+    def _calibrated(r: SearchResult) -> float:
+        return r.distance * factors.get(r.collection, 1.0)
+
     # Build topic_id → label map (scoped query, not full table scan)
     topic_ids = set(assignments.values())
     id_to_label = taxonomy.get_labels_for_ids(list(topic_ids))
@@ -3520,9 +3594,9 @@ def _apply_topic_grouping(
 
     # Sort groups by best (lowest) distance, within group by distance
     out: list[SearchResult] = []
-    for tid, group in sorted(grouped.items(), key=lambda kv: min(r.distance for r in kv[1])):
+    for tid, group in sorted(grouped.items(), key=lambda kv: min(_calibrated(r) for r in kv[1])):
         label = id_to_label[tid]
-        for r in sorted(group, key=lambda r: r.distance):
+        for r in sorted(group, key=_calibrated):
             meta = dict(r.metadata)
             meta["_topic_label"] = label
             out.append(SearchResult(
@@ -3531,8 +3605,8 @@ def _apply_topic_grouping(
                 hybrid_score=r.hybrid_score, topic_boost=r.topic_boost,
             ))
 
-    # Unassigned at the end, sorted by distance
-    for r in sorted(unassigned, key=lambda r: r.distance):
+    # Unassigned at the end, sorted by calibrated distance
+    for r in sorted(unassigned, key=_calibrated):
         out.append(r)
 
     return out

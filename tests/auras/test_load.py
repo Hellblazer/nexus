@@ -818,7 +818,7 @@ def test_the_group_reader_maps_the_engine_record_and_a_missing_name() -> None:
                           ends=None, ended_at=None, ack_deadline=20, ack_deadline_by_topic={},
                           serves=("nexus-develop",), live=True)
     read = group_reader_from(_FakeGroups({"push-train": engine}))
-    assert read("push-train") == GateRecord("push-train", serves=("nexus-develop",), leader="i1")
+    assert read("push-train") == GateRecord("push-train", serves=("nexus-develop",), leader="i1", live=True)
     assert read("gone") is None
 
 

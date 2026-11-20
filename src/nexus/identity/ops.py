@@ -249,6 +249,16 @@ def promote(env: IdentityEnv, identity: str, name: str, token_file: Path | None 
                       token_source=_token_source(token_file),
                       unauthorized=OWN_TOKEN_401_ADVICE if token_file is None else FILE_TOKEN_401_ADVICE)
     lines = [f"{view['id']} is now the seat {name}"]
+    if "board_entries_retitled" in view:
+        # Engine 0.1.198 on: the promote retitled the board entry in its own transaction, whoever ran the command, and
+        # says what it did. An engine that answered is not second-guessed by a client write.
+        if view.get("board_retitle") == "title_taken":
+            lines.append(f"board entry keeps its title: an entry titled {name!r} already exists")
+        elif view["board_entries_retitled"]:
+            lines.append(f"board entry retitled to {name!r}")
+        return lines
+    # An older engine's promote does not retitle: the client does it, best effort, and only inside the session that
+    # owns the entry (the board fence lets nobody else write it).
     if env.board_memory is not None:
         from nexus.identity.board import retitle_entry  # noqa: PLC0415 — deferred: CLI startup cost
 

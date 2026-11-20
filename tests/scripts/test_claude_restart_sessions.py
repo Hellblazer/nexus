@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from tests._module_seam import setattr_in
+from tests._restart_fake_clock import fake_clock as _fake_clock
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "claude-restart-sessions"
 
@@ -470,7 +471,7 @@ def test_restart_logs_and_types_the_plugin_channel_form_for_a_dev_channel_sessio
     monkeypatch.setattr(crs, "tmux", lambda *a: typed.append(a))
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
     monkeypatch.setattr(crs, "alive", lambda _pid: False)  # the old pid is already gone
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     s = {"sessionId": "old-sid", "name": "tamsin", "pid": 111, "pane": "%1", "cwd": "/w", "argv": DEV_ARGV}
     with pytest.raises(crs.RelaunchStalled):
         crs.restart(s, str(handoff))
@@ -492,7 +493,7 @@ def test_restart_hands_started_on_whether_the_dev_dialog_may_be_up(crs, monkeypa
     handoff = tmp_path / "h.md"
     handoff.write_text("# a\n# b\n", encoding="utf-8")
     monkeypatch.setattr(crs, "save_draft", lambda *_a: ("", ""))
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     new = {"sessionId": "new-sid", "pid": 999, "kind": "interactive", "tmux": "x:@1.%1"}
 
     def fake_tmux(*a) -> None:
@@ -974,14 +975,21 @@ def rd(crs, monkeypatch, tmp_path):
     monkeypatch.setattr(crs, "READY_MANIFEST", tmp_path / "restart-ready.json")
     monkeypatch.setattr(crs, "LAST_RUN", tmp_path / "restart-last.json")
     monkeypatch.setattr(crs, "ASK_DIR", ask_dir)
-    # The sandbox gate has its own tests; its inputs are stubbed too, so no test runs the real claude.
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
-    monkeypatch.setattr(crs, "script_sha256", lambda *_a: SHA)
-    monkeypatch.setattr(crs, "claude_version", lambda *_a: "2.1.316")
+    # No real tmux: every session lives on the one server the run reaches (tested in ..._plan.py); plans go in tmp.
+    monkeypatch.setattr(crs, "PLAN_DIR", tmp_path / "plans")
+    monkeypatch.setattr(crs, "check_server", lambda found, quiet=False: (FAKE_SERVER, list(found), ""))
     # Live sessions here carry the test process's pid; its children are not background tasks of theirs.
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
     monkeypatch.delenv("TMUX_PANE", raising=False)
     return tmp_path
+
+
+FAKE_SERVER = ("/tmp/fake-tmux/default", 1)
+
+
+def _with_plan(crs, argv: list[str]) -> list[str]:
+    """The detached half is given the plan its foreground wrote: here, every live session of the scratch dir."""
+    return [*argv, "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))] if "--detached" in argv else argv
 
 
 def _live(rd: Path, name: str, status: str = "idle", pane: str = "%5", **extra) -> Path:
@@ -1172,18 +1180,14 @@ def test_status_prints_the_table_and_exits_nonzero_while_a_target_blocks(crs, rd
     assert "busy" in rows["beta"] and "busy now" in rows["beta"]
 
 
-def test_status_is_still_go_while_the_sandbox_pass_does_not_hold(crs, rd, monkeypatch, capsys) -> None:
-    """--status exits 0 only when a restart would be allowed; the sandbox pass is advisory and never changes it."""
+def test_status_is_go_when_the_round_is_ready(crs, rd, monkeypatch, capsys) -> None:
+    """--status exits 0 only when a restart would be allowed, and says nothing about a sandbox pass."""
     _live(rd, "alpha")
     _round(crs, rd, ["alpha"], alpha=60)
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--status"])
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     assert crs.main() == 0
-    assert "sandbox pass: holds" in capsys.readouterr().out
-    # the pass is advisory (A1, 2026-11-19): any warning is reported, and --status still says go
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "no sandbox pass recorded (x)")
-    assert crs.main() == 0
-    assert "sandbox pass: warning, no sandbox pass recorded" in capsys.readouterr().out
+    assert "sandbox" not in capsys.readouterr().out
 
 
 def test_status_without_a_round_says_so(crs, rd, monkeypatch, capsys) -> None:
@@ -1212,8 +1216,9 @@ def _run_main(crs, monkeypatch, argv: list[str]) -> tuple[int, list[list[str]]]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return real(cmd, **kw)
 
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)  # the plan's `created` is read against the same clock
+    argv = _with_plan(crs, argv)  # before the fake: reading the sessions runs `ps`
     setattr_in(monkeypatch, crs, "subprocess.run", fake_run)
-    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", *argv])
     return crs.main(), tmux_calls
 
@@ -1614,8 +1619,9 @@ def _child(crs, rd, monkeypatch, *argv: str) -> tuple[int, list[str]]:
     restarted: list[str] = []
     monkeypatch.setattr(crs, "restart", lambda s, handoff="": restarted.append(s["name"]) or True)
     monkeypatch.setattr(crs, "update_plugins", lambda: None)
-    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--detached", "--no-update", "--wait", "1", *argv])
-    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
+    setattr_in(monkeypatch, crs, "time.time", lambda: NOW)  # the plan's `created` is read against the same clock
+    monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--detached", "--no-update", "--wait", "1", *argv,
+                                      "--plan", str(crs.write_plan(crs.sessions(), FAKE_SERVER))])
     return crs.main(), restarted
 
 
@@ -1751,7 +1757,6 @@ def test_fresh_and_resume_are_opposites(crs, rd, monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["claude-restart-sessions", "--fresh", "--resume"])
     with pytest.raises(SystemExit):
         crs.main()
-SHA = "a" * 64  # the sandbox-gate tests live in test_claude_restart_sessions_sandbox.py
 
 
 # ── withdrawing a mailed ask (nexus-o581r) ───────────────────────────────────────────────
@@ -1924,7 +1929,7 @@ def _loop_with_mail(crs, monkeypatch, tmp_path, *, busy: bool) -> list[str]:
     monkeypatch.setattr(crs, "went_busy", lambda *_a, **_k: busy)
     monkeypatch.setattr(crs, "prompt_count", lambda _sid: 1)
     monkeypatch.setattr(crs, "status", lambda _s: "idle")
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     assert crs._write_handoffs([s], {"idle"}, 60, 10_000, "x") == {}
     return order
 
@@ -2043,7 +2048,6 @@ def test_status_withdraws_only_the_answered_asks(crs, rd, monkeypatch) -> None:
     (rd / "ready-gamma.json").write_text("{not json", encoding="utf-8")
     calls: list[tuple] = []
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": calls.append((sid, tid)) or "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert sorted(calls) == [("sid-alpha", "t-a"), ("sid-gamma", "t-g")]
@@ -2193,7 +2197,6 @@ def test_status_removes_only_the_answered_targets_markers(crs, rd, monkeypatch) 
     _manifest_with_asks(crs, rd, {"alpha": "t-a", "beta": "t-b"}, markers=True)
     (rd / "ready-alpha.json").write_text(json.dumps({"ready": True, "reason": "idle", "eta_min": None}), encoding="utf-8")
     monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": "withdrawn")
-    monkeypatch.setattr(crs, "sandbox_pass_check", lambda *_a: "")
     a = argparse.Namespace(status=True, dry_run=False, ready_max_age=900)
     crs.ready_round(a, _found(crs), _found(crs))
     assert not _marker_of(crs, rd, "alpha").exists() and _marker_of(crs, rd, "beta").exists()
@@ -2676,7 +2679,7 @@ def _fake_tmux(crs, monkeypatch, tmp_path: Path, panes: list[_Pane], **kw) -> Fa
     monkeypatch.setattr(crs, "LATE", [])
     monkeypatch.setattr(crs, "STUCK", [])
     setattr_in(monkeypatch, crs, "subprocess.run", fake)
-    setattr_in(monkeypatch, crs, "time.sleep", lambda _s: None)
+    _fake_clock(crs, monkeypatch)
     setattr_in(monkeypatch, crs, "os.kill", fake.kill)
     return fake
 
@@ -2734,8 +2737,7 @@ def test_a_pane_that_cannot_be_kept_is_replaced_by_a_window_with_a_shell(crs, mo
 def _roll_args(**over) -> argparse.Namespace:
     """The Namespace _roll and stop_report read, every field the real parser would give."""
     base = dict(fresh=False, nx="", fallback_resume=False, wait=5, handoff_timeout=1, repo="", endpoint="",
-                caller_pane="", only=[], skip=[], keep_dev_channel=False, force=False, no_ready_check=False,
-                skip_sandbox_check=None)
+                caller_pane="", only=[], skip=[], keep_dev_channel=False, force=False, no_ready_check=False)
     return argparse.Namespace(**{**base, **over})
 
 
@@ -2968,7 +2970,7 @@ def test_an_ordinary_shell_pane_settles_without_sleeping(crs, monkeypatch, tmp_p
     pane = _Pane("%1", 111, direct=False)
     fake = _fake_tmux(crs, monkeypatch, tmp_path, [pane])
     sleeps: list[float] = []
-    setattr_in(monkeypatch, crs, "time.sleep", sleeps.append)
+    _fake_clock(crs, monkeypatch, record=sleeps)
     assert crs.settle_pane("%1", "wren", "$1", "/w") == "%1"
     assert sleeps == [] and fake.verbs("respawn-pane") == [] and fake.verbs("new-window") == []
 
@@ -2979,7 +2981,7 @@ def test_an_ordinary_shell_pane_settles_without_sleeping_on_a_real_tmux(crs, mon
     time.sleep(0.5)  # the shell is up
     setattr_in(monkeypatch, crs, "subprocess.run", _REAL_RUN)
     sleeps: list[float] = []
-    setattr_in(monkeypatch, crs, "time.sleep", sleeps.append)
+    _fake_clock(crs, monkeypatch, record=sleeps)
     assert crs.settle_pane(pane, "plain", tm.run("display-message", "-p", "-t", pane, "#{session_id}"), str(tmp_path)) == pane
     assert sleeps == [], f"settle_pane waited on a plain shell: {sleeps}"
 

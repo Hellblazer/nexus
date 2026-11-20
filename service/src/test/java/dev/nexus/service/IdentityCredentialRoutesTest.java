@@ -90,8 +90,15 @@ class IdentityCredentialRoutesTest {
     }
 
     private HttpResponse<String> send(String bearer, String method, String path, Object body) throws Exception {
+        return send(bearer, null, method, path, body);
+    }
+
+    private HttpResponse<String> send(String bearer, String identityToken, String method, String path, Object body) throws Exception {
         var b = TestHttp.request("http://127.0.0.1:" + port + "/v1/identity" + path)
             .header("Authorization", "Bearer " + bearer).header("Content-Type", "application/json");
+        if (identityToken != null) {
+            b.header("X-Nexus-Identity-Token", identityToken);
+        }
         var req = "GET".equals(method) ? b.GET().build()
             : b.method(method, HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -222,16 +229,20 @@ class IdentityCredentialRoutesTest {
         Map<String, Object> start = new LinkedHashMap<>(evidence("s1", 11));
         start.put("event", "start");
         start.put("expected_generation", 0);
-        assertThat(send(TENANT_TOKEN, "POST", "/" + id + "/bind", start).statusCode()).isEqualTo(200);
+        var started = send(TENANT_TOKEN, "POST", "/" + id + "/bind", start);
+        assertThat(started.statusCode()).isEqualTo(200);
+        // The MCP server holds the token the bind returned and sends it on refresh and fork (RDR-253, Sam 2026-11-19,
+        // option A: a data-credential refresh or fork needs the identity's own live token).
+        String token = (String) json(started).get("identity_token");
         assertThat(send(DATA_TOKEN, "POST", "/" + id + "/renew", Map.of("generation", 1, "client_version", "7.99.0"))
             .statusCode()).isEqualTo(200);
-        assertThat(send(DATA_TOKEN, "POST", "/" + id + "/bind", Map.of("event", "refresh", "expected_generation", 1))
+        assertThat(send(DATA_TOKEN, token, "POST", "/" + id + "/bind", Map.of("event", "refresh", "expected_generation", 1))
             .statusCode()).isEqualTo(200);
         Map<String, Object> fork = new LinkedHashMap<>();
         fork.put("event", "fork");
         fork.put("expected_generation", 1);
         fork.put("session_id", "s1-fork");
-        assertThat(send(DATA_TOKEN, "POST", "/" + id + "/bind", fork).statusCode()).isEqualTo(200);
+        assertThat(send(DATA_TOKEN, token, "POST", "/" + id + "/bind", fork).statusCode()).isEqualTo(200);
         assertThat(send(DATA_TOKEN, "GET", "/sessions/s1-fork", null).statusCode()).isEqualTo(200);
         assertThat(send(DATA_TOKEN, "POST", "/" + id + "/bind", Map.of("event", "end", "expected_generation", 1))
             .statusCode()).isEqualTo(200);

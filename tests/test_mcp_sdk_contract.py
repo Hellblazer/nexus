@@ -247,7 +247,7 @@ def test_a_client_probing_the_modern_era_first_falls_back_to_the_handshake_and_g
     ``experimental`` map, so Claude Code connected on 2026-07-28, logged
     "Channel notifications skipped: server did not declare claude/channel
     capability", and never sent ``notifications/initialized``, so the waiter's
-    first send parked forever on the gate (the restart sandbox, 2026-11-04: no
+    first send parked forever on the gate (2026-11-04: no
     mailed ask started a turn). The channel is a handshake-era capability, so
     ``run_stdio_with_channel`` serves the handshake era only: the probe is
     refused, the client falls back to ``initialize``, and the capability and the

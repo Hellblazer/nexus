@@ -206,12 +206,13 @@ class _Clocks:
 REFUSED = IdentityApiError(403, "identity_token_required", "a live identity token is required", {"error": "identity_token_required"})
 
 
-def _lease(tmp_path: Path, clocks: _Clocks, *, with_mono: bool = True) -> tuple[IdentityLease, _Engine, FakeProcesses]:
+def _lease(tmp_path: Path, clocks: _Clocks, *, with_mono: bool = True,
+           fork_grace: bool = False) -> tuple[IdentityLease, _Engine, FakeProcesses]:
     procs = FakeProcesses(tmp_path / "sessions")
     procs.start(100, T0, started_at=100_000, session_id="sid-1")
     engine = _Engine()
     extra: dict[str, Any] = {"monotonic": lambda: clocks.mono} if with_mono else {}
-    lease = IdentityLease(client_factory=lambda: engine, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
+    lease = IdentityLease(fork_grace=fork_grace, client_factory=lambda: engine, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
                           clock=lambda: clocks.wall, client_version="1", sleep=lambda s: None, **extra)
     return lease, engine, procs
 
@@ -223,6 +224,33 @@ def _path(tmp_path: Path) -> Path:
 def _file(tmp_path: Path, token: str | None, expires_at: float | None, generation: int = 1) -> None:
     write_token_file(_path(tmp_path), TokenFile(identity="i1", generation=generation, token=token, expires_at=expires_at,
                                                 session_id="sid-1", pid=100, started_at=100_000, proc_start=T0))
+
+
+def test_an_unknown_session_id_gets_one_renewal_of_grace_before_its_fork_row(tmp_path: Path) -> None:
+    """Develop run 44659989781: on /clear the registry names the new id before the hook binds it. The renewal that
+    first sees an unknown id sends nothing; one the hook bound in between never forks; a /branch id still unknown
+    at the next renewal gets its fork row then."""
+    clocks = _Clocks()
+    lease, engine, procs = _lease(tmp_path, clocks, fork_grace=True)
+    _file(tmp_path, "tok-0", expires_at=clocks.wall + 3_600)
+    known: set[str] = set()
+
+    def session(sid: str) -> dict[str, Any]:
+        if sid in known:
+            return {"session_id": sid}
+        raise IdentityApiError(404, "unknown_session", "no", {})
+    engine.session = session  # type: ignore[method-assign]
+    procs.write_registry(100, 100_000, T0, session_id="clear-sid")       # /clear: the registry first
+    clocks.advance(HEARTBEAT_S)
+    assert not lease.tick().forked and engine.count("fork") == 0, "the renewal in the gap waits for the hook"
+    known.add("clear-sid")                                                # the hook binds it
+    clocks.advance(HEARTBEAT_S)
+    assert not lease.tick().forked and engine.count("fork") == 0
+    procs.write_registry(100, 100_000, T0, session_id="branch-sid")      # /branch: no hook ever binds it
+    clocks.advance(HEARTBEAT_S)
+    assert not lease.tick().forked
+    clocks.advance(HEARTBEAT_S)
+    assert lease.tick().forked and engine.count("fork") == 1, "still unknown at the next renewal: the fork row"
 
 
 def test_the_lease_refresh_and_fork_carry_the_token_being_refreshed(tmp_path: Path) -> None:
@@ -285,12 +313,13 @@ def test_a_fork_refused_identity_token_required_lapses_it_too_and_never_blocks_t
     REFUSED,
 ], ids=["not_owner", "server_error", "identity_token_required"])
 @pytest.mark.parametrize("token", ["tok-0", None], ids=["token", "no_token"])
+@pytest.mark.parametrize("grace", [False, True], ids=["no_grace", "grace"])
 def test_a_refused_fork_never_stops_the_renewal_on_the_same_tick(tmp_path: Path, refusal: IdentityApiError,
-                                                                token: str | None) -> None:
+                                                                token: str | None, grace: bool) -> None:
     """The fork row is sent before the renewal in one heartbeat: a refusal of it used to skip the renewal, retry every tick
     and lapse the seat in 300 seconds with the session alive."""
     clocks = _Clocks()
-    lease, engine, procs = _lease(tmp_path, clocks)
+    lease, engine, procs = _lease(tmp_path, clocks, fork_grace=grace)
     engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
     engine.refuse_bind = refusal
     _file(tmp_path, token, expires_at=clocks.wall + 3_000 if token else None)
@@ -303,7 +332,8 @@ def test_a_refused_fork_never_stops_the_renewal_on_the_same_tick(tmp_path: Path,
     if refusal is REFUSED:
         assert engine.count("fork") == 1, "a lapsed token is not retried"
     else:
-        assert engine.count("fork") == 3, "another refusal is retried on the next tick"
+        # with the grace, the first tick waits; a refusal after it is retried on the next tick, never re-granted a grace
+        assert engine.count("fork") == (2 if grace else 3), "another refusal is retried on the next tick"
 
 
 def test_a_fork_refused_for_a_stale_generation_still_flags_superseded_and_skips_the_renewal(tmp_path: Path) -> None:
@@ -682,18 +712,21 @@ def _events(engine: FakeEngine) -> list[str]:
     return [args[1] for name, args in engine.calls if name == "bind"] + [name for name, _ in engine.calls if name == "create_ephemeral"]
 
 
-def _assert_same_identity_one_binding(engine: FakeEngine, out: Any, own: str, generation: int = 1) -> None:
-    """The session ends bound to the identity it held, at the same generation, with ONE live binding for its pid."""
+def _assert_same_identity_one_binding(engine: FakeEngine, out: Any, own: str, generation: int = 1, *, event: str = "start") -> None:
+    """The session ends bound to the identity it held, at the same generation, with ONE live binding for its pid. *event* is
+    the one that bound it: ``start`` after a refused fork (the token is gone), ``fork`` when the engine took the process's
+    own token."""
     assert out.action == "bound" and out.identity == own, f"not the held identity: {out.row} {out.identity} {out.notices}"
     assert out.generation == generation and out.token_file is not None and out.token_file.exists()
+    assert out.event == event, f"bound by {out.event}, expected {event}"
     assert "create_ephemeral" not in _events(engine), "no second identity"
     live = engine.bindings_by_host(HOST, 100)
     assert [v["id"] for v in live] == [own], f"exactly one live binding for the pid: {[v['id'] for v in live]}"
-    starts = [args for name, args in engine.calls if name == "bind" and args[1] == "start"]
-    assert len(starts) == 1 and starts[0][0] == own and starts[0][2] == generation
-    assert starts[0][3]["session_id"] == "s2", "the start carries the NEW session id: the fork it replaces indexed it"
-    assert starts[0][3].get("pid") == 100 and starts[0][3].get("started_at") == 100_000, "the same process evidence"
-    assert "holder_gone" not in starts[0][3]
+    bound = [args for name, args in engine.calls if name == "bind" and args[1] == event and args[3].get("session_id") == "s2"]
+    assert len(bound) == 1 and bound[0][0] == own and bound[0][2] == generation
+    assert bound[0][3]["session_id"] == "s2", "the bind carries the NEW session id: the fork it replaces indexed it"
+    assert bound[0][3].get("pid") == 100 and bound[0][3].get("started_at") == 100_000, "the same process evidence"
+    assert "holder_gone" not in bound[0][3]
     assert engine.sessions["s2"][0] == own, "the session index knows the new session id"
 
 
@@ -730,6 +763,35 @@ def test_the_privileged_cloud_clear_falls_through_clear_403_then_fork_403_to_the
     out = binder.bind(facts)
     _assert_same_identity_one_binding(engine, out, own)
     assert [e for e in _events(engine) if e in ("clear", "fork", "start")] == ["clear", "fork", "start"]
+
+
+@pytest.mark.parametrize("kind", ["ephemeral", "seat"])
+def test_an_unprivileged_clear_sends_fork_with_the_process_own_token_and_keeps_its_identity(tmp_path: Path, kind: str) -> None:
+    """RDR-253's clear row: a binder that may not send ``clear`` (``allow_privileged=False``) sends the same change as ``fork``
+    with the process's own token, in place of falling through to a NEW ephemeral beside the live binding (the hole the 0.1.198
+    review named) and without a data-credential ``start`` of a held identity (the gap Phase 2 open item 1 closes)."""
+    engine = _NoClearEngine()
+    own = _own(engine, kind=kind, name="alpha" if kind == "seat" else None)
+    _own_file(tmp_path, own)
+    binder, facts = _binder_facts(tmp_path, engine, "clear", privileged=False)
+    out = binder.bind(facts)
+    _assert_same_identity_one_binding(engine, out, own, event="fork")
+    assert out.row == "clear_in_process"
+    assert [e for e in _events(engine) if e in ("clear", "fork", "start")] == ["fork"], "no clear, and no start of a held identity"
+    assert engine.bind_tokens == [("fork", "tok-own")]
+
+
+@pytest.mark.parametrize("kind", ["ephemeral", "seat"])
+def test_an_unprivileged_clear_with_no_live_token_restarts_the_same_identity_after_the_refused_fork(tmp_path: Path, kind: str) -> None:
+    """The token file is gone (or expired): the fork goes without a token, the engine's 403 ``identity_token_required``
+    reaches :meth:`SessionBinder._restart_own`, and ``start`` is the only event that binds."""
+    engine = _ExpiredTokenEngine()
+    own = _own(engine, kind=kind, name="alpha" if kind == "seat" else None)
+    binder, facts = _binder_facts(tmp_path, engine, "clear", privileged=False)
+    out = binder.bind(facts)
+    _assert_same_identity_one_binding(engine, out, own, event="start")
+    assert out.row == "clear_restart_own"
+    assert [e for e in _events(engine) if e in ("clear", "fork", "start")] == ["fork", "start"]
 
 
 def test_a_fork_refused_for_another_reason_still_ends_unbound_with_the_engines_words(tmp_path: Path) -> None:
@@ -814,3 +876,22 @@ def test_no_token_value_reaches_a_binder_log_line(tmp_path: Path) -> None:
     assert out.identity == own and out.token_file is not None
     token = read_token_file(out.token_file).token                      # type: ignore[union-attr]
     assert token and token not in repr(logs) and token not in " ".join(out.notices)
+
+
+def test_the_production_lease_keeps_the_fork_grace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """identity_lease.start builds the lease the server runs: it must keep the one renewal of grace that the fork
+    mechanics tests above switch off."""
+    import nexus.session as session
+    from nexus.mcp import identity_lease
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("NX_IDENTITY_LEASE", raising=False)
+    monkeypatch.delenv("NX_IDENTITY_BIND", raising=False)
+    monkeypatch.setattr(session, "find_immediate_claude_pid", lambda start_pid=None: 4242)
+    monkeypatch.setattr(session, "_command_name_of", lambda pid, **kw: "claude")
+    monkeypatch.setattr(identity_lease, "_run", lambda lease: None)       # no heartbeat thread work in a unit test
+    try:
+        lease = identity_lease.start()
+        assert lease is not None and lease._fork_grace is True
+    finally:
+        identity_lease.shutdown()

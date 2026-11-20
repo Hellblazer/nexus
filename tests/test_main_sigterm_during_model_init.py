@@ -107,19 +107,30 @@ def _spawn(state: dict, dbname: str, log_path: Path, extra_env: dict[str, str]):
 #: every run that lands there: what a loaded host does to the default bound (nexus-y6aj0, a
 #: 6-CPU cgroup with five suites running). The expiry must halt, never ``System.exit``.
 #: Fewer offsets there: each one is an engine boot, and this is the slowest test in the suite.
+#: The fourth field is how many runs must have landed inside init; the fifth, for the per-push case, stops
+#: the sweep at the first landed run. The full sweeps run in the nightly slow leg (Sam 2026-11-19, suite audit
+#: item 2: one landed boot per push, the sweeps nightly). Init's length depends on the host (a fast warm Mac
+#: finished it inside 0.3 s on 2 of 3 boots, chas never did), so the per-push case escalates through up to
+#: three offsets and stops at the first whose SIGTERM landed in init: usually one or two boots. Landing is
+#: required, because ``ort_init_shutdown_wait`` is logged only when Main installs its handlers before it
+#: builds the embedder, the ordering this case exists to keep; a crash at that one landing is probabilistic
+#: (30-40 % a boot before the fix), which the nightly sweeps cover.
 _CASES = (
-    pytest.param({}, _OFFSETS_S, "ort_init_shutdown_wait", id="init-fits-the-bound"),
+    pytest.param({}, (0.05, 0.15, 0.3), "ort_init_shutdown_wait", 1, True, id="one-landed-boot-per-push"),
+    pytest.param({}, _OFFSETS_S, "ort_init_shutdown_wait", _MIN_LANDED, False, id="init-fits-the-bound",
+                 marks=pytest.mark.slow),
     pytest.param(
         {"NX_ORT_INIT_SHUTDOWN_WAIT_MS": "0"}, (0.05, 0.1, 0.2, 0.3, 0.4),
-        "ort_init_shutdown_halt", id="bound-expires",
+        "ort_init_shutdown_halt", _MIN_LANDED, False, id="bound-expires", marks=pytest.mark.slow,
     ),
 )
 
 
 @pytest.mark.needs_stamped_jar
-@pytest.mark.parametrize(("extra_env", "offsets", "landed_event"), _CASES)
+@pytest.mark.parametrize(("extra_env", "offsets", "landed_event", "min_landed", "stop_at_landing"), _CASES)
 def test_sigterm_during_bge_init_exits_143_and_never_crashes(
-    tmp_path: Path, extra_env: dict[str, str], offsets: tuple[float, ...], landed_event: str
+    tmp_path: Path, extra_env: dict[str, str], offsets: tuple[float, ...], landed_event: str, min_landed: int,
+    stop_at_landing: bool, record_property,
 ) -> None:
     _require_model_or_skip()
     state = ensure_engine()
@@ -170,7 +181,10 @@ def test_sigterm_during_bge_init_exits_143_and_never_crashes(
             f"SIGTERM {offset}s after model init began: rc={rc}, want 143 (-6 is SIGABRT after the "
             f"ORT logging-manager SEGV, nexus-o5xyx.1). log tail:\n{text[-2500:]}"
         )
-    assert landed >= _MIN_LANDED, (
+        if stop_at_landing and landed >= min_landed:
+            break
+    record_property("sigterm_runs", "; ".join(results))
+    assert landed >= min_landed, (
         f"non-vacuity: SIGTERM must have landed inside model init ({landed_event} logged) on >= "
-        f"{_MIN_LANDED} runs, got {landed}: {results}"
+        f"{min_landed} runs, got {landed}: {results}"
     )

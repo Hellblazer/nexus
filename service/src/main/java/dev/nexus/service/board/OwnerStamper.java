@@ -41,6 +41,7 @@ public final class OwnerStamper implements OwnerOutHook {
     private final IdentityRepository identities;
     private final Clock clock;
     private volatile AckDeadlineTimer timer;
+    private final AliasReader aliases;
     /** The decision; replaced in a test to make an evaluation fail. */
     private final BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider;
 
@@ -51,6 +52,19 @@ public final class OwnerStamper implements OwnerOutHook {
 
     OwnerStamper(TenantScope scope, TupleRepository tuples, GroupRepository groups, IdentityRepository identities,
                  Clock clock, BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider) {
+        this(scope, tuples, groups, identities, clock, decider, IdentityRepository::liveAliases);
+    }
+
+    /** The live alias of each identity, read in the evaluation's transaction; replaced in a test to make the read fail. */
+    @FunctionalInterface
+    interface AliasReader {
+        Map<String, String> read(org.jooq.DSLContext ctx, String tenant, java.util.Collection<String> ids);
+    }
+
+    OwnerStamper(TenantScope scope, TupleRepository tuples, GroupRepository groups, IdentityRepository identities,
+                 Clock clock, BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider,
+                 AliasReader aliases) {
+        this.aliases = aliases;
         this.scope = scope;
         this.tuples = tuples;
         this.groups = groups;
@@ -126,7 +140,7 @@ public final class OwnerStamper implements OwnerOutHook {
             OwnerDecision.Decision decision =
                 decider.apply(new OwnerDecision.Input(base, pushes, dones, owners, group, ids, now), trigger);
             if (decision.post() != null) {
-                post(tenant, base, decision.post());
+                post(ctx, tenant, base, decision.post());
             }
             // Armed under the lock, so an older evaluation cannot overwrite a newer one's deadline.
             if (timer != null) {
@@ -144,7 +158,7 @@ public final class OwnerStamper implements OwnerOutHook {
                 OwnerDecision.Decision d = OwnerDecision.stamperError(group, sha,
                     BoardReads.rows(ctx, tenant, base, "owner"), clock.instant());
                 if (d.post() != null) {
-                    post(tenant, base, d.post());
+                    post(ctx, tenant, base, d.post());
                 }
                 return null;
             });
@@ -153,7 +167,34 @@ public final class OwnerStamper implements OwnerOutHook {
         }
     }
 
-    private void post(String tenant, String base, OwnerDecision.Post p) {
+    /**
+     * RDR-252, Sam 2026-11-19: the body names the owner and next up by identity id, and this adds each one's live alias
+     * as {@code owner_alias} and {@code next_alias}, read at stamp time through the evaluation's own transaction, so a notice
+     * can say a seat's name. An identity with no live alias gets no field, and a read that fails gets none either: the
+     * row still posts, with ids. The decision stays a function of ids; a {@code clear} row names no one.
+     */
+    private OwnerDecision.Post withAliases(org.jooq.DSLContext ctx, String tenant, OwnerDecision.Post p) {
+        Object owner = p.body().get("owner");
+        Object next = p.body().get("next");
+        List<String> named = java.util.stream.Stream.of(owner, next).filter(String.class::isInstance)
+            .map(String.class::cast).distinct().toList();
+        if (named.isEmpty()) {
+            return p;
+        }
+        Map<String, String> alias;
+        try {
+            alias = aliases.read(ctx, tenant, named);
+        } catch (Throwable t) {
+            // The alias is a cosmetic field: the row goes out with ids alone, as an older engine's did.
+            log.warn("event=board_owner_alias_read_failed tenant={} error={}", tenant, t.getMessage(), t);
+            return p;
+        }
+        return OwnerDecision.withAliases(p, owner instanceof String o ? alias.get(o) : null,
+            next instanceof String n ? alias.get(n) : null);
+    }
+
+    private void post(org.jooq.DSLContext ctx, String tenant, String base, OwnerDecision.Post decided) {
+        OwnerDecision.Post p = withAliases(ctx, tenant, decided);
         String subspace = BoardReads.subspace(base, "owner");
         tuples.out(tenant, subspace, Map.of("topic", base + "--owner"),
             Map.of("from", "engine", "kind", p.kind(), "sha", p.sha()), p.bodyJson(), UUID.randomUUID().toString(), null, null);

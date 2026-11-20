@@ -2,7 +2,8 @@
 title: "No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs"
 id: RDR-241
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-19
 priority: high
 author: Sam
 reviewed-by: self
@@ -158,10 +159,12 @@ mechanism for that is a batched, resumable background job: nexus-f3yqd.2, whose
 design is RDR-246 (accepted 2026-11-16) and whose children are mostly open
 (`bd show nexus-f3yqd.2`). Building a second mechanism here would duplicate it.
 
-**Trigger to revive Gap 2:** nexus-f3yqd.2's job mechanism is built, which is
-observable as nexus-f3yqd.2.22 closed (RDR-246's Minimum Viable Validation: an
-upgrade boot with a registered move over `nexus.chunks`, with its progress shown
-in `nx doctor`). Until then these sites are frozen in the ratchet table as BULK
+**Trigger to revive Gap 2:** nexus-f3yqd.2's job mechanism is active, which is
+observable as nexus-f3yqd.2.23 closed (RDR-246's activation). The first trigger,
+nexus-f3yqd.2.22 closed (the Minimum Viable Validation: an upgrade boot with a
+registered move over `nexus.chunks`, its progress shown in `nx doctor`), fired on
+2026-11-18 while activation still waited on Sam's go, so Sam moved the trigger to
+.2.23 at close (2026-11-19, T2 `nexus/sam-ruling-rdr241-close-2026-11-19`). Until then these sites are frozen in the ratchet table as BULK
 JOB rows, so they can shrink and cannot grow. Which rungs can be expressed as a
 registered move is decided at revival, not here.
 
@@ -329,8 +332,10 @@ draft's claims point at.
 - [x] The engine's existing list routes return the same rows the walks read —
   **Status**: Verified (source), the Key Discovery on live rows above —
   **Method**: Source Search
-- [ ] Dropping documents with an unregistered `source_uri` scheme from
-  `nx doctor --check-references` is acceptable — **Status**: Assumed. Those rows
+- [x] Dropping documents with an unregistered `source_uri` scheme from
+  `nx doctor --check-references` is acceptable — **Status**: Verified (test,
+  nexus-uwggq.1.5): the golden diff dropped exactly the `chroma://` and `C:\`
+  rows, as predicted before the run, and kept the `HTTPS://` row. Those rows
   can only ever report "unknown", which never sets the check's exit code, and
   `nx catalog backfill source-uri` exists to rewrite the `chroma://` ones. A
   registered scheme spelled in capitals (`HTTPS://`) is counted under its
@@ -373,7 +378,8 @@ draft's claims point at.
   (`EXPLAIN ANALYZE`, Postgres's timed query plan, in an engine integration
   test on a 50,000-row fixture; an index only if it is slow, by a Liquibase
   changeset)
-- [ ] The citation join in `link_generator._all_entries` (bib ids across all
+- [waived: a known gap accepted by Sam 2026-11-19, revisit when the citation join is next touched; T2 `nexus/sam-ruling-rdr241-close-2026-11-19`]
+  The citation join in `link_generator._all_entries` (bib ids across all
   content types, `link_generator.py:39-50`) is expressible as SQL —
   **Status**: Unverified, and not planned here: the site stays in the table
   as AGGREGATE until someone designs a route — **Method**: Source Search
@@ -411,7 +417,7 @@ Applied to this RDR's scope, in the order the work can ship:
   `operators/dispatch.py:1263-1270`).
 - **BULK JOB and BOUNDED sites stay.** A BOUNDED site keeps its bound where it is
   set. A BULK JOB site stays a client loop, frozen in the table, until
-  nexus-f3yqd.2's mechanism is built (trigger under Gap 2).
+  nexus-f3yqd.2's mechanism is active (Gap 2's trigger: nexus-f3yqd.2.23 closed).
 
 ### Technical Design
 
@@ -453,6 +459,10 @@ walk call sites can fall and cannot rise. Its parts:
   shapes that are not `all_documents` calls (`find_all`'s grow-until-short loop,
   `link_audit`'s page loop, `bulk_unlink`'s dry-run count) stay in the census
   and out of this scanner; adding them is a later extension of the same table.
+  Stated residual at close (Sam, 2026-11-19, T2 `nexus/sam-ruling-rdr241-close-2026-11-19`): Gap 4 is closed for
+  `all_documents` calls only. `by_content_type`'s single unbounded `/list`,
+  `find_all`'s loop and `link_audit`'s page loop are not counted, and no scanner
+  extension is planned.
 
 The frozen list on `2e09b8cfc` (25 sites, 28 calls). "P1" is Phase 1 (client
 only), "P2" is Phase 2 (engine, then client):
@@ -728,9 +738,9 @@ names the new call site and its `path:line`.
 
 ### Prerequisites
 
-- [ ] Critical Assumptions that gate Phase 2 verified: the engine spike
-  (statement time at 50,000 documents) and the equivalence test of the metadata
-  route. Phase 1 has no open assumption; the `--check-references` behaviour
+- [x] Critical Assumptions that gate Phase 2 verified: the engine spike
+  (statement time at 50,000 documents; nexus-uwggq.2.1, T2 `nexus_rdr/241-research-4`) and the equivalence test of
+  the metadata route (nexus-uwggq.2.7, `tests/integration/test_rdr241_meta_route_equivalence.py`). Phase 1 has no open assumption; the `--check-references` behaviour
   change moved to Phase 2 with nexus-uwggq.1.5 (option C).
 - [x] RDR-193 closed 2026-11-16: no prerequisite remains with it.
 - Not a prerequisite: nexus-f3yqd.2. This plan does not depend on its job
@@ -828,9 +838,10 @@ Raise `REQUIRED_ENGINE_VERSION` in the client release that depends on them
 
 Expected count after this phase: 18 calls.
 
-### Deferred: Gap 2 (trigger: nexus-f3yqd.2's job mechanism is built)
+### Deferred: Gap 2 (trigger: nexus-f3yqd.2.23 closed, the job mechanism active)
 
-Not scheduled. When the trigger fires, rewrite Gap 2 against that mechanism and
+Not scheduled. The trigger moved from nexus-f3yqd.2.22 to .2.23 at close (Sam,
+2026-11-19, T2 `nexus/sam-ruling-rdr241-close-2026-11-19`). When the trigger fires, rewrite Gap 2 against that mechanism and
 the table's remaining BULK JOB rows, and decide which rungs can be expressed as
 a registered move.
 
@@ -915,13 +926,15 @@ sensitive-path list) wherever it is cited. No contradiction found.
 
 Research records `nexus_rdr/241-research-1` to `-5`. Three are verified by
 source search: the call-site census, the two unattended walks, and the
-shipped pieces with the existing routes a walk can switch to. Two are
-assumed, each with a named check before the work it gates: the author and
-meta filter speed at 50,000 documents (a spike in Phase 2, before those
-routes ship) and the per-scheme switch in `nx doctor --check-references`
-(a before-and-after fixture diff, before that switch ships in Phase 2).
-Both gate Phase 2 only. The citation join in `link_generator._all_entries` is unverified
-and outside the plan: that site stays in the ratchet table as AGGREGATE.
+shipped pieces with the existing routes a walk can switch to. Two more
+were assumed and are now verified by the check named before the work each
+gated: the author and meta filter speed at 50,000 documents, by the Phase 2
+spike (nexus-uwggq.2.1; the one exception, a broad author term paged deep at
+about 150 ms, is recorded in Critical Assumptions with Sam's no-index ruling),
+and the per-scheme switch in `nx doctor --check-references`, by the
+before-and-after fixture diff (nexus-uwggq.1.5). The citation join in `link_generator._all_entries` is unverified
+and outside the plan: that site stays in the ratchet table as AGGREGATE, a known
+gap Sam accepted at close, revisited when the citation join is next touched (T2 `nexus/sam-ruling-rdr241-close-2026-11-19`).
 
 ### Scope Verification
 
@@ -930,8 +943,11 @@ the unattended walks (Gap 3), and the routes and switches for Gap 1. Every
 in-scope gap has a phase: Gap 4 is Phase 1's first step, the Gap 1
 switches to existing routes are Phase 1, and Gap 3's two walks and the new
 author, metadata, sensitive-locator and scheme routes are Phase 2. Gap 2 (tenant-wide jobs) is
-deferred with the trigger "nexus-f3yqd.2's job mechanism is built" and is not
-a gate item. The operator-dispatch walk was found during the revision and is
+deferred with the trigger "nexus-f3yqd.2.23 closed" (moved from .2.22 at close,
+T2 `nexus/sam-ruling-rdr241-close-2026-11-19`) and is not a gate item. **Delivered scope, stated at close:** the walk-site
+ratchet (Gap 4, for `all_documents` calls) and the engine-answered tenant-wide
+questions (Gaps 1 and 3), not tenant-wide jobs, despite the title's "Runs
+Tenant-Wide Jobs". The operator-dispatch walk was found during the revision and is
 inside Gap 3's definition (an unattended path that reaches a walk), so it is
 in scope.
 
@@ -1002,7 +1018,9 @@ the next one without the ratchet.
 - 2026-11-17: Client rules and Phase 1 Step 2 record that scoped client reads and writes refuse a blank or whitespace value (nexus-uwggq.1.9, after nexus-uwggq.1.6). The engine-side 400 and the `descendants` LIKE escape are not yet planned in this RDR; they are recorded in the nexus-uwggq.1.9 notes.
 - 2026-11-17: Phase 1's expected count reads 22 calls in 21 sites, the live walk-site scan on e0d833c58, because the `--check-references` switch (nexus-uwggq.1.5) moved to Phase 2; Phase 2's 18 is unchanged. The site table row, the count forecast, Phase 1 Step 2, the Test Plan scenario and the Finalization Gate text say the same (standing grant 3).
 - 2026-11-18: The author-and-meta critical assumption is verified by the Phase 2 spike (nexus-uwggq.2.1): no index for the metadata or sensitive-locator routes; one author statement (a broad term at offset 40,000) ran at 153.7 ms, over the 100 ms rule, and the decision on a GIN `pg_trgm` index on `lower(author)` is pending (see the next entry) (grant 3, linda).
-- 2026-11-18: Amendment matching the reviewed engine routes `2d33588d9` and their gate (grant 3, linda; code review and critique rounds r1 and r2, T2 `nexus/review-7dfe8e09d-nexus-uwggq.2-2026-11-18-r1`, `nexus/critique-7dfe8e09d-nexus-uwggq.2.3-2026-11-18-r1` and their r2 confirmations): four routes, the fourth being by-scheme, which keeps a row iff `urlparse(source_uri).scheme` equals the requested scheme lowercased (leading-whitespace rows kept); the three paged routes answer `{count, limit, offset, documents}` with the exact count and no `capped` flag; rows come in the engine's text order of `tumbler`; the author match folds with PostgreSQL 17's `pg_c_utf8` simple case mapping and differs from `str.lower()` in two classes (U+0130 and a word-final capital sigma); by-meta takes `sensitive=true` as a clause of its own, which closes the sensitive-cap regression of 2026-11-17 in the engine (no type filter on `/sensitive` is needed), and a `meta_min` bound up to 131,072 characters; locator rows carry `sensitive`; a NUL byte or malformed percent escape is a 400; the author-index assumption records the measured facts (153.7 ms; 131 ms without and 143 ms with the index on the collated statement); the Phase 2 intro, Step 3, Step 4, scope and proportionality lines name four routes and four flags.
+- 2026-11-18: Amendment matching the reviewed engine routes `d23b55ba0` and their gate (grant 3, linda; code review and critique rounds r1 and r2, T2 `nexus/review-7dfe8e09d-nexus-uwggq.2-2026-11-18-r1`, `nexus/critique-7dfe8e09d-nexus-uwggq.2.3-2026-11-18-r1` and their r2 confirmations): four routes, the fourth being by-scheme, which keeps a row iff `urlparse(source_uri).scheme` equals the requested scheme lowercased (leading-whitespace rows kept); the three paged routes answer `{count, limit, offset, documents}` with the exact count and no `capped` flag; rows come in the engine's text order of `tumbler`; the author match folds with PostgreSQL 17's `pg_c_utf8` simple case mapping and differs from `str.lower()` in two classes (U+0130 and a word-final capital sigma); by-meta takes `sensitive=true` as a clause of its own, which closes the sensitive-cap regression of 2026-11-17 in the engine (no type filter on `/sensitive` is needed), and a `meta_min` bound up to 131,072 characters; locator rows carry `sensitive`; a NUL byte or malformed percent escape is a 400; the author-index assumption records the measured facts (153.7 ms; 131 ms without and 143 ms with the index on the collated statement); the Phase 2 intro, Step 3, Step 4, scope and proportionality lines name four routes and four flags.
 - 2026-11-18: The author route ships without the GIN `pg_trgm` index (Sam, ask author-index-deep-offset, option A); the deep-offset cost of about 150 ms is accepted and keyset paging is named as the fix if it ever matters (grant 3, linda).
 - 2026-11-19: The `--check-references` switch (nexus-uwggq.1.5, review T2 `nexus/review-3149265f7-nexus-uwggq.1.5-2026-11-19`, critique `nexus/critique-3149265f7-nexus-uwggq.1.5-2026-11-19-r1`): candidates come from one by-scheme read per registered non-`file` scheme, filtered last by the client's own scheme test; on an engine without the route the check reads "not checked" and exits 3, "could not check", as `nx catalog doctor --sensitive-with-aspects` does; a failed `/version` probe is an unreadable catalog, exit 1 (grant 3, linda).
-- 2026-11-19: The author route's fold also reads the final sigma as the medial one and drops U+0307 on both sides, so the route is a superset of the client's `str.lower()` answer, its count an upper bound, and nexus-uwggq.2.6's acceptance reads "superset, equal after `_keep`" (Sam's ruling on ask author-fold-five-pairs, T2 `nexus/sam-ruling-rdr241-author-fold-2026-11-19`; engine ff2884d21).
+- 2026-11-19: The author route's fold also reads the final sigma as the medial one and drops U+0307 on both sides, so the route is a superset of the client's `str.lower()` answer, its count an upper bound, and nexus-uwggq.2.6's acceptance reads "superset, equal after `_keep`" (Sam's ruling on ask author-fold-five-pairs, T2 `nexus/sam-ruling-rdr241-author-fold-2026-11-19`; engine 2e944e278).
+- 2026-11-19: At close, the `--check-references` assumption and the Phase 2 prerequisites are ticked, and the Assumption Verification paragraph says both formerly assumed checks are verified: the golden fixture diff (nexus-uwggq.1.5, exactly the `chroma://` and `C:\` rows left, `HTTPS://` kept), the spike (nexus-uwggq.2.1) and the metadata equivalence test (nexus-uwggq.2.7, 8 of 8 executed in CI run 44514366264). The citation join in `link_generator._all_entries` stays unverified (grant 3, linda).
+- 2026-11-19: Close, on Sam's rulings (T2 `nexus/sam-ruling-rdr241-close-2026-11-19`) for the close-time critique's partial verdict: Gap 2's revival trigger moves from nexus-f3yqd.2.22 (fired) to nexus-f3yqd.2.23 closed; Gap 4 is recorded as closed for `all_documents` calls only (the uncounted siblings named); `link_generator._all_entries` is a known gap, revisited when the citation join is next touched; the delivered scope is the ratchet plus the engine-answered tenant-wide questions, not tenant-wide jobs (linda).

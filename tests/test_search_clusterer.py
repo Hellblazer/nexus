@@ -111,6 +111,49 @@ class TestClusterResults:
         assert ids1 == ids2
 
 
+_CODE, _DOCS = "code__1-1__voyage-code-3__v1", "docs__1-1__voyage-context-3__v1"
+_FACTORS = {_CODE: 1.0, _DOCS: 0.45 / 0.65}  # the calibration scale order_by_calibrated_distance uses
+
+
+def _two_far_clusters() -> np.ndarray:
+    """Rows 0-2 sit near one corner, rows 3-5 near another: Ward at k=2 splits them there."""
+    return np.array([[1, 0, 0, 0], [1, 0.01, 0, 0], [1, 0, 0.01, 0],
+                     [0, 1, 0, 0], [0, 1, 0.01, 0], [0, 1, 0, 0.01]], dtype=np.float32)
+
+
+def _row(rid: str, collection: str, distance: float) -> dict:
+    return {"id": rid, "content": "", "distance": distance, "collection": collection, "metadata": {}}
+
+
+class TestClusterResultsCalibrated:
+    """GH #1667 follow-up C: voyage-code-3 distances run tighter than voyage-context-3, so a raw sort
+    over a pool that spans both puts code first however near the prose row is."""
+
+    def test_clusters_are_ordered_by_calibrated_best_distance(self) -> None:
+        rows = [_row("c0", _CODE, 0.38), _row("c1", _CODE, 0.40), _row("c2", _CODE, 0.42),
+                _row("d0", _DOCS, 0.50), _row("d1", _DOCS, 0.52), _row("d2", _DOCS, 0.54)]
+        raw = cluster_results([dict(r) for r in rows], _two_far_clusters(), k=2)
+        assert [c[0]["id"] for c in raw] == ["c0", "d0"], "no factors: the raw order, as before"
+        out = cluster_results(rows, _two_far_clusters(), k=2, calibration_factors=_FACTORS)
+        assert [c[0]["id"] for c in out] == ["d0", "c0"]
+        assert [r["distance"] for c in out for r in c] == [0.50, 0.52, 0.54, 0.38, 0.40, 0.42], (
+            "the reported distances are not rescaled"
+        )
+
+    def test_rows_inside_a_cluster_are_ordered_by_calibrated_distance(self) -> None:
+        rows = [_row("code", _CODE, 0.40), _row("doc-mid", _DOCS, 0.60), _row("doc-best", _DOCS, 0.50),
+                _row("far0", _DOCS, 0.90), _row("far1", _DOCS, 0.91), _row("far2", _DOCS, 0.92)]
+        out = cluster_results(rows, _two_far_clusters(), k=2, calibration_factors=_FACTORS)
+        assert [r["id"] for r in out[0]] == ["doc-best", "code", "doc-mid"]
+        assert out[0][0]["_cluster_label"] == "doc-best", "the label follows the calibrated best row"
+
+    def test_a_single_model_pool_is_unchanged(self) -> None:
+        rows = [_row(f"r{i}", _DOCS, d) for i, d in enumerate([0.5, 0.3, 0.4, 0.9, 0.8, 0.7])]
+        plain = cluster_results([dict(r) for r in rows], _two_far_clusters(), k=2)
+        factored = cluster_results(rows, _two_far_clusters(), k=2, calibration_factors={_DOCS: 1.0})
+        assert [[r["id"] for r in c] for c in plain] == [[r["id"] for r in c] for c in factored]
+
+
 class TestKmeansNumpy:
     def test_produces_valid_labels(self) -> None:
         rng = np.random.default_rng(42)

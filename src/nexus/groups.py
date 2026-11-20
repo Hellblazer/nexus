@@ -62,7 +62,8 @@ class NoIdentityError(Exception):
 @dataclass(frozen=True)
 class GroupRecord:
     """A group record as ``GET /v1/group/<name>`` returns it. ``live`` is the engine's verdict on the whole rule:
-    false once ``ended_at`` is set or ``ends`` has passed."""
+    false once ``ended_at`` is set or ``ends`` has passed; None when the answer carries none (an absent key is no verdict,
+    never "disbanded")."""
 
     name: str
     leader: str
@@ -74,7 +75,7 @@ class GroupRecord:
     ack_deadline: int
     ack_deadline_by_topic: dict[str, int]
     serves: tuple[str, ...]
-    live: bool
+    live: bool | None
 
     @classmethod
     def from_wire(cls, body: Mapping[str, Any]) -> GroupRecord:
@@ -87,9 +88,18 @@ class GroupRecord:
                 requested_by=body.get("requested_by"), formed_at=body.get("formed_at"), ends=body.get("ends"),
                 ended_at=body.get("ended_at"), ack_deadline=int(body.get("ack_deadline") or 0),
                 ack_deadline_by_topic={str(k): int(v) for k, v in (body.get("ack_deadline_by_topic") or {}).items()},
-                serves=tuple(body.get("serves") or ()), live=bool(body.get("live")))
+                serves=tuple(body.get("serves") or ()), live=None if body.get("live") is None else bool(body["live"]))
         except (KeyError, ValueError, TypeError, AttributeError) as exc:
             raise GroupsError(200, "bad_response", f"the engine's group record is unreadable ({type(exc).__name__}: {exc})") from exc
+
+
+def _rows_naming(rows: list[Any], key: str, what: str, *, also: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+    """*rows* when every one is a map whose *key* and every *also* field are text, else ``bad_response``: a verb indexes or
+    formats those fields, and a malformed answer is one line and exit status 1, never a KeyError or a TypeError."""
+    for field in (key, *also):
+        if not all(isinstance(row, dict) and isinstance(row.get(field), str) for row in rows):
+            raise GroupsError(200, "bad_response", f"a {what} row from the engine names no {field}")
+    return rows
 
 
 def own_identity_id() -> str:
@@ -219,14 +229,15 @@ class GroupsClient:
 
     def memberships(self, identity: str) -> list[dict[str, Any]]:
         """The groups of *identity*, in join order: ``{identity, group, role, joined_at}`` each."""
-        return self._call_identity(lambda: self._identities.memberships(identity))  # the one reader of the route
+        rows = self._call_identity(lambda: self._identities.memberships(identity))  # the one reader of the route
+        return _rows_naming(rows, "group", "membership")
 
     def roster(self, group: str) -> list[dict[str, Any]]:
         """The members of *group* in join order. An answer with no ``members`` list is an error, not an empty roster."""
         rows = self._request("GET", f"/v1/identity/groups/{quote(group, safe='')}").get("members")
         if not isinstance(rows, list):
             raise GroupsError(200, "bad_response", "the roster answer carries no members list")
-        return rows
+        return _rows_naming(rows, "identity", "roster", also=("role",))
 
     def join(self, identity: str, group: str, role: str = "member") -> dict[str, Any]:
         """Join *group* as *identity* (the caller's own: the engine checks the token against it), or change the role."""

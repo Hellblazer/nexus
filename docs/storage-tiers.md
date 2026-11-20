@@ -65,7 +65,8 @@ over time:
   `access_count` and `last_accessed`, so the system can see which entries
   actually get used. On T2 that means each time a caller received the row:
   by title, by id, or on a returned search page, never a match ranked past
-  the page (RDR-209 Phase 0b; see
+  the page, for `memory_search` from conexus 8.5.0 against engine-service-v0.1.196
+  or later (an older client still stamps every match; RDR-209 Phase 0b; see
   [Configuration § Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry)).
 - **Heat-weighted TTL** on T2: frequently-accessed notes survive longer
   than their nominal TTL. The formula is
@@ -155,7 +156,7 @@ T2 is the persistent local layer that bridges sessions. Notes, project state, an
 
 Data is organized by project via the `--project` flag. TTL values: `30d`, `4w`, or permanent. Default is **permanent** for both `nx memory put --ttl` and the `memory_put` MCP tool (reversed 2026-09-12, nexus-473mx: a caller now asks for a clock explicitly rather than getting one by omission). `ttl<=0` is rejected outright by the engine, not coerced to any special meaning.
 
-**Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage: one increment each time a caller received the row (RDR-209 Phase 0b; counts from before the engine-service-v0.1.196 deploy keep the old one-per-search-match meaning). Effective TTL becomes `base_ttl * (1 + log(access_count + 1))`. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
+**Heat-weighted expiry (RDR-057 Phase 2a)**: T2 `access_count` and `last_accessed` columns track usage: one increment each time a caller received the row (RDR-209 Phase 0b; a `memory_search` older than conexus 8.5.0 sends no page limit and still stamps every match, and counts from before the engine-service-v0.1.196 deploy keep that old one-per-search-match meaning). A read with `access="silent"` stamps nothing. Effective TTL becomes `base_ttl * (1 + log(access_count + 1))`. See [Configuration — Heat-Weighted T2 Expiry](configuration.md#heat-weighted-t2-expiry).
 
 **Expiry quarantines, it does not delete (RDR-207)**: an entry past its effective TTL disappears from every read (`get`, `search`, `list`, the MCP memory tools) but stays in the table. `nx memory list --quarantined` shows these entries. `nx memory reap` deletes one only after a rollup summary covers it, `nx memory restore ID` brings one back as permanent, and `nx memory delete --id ID` removes one outright. A `memory_put` with `replaces` (RDR-238) quarantines the entry it names too, in the same write as the new entry, instead of deleting it; that entry is skipped by the rollup and never reaped, so it stays until you restore or delete it by id. See [nx memory](cli-reference.md#nx-memory).
 

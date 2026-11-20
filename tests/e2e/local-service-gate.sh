@@ -510,6 +510,7 @@ print(".".join(map(str, max(vals))) if vals else "")
 ')"
 [ -n "$GATE_STAMP" ] || { echo "[gate] FATAL: could not parse REQUIRED_ENGINE_VERSION / NOTE_URI_MIN_ENGINE_VERSION / RESOLVE_SENSITIVE_MIN_ENGINE_VERSION" >&2; exit 2; }
 GATE_BUILD_REF=""
+GATE_JAR=""   # set to the private launch copy after the stamped rebuild (gate_jar_private_copy, scripts/lib/gate-jar-cache.sh)
 if [ -z "${NEXUS_SERVICE_BIN:-}" ]; then
   JAR_SKIP_REASON="$(uv run python3 -c '
 from tests.db._service_fixture import jar_freshness_skip_reason
@@ -606,6 +607,17 @@ print(jar_freshness_skip_reason() or "")
     RELEASE_PROPS_SNAPSHOT=""
     exit 2
   fi
+  # The launch copy, taken while the service lease is still held: once it is released, another leg in this
+  # worktree may rebuild or restore the shared $JAR (the release battery's dual-gate leg restored the cached jar
+  # there between this gate's build and its launch, 2026-11-19 v8.5.1, and the service served that jar's
+  # build_ref). The copy is checked for this run's exact build_ref and is the only jar this gate launches.
+  GATE_JAR="$SCRATCH/gate-service.jar"
+  if ! gate_jar_private_copy "$JAR" "$GATE_JAR" "$GATE_BUILD_REF"; then
+    release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
+    RELEASE_PROPS_SNAPSHOT=""
+    exit 2
+  fi
+  echo "[gate] launch jar: $GATE_JAR (a private copy of $JAR, build_ref=$GATE_BUILD_REF)"
   release_props_restore_and_release "$RELEASE_PROPS" "$RELEASE_PROPS_SNAPSHOT" service
   RELEASE_PROPS_SNAPSHOT=""
 fi
@@ -625,8 +637,8 @@ if [ -n "${NEXUS_SERVICE_BIN:-}" ]; then
   fi
   echo "[gate] native binary: $NEXUS_SERVICE_BIN (mtime: $_bin_mtime)"
   START_ENV+=("NEXUS_SERVICE_BIN=$NEXUS_SERVICE_BIN")
-elif [ -f "$JAR" ]; then
-  START_ENV+=("NEXUS_SERVICE_JAR=$JAR")
+elif [ -n "${GATE_JAR:-}" ] && [ -f "$GATE_JAR" ]; then
+  START_ENV+=("NEXUS_SERVICE_JAR=$GATE_JAR")
 else
   echo "[gate] ERROR: no launch artifact — build the dev jar first:" >&2
   echo "         scripts/mvnw-leased.sh -q package -DskipTests" >&2

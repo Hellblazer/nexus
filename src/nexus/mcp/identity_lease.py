@@ -14,7 +14,9 @@ server, which is the one process that outlives every ``/clear``:
   50 minutes never lapses it), through ``bind`` with the same generation, which rewrites the process's one token file. A renewal or refresh from a superseded generation is refused: the server
   stops writing identity state and says so.
 * **fork row.** ``/branch`` runs no hook. When the registry entry of its Claude process names a session id the
-  index does not know, the server appends the ``fork`` row.
+  index does not know, the server appends the ``fork`` row at the renewal after the one that first sees it: on
+  ``/clear`` Claude writes the new id before the SessionStart hook binds it, and one renewal of grace lets the hook
+  bind it first.
 * **pending bind.** While unbound it looks for the pending file of its own Claude process (the hook's registry wait
   timed out), binds from it with the data credential and deletes it. That credential may start, resume, fork,
   refresh and end a binding and create an ephemeral identity, and the pending bind needs nothing else.
@@ -126,7 +128,8 @@ class IdentityLease:
     def __init__(self, *, client_factory: Callable[[], Any], config_dir: Path, claude_pid: int,
                  procs: Processes | Any | None = None, clock: Callable[[], float] = time.time,
                  client_version: str | None = None, sleep: Callable[[float], None] = time.sleep,
-                 close_client: bool = False, monotonic: Callable[[], float] | None = None) -> None:
+                 close_client: bool = False, monotonic: Callable[[], float] | None = None,
+                 fork_grace: bool = True) -> None:
         self._factory = client_factory
         self._idir = identity_dir(config_dir)
         self._claude_pid = claude_pid
@@ -135,6 +138,7 @@ class IdentityLease:
         self._sleep = sleep
         self._version = client_version
         self._close_client = close_client
+        self._fork_grace = fork_grace             # one renewal of grace before a fork row (False: fork at first sight)
         self._client: Any = None
         self._lock = threading.RLock()
         self._tick_lock = threading.Lock()
@@ -155,6 +159,7 @@ class IdentityLease:
         self._token_lapsed = False
         self._last_wall: float | None = None      # the wall clock at the last tick, to see a step backwards
         self._fork_sid: str | None = None         # the session id of the fork row in flight, for a once-per-id warning
+        self._unknown_sid: str | None = None      # an unknown registry session id seen once: it gets one renewal of grace
         self._fork_warned: set[str] = set()
         self._started = clock()
         self._next_heartbeat = 0.0
@@ -429,15 +434,24 @@ class IdentityLease:
         entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
         sid = entry.session_id if entry else None
         if not sid or sid in self._known_sessions:
+            self._unknown_sid = None
             return
         self._fork_sid = sid
         try:
             client.session(sid)
             self._known_sessions.add(sid)
+            self._unknown_sid = None
             return
         except IdentityApiError as exc:
             if exc.status != 404:
                 raise
+        if self._fork_grace and self._unknown_sid != sid:
+            # One renewal of grace (develop run 44659989781): on /clear Claude writes the new id into its registry file
+            # before the SessionStart hook binds it, and a fork row sent in that gap doubled the /clear's row. A /branch
+            # runs no hook, so its id is still unknown at the next renewal and gets its fork row then.
+            self._unknown_sid = sid
+            return
+        # the grace is spent: a refused bind is retried on the next renewal (the id joins _known_sessions once it binds)
         with self._lock:
             identity, generation, prior, held = self.identity, self.generation, self.session_id, self.token
         try:

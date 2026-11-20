@@ -2,6 +2,7 @@ import atexit
 import contextlib
 import logging
 import os
+import re
 import unittest.mock
 import warnings
 
@@ -1898,8 +1899,24 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
 )
 
 
+#: The identity files live sessions rewrite mid-run (nexus-hczdo, RDR-253): each session's lease refreshes its
+#: token under 50 minutes left (``identity/<pid>.<startedAt>.token``, its ``.lock``, and the atomic-write
+#: ``.<pid>.<hex32>.tmp`` sibling, all from ``nexus.identity.token_file``), a delegated child's token is
+#: ``identity/delegated/i<n>.token``, and a starting session writes ``identity/pending.<pid>.<epoch>``
+#: (``nexus.identity.pending``). MEASURED 2026-11-19 (marlowe): a long local run failed on 12 token files
+#: owned by live sessions' pids. Exact names only: the rest of ``identity/`` is still reported.
+_LIVE_SESSION_IDENTITY_FILE = re.compile(
+    r"identity/(?:"
+    r"(?:[0-9]+\.[0-9]+|delegated/i[0-9]+)\.token(?:\.lock|\.[0-9]+\.[0-9a-f]{32}\.tmp)?"
+    r"|pending\.[0-9]+\.[0-9]+"
+    r")"
+)
+
+
 def _is_allowlisted_config_dir_path(rel_path: str) -> bool:
     if rel_path.startswith(_REAL_CONFIG_DIR_ALLOWLIST_PREFIXES):
+        return True
+    if _LIVE_SESSION_IDENTITY_FILE.fullmatch(rel_path):
         return True
     # ``<basename>-<hash>.cache`` at the config root: the ripgrep line
     # caches. NOTHING WRITES THESE ANY MORE -- nexus-06aei deleted both the
@@ -2508,6 +2525,14 @@ _MANDATORY_PIN_PROPERTY = "nx_mandatory_pin_marked"
 # either way", never a silent pass and never a false FAIL) instead of
 # scanning a proven-partial view.
 _raw_collected_count = 0
+#: The full pre-deselection item list (see pytest_itemcollected and the ``full_collection`` fixture).
+FULL_COLLECTION_KEY: pytest.StashKey[list] = pytest.StashKey[list]()
+
+
+@pytest.fixture
+def full_collection(request: pytest.FixtureRequest) -> list:
+    """Every item this process collected, before ``-m``/``-k`` deselection and pytest-split's shard selection."""
+    return request.config.stash.get(FULL_COLLECTION_KEY, [])
 
 
 def pytest_itemcollected(item: pytest.Item) -> None:
@@ -2531,6 +2556,9 @@ def pytest_itemcollected(item: pytest.Item) -> None:
     """
     global _raw_collected_count
     _raw_collected_count += 1
+    # Every collected item, kept before any deselection, for a census that must see the whole corpus even in a
+    # run that deselects it (the lint-run mode census, tests/test_mode_declarations_are_explicit.py).
+    item.config.stash.setdefault(FULL_COLLECTION_KEY, []).append(item)
 
 
 # Below this ratio of (session.items after all deselection) / (raw

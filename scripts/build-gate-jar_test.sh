@@ -12,7 +12,7 @@ set -u -o pipefail
 # lease at the shared root, where a live peer run may hold it: the suite then
 # waits on that holder instead of finishing (nexus-mntbl). Scrubbed here, like the
 # suites that already do, and pinned by test_shell_suite_wiring.py's
-# TestSuitesIgnoreAnInheritedLeaseRoot.
+# TestSuitesAreGreen (which runs it with the root exported).
 unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY LAB_CPUS GITHUB_ACTIONS
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -555,6 +555,45 @@ out13i="$(_stamp_with_floor "0, 1, 107" "0, 0, 0" "-")"; rc13i=$?
 [[ $rc13i -ne 0 && "$out13i" == *"RESOLVE_SENSITIVE_MIN_ENGINE_VERSION not parseable"* ]] && ok "a missing resolve floor constant is fatal and named (rc $rc13i)" || bad "missing resolve floor constant rc $rc13i: $out13i"
 [[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored after the floor cases" || bad "props dirty after the floor cases"
 printf '%s\n' "$ev_original" > "$ev_file"
+
+echo "Test 13: --copy-to copies the jar to a private path UNDER the lease, on a HIT and on a build, and checks its build_ref"
+# The release battery's legs share service/target/ in one worktree: a leg that launches that path after this
+# script released the lease can get another leg's jar (release/v8.5.1 battery, 2026-11-19). --copy-to makes
+# the caller's launch copy before the lease is released. A cp shim records whether the lease is held then.
+lease11="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)/nexus-build-lease/service"
+shim11="$WORKDIR/shim11"; mkdir -p "$shim11"; log11="$WORKDIR/cp11.log"; : > "$log11"
+cat > "$shim11/cp" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *copy11*) if [[ -d "$lease11" ]]; then echo held >> "$log11"; else echo free >> "$log11"; fi ;; esac
+exec /bin/cp "\$@"
+SHIM
+chmod +x "$shim11/cp"
+jar_ref11() { python3 -c 'import sys,zipfile,re; p=zipfile.ZipFile(sys.argv[1]).read("META-INF/nexus/release.properties").decode(); print(re.search(r"^build_ref=(.*)$",p,re.M).group(1))' "$1"; }
+(cd "$repo" && scripts/build-gate-jar.sh >/dev/null 2>&1)   # make sure the next run is a HIT
+out11h="$(cd "$repo" && PATH="$shim11:$PATH" scripts/build-gate-jar.sh --copy-to "$WORKDIR/copy11-hit.jar" 2>&1)"; rc11h=$?
+ref11h="$(printf '%s\n' "$out11h" | sed -n 's/^stamped build_ref=//p')"
+[[ $rc11h -eq 0 && "$out11h" == *"HIT"* ]] && ok "HIT with --copy-to succeeds" || bad "HIT with --copy-to (rc $rc11h): $out11h"
+[[ -f "$WORKDIR/copy11-hit.jar" && "$(jar_ref11 "$WORKDIR/copy11-hit.jar")" == "$ref11h" ]] && ok "the HIT copy carries the printed build_ref" || bad "HIT copy missing or wrong build_ref"
+[[ "$out11h" == *"copied $WORKDIR/copy11-hit.jar"* ]] && ok "the HIT prints the copied line" || bad "no copied line on HIT: $out11h"
+[[ "$(cat "$log11")" == "held" ]] && ok "the HIT copy was taken while the lease was held" || bad "HIT copy lease state: '$(cat "$log11")'"
+: > "$log11"
+out11m="$(cd "$repo" && NX_GATE_JAR_CACHE=off PATH="$shim11:$PATH" scripts/build-gate-jar.sh --copy-to "$WORKDIR/copy11-miss.jar" 2>&1)"; rc11m=$?
+ref11m="$(printf '%s\n' "$out11m" | sed -n 's/^stamped build_ref=//p')"
+[[ $rc11m -eq 0 && "$out11m" == *"MISS"* ]] && ok "a build with --copy-to succeeds" || bad "build with --copy-to (rc $rc11m): $out11m"
+[[ -f "$WORKDIR/copy11-miss.jar" && "$(jar_ref11 "$WORKDIR/copy11-miss.jar")" == "$ref11m" ]] && ok "the build's copy carries its build_ref" || bad "build copy missing or wrong build_ref"
+[[ "$(cat "$log11")" == "held" ]] && ok "the build's copy was taken while the lease was held" || bad "build copy lease state: '$(cat "$log11")'"
+python3 - "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+    z.writestr("META-INF/nexus/release.properties", "release_version=0.1.107\nbuild_ref=another-leg\n")
+PY
+[[ "$(jar_ref11 "$WORKDIR/copy11-miss.jar")" == "$ref11m" ]] && ok "another leg rewriting service/target does not reach the copy" || bad "the copy changed with service/target"
+out11b="$(cd "$repo" && scripts/build-gate-jar.sh --copy-to "$WORKDIR/no-such-dir/copy11.jar" 2>&1)"; rc11b=$?
+[[ $rc11b -ne 0 ]] && ok "an unwritable --copy-to fails the run" || bad "unwritable --copy-to exited 0: $out11b"
+[[ "$(cat "$repo/$props_rel")" == $'release_version=\nbuild_ref=\nname=nexus' ]] && ok "release.properties restored after the failed copy" || bad "props dirty after the failed copy"
+rm -f "$repo/service/target/nexus-service-1.0-SNAPSHOT.jar" "$repo/service/target/.gate-jar-key"
 
 echo
 skipnote=""; (( SKIP == 0 )) || skipnote=", $SKIP skipped"

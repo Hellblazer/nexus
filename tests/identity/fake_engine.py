@@ -34,6 +34,8 @@ class FakeEngine:
         self.sessions: dict[str, tuple[str, int]] = {}
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.purged: list[str] = []
+        #: What an engine from 0.1.198 adds to a promote answer (its own retitle of the board entry); None is an older engine.
+        self.promote_board: dict[str, Any] | None = None
         self._n = 0
         self._minted = 0
         self.refuse: dict[str, IdentityApiError] = {}     # route name -> the refusal it answers with (a staged failure)
@@ -183,7 +185,7 @@ class FakeEngine:
             raise _refuse(409, "name_taken", f"{name} is taken")
         rec["kind"], rec["name"] = "seat", name
         self.aliases[name] = {"identity": identity, "state": "live"}
-        return self._view(rec)
+        return {**self._view(rec), **(self.promote_board or {})}
 
     def rename(self, old: str, new: str) -> dict[str, Any]:
         self.calls.append(("rename", (old, new)))

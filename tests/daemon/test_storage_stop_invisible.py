@@ -80,6 +80,59 @@ def test_a_legacy_lease_whose_endpoint_cmdline_reads_empty_does_not_signal_its_g
         bystander.wait(timeout=10)
 
 
+#: A bystander whose /proc cmdline reads empty for real, the way a just-spawned child's does while it is
+#: still in execve (the kernel has switched to the new mm and not yet set its arg range): it writes NULs
+#: over its own argument area through /proc/self/mem, checks the kernel now reports an all-NUL command
+#: line, and says so on stdout. The CI failures of the test above (develop runs 42482720978,
+#: 42728701104, 43811582701; returncode -15) were the old stop reading that window as "ours" and sending
+#: the group SIGTERM; the window lasts microseconds, so this holds it open instead.
+_BLANK_CMDLINE_BYSTANDER = r"""
+import sys, time
+with open("/proc/self/stat") as f:
+    stat = f.read()
+fields = stat[stat.rindex(")") + 2:].split()  # fields[0] is proc(5) field 3, so field n is fields[n - 3]
+arg_start, arg_end = int(fields[48 - 3]), int(fields[49 - 3])  # proc(5) fields 48 arg_start, 49 arg_end
+with open("/proc/self/mem", "r+b", buffering=0) as mem:
+    mem.seek(arg_start)
+    mem.write(b"\0" * (arg_end - arg_start))
+with open("/proc/self/cmdline", "rb") as f:
+    raw = f.read()
+sys.stdout.write("blank\n" if raw and not raw.strip(b"\0") else "readable %r\n" % raw)
+sys.stdout.flush()
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/<pid>/cmdline and /proc/self/mem are Linux")
+def test_a_legacy_lease_whose_endpoint_cmdline_really_reads_empty_does_not_signal_its_group(tmp_path: Path) -> None:
+    """The same case as the monkeypatched test above, through the real /proc read: no seam, a real
+    process whose command line the kernel reports empty is not signalled and is reported unreadable."""
+    bystander = subprocess.Popen(
+        [sys.executable, "-c", _BLANK_CMDLINE_BYSTANDER], start_new_session=True,
+        stdout=subprocess.PIPE, text=True, encoding="utf-8",
+    )
+    try:
+        assert bystander.stdout is not None
+        import select  # noqa: PLC0415 - Linux-only test
+
+        readable, _, _ = select.select([bystander.stdout], [], [], 30)
+        assert readable, "the bystander said nothing within 30 s"
+        ready = bystander.stdout.readline().strip()
+        # Loud, not a skip: a Linux kernel lets a process blank its own argv, so a host that cannot is a finding.
+        assert ready == "blank", f"the bystander could not blank its own command line: {ready!r}"
+        assert sr.process_command(bystander.pid) == "", "the product's /proc read must see the empty command line"
+        registry = _registry(tmp_path)
+        registry.publish(service_identity(), endpoint={"pid": bystander.pid, "port": 1}, version="t", owner_token="tok")
+        outcome = ssd.stop_storage_service(config_dir=tmp_path)
+        assert bystander.poll() is None, "a pid whose command line read empty was signalled"
+        assert bystander.pid not in outcome.pids
+        assert outcome.unreadable == (bystander.pid,)
+        assert registry.records() == [], "the stale lease is still released"
+    finally:
+        bystander.kill()
+        bystander.wait(timeout=10)
+
+
 def test_a_killed_supervisor_in_our_own_namespace_is_not_called_invisible(tmp_path: Path) -> None:
     # kill -9, then a stop inside the lease TTL: the old outcome, not "another PID namespace".
     registry = _registry(tmp_path)

@@ -210,15 +210,16 @@ jobs:
     # form hangs required checks on doc-only PRs).
     #
     # OTHER dorny/paths-filter USAGES IN THIS REPO ARE UNCHANGED BY DESIGN.
-    # CA-3/write-seam-gate below, and engine-service-build's `svc` predicate,
-    # KEEP dorny: their own comments document a DIFFERENT risk profile —
+    # CA-3/write-seam-gate below KEEP dorny (engine-service-build's `svc`
+    # predicate moved to this job's svc step at suite audit item 8): their own comments document a DIFFERENT risk profile —
     # "always true on a develop push" as a deliberate safety net, where an
     # empty/malformed file list resolving toward true just spends extra CI
     # cost and never skips something that needed to run. THIS job is the one
     # place an emptiness bug bought a false NEGATIVE (a skip that shouldn't
     # have happened), which is why it alone gets the git-direct treatment —
-    # do not "unify" the CA-3 / write-seam-gate / svc jobs onto this pattern;
-    # they were never the ones that broke.
+    # do not "unify" the CA-3 / write-seam-gate jobs onto this pattern;
+    # they were never the ones that broke. (The trip-wire's svc gate did
+    # break, always true on develop, and moved here: suite audit item 8.)
     name: doc-only fast lane predicate
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -233,6 +234,13 @@ jobs:
       # nexus-jh1f2 cut 4: the affected-integration job's shard list, [1,2,3] on a pull
       # request into main (every integration file runs there), [1] everywhere else.
       integration_shards: ${{ steps.integration.outputs.integration_shards }}
+      # Suite audit item 8 (Sam 2026-11-19): whether the native-build trip-wire (engine-service-build) runs at all.
+      # scripts/native_trip_wire_svc.py decides; its docstring has the two proofs a skip needs.
+      svc: ${{ steps.svc.outputs.svc }}
+    # The svc step reads the base commit's trip-wire check run (checks: read).
+    permissions:
+      contents: read
+      checks: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -276,7 +284,8 @@ jobs:
               echo "code=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            CHANGED_FILES="$(git diff --name-only "${BASE_SHA}...HEAD")"
+            # --no-renames: a rename's SOURCE counts too (src/ moved into docs/ is not docs-only).
+            CHANGED_FILES="$(git diff --no-renames --name-only "${BASE_SHA}...HEAD")"
           else
             # PUSH events: diff against the previous position of THIS SAME
             # branch (github.event.before), preserving the same-branch
@@ -297,7 +306,7 @@ jobs:
               echo "code=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            CHANGED_FILES="$(git diff --name-only "${BEFORE_SHA}" HEAD)"
+            CHANGED_FILES="$(git diff --no-renames --name-only "${BEFORE_SHA}" HEAD)"
           fi
 
           if [ -z "$CHANGED_FILES" ]; then
@@ -359,6 +368,33 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Does the native-build trip-wire run? (suite audit item 8)
+        id: svc
+        # Answers false only when the range touches none of the build's inputs AND, on a push, the base
+        # commit's own trip-wire run built or proved its commits (a replaced pending run did neither, so its
+        # commits are built here). Every doubt answers true; an empty diff between good commits exits 1.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/native_trip_wire_svc.py --repo . --event "${{ github.event_name }}" \
+            --before "${{ github.event.before }}" --base "${{ github.event.pull_request.base.sha }}" \
+            --output "$GITHUB_OUTPUT"
+
+      - name: Verify the svc predicate is usable (fail loud, never default-skip)
+        # nexus-cqquo, moved here with the gate: engine-service-build skips on anything but 'true', so an empty
+        # or malformed svc output would skip the native build and report green. Refuse it here instead.
+        run: |
+          set -euo pipefail
+          svc="${{ steps.svc.outputs.svc }}"
+          case "$svc" in
+            true|false) ;;
+            *)
+              echo "::error::the trip-wire gate produced no usable svc output ('$svc') — cannot prove whether its inputs changed, refusing to silently skip the native build"
+              exit 1
+              ;;
+          esac
+
       - name: Select the affected integration tests (nexus-rpaat)
         id: integration
         # Same diff base as the gate step: three-dot against the PR base, or
@@ -384,7 +420,7 @@ jobs:
             echo "::warning::no usable diff base ('$BASE'); selecting every integration file"
             mode="all"
           else
-            CHANGED="$(git diff --name-only "${RANGE[@]}")"
+            CHANGED="$(git diff --no-renames --name-only "${RANGE[@]}")"
             if grep -qxE 'scripts/(select_affected_integration_tests|assert_integration_affected_ran)\.py' <<< "$CHANGED"; then
               mode="all"
             fi
@@ -2716,15 +2752,18 @@ jobs:
     # (the codegen runner, Docker) and run the SAME native build the release
     # does (-Pnative -Pprebuilt-jooq -DskipTests), minus smoke + publish.
     #
-    # REQUIRED CHECK since 2026-07-13 (nexus-a5rj8, decided by Hal): a RED
-    # result here blocks merge. The job always runs; its expensive steps are
-    # path-gated via step `if:`, so unrelated PRs still see a fast no-op that
-    # reports green (skipped-steps == success — the branch-protection-safe
-    # skip pattern). service/** PRs pay the ~40min native build, which is
-    # exactly the visibility the trip-wire lacked as an advisory job.
-    # NOTE: the check name below is registered verbatim in the develop branch
-    # protection required contexts — renaming the job breaks the gate.
+    # Gated at job level since suite audit item 8 (Sam 2026-11-19): the `changes` job's `svc` output
+    # (scripts/native_trip_wire_svc.py) decides, so a change outside the build's inputs starts no runner and
+    # the job reports `skipped`. The earlier step-level dorny gate compared a develop push with main (its
+    # unset `base`), so it was always true and the native build ran on every push. The check is not among
+    # the required contexts (`gh api .../branches/{develop,main}/protection/required_status_checks`, read
+    # 2026-11-19: pytest-gate, service change detection, Java tests); a `skipped` job still reads as success
+    # for branch protection. Keep the name: release evidence fixtures and history read it verbatim.
     name: engine-service native build (PR trip-wire)
+    needs: changes
+    # A changes job that did not succeed BUILDS rather than skipping, so `skipped` comes only from the gate's
+    # own decision (which is what lets the next push read a skipped base as covered).
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.svc == 'true')"
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
@@ -2736,57 +2775,22 @@ jobs:
         with:
           fetch-depth: 0  # merge-base without --deepen (see linux CA-3 above)
 
-      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
-        id: changes
-        with:
-          filters: |
-            svc:
-              - 'service/**'
-              - '.github/workflows/ci.yml'
-              - '.github/actions/maven-cache/**'
-
-      - name: Verify the svc predicate is usable (fail loud, never default-skip)
-        # nexus-cqquo: every step below is path-gated `if: ... == 'true'`, and
-        # this job has no job-level `if:` — so an empty, absent, or malformed
-        # `svc` output makes EVERY step below evaluate false, the job
-        # completes having built nothing, and reports GREEN on a REQUIRED
-        # CHECK. Same non-vacuity shape as the `changes` job's doc-only
-        # predicate above (ci.yml:127-145): an UNPROVEN predicate must be
-        # distinguishable from a proven-false one. This does NOT change the
-        # skip pattern itself (skipped-steps-equals-success stays correct for
-        # an affirmatively-false predicate) -- it only refuses to treat
-        # "paths-filter said nothing usable" as that same false.
-        run: |
-          set -euo pipefail
-          svc="${{ steps.changes.outputs.svc }}"
-          case "$svc" in
-            true|false) ;;
-            *)
-              echo "::error::paths-filter produced no usable svc output ('$svc') — cannot prove whether service/** changed, refusing to silently skip the native build"
-              exit 1
-              ;;
-          esac
-
       - name: Set up GraalVM 25.0.3
-        if: steps.changes.outputs.svc == 'true'
         uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
         with:
           java-version: '25.0.3'
           distribution: 'graalvm'
 
       - name: Restore the Maven cache and set Central retries
-        if: steps.changes.outputs.svc == 'true'
         uses: ./.github/actions/maven-cache
         with:
           job-class: native
 
       - name: Generate jOOQ sources (codegen runner, Docker)
-        if: steps.changes.outputs.svc == 'true'
         working-directory: service
         run: ./mvnw -q generate-sources
 
       - name: Build native image (-Pnative -Pprebuilt-jooq, no smoke/publish)
-        if: steps.changes.outputs.svc == 'true'
         working-directory: service
         # The same build the release performs, minus smoke + publish — catches
         # jOOQ-apply and GraalVM-reachability regressions on the PR instead of at
@@ -2827,7 +2831,6 @@ jobs:
         # and required list live in the checker's PLATFORMS table; the release
         # workflow runs the same check on every native leg. JNA is exempt (it
         # ships every platform through its own metadata; see the checker).
-        if: steps.changes.outputs.svc == 'true'
         run: |
           python3 scripts/check_native_embedded_resources.py \
             --report service/target/embedded-resources.json \

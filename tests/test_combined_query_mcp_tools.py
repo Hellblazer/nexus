@@ -14,8 +14,10 @@ from typing import Any
 
 import pytest
 
-from nexus.errors import require_tumbler_prefix
+from nexus.db.http_vector_client import VectorServiceError
+from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE, require_tumbler_prefix
 from nexus.mcp import core
+from nexus.plans.runner import _RETRIEVAL_TOOLS
 
 
 class _FakeServiceT3:
@@ -152,13 +154,14 @@ class TestSearchMetadataScopedTool:
 
 
 class TestSearchTopicScopedTool:
-    def test_structured_chunk_level_merges_collections(self, monkeypatch):
+    def test_structured_chunk_level_merges_collections(self, cloud_mode, monkeypatch):
         rows = {
             "c1": [{"id": "h1", "content": "x", "distance": 0.4, "collection": "c1"}],
             "c2": [{"id": "h2", "content": "y", "distance": 0.1, "collection": "c2"}],
         }
         t3 = _FakeServiceT3(topic_rows_by_col=rows)
         _wire(monkeypatch, t3, ["c1", "c2"])
+        monkeypatch.setattr(core, "collection_model", lambda name: "voyage-context-3")  # the merge groups by model; no tenant here
 
         out = core.search_topic_scoped("q", "Vector Search", corpus="all",
                                        limit=10, structured=True)
@@ -177,6 +180,42 @@ class TestSearchTopicScopedTool:
         _wire(monkeypatch, t3, ["c1"], service=False)
         out = core.search_topic_scoped("q", "T", structured=True)
         assert isinstance(out, str) and out.startswith("Error:")
+
+    def test_merge_orders_and_cuts_on_the_calibrated_scale_across_models(self, cloud_mode, monkeypatch):
+        """GH #1667 follow-up C: voyage-code-3 distances run tighter than voyage-context-3 (0.45 vs 0.65
+        calibration), so a raw merge put the code row at 0.38 ahead of the docs row at 0.50 and the cut
+        to ``limit`` dropped the docs row. Calibrated, 0.50 * 0.45/0.65 = 0.346 wins; the reported
+        distance stays the raw 0.50."""
+        code_col = "code__1-1__voyage-code-3__v1"
+        docs_col = "docs__1-1__voyage-context-3__v1"
+        models = {code_col: "voyage-code-3", docs_col: "voyage-context-3"}
+        rows = {
+            code_col: [{"id": "code-h", "content": "c", "distance": 0.38, "collection": code_col}],
+            docs_col: [{"id": "docs-h", "content": "d", "distance": 0.50, "collection": docs_col}],
+        }
+        t3 = _FakeServiceT3(topic_rows_by_col=rows)
+        _wire(monkeypatch, t3, [code_col, docs_col])
+        monkeypatch.setattr(core, "collection_model", models.__getitem__)
+
+        out = core.search_topic_scoped("q", "T", corpus="code,docs", limit=1, structured=True)
+
+        assert out["ids"] == ["docs-h"]
+        assert out["distances"] == [0.50]
+        assert out["collections"] == [docs_col]
+
+    def test_merge_within_one_model_is_still_by_raw_distance(self, cloud_mode, monkeypatch):
+        a, b = "docs__1-1__voyage-context-3__v1", "knowledge__x__voyage-context-3__v1"
+        rows = {
+            a: [{"id": "ha", "content": "", "distance": 0.50, "collection": a}],
+            b: [{"id": "hb", "content": "", "distance": 0.40, "collection": b}],
+        }
+        t3 = _FakeServiceT3(topic_rows_by_col=rows)
+        _wire(monkeypatch, t3, [a, b])
+        monkeypatch.setattr(core, "collection_model", lambda name: "voyage-context-3")
+
+        out = core.search_topic_scoped("q", "T", corpus="docs,knowledge", limit=1, structured=True)
+
+        assert out["ids"] == ["hb"]
 
 
 class TestSearchGraphHopTool:
@@ -374,10 +413,11 @@ class TestReferenceOnlyRowContentCoercion:
         text = core.search_metadata_scoped("q", corpus="knowledge", structured=False)
         assert "None" not in text
 
-    def test_topic_scoped_null_content_coerces_to_empty_string(self, monkeypatch):
+    def test_topic_scoped_null_content_coerces_to_empty_string(self, cloud_mode, monkeypatch):
         rows = {"c1": [{"id": "h1", "content": None, "distance": 0.1, "collection": "c1"}]}
         t3 = _FakeServiceT3(topic_rows_by_col=rows)
         _wire(monkeypatch, t3, ["c1"])
+        monkeypatch.setattr(core, "collection_model", lambda name: "voyage-context-3")  # the merge groups by model; no tenant here
 
         structured = core.search_topic_scoped("q", "Vector Search", corpus="knowledge",
                                                structured=True)
@@ -441,8 +481,6 @@ class _EngineModelUnavailableT3:
         return "onnx-local"
 
     def _raise(self):
-        from nexus.db.http_vector_client import VectorServiceError
-
         raise VectorServiceError(self._MESSAGE, code=422)
 
     def search_metadata_scoped(self, *args, **kwargs):
@@ -475,8 +513,6 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
     Exception at their own boundary, never raise across the wire)."""
 
     def test_search_metadata_scoped_names_the_mismatch(self, monkeypatch):
-        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
@@ -486,19 +522,16 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         assert "onnx-local" in out
         assert "NX_VOYAGE_API_KEY" in out
 
-    def test_search_topic_scoped_names_the_mismatch(self, monkeypatch):
-        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
-
+    def test_search_topic_scoped_names_the_mismatch(self, cloud_mode, monkeypatch):
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
+        monkeypatch.setattr(core, "collection_model", lambda name: "voyage-context-3")  # the merge groups by model; no tenant needed
 
         out = core.search_topic_scoped("q", topic="anything", corpus="knowledge")
 
         assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
 
     def test_search_graph_hop_names_the_mismatch(self, monkeypatch):
-        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
@@ -507,8 +540,6 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
         assert SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE in out
 
     def test_search_aspect_scoped_names_the_mismatch(self, monkeypatch):
-        from nexus.errors import SEARCH_EMBEDDING_PROFILE_MISMATCH_SIGNATURE
-
         t3 = _EngineModelUnavailableT3()
         _wire(monkeypatch, t3, [_VPLY6_VOYAGE_COLLECTION])
 
@@ -519,7 +550,6 @@ class TestScopedToolsClassifyEmbeddingProfileMismatch:
 
 class TestPlanRunnerRegistration:
     def test_tools_registered_as_retrieval(self):
-        from nexus.plans.runner import _RETRIEVAL_TOOLS
         assert "search_metadata_scoped" in _RETRIEVAL_TOOLS
         assert "search_topic_scoped" in _RETRIEVAL_TOOLS
         assert "search_graph_hop" in _RETRIEVAL_TOOLS
