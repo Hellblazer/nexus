@@ -1261,6 +1261,25 @@ class TestETLFidelity:
         assert coll is not None
         assert coll["name"] == coll_name
 
+    def test_find_collection_answers_a_grandfathered_non_conformant_label(self, cat) -> None:
+        """RDR-229 P2.8 (nexus-p2m1x.13), engine 0.1.200: ``for_tuple`` answers a
+        ``legacy_grandfathered`` row, so a knowledge subject registered under a label
+        that is not of the conformant shape is found by its tuple (before the filter
+        dropped, this answered 404 and ``find_collection`` returned ``None``)."""
+        label = "p213-notes-from-2024"
+        cat.register_collection(
+            label, content_type="knowledge", owner_id="p213-field-notes",
+            embedding_model="bge-base-en-v15-768",
+        )  # legacy_grandfathered is derived: True for a non-conformant name
+        assert cat.get_collection(label)["legacy_grandfathered"] is True, "guard: the row is flagged"
+
+        found = cat.find_collection("knowledge", "p213-field-notes", "bge-base-en-v15-768")
+
+        assert found is not None
+        assert found.label == label
+        assert found.model_version == 1
+        assert cat.find_collection("knowledge", "p213-no-such-subject", "bge-base-en-v15-768") is None
+
     def test_rename_collection(self, cat) -> None:
         """rename_collection returns the count of DOCUMENTS updated (not collections).
 
