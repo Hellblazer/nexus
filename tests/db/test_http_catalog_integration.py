@@ -1280,16 +1280,22 @@ class TestETLFidelity:
         assert found.model_version == 1
         assert cat.find_collection("knowledge", "p213-no-such-subject", "bge-base-en-v15-768") is None
 
-    def test_a_grandfathered_slug_with_a_blank_version_is_answered_as_it_is(self, cat) -> None:
+    def test_a_grandfathered_slug_with_a_blank_version_is_answered_as_it_is(self, cat, pg_instance) -> None:
         """RDR-229 P2.8, engine 0.1.200 (RDR-229 Technical Design item 11 (legacy_grandfathered goes, D5): "the P2.8 test for that row is not yet written"): the lead's row through the real engine
         route: ``legacy_grandfathered`` true, a non-conformant slug name, an empty ``model_version``.
         ``for_tuple`` answers it; the client answers the row as it is with no version, and only a
         bump refuses, naming both fixes."""
         slug = "p213-blank-notes-from-2024"
         model = "bge-base-en-v15-768"
-        cat.register_collection(
-            slug, content_type="knowledge", owner_id="1-213", embedding_model=model, model_version="",
-        )
+        # Seeded by SQL: engine 0.1.200's upsert refuses a blank model_version for a NEW row (P2.5, D1)
+        # and the ETL import cannot create this shape either, but production-era rows of it exist.
+        _psql(pg_instance, (
+            "INSERT INTO nexus.catalog_collections "
+            "(tenant_id, name, content_type, owner_id, embedding_model, model_version, "
+            "legacy_grandfathered, lifecycle_state) "
+            f"VALUES ('default', '{slug}', 'knowledge', '1-213', '{model}', '', true, 'live') "
+            "ON CONFLICT DO NOTHING;"
+        ))
         assert cat.get_collection(slug)["legacy_grandfathered"] is True, "guard: the row is flagged"
         assert cat.get_collection(slug)["model_version"] == "", "guard: the version is blank"
 
