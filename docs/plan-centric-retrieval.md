@@ -344,7 +344,7 @@ reference earlier output via `$stepK.<field>`.
 | `operator_rank` | schema-conforming dict (e.g. `{ranked: [...]}`) |
 | `operator_compare` | schema-conforming dict |
 | `operator_summarize` | schema-conforming dict (or `{summary: str}`) |
-| `operator_generate` | schema-conforming dict (or `{text: str}`) |
+| `operator_generate` | schema-conforming dict (`{output: str}`) |
 | `operator_filter` | `{items: [...], rationale: [{id, reason}]}` — items is a subset of the input, one rationale row per input |
 | `operator_check` | `{schema_version: 1, ok: bool, evidence: [{item_id, quote, role, state, span, tumbler, chash, collection}], rejected: [str], uncovered: [str], requires_review: bool}` — role ∈ `supports` / `contradicts` / `neutral`; the model emits only `item_id`, `quote`, `role`; the host binds the rest after dispatch (RDR-088 amendment 2026-11-01, Witness Schema v1). `state` ∈ `bound` / `unattributed` / `unresolved` / `ambiguous`; only `bound` is a valid witness; a bundled terminal check over an earlier step's output returns every item `unresolved` |
 | `operator_verify` | `{schema_version: 1, verified: bool, reason: str, evidence: [item as for check], rejected: [str], requires_review: bool, citations: [str]}` — `citations` is deprecated: the quotes of `bound` and `unattributed` items, removed at `schema_version: 2` |

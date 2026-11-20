@@ -11101,7 +11101,7 @@ from a retrieval step; the runner hydrates them and keeps each item's source.
         JSON list of them, or a literal string with no reference in it.
         To pass several sources write context=[$step3.contents,
         $step4.contents], never one string that quotes them.
-      - Output: {text: str}
+      - Output: {output: str}
 
   check(check_instruction, ids, collections, items)
       - Tests a claim across the retrieved items. Feed it ids=$step1.ids and
@@ -13169,7 +13169,7 @@ async def _claimed_verify_plan(
                 + f"\n\nYour previous plan cannot run: {why}. The host never invents an operator's "
                 + "claim, evidence or instruction. Give every verify step a claim and its evidence (ids, or "
                 + "evidence text), and every check step a check_instruction (text, or a reference such as "
-                + "$stepN.text), or leave the step out."
+                + "$stepN.output from a generate step or $stepN.summary from a summarize step), or leave the step out."
             )
         except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan's refusal below stands
             log.warning(

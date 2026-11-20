@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx_answer` inline planning: the planner's tool reference names `generate`'s real output field.** It documented `{text: str}` while the operator returns `{output: str}`. An inline plan that read `$stepN.text` after a `generate` failed with `PlanRunStepRefError` whenever the reading step ran on its own: a retrieval step between the two, or the per-step fallback of an oversized fused call. Inside a fused call the reference was deferred and only mis-worded in the prompt. Two planner retry messages that suggested `$stepN.text` now name `$stepN.output` (generate) or `$stepN.summary` (summarize). A test checks every operator the reference documents against its reply schema (RDR-255 finding 23).

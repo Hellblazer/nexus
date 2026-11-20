@@ -3115,7 +3115,7 @@ def _hydrate_operator_args(
             raise PlanRunOperatorArgMissingError(
                 step_index=-1, tool=resolved_tool, missing_arg="claim",
                 detail="the step supplies 'ids' (its evidence) but no non-blank 'claim' to check that evidence against; "
-                "the host never invents a claim, so the plan author states one (text, or a reference such as $stepN.text).",
+                "the host never invents a claim, so the plan author states one (text, or a reference such as $stepN.output from a generate step or $stepN.summary from a summarize step).",
             )
         ids = args["ids"]
         collections = args.get("collections", "knowledge")
