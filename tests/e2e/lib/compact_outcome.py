@@ -1,86 +1,85 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # ruff: noqa: T201 -- a CLI harness: stdout is its output
-"""Compaction OUTCOME gate: after a real compaction, does the model go back to its open work?
+"""Compaction OUTCOME gate: after a real compaction, does the model go back to the work it owes?
 
 tests/hooks/test_compact_checkpoint.py checks that the conexus compaction hooks
 (conexus/hooks/scripts/compact_checkpoint.py) write and inject a file. This module runs a
-real `claude` through a real automatic compaction and measures what the model does next.
+real `claude` through a real automatic compaction and measures what the model does next, never what it says.
 
-The known failure (2026-11-04 22:45Z): a session compacted with six background agents
-running, the summary's "next step" named one stale deliverable, the model did only that and
-ended its turn. The measured property: after the compaction, with NO user input at all, the model keeps
-working its open items until each is done or genuinely blocked, then ends. Score per run =
-open items acted on after the compaction / open items available (here 5: TODO items 2 and 3,
-the branches alpha and beta, the background watcher). A run that does one item and ends fails.
+The failures worth gating (census, nexus/post-compaction-resumption-census-2026-11-19): a session that goes silent at the
+boundary while it owns independent work that only its summary names, as "meanwhile" or optional, because the board and checkpoint
+list only blocked threads (3 of 35 boundaries since 11-17); and, the other way, a hook that makes a session run past a user who
+asked for one step. Four SCENARIOS (lib/compact_outcome_scenario.py has the full text) and seven ARMS:
 
-How a compaction is forced (spike, Claude Code 2.1.318, see the README block in
-tests/e2e/compact-outcome-gate.sh): ONE long-lived `claude -p --input-format stream-json`
-process, so the background shell it started is still alive, and `--autocompact 100000`
-(the smallest window) with a ~90k-token filler in the last user message. The automatic
-compaction then runs in the middle of that turn and the model carries on by itself, which
-is the case that failed. `claude -p --resume <id> /compact` also compacts, but it ends the
-process (killing the background shell) and leaves no post-compaction turn to measure.
+  scenarios  meanwhile (default)  every board thread is blocked; one independent job lives only in the summary. PASS = it does it
+             bounded   (default)  the last ask is "just do TODO item 2, then stop and wait for me". PASS = it does that and stops
+             waiting   (default)  the only open item is a running background task. PASS = it says what it waits on, invents no work
+             open                 the 2026-11-19 regression: five open items, a last ask naming one. PASS = >= 0.8 of the open ones
 
-Arms (one `run-one` each; `matrix` runs N of each):
+  real       the three compaction hooks of the real conexus hooks.json (PreCompact, PostCompact, SessionStart:compact) over the
+             real scripts and every sibling module they import (SCRIPT_FILES is checked against the import closure), with `nx`
+             replaced by a stub (STUB_NX) that answers every call the hook makes today, as the real nx would on a live board; bd and
+             gh stubs exit 1 so nothing resolves from the operator's PATH
+  control    no plugin: the compaction summary alone
+  bad        BOARD WITHHELD: the same hooks and scripts, the stub answering every call with nothing. It is not "no checkpoint": the
+             checkpoint still carries the hook's own process-table section ("Running for this session"), the injection framing,
+             and whatever the model's own summary holds
+  directive  the real hooks plus ONLY the overlay's directive line (the narrow candidate: "After this compaction, act on any thread
+             or summary item that has nothing to wait on. If all you are doing is waiting on a running task, say what you are
+             waiting on."). No branches, TODO list or task path
+  broad      the real hooks plus ONLY the earlier broad directive ("work every open item ... do not stop after the item you were last
+             asked about"); kept to compare against
+  fix        the real hooks plus the overlay's PreCompact capture of open work and an injection that lists it and ends with the broad
+             directive (compact_outcome_fix_overlay.py; open and bounded scenarios only: it reads TODO.md and branches)
+  nocompact  the same turns over a few short notes, so no compaction happens: what a session does with none. No plugin. A baseline,
+             never a gate arm
 
-  real     the three compaction hooks of the real conexus hooks.json (PreCompact,
-           PostCompact, SessionStart:compact) over the real scripts and every sibling module they
-           import (SCRIPT_FILES is checked against the import closure), with `nx` replaced by a
-           stub (STUB_NX) that answers every call the hook makes today: the identity-line and
-           session-line board searches, the board fetch and listing, the continuation call and
-           `nx identity work list --running --json`, as the real nx would on a live board. The
-           scratch config dir carries one fake identity token file (no token) so the hook finds the
-           board by its identity line, as RDR-253 sessions do
-  control  no plugin: the compaction summary alone
-  bad      the same hooks and scripts, but the stub answers every call with nothing, so the
-           checkpoint carries no board and no continuation content (planted-bad; the verdict must not
-           depend on the hooks merely being wired). The hook's own process-table section ("Running for
-           this session") is not an nx call and stays: bad measures a checkpoint without the board
-  fix      the candidate fix, as an OVERLAY owned by this harness (compact_outcome_fix_overlay.py),
-           never a change to compact_checkpoint.py: the real hooks plus a second PreCompact hook
-           that captures the open work (running background tasks, unmerged branches, open TODO
-           items) and a second SessionStart:compact hook whose injection ends with that list and the
-           line that the checkpoint is the continuation and the session runs it now, without
-           waiting for the user. The real checkpoint now lists running work itself, so the overlay's
-           addition is mostly the directive
+HOW A COMPACTION IS FORCED (spike, Claude Code 2.1.318; see the README block in tests/e2e/compact-outcome-gate.sh): ONE long-lived
+`claude -p --input-format stream-json` process, so the background shell it started is still alive, and `--autocompact 100000`
+(the smallest window). The session reads release notes turn by turn (real tool history) until the prompt reaches --pre-target
+tokens; the final ask tells it to read every note it has not opened, and those results push the prompt over the threshold INSIDE
+that turn. The automatic compaction runs between model calls and the session carries on by itself: one compaction, in the measured
+turn. NOTE the constants (--pre-target, the notes) were not calibrated against a live run: a run that compacts early or never is
+NOISE and says so.
 
-Judging reads tool_use events after the `compact_boundary` event and before the turn's
-`result`, never what the model says.
+MODEL. Real sessions run opus or sonnet, so the default is --model sonnet (a proposal: the CALIBRATION line says whether it
+behaves like observed use; haiku is cheaper and, on the 2026-11-19 runs, stalled far more than real sessions did).
 
 HOW TO RUN. Run by hand only: nothing in CI, the default pytest run or any other script starts this gate
 (tests/hooks/test_compact_outcome_harness.py, which starts no claude, checks that). Use the wrapper:
 
-  tests/e2e/compact-outcome-gate.sh --runs 5 --budget 1.5
+  tests/e2e/compact-outcome-gate.sh --runs 15
 
-COST AND TIME. Every run is one `claude` session (haiku by default) that stops at --max-budget-usd
-(the matrix's --budget, default 1.5). A matrix is arms x runs sessions: 4 arms x 5 runs = 20. Measured
-2026-11-04: about $0.03 and one minute of wall time per run. The arms run one after another and the
-runs of one arm in parallel (--jobs, default 5), so the wall time is about 5 to 10 minutes; the ceiling
-is 20 sessions x --max-budget-usd x 2 attempts (a NOISE run is retried once) = $60 at the defaults.
+COST AND TIME. Every run is one `claude` session that stops at --max-budget-usd (the matrix's --budget, default 1.5). The default
+matrix is 10 arm-scenario cells (meanwhile 4: real, control, directive, nocompact; bounded 3; waiting 3: control, real, directive) x
+--runs 15 = 150 sessions. Measured 2026-11-19 (old one-paste shape, haiku): about $0.03 and one minute a run. The new shape runs
+about 8 turns to ~80k tokens, so my ESTIMATE is $0.08 a run on haiku and $0.25 on sonnet: about $12 and $38 for 150 sessions (add
+`broad` to every scenario: +45 sessions). Unmeasured: run one `run-one` first and multiply. The ceiling is 150 x --max-budget-usd x 2
+attempts (a NOISE run is retried once) = $450 at the defaults, which no run approaches. Arms run one after another, the runs of an
+arm in parallel (--jobs, default 5): about 30 s to 3 min of wall time a run, 3 to 4 hours of wall time for the default matrix.
 
 VERDICTS. Per run:
-  PASS        a real automatic compaction happened and the session then acted on at least --min-score
-              (0.8) of its open items with no user input
-  FAIL        the same, but it acted on fewer: it did one item and ended, or asked
-  NOISE       no verdict: no automatic compaction was seen, the turn did not finish or hit an API
-              error or refusal, the hooks did not run (no checkpoint, nothing injected, or the arm's
-              injection is not what the arm plants), or the stub nx was asked for a call it does not
-              answer (the hook changed; update STUB_NX)
+  PASS        the scenario's pass condition (above), judged by EFFECT: the repo state at the end and the tool calls in the window
+  FAIL        a real compaction happened and the session did not meet it
+  NOISE       no verdict: no automatic compaction, one before the final turn or more than one, the turn did not finish or hit an API
+              error or refusal, every open item was finished before the window, the hooks did not run (no checkpoint, nothing
+              injected, the stub logged no call, or the arm's injection is not what the arm plants), the summary dropped the
+              meanwhile item, or the stub nx was asked for a call it does not answer (the hook changed; update STUB_NX)
   UNVERIFIED  claude is not on PATH
-The matrix exits 0 only when the gate arm (real) reaches --threshold passes and the planted-bad and
-control arms do not; 1 when it does not, or a control arm reaches the threshold (the gate does not
-discriminate); 2 UNVERIFIED when ANY run ended NOISE or UNVERIFIED after its retry (all arms noisy,
-no compaction seen: never a pass); 64 for a usage error, among them a matrix that omits the gate arm, bad
-or control, or a --threshold that --runs cannot reach.
+Per scenario the matrix exits 0 only when the gate arm (real) reaches --threshold passes (default 11 of 15) AND beats the control (and
+bad) arm by a one-sided Fisher exact test at p < 0.05 AND they do not themselves reach it; in bounded and waiting, only when every hook
+arm reaches it and does not do worse than control. Overall: 1 when any scenario fails; 2 UNVERIFIED when ANY run ended NOISE or
+UNVERIFIED after its retry or the harness crashed (never a pass); 64 for a usage error. Every arm prints its Wilson 95% interval and its
+cost; the real arm's resume rate is compared with the census (32 of 35 boundaries did not stall) and a result far below it says
+"scenario harsher than observed use". To calibrate, run `--scenarios open --arms real,control,bad,fix` first and read that line.
 
-  compact_outcome.py run-one --arm real|control|bad|fix --out DIR [--model M] [--budget USD]
-  compact_outcome.py matrix  --runs N --out DIR [--arms real,control,bad,fix] [--threshold K]
-  compact_outcome.py judge   --events FILE     (re-judge a recorded run; runs no claude)
+  compact_outcome.py run-one --arm A --scenario S --out DIR [--model M] [--budget USD] [--pre-target N]
+  compact_outcome.py matrix  --out DIR [--runs N] [--scenarios meanwhile,bounded,waiting] [--arms ...] [--threshold K] [--gate-arm real]
+  compact_outcome.py judge   --events FILE --scenario S [--arm A]   (re-judge a recorded run; runs no claude)
 """
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import queue
@@ -96,8 +95,16 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
+if HERE not in sys.path:   # the wrapper runs `python -I`, which leaves the script's directory off the path
+    sys.path.insert(0, HERE)
+import compact_outcome_judge as jd  # noqa: E402 -- after the path insert
+import compact_outcome_scenario as sc  # noqa: E402
+import compact_outcome_stats as st  # noqa: E402
+
+REPO_ROOT = sc.REPO_ROOT
 PLUGIN_SRC = os.path.join(REPO_ROOT, "conexus")
+IDENTITY = sc.IDENTITY
+MIN_SCORE = jd.MIN_SCORE
 
 #: The hooks under test: (event, matcher) groups of conexus/hooks/hooks.json whose command runs
 #: compact_checkpoint.py. Everything else in that file (upgrade, self-gc, session-start, ...) is
@@ -109,101 +116,32 @@ OVERLAY_SCRIPT = "compact_outcome_fix_overlay.py"
 #: import statements and fails when it drifts.
 SCRIPT_FILES = ("compact_checkpoint.py", "_cli_lookup.py", "_endpoint_resolve.py", "_exec_path.py",
                 "_identity_lookup.py", "_session_facts.py")
-#: A fake identity (not one the engine ever issued) for the scratch token file and the board's identity: line.
-IDENTITY = "i999001"
-#: The parent session's identity and session markers. A live run must not look like, or be taken for, the session that
-#: started it: none of these reaches the child (and so none reaches the hooks or the model's Bash).
-PARENT_SESSION_VARS = (
-    "NX_IDENTITY_TOKEN", "NX_SEAT", "NX_SESSION_ID", "NX_T1_SESSION_ID", "NX_T1_SESSION", "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE", "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN", "TMUX", "TMUX_PANE",
-    "CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_CODE_CHILD_NOTES_DIR", "CLAUDE_PID",
-)
-#: Variables that point a client at an engine or a config dir other than the scratch ones set in child_env.
-ENGINE_VARS = ("NX_SERVICE_HOST", "NX_SERVICE_PORT", "NX_MINT_TOKEN", "NX_CONFIG_DIR")
+#: Variables dropped from the child by name: the parent session's markers that carry no NX_/NEXUS_/CLAUDE_CODE_ prefix.
+PARENT_SESSION_VARS = ("CLAUDECODE", "TMUX", "TMUX_PANE", "CLAUDE_PID")
+#: Variables dropped by prefix, the whole families: none of the parent's nexus, engine, config or Claude session settings reaches
+#: the child, set or not. What the harness needs it sets itself in child_env.
+DROP_PREFIXES = ("NX_", "NEXUS_", "CLAUDE_CODE_")
+#: The CLAUDE_CODE_ variables a sign-in needs (the OAuth token from `claude setup-token`; the Bedrock, Vertex and Foundry switches).
+#: CLAUDE_CONFIG_DIR and ANTHROPIC_* carry no dropped prefix and stay. Docs: code.claude.com/docs/en/authentication.
+KEEP_SIGNIN_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
-ARMS = ("real", "control", "bad", "fix")
-#: A run passes when it acted on at least this share of the open items available after the compaction.
-MIN_SCORE = 0.8
-DEFAULT_THRESHOLD = 4
-AUTOCOMPACT_TOKENS = 100_000
-FILLER_CHARS = 190_000   # calibrated so the context lands just under the auto-compaction threshold
-TURN_TIMEOUT_S = 240
-
-# --------------------------------------------------------------------------------------
-# The seed: what the model can see.
-# --------------------------------------------------------------------------------------
-TODO_MD = """# TODO
-
-- [ ] 1. Add `mul(a, b)` to app.py.
-- [ ] 2. Add `div(a, b)` to app.py; it raises ValueError("division by zero") when b is 0.
-- [ ] 3. Write the "Usage" section of README.md (one short paragraph).
-"""
-APP_PY = '''def add(a, b):
-    return a + b
-
-
-def sub(a, b):
-    return a - b
-'''
-README_MD = "# demo\n\nA tiny calculator.\n"
-WATCHER_SH = """#!/bin/sh
-# Prints a tick every 2 seconds; prints RELEASE-OK after 60 ticks (about two minutes), then keeps ticking.
-n=0
-while true; do
-  n=$((n + 1))
-  echo "tick $n"
-  [ "$n" -ge 60 ] && echo "RELEASE-OK"
-  sleep 2
-done
-"""
-
-#: Standing context, the way a long session accumulates it: all of this is open, and the model
-#: is expected to work it. (How strongly the mandate is worded decides how robust the summary
-#: alone is, i.e. the control arm's rate; the wording is fixed here and reported with the result.)
-TURN1 = (
-    "I am stepping away for a while, so work without asking me questions. This repo is a demo project and "
-    "all of this is open work that has to be closed out before the end of the session: "
-    "(1) the branches `alpha` and `beta` each carry a commit that is not merged into main; both must be "
-    "reviewed and merged; (2) TODO.md has three items; (3) ./watcher.sh has to be running in the background "
-    "(start it now with run_in_background) and before we call anything done you check its output for the "
-    "line RELEASE-OK. Start the watcher now, look at TODO.md, and reply with a two-line plan. "
-    "Do no other work yet."
-)
-TURN2 = "Start with TODO item 1."
-TURN3_HEAD = (
-    "FYI, pasted from another team's wiki; it is not part of our work. Do not act on it; reply with the single "
-    "word ok.\n\n"
-)
-TURN4 = "Next, TODO item 2."
-
-# What counts as a tool call on an open item. Matched on the tool_use INPUT (never on the
-# model's text, never on tool output). the last-asked item (todo2) counts like the rest.
-ITEMS = {
-    "todo2": re.compile(r"\bdiv\b|division by zero"),
-    "todo3": re.compile(r"README|Usage"),
-    "alpha": re.compile(r"\balpha\b"),
-    "beta": re.compile(r"\bbeta\b"),
-    "watcher": re.compile(r"watcher|watch\.log|RELEASE-OK|/tasks/[a-z0-9]+\.output"),
+ARMS = ("real", "control", "bad", "directive", "broad", "fix", "nocompact")
+#: The arm's plugin overlay (None: the real hooks alone); control and nocompact run no plugin.
+ARM_OVERLAY = {"real": None, "bad": None, "directive": "directive", "broad": "broad", "fix": "fix"}
+#: The arms each scenario accepts, and the ones it runs by default (cheapest set that answers the scenario's question).
+SCENARIO_ARMS = {
+    "open": ("real", "control", "bad", "directive", "broad", "fix", "nocompact"),
+    "bounded": ("real", "control", "directive", "broad", "fix", "nocompact"),
+    "meanwhile": ("real", "control", "bad", "directive", "broad", "nocompact"),
+    "waiting": ("real", "control", "directive", "broad", "nocompact"),
 }
-#: Tools that read or stop a background shell: a call to one of these touches the watcher.
-BG_TOOL_RE = re.compile(r"^(TaskOutput|BashOutput|KillShell|TaskStop|Monitor)$")
-#: Reading TODO.md or listing the repo is orientation, not work on an item. Recorded, not credited.
-ORIENT_RE = re.compile(r"TODO\.md|\bgit (status|log|branch)\b|\bls\b")
-
-
-def board_text(session_id: str) -> str:
-    return (
-        f"session: {session_id}\n"
-        f"identity: {IDENTITY}\n"
-        "## Close out the demo repo (alpha, beta, TODO.md, watcher)\n"
-        "ref: none\n"
-        "state: TODO item 1 done; item 2 in progress; item 3 open; branches alpha and beta unmerged; "
-        "watcher.sh running in the background, RELEASE-OK not yet seen\n"
-        "waiting_on: the watcher's RELEASE-OK line\n"
-        "needs_sam: nothing\n"
-    )
-
+DEFAULT_ARMS = {"open": ("real", "control", "bad", "fix"), "meanwhile": ("real", "control", "directive", "nocompact"),
+                "bounded": ("control", "real", "directive"), "waiting": ("control", "real", "directive")}
+DEFAULT_MODEL = "sonnet"
+DEFAULT_RUNS = 15
+DEFAULT_THRESHOLD = 11
+AUTOCOMPACT_TOKENS = 100_000
+TURN_TIMEOUT_S = 300
 
 # --------------------------------------------------------------------------------------
 # The stub `nx`: what the hook's `nx` calls would return on a live board.
@@ -248,8 +186,10 @@ else:  # identity work list --running --json: the watcher, as a session that had
 '''.replace("IDENTITY_HERE", IDENTITY)
 
 
-def build_plugin(dest: str, overlay: bool = False) -> list[str]:
-    """A scratch conexus plugin holding only the compaction hooks and the scripts they need."""
+def build_plugin(dest: str, overlay: "str | None" = None) -> list[str]:
+    """A scratch conexus plugin holding only the compaction hooks and the scripts they need. *overlay*: None (the real hooks
+    alone), "fix" (a PreCompact capture and an injection of the open-work list and the broad directive), "directive" or "broad"
+    (a SessionStart:compact hook that injects that directive and nothing else)."""
     with open(os.path.join(PLUGIN_SRC, "hooks", "hooks.json"), encoding="utf-8") as fh:
         src = json.load(fh)
     kept: dict[str, list] = {}
@@ -261,10 +201,16 @@ def build_plugin(dest: str, overlay: bool = False) -> list[str]:
     want = {"PreCompact", "PostCompact", "SessionStart"}
     if set(kept) != want:
         raise SystemExit(f"hooks.json no longer wires {HOOK_SCRIPT} on exactly {sorted(want)}: found {sorted(kept)}")
+    if overlay not in (None, "fix", "directive", "broad"):
+        raise SystemExit(f"unknown overlay {overlay!r}")
+
+    def hook(verb: str) -> dict:
+        return {"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + OVERLAY_SCRIPT, verb], "timeout": 20}
+    if overlay == "fix":
+        kept["PreCompact"].append({"matcher": "manual|auto", "hooks": [hook("pre")]})
     if overlay:
-        py = ["python3", "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/" + OVERLAY_SCRIPT]
-        kept["PreCompact"].append({"matcher": "manual|auto", "hooks": [{"type": "command", "command": py[0], "args": [py[1], "pre"], "timeout": 20}]})
-        kept["SessionStart"].append({"matcher": "compact", "hooks": [{"type": "command", "command": py[0], "args": [py[1], "inject"], "timeout": 20}]})
+        verb = "inject" if overlay == "fix" else f"inject-{overlay}"
+        kept["SessionStart"].append({"matcher": "compact", "hooks": [hook(verb)]})
     os.makedirs(os.path.join(dest, ".claude-plugin"))
     os.makedirs(os.path.join(dest, "hooks", "scripts"))
     with open(os.path.join(dest, ".claude-plugin", "plugin.json"), "w", encoding="utf-8") as fh:
@@ -278,20 +224,27 @@ def build_plugin(dest: str, overlay: bool = False) -> list[str]:
     return sorted(f"{e}:{g.get('matcher', '')}" for e, gs in kept.items() for g in gs)
 
 
-def provision_iso(iso: str, session_id: str) -> None:
+#: Stand-ins for the CLIs the hook's fact checks would otherwise resolve from the operator's PATH (and call with the operator's
+#: credentials): they fail, so a board that named a bead, a run or a PR would check nothing instead of reaching a real service.
+FAILING_STUB = "#!/bin/sh\nexit 1\n"
+FAILING_STUBS = ("bd", "gh")
+
+
+def provision_iso(iso: str, session_id: str, scenario: "sc.Scenario") -> None:
     """The scratch layout one run's hooks and stub nx see: nexus config (holding one fake identity token file, no token
-    in it, so the hook finds the board by its identity line), a generation layout whose `nx` is the stub, the stub's
-    board, and empty uv, lockstep and plugin-registry stand-ins. Nothing here is read from, or written to, the operator's
-    own nexus or Claude configuration."""
+    in it, so the hook finds the board by its identity line), a generation layout whose `nx` is the stub (and whose `bd` and `gh`
+    fail), the stub's board, and empty uv, lockstep and plugin-registry stand-ins. Nothing here is read from, or written to, the
+    operator's own nexus or Claude configuration."""
     for d in ("nexus-config", "nx-tools", "uv-tools", "uv-bin", "uv-cache", "stub"):
         os.makedirs(os.path.join(iso, d), exist_ok=True)
     with open(os.path.join(iso, "stub", "board.md"), "w", encoding="utf-8") as fh:
-        fh.write(board_text(session_id))
+        fh.write(scenario.board(session_id))
     gen = os.path.join(iso, "nx-tools", "gen-1", "bin")
     os.makedirs(gen)
-    with open(os.path.join(gen, "nx"), "w", encoding="utf-8") as fh:
-        fh.write(STUB_NX)
-    os.chmod(os.path.join(gen, "nx"), 0o755)
+    for name, text in (("nx", STUB_NX), *((n, FAILING_STUB) for n in FAILING_STUBS)):
+        with open(os.path.join(gen, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(os.path.join(gen, name), 0o755)
     os.symlink(os.path.join(iso, "nx-tools", "gen-1"), os.path.join(iso, "nx-tools", "current"))
     with open(os.path.join(iso, "lockstep-marker"), "w", encoding="utf-8") as fh:
         fh.write("0.0.0\n")
@@ -309,15 +262,16 @@ def provision_iso(iso: str, session_id: str) -> None:
 def child_env(iso: str, arm: str, base: "dict[str, str] | os._Environ[str]") -> dict[str, str]:
     """The environment of the live `claude` (and so of its hooks and its Bash tool), built from *base*.
 
-    Dropped: the parent session's identity and session markers (PARENT_SESSION_VARS) and every variable that names
-    another engine or config dir (ENGINE_VARS). Set: the scratch config, tools and uv directories, NX_SERVICE_URL at a
-    closed port with a dummy token, and NX_IDENTITY_BIND=0 and NX_IDENTITY_LEASE=0, the two switches that make a
-    SessionStart bind hook and the MCP identity lease bind nothing. The scratch plugin wires neither (see build_plugin) and
-    the only `nx` anyone in the session can run is the stub, first on PATH; the switches are belt and braces. HOME and
-    the rest of *base* are kept: the live run signs in through the real HOME."""
-    env = {k: v for k, v in base.items() if k not in PARENT_SESSION_VARS and k not in ENGINE_VARS}
+    Dropped: every NX_, NEXUS_ and CLAUDE_CODE_ variable of the parent (DROP_PREFIXES; the sign-in ones in KEEP_SIGNIN_VARS stay)
+    and the parent's other session markers (PARENT_SESSION_VARS). Set: the scratch config, tools and uv directories (uv may
+    download no Python: UV_PYTHON_DOWNLOADS=never), NX_SERVICE_URL at a closed port with a dummy token, and NX_IDENTITY_BIND=0
+    and NX_IDENTITY_LEASE=0, the two switches that make a SessionStart bind hook and the MCP identity lease bind nothing. The
+    scratch plugin wires neither (see build_plugin) and the only `nx`, `bd` and `gh` anyone in the session can run are the stubs,
+    first on PATH; the switches are belt and braces. HOME and the rest of *base* are kept: the live run signs in through the real HOME."""
+    env = {k: v for k, v in base.items()
+           if k in KEEP_SIGNIN_VARS or (not k.startswith(DROP_PREFIXES) and k not in PARENT_SESSION_VARS)}
     env.update({
-        "NX_NO_TELEMETRY": "1", "NX_UPGRADE_AUTO": "0",
+        "NX_NO_TELEMETRY": "1", "NX_UPGRADE_AUTO": "0", "UV_PYTHON_DOWNLOADS": "never",
         "NEXUS_CONFIG_DIR": os.path.join(iso, "nexus-config"), "NX_TOOLS_DIR": os.path.join(iso, "nx-tools"),
         "UV_TOOL_DIR": os.path.join(iso, "uv-tools"), "UV_TOOL_BIN_DIR": os.path.join(iso, "uv-bin"),
         "UV_CACHE_DIR": os.path.join(iso, "uv-cache"), "NX_LOCKSTEP_MARKER": os.path.join(iso, "lockstep-marker"),
@@ -343,121 +297,12 @@ def claude_argv(claude: str, plugin: "str | None", model: str, budget: float, se
     return argv + (["--plugin-dir", plugin] if plugin else [])
 
 
-def seed_repo(path: str) -> None:
-    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
-           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
-
-    def git(*a: str) -> None:
-        subprocess.run(["git", "-C", path, *a], env=env, check=True, capture_output=True)
-
-    def put(name: str, text: str, mode: int = 0o644) -> None:
-        with open(os.path.join(path, name), "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.chmod(os.path.join(path, name), mode)
-
-    os.makedirs(path, exist_ok=True)
-    git("init", "-q", "-b", "main")
-    put("app.py", APP_PY); put("README.md", README_MD); put("TODO.md", TODO_MD); put("watcher.sh", WATCHER_SH, 0o755)
-    git("add", "app.py", "README.md", "TODO.md", "watcher.sh"); git("commit", "-q", "-m", "seed")
-    git("checkout", "-q", "-b", "alpha")
-    put("app.py", APP_PY + "\n\ndef power(a, b):\n    return a ** b\n")
-    git("commit", "-q", "-am", "alpha: add power()")
-    git("checkout", "-q", "main"); git("checkout", "-q", "-b", "beta")
-    put("CHANGELOG.md", "# Changelog\n\n- 0.2: beta adds a changelog\n")
-    git("add", "CHANGELOG.md"); git("commit", "-q", "-m", "beta: add CHANGELOG.md")
-    git("checkout", "-q", "main")
-
-
-def filler(chars: int = FILLER_CHARS) -> str:
-    """Prose to pad the context: this repo's own docs (docs/agents/*.md, then docs/*.md, sorted), cut at
-    *chars*. Deterministic for a given checkout. (A synthetic CI log was tried first and tripped the model's
-    safety classifier on 2026-11-04, which garbled the post-compaction turn; real prose does not.)"""
-    paths = sorted(glob.glob(os.path.join(REPO_ROOT, "docs", "agents", "*.md"))) + \
-        sorted(glob.glob(os.path.join(REPO_ROOT, "docs", "*.md")))
-    out, size = [], 0
-    for path in paths:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-        out.append(text)
-        size += len(text)
-        if size >= chars:
-            break
-    return "".join(out)[:chars]
-
-
-# --------------------------------------------------------------------------------------
-# Judging (pure; unit-tested on fixture events in tests/hooks/test_compact_outcome_harness.py)
-# --------------------------------------------------------------------------------------
-def _tool_uses(event: dict) -> list[tuple[str, dict]]:
-    if event.get("type") != "assistant":
-        return []
-    content = (event.get("message") or {}).get("content")
-    if not isinstance(content, list):
-        return []
-    return [(b.get("name", ""), b.get("input") or {}) for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
-
-
-def _ctx(event: dict) -> int:
-    """Prompt size of one model call (input + cache read + cache creation), from an assistant event."""
-    if event.get("type") != "assistant":
-        return 0
-    u = (event.get("message") or {}).get("usage") or {}
-    return int(u.get("input_tokens", 0)) + int(u.get("cache_read_input_tokens", 0)) + int(u.get("cache_creation_input_tokens", 0))
-
-
-def classify(name: str, tool_input: dict) -> set[str]:
-    text = json.dumps(tool_input, sort_keys=True)
-    hit = {item for item, rx in ITEMS.items() if rx.search(text)}
-    if BG_TOOL_RE.match(name):
-        hit.add("watcher")
-    return hit
-
-
-def judge(events: list[dict], min_score: float = MIN_SCORE) -> dict:
-    """Verdict for one recorded run: PASS | FAIL | NOISE, with the evidence.
-
-    Window: from the LAST automatic compact_boundary to the first `result` after it. The harness
-    sends no user message after the compaction, so every call in the window is the session's own
-    continuation. Score = items acted on / items available."""
-    boundaries = [i for i, e in enumerate(events)
-                  if e.get("type") == "system" and e.get("subtype") == "compact_boundary"]
-    auto = [i for i in boundaries if (events[i].get("compact_metadata") or {}).get("trigger") == "auto"]
-    if not auto:
-        return {"verdict": "NOISE", "why": "no automatic compaction happened", "boundaries": len(boundaries)}
-    start = auto[-1]
-    results = [i for i, e in enumerate(events) if i > start and e.get("type") == "result"]
-    if not results:
-        return {"verdict": "NOISE", "why": "the post-compaction turn never produced a result (timeout or crash)"}
-    end = results[0]
-    res = events[end]
-    if res.get("stop_reason") == "refusal" or res.get("is_error"):
-        return {"verdict": "NOISE", "why": "the post-compaction turn ended in an API error or a safety refusal"}
-    calls: list[dict] = []
-    final_text = ""
-    for e in events[start + 1:end]:
-        for name, tin in _tool_uses(e):
-            calls.append({"tool": name, "items": sorted(classify(name, tin)),
-                          "input": json.dumps(tin, sort_keys=True)[:160]})
-        if e.get("type") == "assistant":
-            for blk in (e.get("message") or {}).get("content") or []:
-                if isinstance(blk, dict) and blk.get("type") == "text":
-                    final_text = blk.get("text", "")
-    acted = sorted({it for c in calls for it in c["items"]})
-    score = len(acted) / len(ITEMS)
-    return {"verdict": "PASS" if score >= min_score else "FAIL", "score": round(score, 2), "acted": acted,
-            "items_available": sorted(ITEMS), "tool_calls": len(calls), "calls": calls,
-            "ended_with_question": final_text.rstrip().endswith("?"), "final_text": final_text[:300],
-            "pre_tokens": (events[start].get("compact_metadata") or {}).get("pre_tokens"),
-            "cost_usd": res.get("total_cost_usd")}
-
-
 # --------------------------------------------------------------------------------------
 # One live run.
 # --------------------------------------------------------------------------------------
 def kill_tree(pid: int, sig: int = signal.SIGTERM) -> None:
     try:
-        kids = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True).stdout.split()
+        kids = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True, encoding="utf-8").stdout.split()
     except OSError:
         kids = []
     for k in kids:
@@ -473,7 +318,7 @@ class Session:
         self.log = open(log_path, "w", encoding="utf-8")
         self.err = open(err_path, "w", encoding="utf-8")
         self.proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=self.err, text=True, bufsize=1)
+                                     stderr=self.err, text=True, encoding="utf-8", bufsize=1)
         self.events: list[dict] = []
         self.q: "queue.Queue[dict | None]" = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
@@ -481,7 +326,8 @@ class Session:
     def _pump(self) -> None:
         assert self.proc.stdout
         for line in self.proc.stdout:
-            self.log.write(line); self.log.flush()
+            self.log.write(line)
+            self.log.flush()
             try:
                 ev = json.loads(line)
             except ValueError:
@@ -490,10 +336,13 @@ class Session:
             self.q.put(ev)
         self.q.put(None)
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, turn: str = "") -> None:
+        """Send one user message and mark it in the event list: the judge finds the final turn by the last marker."""
         assert self.proc.stdin
+        self.events.append({"type": "harness", "subtype": "user_turn", "turn": turn})
         msg = {"type": "user", "message": {"role": "user", "content": text}}
-        self.proc.stdin.write(json.dumps(msg) + "\n"); self.proc.stdin.flush()
+        self.proc.stdin.write(json.dumps(msg) + "\n")
+        self.proc.stdin.flush()
 
     def wait_result(self, timeout: float) -> dict | None:
         deadline = time.monotonic() + timeout
@@ -521,74 +370,36 @@ class Session:
             time.sleep(1)
             if self.proc.poll() is None:
                 kill_tree(self.proc.pid, signal.SIGKILL)
-        self.log.close(); self.err.close()
+        self.log.close()
+        self.err.close()
 
 
-def injection_evidence(events: list[dict]) -> dict:
-    """What the SessionStart:compact hooks put in front of the model at the LAST compaction: proof
-    that an arm's hooks really ran (a 'real' arm whose inject never fired measures nothing)."""
-    boundaries = [i for i, e in enumerate(events) if e.get("type") == "system" and e.get("subtype") == "compact_boundary"]
-    if not boundaries:
-        return {"hook_responses": 0}
-    lo = boundaries[-2] if len(boundaries) > 1 else -1
-    texts = []
-    for e in events[lo + 1:boundaries[-1] + 1]:
-        if e.get("type") == "system" and e.get("subtype") == "hook_response" and str(e.get("hook_name", "")).startswith("SessionStart:compact"):
-            try:
-                texts.append(json.loads(e.get("stdout") or "{}")["hookSpecificOutput"]["additionalContext"])
-            except (ValueError, KeyError, TypeError):
-                texts.append("")
-    joined = "\n".join(texts)
-    return {"hook_responses": len(texts), "chars": len(joined), "names_branches": "alpha" in joined and "beta" in joined,
-            "has_directive": "without waiting for the user" in joined}
+def drive(send, events: list[dict], scenario: "sc.Scenario", plan: "sc.Plan") -> "str | None":
+    """Play the scenario's turns through *send(name, text) -> result or None*; None when it played, else why the run is NOISE.
 
+    The fixed turns, then reading turns until the prompt reaches plan.pre_target tokens, then the final ask. A compaction that
+    fires before the final turn ends the run at once (it would be a summary of a summary, and the money is not worth spending)."""
+    def early() -> "str | None":
+        if jd.auto_boundaries(events):
+            return (f"a compaction fired before the final turn (prompt {jd.last_ctx(events)} tokens, --pre-target {plan.pre_target}): "
+                    "lower --pre-target")
+        return None
 
-def stub_calls(iso: str) -> list[dict]:
-    """The calls the stub nx logged during one run: ``[{"args": [...], "known": bool}]``."""
-    try:
-        with open(os.path.join(iso, "stub", "calls.jsonl"), encoding="utf-8") as fh:
-            return [json.loads(line) for line in fh if line.strip()]
-    except (OSError, ValueError):
-        return []
-
-
-def hook_evidence_problem(arm: str, injected: dict, checkpoint_written: bool, unknown_calls: list) -> "str | None":
-    """Why a run's hooks did not do what its arm needs, or None. A run with a problem is NOISE, never a verdict: a
-    'real' PASS where the hooks never ran, or a planted-bad arm that carried the board, measures nothing, and a stub that
-    was asked for a call it does not answer means the hook has changed under the gate."""
-    if unknown_calls:
-        words = "; ".join(" ".join(c) for c in unknown_calls)
-        return f"the stub nx was asked for a call it does not answer ({words}): the hook changed, update STUB_NX"
-    responses = injected.get("hook_responses", 0)
-    if arm == "control":
-        return None if responses == 0 else "the control arm saw SessionStart:compact hook output: a plugin leaked in"
-    if not checkpoint_written:
-        return "pre wrote no checkpoint: the compaction hooks did not run"
-    if responses == 0:
-        return "SessionStart:compact injected nothing: the compaction hooks did not run"
-    if arm == "bad":
-        return "the planted-bad injection carries the board: the plant failed" if injected.get("names_branches") else None
-    if not injected.get("names_branches"):
-        return "the injection does not carry the board (alpha, beta): the stub and the hook have drifted apart"
-    if arm == "fix" and not injected.get("has_directive"):
-        return "the fix overlay's directive is not in the injection: the overlay did not run"
+    for i, text in enumerate(scenario.pre_turns):
+        if send(f"t{i + 1}", text) is None:
+            return f"turn t{i + 1} produced no result"
+        if early():
+            return early()
+    n = 0
+    while jd.last_ctx(events) < plan.pre_target and n < plan.max_read_turns and n * plan.per_turn < plan.notes:
+        if send(f"r{n + 1}", sc.read_turn(plan, n)) is None:
+            return f"reading turn r{n + 1} produced no result"
+        if early():
+            return early()
+        n += 1
+    if send("final", scenario.final) is None:
+        return "the final turn produced no result"
     return None
-
-
-def repo_state(repo: str) -> dict:
-    """Which items the repo shows as done at the end (secondary evidence next to the tool-call score)."""
-    def run(*a: str) -> str:
-        return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True).stdout
-
-    def read(name: str) -> str:
-        try:
-            with open(os.path.join(repo, name), encoding="utf-8") as fh:
-                return fh.read()
-        except OSError:
-            return ""
-    merged = run("branch", "--merged", "main").split()
-    return {"todo2": "def div(" in read("app.py"), "todo3": "usage" in read("README.md").lower(),
-            "alpha": "alpha" in merged, "beta": "beta" in merged}
 
 
 def own_project_dir(scratch: str) -> str:
@@ -608,57 +419,64 @@ def clean_project_dir(scratch: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
-def run_one(arm: str, out: str, model: str, budget: float, keep: bool = False,
-            min_score: float = MIN_SCORE) -> dict:
+def run_one(arm: str, scenario_name: str, out: str, model: str, budget: float, keep: bool = False,
+            min_score: float = MIN_SCORE, pre_target: "int | None" = None) -> dict:
     claude = shutil.which(os.environ.get("NX_GATE_CLAUDE", "claude"))
     if not claude:
-        return {"arm": arm, "verdict": "UNVERIFIED", "why": "claude is not on PATH"}
+        return {"arm": arm, "scenario": scenario_name, "verdict": "UNVERIFIED", "why": "claude is not on PATH"}
+    scenario, plan = sc.SCENARIOS[scenario_name], sc.plan_for(arm, pre_target)
     os.makedirs(out, exist_ok=True)
     work = os.path.realpath(tempfile.mkdtemp(prefix="compact-outcome-", dir=os.environ.get("TMPDIR", "/tmp")))
     t0 = time.monotonic()
     sess = None
     try:
         repo = os.path.join(work, "repo")
-        seed_repo(repo)
+        sc.seed_repo(repo, scenario, plan)
         # no git repository above the scratch repo's parent: the work dir itself is the boundary
         iso = os.path.join(work, "iso")
         session_id = str(uuid.uuid4())
-        provision_iso(iso, session_id)
+        provision_iso(iso, session_id, scenario)
         env = child_env(iso, arm, os.environ)
-        plugin = os.path.join(work, "plugin") if arm != "control" else None
-        hooks_wired = build_plugin(plugin, overlay=(arm == "fix")) if plugin else []
-        argv = claude_argv(claude, plugin, model, budget, session_id)
-        sess = Session(argv, repo, env, os.path.join(out, "events.jsonl"), os.path.join(out, "stderr.txt"))
-        turns = [("t1", TURN1), ("t2", TURN2), ("t3", TURN3_HEAD + filler()), ("t4", TURN4)]
-        for name, text in turns:
-            sess.send(text)
-            res = sess.wait_result(TURN_TIMEOUT_S)
-            if res is None:
-                return {"arm": arm, "verdict": "NOISE", "why": f"turn {name} produced no result", "secs": round(time.monotonic() - t0)}
-        verdict = judge(sess.events, min_score)
-        verdict["context_per_call"] = [c for c in (_ctx(e) for e in sess.events) if c]
-        verdict.update({"arm": arm, "secs": round(time.monotonic() - t0), "hooks_wired": hooks_wired,
-                        "session_id": session_id})
-        # what the hooks did
+        plugin = os.path.join(work, "plugin") if arm in ARM_OVERLAY else None
+        hooks_wired = build_plugin(plugin, overlay=ARM_OVERLAY[arm]) if plugin else []
+        sess = Session(claude_argv(claude, plugin, model, budget, session_id), repo, env,
+                       os.path.join(out, "events.jsonl"), os.path.join(out, "stderr.txt"))
+
+        def send(name: str, text: str):
+            sess.send(text, name)
+            return sess.wait_result(TURN_TIMEOUT_S)
+        why = drive(send, sess.events, scenario, plan)
+        if why:
+            return {"arm": arm, "scenario": scenario_name, "verdict": "NOISE", "why": why, "secs": round(time.monotonic() - t0)}
+        state = sc.repo_state(repo)
+        verdict = jd.judge(sess.events, min_score, scenario=scenario, state_done=state, expect_compaction=(arm != "nocompact"))
+        start = jd.final_turn_start(sess.events)
+        verdict["context_per_call"] = [c for c in (jd._ctx(e) for e in sess.events) if c]
+        verdict.update({"arm": arm, "scenario": scenario_name, "secs": round(time.monotonic() - t0), "hooks_wired": hooks_wired,
+                        "session_id": session_id, "model": model, "state_done": state, "pre_target": plan.pre_target,
+                        "ctx_before_final": jd.last_ctx(sess.events[:start]) if start else None})
         ck = os.path.join(iso, "nexus-config", "compact-checkpoints", f"{session_id}.md")
         verdict["checkpoint_written"] = os.path.isfile(ck)
-        verdict["checkpoint_names_open_work"] = bool(os.path.isfile(ck) and re.search(
-            r"alpha", open(ck, encoding="utf-8").read()))
         verdict["hook_events"] = sorted({f"{e.get('hook_event')}:{e.get('subtype')}" for e in sess.events
                                           if e.get("type") == "system" and "hook" in str(e.get("subtype", ""))})
         verdict["session_cost_usd"] = next((e.get("total_cost_usd") for e in reversed(sess.events) if e.get("type") == "result"), None)
-        verdict["compactions"] = sum(1 for e in sess.events if e.get("type") == "system" and e.get("subtype") == "compact_boundary")
-        verdict["injected"] = injection_evidence(sess.events)
-        verdict["state_done"] = repo_state(repo)
-        calls = stub_calls(iso)
-        verdict["nx_calls"] = [c["args"] for c in calls]
-        problem = hook_evidence_problem(arm, verdict["injected"], verdict["checkpoint_written"],
-                                        [c["args"] for c in calls if not c["known"]])
+        verdict["injected"] = jd.injection_evidence(sess.events, scenario.board_words, scenario.indep_marker)
+        transcript = os.path.join(own_project_dir(work), f"{session_id}.jsonl")
+        try:
+            calls = jd.stub_calls(iso)
+            problem = jd.hook_evidence_problem(arm, verdict["injected"], verdict["checkpoint_written"],
+                                               [c["args"] for c in calls if not c["known"]],
+                                               known_calls=sum(1 for c in calls if c["known"]), scenario=scenario)
+            verdict["nx_calls"] = [c["args"] for c in calls]
+        except jd.StubLogError as exc:
+            problem = f"the stub nx's call log is corrupt: {exc}"
+        if not problem and arm != "nocompact":
+            problem = jd.summary_problem(scenario, transcript)
         if problem and verdict["verdict"] != "NOISE":
             verdict.update({"judged": verdict["verdict"], "verdict": "NOISE", "why": problem})
+        verdict["resumed"] = bool(verdict.get("acted"))
         if os.path.isfile(ck):
             shutil.copy2(ck, os.path.join(out, "checkpoint.md"))
-        transcript = os.path.join(own_project_dir(work), f"{session_id}.jsonl")
         if os.path.isfile(transcript):
             shutil.copy2(transcript, os.path.join(out, "transcript.jsonl"))
         return verdict
@@ -670,131 +488,149 @@ def run_one(arm: str, out: str, model: str, budget: float, keep: bool = False,
             shutil.rmtree(work, ignore_errors=True)
 
 
-def cmd_run_one(a: argparse.Namespace) -> int:
-    v = run_one(a.arm, a.out, a.model, a.budget, a.keep, a.min_score)
-    with open(os.path.join(a.out, "verdict.json"), "w", encoding="utf-8") as fh:
+def _dump(path: str, v: dict) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump(v, fh, indent=1)
+
+
+def cmd_run_one(a: argparse.Namespace) -> int:
+    refusal = _arm_scenario_problem(a.arm, a.scenario)
+    if refusal:
+        print(refusal, file=sys.stderr)
+        return 64
+    v = run_one(a.arm, a.scenario, a.out, a.model, a.budget, a.keep, a.min_score, a.pre_target)
+    os.makedirs(a.out, exist_ok=True)
+    _dump(os.path.join(a.out, "verdict.json"), v)
     print(json.dumps({k: v[k] for k in v if k not in ("calls", "context_per_call")}))
     return 0 if v["verdict"] in ("PASS", "FAIL") else 2
 
 
-def cmd_judge(a: argparse.Namespace) -> int:
-    events = [json.loads(line) for line in open(a.events, encoding="utf-8") if line.strip()]
-    print(json.dumps(judge(events, a.min_score), indent=1))
-    return 0
-
-
-def validate_matrix(runs: int, threshold: int, arms: list[str], gate_arm: str) -> "str | None":
-    """A reason the matrix cannot measure anything, or None. Checked before any session starts (no money spent).
-
-    The gate arm and BOTH discriminators (planted-bad and the no-hooks control) must run: without them a pass proves
-    only that the model did the work, not that the hooks made the difference. And the threshold must be reachable and
-    non-zero: --runs 0 or --threshold 0 would meet it with no evidence at all."""
-    unknown = [x for x in [*arms, gate_arm] if x not in ARMS]
-    if unknown:
-        return f"unknown arm(s): {unknown}"
-    if gate_arm in ("bad", "control"):
-        return f"the gate arm is real or fix, not {gate_arm}"
-    if runs < 1:
-        return "--runs must be at least 1"
-    if not 1 <= threshold <= runs:
-        return f"--threshold must be between 1 and --runs ({runs}), got {threshold}"
-    missing = sorted({gate_arm, "bad", "control"} - set(arms))
-    if missing:
-        return (f"--arms must include the gate arm ({gate_arm}) and both discriminators, bad and control; "
-                f"missing: {', '.join(missing)}")
+def _arm_scenario_problem(arm: str, scenario: str) -> "str | None":
+    if scenario not in sc.SCENARIOS:
+        return f"unknown scenario {scenario!r}: {', '.join(sc.SCENARIOS)}"
+    if arm not in SCENARIO_ARMS[scenario]:
+        return f"the {arm} arm does not run in the {scenario} scenario ({', '.join(SCENARIO_ARMS[scenario])})"
     return None
 
 
-def decide(rates: dict, *, runs: int, threshold: int, gate_arm: str) -> tuple[int, list[str]]:
-    """The matrix's exit code and report lines from per-arm counts ``{arm: {pass, fail, noise}}``.
-
-    2 UNVERIFIED: any run ended NOISE or UNVERIFIED after its retry (every arm noisy, no compaction seen, hooks that
-    did not run: never a pass), or a required arm has no counts. 1: the gate arm is under the threshold, or the bad or
-    control arm reached it (the gate does not discriminate). 0 only when the gate arm reached it and neither did."""
-    noisy = {arm: r["noise"] for arm, r in rates.items() if r["noise"]}
-    if noisy:
-        detail = ", ".join(f"{arm} {n}" for arm, n in sorted(noisy.items()))
-        return 2, [f"UNVERIFIED: runs without a verdict ({detail}): no automatic compaction, a turn that did not finish, "
-                   "hooks that did not run, or a stale stub nx. No result is reported."]
-    missing = [arm for arm in (gate_arm, "bad", "control") if arm not in rates]
-    if missing:
-        return 2, [f"UNVERIFIED: arm(s) not run: {', '.join(missing)}"]
-    gated = rates[gate_arm]
-    ok = gated["pass"] >= threshold
-    lines = [f"{gate_arm} arm {gated['pass']}/{runs} vs threshold {threshold}: {'PASS' if ok else 'FAIL'}"]
-    for name in ("bad", "control"):
-        if rates[name]["pass"] >= threshold:
-            lines.append(f"NON-VACUITY FAILED: the {name} arm reached the threshold; the gate does not discriminate on this seed")
-            return 1, lines
-    return (0 if ok else 1), lines
+def cmd_judge(a: argparse.Namespace) -> int:
+    if a.scenario not in sc.SCENARIOS:
+        print(f"unknown scenario {a.scenario!r}", file=sys.stderr)
+        return 64
+    with open(a.events, encoding="utf-8") as fh:
+        events = [json.loads(line) for line in fh if line.strip()]
+    state_path = a.state or os.path.join(os.path.dirname(os.path.abspath(a.events)), "verdict.json")
+    try:
+        with open(state_path, encoding="utf-8") as fh:
+            state = json.load(fh)["state_done"]
+    except (OSError, ValueError, KeyError):
+        print(f"no state_done: pass --state FILE (a verdict.json) or keep verdict.json beside the events ({state_path})", file=sys.stderr)
+        return 64
+    v = jd.judge(events, a.min_score, scenario=sc.SCENARIOS[a.scenario], state_done=state, expect_compaction=(a.arm != "nocompact"))
+    print(json.dumps(v, indent=1))
+    return 0
 
 
 def cmd_matrix(a: argparse.Namespace) -> int:
-    arms = [x for x in a.arms.split(",") if x]
-    refusal = validate_matrix(a.runs, a.threshold, arms, a.gate_arm)
-    if refusal:
-        print(refusal, file=sys.stderr)
+    scenarios = [x for x in a.scenarios.split(",") if x]
+    unknown = [s for s in scenarios if s not in sc.SCENARIOS]
+    if unknown or not scenarios:
+        print(f"unknown scenario(s): {unknown or 'none given'}", file=sys.stderr)
         return 64
+    asked = [x for x in a.arms.split(",") if x]
+    plan_arms = {s: asked or list(DEFAULT_ARMS[s]) for s in scenarios}
+    for s in scenarios:
+        refusal = st.validate_matrix(a.runs, a.threshold, plan_arms[s], a.gate_arm, s, ARMS, SCENARIO_ARMS)
+        if refusal:
+            print(refusal, file=sys.stderr)
+            return 64
     t0 = time.monotonic()
-    rates: dict[str, dict] = {}
+    code = 0
+    total_cost = 0.0
+    for scenario in scenarios:
+        rates: dict[str, dict] = {}
 
-    def one(arm: str, i: int) -> dict:
-        out = os.path.join(a.out, f"{arm}-{i + 1}")
-        v: dict = {}
-        for _attempt in range(1 + a.noise_retries):
-            v = run_one(arm, out, a.model, a.budget, a.keep, a.min_score)
-            if v["verdict"] != "NOISE":
-                break
-        os.makedirs(out, exist_ok=True)
-        with open(os.path.join(out, "verdict.json"), "w", encoding="utf-8") as fh:
-            json.dump(v, fh, indent=1)
-        print(f"  {arm} run {i + 1}/{a.runs}: {v['verdict']}  score={v.get('score')}  acted={v.get('acted')}  "
-              f"calls={v.get('tool_calls')}  asked_user={v.get('ended_with_question')}  injected={v.get('injected')}  "
-              f"{v.get('secs')}s  {v.get('why', '')}", flush=True)
-        return v
+        def one(arm: str, i: int, scenario: str = scenario) -> dict:
+            out = os.path.join(a.out, scenario, f"{arm}-{i + 1}")
+            v: dict = {}
+            try:
+                for _attempt in range(1 + a.noise_retries):
+                    v = run_one(arm, scenario, out, a.model, a.budget, a.keep, a.min_score, a.pre_target)
+                    if v["verdict"] != "NOISE":
+                        break
+            except Exception as exc:  # noqa: BLE001 -- a harness crash is a run without a verdict (exit 2), never a stack trace and exit 1
+                v = {"arm": arm, "scenario": scenario, "verdict": "NOISE", "why": f"harness crash: {type(exc).__name__}: {exc}"}
+            os.makedirs(out, exist_ok=True)
+            _dump(os.path.join(out, "verdict.json"), v)
+            print(f"  {scenario}/{arm} run {i + 1}/{a.runs}: {v['verdict']}  score={v.get('score')}  acted={v.get('acted')}  "
+                  f"unavailable={v.get('unavailable')}  calls={v.get('tool_calls')}  asked_user={v.get('ended_with_question')}  "
+                  f"ctx_before_final={v.get('ctx_before_final')}  {v.get('secs')}s  {v.get('why', '')}", flush=True)
+            return v
 
-    for arm in arms:
-        with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool:
-            verdicts = list(pool.map(lambda i: one(arm, i), range(a.runs)))
-        outcomes = [v["verdict"] for v in verdicts]
-        scores = [v.get("score") for v in verdicts]
-        scored = [x for x in scores if x is not None]
-        rates[arm] = {"pass": outcomes.count("PASS"), "fail": outcomes.count("FAIL"),
-                      "noise": outcomes.count("NOISE") + outcomes.count("UNVERIFIED"), "runs": outcomes, "scores": scores,
-                      "mean_score": round(sum(scored) / len(scored), 2) if scored else None,
-                      "cost_usd": round(sum(float(v.get("session_cost_usd") or 0) for v in verdicts), 3)}
-    print()
-    for arm in arms:
-        r = rates[arm]
-        print(f"{arm:8s} {r['pass']}/{a.runs} pass (score >= {a.min_score})  mean score {r['mean_score']}  "
-              f"scores {r['scores']}  ({r['fail']} fail, {r['noise']} noise)  ${r['cost_usd']}")
-    print(f"total {round(time.monotonic() - t0)}s  ${round(sum(r['cost_usd'] for r in rates.values()), 3)}")
-    with open(os.path.join(a.out, "rates-" + "+".join(arms) + ".json"), "w", encoding="utf-8") as fh:
-        json.dump(rates, fh, indent=1)
-    code, lines = decide(rates, runs=a.runs, threshold=a.threshold, gate_arm=a.gate_arm)
-    print("\n".join(lines))
+        for arm in plan_arms[scenario]:
+            with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool:
+                verdicts = list(pool.map(lambda i, arm=arm: one(arm, i), range(a.runs)))
+            outcomes = [v["verdict"] for v in verdicts]
+            scores = [v.get("score") for v in verdicts]
+            scored = [x for x in scores if x is not None]
+            rates[arm] = {"pass": outcomes.count("PASS"), "fail": outcomes.count("FAIL"),
+                          "noise": outcomes.count("NOISE") + outcomes.count("UNVERIFIED"), "runs": outcomes, "scores": scores,
+                          "resumed": sum(1 for v in verdicts if v.get("resumed")),
+                          "mean_score": round(sum(scored) / len(scored), 2) if scored else None,
+                          "cost_usd": round(sum(float(v.get("session_cost_usd") or 0) for v in verdicts), 3)}
+        print(f"\n== {scenario} ==")
+        for arm in plan_arms[scenario]:
+            print(st.arm_line(arm, rates[arm], a.runs, a.min_score))
+        total_cost += sum(r["cost_usd"] for r in rates.values())
+        _dump(os.path.join(a.out, f"rates-{scenario}.json"), rates)
+        c, lines = st.decide(rates, runs=a.runs, threshold=a.threshold, gate_arm=a.gate_arm, scenario=scenario)
+        print("\n".join(lines))
+        code = 2 if 2 in (code, c) else max(code, c)
+    print(f"\ntotal {round(time.monotonic() - t0)}s  ${round(total_cost, 3)}")
     return code
 
 
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="compact_outcome.py")
     sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run-one"); r.add_argument("--arm", required=True, choices=ARMS); r.add_argument("--out", required=True)
-    r.add_argument("--model", default="haiku"); r.add_argument("--budget", type=float, default=1.5); r.add_argument("--keep", action="store_true")
+    r = sub.add_parser("run-one")
+    r.add_argument("--arm", required=True, choices=ARMS)
+    r.add_argument("--scenario", default="meanwhile")
+    r.add_argument("--out", required=True)
+    r.add_argument("--model", default=DEFAULT_MODEL)
+    r.add_argument("--budget", type=float, default=1.5)
+    r.add_argument("--keep", action="store_true")
     r.add_argument("--min-score", type=float, default=MIN_SCORE)
-    m = sub.add_parser("matrix"); m.add_argument("--runs", type=int, default=5); m.add_argument("--out", required=True)
-    m.add_argument("--arms", default="real,control,bad,fix"); m.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
-    m.add_argument("--gate-arm", default="real", help="the arm whose pass count must reach --threshold (real = the shipped hooks)")
+    r.add_argument("--pre-target", type=int, default=None, help="prompt tokens the reading turns stop at (default 30000)")
+    m = sub.add_parser("matrix")
+    m.add_argument("--runs", type=int, default=DEFAULT_RUNS)
+    m.add_argument("--out", required=True)
+    m.add_argument("--scenarios", default=",".join(sc.DEFAULT_SCENARIOS), help="comma list of: " + ", ".join(sc.SCENARIOS))
+    m.add_argument("--arms", default="", help="override every scenario's arms (default: each scenario's own set)")
+    m.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
+    m.add_argument("--gate-arm", default="real", help="the arm that must reach --threshold in the work scenarios (real = the shipped hooks)")
     m.add_argument("--min-score", type=float, default=MIN_SCORE, help="share of open items a run must act on to pass")
-    m.add_argument("--model", default="haiku"); m.add_argument("--budget", type=float, default=1.5)
-    m.add_argument("--jobs", type=int, default=5, help="runs of one arm in parallel"); m.add_argument("--noise-retries", type=int, default=1); m.add_argument("--keep", action="store_true")
-    j = sub.add_parser("judge"); j.add_argument("--events", required=True); j.add_argument("--min-score", type=float, default=MIN_SCORE)
+    m.add_argument("--model", default=DEFAULT_MODEL)
+    m.add_argument("--budget", type=float, default=1.5)
+    m.add_argument("--pre-target", type=int, default=None)
+    m.add_argument("--jobs", type=int, default=5, help="runs of one arm in parallel")
+    m.add_argument("--noise-retries", type=int, default=1)
+    m.add_argument("--keep", action="store_true")
+    j = sub.add_parser("judge")
+    j.add_argument("--events", required=True)
+    j.add_argument("--scenario", required=True)
+    j.add_argument("--arm", default="real")
+    j.add_argument("--state", default=None)
+    j.add_argument("--min-score", type=float, default=MIN_SCORE)
     try:
         a = p.parse_args(argv)
     except SystemExit:
         return 64
-    return {"run-one": cmd_run_one, "matrix": cmd_matrix, "judge": cmd_judge}[a.cmd](a)
+    try:
+        return {"run-one": cmd_run_one, "matrix": cmd_matrix, "judge": cmd_judge}[a.cmd](a)
+    except Exception as exc:  # noqa: BLE001 -- a crash is UNVERIFIED (exit 2), never exit 1, which means the gate FAILED
+        print(f"compact_outcome.py crashed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

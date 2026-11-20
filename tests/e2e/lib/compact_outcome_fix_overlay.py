@@ -8,9 +8,11 @@ conexus/hooks changes). The gate's `fix` arm adds two hooks beside the real comp
                                           (running background tasks from the transcript, branches with
                                           unmerged commits, unchecked TODO.md items)
   compact_outcome_fix_overlay.py inject   SessionStart:compact: print the list as additionalContext,
-                                          ending with the directive that the checkpoint is the
+                                          ending with the BROAD directive that the checkpoint is the
                                           continuation and the session runs it now, without waiting
                                           for the user
+  compact_outcome_fix_overlay.py inject-directive   print only DIRECTIVE (the narrow candidate)
+  compact_outcome_fix_overlay.py inject-broad       print only BROAD_DIRECTIVE
 
 This is the behaviour under test, written down so the gate can run it; the spec for the real change
 is separate and this gate becomes its acceptance test. Standard library only. Never exits non-zero.
@@ -31,7 +33,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+#: The candidate for the real hook (the directive-only arm's whole injection): narrow. It starts nothing the user held back,
+#: because it only tells the session to take work that has nothing to wait on and to say what it waits on otherwise.
 DIRECTIVE = (
+    "After this compaction, act on any thread or summary item that has nothing to wait on. "
+    "If all you are doing is waiting on a running task, say what you are waiting on."
+)
+#: The earlier, broad wording (the fix arm's directive and the broad arm's whole injection): kept to compare against.
+BROAD_DIRECTIVE = (
     "This checkpoint is the continuation. The session runs it now, without waiting for the user: "
     "work every open item above until each is done or genuinely blocked, then end your turn. "
     "Do not stop after the item you were last asked about, and do not ask whether to continue."
@@ -97,7 +106,7 @@ def render(work: dict) -> str:
         lines += [f"    {t}" for t in work["todo"]]
     if len(lines) == 1:
         return ""
-    return "\n".join(lines) + "\n\n" + DIRECTIVE + "\n"
+    return "\n".join(lines) + "\n\n" + BROAD_DIRECTIVE + "\n"
 
 
 def main(argv: list[str]) -> int:
@@ -108,7 +117,10 @@ def main(argv: list[str]) -> int:
         if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", sid):
             return 0
         path = _dir() / f"{sid}.openwork.json"
-        if argv and argv[0] == "pre":
+        if argv and argv[0] in ("inject-directive", "inject-broad"):
+            text = DIRECTIVE if argv[0] == "inject-directive" else BROAD_DIRECTIVE
+            sys.stdout.write(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text + "\n"}}) + "\n")
+        elif argv and argv[0] == "pre":
             _dir().mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(capture(payload)), encoding="utf-8")
         elif argv and argv[0] == "inject":
