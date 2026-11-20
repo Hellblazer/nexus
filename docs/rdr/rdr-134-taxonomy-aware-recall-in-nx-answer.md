@@ -970,7 +970,7 @@ out of the top three.
 ### Step 5a-ii, Minimum Viable Validation (`134-research-18`)
 
 Cloud engine 0.1.197, 2026-11-19 19:58:40Z to 20:24:59Z, script
-`scripts/bench/topic_route_engine_arm.py` at develop 8e3a8a432, results
+`scripts/bench/topic_route_engine_arm.py` as of 635c5a653 on develop (the run used a local commit of the same content), results
 `bench/results/rdr134-mvv-2026-11-19.json`. The routed arm was
 `search_cross_corpus` with `topic_route={"mode": "top1"}` at the engine's
 default gate of 0.9 (`topic_route_engine_arm.py:48`). Spend was Voyage query

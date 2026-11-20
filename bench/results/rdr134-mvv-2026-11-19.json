@@ -2,7 +2,7 @@
  "run": {
   "window": "2026-11-19T19:58:40Z..20:24:59Z",
   "engine": "0.1.197 cloud",
-  "code": "develop 8e3a8a432 (arm 486a134fc+635c5a653)",
+  "code": "arm as of 635c5a653 on develop (run from local commit 8e3a8a432, same content)",
   "note": "compact copy: per-collection status and raw-count maps dropped; counts, short lists and routed coverage kept"
  },
  "rows": [
