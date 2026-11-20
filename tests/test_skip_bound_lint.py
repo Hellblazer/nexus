@@ -47,15 +47,15 @@ the ``lint`` marker, or name the file with one of the keywords above, or drop
 it in ``tests/e2e/``, and it is GATE-LIKE; otherwise it is
 SUBSTRATE-DEPENDENT by default.
 
-Two GitHub Actions jobs are KNOWN, INTENTIONAL all-steps-skipped-on-green
-jobs and are OUT OF SCOPE for this tests/ scan (it never reads ``.yml``):
+GitHub Actions jobs that skip on green are OUT OF SCOPE for this tests/ scan
+(it never reads ``.yml``). One is a KNOWN, INTENTIONAL all-steps-skipped-on-green job:
 ``write-seam-gate`` (``.github/workflows/ci.yml:1690-1722``, doc comment at
 ``:1708-1713``: "the job ALWAYS runs ... but the expensive build/test steps
-run only when the write-seam surface changes") and ``engine-service-build``
-(``:1603-1646``, doc comment at ``:1614``: "The job always runs; its
-expensive steps are path-gated via step `if:`"). Both are the
-branch-protection-safe skipped-steps-equals-success pattern on a REQUIRED
-check, not a vacuous gate -- named here so a reader of this file does not
+run only when the write-seam surface changes"). ``engine-service-build`` (the native
+trip-wire) was another until suite audit item 8 (2026-11-19) gated it at job level on
+the ``changes`` job's ``svc`` output (``scripts/native_trip_wire_svc.py``), so it now
+reports ``skipped``. Both are branch-protection-safe skip patterns, not a vacuous
+gate -- named here so a reader of this file does not
 mistake their existence for a gap this lint should have caught.
 
 Step 2 -- enforce on GATE-LIKE sites only

@@ -92,6 +92,9 @@ def test_changes_job_outputs_contract_unchanged() -> None:
         "integration_files": "${{ steps.integration.outputs.integration_files }}",
         "integration_any": "${{ steps.integration.outputs.integration_any }}",
         "integration_shards": "${{ steps.integration.outputs.integration_shards }}",
+        # Suite audit item 8 (Sam 2026-11-19): the native-build trip-wire's job gate, from its own step
+        # (scripts/native_trip_wire_svc.py; tests/scripts/test_native_trip_wire_svc.py).
+        "svc": "${{ steps.svc.outputs.svc }}",
     }
 
 
@@ -112,7 +115,11 @@ def test_checkout_still_fetch_depth_zero() -> None:
 
 @pytest.mark.parametrize(
     "job_name",
-    ["ca3-pgvector-bundle", "ca3-pgvector-bundle-macos", "engine-service-build", "write-seam-gate"],
+    # engine-service-build left this family at suite audit item 8 (Sam 2026-11-19, T2
+    # nexus/sam-ruling-suite-audit-and-cleanup-2026-11-19): its dorny gate compared a develop push with main and was
+    # always true; it is now gated at job level on the changes job's svc output, whose script proves a skip is never
+    # wrongful (tests/scripts/test_native_trip_wire_svc.py, the superseded-run case included).
+    ["ca3-pgvector-bundle", "ca3-pgvector-bundle-macos", "write-seam-gate"],
 )
 def test_conservative_family_still_uses_dorny(job_name: str) -> None:
     """The 'always true on a develop push' safety-net family is a DIFFERENT
