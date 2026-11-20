@@ -14,7 +14,8 @@ from __future__ import annotations
 import functools
 import json
 import statistics
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -30,6 +31,7 @@ _PAGE = 300
 _MAX_ROWS = 10_000
 #: The owner-row reasons the engine posts for a hand-on; each carries a new ``episode_at`` and continues the open red.
 _HAND_ON_REASONS = ("handoff", "escalated")
+_IDENTITY_ID = re.compile(r"i[0-9]+")
 
 
 @dataclass
@@ -41,6 +43,10 @@ class GroupEnv:
     client: GroupsClient
     caller: Callable[[], str | None]
     tuples: Callable[[], Any]
+    #: The identity service's name lookup (``IdentityClient.alias``: a name in, ``{"identity": ...}`` out), which
+    #: ``ack-times`` asks about an ack whose ``from`` is a name. None: such an ack resolves only through the owner
+    #: rows' own stamped pairs, and otherwise counts for nobody.
+    alias_lookup: Callable[[str], Mapping[str, Any]] | None = None
 
     @classmethod
     def real(cls) -> GroupEnv:
@@ -49,7 +55,10 @@ class GroupEnv:
 
             return HttpTupleStore()
 
-        return cls(client=GroupsClient.from_config(), caller=groups.own_identity_id, tuples=tuples)
+        from nexus.tuple_directory import identity_alias_lookup  # noqa: PLC0415 — deferred: CLI startup cost
+
+        return cls(client=GroupsClient.from_config(), caller=groups.own_identity_id, tuples=tuples,
+                   alias_lookup=identity_alias_lookup())
 
 
 def _env(ctx: click.Context) -> GroupEnv:
@@ -337,7 +346,26 @@ def _json_body(row: Any) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
+def _name_resolver(lookup: Callable[[str], Mapping[str, Any]] | None) -> Callable[[str], str | None]:
+    """A name to its identity id through the identity service's name route, asked once per name (a failure, an
+    unknown or retired name, or an answer that is no identity id is None, and is remembered too)."""
+    seen: dict[str, str | None] = {}
+
+    def resolve(name: str) -> str | None:
+        if lookup is None:
+            return None
+        if name not in seen:
+            try:
+                found = str(lookup(name).get("identity") or "")
+            except Exception:  # noqa: BLE001 -- a name the service cannot place counts for nobody; the read goes on
+                found = ""
+            seen[name] = found if _IDENTITY_ID.fullmatch(found) else None
+        return seen[name]
+
+    return resolve
+
+
+def reds_from(rows: list[Any], resolve_name: Callable[[str], str | None] | None = None) -> list[dict[str, Any]]:
     """One entry per red of an ``--owner`` subspace, from its owner, clear and ack rows.
 
     A red begins at an owner row that is neither a refresh nor a hand-on, and lasts to the next clear row or the next
@@ -348,7 +376,11 @@ def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
     named as owner at the ack's time (an ack from one the red was handed away from does not, and none counts once the
     red is escalated with no owner), and for the sha of any red tip of the red. The ack is matched on the row's
     ``dims.from``, which the poster writes (the engine matches the row's sender-session stamp; the two agree for an
-    honest owner, and this read is a calibration aid, not the engine's count). ``minutes`` runs from the first row's
+    honest owner, and this read is a calibration aid, not the engine's count). A ``from`` that is a name, not an
+    identity id (an ack posted by hand before the client stamped it, tuple b18af4e1), is resolved first: through the
+    red's own owner rows, which carry the ``owner_alias`` and ``next_alias`` the engine stamped beside each id, and
+    for any other name through *resolve_name* (the identity service, the record of who holds a name). A name that
+    resolves to no one, or to another identity, counts for nobody. ``minutes`` runs from the first row's
     ``episode_at`` to the first counting ack; a red with none has ``acked_at`` null. ``handoffs`` counts the hand-ons,
     the escalation included, as the engine's own counter does.
     """
@@ -383,14 +415,21 @@ def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
         tips = {(r.dims or {}).get("sha") for _, r, _ in episode} | {s for _, _, b in episode for s in (b.get("suspects") or [])}
         acked: tuple[datetime, Any] | None = None
         acked_alias: str | None = None
+        acked_by: str | None = None
+        # The names this red's own rows stamped: the engine wrote each beside its id when it posted the row.
+        stamped = {str(b[f"{who}_alias"]): str(b[who]) for _, _, b in episode for who in ("owner", "next") if b.get(who) and b.get(f"{who}_alias")}
         for at, ack in acks:
             if at < start or (end is not None and at >= end):
                 continue
             current = [b for t, _, b in episode if t <= at][-1:]
             owner = current[0].get("owner") if current else None
-            if owner and (ack.dims or {}).get("from") == owner and (ack.dims or {}).get("sha") in tips:
+            poster = (ack.dims or {}).get("from")
+            if poster and not _IDENTITY_ID.fullmatch(poster):
+                poster = stamped.get(poster) or (resolve_name(poster) if resolve_name else None)
+            if owner and poster == owner and (ack.dims or {}).get("sha") in tips:
                 acked = (at, ack)
                 acked_alias = current[0].get("owner_alias")
+                acked_by = poster
                 break
         began = _instant(red["key"]) or start
         first = episode[0]
@@ -400,7 +439,7 @@ def reds_from(rows: list[Any]) -> list[dict[str, Any]]:
             # RDR-252 (engine 0.1.198): the alias the engine stamped beside the id; null from an older engine's row.
             "owner_alias": episode[-1][2].get("owner_alias"),
             "handoffs": sum(1 for _, _, b in episode[1:] if b.get("reason") in _HAND_ON_REASONS and not b.get("refresh")),
-            "acked_at": acked[1].created_at if acked else None, "acked_by": (acked[1].dims or {}).get("from") if acked else None,
+            "acked_at": acked[1].created_at if acked else None, "acked_by": acked_by if acked else None,
             "acked_by_alias": acked_alias if acked else None,
             "minutes": round((acked[0] - began).total_seconds() / 60, 1) if acked else None,
             "cleared_at": cleared.isoformat().replace("+00:00", "Z") if cleared else None,
@@ -426,6 +465,7 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     if not topics:
         raise click.ClickException(f"{name} serves no topic, so it has no owner post to read")
     store = env.tuples()
+    resolve_name = _name_resolver(env.alias_lookup)
     reds: list[dict[str, Any]] = []
     for topic in topics:
         subspace = f"board/ci/{topic}--owner"
@@ -435,7 +475,7 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
             raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
         if truncated:
             click.echo(f"note: stopped at {len(rows)} rows of {subspace}; later reds are not shown", err=True)
-        reds.extend({"topic": topic, **red} for red in reds_from(rows))
+        reds.extend({"topic": topic, **red} for red in reds_from(rows, resolve_name))
     if as_json:
         click.echo(json.dumps({"group": name, "reds": reds}, indent=2, sort_keys=True))
         return

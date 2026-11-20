@@ -3100,6 +3100,14 @@ Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as fo
 | 4 | a conclusion is missing or one this table does not know |
 | 5 | GitHub could not be read: at once for `gh` missing, HTTP 401, 404 or 422 or a login prompt; after 3 consecutive failed reads with the same error; or at the deadline when no read worked. The line names the last error. Also a `--gh-repo` that is not `OWNER/NAME` |
 
+### nx ci ack
+
+```
+nx ci ack <sha> [--topic nexus-develop--owner]
+```
+
+Acknowledges a red develop: posts the owner's `kind=ack` row on `board/ci/<topic>` with `from=<your identity id>`, the full sha and a fresh nonce, and prints `acked <sha7> on <subspace> as <identity>`. `<sha>` is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the red open on the owner post (the `sha` and `suspects` of the owner rows since the last `clear` row), and refused when it is no tip of it, when it is ambiguous, when no red is open, or when it is not 7 to 40 hex digits. With no identity the command refuses (`nx identity show` says whether the session holds one); an ack is counted by the identity that owns the red, so a name in `from` counts as no ack, and this verb never writes one. The `ci_develop_red` aura's state line ends `Ack: nx ci ack <sha7>`. `--topic` names the owner post and must end `--owner`.
+
 ## nx collection
 
 Manage T3 collections (local or cloud).
@@ -5780,6 +5788,8 @@ The tuple space is a coordination and metadata store, not a value store: `--body
 | `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
 | `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
 
+An ack of a develop red is the one write whose `from` is not the caller's to choose: a `kind=ack` row on a `board/ci/<topic>--owner` subspace is stamped with the caller's own identity id whatever `--dim from=` said (one info line logs the replaced value), and refused when the process holds no identity (`nx identity show` says whether it does). The MCP `tuple_out` tool does the same. `nx ci ack` is the verb that posts one.
+
 ### nx tuple rd
 
 ```
@@ -6184,7 +6194,7 @@ The record of `NAME` (serves, deadlines, `ends`, whether it is live or disbanded
 nx group ack-times NAME [--json]
 ```
 
-The calibration read for `NAME`'s acknowledgement deadline: per red on the topics the group serves, the sha, when its first owner row's episode began (`episode_at`), the time of the counting acknowledgement and the minutes between, with the number of hand-ons (a hand-off or an escalation). A hand-off or an escalation row carries a new `episode_at` from the engine, but it continues the open red: it is one red, and the minutes run from the first row's `episode_at`. It reads `board/ci/<topic>--owner` and counts an ack the way the engine does, with one difference: it matches the `kind=ack` row's `from` dimension (the identity id the engine records from the token on a board or CI post) against the owner at that time, where the engine matches the row's sender-session stamp. For an honest owner they agree; the read is a calibration aid, not the engine's count. A red with no counting ack prints `no ack`. The read pages until the board has no more rows and stops at 10,000 rows per topic, saying so on standard error. The text form prints one summary line (reds, acknowledged reds, median and longest minutes) and then one line per red, naming the acknowledging owner by the alias the engine stamped on its owner row (engine 0.1.198 on), else by its id.
+The calibration read for `NAME`'s acknowledgement deadline: per red on the topics the group serves, the sha, when its first owner row's episode began (`episode_at`), the time of the counting acknowledgement and the minutes between, with the number of hand-ons (a hand-off or an escalation). A hand-off or an escalation row carries a new `episode_at` from the engine, but it continues the open red: it is one red, and the minutes run from the first row's `episode_at`. It reads `board/ci/<topic>--owner` and counts an ack the way the engine does, with one difference: it matches the `kind=ack` row's `from` dimension (the identity id the engine records from the token on a board or CI post) against the owner at that time, where the engine matches the row's sender-session stamp. An ack whose `from` is a name, not an identity id (a hand post from before the client stamped it), is resolved first: through the `owner_alias` and `next_alias` the engine stamped on that red's own owner rows, and for any other name through the identity service's name route (`GET /v1/identity/alias/<name>`, the resolver `nx send` uses); a name that resolves to no one, or to another identity, counts for nobody. For an honest owner they agree; the read is a calibration aid, not the engine's count. A red with no counting ack prints `no ack`. The read pages until the board has no more rows and stops at 10,000 rows per topic, saying so on standard error. The text form prints one summary line (reds, acknowledged reds, median and longest minutes) and then one line per red, naming the acknowledging owner by the alias the engine stamped on its owner row (engine 0.1.198 on), else by its id.
 
 | Flag | Description |
 |------|-------------|

@@ -223,7 +223,7 @@ def test_every_owner_display_carries_the_hint_whole_inside_the_state_line_at_the
     64-digit sha, the longest reason (32 characters) and the longest identity the procedure accepts to show."""
     longest_reason = "r" * 32
     shown = [
-        _run(**_row(ME, reason=reason, sha="a" * 64, me="i" + "9" * 12))["text"]
+        _run(**_row("i" + "9" * 12, reason=reason, sha="a" * 64, me="i" + "9" * 12))["text"]
         for reason in ("earliest_suspect", "handoff", longest_reason)
     ]
     for text in shown:

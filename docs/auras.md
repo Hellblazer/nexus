@@ -16,7 +16,7 @@ One aura ships: `ci_develop_red`. It is for sessions in the `push-train` group (
 
 ```text
 ## aura: develop CI red
-state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: post kind=ack sha=8b30c161bdb23adab27171f3185c2b52f158b736 to board/ci/nexus-develop--owner.
+state: Develop is red at 8b30c16, first red in your push. Diagnose it. Ack: nx ci ack 8b30c16.
 ```
 
 There are six displays. `<owner>` is the owner's alias, else its identity id: from engine 0.1.198 the row carries the owner's live alias (`owner_alias`) beside the id, and the notice shows it; a row with no alias (an older engine, or an identity with none) shows the id. Who owns the red is always decided on the ids; the alias is a name to show.
@@ -30,7 +30,7 @@ There are six displays. `<owner>` is the owner's alias, else its identity id: fr
 | You are next up | `Develop is red at <sha>; <owner: alias, else id> owns it. You are next up.` | yes |
 | Someone else owns it | `Develop is red at <sha>; <owner: alias, else id> owns it. Hold your pushes.` | no |
 
-The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the post rather than the command, and is left off when it would not fit whole. The command is `nx tuple out board/ci/nexus-develop--owner --dim from=<your identity id> --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>` (`from` is the template's one required dimension, and on a board or CI post it is the identity id the engine records from your token, never an alias; `kind` and `sha` are dimensions, `topic` is the key the subspace carries). An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
+The first three owner displays end with the acknowledgement: the owner writes a `kind=ack` post with `sha=<the red sha>` to `board/ci/nexus-develop--owner`, with `nx tuple out` or the `tuple_out` MCP tool, and the stamper counts it when it comes from the owner's identity. The state line holds 200 characters, so the hint names the helper rather than the whole post: `Ack: nx ci ack <sha7>`. `nx ci ack` resolves the prefix against the open red's tips and posts the row with `from=<your identity id>`, the full sha and a fresh nonce. A hand post (`nx tuple out board/ci/nexus-develop--owner --dim kind=ack --dim sha=<the red sha> --nonce <a fresh uuid>`, or the `tuple_out` tool) is restamped by the client: `from` on an ack of a red is always the caller's own identity id, never a name (an ack carrying a name was counted as no ack, tuple b18af4e1), and a caller with no identity is refused. An unacknowledged red is handed to the next up after the group's deadline (20 minutes by default), and then to Sam as an escalation.
 
 A session wakes (the channel notice below) only on a post that starts something: a row with `refresh: false` that makes it the owner or next up, or an escalated row that names it or names no one. A refresh row, where a newer red keeps the same owner, rewrites the block and does not wake it again. A `kind=clear` post (develop is green again) removes the block.
 
