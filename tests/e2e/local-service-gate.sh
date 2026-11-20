@@ -852,7 +852,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   # RDR-204 Phase 1 (nexus-ft04v.7): a chunk write against an unregistered
   # collection is a 422; the engine no longer auto-registers. Register the
   # way the client does, with the tenant profile's bge model.
-  SMOKE_BODY="$("$E2E_PYTHON" -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768'}))")"
+  SMOKE_BODY="$("$E2E_PYTHON" -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768','model_version':'v1'}))")"
   smoke_request POST /v1/catalog/collections/upsert "$SMOKE_BODY"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/collections/upsert"
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
