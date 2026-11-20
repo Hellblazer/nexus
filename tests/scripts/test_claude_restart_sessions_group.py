@@ -276,26 +276,34 @@ def test_a_member_that_is_not_live_whose_alias_a_live_session_carries_says_so(en
         "old (ended": "a live session here has this name, but the member is not live, so it is not asked"}
 
 
-def test_an_unleased_member_is_matched_and_asked(env: Env, capsys) -> None:
-    """unleased is a live binding whose MCP server cannot renew: the alias is still this identity's, and the local
-    session file proves the session is running, so it is asked like a live member rather than left out."""
+@pytest.mark.parametrize("beta", [None, "desktop", "tmux"])
+def test_an_unleased_member_is_a_desktop_binding_and_is_never_asked(env: Env, capsys, beta) -> None:
+    """unleased is the lease a Desktop binding gets (binder.py): no tmux pane, so the round cannot ask it, and a tmux
+    session carrying its alias is some other session. Asking that one would count the member covered unasked."""
     env.live("alpha")
-    env.live("beta")
+    if beta == "desktop":
+        env.desktop("beta")
+    elif beta == "tmux":
+        env.live("beta")
     env.group("crew", ["alpha", ("beta", "unleased")])
     assert env.run("--ask-ready", "--group", "crew") == 0
-    assert sorted(env.mailed) == ["alpha", "beta"]
+    assert env.mailed == ["alpha"]
     out = capsys.readouterr().out
-    assert "group crew: 2 of 2 member(s) covered here" in out and _uncovered(out) == {}
+    assert "group crew: 1 of 2 member(s) covered here" in out
+    assert _uncovered(out) == {"beta (unleased": "a Desktop binding (no tmux pane), cannot be asked from here"}
 
 
-def test_an_unleased_member_with_no_session_here_says_no_live_session(env: Env, capsys) -> None:
+def test_a_live_member_whose_session_has_no_tmux_pane_says_so(env: Env, capsys) -> None:
     env.live("alpha")
-    env.group("crew", ["alpha", ("beta", "unleased")])
+    env.desktop("gamma")
+    env.group("crew", ["alpha", "gamma"])
     assert env.run("--ask-ready", "--group", "crew") == 0
-    assert _uncovered(capsys.readouterr().out) == {"beta (unleased": "no live session here"}
+    assert _uncovered(capsys.readouterr().out) == {
+        "gamma (live": "no tmux pane (a Desktop session), cannot be asked from here"}
 
 
 @pytest.mark.parametrize(("flags", "why"), [(("--skip", "beta"), "left out by --skip"),
+                                            (("--skip", "sid-beta"), "left out by --skip"),
                                             (("--only", "alpha"), "not in --only")])
 def test_a_member_the_round_left_out_by_flag_names_the_flag(env: Env, capsys, flags, why) -> None:
     env.live("alpha")
@@ -315,6 +323,18 @@ def test_a_member_on_another_tmux_server_says_so(env: Env, capsys) -> None:
     assert env.run("--ask-ready", "--group", "crew") == 0
     assert env.mailed == ["alpha"]
     assert _uncovered(capsys.readouterr().out) == {"beta (live": "not on this tmux server"}
+
+
+def test_status_names_a_target_left_out_by_a_flag_apart_from_one_that_is_gone(env: Env, capsys) -> None:
+    for n in ("alpha", "beta", "gamma"):
+        env.live(n)
+    assert env.run("--ask-ready") == 0
+    (env.root / "sessions" / "gamma.json").unlink()
+    capsys.readouterr()
+    env.run("--status", "--skip", "beta")
+    out = capsys.readouterr().out
+    assert "in the round but not live now: gamma" in out
+    assert "in the round but left out of this read (--only, --skip or another tmux server): beta" in out
 
 
 def test_a_group_whose_members_are_all_covered_prints_no_gaps(env: Env, capsys) -> None:
@@ -376,7 +396,7 @@ def test_a_blank_group_name_without_a_round_flag_is_a_usage_error_too(env: Env, 
     assert env.mailed == [] and env.restarted == []
 
 
-@pytest.mark.parametrize("state", ["ended", "lapsed", "unheld"])
+@pytest.mark.parametrize("state", ["ended", "lapsed", "unheld", "unleased"])
 def test_a_member_that_is_not_live_does_not_match_a_session_reusing_its_alias(env: Env, state: str) -> None:
     """Review F2: the roster names members by alias, and an ended member's alias is free to reuse. Only a live member
     matches a session; a live non-member session that took the alias of one that is not live is not asked."""

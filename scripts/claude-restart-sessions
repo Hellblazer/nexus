@@ -129,11 +129,12 @@ from ~/.claude/sessions/*.json, then the excluded sessions; a round that kept ea
 re-asked and the ones whose answers it kept. Neither restarts anything.
 With --group NAME (on --ask-ready or --status only) the round is about one group: the members are read from the
 engine roster (`nx group list NAME --json`) and a live session is matched to a member by session name, for a member whose
-state is live or unleased (an ended or lapsed member's alias may have been taken by a session that is no member). Only those sessions
+state is live (an ended or lapsed member's alias may have been taken by a session that is no member; an unleased
+member is a Desktop binding, which cannot be asked from here). Only those sessions
 are asked, listed and reported; --status exits 0 when they are ready, whatever the rest of the round holds (its file
 keeps the other targets). The round prints how many members it covers and each one it does not, with its state and why
-("no alias", "no live session here", a live session with the name of a member that is not live, "left out by --skip",
-"not in --only", "not on this tmux server"), so a ready exit cannot hide who was never asked. A blank NAME, an unknown, disbanded
+("no alias", "no live session here", a Desktop binding or session, a live session with the name of a member that is
+not live, "left out by --skip", "not in --only", "not on this tmux server"), so a ready exit cannot hide who was never asked. A blank NAME, an unknown, disbanded
 group, one whose roster cannot be read, and one with no live member here, refuse in one line (exit 6) and ask nothing. A
 group round replaces the round file, so a restart after it still refuses for every session the group round never asked.
 The restart takes no group.
@@ -2747,15 +2748,24 @@ def group_roster(name: str) -> tuple[list[dict] | None, str]:
     return members, ""
 
 
-# A member whose session the round asks: live, or unleased (a live binding whose MCP server cannot renew). An unleased
-# binding still holds its alias, so a session carrying it is that member; the session file proves it is running, and
-# asking it is the safe side, since a ready exit must not leave a running member unasked.
-MATCHED_STATES = frozenset({"live", "unleased"})
-
-
 def group_names(members: list[dict]) -> frozenset[str]:
-    """The names a session must carry to be one of the group's: the aliases of its live (or unleased) members."""
-    return frozenset(m["name"] for m in members if m["state"] in MATCHED_STATES and m["name"])
+    """The names a session must carry to be one of the group's: the aliases of its live members. An unleased member is
+    a Desktop binding (binder.py sets the lease so), which has no tmux pane and cannot be asked from here; a tmux
+    session carrying its alias is some other session, so it is not matched."""
+    return frozenset(m["name"] for m in members if m["state"] == "live" and m["name"])
+
+
+def paneless_names() -> frozenset[str]:
+    """The names of the live interactive sessions with no tmux pane (Desktop and the like): sessions() leaves them out,
+    and the round cannot ask them."""
+    out = set()
+    for path in sorted(SESSIONS.glob("*.json")):
+        d = read(path) or {}
+        pane = str(d.get("tmux") or "").rsplit(".", 1)[-1]
+        pid = int(d.get("pid", 0) or 0)
+        if d.get("kind") == "interactive" and not pane.startswith("%") and d.get("name") and pid and alive(pid):
+            out.add(d["name"])
+    return frozenset(out)
 
 
 def print_group_coverage(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> None:
@@ -2765,28 +2775,33 @@ def print_group_coverage(a: argparse.Namespace, listed: list[dict], found: list[
     if members is None:
         return
     here = {s.get("name") for s in found}
-    gaps = [m for m in members if not (m["state"] in MATCHED_STATES and m["name"] in here)]
+    gaps = [m for m in members if not (m["state"] == "live" and m["name"] in here)]
     print(f"group {a.group}: {len(members) - len(gaps)} of {len(members)} member(s) covered here")
     live_here = {s.get("name"): s for s in listed}
     off_server = getattr(a, "off_server_names", frozenset())
+    paneless = paneless_names() if gaps else frozenset()
     for m in gaps:
-        print(f"  {m['name'] or m['identity']} ({m['state']}): {coverage_gap(m, live_here, off_server, a)}")
+        print(f"  {m['name'] or m['identity']} ({m['state']}): {coverage_gap(m, live_here, off_server, paneless, a)}")
 
 
-def coverage_gap(m: dict, live_here: dict[str, dict], off_server: frozenset[str], a: argparse.Namespace) -> str:
-    """Why the round does not cover a member: the first of no alias, not a matched state, no session, a flag, the server."""
+def coverage_gap(m: dict, live_here: dict[str, dict], off_server: frozenset[str], paneless: frozenset[str],
+                 a: argparse.Namespace) -> str:
+    """Why the round does not cover a member: the first of no alias, a Desktop binding, not live, the tmux server,
+    no pane, no session, --skip, --only. live_here holds the tmux sessions on this server, before --only and --skip."""
     name = m["name"]
     if not name:
         return "no alias"
-    if m["state"] not in MATCHED_STATES:
-        if name in live_here or name in off_server:
+    if m["state"] == "unleased":
+        return "a Desktop binding (no tmux pane), cannot be asked from here"
+    if m["state"] != "live":
+        if name in live_here or name in paneless:
             return "a live session here has this name, but the member is not live, so it is not asked"
         return "no live session here"
     if name in off_server:
         return "not on this tmux server"
     s = live_here.get(name)
     if s is None:
-        return "no live session here"
+        return "no tmux pane (a Desktop session), cannot be asked from here" if name in paneless else "no live session here"
     if skipped(name, s["sessionId"], a.skip):
         return "left out by --skip"
     return "not in --only"
@@ -3118,10 +3133,15 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
         problem = round_problem(found, view, now, a.ready_max_age)
         if problem:
             print(problem)
-        gone = [t.get("name") or t["sessionId"][:8] for t in view["targets"]
-                if t["sessionId"] not in {s["sessionId"] for s in found}]
+        read_ids = {s["sessionId"] for s in found}
+        left_ids = {s["sessionId"] for s in listed} | set(getattr(a, "off_server_ids", ()))
+        unread = [t for t in view["targets"] if t["sessionId"] not in read_ids]
+        gone = [t.get("name") or t["sessionId"][:8] for t in unread if t["sessionId"] not in left_ids]
+        left = [t.get("name") or t["sessionId"][:8] for t in unread if t["sessionId"] in left_ids]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
+        if left:
+            print("in the round but left out of this read (--only, --skip or another tmux server): " + ", ".join(left))
         return 0 if rows and not problem and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
@@ -3316,6 +3336,7 @@ def main() -> int:
         if len(hosted) < len(found):
             off = {s["sessionId"] for s in found} - {s["sessionId"] for s in hosted}
             a.off_server_names = frozenset(s.get("name") for s in listed if s["sessionId"] in off)
+            a.off_server_ids = frozenset(off)
             listed = [s for s in listed if s["sessionId"] not in off]
             print(f"{len(off)} session(s) skipped: not on this tmux server (see the SKIP lines in {LOG})")
         return ready_round(a, listed, hosted)
