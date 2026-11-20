@@ -1753,7 +1753,7 @@ Not created; this list is for planning at acceptance. Each implementation
 bead is test-first: its failing test lands first in the same branch, and
 its acceptance is that test green plus the census pin it lowers.
 
-**Phase 1: the census and the measurement**
+**Phase 1 (CLOSED, 2026-11-20): the census and the measurement**
 
 - P1.1 Widen the client census (new shapes, derived helper set, class label
   per site, an interim `holdover` class, and the non-parse labels `label-pattern`
