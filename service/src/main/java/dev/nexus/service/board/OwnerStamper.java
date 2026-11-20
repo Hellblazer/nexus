@@ -42,6 +42,7 @@ public final class OwnerStamper implements OwnerOutHook {
     private final Clock clock;
     private volatile AckDeadlineTimer timer;
     private final AliasReader aliases;
+    private final LivenessReader liveness;
     /** The decision; replaced in a test to make an evaluation fail. */
     private final BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider;
 
@@ -55,6 +56,19 @@ public final class OwnerStamper implements OwnerOutHook {
         this(scope, tuples, groups, identities, clock, decider, IdentityRepository::liveAliases);
     }
 
+    OwnerStamper(TenantScope scope, TupleRepository tuples, GroupRepository groups, IdentityRepository identities,
+                 Clock clock, BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider,
+                 AliasReader aliases) {
+        this(scope, tuples, groups, identities, clock, decider, aliases, BoardReads::identities);
+    }
+
+    /** The fail-safe's liveness read; replaced in a test to make it fail. */
+    @FunctionalInterface
+    interface LivenessReader {
+        Identities read(IdentityRepository identities, String tenant, List<BoardRow> pushes, List<BoardRow> owners,
+                        GroupView group);
+    }
+
     /** The live alias of each identity, read in the evaluation's transaction; replaced in a test to make the read fail. */
     @FunctionalInterface
     interface AliasReader {
@@ -63,8 +77,9 @@ public final class OwnerStamper implements OwnerOutHook {
 
     OwnerStamper(TenantScope scope, TupleRepository tuples, GroupRepository groups, IdentityRepository identities,
                  Clock clock, BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider,
-                 AliasReader aliases) {
+                 AliasReader aliases, LivenessReader liveness) {
         this.aliases = aliases;
+        this.liveness = liveness;
         this.scope = scope;
         this.tuples = tuples;
         this.groups = groups;
@@ -178,7 +193,7 @@ public final class OwnerStamper implements OwnerOutHook {
             Identities ids;
             try {
                 ids = group == null ? new Identities(Map.of(), Map.of())
-                    : BoardReads.identities(identities, tenant, List.of(), owners, group);
+                    : liveness.read(identities, tenant, List.of(), owners, group);
             } catch (Throwable t) {
                 // Nobody can be shown live: the row then names no one and wakes every member, as the RDR says for that case.
                 log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
