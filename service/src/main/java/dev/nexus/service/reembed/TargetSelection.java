@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.reembed;
 
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.time.Instant;
-import java.time.OffsetDateTime;
-import java.time.format.DateTimeParseException;
 import java.util.regex.Pattern;
 
 /**

@@ -10533,23 +10533,29 @@ public final class CatalogRepository {
                        // embedding_model) tuple with the conformant collection of the same owner.
                        // Version dominates (a slug at v2 beats a conformant v1). At equal version
                        // the tie goes to the collection REGISTERED FIRST: created_at ascending, then
-                       // the name only so the order is total (the one unique column until P3.1;
-                       // equal stamps fall to it). nexus-p2m1x.4 (RDR-229 P1.4; Sam 2026-11-20, T2
-                       // nexus/sam-ruling-rdr229-p14-tie-2026-11-20, taken only after P1.2's census
-                       // showed no tuple whose legacy slug is older than its conformant sibling):
+                       // the name only so the order is total (unique within a tenant, the only such
+                       // column until P3.1; equal stamps fall to it). nexus-p2m1x.4 (RDR-229 P1.4;
+                       // Sam 2026-11-20, T2 nexus/sam-ruling-rdr229-p14-tie-2026-11-20, whose condition
+                       // is met: P1.2's production census read created_at_winner_differs 0 on both
+                       // tenants, T2 nexus_rdr/229-p1.2-census-2026-11-20):
                        // this was name ASC, a proxy that picked a '0'-leading slug over the conformant
                        // name and made the winner depend on how a collection is NAMED. created_at is
                        // a timestamptz stamped on insert and never rewritten by a re-registration. It
                        // is first registration, except that a row backfilled by hygiene-001-6 carries
                        // its first document's indexed_at, or the migration time, and a rename copies it
-                       // onto the successor, so it is the age of the collection's lineage. A later
-                       // sibling cannot change what an existing tuple resolves to, whatever it is
-                       // called. P3.1's collection_id (identity) replaces created_at here with the
+                       // onto the successor, so it is the age of the collection's lineage. At an equal
+                       // version a later sibling cannot change what an existing tuple resolves to,
+                       // whatever it is called (a higher version still can). P3.1's collection_id (identity) replaces created_at here with the
                        // same meaning, and TargetSelection (reembed) orders the same way.
                        // An ordering, not a parse of the name (RDR-204, CollectionParseGateTest).
-                       // Consumers read the returned row's model_version (HttpCatalogClient.collection_for)
-                       // or only its existence (_tuple_registered); both siblings carry the same version
-                       // at a tie, and the client re-renders the name from owner_id itself.
+                       // Consumers read the returned row's model_version (HttpCatalogClient.collection_for,
+                       // since P1.4; an OLDER client parses the NAME's version instead, and a name that
+                       // does not parse, a legacy slug, raises there) or only its existence
+                       // (_tuple_registered). Both rows at a tie carry the same model_version, and the
+                       // names' versions agree at the census's only real tie (gate-xr789 docs owner
+                       // 1-40, both v1); the client re-renders the name from owner_id itself. A row
+                       // with an empty model_version orders as 0 and is read from its name by both
+                       // the old and the new client.
                        // CatalogRepositoryTest pins the tie, the flip, the total order and the D5 case.
                        .orderBy(COL_VERSION_NUM.desc(), F_COL_CRTAT.asc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();

@@ -185,6 +185,19 @@ class TargetSelectionTest {
         assertThat(select(rowAt("b", ""), rowAt("a", ""))).isEqualTo(new Live("a"));
     }
 
+    /**
+     * A blank stamp, one that does not parse and Postgres's {@code infinity} sort AFTER a real stamp, so the
+     * real row wins whatever the names; if {@code registeredAt} mapped them to {@code Instant.MIN} or
+     * {@code EPOCH} the odd row ("a", the lower name) would win in either input order.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"", "garbage", "infinity"})
+    void aBlankOrUnparseableStampSortsAfterARealOne(String odd) {
+        var real = rowAt("z", "2026-01-01 00:00:00+00");
+        var strange = rowAt("a", odd);
+        assertThat(select(real, strange)).isEqualTo(select(strange, real)).isEqualTo(new Live("z"));
+    }
+
     @Test
     void aHigherVersionStillBeatsAnOlderRow() {
         var newerV2 = new CollectionRow("n", CT, OWNER, MODEL, "v2", false, "", "live", "2026-05-01 00:00:00+00");
