@@ -14,7 +14,9 @@ server, which is the one process that outlives every ``/clear``:
   50 minutes never lapses it), through ``bind`` with the same generation, which rewrites the process's one token file. A renewal or refresh from a superseded generation is refused: the server
   stops writing identity state and says so.
 * **fork row.** ``/branch`` runs no hook. When the registry entry of its Claude process names a session id the
-  index does not know, the server appends the ``fork`` row.
+  index does not know, the server appends the ``fork`` row at the renewal after the one that first sees it: on
+  ``/clear`` Claude writes the new id before the SessionStart hook binds it, and one renewal of grace lets the hook
+  bind it first.
 * **pending bind.** While unbound it looks for the pending file of its own Claude process (the hook's registry wait
   timed out), binds from it with the data credential and deletes it. That credential may start, resume, fork,
   refresh and end a binding and create an ephemeral identity, and the pending bind needs nothing else.
@@ -432,11 +434,13 @@ class IdentityLease:
         entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
         sid = entry.session_id if entry else None
         if not sid or sid in self._known_sessions:
+            self._unknown_sid = None
             return
         self._fork_sid = sid
         try:
             client.session(sid)
             self._known_sessions.add(sid)
+            self._unknown_sid = None
             return
         except IdentityApiError as exc:
             if exc.status != 404:
@@ -447,7 +451,7 @@ class IdentityLease:
             # runs no hook, so its id is still unknown at the next renewal and gets its fork row then.
             self._unknown_sid = sid
             return
-        self._unknown_sid = None
+        # the grace is spent: a refused bind is retried on the next renewal (the id joins _known_sessions once it binds)
         with self._lock:
             identity, generation, prior, held = self.identity, self.generation, self.session_id, self.token
         try:

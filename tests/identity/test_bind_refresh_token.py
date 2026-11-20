@@ -242,7 +242,7 @@ def test_an_unknown_session_id_gets_one_renewal_of_grace_before_its_fork_row(tmp
     engine.session = session  # type: ignore[method-assign]
     procs.write_registry(100, 100_000, T0, session_id="clear-sid")       # /clear: the registry first
     clocks.advance(HEARTBEAT_S)
-    assert not lease.tick().forked, "the renewal in the gap waits for the hook"
+    assert not lease.tick().forked and engine.count("fork") == 0, "the renewal in the gap waits for the hook"
     known.add("clear-sid")                                                # the hook binds it
     clocks.advance(HEARTBEAT_S)
     assert not lease.tick().forked and engine.count("fork") == 0
@@ -313,12 +313,13 @@ def test_a_fork_refused_identity_token_required_lapses_it_too_and_never_blocks_t
     REFUSED,
 ], ids=["not_owner", "server_error", "identity_token_required"])
 @pytest.mark.parametrize("token", ["tok-0", None], ids=["token", "no_token"])
+@pytest.mark.parametrize("grace", [False, True], ids=["no_grace", "grace"])
 def test_a_refused_fork_never_stops_the_renewal_on_the_same_tick(tmp_path: Path, refusal: IdentityApiError,
-                                                                token: str | None) -> None:
+                                                                token: str | None, grace: bool) -> None:
     """The fork row is sent before the renewal in one heartbeat: a refusal of it used to skip the renewal, retry every tick
     and lapse the seat in 300 seconds with the session alive."""
     clocks = _Clocks()
-    lease, engine, procs = _lease(tmp_path, clocks)
+    lease, engine, procs = _lease(tmp_path, clocks, fork_grace=grace)
     engine.session = lambda sid: (_ for _ in ()).throw(IdentityApiError(404, "unknown_session", "no", {}))   # type: ignore[method-assign]
     engine.refuse_bind = refusal
     _file(tmp_path, token, expires_at=clocks.wall + 3_000 if token else None)
@@ -331,7 +332,8 @@ def test_a_refused_fork_never_stops_the_renewal_on_the_same_tick(tmp_path: Path,
     if refusal is REFUSED:
         assert engine.count("fork") == 1, "a lapsed token is not retried"
     else:
-        assert engine.count("fork") == 3, "another refusal is retried on the next tick"
+        # with the grace, the first tick waits; a refusal after it is retried on the next tick, never re-granted a grace
+        assert engine.count("fork") == (2 if grace else 3), "another refusal is retried on the next tick"
 
 
 def test_a_fork_refused_for_a_stale_generation_still_flags_superseded_and_skips_the_renewal(tmp_path: Path) -> None:
@@ -874,3 +876,22 @@ def test_no_token_value_reaches_a_binder_log_line(tmp_path: Path) -> None:
     assert out.identity == own and out.token_file is not None
     token = read_token_file(out.token_file).token                      # type: ignore[union-attr]
     assert token and token not in repr(logs) and token not in " ".join(out.notices)
+
+
+def test_the_production_lease_keeps_the_fork_grace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """identity_lease.start builds the lease the server runs: it must keep the one renewal of grace that the fork
+    mechanics tests above switch off."""
+    import nexus.session as session
+    from nexus.mcp import identity_lease
+
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.delenv("NX_IDENTITY_LEASE", raising=False)
+    monkeypatch.delenv("NX_IDENTITY_BIND", raising=False)
+    monkeypatch.setattr(session, "find_immediate_claude_pid", lambda start_pid=None: 4242)
+    monkeypatch.setattr(session, "_command_name_of", lambda pid, **kw: "claude")
+    monkeypatch.setattr(identity_lease, "_run", lambda lease: None)       # no heartbeat thread work in a unit test
+    try:
+        lease = identity_lease.start()
+        assert lease is not None and lease._fork_grace is True
+    finally:
+        identity_lease.shutdown()
