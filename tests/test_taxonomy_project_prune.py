@@ -41,7 +41,7 @@ def _wire(
     monkeypatch.setattr("nexus.commands.taxonomy_cmd._T2Database", lambda *_a, **_k: _Db())
     monkeypatch.setattr("nexus.commands.taxonomy_cmd._command_shared_t2_client", lambda: None)
     monkeypatch.setattr("nexus.db.make_t3", lambda: object())
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_names", lambda: sorted(rows))
+    monkeypatch.setattr("nexus.mcp_infra.get_live_collection_names", lambda: sorted(rows))
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",
         lambda name, *, refresh=True, strict=False: (
@@ -77,7 +77,7 @@ def test_prune_with_backfill_survives_an_unreadable_listing(monkeypatch) -> None
     def _boom():
         raise RuntimeError("listing unreadable")
 
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_names", _boom)
+    monkeypatch.setattr("nexus.mcp_infra.get_live_collection_names", _boom)
     result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
     assert result.exit_code == 0, result.output
     assert pruned == [("docs__only-topics", 0.55)]
