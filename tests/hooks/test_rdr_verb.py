@@ -803,9 +803,12 @@ def test_t2_rows_that_arrive_in_time_still_give_the_breakdown(
         "nexus.db.t2_reads.rdr_rows",
         lambda project: [{"title": "001", "content": "status: draft\n"}],
     )
-    out = mod.run(None).stdout or ""
-    assert out.startswith("RDR: 1 documents (1 RDRs: 1 draft), indexed in rdr__1-1__"), out
-    assert rdr_hook_module._T2_LATE_NOTE not in out
+    # A healthy tree is silent at session start (SessionStart progressive disclosure): the count line lives in
+    # ``nx brief rdr``, which renders it through the same summary the hook builds its remedy lines from.
+    assert (mod.run(None).stdout or "") == ""
+    lines = mod.brief_lines()
+    assert lines[0].startswith("RDR: 1 documents (1 RDRs: 1 draft), indexed in rdr__1-1__"), lines
+    assert rdr_hook_module._T2_LATE_NOTE not in "\n".join(lines)
 
 
 # ── nexus-wozn6 fix round: a budget cut is said, never silent ───────────────
@@ -982,7 +985,7 @@ def test_the_t2_fetch_starts_before_the_catalog_and_t3_legs(
     monkeypatch.setattr(mod, "_resolve_rdr_collection", resolve)
     monkeypatch.setattr("nexus.db.make_t3", lambda: _ListingT3())
     monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", rows)
-    out = mod.run(None).stdout or ""
+    out = "\n".join(mod.brief_lines())  # a healthy start prints nothing; the count line is the brief's
     assert seen["t2_running_before_catalog"] is True
     assert "1 draft" in out, out
 
