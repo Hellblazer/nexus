@@ -128,6 +128,18 @@ final class OwnerFixture {
         return this;
     }
 
+    /** A done row with {@code dims.outcome}, no {@code branch_outcome}, and a body whose {@code carried} is null. */
+    OwnerFixture doneCarriedNull(String sha, String outcome) {
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", "github");
+        dims.put("kind", "sha");
+        dims.put("sha", sha);
+        dims.put("outcome", outcome);
+        dones.add(new BoardRow("d" + (++seq), tick(), dims,
+            "{\"state\":\"concluded\",\"sha\":\"" + sha + "\",\"carried\":null}", null));
+        return this;
+    }
+
     /** A done row before the adapter's result dims: the verdict is in {@code runs} only. */
     OwnerFixture doneRuns(String sha, String... conclusions) {
         Map<String, String> dims = new LinkedHashMap<>();

@@ -17,7 +17,9 @@ import java.util.Set;
  * that concluded failure, timed_out, startup_failure or action_required is a failure; else a run with an unknown
  * conclusion (including the old two-element entries), or a body whose {@code n} counts more runs than it lists
  * (trailing entries dropped), leaves no verdict; else a run that concluded cancelled or stale
- * is cancelled; else success. Only {@code success} and {@code failure} are verdicts.
+ * is cancelled; else success. Only {@code success} and {@code failure} are verdicts. A row with no branch_outcome
+ * whose body says {@code "carried": null} (the adapter's carry-forward read failed) has no verdict when its per-sha
+ * result is success: the engine fails toward not clearing.
  */
 public final class DoneVerdict {
 
@@ -55,9 +57,16 @@ public final class DoneVerdict {
         String outcome = row.dim("branch_outcome");
         if (outcome == null || outcome.isBlank()) {
             outcome = row.dim("outcome");
-        }
-        if (outcome == null || outcome.isBlank()) {
-            outcome = derive(body);
+            if (outcome == null || outcome.isBlank()) {
+                outcome = derive(body);
+            }
+            // The adapter's carry-forward read failed (no branch_outcome, body "carried": null): a per-sha success
+            // may hide a carried red, so it is no verdict. This fails toward not clearing. A per-sha failure or
+            // cancelled stays: a red is red whatever was carried. An absent "carried" key (nothing to carry, or a row
+            // from before the adapter wrote it) and a list both fall back as before.
+            if (DoneVerdict.OK.equals(outcome) && body != null && body.has("carried") && body.get("carried").isNull()) {
+                return Optional.empty();
+            }
         }
         return outcome == null ? Optional.empty() : Optional.of(new Verdict(sha, outcome));
     }

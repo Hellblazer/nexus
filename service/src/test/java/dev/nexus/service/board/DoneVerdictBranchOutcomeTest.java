@@ -72,6 +72,40 @@ class DoneVerdictBranchOutcomeTest {
             "{}", null))).as("no sha anywhere").isEmpty();
     }
 
+    // ── a failed carry-forward read: "carried": null ─────────────────────────
+
+    private static final String CARRIED_NULL = "{\"sha\":\"Y\",\"n\":1,\"carried\":null,\"runs\":[[100,1,\"CI\",\"success\"]]}";
+    private static final String CARRIED_LIST =
+        "{\"sha\":\"Y\",\"n\":1,\"carried\":[[\"Service CI\",7,\"success\",\"X\"]],\"runs\":[[100,1,\"CI\",\"success\"]]}";
+
+    @Test
+    void aFailedCarryReadWithAPerShaSuccessIsNoVerdict() {
+        assertThat(verdictOf(CARRIED_NULL, "outcome", "success")).as("outcome dim").isEmpty();
+        assertThat(verdictOf(CARRIED_NULL)).as("outcome derived from the runs").isEmpty();
+    }
+
+    @Test
+    void aFailedCarryReadWithAPerShaFailureOrCancelledIsStillAVerdict() {
+        assertThat(outcomeOf(CARRIED_NULL, "outcome", "failure")).isEqualTo("failure");
+        assertThat(outcomeOf(CARRIED_NULL, "outcome", "cancelled")).isEqualTo("cancelled");
+        assertThat(outcomeOf("{\"sha\":\"Y\",\"n\":1,\"carried\":null,\"runs\":[[101,1,\"CI\",\"failure\"]]}"))
+            .as("derived red").isEqualTo("failure");
+    }
+
+    @Test
+    void anAbsentCarriedKeyOrAListFallsBackAsToday() {
+        assertThat(outcomeOf(ONE_GREEN_RUN, "outcome", "success")).isEqualTo("success");
+        assertThat(outcomeOf(CARRIED_LIST, "outcome", "success")).isEqualTo("success");
+        assertThat(outcomeOf("{\"sha\":\"Y\",\"carried\":[]}", "outcome", "success")).isEqualTo("success");
+    }
+
+    @Test
+    void aBranchOutcomeWinsOverACarriedNull() {
+        assertThat(outcomeOf(CARRIED_NULL, "outcome", "success", "branch_outcome", "success")).isEqualTo("success");
+        assertThat(outcomeOf(CARRIED_NULL, "outcome", "success", "branch_outcome", "failure")).isEqualTo("failure");
+        assertThat(outcomeOf(CARRIED_NULL, "outcome", "failure", "branch_outcome", "success")).isEqualTo("success");
+    }
+
     // ── what the stamper's decision does with it ─────────────────────────────
 
     private static OwnerFixture base() {
@@ -119,5 +153,20 @@ class DoneVerdictBranchOutcomeTest {
 
         assertThat(clear).isNotNull();
         assertThat(clear.kind()).isEqualTo("clear");
+    }
+
+    @Test
+    void aFailedCarryReadDoesNotClearAnOpenEpisodeAndRaisesNothing() {
+        OwnerFixture f = base();
+        f.doneBranch("P1", "failure", "failure");
+        f.recordNow(f.decide());
+        f.doneCarriedNull("P2", "success");   // the carry-forward read failed: no branch_outcome, carried null
+
+        assertThat(f.decide().post()).as("no verdict for P2: P1's red stands, nothing posted").isNull();
+        f.doneCarriedNull("P2", "failure");   // a red is red whatever was carried
+        OwnerDecision.Post post = f.decide().post();
+        assertThat(post).isNotNull();
+        assertThat(post.kind()).isEqualTo("owner");
+        assertThat(post.sha()).isEqualTo("P2");
     }
 }
