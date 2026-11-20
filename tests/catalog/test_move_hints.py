@@ -353,3 +353,49 @@ def test_time_between_files_does_not_spend_the_budget_but_query_time_does(new_pd
             clock.now += 300.0  # five minutes of indexing between two files
             hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
     assert reader.calls.count("documents_by_meta") == 3, "4 s a file: three files fit under 10 s, the fourth finds it spent"
+
+
+# ── the closing line when files were not checked ────────────────────────────
+
+
+_NOT_CHECKED = "move hints checked for {n} of {m} files; run nx index pdf --force on a moved file to check it again"
+
+
+def test_a_capped_run_ends_with_one_line_saying_how_many_files_were_checked(new_pdf, monkeypatch):
+    monkeypatch.setattr(hints, "CURATOR_HINT_MAX_FILES", 3)
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)), rows=[_entry("1.1.3", "/gone/x.pdf")])
+    with hints.run_scope() as scope:
+        for i in range(10):
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+        lines = scope.drain()
+    assert lines[-1] == _NOT_CHECKED.format(n=3, m=10)
+    assert lines[:-1] == [hints.document_move_line("1.1.3", str(new_pdf))], "the move line first, once"
+    assert not lines[-1].startswith("nx catalog") and "--no-dry-run" not in lines[-1] and "--confirm" not in lines[-1]
+    assert scope.drain() == [], "printed once"
+
+
+def test_a_run_stopped_by_a_failed_query_ends_with_the_same_line(new_pdf):
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)), boom=httpx.ReadTimeout("read timed out"))
+    with hints.run_scope() as scope:
+        for i in range(5):
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+        lines = scope.drain()
+    assert lines == [_NOT_CHECKED.format(n=0, m=5)]
+
+
+def test_a_spent_budget_ends_with_the_same_line(new_pdf):
+    clock = _Clock()
+    reader = _SlowReader(clock, 6.0, here=_entry("1.1.9", str(new_pdf)))
+    with hints.run_scope(budget_s=10.0, clock=clock) as scope:
+        for i in range(4):
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+        lines = scope.drain()
+    assert lines == [_NOT_CHECKED.format(n=2, m=4)]
+
+
+def test_a_run_that_checked_every_file_ends_with_no_such_line(new_pdf):
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)))
+    with hints.run_scope() as scope:
+        for i in range(3):
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+        assert scope.drain() == []

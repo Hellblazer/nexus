@@ -116,6 +116,8 @@ class HintCollector:
         self._clock = clock
         self._query_s = 0.0
         self._asked = 0
+        self._refused = 0
+        self._checked = 0
         self._stopped = False
         self._owner_is_curator: dict[str, bool] = {}
 
@@ -124,9 +126,15 @@ class HintCollector:
         :data:`CURATOR_HINT_MAX_FILES` files were asked about. Counts the file it admits."""
         with self._lock:
             if self._stopped or self._query_s >= self._budget_s or self._asked >= CURATOR_HINT_MAX_FILES:
+                self._refused += 1
                 return False
             self._asked += 1
             return True
+
+    def checked(self) -> None:
+        """The curator hint read the catalog for one admitted file to the end (a failed query is not a check)."""
+        with self._lock:
+            self._checked += 1
 
     def stop(self) -> None:
         """A query failed: the curator hint asks about no further file this run."""
@@ -165,9 +173,16 @@ class HintCollector:
                 self._lines.append(line)
 
     def drain(self) -> list[str]:
-        """The recorded lines, once: the collector is empty afterwards, so a second drain prints nothing."""
+        """The recorded lines, once: the collector is empty afterwards, so a second drain prints nothing. When the curator
+        hint refused any file (the cap, the spent budget, or a stop after a failed query) the lines end with one line
+        saying how many of the run's files it checked. It is a note, not a command: it names no write form."""
         with self._lock:
             lines, self._lines = self._lines, []
+            if self._refused:
+                total = self._asked + self._refused
+                lines.append(f"move hints checked for {self._checked} of {total} files; "
+                             f"run nx index pdf --force on a moved file to check it again")
+            self._asked = self._refused = self._checked = 0
         return lines
 
 
@@ -332,6 +347,7 @@ def record_curator_hint(doc_id: str, content_hash: str, *, reader: Any = None) -
     if lines is None:
         collector.stop()
         return
+    collector.checked()
     for line in lines:
         collector.add(line)
 
