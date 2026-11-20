@@ -2223,6 +2223,40 @@ class CatalogRepositoryTest {
             .as("a higher model_version still wins").isEqualTo(slugV2);
     }
 
+    private void registerCollAt(String tenant, String name, String owner, String model, String version,
+                                String createdAt, boolean legacyGrandfathered) {
+        repo.upsertCollection(tenant, Map.of(
+            "name", name, "content_type", "code", "owner_id", owner,
+            "embedding_model", model, "model_version", version,
+            "created_at", createdAt, "legacy_grandfathered", legacyGrandfathered));
+    }
+
+    /**
+     * nexus-p2m1x.4, the RDR's third assertion: a tuple holding a conformant collection, a repaired
+     * legacy slug and a {@code legacy_grandfathered} row resolves to the same collection before P1.4,
+     * after it, and after D5 drops the {@code legacy_grandfathered = false} filter (P3.8 re-runs this
+     * test with that predicate gone; keep it in the suite). The conformant row is the lexically lowest
+     * name AND the first registered, and the grandfathered row sorts above it and was registered last,
+     * so the winner does not move whether the tie runs by name (today) or by registration time (the
+     * census-gated switch, Sam 2026-11-20): the one the filter drop must not change.
+     */
+    @Test @Order(60)
+    void collectionForTuple_slugAndGrandfatheredSiblingsDoNotMoveTheWinnerAcrossD5() {
+        String tenant = "p2m1x4-d5-tenant";
+        String conformant = "code__1-42__voyage-code-3__v1";
+        registerCollAt(tenant, conformant, "1-42", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, "code__aslug-p2m1x4__voyage-code-3__v1", "1-42", OWN_MODEL, "v1",
+            "2026-02-01T00:00:00Z", false);
+        String grandfathered = "code__zgrand-p2m1x4__voyage-code-3__v1";
+        registerCollAt(tenant, grandfathered, "1-42", OWN_MODEL, "v1", "2026-03-01T00:00:00Z", true);
+        assertThat(repo.getCollection(tenant, grandfathered).get("legacy_grandfathered"))
+            .as("guard: the grandfathered row is on the tuple and flagged").isEqualTo(true);
+        assertThat(grandfathered.compareTo(conformant)).as("guard: it sorts above the winner").isGreaterThan(0);
+
+        assertThat(repo.collectionForTuple(tenant, "code", "1-42", OWN_MODEL).get("name"))
+            .as("the conformant collection wins with both siblings present").isEqualTo(conformant);
+    }
+
     /**
      * nexus-6pbwx: the NAME ASC tie-break is a proxy for "the conformant name", and this
      * documents where it stops holding: a slug that starts with '0' sorts below the

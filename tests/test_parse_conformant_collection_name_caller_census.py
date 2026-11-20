@@ -118,8 +118,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         ('"""', "parsed = parse_conformant_collection_name(name)"),
     ): (
         "CollectionName.parse: the render path's own parse counterpart. "
-        "Pre-existing single caller (http_catalog_client.py's "
-        "collection_for) unaffected by this bead."
+        "Its one caller is version_from_for_tuple_row's temporary fallback "
+        "for a row with an empty model_version (RDR-229 P1.4, nexus-p2m1x.4; "
+        "http_catalog_client.py's collection_for reads the row, no longer the "
+        "name). Unaffected by nexus-ft04v.27."
     ),
     (
         "src/nexus/commands/collection.py",

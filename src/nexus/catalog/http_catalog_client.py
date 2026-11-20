@@ -96,7 +96,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
-from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
+from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler, version_from_for_tuple_row
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
@@ -3897,7 +3897,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 embedding_model=embedding_model,
             )
             if result and result.get("name"):
-                existing_version = CollectionName.parse(result["name"]).model_version
+                existing_version = version_from_for_tuple_row(
+                    result, content_type=content_type, owner_id=owner_id,
+                    embedding_model=embedding_model,
+                )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
