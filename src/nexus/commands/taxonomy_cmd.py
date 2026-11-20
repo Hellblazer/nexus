@@ -2792,9 +2792,10 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
 @click.option(
     "--threshold", "-t", default=None, type=float,
     help=(
-        "Cosine similarity threshold. When omitted, per-corpus-type "
-        "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
-        "docs__*/rdr__* → 0.55. The tuning guide is linked at the end of this help."
+        "Cosine similarity threshold. When omitted, a per-corpus-type "
+        "default applies, read from the collection's catalog content type "
+        "(its name's prefix only when no catalog row backs it): code → 0.70, "
+        "knowledge → 0.50, docs/rdr → 0.55. The tuning guide is linked at the end of this help."
     ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
@@ -2804,9 +2805,10 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     "--prune-below-threshold", "prune_below_threshold", is_flag=True,
     help=(
         "Recovery: delete projection assignments whose stored raw cosine is "
-        "below the corpus threshold (explicit --threshold, else the per-prefix "
-        "default), for the source collection given or, with --backfill, for "
-        "every corpus prefix. Undoes a pass that admitted weak matches (GH #1528)."
+        "below the corpus threshold (explicit --threshold, else the "
+        "per-content-type default), for the source collection given or, with "
+        "--backfill, for every collection. Undoes a pass that admitted weak "
+        "matches (GH #1528)."
     ),
 )
 @click.option(
@@ -2835,8 +2837,9 @@ def project_cmd(
 
     \b
     Threshold resolution (RDR-077 Phase 4a):
-      explicit --threshold overrides; otherwise the per-prefix default
-      applies (see --threshold option for the full table).
+      explicit --threshold overrides; otherwise the default of the
+      collection's catalog content type applies (see --threshold option for
+      the full table).
     \b
     Examples:
       nx taxonomy project docs__art-architecture --against knowledge__art
@@ -2844,8 +2847,8 @@ def project_cmd(
       nx taxonomy project code__nexus --use-icf --persist
       nx taxonomy project --backfill --persist
     """
-    from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     t3 = make_t3()
@@ -2859,25 +2862,25 @@ def project_cmd(
     # (defaults applied at the per-source level inside _run_backfill).
     resolved_threshold = threshold
     if resolved_threshold is None and source_collection:
-        resolved_threshold = default_projection_threshold(source_collection)
+        resolved_threshold = projection_threshold(source_collection)
 
     try:
         if prune_below_threshold:
-            # GH #1528 (nexus-4tfxp): one engine-side DELETE per prefix, on the
+            # GH #1528 (nexus-4tfxp): one engine-side DELETE per collection, on the
             # stored RAW cosine, so a pass that admitted weak matches can be
-            # undone without a rebuild.
+            # undone without a rebuild. RDR-229 P2.4: each collection's threshold
+            # is its row's content type, so the walk is per full collection name,
+            # never per name prefix.
             if backfill or not source_collection:
-                targets = [
-                    (prefix, threshold if threshold is not None else default_projection_threshold(prefix + "x"))
-                    for prefix in ("code__", "knowledge__", "docs__", "rdr__")
-                ]
+                targets = _prune_targets(db.taxonomy, threshold)
             else:
                 targets = [(source_collection, resolved_threshold)]
             total_removed = 0
-            for prefix, thr in targets:
-                removed = db.taxonomy.prune_projection_below(prefix, thr)
+            for name, thr in targets:
+                removed = db.taxonomy.prune_projection_below(name, thr)
                 total_removed += removed
-                click.echo(f"  {prefix}: removed {removed} projection assignment(s) below {thr:.2f}")
+                if removed or len(targets) == 1:
+                    click.echo(f"  {name}: removed {removed} projection assignment(s) below {thr:.2f}")
             click.echo(f"Pruned {total_removed} projection assignment(s).")
             return
         if backfill:
@@ -3103,6 +3106,50 @@ def _without_superseded(collections: list[str]) -> list[str]:
     return kept
 
 
+def _prune_targets(taxonomy: Any, threshold: float | None) -> list[tuple[str, float]]:
+    """The ``(collection, threshold)`` pairs ``--prune-below-threshold`` sweeps
+    when no single source is named (RDR-229 P2.4).
+
+    Every collection the catalog lists plus every collection holding topics,
+    each at *threshold* when given, else its row's default. A listing that
+    cannot be read leaves the topic-holding collections, which still answer
+    through the name derivation: the sweep is a recovery path and does not
+    stop on it.
+
+    The engine matches a prune by name PREFIX, so pruning a collection whose
+    name is a proper prefix of another's also reaches the longer one's rows.
+    When that would delete rows the longer collection's own (lower) threshold
+    keeps, the shorter one is skipped and said so, rather than over-deleting.
+    """
+    from nexus.mcp_infra import get_collection_names  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    names = set(taxonomy.get_distinct_collections())
+    try:
+        names.update(get_collection_names())
+    except Exception:  # noqa: BLE001 - recovery sweep: an unreadable listing narrows it to the collections with topics, it does not stop it
+        _log.warning("taxonomy_prune_listing_unreadable", exc_info=True)
+    ordered = sorted(names)
+    thresholds = {
+        n: (threshold if threshold is not None else projection_threshold(n)) for n in ordered
+    }
+    targets: list[tuple[str, float]] = []
+    for n in ordered:
+        longer = next(
+            (m for m in ordered if m != n and m.startswith(n) and thresholds[m] < thresholds[n]),
+            None,
+        )
+        if longer is not None:
+            click.echo(
+                f"  {n}: skipped, its name is a prefix of {longer} and the engine prunes by "
+                f"name prefix, so {thresholds[n]:.2f} would also delete {longer}'s rows "
+                f"between {thresholds[longer]:.2f} and {thresholds[n]:.2f}"
+            )
+            continue
+        targets.append((n, thresholds[n]))
+    return targets
+
+
 def _run_backfill(
     taxonomy: "HttpTaxonomyStore",
     chroma_client: Any,
@@ -3115,10 +3162,11 @@ def _run_backfill(
     """Project all collections against each other.
 
     When *threshold* is None, applies the RDR-077 per-corpus-type default
-    for each source collection (``default_projection_threshold``). An
+    for each source collection, read from its catalog row
+    (``projection_threshold``). An
     explicit *threshold* short-circuits that and applies uniformly.
     """
-    from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     collections = _without_superseded(taxonomy.get_distinct_collections())
 
@@ -3140,7 +3188,7 @@ def _run_backfill(
             continue
         per_src_threshold = (
             threshold if threshold is not None
-            else default_projection_threshold(src)
+            else projection_threshold(src)
         )
         _progress(
             f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s) "
