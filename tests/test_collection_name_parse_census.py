@@ -287,6 +287,24 @@ which reads the row first, is mint (the NoRow outcome). ``scripts/`` (10 raw sit
 ``SRC`` and so outside this gate. Phase 2 lowers the pins by deleting ledger
 entries.
 
+RDR-229 P1.R fix round (2026-11-20, nexus-p2m1x.5) re-pinned it at 265. The
+review found eight call sites the helper set could not see: five callers of
+``corpus.resolve_corpus`` (its parse is ``startswith(f"{corpus}__")``, a shape
+the P1.1 roots, which were regexes and raw ``"__"`` tests, did not include) and
+three callers of ``CollectionName.parse`` (the helpers were derived from
+``corpus.py`` only). The derivation now takes every function that holds a
+name-decomposing site, or calls ``parse_conformant_collection_name``, as a root
+across ``src/nexus`` (``tests/_collection_name_census_cross.py``, which also
+lists what it still cannot see), and the same rule found twelve more call sites
+(of ``collection_attributes``, ``_under``, ``target_collection_for``,
+``_backfill_papers`` / ``_backfill_knowledge`` and the one-off census's
+``_parse``). A new ``regex_prefix`` shape counts the one-off census's
+``_QUARANTINE_RE`` (a diagnostic). The 21 live in
+``tests/_collection_name_census_sites_callers.py``.
+``tests/test_collection_name_census_cross_roots.py`` proves a new caller of
+``resolve_corpus`` or ``CollectionName.parse`` in any module turns the census
+red.
+
 WHY A CENSUS-IN-TEST-FILE RATHER THAN A ``src/`` LINT MODULE (the
 alternative the bead names, ``storage_boundary_lint.py``-style). Nothing in
 ``src/nexus`` needs to call this scanner at runtime or share it across
@@ -330,21 +348,26 @@ for _site in LEDGER:
         COLLECTION_NAME_PARSE_CENSUS.get(_site.rel, 0) + _site.n
     )
 
-#: THE PIN (RDR-229 P1.1, 2026-11-20, measured on develop 970f73223):
-#: 244 sites, by class and by shape (243 at P1.1, plus the one-off P1.2 collections-census parse, a diagnostic
-#: ledger entry that is deleted before Phase 4). Phase 2 lowers these by deleting ledger
-#: entries; nothing here may rise without a ledger entry and a reason.
-PARSE_SITE_PIN: int = 244
+#: THE PIN (RDR-229 P1.1, 2026-11-20, measured on develop 970f73223 and
+#: re-measured by the P1.R fix round on 118701321): 265 sites, by class and by
+#: shape. 243 at P1.1, plus the one-off P1.2 collections-census parse (a
+#: diagnostic ledger entry that is deleted before Phase 4) = 244, plus the 21
+#: the fix round's cross-module roots found (20 calls to a root, 8 of them the
+#: review's, and the one-off census's ``_QUARANTINE_RE``). Phase 2 lowers these
+#: by deleting ledger entries; nothing here may rise without a ledger entry and
+#: a reason.
+PARSE_SITE_PIN: int = 265
 CLASS_PIN: dict[str, int] = {
-    "mint": 107, "holdover": 40, "routing": 36, "diagnostic": 31,
-    "migration-source": 14, "label-pattern": 9, "file-path": 5,
+    "mint": 111, "holdover": 45, "diagnostic": 40, "routing": 36,
+    "migration-source": 17, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 172, "const_prefix": 31, "fnmatch": 14,
+    "primitive_call": 192, "const_prefix": 31, "fnmatch": 14,
     "loop_prefix": 7, "strip_prefix": 4, "startswith": 4, "split": 2,
-    "fstring_prefix": 2, "hash_suffix": 2, "in": 1, "glob_default": 1,
-    "sql_prefix": 1, "concat_prefix": 1, "endswith": 1, "substring": 1,
+    "fstring_prefix": 2, "hash_suffix": 2, "regex_prefix": 1, "in": 1,
+    "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
+    "substring": 1,
 }
 
 #: The three candidate-string PRIMITIVES (RDR-204 Phase 3 repoint,
@@ -754,11 +777,14 @@ def test_pin_matches_documented_total() -> None:
     on 2026-11-03 for the rename's class-(a) target-model token in
     HttpCatalogClient.rename_collection_cascade, nexus-ucagi; then 46 -- 243
     on 2026-11-20 when RDR-229 P1.1 (nexus-p2m1x.1) widened the scanner and
-    made the census a per-site ledger, see the module docstring) is derived
+    made the census a per-site ledger, see the module docstring; then 243 -- 265
+    on 2026-11-20 when the P1.R fix round (nexus-p2m1x.5) derived cross-module
+    parser roots: +1 for the P1.2 one-off census parse, +21 for the callers of
+    ``resolve_corpus``, ``CollectionName.parse`` and the other roots) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 244
+    assert PARSE_SITE_PIN == 265
 
 
 # ---------------------------------------------------------------------------

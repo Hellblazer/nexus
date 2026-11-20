@@ -40,8 +40,12 @@ nexus-ft04v.26 repoints them at the catalog row), ``collection_
 registration_kwargs`` (the write-time registration derivation used by
 ``HttpCatalogClient.register_collection``'s own bare-call fallback and
 ``ensure_collection_registered``, never one of the ten retired sites),
-and ``CollectionName.parse`` (the render path's parse counterpart, one
-pre-existing caller, unaffected by this bead). This is EXACTLY the
+and ``CollectionName.parse`` (the render path's parse counterpart; its own
+call here is the one this file counts, and its CALLERS are counted by the
+collection-name parse census, ``tests/test_collection_name_parse_census.py``,
+since the RDR-229 P1.R fix round: ``version_from_for_tuple_row``'s temporary
+fallback, ``sensitivity_doctor._external_embedder`` and
+``sensitive_write._parse_collection``). This is EXACTLY the
 allowlist named: "the helpers (render path) and the gate" -- this file
 IS the gate. Every entry below is real (verified independently by
 ``test_allowlisted_sites_are_real_calls_not_stale_entries``); the pin is
@@ -118,10 +122,14 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         ('"""', "parsed = parse_conformant_collection_name(name)"),
     ): (
         "CollectionName.parse: the render path's own parse counterpart. "
-        "Its one caller is version_from_for_tuple_row's temporary fallback "
-        "for a row with an empty model_version (RDR-229 P1.4, nexus-p2m1x.4; "
-        "http_catalog_client.py's collection_for reads the row, no longer the "
-        "name). Unaffected by nexus-ft04v.27."
+        "Its callers are three: version_from_for_tuple_row's temporary "
+        "fallback for a row with an empty model_version (RDR-229 P1.4, "
+        "nexus-p2m1x.4; http_catalog_client.py's collection_for reads the "
+        "row, no longer the name), sensitivity_doctor._external_embedder and "
+        "sensitive_write._parse_collection. None is checked here (this test "
+        "counts calls to parse_conformant_collection_name); the collection-"
+        "name parse census ledgers each (RDR-229 P1.R, nexus-p2m1x.5). "
+        "Unaffected by nexus-ft04v.27."
     ),
     (
         "src/nexus/commands/collection.py",
