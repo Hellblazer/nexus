@@ -147,7 +147,7 @@ def test_index_pdf_dir_writes_to_the_label_of_the_subjects_row(runner, home, mon
     d.mkdir()
     (d / "a.pdf").write_bytes(b"fake pdf")
     _install_finder(monkeypatch, _finder_returning(_attrs("notes-from-2024")))
-    with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_RESULT) as m:
+    with patch("nexus.doc_indexer.index_pdf", return_value=2) as m:  # the batch path takes a chunk count
         result = runner.invoke(main, ["index", "pdf", "--dir", str(d), "--collection", "field-notes"])
     assert result.exit_code == 0, result.output
     assert m.call_args.kwargs["collection_name"] == "notes-from-2024"

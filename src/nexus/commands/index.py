@@ -3239,7 +3239,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     _log = structlog.get_logger(__name__)
 
     from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
-    from nexus.corpus import candidate_knowledge_subject, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import candidate_knowledge_subject, catalog_subject_finder, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,
@@ -3379,7 +3379,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
 
         if collection is not None:
             # nexus-hmxi note: this call site intentionally does NOT
-            # probe T3 (no ``t3=`` kwarg). Bulk index targets land on
+            # probe T3 (no ``t3=`` kwarg); ``subject_finder`` reads only the
+            # catalog row of a knowledge subject (RDR-229 P2.8), never a T3
+            # name. Bulk index targets land on
             # the auto-promoted conformant shape so a fresh ``nx index
             # pdf --dir`` does not add a network round-trip and a
             # credential dependency just to grandfather a legacy
@@ -3389,7 +3391,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
             # for_write=True (nexus-35ok4): indexing WRITES new content —
             # raises loud if local.embed_model is voyage-shaped with no
             # key configured, never silently mints a bge collection.
-            collection = t3_collection_name(collection, for_write=True)
+            collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
         if sensitive:
             collection = _route_sensitive_index(
                 collection, corpus, ack=ack_external_embedder, what="nx index pdf --dir --sensitive")
@@ -3602,7 +3604,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     # for_write=True (nexus-35ok4): indexing WRITES new content — raises
     # loud if local.embed_model is voyage-shaped with no key configured.
     if collection is not None:
-        collection = t3_collection_name(collection, for_write=True)
+        collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
     if sensitive and not dry_run:
         # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
         collection = _route_sensitive_index(
@@ -3913,6 +3915,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         EmbeddingProfileMismatchError,
         LocalVoyageCredentialMissingError,
+        catalog_subject_finder,
         t3_collection_name,
     )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
@@ -3943,7 +3946,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     if collection is not None:
         # for_write=True (nexus-35ok4): indexing WRITES new content —
         # raises loud if local.embed_model is voyage-shaped with no key.
-        collection = t3_collection_name(collection, for_write=True)
+        collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
         # No extractor warning for knowledge__ targets: aspect extraction
         # routes each document by shape (scholarly-paper-v1 for papers,
         # general-prose-v1 for prose; c79909c4b, nexus-kk4ut).

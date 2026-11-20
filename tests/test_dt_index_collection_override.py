@@ -5,7 +5,7 @@ the engine and was refused as non-conformant AFTER the catalog Document had
 been registered, leaving ``physical_collection`` stale."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -18,7 +18,7 @@ from nexus.commands.dt import _resolve_dt_collection
 def test_collection_override_is_normalised_to_conformant_name():
     with patch("nexus.corpus.t3_collection_name", return_value="knowledge__agentic-scholar__voyage-context-3__v1") as norm:
         out = _resolve_dt_collection("knowledge__agentic-scholar", "dt", ".pdf")
-    norm.assert_called_once_with("knowledge__agentic-scholar", for_write=True)
+    norm.assert_called_once_with("knowledge__agentic-scholar", for_write=True, subject_finder=ANY)
     assert out == "knowledge__agentic-scholar__voyage-context-3__v1"
 
 
