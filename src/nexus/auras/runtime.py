@@ -76,8 +76,30 @@ class _Failure(Exception):
         self.kind = kind
 
 
-def _matches(pairs: Sequence[tuple[str, str]] | None, dims: Mapping[str, str]) -> bool:
-    return pairs is not None and all(dims.get(k) == v for k, v in pairs)
+#: The ``from`` value that names the engine. ``from`` is a dimension the writer typed, so any writer can post it;
+#: a row counts as the engine's only when it also carries no ``sender_session`` (RDR-252 critique S3).
+ENGINE_WRITER = "engine"
+
+
+def _engine_wrote(row: Any) -> bool:
+    """True when *row* is one the engine wrote itself: the engine stamps ``sender_session`` on a client's write and
+    writes its own rows with none, so the stamp must be rendered (``sender_session_known``) and empty. An engine that
+    renders no stamp cannot say, which reads as not the engine's."""
+    return bool(getattr(row, "sender_session_known", False)) and not getattr(row, "sender_session", None)
+
+
+def _matches(pairs: Sequence[tuple[str, str]] | None, row: Any) -> bool:
+    """Every pair equals the row's dimension. A pair ``from = "engine"`` also needs the row to be one the engine
+    wrote (:func:`_engine_wrote`): the typed ``from`` alone is a claim any writer can make."""
+    if pairs is None:
+        return False
+    dims = row.dims or {}
+    for k, v in pairs:
+        if dims.get(k) != v:
+            return False
+        if k == "from" and v == ENGINE_WRITER and not _engine_wrote(row):
+            return False
+    return True
 
 
 _ABSENT = object()
@@ -185,10 +207,9 @@ class AuraRuntime:
             if lane.aura.subspace != subspace:
                 continue
             for row in rows:
-                dims = row.dims or {}
-                if not lane.aura.match or _matches(lane.aura.match, dims):
+                if not lane.aura.match or _matches(lane.aura.match, row):
                     self._enqueue(lane, _Item("fire", row))
-                elif _matches(lane.aura.clear_match, dims):
+                elif _matches(lane.aura.clear_match, row):
                     self._enqueue(lane, _Item("clear", row))
 
     def _enqueue(self, lane: _Lane, item: _Item) -> None:

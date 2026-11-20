@@ -72,6 +72,8 @@ That notice wakes an idle session the way any channel message does.
 
 `display.channel` may also be the name of a boolean field of the procedure's result (`channel = "wake"`, as `ci_develop_red` does). The notice is then sent only when that field is `true`, so one aura can wake some sessions and leave the block alone for the rest. The text is still the fixed template. A result with no such field, or one that is not a boolean, is a failure like a missing `when` field: the block shows `aura error: result on tuple <id>`, no notice goes out, and three in a row disable the aura.
 
+**`from = "engine"`.** `from` is a dimension the writer types, so a match on it alone would let any session post as the engine. A match pair `from = "engine"` therefore also requires the row to be one the engine wrote: the engine renders `sender_session` on every row, stamps it on a client's write, and writes its own rows with none. A row with a session stamped on it, or from an engine that does not render the stamp, matches neither the trigger nor the clear. A row from a client that holds no live session carries no stamp either, so a null stamp rules out a stamped forgery and does not by itself prove the engine wrote the row.
+
 **Clearing.** An aura with a `[clear]` table removes its block when a post matching that table arrives on the same subspace. For `ci_develop_red` that is a `kind=clear` post, which the stamper writes when develop is green again. A clear does not run the procedure.
 
 Posts on the aura's subspace are not announced to the agent unless the session also subscribes that subspace itself; the aura's notice is the only one.
