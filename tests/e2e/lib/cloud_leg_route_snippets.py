@@ -40,3 +40,15 @@ import json
 from nexus.commands.catalog import _get_catalog
 print(json.dumps(_get_catalog().sensitive_locators(limit=10), default=str)[:400])
 """
+
+COLLECTION_UPSERT = r"""
+from nexus.commands.catalog import _get_catalog
+from nexus.corpus import t3_collection_name
+from nexus.db import make_t3
+# RDR-229 P2.5 D1: re-register the probe collection the store-put step writes to (the same name store put
+# resolves, for_write=True). It is an existing row, or the row store-put would create, with the client's
+# default model_version, so the upsert route is driven and nothing new is left behind.
+name = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
+_get_catalog().register_collection(name)
+print(name)
+"""
