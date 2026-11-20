@@ -37,6 +37,11 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
 )
+from nexus.db.collection_lifecycle import (
+    QUARANTINE_NAME_PREFIX,
+    TAXONOMY_BYPASS_PREFIXES,
+    bypasses_canonical_schema,
+)
 from nexus.db.limits import QUOTAS
 from nexus.sensitivity import ReadSensitivity, check_read_sensitivity
 from nexus.ttl import refuse_ttl_over_cap
@@ -76,19 +81,28 @@ def _normalize_partial(metadata: dict, collection_name: str) -> dict:
 # T3-public write path symmetric so .nxexp round-trips don't silently
 # strip the collection's metadata at import time.
 _BYPASS_SCHEMA_PREFIXES: tuple[str, ...] = (
-    "taxonomy__",
+    *TAXONOMY_BYPASS_PREFIXES,
     # nexus-xukbj: quarantine siblings (quarantine-<type>__...) are
     # system-internal, deliberately non-conformant and catalog-unregistered
     # — the drift/doctor checks must treat them as expected state.
-    "quarantine-",
+    # RDR-229 P2.5: only a name with no catalog row is judged by this prefix;
+    # a row's lifecycle_state decides when there is one
+    # (:mod:`nexus.db.collection_lifecycle`).
+    QUARANTINE_NAME_PREFIX,
 )
 
 
 def _bypass_canonical_schema(collection_name: str) -> bool:
     """Return ``True`` if *collection_name* should skip canonical schema
     normalisation/validation (nexus-o6aa.9.16).
+
+    The ``quarantine-`` half reads the collection's cached catalog row (RDR-229 P2.5). This is
+    the write path, so it reads whatever the process's collection-row cache holds and never
+    fetches the listing: a cold cache is no row, and the name decides as it always did.
     """
-    return collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+
+    return bypasses_canonical_schema(collection_name, get_collection_row(collection_name, refresh=False))
 
 
 def _rewrite_collection_metadata(

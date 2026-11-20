@@ -67,7 +67,7 @@ from nexus.corpus import (
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
-from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — same cross-module reuse pattern as commands/catalog_cmds/doctor.py
+from nexus.db.collection_lifecycle import bypasses_canonical_schema
 from nexus.errors import (
     BatchWriteFailedError,
     EmbeddingDimensionMismatch,
@@ -1844,7 +1844,11 @@ def import_collection(
         from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
 
         require_note_uri_engine()
-    bypass_schema = collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    # RDR-229 P2.5: a quarantine sibling is the target's row saying so, read through the db's own row
+    # resolver (the cached listing a service-backed client already holds), not its `quarantine-` label.
+    row_resolver = getattr(db, "_resolve_collection_row", None)
+    target_row = row_resolver(collection_name) if callable(row_resolver) else None
+    bypass_schema = bypasses_canonical_schema(collection_name, target_row)
     if _owners_apply(db) and bypass_schema:
         # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs
         # can be written with an owner row, and the engine refuses an ownerless write. Say so now,

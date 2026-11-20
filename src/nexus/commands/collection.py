@@ -769,7 +769,7 @@ def _find_dimension_mismatched_collections(
     # (regex, unaffected by the repoint) reads the name's own segment
     # directly, exactly as this function's docstring describes.
     from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     engine_models, active_label = _served_embedding_models(t3)
     mismatches: list[dict] = []
@@ -780,7 +780,7 @@ def _find_dimension_mismatched_collections(
 
     for c in t3.list_collections():
         name = c["name"]
-        if name.startswith(_BYPASS_SCHEMA_PREFIXES):
+        if bypasses_canonical_schema(name, c):
             continue
         if not is_conformant_collection_name(name):
             skipped += 1

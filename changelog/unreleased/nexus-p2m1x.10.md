@@ -1,0 +1,4 @@
+### Changed
+
+- A collection's quarantine state now comes from its catalog row's `lifecycle_state`, not from a `quarantine-` name prefix, in the engine's guards and SQL functions and in the client's schema-bypass checks (RDR-229 P2.5, P2.6). A name with no catalog row is still judged by its prefix. `nx doctor`'s chash conformance report counts manifest rows by the collection's registered embedding model instead of parsing the name, and lists rows whose collection has no catalog row on their own line.
+- The engine refuses with a 400 a collection registration that would create a new row with a blank `model_version`, a registration through the client route with a `lifecycle_state` other than `live`, and a new client registration of a `quarantine-` name (RDR-229 P2.5). Released clients send none of these. An ETL import takes a missing version from a conformant `__vN` name, and refuses a new row whose state and name disagree.

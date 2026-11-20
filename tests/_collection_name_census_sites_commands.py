@@ -11,7 +11,6 @@ re-derived by ``tests._lint_line_anchor`` on every run.
 from __future__ import annotations
 
 from tests._collection_name_census_notes import (
-    BYPASS,
     DIAG_D,
     LABEL,
     MINT_A,
@@ -34,9 +33,6 @@ SITES: tuple[S, ...] = (
     S('src/nexus/commands/collection.py',
       ('if r.get("content_type") == "docs"', 'and any(fnmatch.fnmatchcase(r["name"], p) for p in patterns)'),
       'fnmatch', 'label-pattern', LABEL),
-    S('src/nexus/commands/collection.py',
-      ('name = c["name"]', 'if name.startswith(_BYPASS_SCHEMA_PREFIXES):'),
-      'const_prefix', 'routing', BYPASS),
     S('src/nexus/commands/collection.py',
       ('continue', 'if not is_conformant_collection_name(name):'),
       'primitive_call', 'diagnostic', DIAG_D),

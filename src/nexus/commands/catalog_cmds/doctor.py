@@ -453,7 +453,7 @@ def _run_collections_drift() -> dict:
     with-report, not all-or-nothing.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
     from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — command-local import (nexus.db.collection_state)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -462,7 +462,7 @@ def _run_collections_drift() -> dict:
         t3_db = make_t3()
         t3_names = {
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         }
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -668,14 +668,14 @@ def _run_chunk_size_distribution() -> dict:
     aren't meaningful.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
     from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
         t3 = make_t3()
         collections = [
             c["name"] for c in t3.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         ]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -785,14 +785,14 @@ def _run_chunk_text_dedup() -> dict:
     ``{"pass": bool, "within": {coll: {...}}, "cross": [{...}]}``.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
     from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
         t3 = make_t3()
         collections = [
             c["name"] for c in t3.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         ]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -926,7 +926,7 @@ def _run_t3_vs_catalog() -> dict:
     Bypass-schema collections (``taxonomy__*``) are skipped from all.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections  # noqa: PLC0415 — command-local import
@@ -935,7 +935,7 @@ def _run_t3_vs_catalog() -> dict:
         t3_db = make_t3()
         t3_listing = {
             c["name"]: c for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         }
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -1107,7 +1107,7 @@ def _run_name_vs_embed_dim() -> dict:
         is_conformant_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
 
     mismatches: list[dict] = []
     empty: list[str] = []
@@ -1120,7 +1120,7 @@ def _run_name_vs_embed_dim() -> dict:
         t3_db = make_t3()
         cols = [
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         ]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {

@@ -356,14 +356,20 @@ for _site in LEDGER:
 #: review's, and the one-off census's ``_QUARANTINE_RE``). Phase 2 lowers these
 #: by deleting ledger entries; nothing here may rise without a ledger entry and
 #: a reason.
-PARSE_SITE_PIN: int = 265
+#:
+#: P2.5 (nexus-p2m1x.10, 2026-11-20), re-measured on P1.R's 11da32740: 265 -> 255. The twelve
+#: ``_BYPASS_SCHEMA_PREFIXES`` tests became calls to ONE helper (``db/rows/lifecycle.bypasses_canonical_schema``),
+#: whose two name tests are the only sites left: the ``taxonomy__`` half (routing, P2.9) and the quarantine
+#: fallback for a name no row backs (migration-source). routing 36 -> 25, migration-source 17 -> 18,
+#: const_prefix 31 -> 21.
+PARSE_SITE_PIN: int = 255
 CLASS_PIN: dict[str, int] = {
-    "mint": 111, "holdover": 45, "diagnostic": 40, "routing": 36,
-    "migration-source": 17, "label-pattern": 9, "file-path": 5,
+    "mint": 111, "holdover": 45, "diagnostic": 40, "routing": 25,
+    "migration-source": 18, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 192, "const_prefix": 31, "fnmatch": 14,
+    "primitive_call": 192, "const_prefix": 21, "fnmatch": 14,
     "loop_prefix": 7, "strip_prefix": 4, "startswith": 4, "split": 2,
     "fstring_prefix": 2, "hash_suffix": 2, "regex_prefix": 1, "in": 1,
     "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -784,7 +790,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 265
+    assert PARSE_SITE_PIN == 255
 
 
 # ---------------------------------------------------------------------------
@@ -896,15 +902,16 @@ def test_every_fnmatch_is_labelled_by_what_it_matches() -> None:
 
 def test_the_routing_class_is_measured_not_listed() -> None:
     """RDR-229 P2.9 must empty a class the census counted, over every shape
-    the routing census scans. 36 sites: the 23 content-type tests, the
-    shipped ``code__*`` default, and the taxonomy__ half of the 12
-    ``_BYPASS_SCHEMA_PREFIXES`` tests (229-research-39)."""
+    the routing census scans. 25 sites since P2.5 (nexus-p2m1x.10): the 23
+    content-type tests, the shipped ``code__*`` default, and the taxonomy__
+    half of the schema-bypass test, which was 12 sites (229-research-39) until
+    P2.5 gathered them into ``db/collection_lifecycle.py``."""
     routing = _by_class("routing")
-    assert sum(s.n for s in routing) == CLASS_PIN["routing"] == 36
+    assert sum(s.n for s in routing) == CLASS_PIN["routing"] == 25
     assert {s.shape for s in routing} == {
         "const_prefix", "loop_prefix", "startswith", "glob_default",
     }
-    assert sum(1 for s in routing if s.note == _BYPASS_NOTE) == 12
+    assert sum(1 for s in routing if s.note == _BYPASS_NOTE) == 1
     assert [s.shape for s in routing if s.shape == "glob_default"] == ["glob_default"]
     # Recovery-bundle classification of ANOTHER install's name is a migration
     # source, never routing (item 1); the URI-string classifiers stay at 2.

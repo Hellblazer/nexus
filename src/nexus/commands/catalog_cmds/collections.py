@@ -49,7 +49,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
       nx catalog backfill-collections
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -67,7 +67,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
         # backfill could clear.
         t3_names = {
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         }
     except Exception as exc:
         # Refusing to do a "partial" backfill that registers only the
@@ -553,7 +553,7 @@ def collection_gc_cmd(apply: bool) -> None:
     Filed under nexus-ks40 (catalog/T3 hygiene).
     """
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -588,7 +588,7 @@ def collection_gc_cmd(apply: bool) -> None:
         # collection whose chunks have no live owner has live count 0 but is
         # not empty, and must not be deleted as a zombie.
         count = c.get("stored_count", c.get("count", 0))
-        if name.startswith(_BYPASS_SCHEMA_PREFIXES):
+        if bypasses_canonical_schema(name, c):
             skipped_bypass += 1
             continue
         if name in projection_names or name in doc_collection_names:
