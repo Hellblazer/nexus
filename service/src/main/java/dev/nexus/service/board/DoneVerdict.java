@@ -10,16 +10,24 @@ import java.util.Set;
 
 /**
  * The verdict a {@code board/ci/<base>--done} row carries: the tip sha and {@code success}, {@code failure} or
- * {@code cancelled}. It is {@code dims.branch_outcome} when present and not blank (the adapter's carry-forward of a
- * path-filtered workflow's last result on the branch, written once its FOLD_BRANCH_OUTCOME switch is on, so a Service
- * CI red that a later sha never re-ran still stands); else {@code dims.outcome} when present (the per-sha fold,
- * written once its FOLD_RESULT_DIMS switch is on); otherwise it is derived from the {@code runs} conclusions in the body with the template's rules: any run
- * that concluded failure, timed_out, startup_failure or action_required is a failure; else a run with an unknown
- * conclusion (including the old two-element entries), or a body whose {@code n} counts more runs than it lists
- * (trailing entries dropped), leaves no verdict; else a run that concluded cancelled or stale
- * is cancelled; else success. Only {@code success} and {@code failure} are verdicts. A row with no branch_outcome
- * whose body says {@code "carried": null} (the adapter's carry-forward read failed) has no verdict when its per-sha
- * result is success: the engine fails toward not clearing.
+ * {@code cancelled}. Only {@code success} and {@code failure} are verdicts ({@link Verdict#counts}).
+ *
+ * <p>The per-sha result is {@code dims.outcome} when present (written once the adapter's FOLD_RESULT_DIMS switch is
+ * on), else derived from the {@code runs} conclusions in the body with the template's rules: any run that concluded
+ * failure, timed_out, startup_failure or action_required is a failure; else a run with an unknown conclusion
+ * (including the old two-element entries), or a body whose {@code n} counts more runs than it lists (trailing entries
+ * dropped), leaves no verdict; else a run that concluded cancelled or stale is cancelled; else success.
+ *
+ * <p>{@code dims.branch_outcome}, when present and not blank, is the per-sha result folded with the latest earlier
+ * result of each path-filtered workflow that did not run on the sha (the adapter's FOLD_BRANCH_OUTCOME switch), so a
+ * Service CI red that a later sha never re-ran still stands. It decides, with two limits. A per-sha failure is a
+ * failure whatever it says (a red is red; a branch_outcome can only be as bad as the per-sha result, so a
+ * contradiction is a writer bug and fails toward red). A value other than success, failure or cancelled is no verdict.
+ *
+ * <p>Without branch_outcome, a per-sha success is judged by the body's {@code carried}, when the body carries the key:
+ * null (the carry read failed), a list holding an entry whose conclusion is not success, neutral or skipped (or is
+ * missing), or a {@code carried_n} above the list's length (entries were trimmed, the hidden ones cannot be checked)
+ * leaves no verdict. The engine fails toward not clearing. A body without the key reads as before.
  */
 public final class DoneVerdict {
 
@@ -41,10 +49,26 @@ public final class DoneVerdict {
     private DoneVerdict() {
     }
 
+    public static final String REASON_CARRY_FAILED = "carry_failed";
+    public static final String REASON_CANCELLED = "cancelled";
+    public static final String REASON_UNKNOWN = "unknown";
+
+    /**
+     * A row's verdict, or its absence with the reason: {@code reason} is null when the verdict counts, else
+     * {@code carry_failed} (the carry-forward was null, unverifiable or held a non-passing result), {@code cancelled}
+     * or {@code unknown} (not a sha row, no sha, an outcome that cannot be told or is not recognised).
+     */
+    public record Resolution(Optional<Verdict> verdict, String reason) {
+    }
+
     /** The verdict of a done row, or empty when it is not a {@code kind=sha} row or its outcome cannot be told. */
     public static Optional<Verdict> of(BoardRow row) {
+        return resolve(row).verdict();
+    }
+
+    public static Resolution resolve(BoardRow row) {
         if (!"sha".equals(row.kind())) {
-            return Optional.empty();
+            return none(REASON_UNKNOWN);
         }
         JsonNode body = parse(row.body());
         String sha = row.sha();
@@ -52,23 +76,59 @@ public final class DoneVerdict {
             sha = body.get("sha").asText();
         }
         if (sha == null || sha.isBlank()) {
-            return Optional.empty();
+            return none(REASON_UNKNOWN);
         }
-        String outcome = row.dim("branch_outcome");
-        if (outcome == null || outcome.isBlank()) {
-            outcome = row.dim("outcome");
-            if (outcome == null || outcome.isBlank()) {
-                outcome = derive(body);
+        String perSha = row.dim("outcome");
+        if (perSha == null || perSha.isBlank()) {
+            perSha = derive(body);
+        }
+        String outcome;
+        String branch = row.dim("branch_outcome");
+        if (branch != null && !branch.isBlank()) {
+            if (RED.equals(perSha)) {
+                outcome = RED;
+            } else if (!OK.equals(branch) && !RED.equals(branch) && !"cancelled".equals(branch)) {
+                return none(REASON_UNKNOWN);
+            } else {
+                outcome = branch;
             }
-            // The adapter's carry-forward read failed (no branch_outcome, body "carried": null): a per-sha success
-            // may hide a carried red, so it is no verdict. This fails toward not clearing. A per-sha failure or
-            // cancelled stays: a red is red whatever was carried. An absent "carried" key (nothing to carry, or a row
-            // from before the adapter wrote it) and a list both fall back as before.
-            if (DoneVerdict.OK.equals(outcome) && body != null && body.has("carried") && body.get("carried").isNull()) {
-                return Optional.empty();
+        } else {
+            outcome = perSha;
+            if (OK.equals(outcome) && !carryVerified(body)) {
+                return none(REASON_CARRY_FAILED);
             }
         }
-        return outcome == null ? Optional.empty() : Optional.of(new Verdict(sha, outcome));
+        if (outcome == null) {
+            return none(REASON_UNKNOWN);
+        }
+        Verdict v = new Verdict(sha, outcome);
+        return new Resolution(Optional.of(v), v.counts() ? null
+            : "cancelled".equals(outcome) ? REASON_CANCELLED : REASON_UNKNOWN);
+    }
+
+    private static Resolution none(String reason) {
+        return new Resolution(Optional.empty(), reason);
+    }
+
+    /**
+     * True when the body carries no {@code carried} key, or a list the engine can check itself: every entry a
+     * {@code [workflow, run, conclusion, sha]} whose conclusion passes, and no more entries counted in
+     * {@code carried_n} than listed. A null list, a missing or non-passing conclusion, or trimmed entries is false.
+     */
+    private static boolean carryVerified(JsonNode body) {
+        if (body == null || !body.has("carried")) {
+            return !(body != null && body.path("carried_n").isNumber() && body.get("carried_n").asLong() > 0);
+        }
+        JsonNode carried = body.get("carried");
+        if (!carried.isArray()) {
+            return false;   // null, or a shape nobody writes
+        }
+        for (JsonNode entry : carried) {
+            if (!entry.isArray() || entry.size() < 3 || !entry.get(2).isTextual() || !SUCCESS.contains(entry.get(2).asText())) {
+                return false;
+            }
+        }
+        return !(body.path("carried_n").isNumber() && body.get("carried_n").asLong() > carried.size());
     }
 
     /** The outcome from the body's {@code runs}, or null when none can be told. */

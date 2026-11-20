@@ -87,10 +87,16 @@ public final class OwnerStamper implements OwnerOutHook {
             if (base == null) {
                 return;
             }
-            DoneVerdict.Verdict v = DoneVerdict.of(new BoardRow(null, clock.instant(), dims, body, null))
-                .filter(DoneVerdict.Verdict::counts).orElse(null);
+            DoneVerdict.Resolution r = DoneVerdict.resolve(new BoardRow(null, clock.instant(), dims, body, null));
+            DoneVerdict.Verdict v = r.verdict().filter(DoneVerdict.Verdict::counts).orElse(null);
             if (v == null) {
-                return;   // not kind=sha, or cancelled, or an outcome that cannot be told: not a verdict
+                // not kind=sha, or cancelled, or an outcome that cannot be told: not a verdict. A sha row that leaves
+                // no verdict says why, since a suppressed clear after a failed carry read is otherwise silent.
+                if ("sha".equals(dims.get("kind"))) {
+                    log.info("event=board_done_no_verdict tenant={} base={} sha={} reason={}",
+                        tenant, base, dims.get("sha"), r.reason());
+                }
+                return;
             }
             try {
                 evaluate(tenant, base, OwnerDecision.Trigger.DONE);

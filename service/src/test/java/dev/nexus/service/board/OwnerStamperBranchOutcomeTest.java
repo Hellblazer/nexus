@@ -53,6 +53,34 @@ class OwnerStamperBranchOutcomeTest {
         assertThat(se.ownerRows(t, StamperEnv.BASE).getLast().sha()).isEqualTo("Y");
     }
 
+    @Test
+    void aFailedOrUnverifiableCarryReadDoesNotClearThroughTheHookButAPlainGreenDoes() {
+        String t = se.tenant();
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        se.doneBody(t, StamperEnv.BASE, "X", "failure", "{\"state\":\"concluded\",\"sha\":\"X\"}");
+        assertThat(kinds(t)).containsExactly("owner");
+
+        se.doneBody(t, StamperEnv.BASE, "Y", "success", "{\"state\":\"concluded\",\"sha\":\"Y\",\"carried\":null}");
+        assertThat(kinds(t)).as("carried null: the read failed").doesNotContain("clear");
+
+        se.doneBody(t, StamperEnv.BASE, "Y", "success",
+            "{\"state\":\"concluded\",\"sha\":\"Y\",\"carried\":[[\"Service CI\",7,\"failure\",\"X\"]]}");
+        assertThat(kinds(t)).as("a carried list holding a red").doesNotContain("clear");
+
+        se.doneBody(t, StamperEnv.BASE, "Y", "success",
+            "{\"state\":\"concluded\",\"sha\":\"Y\",\"carried\":[[\"Service CI\",7,\"success\",\"X\"]],\"carried_n\":2}");
+        assertThat(kinds(t)).as("a trimmed carried list").doesNotContain("clear");
+
+        se.doneBody(t, StamperEnv.BASE, "Y", "success",
+            "{\"state\":\"concluded\",\"sha\":\"Y\",\"carried\":[[\"Service CI\",7,\"success\",\"X\"]],\"carried_n\":1}");
+        assertThat(kinds(t)).endsWith("clear");
+    }
+
     private List<String> kinds(String tenant) {
         return se.ownerRows(tenant, StamperEnv.BASE).stream().map(StamperEnv.Row::kind).toList();
     }

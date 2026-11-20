@@ -168,8 +168,10 @@ found, with how sure it is:
 - `scripts/git-push-develop.sh` claims `lock/ci-develop-push` with a claimant
   naming the session, and prints `PUSH_OK n=<count> tip=<sha>`.
 - The CI post on `board/ci/nexus-develop--done` carries `kind=sha`, the sha,
-  `outcome` and the run (RDR-220). Posts are unattested: the engine records no
-  session for the GitHub adapter's writes.
+  `outcome` (the tip's own), `branch_outcome` once the adapter's switch is on
+  (the tip's runs plus carried-forward results, read first by the stamper) and
+  the run (RDR-220). Posts are unattested: the engine records no session for
+  the GitHub adapter's writes.
 
 ## Research Findings
 
@@ -463,7 +465,18 @@ tip need not have a run of its own: develop CI runs in concurrency slots
 where "a newer push replaces only that slot's pending run"
 (`.github/workflows/ci.yml:20-40`; `nexus_rdr/252-research-3`), and a
 replaced run posts `outcome=cancelled`. So the stamper treats only
-`success` and `failure` as verdicts, and a verdict counts only if its tip is
+`success` and `failure` as verdicts, and a tip's verdict is develop's state at
+that tip, not only the tip's own runs: the `--done` row's `branch_outcome` dim
+(the tip's outcome folded with the latest earlier result of each workflow that
+did not run on the tip, such as the path-filtered Service CI; the adapter's
+FOLD_BRANCH_OUTCOME switch) is read ahead of `outcome`, so a clear needs every
+workflow's latest result green. A per-sha failure stays a failure whatever
+`branch_outcome` says, and a `branch_outcome` outside success, failure and
+cancelled is no verdict. A row without `branch_outcome` whose body carries a
+null `carried` (the carry read failed), a `carried` list with a non-passing or
+unknown entry, or a `carried_n` above the list's length (entries trimmed) has
+no verdict when its per-sha result is success; a body without `carried` reads
+as before. `outcome` stays the tip's own result. A verdict counts only if its tip is
 the newest tip in the chain with a verdict. A late red for an older tip is
 history, not a block; a late green for an older tip does not clear a block a
 newer red raised. When a push's `base` matches no recorded tip (a hand push, a
@@ -1131,3 +1144,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-19: wording matched to the reviewed engine 0.1.198 code (nexus-igea9, b300a8550, 76bbd34d4; grant 3): the owner row carries `owner_alias` and `next_alias`, read at stamp time, absent for an identity with none or on a failed read; the notice shows the alias, else the id; the aliases count inside the 1024-byte cap, suspects cut first.
 - 2026-11-20: engine fixes for the close critique's S2 and S3 (nexus-igea9; grant 3): the deadline rebuild retries failed pairs until a full census, a stamper error arms its deadline and escalates at it, a failing evaluation falls back to the current owner row, and `from=engine` is engine-only (client writes refused with `reserved_dim`; a prior row counts as state only with a null sender session). `board-ci.yaml` `from.engine` documents the refusal.
 - 2026-11-20: `nx ci ack` and the client stamp of `from` on an ack (nexus-igea9; grant 3): `nx group ack-times` resolves an ack's poster by the sender-session stamp through the session index, a delegated child to its parent (read from the child's identity record, and noted as unresolved when the credential cannot read it), and reads `from` (a name through the red's `owner_alias`/`next_alias`, then the identity service) only for a row with no stamp; it counts red tips and the engine's own owner and clear rows as the engine does, but it is a client read of the identity service, not the engine's count. The engine counts the sender stamp; a hand ack with a session alias stopped the hand-off on red ae619ef56 and only ack-times missed it.
+- 2026-11-20: wording matched to the reviewed carry-forward engine code (conexus-lru2; grant 3): a tip's verdict reads the `--done` row's `branch_outcome` (the tip's outcome folded with the latest earlier result of a path-filtered workflow such as Service CI) ahead of `outcome`, so a Service CI red a later sha never re-ran keeps the red episode open; a per-sha failure is never overridden, an unrecognised `branch_outcome` is no verdict, and a row without it whose body carries a null, trimmed or non-passing `carried` list has no verdict for a per-sha success; the stamper logs `board_done_no_verdict` with the reason.

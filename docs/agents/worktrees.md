@@ -168,9 +168,12 @@ things to avoid carefully; they are impossible.
    the body. The owner stamper reads `branch_outcome` ahead of `outcome`, so a
    Service CI red a later sha never re-ran keeps the red episode open and a
    clear needs every workflow's latest result green; `outcome` stays this
-   sha's own. When the adapter's carry read fails the row has no
-   `branch_outcome` and `carried` is null; a per-sha success then counts as no
-   verdict (no clear), a per-sha failure still counts. For a truncated
+   sha's own, and a per-sha failure is never overridden. A row with no
+   `branch_outcome` whose body carries a null `carried` (the carry read
+   failed), a `carried` list holding a non-passing entry, or a `carried_n`
+   above the list's length has no verdict when its per-sha result is success
+   (no clear, and the stamper logs `board_done_no_verdict`); a per-sha failure
+   still counts. For a truncated
    list, or a missing conclusion, read the `kind=run` rows or the check runs,
    and a cancelled run per the rule below. The
    wake is best-effort: the adapter drops it without retry on a GitHub or

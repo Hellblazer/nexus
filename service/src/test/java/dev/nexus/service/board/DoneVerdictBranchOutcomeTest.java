@@ -27,6 +27,14 @@ class DoneVerdictBranchOutcomeTest {
         return DoneVerdict.of(new BoardRow("d1", OwnerFixture.T0, d, body, null));
     }
 
+    private static BoardRow row(String body, String... dims) {
+        Map<String, String> d = new LinkedHashMap<>(Map.of("from", "github", "kind", "sha", "sha", "Y"));
+        for (int i = 0; i < dims.length; i += 2) {
+            d.put(dims[i], dims[i + 1]);
+        }
+        return new BoardRow("d1", OwnerFixture.T0, d, body, null);
+    }
+
     private static String outcomeOf(String body, String... dims) {
         return verdictOf(body, dims).map(DoneVerdict.Verdict::outcome).orElse(null);
     }
@@ -37,8 +45,21 @@ class DoneVerdictBranchOutcomeTest {
     }
 
     @Test
-    void aBranchOutcomeOfSuccessWinsOverAPerShaFailure() {
-        assertThat(outcomeOf(ONE_GREEN_RUN, "outcome", "failure", "branch_outcome", "success")).isEqualTo("success");
+    void aPerShaFailureIsAFailureWhateverTheBranchOutcomeSays() {
+        for (String branch : new String[] {"success", "cancelled", "failure", "bogus", "neutral"}) {
+            assertThat(outcomeOf(ONE_GREEN_RUN, "outcome", "failure", "branch_outcome", branch))
+                .as("branch_outcome " + branch).isEqualTo("failure");
+        }
+        assertThat(outcomeOf("{\"sha\":\"Y\",\"n\":1,\"runs\":[[101,1,\"CI\",\"failure\"]]}", "branch_outcome", "success"))
+            .as("the per-sha failure derived from the runs").isEqualTo("failure");
+    }
+
+    @Test
+    void anUnrecognisedBranchOutcomeIsNoVerdict() {
+        assertThat(verdictOf(ONE_GREEN_RUN, "outcome", "success", "branch_outcome", "bogus")).isEmpty();
+        assertThat(verdictOf(ONE_GREEN_RUN, "branch_outcome", "SUCCESS")).as("case matters").isEmpty();
+        assertThat(DoneVerdict.resolve(row(ONE_GREEN_RUN, "outcome", "success", "branch_outcome", "bogus")).reason())
+            .isEqualTo(DoneVerdict.REASON_UNKNOWN);
     }
 
     @Test
@@ -103,7 +124,81 @@ class DoneVerdictBranchOutcomeTest {
     void aBranchOutcomeWinsOverACarriedNull() {
         assertThat(outcomeOf(CARRIED_NULL, "outcome", "success", "branch_outcome", "success")).isEqualTo("success");
         assertThat(outcomeOf(CARRIED_NULL, "outcome", "success", "branch_outcome", "failure")).isEqualTo("failure");
-        assertThat(outcomeOf(CARRIED_NULL, "outcome", "failure", "branch_outcome", "success")).isEqualTo("success");
+        assertThat(outcomeOf(CARRIED_NULL, "outcome", "failure", "branch_outcome", "success"))
+            .as("a per-sha failure is not overridden").isEqualTo("failure");
+    }
+
+    // ── a carried list the engine can check itself (branch_outcome absent) ──
+
+    private static String carried(String list, String extra) {
+        return "{\"sha\":\"Y\",\"n\":1,\"carried\":" + list + extra + ",\"runs\":[[100,1,\"CI\",\"success\"]]}";
+    }
+
+    @Test
+    void aCarriedListWithAnyNonPassingEntryLeavesAPerShaSuccessNoVerdict() {
+        for (String conclusion : new String[] {"\"failure\"", "\"cancelled\"", "\"timed_out\"", "\"stale\"", "null", "\"bogus\""}) {
+            String body = carried("[[\"Service CI\",7," + conclusion + ",\"X\"]]", "");
+            assertThat(verdictOf(body, "outcome", "success")).as(conclusion).isEmpty();
+            assertThat(DoneVerdict.resolve(row(body, "outcome", "success")).reason()).as(conclusion)
+                .isEqualTo(DoneVerdict.REASON_CARRY_FAILED);
+        }
+        assertThat(verdictOf(carried("[[\"Service CI\",7]]", ""), "outcome", "success")).as("a short entry").isEmpty();
+        assertThat(verdictOf(carried("[[\"A\",1,\"success\",\"X\"],[\"B\",2,\"failure\",\"X\"]]", ""), "outcome", "success"))
+            .as("one bad entry among good ones").isEmpty();
+    }
+
+    @Test
+    void aCarriedListOfPassingEntriesLeavesAPerShaSuccess() {
+        String body = carried("[[\"A\",1,\"success\",\"X\"],[\"B\",2,\"neutral\",\"X\"],[\"C\",3,\"skipped\",\"X\"]]", ",\"carried_n\":3");
+        assertThat(outcomeOf(body, "outcome", "success")).isEqualTo("success");
+    }
+
+    @Test
+    void aTrimmedCarriedListLeavesAPerShaSuccessNoVerdict() {
+        String one = "[[\"Service CI\",7,\"success\",\"X\"]]";
+        assertThat(verdictOf(carried(one, ",\"carried_n\":2"), "outcome", "success")).as("n 2, one listed").isEmpty();
+        assertThat(outcomeOf(carried(one, ",\"carried_n\":1"), "outcome", "success")).as("n equals the list").isEqualTo("success");
+        assertThat(verdictOf(carried("[]", ",\"carried_n\":1"), "outcome", "success")).as("everything trimmed").isEmpty();
+    }
+
+    @Test
+    void aPerShaFailureOrCancelledIsKeptOverABadCarriedList() {
+        String bad = carried("[[\"Service CI\",7,\"failure\",\"X\"]]", ",\"carried_n\":5");
+        assertThat(outcomeOf(bad, "outcome", "failure")).isEqualTo("failure");
+        assertThat(outcomeOf(bad, "outcome", "cancelled")).isEqualTo("cancelled");
+    }
+
+    @Test
+    void aBranchOutcomeIsNotSecondGuessedByTheCarriedList() {
+        String bad = carried("[[\"Service CI\",7,\"failure\",\"X\"]]", ",\"carried_n\":5");
+        assertThat(outcomeOf(bad, "outcome", "success", "branch_outcome", "success")).isEqualTo("success");
+    }
+
+    @Test
+    void aRowOnTheLastLadderRungWithABadCarriedListIsJudgedFromItsBody() {
+        // base dims only: no sha, outcome or branch_outcome dim; the sha and the verdict come from the body
+        Map<String, String> base = new LinkedHashMap<>(Map.of("from", "github", "kind", "sha"));
+        String red = "[[\"Service CI\",7,\"failure\",\"X\"]]";
+        String greenRuns = "[[100,1,\"CI\",\"success\"]]";
+        String redRuns = "[[100,1,\"CI\",\"failure\"]]";
+        assertThat(DoneVerdict.of(new BoardRow("d1", OwnerFixture.T0, base,
+            "{\"sha\":\"Y\",\"n\":1,\"carried\":" + red + ",\"runs\":" + greenRuns + "}", null)))
+            .as("per-sha success over a carried red").isEmpty();
+        assertThat(DoneVerdict.of(new BoardRow("d1", OwnerFixture.T0, base,
+            "{\"sha\":\"Y\",\"n\":1,\"carried\":" + red + ",\"runs\":" + redRuns + "}", null)))
+            .get().extracting(DoneVerdict.Verdict::sha, DoneVerdict.Verdict::outcome).containsExactly("Y", "failure");
+        assertThat(DoneVerdict.of(new BoardRow("d1", OwnerFixture.T0, base,
+            "{\"sha\":\"Y\",\"n\":1,\"runs\":" + greenRuns + "}", null)))
+            .as("no carried key: as today").get().extracting(DoneVerdict.Verdict::outcome).isEqualTo("success");
+    }
+
+    @Test
+    void theReasonNamesWhyThereIsNoCountingVerdict() {
+        assertThat(DoneVerdict.resolve(row(CARRIED_NULL, "outcome", "success")).reason()).isEqualTo(DoneVerdict.REASON_CARRY_FAILED);
+        assertThat(DoneVerdict.resolve(row(ONE_GREEN_RUN, "outcome", "cancelled")).reason()).isEqualTo(DoneVerdict.REASON_CANCELLED);
+        assertThat(DoneVerdict.resolve(row("{\"sha\":\"Y\"}")).reason()).isEqualTo(DoneVerdict.REASON_UNKNOWN);
+        assertThat(DoneVerdict.resolve(row(ONE_GREEN_RUN, "outcome", "success")).reason()).as("a verdict has none").isNull();
+        assertThat(DoneVerdict.resolve(row(ONE_GREEN_RUN, "outcome", "failure")).reason()).isNull();
     }
 
     // ── what the stamper's decision does with it ─────────────────────────────
