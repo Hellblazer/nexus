@@ -77,7 +77,7 @@ public final class NoteUri {
      * {@code nexus.catalog_reconcile_commit} (catalog-049).
      */
     public static Field<String> moveTo(Field<String> uri, String oldColl, String newColl) {
-        if (isFileRoutedCollection(oldColl)) {
+        if (segmentFileRouted(oldColl)) {
             return uri;
         }
         String oldNote = NOTE + oldColl + "/";
@@ -101,7 +101,7 @@ public final class NoteUri {
 
     /** {@link #moveTo(Field, String, String)} on one value, for a pre-check computed outside SQL. */
     public static String moveTo(String uri, String oldColl, String newColl) {
-        if (uri == null || isFileRoutedCollection(oldColl)) {
+        if (uri == null || segmentFileRouted(oldColl)) {
             return uri;
         }
         String prefix = NOTE + oldColl + "/";
@@ -110,7 +110,7 @@ public final class NoteUri {
 
     /** True for a URI that {@link #moveTo} would rewrite out of {@code coll}: exactly its {@code nx-note://} notes. */
     public static Condition namesCollection(Field<String> uri, String coll) {
-        if (isFileRoutedCollection(coll)) {
+        if (segmentFileRouted(coll)) {
             return DSL.falseCondition();
         }
         return startsWith(uri, DSL.val(NOTE + coll + "/"));
@@ -185,7 +185,19 @@ public final class NoteUri {
 
     private static boolean fileRouted(String afterScheme) {
         int slash = afterScheme.indexOf('/');
-        String segment = slash < 0 ? afterScheme : afterScheme.substring(0, slash);
+        return segmentFileRouted(slash < 0 ? afterScheme : afterScheme.substring(0, slash));
+    }
+
+    /**
+     * The URI-segment test of {@link #isNote}: the segment opens with a frozen file-routed prefix. {@link #moveTo} and
+     * {@link #namesCollection} use this, not {@link #isFileRoutedCollection}: the old collection IS the URI's segment
+     * ({@code nx-note://<old>/}), so they classify exactly what {@code isNote} classifies, and they do not move with the
+     * live-collection test that RDR-229 P2.9 repoints to the registry row's content type.
+     */
+    private static boolean segmentFileRouted(String segment) {
+        if (segment == null) {
+            return false;
+        }
         for (String p : FILE_ROUTED_PREFIXES) {
             if (segment.startsWith(p)) {
                 return true;
