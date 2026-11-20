@@ -73,7 +73,7 @@ unsure whether a new document belongs to an existing subject, it does.
 
 ## Rule 3: type the subject, never the machinery
 
-Give the bare subject and let the catalog render the rest:
+Give the bare subject and let the catalog do the rest:
 
 ```bash
 nx store put paper.md --collection distributed-systems
@@ -81,32 +81,50 @@ nx index md notes/overview.md --collection vector-search
 nx index pdf --dir ~/papers/oracles --collection augur-oracle-papers
 ```
 
-`distributed-systems` becomes `knowledge__distributed-systems__<model>__v1`
-on your install, with the model your install actually embeds with. Never
-type the four-segment form, a model token, or a version yourself. A name
-that encodes a model the install does not use is exactly how local
+`distributed-systems` is a subject, not a collection name. `nx` looks the
+collection up by its attributes: content type `knowledge`, owner
+`distributed-systems`, and the embedding model your install actually embeds
+with (RDR-229 item 5). If no collection has those attributes, `nx`
+registers one with them, and the engine gives it a label.
+
+**A collection is a registry row, and its name is a label.** Each
+collection has a `collection_id`, a number the engine assigns and never
+reuses, and every table that belongs to a collection points at that id. The
+row also holds the attributes: content type, owner, embedding model, model
+version, dimension and lifecycle state. The name is only a label: the string
+you type and read in a command. Nothing is decided from it. Which model
+embeds a collection, which content type it is and whether it is quarantined
+are read from the row, never from the label.
+
+**New collections get a minted label.** When `nx` registers a collection,
+the engine sets its label to `c` followed by its id (`c4812`). The label
+says nothing about the collection; listings show the attributes beside it
+(`nx collection list`, `nx catalog show`). Collections created before this
+change keep their old four-segment names
+(`knowledge__distributed-systems__voyage-context-3__v1`) as labels; those
+names are no longer parsed for meaning either.
+
+**A label is unique among a tenant's live collections.** Two live
+collections cannot answer to one label, so a label in a command names one
+collection. A superseded collection keeps its label for history and
+releases it for reuse. To give a collection a readable label, rename it:
+
+```bash
+nx collection rename c4812 distributed-systems-papers
+```
+
+A rename changes one row; the collection's id, chunks and catalog documents
+stay where they are. A label may be any non-empty UTF-8 string without
+control characters, up to 255 bytes, except the minted form `c<digits>`,
+which only the engine assigns.
+
+Never type a four-segment name, a model token or a version to create a
+collection. A name that encoded a model the install did not use is how local
 collections once ended up labelled with a model that never embedded them
-(GH #667, RDR-109). RDR-204 is retiring the encoded name as an authority
-altogether; a name you type by hand today is a name that has to be
-migrated tomorrow.
+(GH #667, RDR-109). With the subject alone, `nx` finds or creates the right
+collection for the model it embeds with.
 
 Subject names are lowercase, hyphen-separated, two or three words, ASCII.
-The owner segment of the four-segment name (and of the grandfathered
-two-segment form) admits letters, digits, hyphens, and a SINGLE underscore
-between two such tokens — `[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*` — never a bare
-`__`, which stays reserved, unconditionally, for the segment separator. The
-engine's attribute-backfill walk (`hygiene-004-owner-grammar-underscore.xml`'s
-`hygiene-004-1`) and the Java test helper that seeds fixtures against it
-(`PgContainerHelper`'s `CONFORMANT_COLLECTION_NAME` /
-`CONFORMANT_QUARANTINE_COLLECTION_NAME`) both use exactly this grammar
-(nexus-ztafa). The client's own collection-name PARSING functions
-(`is_conformant_collection_name` / `parse_conformant_collection_name` in
-`src/nexus/corpus.py`) admit the same single-underscore owner: both match
-against `_CONFORMANT_COLLECTION_RE`, whose owner group is
-`_OWNER_SEGMENT_RE` — the identical grammar, one symbol, widened by
-nexus-ft04v.26. `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` stays a
-separate, whole-string ChromaDB shape check with no owner-segment
-concept; it is not the parser these two functions use.
 
 The `owner_id` column is not the name's owner segment for a repo
 collection (nexus-6pbwx). A collection's owner is its source, set once at
