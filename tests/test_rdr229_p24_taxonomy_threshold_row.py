@@ -133,9 +133,9 @@ class _Taxonomy:
         self.projected.append((source, round(threshold, 2)))
         return {"matched_topics": [], "novel_chunks": [], "total_chunks": 0, "chunk_assignments": []}
 
-    def prune_projection_below(self, prefix: str, thr: float, *, exact: bool = False) -> int:
+    def prune_projection_below(self, prefix: str, thr: float, *, exact: bool = False) -> tuple[int, str | None]:
         self.pruned.append((prefix, round(thr, 2)))
-        return 1
+        return 1, ("exact" if exact else "prefix")
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, distinct: list[str]) -> _Taxonomy:
@@ -338,9 +338,28 @@ def test_prune_projection_below_posts_match_exact_only_when_asked() -> None:
     bodies: list[dict] = []
     store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
     store._post = lambda path, body, **_kw: bodies.append(body) or {"removed": 3}  # type: ignore[method-assign]
-    assert store.prune_projection_below("code__x", 0.7) == 3
-    assert store.prune_projection_below("code__x", 0.7, exact=True) == 3
+    assert store.prune_projection_below("code__x", 0.7) == (3, None), "an engine without the echo: mode None"
+    assert store.prune_projection_below("code__x", 0.7, exact=True) == (3, None)
     assert bodies == [
         {"source_collection_prefix": "code__x", "min_similarity": 0.7},
         {"source_collection_prefix": "code__x", "min_similarity": 0.7, "match": "exact"},
     ]
+
+
+@pytest.mark.parametrize(
+    "reply, expected",
+    [
+        ({"removed": 3, "match": "exact"}, (3, "exact")),
+        ({"removed": 3, "match": "prefix"}, (3, "prefix")),
+        ({"removed": 3}, (3, None)),
+        ({"removed": 3, "match": 7}, (3, None)),
+        ({}, (0, None)),
+    ],
+    ids=["exact", "prefix", "absent", "non-string", "empty"],
+)
+def test_prune_projection_below_returns_the_echoed_mode_beside_the_count(reply, expected) -> None:
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+
+    store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+    store._post = lambda path, body, **_kw: reply  # type: ignore[method-assign]
+    assert store.prune_projection_below("code__x", 0.7, exact=True) == expected
