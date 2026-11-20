@@ -6945,7 +6945,7 @@ class HttpVectorClient:
     def find_collection(self, content_type: str, owner_id: str, embedding_model: str) -> Any:
         """The catalog row registered for ``(content_type, owner_id, embedding_model)``
         in THIS client's tenant, as
-        :class:`~nexus.catalog.collection_attributes.CollectionAttributes`, or
+        :class:`~nexus.catalog.collection_name.CollectionAttributes`, or
         ``None`` when no row backs the tuple (RDR-229 P2.8).
 
         The read goes through the process's catalog reader, whose tenant is
