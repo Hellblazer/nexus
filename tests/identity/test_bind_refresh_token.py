@@ -206,12 +206,13 @@ class _Clocks:
 REFUSED = IdentityApiError(403, "identity_token_required", "a live identity token is required", {"error": "identity_token_required"})
 
 
-def _lease(tmp_path: Path, clocks: _Clocks, *, with_mono: bool = True) -> tuple[IdentityLease, _Engine, FakeProcesses]:
+def _lease(tmp_path: Path, clocks: _Clocks, *, with_mono: bool = True,
+           fork_grace: bool = False) -> tuple[IdentityLease, _Engine, FakeProcesses]:
     procs = FakeProcesses(tmp_path / "sessions")
     procs.start(100, T0, started_at=100_000, session_id="sid-1")
     engine = _Engine()
     extra: dict[str, Any] = {"monotonic": lambda: clocks.mono} if with_mono else {}
-    lease = IdentityLease(client_factory=lambda: engine, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
+    lease = IdentityLease(fork_grace=fork_grace, client_factory=lambda: engine, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
                           clock=lambda: clocks.wall, client_version="1", sleep=lambda s: None, **extra)
     return lease, engine, procs
 
@@ -223,6 +224,33 @@ def _path(tmp_path: Path) -> Path:
 def _file(tmp_path: Path, token: str | None, expires_at: float | None, generation: int = 1) -> None:
     write_token_file(_path(tmp_path), TokenFile(identity="i1", generation=generation, token=token, expires_at=expires_at,
                                                 session_id="sid-1", pid=100, started_at=100_000, proc_start=T0))
+
+
+def test_an_unknown_session_id_gets_one_renewal_of_grace_before_its_fork_row(tmp_path: Path) -> None:
+    """Develop run 44659989781: on /clear the registry names the new id before the hook binds it. The renewal that
+    first sees an unknown id sends nothing; one the hook bound in between never forks; a /branch id still unknown
+    at the next renewal gets its fork row then."""
+    clocks = _Clocks()
+    lease, engine, procs = _lease(tmp_path, clocks, fork_grace=True)
+    _file(tmp_path, "tok-0", expires_at=clocks.wall + 3_600)
+    known: set[str] = set()
+
+    def session(sid: str) -> dict[str, Any]:
+        if sid in known:
+            return {"session_id": sid}
+        raise IdentityApiError(404, "unknown_session", "no", {})
+    engine.session = session  # type: ignore[method-assign]
+    procs.write_registry(100, 100_000, T0, session_id="clear-sid")       # /clear: the registry first
+    clocks.advance(HEARTBEAT_S)
+    assert not lease.tick().forked, "the renewal in the gap waits for the hook"
+    known.add("clear-sid")                                                # the hook binds it
+    clocks.advance(HEARTBEAT_S)
+    assert not lease.tick().forked and engine.count("fork") == 0
+    procs.write_registry(100, 100_000, T0, session_id="branch-sid")      # /branch: no hook ever binds it
+    clocks.advance(HEARTBEAT_S)
+    assert not lease.tick().forked
+    clocks.advance(HEARTBEAT_S)
+    assert lease.tick().forked and engine.count("fork") == 1, "still unknown at the next renewal: the fork row"
 
 
 def test_the_lease_refresh_and_fork_carry_the_token_being_refreshed(tmp_path: Path) -> None:

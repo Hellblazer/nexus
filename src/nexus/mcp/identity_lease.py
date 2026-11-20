@@ -126,7 +126,8 @@ class IdentityLease:
     def __init__(self, *, client_factory: Callable[[], Any], config_dir: Path, claude_pid: int,
                  procs: Processes | Any | None = None, clock: Callable[[], float] = time.time,
                  client_version: str | None = None, sleep: Callable[[float], None] = time.sleep,
-                 close_client: bool = False, monotonic: Callable[[], float] | None = None) -> None:
+                 close_client: bool = False, monotonic: Callable[[], float] | None = None,
+                 fork_grace: bool = True) -> None:
         self._factory = client_factory
         self._idir = identity_dir(config_dir)
         self._claude_pid = claude_pid
@@ -135,6 +136,7 @@ class IdentityLease:
         self._sleep = sleep
         self._version = client_version
         self._close_client = close_client
+        self._fork_grace = fork_grace             # one renewal of grace before a fork row (False: fork at first sight)
         self._client: Any = None
         self._lock = threading.RLock()
         self._tick_lock = threading.Lock()
@@ -439,7 +441,7 @@ class IdentityLease:
         except IdentityApiError as exc:
             if exc.status != 404:
                 raise
-        if self._unknown_sid != sid:
+        if self._fork_grace and self._unknown_sid != sid:
             # One renewal of grace (develop run 44659989781): on /clear Claude writes the new id into its registry file
             # before the SessionStart hook binds it, and a fork row sent in that gap doubled the /clear's row. A /branch
             # runs no hook, so its id is still unknown at the next renewal and gets its fork row then.

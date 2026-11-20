@@ -39,7 +39,7 @@ def _setup(tmp_path: Path, now: list[float]) -> tuple[IdentityLease, _Engine, Fa
     procs = FakeProcesses(tmp_path / "sessions")
     procs.start(100, T0, started_at=100_000, session_id="sid-1")
     engine = _Engine()
-    lease = IdentityLease(client_factory=lambda: engine, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
+    lease = IdentityLease(fork_grace=False, client_factory=lambda: engine, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
                           clock=lambda: now[0], client_version="1", sleep=lambda s: None)
     return lease, engine, procs
 
@@ -227,7 +227,7 @@ def test_the_lease_reuses_one_engine_client_closes_it_on_shutdown_and_rebuilds_a
         made.append(_Client())
         return made[-1]
 
-    lease = IdentityLease(client_factory=factory, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
+    lease = IdentityLease(fork_grace=False, client_factory=factory, config_dir=tmp_path / "config", claude_pid=100, procs=procs,
                           clock=lambda: now[0], client_version="1", sleep=lambda s: None, close_client=True)
     _file(tmp_path, "tok-0", expires_at=now[0] + 3600)
     lease.tick()
