@@ -2284,7 +2284,7 @@
         and does not promise. DATA EFFECT: none. Function definition only. After identity-005, before the grants-nexus-svc.xml
         runAlways block.
     -->
-    <include file="db/changelog/vectors-063-drop-tenant-partitions-lock-order.xml"/>
+    <include file="db/changelog/vectors-064-drop-tenant-partitions-lock-order.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

@@ -86,7 +86,7 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <changeSet id="vectors-063-1" author="folio-droplock">
+    <changeSet id="vectors-064-1" author="folio-droplock">
         <comment>nexus.drop_tenant_partitions looks the tenant's leaves up first (none: returns 0, locks nothing), serializes with other drops, then after its deletes takes ACCESS EXCLUSIVE on the tables around the leaves, the two roots (ONLY) and the tenant's own partitions and leaves, one lock per relation under one deadline per attempt (half of deadlock_timeout, at most 500 ms), repeated up to five times with a 0.2 s x attempt backoff, then lock_not_available (55P03) naming the tenant; the detach loop runs under the same budget. It locks no other tenant's partition or leaf. The locks are held to the caller's COMMIT; a NOTICE reports the attempt and the hold to function return. SECURITY INVOKER, EXECUTE revoked from PUBLIC (kept by CREATE OR REPLACE), no grant. DATA EFFECT: none. A function redefinition only; no row is changed by this changeset.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.drop_tenant_partitions(p_tenant text) RETURNS integer
