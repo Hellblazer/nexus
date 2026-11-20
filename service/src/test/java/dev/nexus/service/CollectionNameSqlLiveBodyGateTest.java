@@ -80,13 +80,26 @@ import java.util.regex.Pattern;
  *   <li>names assembled at run time ({@code EXECUTE format('CREATE FUNCTION ' || ...)}) are invisible; a literal
  *       {@code EXECUTE $f$CREATE OR REPLACE FUNCTION ...$f$} is seen (vectors-031's {@code text_gate_probe_*});</li>
  *   <li>one-shot DML backfills, views, constraints and generated columns that parse a name are out of scope: this
- *       gate covers function bodies only.</li>
+ *       gate covers function bodies only;</li>
+ *   <li>{@code E'\\_\\_'} (a backslash-escaped LIKE written inside an E-string) is not counted: the literal reads {@code
+ *       \_\_} only after the string is unescaped;</li>
+ *   <li>an unqualified name in a {@code DROP FUNCTION} does not fold to {@code nexus.}; and an unqualified {@code CREATE}
+ *       fails the non-vacuity guard instead;</li>
+ *   <li>{@code SQL_BLOCK} also matches {@code <sqlCheck>} (it begins {@code <sql}), so {@code sqlBlocks} in the run line
+ *       is not a true count of {@code <sql>} blocks; it is only compared to zero;</li>
+ *   <li>the {@code QuarantineOrigin} helpers that reach the prefix only through {@code isQuarantineName} or {@code PREFIX}
+ *       inside that class ({@code holdsRowsOf}, {@code countRowsOf}, {@code deleteRowsOf}, {@code retagRowsOf}, {@code
+ *       isLiveRegistered}, {@code deleteQuarantineCollectionRows}) are not callers the Java census counts: the
+ *       reads inside them are counted once, in {@code QuarantineOrigin} itself;</li>
+ *   <li>the type normaliser knows the aliases and multi-word forms in {@link #TYPE_ALIASES} and {@link #KNOWN_MULTIWORD}
+ *       and fails loud on any other whitespace in a type ({@code interval day to second}, a domain with spaces);</li>
+ *   <li>a quoted parameter name is dropped but a quoted TYPE keeps no case.</li>
  * </ul>
  */
 class CollectionNameSqlLiveBodyGateTest {
 
     private static final Path CHANGELOG_DIR = Path.of("src", "main", "resources", "db", "changelog");
-    private static final String MASTER = "db.changelog-master.xml";
+    static final String MASTER = "db.changelog-master.xml";
 
     static final String DUNDER_LITERAL = "dunder-literal";
     static final String QUARANTINE_LITERAL = "quarantine-literal";
@@ -115,6 +128,14 @@ class CollectionNameSqlLiveBodyGateTest {
     /** Floors on the real tree (233 includes and 119 live functions at the first run); a scan below them read too little. */
     static final int INCLUDES_FLOOR = 233;
     static final int LIVE_FUNCTIONS_FLOOR = 100;
+
+    /**
+     * The live functions the real tree resolves to (name plus signature), pinned exactly, with no live overload today: the
+     * key count equals the name count (119). A resolver that stops folding a type spelling or a DEFAULT reads 120 or 146
+     * here (stale signatures that were really dropped), so this pin is what makes the normaliser load-bearing. A function
+     * added or dropped moves it, in the same edit.
+     */
+    static final int LIVE_FUNCTIONS_PIN = 119;
 
     // ── model ───────────────────────────────────────────────────────────
 
@@ -145,24 +166,21 @@ class CollectionNameSqlLiveBodyGateTest {
     private static final Pattern DOLLAR_TAG = Pattern.compile("\\$[A-Za-z_]*\\$");
 
     /**
-     * The master's includes in order. Fails when an {@code <include>} tag is not one the reader can place as a
-     * {@code db/changelog/<file>} (a different path, an {@code includeAll}), so the matched count always equals the tag
-     * count; attributes may come in any order.
+     * The master's includes in order. Every {@code <include>} and {@code <includeAll>} tag either yields a file or fails
+     * the scan (a different path, an {@code includeAll}), so the matched count equals the tag count by construction;
+     * attributes may come in any order.
      */
     static List<String> includes(String masterXml) {
         String xml = XML_COMMENT.matcher(masterXml).replaceAll("");
         Matcher t = INCLUDE_TAG.matcher(xml);
         List<String> out = new ArrayList<>();
-        int tags = 0;
         while (t.find()) {
-            tags++;
             Matcher f = INCLUDE_FILE.matcher(t.group());
             if (!f.find()) {
                 throw new IllegalStateException("an <include> the changelog reader cannot place as db/changelog/<file>: " + t.group());
             }
             out.add(f.group(1));
         }
-        if (out.size() != tags) throw new IllegalStateException("matched " + out.size() + " includes of " + tags + " <include> tags");
         return out;
     }
 
@@ -278,40 +296,76 @@ class CollectionNameSqlLiveBodyGateTest {
     private static final java.util.Set<String> MODES = java.util.Set.of("in", "out", "inout", "variadic");
     /** First words of multi-word type names: an argument that starts with one is an unnamed type. */
     private static final java.util.Set<String> MULTIWORD_TYPE_START =
-        java.util.Set.of("double", "character", "timestamp", "time", "bit", "national", "interval");
+        java.util.Set.of("double", "character", "char", "timestamp", "time", "bit", "national", "interval");
+    /** The multi-word type names left after folding; any other whitespace in a normalised type fails loud. */
+    private static final java.util.Set<String> KNOWN_MULTIWORD = java.util.Set.of(
+        "double precision", "character varying", "bit varying", "timestamp with time zone", "time with time zone");
     private static final Map<String, String> TYPE_ALIASES = Map.ofEntries(
         Map.entry("int", "integer"), Map.entry("int4", "integer"), Map.entry("int8", "bigint"),
         Map.entry("int2", "smallint"), Map.entry("bool", "boolean"), Map.entry("float8", "double precision"),
         Map.entry("float4", "real"), Map.entry("float", "double precision"), Map.entry("varchar", "character varying"),
-        Map.entry("timestamptz", "timestamp with time zone"), Map.entry("timetz", "time with time zone"),
-        Map.entry("decimal", "numeric"), Map.entry("bpchar", "character"));
+        Map.entry("char varying", "character varying"), Map.entry("char", "character"), Map.entry("bpchar", "character"),
+        Map.entry("varbit", "bit varying"), Map.entry("timestamptz", "timestamp with time zone"),
+        Map.entry("timetz", "time with time zone"), Map.entry("timestamp without time zone", "timestamp"),
+        Map.entry("time without time zone", "time"), Map.entry("decimal", "numeric"));
     private static final Pattern TYPE_MODIFIER = Pattern.compile("\\(\\s*\\d+(?:\\s*,\\s*\\d+)?\\s*\\)");
+    private static final Pattern FLOAT_PRECISION = Pattern.compile("(?i)\\bfloat\\s*\\(\\s*(\\d+)\\s*\\)");
+    private static final Pattern DEFAULT_CLAUSE = Pattern.compile("(?i)(?:^|\\s+)default(?:\\s+|$)|\\s*:?=\\s*");
+    private static final Pattern QUOTED_NAME_THEN_TYPE = Pattern.compile("^\"(?:[^\"]|\"\")*\"\\s+(.+)$", Pattern.DOTALL);
 
-    /** One type name, lower-case, whitespace-collapsed, length modifiers dropped, {@code pg_catalog.}, {@code public.} and {@code nexus.} schema qualifiers dropped, aliases folded. */
+    /** {@code float(n)} is {@code real} up to 24 bits and {@code double precision} above: folded before modifiers are dropped. */
+    private static String foldFloat(String lowerCase) {
+        return FLOAT_PRECISION.matcher(lowerCase).replaceAll(m -> Integer.parseInt(m.group(1)) <= 24 ? "real" : "double precision");
+    }
+
+    /**
+     * One type name, lower-case, whitespace-collapsed, length modifiers dropped, {@code pg_catalog.}, {@code public.} and
+     * {@code nexus.} schema qualifiers dropped, array spellings ({@code ARRAY}, {@code [3]}, {@code [][]}) folded to
+     * one {@code []}, aliases folded. Fails loud on a type that is empty or still holds whitespace outside {@link
+     * #KNOWN_MULTIWORD}: an identity that cannot be reduced is never guessed.
+     */
     static String normType(String raw) {
-        String t = TYPE_MODIFIER.matcher(raw.toLowerCase()).replaceAll("").replaceAll("\\s+", " ").trim();
+        String t = foldFloat(raw.toLowerCase());
+        t = TYPE_MODIFIER.matcher(t).replaceAll("").replaceAll("\\s+", " ").trim();
         // The vector type was created unqualified (vectors-007) and later written nexus.vector (vectors-055): one type.
         t = t.replace("pg_catalog.", "").replace("public.", "").replace("nexus.", "");
-        boolean array = t.endsWith("[]");
-        if (array) t = t.substring(0, t.length() - 2).trim();
+        boolean array = t.matches(".*(?:\\s+array\\s*(?:\\[\\s*\\d*\\s*])?|(?:\\[\\s*\\d*\\s*])+)$");
+        if (array) t = t.replaceAll("(?:\\s+array\\s*(?:\\[\\s*\\d*\\s*])?|(?:\\[\\s*\\d*\\s*])+)$", "").trim();
         t = TYPE_ALIASES.getOrDefault(t, t);
+        if (t.isEmpty()) throw new IllegalStateException("an argument that normalises to an empty type: '" + raw + "'");
+        if (t.contains(" ") && !KNOWN_MULTIWORD.contains(t)) {
+            throw new IllegalStateException("an argument type the normaliser cannot reduce (whitespace outside the known multi-word types): '"
+                + raw + "' -> '" + t + "'");
+        }
         return array ? t + "[]" : t;
     }
 
     /**
      * The identity of an argument list: the input types in order, {@code (t1,t2,...)}. Accepts {@code CREATE}'s
-     * {@code [mode] [name] type [DEFAULT ...]} and {@code DROP}'s bare types alike; {@code OUT} arguments are not part
-     * of the identity.
+     * {@code [mode] [name] type [DEFAULT ...]} and {@code DROP}'s bare types alike. {@code OUT} arguments are not part
+     * of the identity; {@code IN OUT}, {@code INOUT} and {@code VARIADIC} are; a quoted parameter name is dropped. An
+     * argument it cannot reduce throws, so a signature never silently collapses to {@code ()}.
      */
     static String signature(String argList) {
         List<String> types = new ArrayList<>();
         for (String arg : topLevel(argList)) {
-            Matcher d = Pattern.compile("(?i)\\s+default\\s+|\\s*=\\s*").matcher(arg);
+            Matcher d = DEFAULT_CLAUSE.matcher(arg);
             String a = (d.find() ? arg.substring(0, d.start()) : arg).trim();
+            Matcher q = QUOTED_NAME_THEN_TYPE.matcher(a);
+            if (q.matches()) a = q.group(1).trim();
             List<String> tokens = new ArrayList<>(List.of(a.split("\\s+")));
-            if (tokens.get(0).isEmpty()) continue;
-            String mode = MODES.contains(tokens.get(0).toLowerCase()) ? tokens.remove(0).toLowerCase() : "in";
-            if (mode.equals("out") || tokens.isEmpty()) continue;
+            if (tokens.get(0).isEmpty()) throw new IllegalStateException("an empty argument in the list '" + argList + "'");
+            String mode = "in";
+            if (tokens.size() >= 2 && tokens.get(0).equalsIgnoreCase("in") && tokens.get(1).equalsIgnoreCase("out")) {
+                tokens.remove(0);
+                tokens.set(0, "inout");
+            }
+            if (MODES.contains(tokens.get(0).toLowerCase())) mode = tokens.remove(0).toLowerCase();
+            if (tokens.isEmpty()) throw new IllegalStateException("an argument with a mode and no type: '" + arg + "'");
+            if (mode.equals("out")) continue;
+            // Type modifiers go before the name test: "numeric (10, 2)" must not read numeric as the name.
+            String rest = TYPE_MODIFIER.matcher(foldFloat(String.join(" ", tokens).toLowerCase())).replaceAll("");
+            tokens = new ArrayList<>(List.of(rest.trim().split("\\s+")));
             if (tokens.size() >= 2 && !MULTIWORD_TYPE_START.contains(tokens.get(0).toLowerCase())
                     && !tokens.get(0).contains(".") && !tokens.get(0).contains("(")) {
                 tokens.remove(0);  // the parameter name
@@ -573,6 +627,10 @@ class CollectionNameSqlLiveBodyGateTest {
             + " liveNames=" + names + " expressions=" + total + " functionsWithExpressions="
             + actual.keySet().stream().map(k -> k.substring(0, k.indexOf('|'))).distinct().count() + " census=" + actual);
 
+        assertThat(overloaded).as("no live overloads today: a name with two live signatures means a DROP or a CREATE was not matched, "
+            + "or a real overload arrived (then pin it and say so)").isEmpty();
+        assertThat(r.live.size()).as("live keys equal live names").isEqualTo((int) names);
+        assertThat(r.live.size()).as("LIVE_FUNCTIONS_PIN: the exact live function count").isEqualTo(LIVE_FUNCTIONS_PIN);
         assertThat(checkCensus(actual, NAME_PARSING_CENSUS))
             .as("RDR-229 item 4: live plpgsql bodies that parse a collection name. REGRESSION = a new site; "
                 + "STALE FINGERPRINT = a site removed without lowering the pin")
@@ -581,290 +639,5 @@ class CollectionNameSqlLiveBodyGateTest {
             .as("NAME_PARSING_TOTAL_CEILING equals the declared census: lowered in the same edit as any reduction")
             .isEqualTo(NAME_PARSING_TOTAL_CEILING);
         assertThat(total).as("the scanned total equals the ceiling").isEqualTo(NAME_PARSING_TOTAL_CEILING);
-    }
-
-    // ── falsification: the detector must actually detect ────────────────
-
-    private static String changelog(String sql, String rollbackSql) {
-        return "<databaseChangeLog><changeSet id=\"x\" author=\"y\">"
-            + "<sql splitStatements=\"false\"><![CDATA[" + sql + "]]></sql>"
-            + (rollbackSql == null ? "<rollback/>"
-                : "<rollback><sql><![CDATA[" + rollbackSql + "]]></sql></rollback>")
-            + "</changeSet></databaseChangeLog>";
-    }
-
-    private static String fn(String name, String expr) {
-        return "CREATE OR REPLACE FUNCTION " + name + "(p text) RETURNS text LANGUAGE plpgsql AS $$\n"
-            + "BEGIN RETURN " + expr + "; END $$;";
-    }
-
-    private static Resolution resolve(Map<String, String> files) {
-        return resolveLive(new ArrayList<>(files.keySet()), files::get);
-    }
-
-    @Test
-    void aLaterDefinitionReplacesTheEarlierBody_inBothDirections() {
-        var oldHasParse = new java.util.LinkedHashMap<String, String>();
-        oldHasParse.put("a.xml", changelog(fn("nexus.f", "split_part(p, '__', 3)"), null));
-        oldHasParse.put("b.xml", changelog(fn("nexus.f", "p"), null));
-        Resolution r = resolve(oldHasParse);
-        assertThat(r.live.get("nexus.f(text)").file()).isEqualTo("b.xml");
-        assertThat(census(r.live)).as("the old body is not live").isEmpty();
-
-        var newHasParse = new java.util.LinkedHashMap<String, String>();
-        newHasParse.put("a.xml", changelog(fn("nexus.f", "p"), null));
-        newHasParse.put("b.xml", changelog(fn("nexus.f", "split_part(p, '__', 3)"), null));
-        assertThat(census(resolve(newHasParse).live)).containsExactly(Map.entry("nexus.f|" + DUNDER_LITERAL, 1));
-    }
-
-    @Test
-    void aBodyInsideARollbackBlockIsNotLive() {
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml", changelog(fn("nexus.f", "p"), fn("nexus.f", "split_part(p, '__', 3)")));
-        files.put("b.xml", changelog(fn("nexus.g", "p"), null));  // <rollback/> self-closing
-        Resolution r = resolve(files);
-        assertThat(census(r.live)).as("the rollback copy of a body is the OLD body, never counted").isEmpty();
-        assertThat(r.live.get("nexus.f(text)").text()).doesNotContain("split_part");
-    }
-
-    @Test
-    void aDroppedFunctionIsNotLive_andRecreatingItBringsItBack() {
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml", changelog(fn("nexus.f", "split_part(p, '__', 3)"), null));
-        files.put("b.xml", changelog("DROP FUNCTION IF EXISTS nexus.f(text);", null));
-        Resolution dropped = resolve(files);
-        assertThat(dropped.live).isEmpty();
-        assertThat(census(dropped.live)).isEmpty();
-
-        files.put("c.xml", changelog(fn("nexus.f", "string_to_array(p, '__')"), null));
-        assertThat(census(resolve(files).live)).containsExactly(Map.entry("nexus.f|" + DUNDER_LITERAL, 1));
-    }
-
-    @Test
-    void theTwoShapesCount_andLookalikesDoNot() {
-        String body = fn("nexus.f",
-            "split_part(p, '__', 3) || split_part(lower(p), '__', 1) || split_part(p, ',', 1)"
-            + " || (string_to_array(p, '__'))[1] || string_to_array(p, ',')::text"
-            + " || CASE WHEN starts_with(p, 'quarantine-') THEN 'quarantine-%' ELSE 'quarantine' END");
-        Map<String, Integer> found = expressions(blankSqlComments(body));
-        assertThat(found).containsEntry(DUNDER_LITERAL, 3).containsEntry(QUARANTINE_LITERAL, 2);
-    }
-
-    @Test
-    void commentedOutExpressionsAreNotCounted_andADashDashInAStringDoesNotEatTheCode() {
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml",
-            "<databaseChangeLog><!-- <sql>CREATE FUNCTION nexus.ghost() split_part(x,'__',1)</sql> -->"
-            + "<changeSet id=\"x\"><sql><![CDATA["
-            + "-- split_part(p, '__', 3) in a line comment\n"
-            + "/* string_to_array(p, '__') in a block comment */\n"
-            + "CREATE OR REPLACE FUNCTION nexus.f(p text) RETURNS text LANGUAGE plpgsql AS $$\n"
-            + "BEGIN -- 'quarantine-' in a trailing comment\n"
-            + "RETURN '--' || split_part(p, '__', 2); END $$;"
-            + "]]></sql></changeSet></databaseChangeLog>");
-        Resolution r = resolve(files);
-        assertThat(r.live.values().stream().map(Live::name)).doesNotContain("nexus.ghost");
-        assertThat(census(r.live)).containsExactly(Map.entry("nexus.f|" + DUNDER_LITERAL, 1));
-    }
-
-    @Test
-    void aFunctionBodyEndsAtItsDollarQuote_soTheNextStatementIsNotItsText() {
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml", changelog(fn("nexus.f", "p")
-            + "\nCREATE TABLE nexus.t AS SELECT split_part(name, '__', 3) FROM nexus.catalog_collections;", null));
-        assertThat(census(resolve(files).live)).as("a statement after the function is not part of its body").isEmpty();
-    }
-
-    @Test
-    void aNewExpressionBeyondThePin_failsAsRegression() {
-        Map<String, Integer> actual = Map.of("nexus.f|" + DUNDER_LITERAL, 3);
-        Map<String, Integer> declared = Map.of("nexus.f|" + DUNDER_LITERAL, 2);
-        assertThat(checkCensus(actual, declared)).anyMatch(v -> v.contains("REGRESSION"));
-        assertThat(checkCensus(Map.of("nexus.new_fn|" + QUARANTINE_LITERAL, 1), Map.of()))
-            .as("a function the census has never seen").anyMatch(v -> v.contains("REGRESSION"));
-    }
-
-    @Test
-    void anExpressionRemovedWithoutLoweringThePin_failsAsStaleFingerprint() {
-        Map<String, Integer> actual = Map.of("nexus.f|" + DUNDER_LITERAL, 1);
-        Map<String, Integer> declared = Map.of("nexus.f|" + DUNDER_LITERAL, 2);
-        assertThat(checkCensus(actual, declared)).anyMatch(v -> v.contains("STALE FINGERPRINT"));
-        assertThat(checkCensus(Map.of(), declared)).as("the function itself is gone").anyMatch(v -> v.contains("STALE FINGERPRINT"));
-    }
-
-    @Test
-    void anEmptyScanFails_andSoDoesAMisresolvedLastDefiner() {
-        assertThatThrownBy(() -> assertNonVacuous(resolve(Map.of()), Map.of(), 1, 1))
-            .as("no includes, no blocks, no functions").isInstanceOf(AssertionError.class);
-
-        var empty = new java.util.LinkedHashMap<String, String>();
-        empty.put("a.xml", "<databaseChangeLog/>");
-        assertThatThrownBy(() -> assertNonVacuous(resolve(empty), Map.of(), 1, 1))
-            .as("an include with no forward <sql> is a scan that found nothing").isInstanceOf(AssertionError.class);
-
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml", changelog(fn("nexus.f", "p"), null));
-        files.put("b.xml", changelog(fn("nexus.f", "p"), null));
-        assertNonVacuous(resolve(files), Map.of("nexus.f", "b.xml"), 1, 1);
-        assertThatThrownBy(() -> assertNonVacuous(resolve(files), Map.of("nexus.f", "a.xml"), 1, 1))
-            .as("the last definer is b.xml, so a pin naming a.xml is a misresolution").isInstanceOf(AssertionError.class);
-        assertThatThrownBy(() -> assertNonVacuous(resolve(files), Map.of("nexus.missing", "a.xml"), 1, 1))
-            .as("a required function that is not live fails").isInstanceOf(AssertionError.class);
-    }
-
-    // ── RDR-229 P1.3 review round 1 ─────────────────────────────────────
-
-    private static int total(Map<String, Integer> c) {
-        return c.values().stream().mapToInt(Integer::intValue).sum();
-    }
-
-    private static String fnWith(String name, String args, String expr) {
-        return "CREATE OR REPLACE FUNCTION " + name + "(" + args + ") RETURNS text LANGUAGE plpgsql AS $$\n"
-            + "BEGIN RETURN " + expr + "; END $$;";
-    }
-
-    private static Resolution one(String sql) {
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml", changelog(sql, null));
-        return resolve(files);
-    }
-
-    @Test
-    void overloads_areSeparateLiveFunctions_andOneReplacementLeavesTheOther() {
-        String both = fnWith("nexus.f", "p integer", "split_part('a', '__', 1)") + "\n"
-            + fnWith("nexus.f", "p text", "split_part('a', '__', 2)");
-        Resolution r = one(both);
-        assertThat(r.live).as("two overloads of one name").hasSize(2);
-        assertThat(total(census(r.live))).as("each overload's expression counts").isEqualTo(2);
-
-        Resolution replaced = one(both + "\n" + fnWith("nexus.f", "q integer", "q::text"));
-        assertThat(replaced.live).hasSize(2);
-        assertThat(total(census(replaced.live))).as("CREATE OR REPLACE of the integer overload leaves the text one").isEqualTo(1);
-    }
-
-    @Test
-    void aDropNamesItsArgumentList_soOnlyThatOverloadGoes() {
-        String both = fnWith("nexus.f", "p integer", "split_part('a', '__', 1)") + "\n"
-            + fnWith("nexus.f", "p text", "split_part('a', '__', 2)");
-        Resolution r = one(both + "\nDROP FUNCTION nexus.f(integer);");
-        assertThat(r.live).hasSize(1);
-        assertThat(total(census(r.live))).isEqualTo(1);
-
-        assertThat(one(both + "\nDROP FUNCTION IF EXISTS nexus.f(p text);").live).as("a named argument in the DROP").hasSize(1);
-        assertThat(one(both + "\nDROP FUNCTION nexus.f;").live).as("no argument list drops every overload").isEmpty();
-        assertThat(one(both + "\nDROP FUNCTION nexus.f(bigint);").live).as("a signature nothing has drops nothing").hasSize(2);
-    }
-
-    @Test
-    void oneDropStatementCanNameSeveralFunctions() {
-        String sql = fnWith("nexus.a", "p integer", "split_part('a', '__', 1)") + "\n"
-            + fnWith("nexus.b", "p int", "split_part('a', '__', 1)") + "\n"
-            + fnWith("nexus.c", "p int", "split_part('a', '__', 1)") + "\n"
-            + "DROP FUNCTION nexus.a(int), nexus.b(integer);";
-        Resolution r = one(sql);
-        assertThat(r.live.values().stream().map(Live::name)).containsExactly("nexus.c");
-    }
-
-    @Test
-    void aDropByTypesMatchesACreateByNamedParameters_theWayVectors055DoesForSearchAspectScoped() {
-        String create = fnWith("nexus.s", "p_query nexus.vector, p_collections text[], p_min double precision, p_n integer, p_tenant text",
-            "split_part('a', '__', 1)");
-        assertThat(one(create).live).hasSize(1);
-        assertThat(one(create + "\nDROP FUNCTION IF EXISTS nexus.s(nexus.vector,text[],double precision,integer,text);").live)
-            .as("the exact signature drops it").isEmpty();
-        assertThat(one(create + "\nDROP FUNCTION IF EXISTS nexus.s(nexus.vector,text[],double precision,integer);").live)
-            .as("one argument short is a different function: it stays live").hasSize(1);
-        assertThat(one(create + "\nDROP FUNCTION IF EXISTS nexus.s(nexus.vector, text[], float8, int, varchar(10));").live)
-            .as("type aliases: float8 = double precision, int = integer; varchar is not text, so it stays").hasSize(1);
-        assertThat(one(create + "\nDROP FUNCTION IF EXISTS nexus.s(nexus.vector, text[], float8, int, text);").live)
-            .as("type aliases: float8 = double precision, int = integer").isEmpty();
-    }
-
-    private static int bodyCount(String expr) {
-        return total(census(one(fnWith("nexus.f", "p text", expr)).live));
-    }
-
-    @Test
-    void everyDunderRespellingCounts_notOnlyInsideSplitPartOrStringToArray() {
-        assertThat(bodyCount("split_part(p, $x$__$x$, 3)")).as("a dollar-quoted separator").isEqualTo(1);
-        assertThat(bodyCount("string_to_table(p, '__')::text")).as("string_to_table").isEqualTo(1);
-        assertThat(bodyCount("(regexp_split_to_array(p, '__'))[1]")).as("regexp_split_to_array").isEqualTo(1);
-        assertThat(bodyCount("strpos(p, '__')::text")).as("strpos").isEqualTo(1);
-        assertThat(bodyCount("position('__' in p)::text")).as("position").isEqualTo(1);
-        assertThat(bodyCount("CASE WHEN p LIKE '%\\_\\_%' THEN p END")).as("an escaped LIKE").isEqualTo(1);
-        assertThat(bodyCount("CASE WHEN p LIKE 'code__%' THEN p END")).as("a content-type prefix literal").isEqualTo(1);
-        assertThat(bodyCount("CASE WHEN p LIKE ANY (ARRAY['rdr__%', 'docs__%']) THEN p END")).as("two prefix literals").isEqualTo(2);
-        assertThat(bodyCount("p || '_' || '_'")).as("an assembled separator").isEqualTo(1);
-        assertThat(bodyCount("repeat('_', 2)")).as("repeat('_', n)").isEqualTo(1);
-        assertThat(bodyCount("p || 'a_b'")).as("a single underscore is not a separator").isZero();
-
-        String declared = "CREATE OR REPLACE FUNCTION nexus.g(p text) RETURNS text LANGUAGE plpgsql AS $$\n"
-            + "DECLARE v_sep text := '__';\nBEGIN RETURN p; END $$;";
-        assertThat(total(census(one(declared).live))).as("a separator held in a variable").isEqualTo(1);
-    }
-
-    @Test
-    void aLabelThatMerelyContainsTheWord_isNotAQuarantinePrefix() {
-        assertThat(bodyCount("'gc-quarantine-orphans'")).as("an audit label").isZero();
-        assertThat(bodyCount("'quarantine-%'")).as("a LIKE pattern on the prefix").isEqualTo(1);
-    }
-
-    @Test
-    void theOuterBodyQuoteIsNotALiteral_butAnInnerDollarQuotedStringIs() {
-        String text = "CREATE OR REPLACE FUNCTION nexus.f(p text) RETURNS text LANGUAGE plpgsql AS $body$\n"
-            + "BEGIN RETURN split_part(p, $q$__$q$, 1) || $q$quarantine-$q$; END $body$;";
-        assertThat(census(one(text).live).values()).containsExactlyInAnyOrder(1, 1);
-    }
-
-    @Test
-    void theIncludeReader_acceptsAttributesInAnyOrder_andRefusesWhatItCannotRead() {
-        assertThat(includes("<databaseChangeLog><include author=\"a\" file=\"db/changelog/a.xml\" relativeToChangelogFile=\"false\"/>"
-            + "<!-- <include file=\"db/changelog/ghost.xml\"/> --><include file=\"db/changelog/b.xml\"/></databaseChangeLog>"))
-            .containsExactly("a.xml", "b.xml");
-        assertThatThrownBy(() -> includes("<databaseChangeLog><include file=\"elsewhere/x.xml\"/></databaseChangeLog>"))
-            .as("an include the reader cannot place is a failure, never a silent skip").isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> includes("<databaseChangeLog><includeAll path=\"db/changelog/\"/></databaseChangeLog>"))
-            .as("includeAll names no file").isInstanceOf(IllegalStateException.class);
-    }
-
-    @Test
-    void aForwardChangesetTheScanCannotReadFailsLoud_butARollbackOfOneDoesNot() {
-        for (String tag : List.of("<sqlFile path=\"x.sql\"/>", "<createProcedure>CREATE FUNCTION f()</createProcedure>",
-                "<customChange class=\"x\"/>", "<executeCommand executable=\"x\"/>")) {
-            assertThatThrownBy(() -> forwardSqlBlocks("<databaseChangeLog><changeSet id=\"x\">" + tag + "</changeSet></databaseChangeLog>"))
-                .as(tag).isInstanceOf(IllegalStateException.class);
-        }
-        assertThat(forwardSqlBlocks("<databaseChangeLog><changeSet id=\"x\"><sql>SELECT 1</sql><rollback><sqlFile path=\"x.sql\"/></rollback>"
-            + "</changeSet><!-- <sqlFile path=\"y.sql\"/> --></databaseChangeLog>")).hasSize(1);
-    }
-
-    @Test
-    void everyChangelogInTheDirectoryMustBeIncluded() {
-        assertEveryChangelogIncluded(List.of("a.xml", "b.xml", MASTER), List.of("a.xml", "b.xml"));
-        assertThatThrownBy(() -> assertEveryChangelogIncluded(List.of("a.xml", "orphan.xml", MASTER), List.of("a.xml")))
-            .as("a changelog nothing includes is never scanned").isInstanceOf(AssertionError.class);
-        assertThatThrownBy(() -> assertEveryChangelogIncluded(List.of("a.xml"), List.of("a.xml", "gone.xml")))
-            .as("an include with no file").isInstanceOf(AssertionError.class);
-    }
-
-    @Test
-    void theFloorsFailAScanThatFoundTooLittle() {
-        var files = new java.util.LinkedHashMap<String, String>();
-        files.put("a.xml", changelog(fn("nexus.f", "p"), null));
-        Resolution r = resolve(files);
-        assertNonVacuous(r, Map.of(), 1, 1);
-        assertThatThrownBy(() -> assertNonVacuous(r, Map.of(), 2, 1)).as("include floor").isInstanceOf(AssertionError.class);
-        assertThatThrownBy(() -> assertNonVacuous(r, Map.of(), 1, 2)).as("live-function floor").isInstanceOf(AssertionError.class);
-    }
-
-    @Test
-    void theCommentBlanker_honoursBackslashEscapesInEStringsAndDoubledQuotes() {
-        String e = "SELECT E'it\\'s -- not a comment' || split_part(p, '__', 1); -- a real comment\n";
-        String blankedE = blankSqlComments(e);
-        assertThat(blankedE).contains("-- not a comment").contains("split_part(p, '__', 1)").doesNotContain("a real comment");
-
-        String doubled = "SELECT 'it''s -- not a comment' || split_part(p, '__', 1); -- a real comment\n";
-        String blankedD = blankSqlComments(doubled);
-        assertThat(blankedD).contains("-- not a comment").contains("split_part(p, '__', 1)").doesNotContain("a real comment");
     }
 }

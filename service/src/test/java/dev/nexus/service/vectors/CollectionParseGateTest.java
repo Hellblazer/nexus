@@ -317,6 +317,9 @@ class CollectionParseGateTest {
      *   <li>{@code PgVectorRepository.java} 1: {@code "quarantine-" + originCollection} (the reaper's sibling name).</li>
      * </ul>
      * Reduce-only, both directions, a file at zero carries no entry (the rule of {@link #COLLECTION_LITERAL_CENSUS}).
+     *
+     * <p>Known limit: a literal that holds the prefix after a JSON quote ({@code "{\"name\":\"quarantine-..."}) is not
+     * counted; only a start-of-literal prefix and an SQL-quoted one are.
      */
     private static final Map<String, Integer> QUARANTINE_LITERAL_CENSUS = Map.of(
         "dev/nexus/service/ChunkReaper.java", 1,
