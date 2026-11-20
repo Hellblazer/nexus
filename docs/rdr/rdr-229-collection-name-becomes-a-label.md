@@ -715,13 +715,16 @@ lifecycle (`QuarantineOrigin`, `ChunkReaper` routing, `VectorHandler`,
 `quarantine-` prefix stays on the labels that already have it. The ETL
 import path, which receives rows from another install, takes
 `lifecycle_state` from the imported row when present and falls back to the
-prefix as a migration source. A new imported row whose effective state
-(its own, or the fallback from its name or content type) and name disagree
-refuses the whole batch with a message that counts and names the rows;
-rows already registered are skipped first.
+prefix as a migration source. On this path the prefix evidence is the
+name or the content type carrying `quarantine-`, the same two tests the
+fallback reads. A new imported row whose effective state (its own, or the
+fallback) disagrees with that evidence refuses the whole batch with a
+message that counts and names the rows; rows already registered are skipped
+first.
 
-Every new row keeps the `quarantine-` prefix and the `'quarantine'` state
-together. A name and a state disagree in exactly two cases: a `quarantine-`
+Every new row except the import residual below keeps the `quarantine-`
+prefix and the `'quarantine'` state together. A name and a state disagree
+in exactly two cases: a `quarantine-`
 name with `'live'`, or any other name with `'quarantine'`. `'dormant'` and
 `'disputed'` are admin states independent of the name (hygiene-002 marks
 rows `'disputed'`), so they never disagree. `upsertCollection` refuses,
@@ -743,6 +746,15 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   `holdsRowsOf`, the collection delete cascade, and both ends of rename
   and rehome (a new target has no row yet). Whether the fallback is still
   needed once names are minted labels is a Phase 3 question.
+- *The import's content-type evidence.* An imported legacy row with a
+  plain name, a `quarantine-` content type and no `lifecycle_state` lands
+  as `'quarantine'`. It is a migration source, which item 9 forbids
+  stranding, and P2.1's `CatalogEtlImportNonStrandingTest` is the
+  pre-declared check of that shape. It is the one way a plain-named
+  quarantine row enters. It stays safe because lifecycle is read from the
+  row, so such a row is treated as quarantine everywhere and the guards
+  refuse it as a target. A plain name with an explicit `'quarantine'` and a
+  plain content type has no legacy evidence behind it and is refused.
 - *The registration-side `quarantine-` prefix refusal: the engine mints the
   `quarantine-` name; this guard stops a client minting one.* The client
   route (`POST /v1/catalog/collections/upsert`) also registers `live` only,
