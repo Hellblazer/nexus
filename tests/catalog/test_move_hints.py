@@ -383,6 +383,19 @@ def test_a_run_stopped_by_a_failed_query_ends_with_the_same_line(new_pdf):
     assert lines == [_NOT_CHECKED.format(n=0, m=5)]
 
 
+def test_a_capped_run_on_an_engine_without_the_move_routes_prints_nothing(new_pdf, monkeypatch):
+    """The probe-first rule: an engine that reports no move routes gets no hint output at all, not a "checked N of
+    M" note for files the hint never read (confirmation round r3, R-a)."""
+    monkeypatch.setattr(hints, "CURATOR_HINT_MAX_FILES", 2)
+    reader = _Reader(supported=False, here=_entry("1.1.9", str(new_pdf)), rows=[_entry("1.1.3", "/gone/x.pdf")])
+    with hints.run_scope() as scope:
+        for i in range(3):
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+        lines = scope.drain()
+    assert lines == []
+    assert set(reader.calls) == {"supports_catalog_move"}, "nothing but the probe was asked"
+
+
 def test_a_spent_budget_ends_with_the_same_line(new_pdf):
     clock = _Clock()
     reader = _SlowReader(clock, 6.0, here=_entry("1.1.9", str(new_pdf)))

@@ -119,6 +119,7 @@ class HintCollector:
         self._refused = 0
         self._checked = 0
         self._stopped = False
+        self._unsupported = False
         self._owner_is_curator: dict[str, bool] = {}
 
     def admit(self) -> bool:
@@ -140,6 +141,11 @@ class HintCollector:
         """A query failed: the curator hint asks about no further file this run."""
         with self._lock:
             self._stopped = True
+
+    def unsupported(self) -> None:
+        """The engine reports no move routes: the run prints no hint output at all, the closing note included."""
+        with self._lock:
+            self._unsupported = True
 
     def budget_spent(self) -> bool:
         """Has the curator hint spent its query-time budget?"""
@@ -175,10 +181,11 @@ class HintCollector:
     def drain(self) -> list[str]:
         """The recorded lines, once: the collector is empty afterwards, so a second drain prints nothing. When the curator
         hint refused any file (the cap, the spent budget, or a stop after a failed query) the lines end with one line
-        saying how many of the run's files it checked. It is a note, not a command: it names no write form."""
+        saying how many of the run's files it checked. It is a note, not a command: it names no write form. An engine
+        without the move routes gets no note (the probe-first rule)."""
         with self._lock:
             lines, self._lines = self._lines, []
-            if self._refused:
+            if self._refused and not self._unsupported:
                 total = self._asked + self._refused
                 lines.append(f"move hints checked for {self._checked} of {total} files; "
                              f"run nx index pdf --force on a moved file to check it again")
@@ -303,6 +310,8 @@ def curator_hint_lines(reader: Any, doc_id: str, content_hash: str, collector: H
     when *collector* is given, and the run's time budget is checked between requests. May raise: callers wrap it in
     :func:`fail_open`."""
     if not engine_supports_moves(reader):
+        if collector is not None:
+            collector.unsupported()
         return []
     here = reader.resolve(doc_id)
     if here is None or getattr(here, "alias_of", "") or not here.file_path or not Path(here.file_path).is_absolute():
