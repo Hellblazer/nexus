@@ -153,6 +153,57 @@ class TargetSelectionTest {
         assertThat(CollectionRow.fromMap(m).legacyGrandfathered()).isTrue();
     }
 
+    // ---- the tie at equal version: the first registered, then the name (nexus-p2m1x.4) ----
+
+    private static CollectionRow rowAt(String name, String createdAt) {
+        return new CollectionRow(name, CT, OWNER, MODEL, "v1", false, "", "live", createdAt);
+    }
+
+    @Test
+    void atEqualVersionTheFirstRegisteredWinsNotTheLowerName() {
+        var older = rowAt("z-older", "2026-01-01 00:00:00+00");
+        var newer = rowAt("a-newer", "2026-02-01 00:00:00+00");
+        assertThat(select(older, newer)).isEqualTo(select(newer, older)).isEqualTo(new Live("z-older"));
+    }
+
+    @Test
+    void stampsAreComparedAsInstantsNotAsText() {
+        // "a" sorts lower as text, but 08:00-02 is 10:00 UTC, later than "b"'s 09:00 UTC, so "b" was
+        // registered first and wins. The fraction and the half-hour offset are the other Postgres shapes.
+        assertThat(select(rowAt("a", "2026-01-01 08:00:00-02"), rowAt("b", "2026-01-01 09:00:00+00")))
+            .isEqualTo(new Live("b"));
+        assertThat(select(rowAt("a", "2026-01-01 00:00:00.5+00"), rowAt("b", "2026-01-01 00:00:00+00")))
+            .isEqualTo(new Live("b"));
+        assertThat(select(rowAt("a", "2026-01-01 05:30:00+05:30"), rowAt("b", "2026-01-01 00:00:01+00")))
+            .isEqualTo(new Live("a"));
+    }
+
+    @Test
+    void equalOrBlankStampsFallToTheName() {
+        assertThat(select(rowAt("b", "2026-01-01 00:00:00+00"), rowAt("a", "2026-01-01 00:00:00+00")))
+            .isEqualTo(new Live("a"));
+        assertThat(select(rowAt("b", ""), rowAt("a", ""))).isEqualTo(new Live("a"));
+    }
+
+    @Test
+    void aHigherVersionStillBeatsAnOlderRow() {
+        var newerV2 = new CollectionRow("n", CT, OWNER, MODEL, "v2", false, "", "live", "2026-05-01 00:00:00+00");
+        assertThat(select(rowAt("o", "2026-01-01 00:00:00+00"), newerV2)).isEqualTo(new Live("n"));
+    }
+
+    @Test
+    void theListRouteMapCarriesItsCreatedAt() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", "t");
+        m.put("content_type", CT);
+        m.put("owner_id", OWNER);
+        m.put("embedding_model", MODEL);
+        m.put("model_version", "v1");
+        m.put("lifecycle_state", "live");
+        m.put("created_at", "2026-01-01 00:00:00+00");
+        assertThat(CollectionRow.fromMap(m).createdAt()).isEqualTo("2026-01-01 00:00:00+00");
+    }
+
     // ---- decision ----
 
     @Test
