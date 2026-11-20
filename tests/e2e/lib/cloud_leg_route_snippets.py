@@ -53,8 +53,22 @@ _get_catalog().register_collection(name)
 print(name)
 """
 PRUNE_PROJECTION = r"""
+import httpx
 from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
-# RDR-229 P2.4: a destructive route, probed so that it cannot delete: the name matches no collection and the floor
-# is 0.0 (no stored similarity is below it), so a healthy route answers {"removed": 0}.
-print(HttpTaxonomyStore().prune_projection_below("cloudleg-@label@", 0.0))
+# RDR-229 P2.4: a destructive route, probed so that it cannot delete. What makes it safe is the NAME: nothing is
+# registered under it, so no source collection matches whatever the mode or the floor (a raw cosine can be negative,
+# so the floor alone would prove nothing). A healthy route answers {"removed": 0}.
+store = HttpTaxonomyStore()
+name = "@label@-prune-probe"
+print(store.prune_projection_below(name, 0.0))
+# The second half proves the body field `match` crosses the edge and reaches the handler: an engine that reads it
+# refuses an unknown value with 400. An engine that drops the field would answer 200 and fail the probe.
+try:
+    store._post("/assignments/prune_projection",
+                {"source_collection_prefix": name, "min_similarity": 0.0, "match": "bogus"}, idempotent=False)
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 400, f"match=bogus answered {exc.response.status_code}, not 400"
+    print("match=bogus refused 400")
+else:
+    raise SystemExit("match=bogus was accepted: the engine ignores the match field, or the edge strips it")
 """
