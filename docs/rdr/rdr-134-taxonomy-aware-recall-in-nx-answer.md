@@ -504,13 +504,13 @@ the engine's parallel fan-out; the unrouted figures (2.5 s for one
 time, both measured from the client, `-13`) show that one batched request is
 far cheaper than one request per collection. They do not say how much of the
 2.5 s is spent inside the engine. Ranking topics within each collection is the variant
-both measurements support; ranking across collections is refuted. The
+both client-side measurements support; ranking across collections is refuted. The
 coverage check and the zero-row fallback make a missing, orphaned or partly
 assigned taxonomy below 0.9 coverage fall back to today's search for that
 collection. Scoping
 the default to `nx_answer` keeps unmeasured paths (`nx search`, the MCP
 `search` tool) unchanged; inside `nx_answer` the search layer routes prose
-collections only, and Step 9 measures the plans the questions match.
+collections only, and Step 9 measured the plans the questions matched.
 
 ## Alternatives Considered
 
@@ -825,8 +825,8 @@ Critical Assumptions list for each one's status and Results for the numbers.
 ### Scope Verification
 
 The Minimum Viable Validation (the engine route reproduces the production-set
-gain within the latency bound) is Step 5a of Phase 1 and is executed, not
-deferred.
+gain within the latency bound) is Step 5a of Phase 1. It was executed, not
+deferred, and it failed all three bars (Results).
 
 ### Cross-Cutting Concerns
 
@@ -861,9 +861,8 @@ The design reuses the RDR-156 routes rather than adding an index.
   `rdr134-taxonomy-ab-prod-2026-11-16.json`,
   `rdr134-taxonomy-ab-leg1-gated-2026-11-17.json`,
   `rdr134-taxonomy-ab-prod-gated-2026-11-17.json` (`-16`),
-  `rdr134-mvv-2026-11-19.json` (`-18`). The Step 9 rerun's rows,
-  `rdr134-step9-ab-rerun.json`, are not in `bench/results/`; `-17` records
-  them.
+  `rdr134-mvv-2026-11-19.json` (`-18`),
+  `rdr134-step9-ab-rerun-2026-11-19.json` (`-17`).
 - Voyage AI API reference, `input_type` (docs.voyageai.com/reference).
 - Dehghankar, Asudeh, Mittal, Shetiya, Das. 2026. "Random-Access Ranked
   Retrieval and Similarity Search." Catalog tumbler `1.12.6`. Source of the
@@ -916,7 +915,7 @@ Read the numbers below with this in mind.
   not seen then (inferred from that run stopping after 8 of 73 questions, not
   read per question).
 - In the Step 9 rerun exactly one title question ran (the rerun file's
-  summary, `by_kind.title.n` = 1, in `rdr134-step9-ab-rerun.json`). It scored
+  summary, `by_kind.title.n` = 1, in `rdr134-step9-ab-rerun-2026-11-19.json`). It scored
   NDCG@3 0.0 in both arms, so it says nothing either way.
 
 ### Step 9, nx_answer A/B (`134-research-17`)
