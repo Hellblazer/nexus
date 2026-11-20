@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Characterization of what nexus does TODAY when a curator-owned PDF is indexed again from a new path
-after it moved (GH #1571). Research input for the RDR on identity across a path move.
+"""Characterization of what nexus does when a curator-owned PDF is indexed again from a new path after it moved
+(GH #1571), and what ``nx catalog owners --execute move`` (RDR-254, 254-P2-S4) does about it.
 
-The tests pin the current behaviour; none of them asserts what the behaviour SHOULD be. They drive the
+The registration tests pin the behaviour that is deliberately unchanged: a moved file registered again is a NEW
+document, and the engine's unique index still refuses the raw ``update`` repair. The first two tests then run the
+move command on the state they pin and assert its result: one live row at the new path, holding the old tumbler.
+The third (two byte-identical copies) is unchanged: two files that both exist are two documents.
+
+The tests pin the behaviour; none of the characterization assertions says what it SHOULD be. They drive the
 single-file PDF pre-flight (``nexus.doc_indexer._register_or_lookup_doc_id``, the call ``index_pdf`` makes)
 against the live test catalog, with no extraction or embedding, and stamp ``meta.content_hash`` the way the
 PDF writer does (``stamp_registered_content_hash``) so the file hash is on both rows.
@@ -24,7 +29,9 @@ from pathlib import Path
 
 import httpx
 import pytest
+from click.testing import CliRunner
 
+from nexus.cli import main
 from tests._catalog_fixture_ops import ActiveCatalog
 
 pytestmark = pytest.mark.integration
@@ -64,17 +71,25 @@ def _raw_uri(path: Path) -> str:
     return "file://" + str(path)
 
 
+def _move(old_id: str, new: Path, *flags: str):
+    """The repair: ``nx catalog owners --execute move --document <old> --new-path <new>``."""
+    return CliRunner().invoke(
+        main, ["catalog", "owners", "--execute", "move", "--document", old_id, "--new-path", str(new), *flags])
+
+
 def _content_hash(entry) -> str:
     return (getattr(entry, "meta", None) or {}).get("content_hash", "")
 
 
 @pytest.mark.t2_tenant
-def test_a_moved_curator_pdf_registers_as_a_new_document_and_the_old_row_stays_live(tmp_path):
-    """characterization: pins current behaviour for the moved-path identity RDR; a change here is a design decision, not a regression.
+def test_a_moved_curator_pdf_registers_as_a_new_document_and_the_move_command_keeps_the_old_tumbler(tmp_path):
+    """characterization plus the command: pins current behaviour for the moved-path identity RDR; a change in the
+    registration half is a design decision, not a regression.
 
     /a/x.pdf is registered, the file moves to /b/x.pdf (same bytes), and it is registered again. A second
     document is minted at the new path; the old row keeps its old path, stays live and chunk-bearing in the
-    sense that nothing touches it, and both rows carry the same file hash that nothing compared.
+    sense that nothing touches it, and both rows carry the same file hash that nothing compared. Then
+    ``nx catalog owners --execute move`` leaves ONE live row at the new path, and it is the old tumbler.
     """
     cat = ActiveCatalog()
     corpus = f"moved-pdf-{_next()}"
@@ -105,14 +120,29 @@ def test_a_moved_curator_pdf_registers_as_a_new_document_and_the_old_row_stays_l
     # re-registering either path resolves to its own row, never to the other
     assert _register(new, corpus) == (new_id, False)
 
+    # the repair (RDR-254): the dry run writes nothing, the write leaves one live row at the new path, the OLD tumbler
+    dry = _move(old_id, new)
+    assert dry.exit_code == 0, dry.output
+    assert cat.resolve(old_id).file_path == str(old) and str(cat.by_source_uri(_raw_uri(new)).tumbler) == new_id
+    done = _move(old_id, new, "--no-dry-run", "--confirm")
+    assert done.exit_code == 0, done.output
+    moved = cat.resolve(old_id)
+    assert moved.file_path == str(new) and moved.source_uri == _raw_uri(new)
+    assert str(cat.by_source_uri(_raw_uri(new)).tumbler) == old_id, "one live row holds the new path: the old tumbler"
+    assert cat.by_source_uri(_raw_uri(old)) is None, "nothing is left at the dead path"
+    assert _content_hash(moved) == _SHA
+    assert getattr(cat.resolve(new_id, follow_alias=False), "source_uri", "") == "", "the new row was absorbed"
+
 
 @pytest.mark.t2_tenant
-def test_pointing_the_old_row_at_the_new_path_hits_the_live_source_uri_unique_index(tmp_path):
-    """characterization: pins current behaviour for the moved-path identity RDR; a change here is a design decision, not a regression.
+def test_pointing_the_old_row_at_the_new_path_hits_the_unique_index_and_the_move_command_does_it(tmp_path):
+    """characterization plus the command: pins current behaviour for the moved-path identity RDR; a change in the
+    ``update`` half is a design decision, not a regression.
 
     After the move has been registered a second time, the obvious repair, ``nx catalog update <old>
     --source-uri file://<new>``, goes through ``writer.update(old, source_uri=...)`` and is refused by the
-    engine: the new path already holds the live row for that URI (ux_catalog_documents_live_source_uri).
+    engine: the new path already holds the live row for that URI (ux_catalog_documents_live_source_uri). The
+    move command does what that update cannot: it absorbs the row at the new path, then re-points the old one.
     """
     cat = ActiveCatalog()
     corpus = f"moved-pdf-{_next()}"
@@ -136,6 +166,12 @@ def test_pointing_the_old_row_at_the_new_path_hits_the_live_source_uri_unique_in
     # nothing moved: both rows keep their own URI
     assert cat.resolve(old_id).source_uri == _raw_uri(old)
     assert cat.resolve(new_id).source_uri == _raw_uri(new)
+
+    # the command succeeds where the raw update was refused: no 409, one live row at the new path, the old tumbler
+    done = _move(old_id, new, "--no-dry-run", "--confirm")
+    assert done.exit_code == 0, done.output
+    assert cat.resolve(old_id).source_uri == _raw_uri(new)
+    assert str(cat.by_source_uri(_raw_uri(new)).tumbler) == old_id
 
 
 @pytest.mark.t2_tenant

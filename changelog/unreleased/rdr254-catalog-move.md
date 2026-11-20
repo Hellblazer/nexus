@@ -1,0 +1,3 @@
+### Added
+
+- `nx catalog owners --execute move` keeps a document's or a repository's identity when its path moves (RDR-254, GH #1571). `--document <tumbler> --new-path <file>` re-points the old curator document at the file's new path and absorbs the row registered there since, so the old tumbler survives with its links and aspects; `--owner <prefix> --new-root <dir>` re-roots a repo owner at a moved repository and folds an owner already registered at the new root into it. A dry run by default (`--no-dry-run --confirm` writes); the report prints the counts, every absorbed tumbler and the exact write command. It needs an engine that advertises `catalog_move_supported`; an older engine is refused before any request.
