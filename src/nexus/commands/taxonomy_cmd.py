@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 import numpy as np
@@ -2861,7 +2861,7 @@ def project_cmd(
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
     # (defaults applied at the per-source level inside _run_backfill).
     resolved_threshold = threshold
-    if resolved_threshold is None and source_collection:
+    if resolved_threshold is None and source_collection and not prune_below_threshold:
         resolved_threshold = projection_threshold(source_collection)
 
     try:
@@ -2870,18 +2870,34 @@ def project_cmd(
             # stored RAW cosine, so a pass that admitted weak matches can be
             # undone without a rebuild. RDR-229 P2.4: each collection's threshold
             # is its row's content type, so the walk is per full collection name,
-            # never per name prefix.
-            if backfill or not source_collection:
-                targets = _prune_targets(db.taxonomy, threshold)
-            else:
-                targets = [(source_collection, resolved_threshold)]
+            # never per name prefix. Prune deletes, so it never acts on a guess from
+            # the name when the row read was unreadable (see _prune_plan).
+            exact = prune_supports_exact()
+            plan = _prune_plan(
+                db.taxonomy, threshold,
+                only=None if (backfill or not source_collection) else source_collection,
+                exact=exact,
+            )
             total_removed = 0
-            for name, thr in targets:
-                removed = db.taxonomy.prune_projection_below(name, thr)
+            for name, thr in plan.targets:
+                removed = db.taxonomy.prune_projection_below(name, thr, exact=exact)
                 total_removed += removed
-                if removed or len(targets) == 1:
+                if removed or len(plan.targets) == 1:
                     click.echo(f"  {name}: removed {removed} projection assignment(s) below {thr:.2f}")
             click.echo(f"Pruned {total_removed} projection assignment(s).")
+            if plan.skipped:
+                click.echo(
+                    f"{len(plan.skipped)} skipped: pruned only down to the lowest threshold of a "
+                    "collection whose name they prefix (the engine matches a prune by name prefix); "
+                    "their rows between that and their own threshold remain."
+                )
+            if plan.refused:
+                click.echo(
+                    f"{len(plan.refused)} refused: the catalog row could not be read, so the "
+                    "threshold would be a guess from the name; pass --threshold to prune at one you choose."
+                )
+                if not plan.targets:
+                    raise click.ClickException("nothing pruned: every collection's row read was unreadable")
             return
         if backfill:
             _run_backfill(
@@ -3106,48 +3122,103 @@ def _without_superseded(collections: list[str]) -> list[str]:
     return kept
 
 
-def _prune_targets(taxonomy: Any, threshold: float | None) -> list[tuple[str, float]]:
-    """The ``(collection, threshold)`` pairs ``--prune-below-threshold`` sweeps
-    when no single source is named (RDR-229 P2.4).
+def prune_supports_exact() -> bool:
+    """Whether the engine's taxonomy prune route has the exact-name mode (a request
+    field ``match: "exact"``, advertised by a ``/version`` capability flag; the engine
+    half is nexus-p2m1x.9's follow-up for engine 0.1.200).
 
-    Every collection the catalog lists plus every collection holding topics,
-    each at *threshold* when given, else its row's default. A listing that
-    cannot be read leaves the topic-holding collections, which still answer
-    through the name derivation: the sweep is a recovery path and does not
-    stop on it.
+    ``False`` until the flag's key is known: with it, :func:`_prune_plan` keeps the
+    prefix-collision guard and the prune runs in the engine's prefix mode, as it
+    does against an engine that predates the mode.
+    """
+    return False
 
-    The engine matches a prune by name PREFIX, so pruning a collection whose
-    name is a proper prefix of another's also reaches the longer one's rows.
-    When that would delete rows the longer collection's own (lower) threshold
-    keeps, the shorter one is skipped and said so, rather than over-deleting.
+
+class _PrunePlan(NamedTuple):
+    """What ``--prune-below-threshold`` will do: ``targets`` is ``(collection, threshold)``
+    pairs, ``skipped`` the names pruned only to a lower threshold than their own, ``refused``
+    the names left alone because their row read was unreadable."""
+
+    targets: list[tuple[str, float]]
+    skipped: list[str]
+    refused: list[str]
+
+
+def _prune_plan(
+    taxonomy: Any, threshold: float | None, *, only: str | None, exact: bool,
+) -> _PrunePlan:
+    """The prune plan for ``--prune-below-threshold`` (RDR-229 P2.4): every collection the
+    live catalog listing names plus every collection holding topics, or just *only* (the
+    single-source form), each at *threshold* when given, else its row's default.
+
+    Prune is the one consumer that deletes, so an **unreadable** row read (the listing raised)
+    is refused for that collection, with a printed line, unless an explicit *threshold* was
+    given: a code__-named collection with a knowledge row would otherwise be pruned at the
+    name's 0.70 instead of 0.50. A NoRow answer (no row backs the name) keeps its name
+    derivation, as the old prefix sweep did. A listing that cannot be read narrows the sweep
+    to the collections holding topics; the sweep is a recovery path and does not stop on it.
+
+    The engine matches a prune by name PREFIX unless it supports the exact-name mode
+    (*exact*), so pruning a collection whose name is a proper prefix of another's also
+    reaches the longer one's rows. Such a collection is pruned at the lowest threshold
+    among it and the collections whose names extend it: that deletes nothing an extension's
+    own pass would keep, at the cost of leaving the collection's own rows between the two
+    thresholds, which the plan reports as skipped. With *exact* there is nothing to guard.
     """
     from nexus.mcp_infra import get_live_collection_names  # noqa: PLC0415 - deferred to avoid circular import at module load
-    from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.projection_threshold import resolve_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
+    if only is not None and threshold is not None:
+        return _PrunePlan([(only, threshold)], [], [])  # the user's own number: no listing needed
     names = set(taxonomy.get_distinct_collections())
     try:
         names.update(get_live_collection_names())
     except Exception:  # noqa: BLE001 - recovery sweep: an unreadable listing narrows it to the collections with topics, it does not stop it
         _log.warning("taxonomy_prune_listing_unreadable", exc_info=True)
+    if only is not None:
+        names.add(only)
     ordered = sorted(names)
-    thresholds = {
-        n: (threshold if threshold is not None else projection_threshold(n)) for n in ordered
-    }
+    candidates = ordered if only is None else [only]
+
+    answers: dict[str, tuple[float, str]] = {}
+
+    def _answer(name: str) -> tuple[float, str]:
+        if name not in answers:
+            if threshold is not None:
+                answers[name] = (threshold, "explicit")
+            else:
+                resolved = resolve_projection_threshold(name)
+                answers[name] = (resolved.value, resolved.source)
+        return answers[name]
+
     targets: list[tuple[str, float]] = []
-    for n in ordered:
-        longer = next(
-            (m for m in ordered if m != n and m.startswith(n) and thresholds[m] < thresholds[n]),
-            None,
-        )
-        if longer is not None:
+    skipped: list[str] = []
+    refused: list[str] = []
+    for n in candidates:
+        thr, source = _answer(n)
+        if source == "unreadable":
+            refused.append(n)
             click.echo(
-                f"  {n}: skipped, its name is a prefix of {longer} and the engine prunes by "
-                f"name prefix, so {thresholds[n]:.2f} would also delete {longer}'s rows "
-                f"between {thresholds[longer]:.2f} and {thresholds[n]:.2f}"
+                f"  {n}: refused, its catalog row could not be read, so its threshold would be "
+                "a guess from the name; pass --threshold to prune at one you choose"
             )
             continue
-        targets.append((n, thresholds[n]))
-    return targets
+        if exact:
+            targets.append((n, thr))
+            continue
+        lowest, lowest_name = thr, None
+        for m in ordered:
+            if m != n and m.startswith(n) and _answer(m)[0] < lowest:
+                lowest, lowest_name = _answer(m)[0], m
+        if lowest_name is not None:
+            skipped.append(n)
+            click.echo(
+                f"  {n}: pruned only below {lowest:.2f} (its own threshold is {thr:.2f}): its name "
+                f"prefixes {lowest_name}, and the engine's name-prefix match would also delete "
+                f"{lowest_name}'s rows between {lowest:.2f} and {thr:.2f}"
+            )
+        targets.append((n, lowest))
+    return _PrunePlan(targets, skipped, refused)
 
 
 def _run_backfill(
@@ -3343,9 +3414,10 @@ def hubs_cmd(
     "--threshold", "-t", default=None, type=float,
     help=(
         "Count projections whose raw cosine similarity falls below this "
-        "value. Defaults to the per-corpus-type value "
-        "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). The tuning "
-        "guide is linked at the end of this help."
+        "value. Defaults to the value of the collection's catalog content "
+        "type (code 0.70, knowledge 0.50, docs/rdr 0.55; its name's prefix "
+        "only when no catalog row backs it). The tuning guide is linked at "
+        "the end of this help."
     ),
 )
 @click.option(
