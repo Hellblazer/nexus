@@ -10526,7 +10526,8 @@ public final class CatalogRepository {
                                                     String ownerId, String embeddingModel) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
+                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
+                               CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                        .from(CATALOG_COLLECTIONS)
                        .where(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType)
                               .and(CATALOG_COLLECTIONS.OWNER_ID.eq(ownerId))
@@ -10584,8 +10585,15 @@ public final class CatalogRepository {
                        // CatalogRepositoryTest pins the tie, the flip, the total order and the D5 case.
                        .orderBy(COL_VERSION_NUM.desc(), F_COL_CRTAT.asc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
-            return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
-                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
+            if (r == null) return null;
+            Map<String, Object> row = collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
+                                              r.value6(), r.value7(), r.value8(), r.value9(), r.value10());
+            // RDR-229 P2.5 (nexus-p2m1x.10): the row says its own state, so the client refuses
+            // a quarantine row from the row (HttpCatalogClient.collection_for), not from a name
+            // that fails to parse. The filter above still keeps quarantine out; this is the
+            // client's second check, and an additive field on the wire.
+            row.put("lifecycle_state", nne(r.value11()));
+            return row;
         });
     }
 
@@ -14496,8 +14504,8 @@ public final class CatalogRepository {
      * {@link #collRow} plus {@code dimension} and {@code lifecycle_state} (RDR-204
      * Phase 2, bead nexus-ft04v.24) plus {@code aspects_enabled} (RDR bead
      * nexus-l46pu) — used ONLY by {@link #listCollections(String, String,
-     * String)}. {@link #collectionForTuple} is out of both beads' scope and
-     * keeps {@link #collRow}'s original 10-key shape; every key {@link #collRow}
+     * String)}. {@link #collectionForTuple} is out of both beads' scope; it
+     * appends only {@code lifecycle_state} to {@link #collRow}'s 10 keys (RDR-229 P2.5); every key {@link #collRow}
      * already sets is untouched here, this only appends three keys at the end.
      * {@link #getCollection} carries {@code aspects_enabled} too, via the
      * sibling helper {@link #collRowWithAspects}, but not {@code dimension}/

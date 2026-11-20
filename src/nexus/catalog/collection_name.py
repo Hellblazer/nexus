@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
+#: The ``lifecycle_state`` values a ``for_tuple`` row may carry and still be written to (RDR-229
+#: P2.5). The engine's CHECK allows these and ``quarantine`` (hygiene-002); its tuple filter is
+#: ``<> 'quarantine'`` on purpose, so ``dormant`` and ``disputed`` keep resolving.
+RESOLVABLE_LIFECYCLE_STATES: frozenset[str] = frozenset({"live", "dormant", "disputed"})
+
 
 def owner_segment_for_tumbler(tumbler: str | Tumbler) -> str:
     """Return the collection-name owner segment for a tumbler.
@@ -155,7 +160,12 @@ def version_from_for_tuple_row(
 
     - the row's ``content_type``, ``owner_id`` or ``embedding_model`` differ
       from the requested tuple (the engine resolved some other tuple),
-    - ``model_version`` is missing or non-empty and malformed (``"v0"`` included).
+    - ``model_version`` is missing or non-empty and malformed (``"v0"`` included),
+    - the row's ``lifecycle_state`` is ``quarantine`` or a state the client does
+      not know (RDR-229 P2.5). The engine already filters quarantine out; this is
+      the client's own check, since P1.4 stopped parsing the name whose failure
+      used to refuse a quarantine sibling (nexus-n9xjy). A row with no
+      ``lifecycle_state`` (an engine older than P2.5) is accepted as before.
 
     An EMPTY ``model_version`` (the column is ``NOT NULL DEFAULT ''`` and an
     upsert never rewrites it, so such rows exist and cannot be repaired by
@@ -172,6 +182,12 @@ def version_from_for_tuple_row(
         raise ValueError(
             f"for_tuple answered {row.get('name')!r} for tuple {want!r}, but the row "
             f"carries (content_type, owner_id, embedding_model) = {got!r}"
+        )
+    state = row.get("lifecycle_state")
+    if state is not None and state not in RESOLVABLE_LIFECYCLE_STATES:
+        raise ValueError(
+            f"for_tuple answered {row.get('name')!r} for tuple {want!r} in lifecycle_state "
+            f"{state!r}; only a {'/'.join(sorted(RESOLVABLE_LIFECYCLE_STATES))} row is a write target"
         )
     raw = row.get("model_version")
     if raw == "":

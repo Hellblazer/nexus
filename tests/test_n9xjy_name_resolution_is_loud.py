@@ -13,21 +13,25 @@ every document of the repo to it: ``code__1-1`` -> ``code__nexus-571b8edd``,
 41,032 rows orphaned inside 81 minutes on 2026-09-08, nothing above DEBUG
 logged.
 
-Both wrappers now let anything that is not ``LookupError`` propagate. The fake
-catalog below stands in for the transport only: the ``ValueError`` it raises
-comes from the real parser on the real name the engine returned. Since P1.4
-``HttpCatalogClient.collection_for`` no longer parses that name (see
-``tests/test_p2m1x4_for_tuple_version.py``); the fake below stands in for a
-resolver that still does, so the wrappers' propagation contract stays pinned.
+Both wrappers now let anything that is not ``LookupError`` propagate. Since P1.4
+``HttpCatalogClient.collection_for`` no longer parses the returned name (see
+``tests/test_p2m1x4_for_tuple_version.py``), so that parse no longer refuses a
+quarantine sibling. Since P2.5 (nexus-p2m1x.10) the ``for_tuple`` row carries
+``lifecycle_state`` and the client refuses a quarantine row from it. The fake
+catalog below stands in for the transport only: it is the real
+``HttpCatalogClient`` over an ``httpx.MockTransport`` that answers the row the
+engine returned for the contested tuple, and the ``ValueError`` comes from the
+client's own refusal.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
-from nexus.catalog.collection_name import CollectionName
+from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.indexer import _repo_collection_or_legacy
 from nexus.registry import RepoRegistry
 from nexus.repo_identity import _resolve_repo_collection
@@ -38,18 +42,40 @@ QUARANTINE_SIBLING = "quarantine-code__1-1__voyage-code-3__v1"
 SYNTH_OWNER = "nexus-571b8edd"
 
 
-class _ResolverReturnsQuarantineSibling:
-    """A catalog whose version oracle got the quarantine sibling back.
+def _quarantine_sibling_row() -> dict:
+    """The contested tuple's for_tuple row: the sibling's attributes match the tuple and its
+    version parses, so only its lifecycle_state tells the client it is not a write target."""
+    return {
+        "name": QUARANTINE_SIBLING, "content_type": "code", "owner_id": "1-1",
+        "embedding_model": "voyage-code-3", "model_version": "v1", "lifecycle_state": "quarantine",
+    }
 
-    Mirrors the failing frame ``HttpCatalogClient.collection_for`` had before
-    RDR-229 P1.4 (it now reads the row): the resolver's returned name goes
-    through the real ``CollectionName.parse``,
-    which is where the ``ValueError`` originates. Nothing here fabricates the
-    exception.
+
+def _real_client_answering_the_sibling() -> HttpCatalogClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/catalog/collections/for_tuple":
+            return httpx.Response(200, json=_quarantine_sibling_row())
+        return httpx.Response(200, json={})
+
+    return HttpCatalogClient(
+        base_url="http://mock.test", _token="test-token",
+        client=httpx.Client(base_url="http://mock.test", transport=httpx.MockTransport(handler)),
+    )
+
+
+class _ResolverReturnsQuarantineSibling:
+    """A catalog whose ``for_tuple`` answered the quarantine sibling.
+
+    ``collection_for_repo`` is the real ``HttpCatalogClient.collection_for`` on
+    the tuple the repo owns; only the owner lookup in front of it is skipped (its
+    own LookupError path is ``_OwnerUnregistered`` below). The ``ValueError``
+    is the client's refusal of the row; nothing here fabricates it.
     """
 
     def collection_for_repo(self, repo: Path, content_type: str, *, bump: bool = False):
-        return CollectionName.parse(QUARANTINE_SIBLING)
+        return _real_client_answering_the_sibling().collection_for(
+            content_type, "1.1", "voyage-code-3", bump=bump,
+        )
 
 
 class _OwnerUnregistered:
@@ -71,10 +97,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return r
 
 
-def test_the_oracle_parse_is_the_loud_frame() -> None:
-    """The ValueError originates in the real parser, not in a fake."""
-    with pytest.raises(ValueError, match="quarantine-code"):
-        CollectionName.parse(QUARANTINE_SIBLING)
+def test_the_clients_refusal_is_the_loud_frame() -> None:
+    """The ValueError originates in the real client's row check, not in a fake."""
+    with pytest.raises(ValueError, match="quarantine-code.*lifecycle_state 'quarantine'"):
+        _ResolverReturnsQuarantineSibling().collection_for_repo(Path("."), "code")
 
 
 # ── indexer._repo_collection_or_legacy ─────────────────────────────────────

@@ -2955,6 +2955,12 @@ class CatalogRepositoryTest {
         assertThat(resolved.get("name"))
             .as("a quarantine sibling must NEVER win a tuple, however it sorts")
             .isEqualTo(real);
+        // RDR-229 P2.5: the row carries its lifecycle_state, so the client can refuse a
+        // quarantine row itself (HttpCatalogClient.collection_for) instead of relying on
+        // a name that fails to parse (P1.4 removed that accident).
+        assertThat(resolved.get("lifecycle_state"))
+            .as("the for_tuple row carries lifecycle_state")
+            .isEqualTo("live");
     }
 
     // Order(63) was importCollection_overwritesStubRow: it seeded a "stub" row (all
