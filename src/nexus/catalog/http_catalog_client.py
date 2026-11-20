@@ -289,8 +289,9 @@ STUB_METADATA_TIMEOUT_S = 28.0
 from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
 from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators
 from nexus.catalog.engine_writes import move as _move
-from nexus.catalog.engine_writes.floors import (  # noqa: F401 — re-exported: callers import the floors here
-    CATALOG_SENSITIVITY_MIN_ENGINE_VERSION,
+# engine_writes/floors.py owns the hand-kept CATALOG_*_MIN_ENGINE_VERSION constants: a copy re-exported here would
+# be a second place to edit by mistake, so only the error and the require_* function are re-exported.
+from nexus.catalog.engine_writes.floors import (  # noqa: F401 — re-exported: callers import them here
     CatalogSensitivityUnsupportedError,
     require_catalog_sensitivity,
 )

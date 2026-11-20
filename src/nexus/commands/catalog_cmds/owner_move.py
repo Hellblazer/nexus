@@ -30,7 +30,7 @@ from typing import Any
 import click
 import httpx
 
-from nexus.commands.catalog_cmds.owners import _inside_git_work_tree, _report_only_notice
+from nexus.commands.catalog_cmds.owners import _inside_git_work_tree
 
 #: ``(report key, label)``, in print order. ``absorbed`` rows are TRASHED (their content, links and aspect rows move
 #: onto the surviving row), and ``trashed`` counts only the rows of a folded owner that had no counterpart.
@@ -100,24 +100,64 @@ def _owner_target(owner: str, new_root: str) -> dict[str, Any]:
     return {"owner": owner.strip(), "new_root": str(main_repo), "new_repo_hash": repo_hash}
 
 
-def _refusal(exc: httpx.HTTPStatusError) -> click.ClickException:
-    status = exc.response.status_code
+def _body_text(exc: httpx.HTTPStatusError) -> tuple[str, str]:
+    """``(error message, field detail)`` of an engine error body; a body that is not a JSON object gives its text."""
+    response = exc.response
     try:
-        text = exc.response.json().get("error") or exc.response.text
+        body = response.json()
     except ValueError:
-        text = exc.response.text
-    what = "refused the move" if status == 409 else f"rejected the request ({status})"
-    return click.ClickException(f"The engine {what}: {text}. Nothing was written.")
+        body = None
+    if not isinstance(body, dict):
+        return (response.text or "").strip(), ""
+    message = str(body.get("error") or response.text or "").strip()
+    field = body.get("field")
+    detail = f" (field {field!s}: {body['value']!s})" if field and "value" in body else (f" (field {field!s})" if field else "")
+    return message, detail
 
 
-def _echo_report(heading: str, report: dict[str, Any], *, will_act: bool) -> None:
+def _failure(exc: httpx.HTTPStatusError, *, will_act: bool) -> click.ClickException:
+    """What a failed route call says it knows. A 400 or 409 is the engine refusing before it writes (or rolling back),
+    so nothing was written. Any other status (a 5xx, a gateway or edge answer) leaves the outcome unknown."""
+    status = exc.response.status_code
+    message, detail = _body_text(exc)
+    if status in (400, 409):
+        what = "refused the move" if status == 409 else f"rejected the request ({status})"
+        again = " Run it again." if "integrity constraint violation" in message else ""
+        return click.ClickException(f"The engine {what}: {message}{detail}. Nothing was written.{again}")
+    if will_act:
+        return click.ClickException(
+            f"The move's outcome is unknown: {exc}. Re-run the same command without --no-dry-run --confirm "
+            f"(a dry run) to check what is left to move; re-running is safe."
+        )
+    return click.ClickException(f"The dry run failed: {exc}. A dry run writes nothing; re-running it is safe.")
+
+
+def _transport_failure(exc: httpx.TransportError, *, will_act: bool) -> click.ClickException:
+    """A timeout or lost connection: the engine may or may not have finished. ``nx catalog``'s precedent
+    (``_service_timeout_error``): say it may have completed, and that running again is safe."""
+    if will_act:
+        return click.ClickException(
+            f"the nexus service did not answer the move ({type(exc).__name__}). The move may have completed "
+            f"server-side; re-run the same command without --no-dry-run --confirm (a dry run) to see; "
+            f"re-running is safe."
+        )
+    return click.ClickException(
+        f"the nexus service did not answer the dry run ({type(exc).__name__}). A dry run writes nothing; "
+        f"re-running it is safe."
+    )
+
+
+def _echo_report(heading: str, report: dict[str, Any], *, will_act: bool, owner_move: bool) -> None:
     click.echo(f"{heading} ({'write' if will_act else 'dry run'})")
     for key, label in _COUNT_ROWS:
+        if key == "trashed" and not owner_move:
+            continue  # only a folded owner's rows can be trashed outright; a document move trashes through "absorbed"
         if key in report:
             click.echo(f"  {label}: {report[key]}")
     absorbed = report.get("absorbed_tumblers") or []
     if absorbed:
-        click.echo(f"  absorbed documents ({len(absorbed)}, now trashed):")
+        fate = "now trashed" if will_act else "would be trashed"
+        click.echo(f"  absorbed documents ({len(absorbed)}, {fate}):")
         for t in absorbed:
             click.echo(f"    {t}")
 
@@ -127,13 +167,13 @@ def run_move(*, document: str | None, new_path: str | None, owner: str | None, n
     """Run the move arm. See the module docstring for the order of the steps."""
     if document:
         target = _document_target(document, str(new_path))
-        form = (f"nx catalog owners --execute move --document {shlex.quote(document)} "
-                f"--new-path {shlex.quote(str(new_path))} --no-dry-run --confirm")
+        form = (f"nx catalog owners --execute move --document {shlex.quote(target['tumbler'])} "
+                f"--new-path {shlex.quote(target['new_file_path'])} --no-dry-run --confirm")
         heading = f"Move document {target['tumbler']} to {target['new_file_path']}"
     else:
         target = _owner_target(str(owner), str(new_root))
-        form = (f"nx catalog owners --execute move --owner {shlex.quote(str(owner))} "
-                f"--new-root {shlex.quote(str(new_root))} --no-dry-run --confirm")
+        form = (f"nx catalog owners --execute move --owner {shlex.quote(target['owner'])} "
+                f"--new-root {shlex.quote(target['new_root'])} --no-dry-run --confirm")
         heading = f"Move owner {target['owner']} to {target['new_root']} (hash {target['new_repo_hash']})"
 
     from nexus.catalog.engine_writes.floors import CatalogMoveUnsupportedError, require_catalog_move  # noqa: PLC0415
@@ -144,7 +184,9 @@ def run_move(*, document: str | None, new_path: str | None, owner: str | None, n
     except CatalogMoveUnsupportedError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    will_act = _report_only_notice(dry_run, confirm)
+    will_act = not dry_run and confirm
+    if not dry_run and not confirm:
+        click.echo("--no-dry-run alone is treated as report-only. Add --confirm to actually move.")
     writer = _cat_cmd._get_catalog_writer()
     try:
         if document:
@@ -156,11 +198,19 @@ def run_move(*, document: str | None, new_path: str | None, owner: str | None, n
                 target["owner"], new_root=target["new_root"], new_repo_hash=target["new_repo_hash"],
                 dry_run=not will_act)
     except httpx.HTTPStatusError as exc:
-        raise _refusal(exc) from exc
+        raise _failure(exc, will_act=will_act) from exc
+    except httpx.TransportError as exc:  # a timeout is one: the write is never resent, so say what is unknown
+        raise _transport_failure(exc, will_act=will_act) from exc
     finally:
         writer.close()
 
-    _echo_report(heading, report, will_act=will_act)
+    if report.get("dry_run") is not (not will_act):
+        raise click.ClickException(
+            f"the engine answered dry_run={report.get('dry_run')!r} to a request that asked for "
+            f"dry_run={not will_act}; refusing to report a move it may not have made. Re-run the command "
+            f"without --no-dry-run --confirm (a dry run) to see the state."
+        )
+    _echo_report(heading, report, will_act=will_act, owner_move=bool(owner))
     if will_act:
         click.echo("Done.")
     else:

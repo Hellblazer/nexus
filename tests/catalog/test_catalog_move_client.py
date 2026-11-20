@@ -161,21 +161,41 @@ def test_blank_arguments_are_refused_before_any_request() -> None:
     assert seen == []
 
 
+def _call(cat: HttpCatalogClient, which: str) -> None:
+    if which == "document":
+        cat.move_document("1.2.3", new_source_uri="file:///new/x.pdf", new_file_path="/new/x.pdf", dry_run=False)
+    else:
+        cat.move_owner("1.5", new_root="/new", new_repo_hash="h", dry_run=False)
+
+
 @pytest.mark.parametrize("which", ["document", "owner"])
-def test_a_refusal_is_a_409_the_caller_sees_and_the_write_is_not_resent(which: str) -> None:
+def test_a_refusal_is_a_409_the_caller_sees(which: str) -> None:
     calls: list = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         return httpx.Response(409, json={"error": "another live row holds file:///new/x.pdf"})
 
-    cat = _client(handler)
     with pytest.raises(httpx.HTTPStatusError) as exc:
-        if which == "document":
-            cat.move_document("1.2.3", new_source_uri="file:///new/x.pdf", new_file_path="/new/x.pdf", dry_run=False)
-        else:
-            cat.move_owner("1.5", new_root="/new", new_repo_hash="h", dry_run=False)
+        _call(_client(handler), which)
     assert exc.value.response.status_code == 409 and len(calls) == 1
+
+
+@pytest.mark.parametrize("which", ["document", "owner"])
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.ConnectError("reset")])
+def test_a_write_that_fails_in_transport_is_not_resent(which: str, failure: Exception) -> None:
+    """The write's reply can be lost after the engine acted, so the transport must make exactly ONE attempt:
+    a resend could report different counts or re-fold. The handler raises on call 1 and a second call would be
+    visible, so this goes red if ``idempotent=False`` is dropped."""
+    calls: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        raise failure
+
+    with pytest.raises(type(failure)):
+        _call(_client(handler), which)
+    assert len(calls) == 1, calls
 
 
 def test_the_transport_never_resends_a_move_and_a_dry_run_is_not_a_production_write() -> None:

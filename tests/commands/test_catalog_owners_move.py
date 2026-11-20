@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from nexus.catalog.engine_writes import floors
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 
@@ -145,7 +146,7 @@ def test_dry_run_report_ends_with_write_form(moved_pdf, tmp_path) -> None:
     assert dry.exit_code == 0, dry.output
     last = dry.output.rstrip("\n").splitlines()[-1]
     assert last == (f"nx catalog owners --execute move --document {shlex.quote(old)} "
-                    f"--new-path {shlex.quote(str(spaced))} --no-dry-run --confirm")
+                    f"--new-path {shlex.quote(str(spaced.resolve()))} --no-dry-run --confirm")
     argv = shlex.split(last)
     assert argv[:3] == ["nx", "catalog", "owners"] and "--no-dry-run" not in dry.output.replace(last, "")
 
@@ -203,7 +204,8 @@ def test_refuses_absent_new_path(moved_pdf, tmp_path, move_routes_spy) -> None:
 
 def test_refuses_on_engine_without_flag(moved_pdf, move_routes_spy, monkeypatch) -> None:
     """The old-engine refusal against a flag-less /version: nothing written, no move route reached, and the message
-    is require_catalog_move's."""
+    is require_catalog_move's. The floor is pinned to None so filling it at 254-P5-S1 does not change the text."""
+    monkeypatch.setattr(floors, "CATALOG_MOVE_MIN_ENGINE_VERSION", None)
     monkeypatch.setattr(HttpCatalogClient, "_version_flags", lambda self: {"release_version": "0.1.150"})
     before = moved_pdf["cat"].resolve(moved_pdf["old"]).file_path
     result = _move(moved_pdf["old"], moved_pdf["new_path"], "--no-dry-run", "--confirm")
@@ -234,7 +236,7 @@ def test_an_engine_refusal_is_reported_as_a_refusal(moved_pdf, tmp_path) -> None
 def test_prints_absorbed_tumblers(moved_pdf) -> None:
     result = _move(moved_pdf["old"], moved_pdf["new_path"])
     assert result.exit_code == 0, result.output
-    assert re.search(rf"absorbed documents \(1, now trashed\):\n    {re.escape(moved_pdf['new'])}\n", result.output), result.output
+    assert re.search(rf"absorbed documents \(1, would be trashed\):\n    {re.escape(moved_pdf['new'])}\n", result.output), result.output
 
 
 @pytest.mark.parametrize("args, message", [
@@ -309,7 +311,7 @@ def test_owner_move_dry_run_then_write_fold_the_new_owner_into_the_old_one(renam
     assert (_owner_row(cat, a), _owner_row(cat, b)) == before, "a dry run writes nothing"
     last = dry.output.rstrip("\n").splitlines()[-1]
     assert last == (f"nx catalog owners --execute move --owner {shlex.quote(a)} "
-                    f"--new-root {shlex.quote(str(renamed_repo['new']))} --no-dry-run --confirm")
+                    f"--new-root {shlex.quote(renamed_repo['new_root'])} --no-dry-run --confirm")
     assert _counts(dry.output)["owners folded"] == 1 and _counts(dry.output)["absorbed (trashed)"] == 2
 
     done = CliRunner().invoke(main, ["catalog", *shlex.split(last)[2:]])
@@ -328,7 +330,7 @@ def test_prints_every_absorbed_tumbler_of_an_owner_fold(renamed_repo) -> None:
     absorbed = {renamed_repo["docs"][("b", "src/one.py")], renamed_repo["docs"][("b", "src/two.py")]}
     listed = re.findall(r"^    (\d+\.\d+\.\d+)$", result.output, re.M)
     assert set(listed) == absorbed and len(listed) == 2
-    assert "absorbed documents (2, now trashed):" in result.output
+    assert "absorbed documents (2, would be trashed):" in result.output
 
 
 def test_owner_move_from_worktree_sends_main_repo_root_and_hash(renamed_repo) -> None:
@@ -364,6 +366,7 @@ def test_owner_refuses_absent_new_root(renamed_repo, move_routes_spy) -> None:
 
 
 def test_owner_move_refuses_on_engine_without_flag(renamed_repo, move_routes_spy, monkeypatch) -> None:
+    monkeypatch.setattr(floors, "CATALOG_MOVE_MIN_ENGINE_VERSION", None)
     monkeypatch.setattr(HttpCatalogClient, "_version_flags", lambda self: {"release_version": "0.1.150"})
     result = _run("--execute", "move", "--owner", renamed_repo["a"], "--new-root", str(renamed_repo["new"]),
                   "--no-dry-run", "--confirm")
