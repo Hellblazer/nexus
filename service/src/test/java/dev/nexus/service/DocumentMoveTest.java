@@ -1226,8 +1226,7 @@ class DocumentMoveTest {
 
         // P2.10: a chroma:// value is never rewritten, so its would-be target holds nothing against it
         assertThat(holders).containsOnlyKeys(taken);
-        assertThat(holders).containsEntry(taken, h1);
-        assertThat(h2).as("the chroma:// holder stays a live document, and no holder of the legacy row").isNotNull();
+        assertThat(holders).containsEntry(taken, h1).doesNotContainKey(legacy).doesNotContainValue(h2);
         assertThat(catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of())).isEmpty();
     }
 }
