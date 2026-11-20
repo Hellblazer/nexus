@@ -225,6 +225,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_restore_body: dict[str, Any] = {}
     #: RDR-243 (nexus-rfvyy.6.8): last body POSTed to /sensitivity.
     last_sensitivity_body: dict[str, Any] = {}
+    #: RDR-254: last body POSTed to /documents/move or /owners/move.
+    last_move_body: dict[str, Any] = {}
     #: RDR-204 (nexus-ft04v.33): rows /embedding_profile serves (the Voyage
     #: shape by default) and the status it answers with (200, or 404/405 to
     #: play an engine below the Phase 2 route).
@@ -255,6 +257,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_owners_by_type_body = {}
         cls.last_restore_body = {}
         cls.last_sensitivity_body = {}
+        cls.last_move_body = {}
 
     def log_message(self, *args: Any) -> None:
         pass  # suppress test noise
@@ -735,6 +738,24 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     flags.append(0 if t in seen else 1)
                     seen.add(t)
                 self._send_json({"updated": flags})
+        elif op in ("/documents/move", "/owners/move"):
+            # RDR-254: mirrors CatalogMoveRoutes -- every required field a non-blank string and dry_run a JSON
+            # boolean (no default), else 400; the reply is the counts object (owners_folded on the owner route
+            # only) with dry_run echoed and absorbed_tumblers a list. This fake keeps no rows, so it moves nothing.
+            need = ("tumbler", "new_source_uri", "new_file_path") if op == "/documents/move" else (
+                "owner", "new_root", "new_repo_hash")
+            bad = [k for k in need if not (isinstance(body.get(k), str) and body[k].strip())]
+            if bad or not isinstance(body.get("dry_run"), bool):
+                self._send_json({"error": f"{bad[0]!r} required" if bad else "'dry_run' must be a boolean"}, 400)
+            else:
+                FakeCatalogHandler.last_move_body = body
+                report: dict = {"dry_run": body["dry_run"], "repointed": 0, "absorbed": 0, "trashed": 0,
+                                "skipped": 0, "unchanged": 0, "aspect_rows_rewritten": 0, "aspect_rows_deleted": 0,
+                                "highlight_rows_rewritten": 0, "highlight_rows_deleted": 0, "links_remapped": 0,
+                                "links_collapsed": 0, "links_dropped": 0}
+                if op == "/owners/move":
+                    report["owners_folded"] = 0
+                self._send_json({**report, "absorbed_tumblers": []})
         elif op == "/link":
             FakeCatalogHandler.last_link_body = body
             resp: dict = {"ok": True}
@@ -1752,6 +1773,16 @@ class TestHttpCatalogClientRoundTrip:
         out = client.set_sensitivity(["1.1.5", "1.1.1", "1.1.2"], True, reason="r")
         assert FakeCatalogHandler.last_sensitivity_body["tumblers"] == ["1.1.1", "1.1.2"]
         assert out == {"updated": [1, 0, 1], "targets": ["1.1.1", "1.1.1", "1.1.2"]}
+
+    def test_move_journey_posts_both_routes_through_the_fake(self, client: HttpCatalogClient) -> None:
+        """RDR-254: both move routes answer through the fake with the real response shape (owners_folded on the
+        owner route only), and the route census passes in both directions."""
+        doc = client.move_document("1.1.1", new_source_uri="file:///n/x.pdf", new_file_path="/n/x.pdf", dry_run=True)
+        assert FakeCatalogHandler.last_move_body["new_file_path"] == "/n/x.pdf"
+        assert doc["dry_run"] is True and doc["absorbed_tumblers"] == [] and "owners_folded" not in doc
+        owner = client.move_owner("1.1", new_root="/n", new_repo_hash="h", dry_run=False)
+        assert owner["dry_run"] is False and owner["owners_folded"] == 0
+        assert FakeCatalogHandler.post_ops[-2:] == ["/documents/move", "/owners/move"]
 
     def test_chash_positions_journey(self, client: HttpCatalogClient) -> None:
         """nexus-opxwd: the hits' (chash, doc_id, position, chunk_count),

@@ -17,26 +17,6 @@ from __future__ import annotations
 #: live fake server, delete the entry (the completeness gate below refuses a
 #: stale one).
 ROUTE_EXCLUSIONS: dict[str, str] = {
-    "/documents/move": (
-        "RDR-254 Phase 1: DELIBERATELY engine-only for now (provisional "
-        "engine 0.1.199). The client half (HttpCatalogClient.move_document "
-        "behind `nx catalog owners --execute move`, plan item 254-P2-S3) is a "
-        "separate change, so there is no client method to fake yet. Its wire "
-        "shape (counts, absorbed_tumblers, the required dry_run boolean, 400 "
-        "on a malformed or relative path, 409 on every refusal) is validated "
-        "Java-side by CatalogDocumentMoveTest and CatalogMoveRoutesTest. When "
-        "the client method lands, DELETE this entry and fake the route"
-    ),
-    "/owners/move": (
-        "RDR-254 Phase 1: DELIBERATELY engine-only for now (provisional "
-        "engine 0.1.199). The client half (HttpCatalogClient.move_owner, plan "
-        "item 254-P2-S3) is a separate change, so there is no client method "
-        "to fake yet. Its wire shape (counts, owners_folded, "
-        "absorbed_tumblers, the required dry_run boolean, 400 on a relative "
-        "new_root, 409 on every refusal) is validated Java-side by "
-        "CatalogOwnerMoveTest and CatalogMoveRoutesTest. When the client "
-        "method lands, DELETE this entry and fake the route"
-    ),
     "/sensitive": (
         "nexus-f3yqd: DELIBERATELY engine-only for now (engine 0.1.188) — the "
         "client half (an HttpCatalogClient method behind the doctor's bounded "

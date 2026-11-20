@@ -55,3 +55,45 @@ def require_catalog_sensitivity(cat: Any, *, what: str = "a sensitive write") ->
         f"{floor}. An engine without it would drop the flag silently. Nothing was written."
     )
 
+
+#: RDR-254: the first engine release that carries ``POST /v1/catalog/documents/move`` and ``/owners/move`` and
+#: advertises ``catalog_move_supported`` on ``GET /version``. HAND-KEPT: ``None`` until the engine tag that carries
+#: the routes is cut (254-P5-S1 fills it in); the refusal text says "not yet released" while it is ``None``.
+#: Not a gate: the probe is the gate.
+CATALOG_MOVE_MIN_ENGINE_VERSION: tuple[int, int, int] | None = None
+
+
+class CatalogMoveUnsupportedError(RuntimeError):
+    """A ``nx catalog owners --execute move`` call was refused because the engine did not confirm ``catalog_move_supported``."""
+
+
+def require_catalog_move(cat: Any, *, what: str = "a catalog move") -> None:
+    """Refuse *what* unless *cat*'s engine advertises ``catalog_move_supported`` as a JSON ``true``.
+
+    Called before any move route call (RDR-254): an engine without the routes answers 404, and a half-confirmed
+    engine must not be sent a write. An UNKNOWN answer refuses: a probe that failed, an edge that trimmed
+    ``/version``, or a handle with no probe at all.
+    """
+    probe = getattr(cat, "catalog_move_probe", None)
+    supported, version = False, ""
+    if callable(probe):
+        try:
+            supported, version = probe()
+        except Exception as exc:  # noqa: BLE001 - an unreadable probe is an unknown answer, which refuses
+            _log.warning("engine_floors.move_probe_failed", error=str(exc))
+    if supported is True:
+        return
+    if not version:
+        raise CatalogMoveUnsupportedError(
+            f"{what} refused: could not confirm that the engine supports catalog moves "
+            f"(GET /version gave no answer or no catalog_move_supported key). Nothing was written."
+        )
+    floor = (
+        ".".join(map(str, CATALOG_MOVE_MIN_ENGINE_VERSION))
+        if CATALOG_MOVE_MIN_ENGINE_VERSION is not None
+        else "not yet released (RDR-254 Phase 1)"
+    )
+    raise CatalogMoveUnsupportedError(
+        f"{what} refused: engine {version} does not support catalog moves; minimum engine version: "
+        f"{floor}. Nothing was written."
+    )
