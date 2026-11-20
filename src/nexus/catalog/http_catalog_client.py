@@ -102,7 +102,6 @@ from nexus.catalog.collection_name import (
     collection_for_repo_row,
     find_collection_row,
     owner_segment_for_tumbler,
-    version_from_for_tuple_row,
     version_unreadable_message,
 )
 from nexus.db.limits import QUOTAS
@@ -3886,6 +3885,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *,
         bump: bool = False,
     ) -> "CollectionName | CollectionAttributes":
+        """The migration-source resolver (its one caller is the indexer's legacy migration).
+
+        It still renders the conformant name from a row's READABLE version, a grandfathered row
+        included; :meth:`collection_for_repo` answers the row's label. The render goes with P3.8.
+        A row with no readable version is answered as it is (``model_version`` None); only
+        ``bump=True`` refuses.
+        """
         # Mirror canonical _DocumentOps.collection_for: the catalog RENDERS the name; a
         # NEW tuple lands at v1 (never a 404/None), an existing tuple returns vN, and
         # bump returns vN+1. The service /collections/for_tuple is lookup-only (404 on a
@@ -3908,17 +3914,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 embedding_model=embedding_model,
             )
             if result and result.get("name"):
-                existing_version = version_from_for_tuple_row(
+                # One read of the version: a second one would log the unreadable warning twice.
+                row = CollectionAttributes.from_for_tuple(
                     result, content_type=content_type, owner_id=owner_id,
                     embedding_model=embedding_model,
                 )
-                if existing_version is None:  # grandfathered row, no readable version (engine 0.1.200)
+                if row.model_version is None:  # grandfathered row, no readable version (engine 0.1.200)
                     if bump:
-                        raise ValueError(version_unreadable_message(result["name"]))
-                    return CollectionAttributes.from_for_tuple(
-                        result, content_type=content_type, owner_id=owner_id,
-                        embedding_model=embedding_model,
-                    )
+                        raise ValueError(version_unreadable_message(row.label))
+                    return row
+                existing_version = row.model_version
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
