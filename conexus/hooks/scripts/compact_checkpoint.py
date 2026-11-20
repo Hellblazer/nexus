@@ -23,8 +23,8 @@ session's ``threads`` board entry (the entry whose body has a ``session: <sessio
 full-text search; failing that, the one titled exactly the session's name; the judgment half of a
 session lives there and a hook cannot write it), the branch and HEAD, the
 in-progress beads, the uncommitted files, the open PRs and the recent commits from
-``nx command-context continuation``. Ready beads and memory titles are not kept: the
-SessionStart group that runs on the same event already injects them. Continuation runs
+``nx command-context continuation``. Ready beads and memory titles are not kept: a
+session loads them on demand with ``nx brief beads`` and ``nx brief memory``. Continuation runs
 in the session's worktree when the launch directory's repository has one: a worktree
 named ``<session>`` or ``<session>-<topic>``, the one whose branch carries a board ``ref:``
 bead when several match, else the most recently active, with the others listed (the

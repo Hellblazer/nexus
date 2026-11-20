@@ -284,7 +284,8 @@ def _render_bd_prime(project_dir: Path) -> list[str]:
 
     A project can disable the beads plugin to drop its skill-listing entries; its one load-bearing contribution, the
     SessionStart ``bd prime``, is printed here instead. ``[]`` outside a beads repo, with the plugin on, or when the
-    primer is empty. The caller has already seen a ``bd ready`` that did not fail or time out."""
+    primer is empty. It runs ``bd prime`` on its own: SessionStart no longer runs ``bd ready`` before it, and
+    ``nx brief beads`` calls it after its own ``bd ready``."""
     cwd = str(project_dir)
     try:
         if (project_dir / '.beads').is_dir():
@@ -342,11 +343,25 @@ def _render_knowledge_map(cwd: str) -> list[str]:
     return []
 
 
+def repo_names(cwd: str) -> tuple[str, str]:
+    """``(toplevel, main)`` for the repo at *cwd*, from one ``git rev-parse``. *toplevel* is the checkout's own directory
+    name, the T2 project the scan used and the reachability probe asks about; *main* is the parent of the git common
+    dir, the same for every worktree of one repository, and is the ``repo`` of every usage line so a worktree session
+    does not fragment the count. Outside a repo both are *cwd*'s own name."""
+    own = os.path.basename(os.path.realpath(cwd))
+    out = run_command(['git', 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'],
+                      timeout=5, cwd=cwd)
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if not lines:
+        return own, own
+    toplevel = Path(lines[0]).name
+    main = Path(lines[1]).parent.name if len(lines) > 1 and Path(lines[1]).name == ".git" else toplevel
+    return toplevel, main or toplevel
+
+
 def repo_name(cwd: str) -> str:
-    """The name of the repo at *cwd*: its ``git rev-parse --show-toplevel`` directory, else *cwd*'s own name. The T2
-    project the scan used, and the ``repo`` of every usage line."""
-    toplevel = run_command(['git', 'rev-parse', '--show-toplevel'], timeout=5, cwd=cwd)
-    return Path(toplevel).name if toplevel else os.path.basename(os.path.realpath(cwd))
+    """The checkout's own name (:func:`repo_names`' first half): the T2 project the scan used."""
+    return repo_names(cwd)[0]
 
 
 def _t2_reachability_lines(project: str) -> list[str]:
@@ -380,12 +395,12 @@ def run(payload: dict | None) -> HookResult:
     # nexus-mtheb: the T1 contract leads the context.
     output_lines: list[str] = list(_T1_TOP_LINES)
     project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
-    repo = repo_name(str(project_dir))
+    repo, usage_repo = repo_names(str(project_dir))
 
     # --- Threads board: this session's threads whose due: has come (nexus-ct74m) ---
     # The one use of the payload: its session id finds the session's own board entry.
     session_id = str((payload or {}).get("session_id") or "")
-    _record_session_start(session_id, repo, str((payload or {}).get("source") or ""))
+    _record_session_start(session_id, usage_repo, str((payload or {}).get("source") or ""))
     if session_id:
         try:
             from nexus.hooks.board_due import due_lines  # noqa: PLC0415 — deferred: only a payload with a session id pays

@@ -178,7 +178,7 @@ def _record(topic: str, result: BriefResult, source: str, cwd: str) -> None:
     try:
         fields = {
             "topic": topic[:_LOG_TOPIC_CHARS], "ok": result.ok, "bytes": len(result.text.encode("utf-8")), "source": source,
-            "session_id": _session_id(), "repo": session_context.repo_name(cwd),
+            "session_id": _session_id(), "repo": session_context.repo_names(cwd)[1],
         }
         _log.info("brief_load", **fields)
         usage_log.append("brief_load", **fields)

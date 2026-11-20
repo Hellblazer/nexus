@@ -219,7 +219,8 @@ class TestRunPrintsNothingThatMoved:
         monkeypatch.setattr(t2_prefix_scan, "scan", lambda project, **kw: pytest.fail("the T2 scan ran at session start"))
         out = session_context.run(None).stdout or ""
         assert "T2 Memory" not in out and "Ready Beads" not in out and "Capabilities" not in out
-        assert spawned == [["git", "rev-parse", "--show-toplevel"]], "the one spawn is the repo name; no bd, no nx"
+        assert spawned == [["git", "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]], (
+            "the one spawn is the repo names; no bd, no nx")
 
     def test_with_a_session_id_the_hook_still_asks_for_due_threads_and_notes(self, monkeypatch, tmp_path: Path) -> None:
         """The hook no longer runs the T2 scan, but with a session id it still calls ``board_due`` and ``identity_notes``
@@ -343,6 +344,21 @@ class TestWhatStaysAlwaysOnBesidesTheIndex:
         claude.mkdir()
         (claude / "settings.json").write_text('{"enabledPlugins": {"beads@beads-marketplace": true}}', encoding="utf-8")
         assert "# beads primer" not in (session_context.run(None).stdout or ""), "the plugin prints it"
+
+    def test_a_worktree_logs_its_main_repos_name_and_scans_its_own(self, tmp_path: Path) -> None:
+        """Usage lines group by the main repo (the parent of the git common dir), so a worktree session does not
+        fragment the count; the T2 project the scan and the reachability probe ask about stays the toplevel's name."""
+        main = tmp_path / "mainrepo"
+        main.mkdir()
+        git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+        subprocess.run([*git, "init", "-q", "."], cwd=main, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "seed"], cwd=main, check=True)
+        subprocess.run([*git, "worktree", "add", "-q", str(tmp_path / "wt-feature")], cwd=main, check=True)
+        assert session_context.repo_names(str(tmp_path / "wt-feature")) == ("wt-feature", "mainrepo")
+        assert session_context.repo_names(str(main)) == ("mainrepo", "mainrepo")
+        plain = tmp_path / "notarepo"
+        plain.mkdir()
+        assert session_context.repo_names(str(plain)) == ("notarepo", "notarepo")
 
     def test_each_start_records_one_session_start_line_for_the_denominator(self, monkeypatch, tmp_path: Path) -> None:
         self._env(monkeypatch, tmp_path)
