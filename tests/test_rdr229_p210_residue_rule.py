@@ -3,7 +3,7 @@
 
 After P2.10 no engine path moves ``chroma://`` residue or an ``nx-note://<file-routed>`` value, so both keep the
 segment they were written with when their documents move onto a prefix-free label (the engine tests are
-``NoteUriResidueRuleTest``, ``NoteUriMoveTest``, ``DocumentMoveTest`` and ``CatalogReconcileCommitBehaviourTest``). This
+``NoteUriResidueRuleTest``, ``NoteUriMoveTest``, ``DocumentMoveTest`` and ``CatalogReconcileCommitNoteUriRuleTest``). This
 file pins what the CLIENT twin says of those values, and that the prefix list the SQL of the changeset names is the
 frozen one: the three URI-string classifiers stay on their list (RDR-229 item 12).
 """
@@ -40,23 +40,47 @@ def test_the_same_value_on_a_prefix_free_label_would_be_a_note(uri):
     assert is_note_uri(canonical_note_uri(uri))
 
 
-def _prefixes_named_by(text: str, pattern: str) -> set[str]:
-    return set(re.findall(pattern, text))
+def _forward_function_body(text: str) -> str:
+    """The forward (not rollback) body of catalog-049-1's function: the first CDATA block of that changeset."""
+    start = text.index('<changeSet id="catalog-049-1"')
+    cdata = text.index("<![CDATA[", start)
+    return text[cdata: text.index("]]>", cdata)]
 
 
-def test_the_changesets_prefix_lists_are_the_frozen_list():
-    """catalog-049's three URI rewrites and its three moves test a segment against the same list as ``NoteUri`` and
-    ``aspect_readers``; a prefix added on one side only fails here."""
+def _prefix_tests(segment: str, column: str) -> list[str]:
+    """The prefixes tested with ``starts_with(<column>, '<prefix>')`` in ``segment``, in order."""
+    return re.findall(rf"starts_with\({re.escape(column)}, '([a-z]+__)'\)", segment)
+
+
+def test_every_uri_rewrite_arm_of_the_function_carries_the_whole_frozen_guard():
+    """catalog-049-1 rewrites a note URI in three places (the collision pre-check, the update UPDATE, the repoint UPDATE).
+    Each ``nx-note://`` arm must test the old collection against EVERY frozen prefix before its ``THEN``, counted per arm so
+    one guarded arm cannot cover for another, and no ``chroma://`` arm may be left."""
+    body = _forward_function_body((CHANGELOG / "catalog-049-note-uri-residue.xml").read_text())
+    arms = body.split("starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')")[1:]
+    assert len(arms) == 3, f"expected the three nx-note:// arms of the function, found {len(arms)}"
+    for number, arm in enumerate(arms, start=1):
+        before_then = arm[: arm.index("THEN")]
+        assert _prefix_tests(before_then, "d.physical_collection") == list(FILE_ROUTED_PREFIXES), (
+            f"arm {number} does not test the old collection against exactly FILE_ROUTED_PREFIXES, in order, before THEN"
+        )
+    assert "'chroma://'" not in body, "a chroma:// arm is left in the function"
+
+
+def test_every_move_template_and_verification_carries_the_whole_frozen_guard_and_the_file_types():
+    """Six texts (three templates, three verifications): each tests its collection column against every frozen prefix
+    and names exactly the file-typed content types. A regex that matches nothing fails; it never passes."""
     text = (CHANGELOG / "catalog-049-note-uri-residue.xml").read_text()
-    frozen = set(FILE_ROUTED_PREFIXES)
-    function_guard = _prefixes_named_by(text, r"starts_with\(d\.physical_collection, '([a-z]+__)'\)")
-    assert function_guard == frozen, "the function's moveTo guard names a different list than FILE_ROUTED_PREFIXES"
-    for column in ("physical_collection", "collection"):
-        named = _prefixes_named_by(text, rf"starts_with\(t\.{column}, '([a-z]+__)'\)")
-        if named:
-            assert named == frozen, f"a move's prefix-free test on t.{column} names a different list"
-    # the moves repair what the content type says: code, docs and rdr are the frozen list's names without the suffix
-    content_types = set(re.findall(r"c\.content_type IN \(([^)]*)\)", text))
-    assert content_types, "no move names the file-typed content types"
-    for group in content_types:
-        assert {t.strip().strip("'") for t in group.split(",")} == {p.removesuffix("__") for p in frozen}
+    templates = re.findall(r"\$t\$(.*?)\$t\$", text, re.DOTALL)
+    verifications = re.findall(r"\$v\$(.*?)\$v\$", text, re.DOTALL)
+    assert len(templates) == 3 and len(verifications) == 3, (len(templates), len(verifications))
+    columns = ["physical_collection", "collection", "collection"]
+    content_types = [p.removesuffix("__") for p in FILE_ROUTED_PREFIXES]
+    for kind, texts in (("template", templates), ("verification", verifications)):
+        for number, (body, column) in enumerate(zip(texts, columns, strict=True), start=1):
+            assert _prefix_tests(body, f"t.{column}") == list(FILE_ROUTED_PREFIXES), (
+                f"{kind} {number}: t.{column} is not tested against exactly FILE_ROUTED_PREFIXES"
+            )
+            groups = re.findall(r"c\.content_type IN \(([^)]*)\)", body)
+            assert len(groups) == 1, f"{kind} {number}: expected one content_type list, found {len(groups)}"
+            assert sorted(t.strip().strip("'") for t in groups[0].split(",")) == sorted(content_types)

@@ -80,8 +80,8 @@ def test_dry_run_reports_candidates_and_markers_without_writing(monkeypatch):
     assert result.exit_code == 0, result.output
     report = json.loads(result.stdout)
     assert report["total_chroma_rows"] == 2
-    assert report["by_collection"]["rdr__x"] == {"count": 1, "candidate": True}
-    assert report["by_collection"]["knowledge__x"] == {"count": 1, "candidate": False}
+    assert report["by_collection"]["rdr__x"] == {"count": 1, "candidate": True, "candidate_rows": 1}
+    assert report["by_collection"]["knowledge__x"] == {"count": 1, "candidate": False, "candidate_rows": 0}
     assert report["candidates"] == 1
     assert report["rederivable"] == 1
     assert report["apply"] is False
@@ -146,6 +146,7 @@ def test_no_chroma_rows_is_a_clean_no_op(monkeypatch):
 def test_the_census_calls_a_non_file_routed_chroma_row_a_legacy_note_not_a_marker(monkeypatch):
     """RDR-231 (nexus-bivz3.15): those rows are legacy notes the ENGINE backfill rewrites to nx-note://;
     "store_put-origin marker (left alone)" described the retired identity model."""
+    _ROWS["knowledge__x"] = {"content_type": "knowledge"}
     docs = [
         _FakeDoc("1.1.1", "rdr__x", "chroma://rdr__x//abs/rdr-1.md"),
         _FakeDoc("1.1.2", "knowledge__x", "chroma://knowledge__x/Some Title"),
@@ -204,7 +205,7 @@ def test_residue_still_on_a_prefix_free_segment_is_a_candidate_when_its_collecti
     _collection_rows["plain"] = {"content_type": content_type}
     docs = [_FakeDoc("1.1.1", "plain", "chroma://plain//abs/a.md")]
     report = json.loads(_invoke(monkeypatch, docs, ["--json"]).stdout)
-    assert report["by_collection"]["plain"] == {"count": 1, "candidate": True}
+    assert report["by_collection"]["plain"] == {"count": 1, "candidate": True, "candidate_rows": 1}
     assert report["updates"] == [
         {"tumbler": "1.1.1", "collection": "plain", "was": "chroma://plain//abs/a.md", "now": "file:///abs/a.md"}
     ]
@@ -214,7 +215,7 @@ def test_a_knowledge_collections_chroma_note_on_a_prefix_free_label_is_not_a_can
     _collection_rows["plain-know"] = {"content_type": "knowledge"}
     docs = [_FakeDoc("1.1.1", "plain-know", "chroma://plain-know/A title")]
     report = json.loads(_invoke(monkeypatch, docs, ["--json"]).stdout)
-    assert report["by_collection"]["plain-know"] == {"count": 1, "candidate": False}
+    assert report["by_collection"]["plain-know"] == {"count": 1, "candidate": False, "candidate_rows": 0}
     assert report["candidates"] == 0
     assert report["updates"] == []
 
@@ -240,3 +241,53 @@ def test_a_chroma_uri_with_no_path_is_refused_as_malformed(monkeypatch):
     report = json.loads(_invoke(monkeypatch, docs, ["--json"]).stdout)
     assert report["refused"] == 1
     assert "malformed" in report["refusals"][0]["reason"]
+
+
+# ── review r1 (nexus-p2m1x.15): a failed row lookup is never a legacy note ───────────────────────────────────────────
+
+
+def test_a_failed_collection_row_lookup_fails_loud_and_writes_nothing(monkeypatch):
+    """The service flaps while the verb reads a collection's row: the verb must stop, not label every prefix-free
+    file-typed row a legacy note (which tells the operator the engine will turn them into notes)."""
+    from nexus.mcp_infra import ServiceNotReadyError  # noqa: PLC0415
+
+    def _down(name, *, strict=False, **_kw):
+        if strict:
+            raise ServiceNotReadyError("collections listing failed")
+        return None  # the non-strict read answers "no row" for a failed listing: the verb must not use it
+
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _down)
+    docs = [_FakeDoc("1.1.1", "plain-docs", "chroma://plain-docs//abs/a.md")]
+    writer = _FakeWriter()
+    result = _invoke(monkeypatch, docs, ["--apply"], writer=writer)
+    assert result.exit_code != 0
+    assert "legacy note" not in result.output
+    assert "collections listing failed" in result.output or "collection row" in result.output
+    assert writer.update_many_calls == []
+
+
+def test_a_collection_with_no_row_is_unclassified_never_a_legacy_note(monkeypatch):
+    docs = [_FakeDoc("1.1.1", "unregistered", "chroma://unregistered//abs/a.md")]
+    result = _invoke(monkeypatch, docs, [])
+    assert result.exit_code == 0, result.output
+    assert "legacy note" not in result.output
+    assert "no catalog row" in result.output
+
+
+def test_a_collection_with_candidate_and_non_candidate_rows_does_not_tag_both_as_candidates(monkeypatch):
+    """A prefix-free knowledge collection holding one note and one residue value that names a file-routed segment."""
+    _ROWS["plain-know"] = {"content_type": "knowledge"}
+    docs = [
+        _FakeDoc("1.1.1", "plain-know", "chroma://docs__old//abs/a.md"),
+        _FakeDoc("1.1.2", "plain-know", "chroma://plain-know/A title"),
+    ]
+    result = _invoke(monkeypatch, docs, [])
+    assert "plain-know: 2  [1 of 2 candidate]" in result.output
+    report = json.loads(_invoke(monkeypatch, docs, ["--json"]).stdout)
+    assert report["by_collection"]["plain-know"] == {"count": 2, "candidate": True, "candidate_rows": 1}
+
+
+def test_a_refusal_names_the_function_it_actually_calls(monkeypatch):
+    """The relative-path refusal and the no-result refusal speak of file_routed_uri, not uri_for."""
+    docs = [_FakeDoc("1.1.1", "rdr__x", "chroma://rdr__x/relative.md")]
+    assert "uri_for" not in _invoke(monkeypatch, docs, ["--json"]).stdout

@@ -118,26 +118,42 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     # A content type's name prefix is ``<content_type>__``, so the file-typed content types are the frozen prefix
     # list's, never a second list (the same derivation as nexus.catalog.rdr229.uri_residue_doctor).
     file_typed = frozenset(p.removesuffix("__") for p in FILE_ROUTED_PREFIXES)
-    typed: dict[str, bool] = {}
+    kinds: dict[str, str] = {}   # collection -> "file_typed" | "other" | "no_row"
 
-    def _collection_is_file_typed(collection: str) -> bool:
-        if collection not in typed:
-            row = mcp_infra.get_collection_row(collection) or {}
-            typed[collection] = row.get("content_type") in file_typed
-        return typed[collection]
+    def _collection_kind(collection: str) -> str:
+        if collection not in kinds:
+            try:
+                # strict: a listing that failed must stop the verb, never read as "no row" (which would class every
+                # prefix-free file-typed row a legacy note the engine is about to turn into a note)
+                row = mcp_infra.get_collection_row(collection, strict=True)
+            except Exception as exc:  # noqa: BLE001 — any failed read of the registry stops the verb, whatever raised it
+                raise click.ClickException(
+                    f"could not read the catalog row of collection {collection!r} ({exc}); no row is classified "
+                    "and nothing is written. Retry when the service answers."
+                ) from exc
+            if row is None:
+                kinds[collection] = "no_row"
+            else:
+                kinds[collection] = "file_typed" if row.get("content_type") in file_typed else "other"
+        return kinds[collection]
 
-    def _is_candidate(d: object) -> bool:
+    def _classify(d: object) -> str:
+        """``candidate``, ``legacy_note`` or ``unclassified`` (no catalog row for the collection, and a segment that
+        names no file-routed prefix: not known to be residue and not known to be a note)."""
         # the URI-string classifier over the frozen list (it reads only the residue's own segment), or the row's type
-        return _collection_is_file_routed(_after_scheme(d.source_uri or "")) or _collection_is_file_typed(
-            d.physical_collection
-        )
+        if _collection_is_file_routed(_after_scheme(d.source_uri or "")):
+            return "candidate"
+        kind = _collection_kind(d.physical_collection)
+        return "candidate" if kind == "file_typed" else ("unclassified" if kind == "no_row" else "legacy_note")
 
-    candidates = [d for d in chroma_rows if _is_candidate(d)]
+    classes = [(d, _classify(d)) for d in chroma_rows]
+    candidates = [d for d, c in classes if c == "candidate"]
 
     by_collection = Counter(d.physical_collection for d in chroma_rows)
-    candidate_collections = {d.physical_collection for d in candidates}
+    candidate_rows = Counter(d.physical_collection for d in candidates)
+    unclassified_rows = Counter(d.physical_collection for d, c in classes if c == "unclassified")
     census = {
-        coll: {"count": n, "candidate": coll in candidate_collections}
+        coll: {"count": n, "candidate": candidate_rows[coll] > 0, "candidate_rows": candidate_rows[coll]}
         for coll, n in sorted(by_collection.items())
     }
 
@@ -156,7 +172,7 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
             continue
         new_uri = file_routed_uri(d.physical_collection, path)
         if not new_uri:
-            refused.append((d, f"uri_for did not re-derive a file:// URI (got {new_uri!r})"))
+            refused.append((d, f"file_routed_uri did not re-derive a file:// URI (got {new_uri!r})"))
             continue
         updates.append((d, new_uri))
 
@@ -184,8 +200,16 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     else:
         click.echo(f"chroma:// source_uri rows: {report['total_chroma_rows']}")
         for coll, info in census.items():
-            tag = "candidate" if info["candidate"] else "legacy note (the engine backfill rewrites it to nx-note://)"
-            click.echo(f"  {coll}: {info['count']}  [{tag}]")
+            n, k = info["count"], info["candidate_rows"]
+            if k == n:
+                tag = "candidate"
+            elif k:
+                tag = f"{k} of {n} candidate"
+            elif unclassified_rows[coll] == n:
+                tag = "no catalog row for this collection: not classified, left alone"
+            else:
+                tag = "legacy note (the engine backfill rewrites it to nx-note://)"
+            click.echo(f"  {coll}: {n}  [{tag}]")
         click.echo(
             f"Re-derivable: {report['rederivable']}, refused: {report['refused']}"
         )
