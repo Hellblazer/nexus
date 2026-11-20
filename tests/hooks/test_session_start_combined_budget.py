@@ -44,8 +44,11 @@ import pytest
 from nexus import brief
 from nexus.hooks import identity_notes, session_context, t2_prefix_scan
 
-#: Measured on the progressive-disclosure build: guidance 1,900 B + hook 1,279 B = 3,179 B. Rounded up by about 2%.
-_COMBINED_BUDGET_BYTES = 3250
+#: Sam's ceilings (T2 nexus/sam-ruling-clear-start-bytes-2026-11-20): 3,200 B for every start but /clear, 3,600 B for /clear,
+#: which also prints the resume line. Measured on the progressive-disclosure build: guidance 1,900 B + hook 1,279 B = 3,179 B,
+#: and 3,581 B on /clear with the resume line at its 400-byte cap.
+_COMBINED_BUDGET_BYTES = 3200
+_CLEAR_COMBINED_BUDGET_BYTES = 3600
 
 #: guidance 1,900 B + hook 1,279 B + sn static 1,143 B = 4,322 B. Rounded up by about 1.3%.
 _BOUNDED_SESSIONSTART_BUDGET_BYTES = 4380
@@ -212,6 +215,8 @@ def test_the_resume_line_on_clear_is_counted_and_composes_with_the_other_new_lin
             + len(_SN_SESSION_START_SECTION.read_bytes()))
     assert base < _BOUNDED_SESSIONSTART_BUDGET_BYTES, f"{base}B without the resume line >= {_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     assert base + added < _BOUNDED_SESSIONSTART_BUDGET_BYTES + allowance
+    clear = _bytes(_real_guidance_emitter_output()) + _bytes(_real_hook_output(monkeypatch, tmp_path)) + added
+    assert clear <= _CLEAR_COMBINED_BUDGET_BYTES, f"a /clear start is {clear}B, over Sam's {_CLEAR_COMBINED_BUDGET_BYTES}B"
     for source in ("startup", "resume", "compact", "fork"):
         assert resume_line.with_resume_line("", {"source": source}, open_store=lambda: Store()) == "", f"no line on {source}"
 
