@@ -5,7 +5,7 @@ Each ``row_*`` takes a scoped :class:`~tests.identity.conftest.World` on the one
 tests/identity/test_identity_engine_journeys.py and drives the REAL engine through the verbs. This module holds no test
 and mints no tenant (the tenant ceiling, tests/storage_touch_ceiling.toml, is Sam's); one ``_journey`` entry there runs
 ``ROWS`` (tag ``grp``). Run only these: ``NX_ROWS=group_journeys uv run pytest tests/identity/test_identity_engine_journeys.py``.
-The tenant-free tests of the same behaviour, against canned engine answers, are tests/test_group_cmd.py.
+The tenant-free tests of the same behaviour, against canned engine answers, are tests/test_group_cmd.py and, for ack-times, tests/test_group_ack_times.py.
 """
 from __future__ import annotations
 
@@ -326,6 +326,8 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
         assert "could not be resolved" not in result.stderr, result.stderr
         reds = json.loads(result.stdout)["reds"]
         assert [(r["sha"], r["acked_by"], r["handoffs"]) for r in reds] == [(s1, alpha.identity, 0), (s2, beta.identity, 1), (s3, None, 0)]
+        assert [r["ignored_acks"] for r in reds] == [0, 0, 1], "only the s3 ack, which carried no session stamp, is ignored"
+        assert "1 ack on red tips carried no session stamp the engine maps; it did not count" in result.stderr, result.stderr
         assert 11.9 <= reds[0]["minutes"] <= 12.6 and 8.9 <= reds[1]["minutes"] <= 9.6 and reds[2]["minutes"] is None, reds
         assert reds[0]["cleared_at"] and reds[1]["cleared_at"] is None
         text = _cli(reader, "ack-times", name)

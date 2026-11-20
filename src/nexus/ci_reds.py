@@ -119,12 +119,16 @@ class AckResolver:
     :attr:`unresolved` counts the ACKS whose poster could not be named for a reason other than "the service does not
     know it": a failed or refused lookup, no session route to ask, a stamp that is no session id, a delegated identity
     whose parent could not be read. None of those is remembered, so one transient error cannot make an ack read as no ack
-    for the rest of the run."""
+    for the rest of the run. :attr:`ignored` counts the acks no identity holds the stamp of; the caller asks only about
+    acks that pass its own cheap checks (a red tip, inside the red, an owner), so it is the signal for a red's own acks."""
 
     session_lookup: Lookup | None = None
     identity_lookup: Lookup | None = None
     #: Acks whose poster could not be resolved (see the class docstring).
     unresolved: int = 0
+    #: Acks the engine ignores: no sender-session stamp, or a stamp the session index maps to no identity. Counted so a
+    #: reader can tell "the owner was too slow" from "the owner acked and the engine could not see it".
+    ignored: int = 0
     _failures: int = 0
     _sessions: dict[str, str | None] = field(default_factory=dict)
 
@@ -175,16 +179,19 @@ class AckResolver:
             return None
         return self._ask(self._sessions, session_id, self._fetch_session, self._final_session)
 
-
     def poster(self, ack: Any) -> str | None:
         """The identity *ack* counts for: the one its sender-session stamp maps to (a delegated child to its parent), as the
         engine counts it. An ack with no stamp counts for nobody and ``from`` is never read. Counts the ack in
-        :attr:`unresolved` when the lookup it needed failed."""
+        :attr:`unresolved` when the lookup it needed failed, and in :attr:`ignored` when it has no stamp or the index
+        maps its stamp to nobody (the service's own answer)."""
         sender = getattr(ack, "sender_session", None)
         if not sender:
+            self.ignored += 1
             return None
         failures = self._failures
         who = self.session(str(sender))
         if self._failures > failures:
             self.unresolved += 1
+        elif who is None:
+            self.ignored += 1
         return who

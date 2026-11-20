@@ -343,7 +343,8 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
     an ack with no stamp counts for nobody (:meth:`nexus.ci_reds.AckResolver.poster`). The cheap
     checks, an owner and a tip, come before any lookup. ``minutes`` runs from the first row's ``episode_at`` to the
     first counting ack; a red with none has ``acked_at`` null. ``handoffs`` counts the hand-ons, the escalation
-    included, as the engine's own counter does.
+    included, as the engine's own counter does. ``ignored_acks`` counts the acks that pass those checks but carry no
+    stamp, or one the index maps to nobody, up to the counting ack: the engine ignores them and so does ``minutes``.
     """
     resolver = resolver or AckResolver()
     reds, acks = ci_reds.split(rows)
@@ -358,6 +359,7 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
         acked: tuple[datetime, Any] | None = None
         acked_alias: str | None = None
         acked_by: str | None = None
+        ignored_before = resolver.ignored
         for at, ack in acks:
             if at < start or (end is not None and at >= end):
                 continue
@@ -383,6 +385,8 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
             "acked_by_alias": acked_alias if acked else None,
             "minutes": round((acked[0] - began).total_seconds() / 60, 1) if acked else None,
             "cleared_at": cleared.isoformat().replace("+00:00", "Z") if cleared else None,
+            # Acks on a red tip, inside the red, that the engine ignores (null or unmapped stamp), up to the counting ack.
+            "ignored_acks": resolver.ignored - ignored_before,
         })
     return out
 
@@ -421,6 +425,10 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     if resolver.unresolved:
         n = resolver.unresolved
         click.echo(f"note: {n} ack{'s' if n != 1 else ''} could not be resolved; counts may be low", err=True)
+    if resolver.ignored:
+        n = resolver.ignored
+        click.echo(f"note: {n} ack{'s' if n != 1 else ''} on red tips carried no session stamp the engine maps; "
+                   f"{'they' if n != 1 else 'it'} did not count", err=True)
     if as_json:
         click.echo(json.dumps({"group": name, "reds": reds}, indent=2, sort_keys=True))
         return
