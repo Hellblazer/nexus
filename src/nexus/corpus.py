@@ -337,6 +337,17 @@ class EmbeddingProfileMismatchError(RuntimeError):
         )
 
 
+class CollectionRegistryUnreadableError(RuntimeError):
+    """A write could not read the catalog row for the collection it names
+    (RDR-229 P2.8, item 1's Unreadable outcome).
+
+    A read falls back to the name resolution when the registry cannot be read,
+    but a write must not: the subject's collection may be registered under a
+    label the render does not produce, and writing to the rendered name would
+    split the subject across two collections.
+    """
+
+
 class CatalogReaderUnavailableError(RuntimeError):
     """:func:`nexus.catalog.factory.make_catalog_reader` returned
     ``None`` instead of a reader (RDR-204 Phase 3, nexus-ft04v.26,
@@ -1321,7 +1332,9 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
         )
 
 
-def _knowledge_subject_label(t3: object, subject: str, model: str, rendered: str) -> "str | None":
+def _knowledge_subject_label(
+    t3: object, subject: str, model: str, rendered: str, *, for_write: bool,
+) -> "str | None":
     """The label of the knowledge collection registered for *subject*, found by its
     row's attributes, never by rendering (RDR-229 P2.8, item 5).
 
@@ -1332,23 +1345,28 @@ def _knowledge_subject_label(t3: object, subject: str, model: str, rendered: str
     name the resolution below would try first: a row under the rendered name
     leaves that resolution, with its legacy fallbacks, exactly as it was.
 
-    The row comes from the process's catalog, which need not be *t3*'s tenant,
-    so a label *t3* does not hold is not answered. ``None`` (the name resolution
-    stands) when *t3* has no ``find_collection``, no row backs the subject, or
-    the read fails.
+    ``None`` (the name resolution stands) when *t3* has no ``find_collection``
+    or no row backs the subject. *t3*'s ``find_collection`` answers only for its
+    own tenant (:meth:`nexus.db.http_vector_client.HttpVectorClient.find_collection`).
+    When the row cannot be read, a read falls back to the name resolution and a
+    write raises :class:`CollectionRegistryUnreadableError`.
     """
+    from nexus.catalog.collection_attributes import CollectionAttributes  # noqa: PLC0415 — circular-dep avoidance (catalog)
+
     finder = getattr(t3, "find_collection", None)
     if finder is None:
         return None
     try:
         row = finder("knowledge", subject, model)
-        if row is None or row.label == rendered:
-            return None
-        if not t3.collection_exists(row.label):  # type: ignore[attr-defined]
-            _log.debug("t3_collection_name_subject_row_not_in_store", subject=subject, label=row.label)
-            return None
-    except Exception:  # noqa: BLE001 — the row read is a first source; the name resolution below answers without it, as before P2.8
+    except Exception as exc:  # noqa: BLE001 — any failure is "unreadable": a read falls back, a write refuses
+        if for_write:
+            raise CollectionRegistryUnreadableError(
+                f"cannot read the catalog row for knowledge subject {subject!r}; "
+                f"refusing to write under the rendered name {rendered!r}: {exc}"
+            ) from exc
         _log.warning("t3_collection_name_subject_row_read_failed", subject=subject, exc_info=True)
+        return None
+    if not isinstance(row, CollectionAttributes) or row.label == rendered:
         return None
     return row.label
 
@@ -1552,6 +1570,7 @@ def t3_collection_name(
     if ct == "knowledge":
         found = _knowledge_subject_label(
             t3, owner_segment, _resolve_promoted_model_token(ct, for_write=False), promoted,
+            for_write=for_write,
         )
         if found is not None:
             return found

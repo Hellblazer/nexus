@@ -3994,16 +3994,22 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 content_type, owner, token,
             ),
         )
-        if not bump:
-            row = self.find_collection(
-                content_type, owner_segment_for_tumbler(owner), embedding_model,
+        owner_id = owner_segment_for_tumbler(owner)
+        if not owner_id:
+            raise ValueError(
+                f"collection_for_repo: cannot derive owner_id segment from owner {owner!r}"
             )
-            if row is not None:
-                return row
-        minted = self.collection_for(content_type, owner, embedding_model, bump=bump)
+        row = self.find_collection(content_type, owner_id, embedding_model)
+        if row is not None and not bump:
+            return row
+        version = row.model_version + 1 if row is not None else 1
         return CollectionAttributes.minted(
-            label=minted.render(), content_type=content_type, owner_id=minted.owner_id,
-            embedding_model=embedding_model, model_version=minted.model_version,
+            label=CollectionName(
+                content_type=content_type, owner_id=owner_id,
+                embedding_model=embedding_model, model_version=version,
+            ).render(),
+            content_type=content_type, owner_id=owner_id,
+            embedding_model=embedding_model, model_version=version,
         )
 
     def find_collection(

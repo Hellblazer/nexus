@@ -6942,18 +6942,19 @@ class HttpVectorClient:
             if close is not None:
                 close()
 
-    @staticmethod
-    def find_collection(content_type: str, owner_id: str, embedding_model: str) -> Any:
-        """The catalog row registered for ``(content_type, owner_id, embedding_model)``,
-        as :class:`~nexus.catalog.collection_attributes.CollectionAttributes`, or
+    def find_collection(self, content_type: str, owner_id: str, embedding_model: str) -> Any:
+        """The catalog row registered for ``(content_type, owner_id, embedding_model)``
+        in THIS client's tenant, as
+        :class:`~nexus.catalog.collection_attributes.CollectionAttributes`, or
         ``None`` when no row backs the tuple (RDR-229 P2.8).
 
-        Read through the catalog reader, as :meth:`_catalog_chashes_for_title` is.
-        That reader is the process default, not one bound to this client's tenant,
-        so a caller that needs this store's collection checks the label against
-        this store before using it (:func:`nexus.corpus.t3_collection_name` does).
-        A failed read raises.
+        The read goes through the process's catalog reader, whose tenant is
+        :func:`_process_default_tenant`, so a client built for another tenant
+        answers ``None`` (no lookup) rather than another tenant's row: the same
+        rule as :meth:`_resolve_collection_row` (nexus-fryrd). A failed read raises.
         """
+        if self._tenant != _process_default_tenant():
+            return None
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
 
         reader = make_catalog_reader()
