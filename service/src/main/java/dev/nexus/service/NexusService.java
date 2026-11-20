@@ -884,7 +884,8 @@ public final class NexusService {
         if (tupleTemplateRegistry != null) {
             this.tupleRepo = TupleRepository.fromEnv(tenantScope, tupleTemplateRegistry);
             boardOwner = new dev.nexus.service.board.BoardOwnerWiring(tenantScope, tupleRepo, identityRepo, java.time.Clock.systemUTC());
-            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo, identityFence, boardOwner.hook()));
+            var tuplesCtx = server.createContext("/v1/tuples", new TupleHandler(tupleRepo, identityFence, boardOwner.hook(),
+                (tenant, stamp) -> dev.nexus.service.board.Identities.countedIdentity(identityRepo, tenant, stamp)));
             tuplesCtx.getFilters().addAll(authFilter);
         } else {
             this.tupleRepo = null;

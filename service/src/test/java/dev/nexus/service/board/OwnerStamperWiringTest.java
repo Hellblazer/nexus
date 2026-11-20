@@ -293,6 +293,239 @@ class OwnerStamperWiringTest {
             .extracting(r -> r.dims().get("from")).containsExactly(a);
     }
 
+    private HttpResponse<String> postAs(String bearer, String identityToken, String path, Map<String, Object> body) throws Exception {
+        return postAs(bearer, identityToken, null, path, body);
+    }
+
+    private HttpResponse<String> postAs(String bearer, String identityToken, String sessionToken, String path,
+                                        Map<String, Object> body) throws Exception {
+        var b = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + bearer).header("Content-Type", "application/json");
+        if (identityToken != null) {
+            b.header("X-Nexus-Identity-Token", identityToken);
+        }
+        if (sessionToken != null) {
+            b.header("X-Nexus-T1-Session", sessionToken);
+        }
+        return http.send(b.POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
+    /** How the ack of {@link #ackThenDeadline} is made: whose credential it carries. */
+    private enum Via { OWNER_TOKEN, CHILD_TOKEN, NO_CREDENTIAL, MAPPED_MINTED_SESSION, UNMAPPED_MINTED_SESSION }
+
+    /** What an ack over the real route did: its status, the {@code from} the row landed with, the owner's id, and the owner rows after the deadline. */
+    private record AckRun(int ackStatus, String ackFrom, String ownerId, List<String> rows) { }
+
+    /**
+     * Alpha owns the red on Y; an ack for Y is posted over the real route with {@code from} (null: left out) and
+     * the credential {@code via} names (the owner's token, a delegated child's token, none, a minted session the
+     * index maps to alpha, a minted session it does not map); the deadline then falls due.
+     */
+    private AckRun ackThenDeadline(String from, Via via) throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String client = "client-" + UUID.randomUUID();
+        seedToken(client, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        se.done(t, StamperEnv.BASE, "Y", "failure");
+        assertThat(se.ownerRows(t, StamperEnv.BASE).getFirst().body()).containsEntry("owner", a);
+        assertThat(se.env.tokenOf(a)).as("the fixture's bind returned alpha's identity token").isNotBlank();
+
+        String identityToken = null;
+        String sessionToken = null;
+        switch (via) {
+            case OWNER_TOKEN -> identityToken = se.env.tokenOf(a);
+            case CHILD_TOKEN -> identityToken = se.env.tokenOf(se.env.delegated(t, a, "alpha-child"));
+            case MAPPED_MINTED_SESSION -> sessionToken = mintSession(client, "sess-alpha");
+            case UNMAPPED_MINTED_SESSION -> sessionToken = mintSession(client, "sess-nobody-" + UUID.randomUUID());
+            case NO_CREDENTIAL -> { }
+        }
+        Map<String, String> dims = new java.util.LinkedHashMap<>();
+        if (from != null) {
+            dims.put("from", from);
+        }
+        dims.put("kind", "ack");
+        dims.put("sha", "Y");
+        var ack = postAs(client, identityToken, sessionToken, "/v1/tuples/out", Map.of(
+            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"), "dims", dims,
+            "body", "{}", "nonce", UUID.randomUUID().toString()));
+        String landedFrom = se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 10, null).stream()
+            .filter(r -> "ack".equals(r.dims().get("kind"))).map(r -> r.dims().get("from")).findFirst().orElse(null);
+
+        se.env.ids.clock.advance(java.time.Duration.ofMinutes(21));
+        for (String id : new String[] {l, a, c}) {
+            se.env.renew(t, id);
+        }
+        se.stamper.onDeadline(t, StamperEnv.BASE);
+        return new AckRun(ack.statusCode(), landedFrom, a,
+            se.ownerRows(t, StamperEnv.BASE).stream().map(r -> r.kind() + "/" + r.get("reason")).toList());
+    }
+
+    private String mintSession(String bearer, String sessionId) throws Exception {
+        var r = postAs(bearer, null, "/v1/sessions/start", Map.of("session_id", sessionId));
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        return MAPPER.readTree(r.body()).get("session_token").asText();
+    }
+
+    private static final List<String> HELD = List.of("owner/earliest_suspect");
+    private static final List<String> HANDED_OFF = List.of("owner/earliest_suspect", "owner/handoff");
+
+    @Test
+    void anAckWithNoFromStampedByTheEngineStopsTheDeadline() throws Exception {
+        var run = ackThenDeadline(null, Via.OWNER_TOKEN);
+
+        assertThat(run.ackStatus()).isEqualTo(200);
+        assertThat(run.ackFrom()).as("stamped with alpha's identity id, not left out").isEqualTo(run.ownerId());
+        assertThat(run.rows()).as("the stamped ack counts: no hand-off row").isEqualTo(HELD);
+    }
+
+    @Test
+    void anAckThatSaysAnAliasWithATokenIsStampedWithTheIdentityAndStopsTheDeadline() throws Exception {
+        var run = ackThenDeadline("marginalia", Via.OWNER_TOKEN);
+
+        assertThat(run.ackStatus()).as("an alias is overwritten, not refused").isEqualTo(200);
+        assertThat(run.ackFrom()).as("the label ack-times reads is alpha's identity id").isEqualTo(run.ownerId());
+        assertThat(run.rows()).isEqualTo(HELD);
+    }
+
+    @Test
+    void aDelegatedChildsAckIsLabelledWithTheParentTheDecisionCountsAndStopsTheDeadline() throws Exception {
+        var run = ackThenDeadline("marginalia", Via.CHILD_TOKEN);
+
+        assertThat(run.ackStatus()).isEqualTo(200);
+        assertThat(run.ackFrom()).as("the parent's id: the engine counts a delegated child's ack for its parent").isEqualTo(run.ownerId());
+        assertThat(run.rows()).as("the owner's child acknowledged: no hand-off").isEqualTo(HELD);
+    }
+
+    @Test
+    void aTokenlessAckFromAMintedSessionTheIndexMapsIsLabelledAndStopsTheDeadline() throws Exception {
+        var run = ackThenDeadline("marginalia", Via.MAPPED_MINTED_SESSION);
+
+        assertThat(run.ackStatus()).isEqualTo(200);
+        assertThat(run.ackFrom()).isEqualTo(run.ownerId());
+        assertThat(run.rows()).isEqualTo(HELD);
+    }
+
+    @Test
+    void anAckFromASessionTheIndexDoesNotMapKeepsItsFromAndTheDeadlineStillHandsOff() throws Exception {
+        var run = ackThenDeadline("marginalia", Via.UNMAPPED_MINTED_SESSION);
+
+        assertThat(run.ackStatus()).isEqualTo(200);
+        assertThat(run.ackFrom()).as("nothing maps: from stays as sent").isEqualTo("marginalia");
+        assertThat(run.rows()).as("the engine does not count this ack either, so the typed from matches no counted ack")
+            .isEqualTo(HANDED_OFF);
+    }
+
+    @Test
+    void anAckThatSaysAnAliasWithNoCredentialDoesNotStopTheDeadline() throws Exception {
+        var run = ackThenDeadline("alpha", Via.NO_CREDENTIAL);
+
+        assertThat(run.ackStatus()).as("no credential: accepted as it was").isEqualTo(200);
+        assertThat(run.ackFrom()).isEqualTo("alpha");
+        assertThat(run.rows()).as("control: an ack no session maps to the owner does not close the red, so the tests above are not vacuous")
+            .isEqualTo(HANDED_OFF);
+    }
+
+    private static long lifetimeSeconds(dev.nexus.service.db.TupleRepository.TupleRow r) {
+        return java.time.Duration.between(r.createdAt(), r.expiresAt()).toSeconds();
+    }
+
+    @Test
+    void ownerAckAndClearRowsLiveThirtyFiveDaysWhileTheOtherTopicsKeepThree() throws Exception {
+        long thirtyFiveDays = 35L * 24 * 3600;
+        long threeDays = 3L * 24 * 3600;
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String adapter = "adapter-" + UUID.randomUUID();
+        String client = "client-" + UUID.randomUUID();
+        seedToken(adapter, t, TokenStore.SCOPE_BOARD_CI);
+        seedToken(client, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        se.done(t, StamperEnv.BASE, "Y", "failure");                                  // the stamper's owner row
+        var ack = postAs(client, se.env.tokenOf(a), "/v1/tuples/out", Map.of(           // a session's ack row
+            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+            "dims", Map.of("kind", "ack", "sha", "Y"), "body", "{}", "nonce", UUID.randomUUID().toString()));
+        assertThat(ack.statusCode()).as(ack.body()).isEqualTo(200);
+        se.push(t, StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.done(t, StamperEnv.BASE, "Z", "success");                                  // the stamper's clear row
+        out(adapter, Map.of("subspace", "board/ci/nexus-develop", "keys", Map.of("topic", "nexus-develop"),   // the adapter's post
+            "dims", Map.of("from", "github", "kind", "job", "sha", "Z"),
+            "body", "{\"state\":\"completed\"}", "nonce", UUID.randomUUID().toString()));
+
+        var owner = se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 50, null);
+        assertThat(owner).extracting(r -> r.dims().get("kind")).as("an owner row, an ack and a clear row were written")
+            .contains("owner", "ack", "clear");
+        for (var row : owner) {
+            assertThat(lifetimeSeconds(row)).as(row.dims().get("kind") + " row").isBetween(thirtyFiveDays - 5, thirtyFiveDays + 5);
+        }
+        var push = se.tuples.rdp(t, "board/ci/nexus-develop--push", Map.of(), 50, null);
+        assertThat(push).isNotEmpty();
+        push.forEach(row -> assertThat(lifetimeSeconds(row)).as("push row").isBetween(threeDays - 5, threeDays + 5));
+        var base = se.tuples.rdp(t, "board/ci/nexus-develop", Map.of(), 50, null);
+        assertThat(base).isNotEmpty();
+        base.forEach(row -> assertThat(lifetimeSeconds(row)).as("adapter post").isBetween(threeDays - 5, threeDays + 5));
+    }
+
+    @Test
+    void anExplicitTtlOnAnOwnerTopicMayReachThirtyFiveDaysAndNoFurther() throws Exception {
+        String t = se.tenant();
+        var ok = se.tuples.out(t, "board/ci/ttl-check--owner", Map.of("topic", "ttl-check--owner"),
+            Map.of("from", "i1", "kind", "ack", "sha", "S"), "{}", UUID.randomUUID().toString(), 35L * 24 * 3600);
+        assertThat(ok).isNotNull();
+        org.junit.jupiter.api.Assertions.assertThrows(dev.nexus.service.db.TtlTooLongException.class, () ->
+            se.tuples.out(t, "board/ci/ttl-check--owner", Map.of("topic", "ttl-check--owner"),
+                Map.of("from", "i1", "kind", "ack", "sha", "S2"), "{}", UUID.randomUUID().toString(), 35L * 24 * 3600 + 1));
+        org.junit.jupiter.api.Assertions.assertThrows(dev.nexus.service.db.TtlTooLongException.class, () ->
+            se.tuples.out(t, "board/ci/ttl-check", Map.of("topic", "ttl-check"),
+                Map.of("from", "github", "kind", "job", "sha", "S"), "{}", UUID.randomUUID().toString(), 3L * 24 * 3600 + 1));
+    }
+
+    /**
+     * Behaviour of the 35-day retention (RDR-252, nexus-igea9.4): after three days the push and done rows have
+     * expired while the owner row of the same red is still live. The next green then clears that episode and nothing
+     * worse: no stamper error, no hand-off, no escalation, and no second owner row.
+     */
+    @Test
+    void anOwnerRowThatOutlivesItsPushAndDoneRowsIsClearedByTheNextGreen() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        se.done(t, StamperEnv.BASE, "Y", "failure");
+        assertThat(se.ownerRows(t, StamperEnv.BASE)).extracting(StamperEnv.Row::kind).containsExactly("owner");
+
+        // Three days on: the template's other topics have expired; the owner subspace has not.
+        se.env.ids.scope.withTenant(t, ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.TUPLES)
+            .set(dev.nexus.service.jooq.nexus.Tables.TUPLES.EXPIRES_AT, java.time.OffsetDateTime.now().minusSeconds(1))
+            .where(dev.nexus.service.jooq.nexus.Tables.TUPLES.TENANT_ID.eq(t))
+            .and(dev.nexus.service.jooq.nexus.Tables.TUPLES.SUBSPACE.in("board/ci/nexus-develop--push", "board/ci/nexus-develop--done"))
+            .execute());
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--push", Map.of(), 10, null)).as("the push rows are gone").isEmpty();
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 10, null)).as("the owner row is still there").hasSize(1);
+
+        se.push(t, StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.done(t, StamperEnv.BASE, "Z", "success");
+
+        assertThat(se.ownerRows(t, StamperEnv.BASE).stream().map(r -> r.kind() + "/" + r.get("reason")).toList())
+            .as("the green clears the open episode and posts nothing else")
+            .containsExactly("owner/earliest_suspect", "clear/null");
+    }
+
     @Test
     void theStampersOwnerAndClearRowsCarryNoSenderSession() throws Exception {
         // Null sender_session with from=engine is what makes a row the engine's: the route refuses a client's

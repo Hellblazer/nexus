@@ -39,6 +39,10 @@ import java.util.Objects;
  *                           be declared {@code required: true} in {@link #dimensions}
  * @param take              claim policy
  * @param retentionSeconds  {@code out}'s default TTL and its ceiling; required, positive
+ * @param retentionBySuffix per-topic retention (RDR-252, nexus-igea9.4): a subspace whose last segment ends with
+ *                           one of these suffixes (for example {@code --owner}) takes that many seconds as its
+ *                           default TTL and ceiling in place of {@link #retentionSeconds}; the longest matching
+ *                           suffix wins. Empty for every template but {@code board/ci/<topic>}.
  * @param maxBodyBytes      optional per-template ceiling on {@code body}, UTF-8 bytes
  *                           (bead nexus-r7xao). {@code null} means the global {@link
  *                           dev.nexus.service.db.TupleLimits#MAX_BODY_BYTES} cap applies
@@ -126,6 +130,7 @@ public record TemplateSchema(
         boolean lock,
         Long maxLiveRows,
         Long claimLogTtlSeconds,
+        Map<String, Long> retentionBySuffix,
         TemplateDoc doc) {
 
     public TemplateSchema {
@@ -141,19 +146,47 @@ public record TemplateSchema(
         keyValues = Map.copyOf(copiedKeyValues);
         dimensions = Map.copyOf(dimensions);
         idDims = List.copyOf(idDims);
+        retentionBySuffix = Map.copyOf(retentionBySuffix);
+    }
+
+    /**
+     * The default TTL and ceiling of a row written to {@code subspace}: the longest {@link #retentionBySuffix} entry
+     * whose suffix the subspace's last segment ends with, else {@link #retentionSeconds}.
+     */
+    public long retentionSecondsFor(String subspace) {
+        if (retentionBySuffix.isEmpty() || subspace == null) {
+            return retentionSeconds;
+        }
+        String last = subspace.substring(subspace.lastIndexOf('/') + 1);
+        String best = null;
+        for (String suffix : retentionBySuffix.keySet()) {
+            if (last.endsWith(suffix) && (best == null || suffix.length() > best.length())) {
+                best = suffix;
+            }
+        }
+        return best == null ? retentionSeconds : retentionBySuffix.get(best);
+    }
+
+    /** The longest retention any subspace of this template can take. */
+    public long maxRetentionSeconds() {
+        long max = retentionSeconds;
+        for (long v : retentionBySuffix.values()) {
+            max = Math.max(max, v);
+        }
+        return max;
     }
 
     /** The same template carrying {@code doc}. */
     public TemplateSchema withDoc(TemplateDoc newDoc) {
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, newDoc);
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, retentionBySuffix, newDoc);
     }
 
     /** The same template with no {@code doc}: what a non-classpath template falls back to when its
      *  doc block fails (RDR-239 S3). */
     public TemplateSchema withoutDoc() {
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, null);
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, retentionBySuffix, null);
     }
 
     /** True when {@link #name} carries no {@code <param>} segment (a literal name). */
