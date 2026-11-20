@@ -71,26 +71,68 @@ class NoteUriCorpusTest {
     }
 
     @Test
-    void moveToRewritesBothNoteSpellingsAndNothingElse() {
+    void moveToRewritesOnlyTheNoteSpellingOfANoteCollection() {
         Field<String> uri = DSL.field(DSL.name("source_uri"), SQLDataType.CLOB);
         String sql = DSL.using(SQLDialect.POSTGRES).renderInlined(NoteUri.moveTo(uri, "knowledge__a", "knowledge__b"));
+        // P2.10: the chroma:// arm is gone; residue and legacy-spelled values come back unchanged.
         assertThat(sql).contains("case")
             .contains("'nx-note://knowledge__a/'").contains("'nx-note://knowledge__b/'")
-            .contains("'chroma://knowledge__a/'").contains("'chroma://knowledge__b/'")
+            .doesNotContain("chroma://")
             .contains("starts_with")
             .doesNotContain("like")
             .contains("else \"source_uri\"");
     }
 
     @Test
-    void moveToFromTheRowsCollectionReadsTheColumn() {
+    void moveToOutOfAFileRoutedCollectionIsTheIdentity() {
+        Field<String> uri = DSL.field(DSL.name("source_uri"), SQLDataType.CLOB);
+        for (String prefix : NoteUri.FILE_ROUTED_PREFIXES) {
+            String coll = prefix + "x__minilm-l6-v2-384__v1";
+            String sql = DSL.using(SQLDialect.POSTGRES).renderInlined(NoteUri.moveTo(uri, coll, "plainlabel"));
+            assertThat(sql).as(coll).isEqualTo("\"source_uri\"");
+            assertThat(NoteUri.moveTo("nx-note://" + coll + "/a.md", coll, "plainlabel")).as(coll)
+                .isEqualTo("nx-note://" + coll + "/a.md");
+            assertThat(NoteUri.moveTo("chroma://" + coll + "/a.md", coll, "plainlabel")).as(coll)
+                .isEqualTo("chroma://" + coll + "/a.md");
+        }
+    }
+
+    @Test
+    void moveToFromTheRowsCollectionReadsTheColumnAndGuardsEveryFileRoutedPrefix() {
         Field<String> uri = DSL.field(DSL.name("source_uri"), SQLDataType.CLOB);
         Field<String> coll = DSL.field(DSL.name("physical_collection"), SQLDataType.CLOB);
         String sql = DSL.using(SQLDialect.POSTGRES).renderInlined(NoteUri.moveTo(uri, coll, "knowledge__b"));
         assertThat(sql).contains("\"physical_collection\"")
-            .contains("'nx-note://knowledge__b/'").contains("'chroma://knowledge__b/'")
+            .contains("'nx-note://knowledge__b/'")
+            .doesNotContain("chroma://")
             .contains("char_length(\"physical_collection\")")
             .doesNotContain("like")
             .contains("else \"source_uri\"");
+        for (String prefix : NoteUri.FILE_ROUTED_PREFIXES) {
+            assertThat(sql).as("guard for " + prefix)
+                .contains("starts_with(\"physical_collection\", '" + prefix + "')");
+        }
+    }
+
+    @Test
+    void moveToOnOneValueRewritesOnlyANoteOfANoteCollection() {
+        assertThat(NoteUri.moveTo("nx-note://knowledge__a/t", "knowledge__a", "knowledge__b"))
+            .isEqualTo("nx-note://knowledge__b/t");
+        assertThat(NoteUri.moveTo("chroma://knowledge__a/t", "knowledge__a", "knowledge__b"))
+            .as("the legacy spelling is not moved").isEqualTo("chroma://knowledge__a/t");
+        assertThat(NoteUri.moveTo("file:///a/t", "knowledge__a", "knowledge__b")).isEqualTo("file:///a/t");
+        assertThat(NoteUri.moveTo((String) null, "knowledge__a", "knowledge__b")).isNull();
+    }
+
+    @Test
+    void namesCollectionSelectsExactlyWhatMoveToRewrites() {
+        Field<String> uri = DSL.field(DSL.name("source_uri"), SQLDataType.CLOB);
+        var dsl = DSL.using(SQLDialect.POSTGRES);
+        String note = dsl.renderInlined(NoteUri.namesCollection(uri, "knowledge__a"));
+        assertThat(note).contains("starts_with").contains("'nx-note://knowledge__a/'").doesNotContain("chroma://");
+        for (String prefix : NoteUri.FILE_ROUTED_PREFIXES) {
+            String coll = prefix + "x__minilm-l6-v2-384__v1";
+            assertThat(dsl.renderInlined(NoteUri.namesCollection(uri, coll))).as(coll).isEqualTo("false");
+        }
     }
 }
