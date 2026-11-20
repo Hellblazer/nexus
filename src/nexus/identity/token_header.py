@@ -22,8 +22,9 @@ MCP server itself) and sends the token in :data:`~nexus.identity.token_contract.
   A fenced write is never retried without a token, which JDR-002's 401 fallback would otherwise do.
 
 The ancestor is discovered once per process, a miss included (a process with no Claude ancestor never walks the
-process table again): the ancestry of a running process does not change. Only the registry lookup that names the token
-file is repeated, since the registry file may not exist yet.
+process table again): the ancestry of a running process does not change. The registry lookup that names the token
+file is repeated on every call, because its answer does change: an in-place ``/restart`` gives the same Claude pid a new
+``startedAt``, hence a new token file, under a process (the MCP server) that outlives it.
 """
 from __future__ import annotations
 
@@ -40,7 +41,6 @@ from nexus.identity.token_file import TokenFile, ancestor_token_path, identity_d
 NX_IDENTITY_TOKEN_ENV = "NX_IDENTITY_TOKEN"
 
 _LOCK = threading.Lock()
-_DISCOVERED: dict[str, Path | None] = {}
 
 
 class GenerationSupersededError(RuntimeError):
@@ -127,23 +127,17 @@ def _discover() -> Path | None:
 
 
 def token_file_path() -> Path | None:
-    """The path of this process's token file. The ancestor is cached; the registry lookup is repeated until it finds the
-    file's name, which it then keeps."""
-    key = (os.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip() or "ancestor"
-    with _LOCK:
-        if _DISCOVERED.get(key) is not None:
-            return _DISCOVERED[key]
-    found = _discover()
-    with _LOCK:
-        _DISCOVERED[key] = found
-    return found
+    """The path of this process's token file, named by the registry file of its Claude ancestor on EVERY call. The
+    ancestor (a pid) is cached; the name is not: an in-place ``/restart`` keeps the pid and gives the registry file a new
+    ``startedAt``, so the next generation's token is in a new file, and a long-lived process (the MCP server) that kept the
+    first name it found kept reading the superseded generation's file (nexus-hczdo). The lookup is one small JSON read."""
+    return _discover()
 
 
 def reset_for_tests() -> None:
     global _RESOLVER_DOWN_UNTIL
     with _LOCK:
         _RESOLVER_DOWN_UNTIL = 0.0
-        _DISCOVERED.clear()
         _ANCESTOR.clear()
         _VERIFIED.clear()
 

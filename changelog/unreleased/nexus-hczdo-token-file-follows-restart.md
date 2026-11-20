@@ -1,0 +1,3 @@
+### Fixed
+
+- **A long-lived process (the MCP server) follows its Claude process's registry file to the new token file after an in-place `/restart`.** The restart keeps the Claude pid and gives its registry file a new `startedAt`, so the next generation's identity token is written to a new file. The token reader kept the file name it found first, so the server went on sending the superseded generation's token: identity-scope scratch writes were refused as `generation_superseded` while the old token lasted, and the identity scope stayed unusable until a fresh server started. The name is now looked up from the registry on every call (nexus-hczdo).
