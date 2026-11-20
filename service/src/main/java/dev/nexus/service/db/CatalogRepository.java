@@ -4382,10 +4382,33 @@ public final class CatalogRepository {
         return out;
     }
 
+    /** The content types a live collection routes by file path rather than by note title (RDR-229 item 12). */
+    private static final java.util.Set<String> FILE_ROUTED_CONTENT_TYPES = java.util.Set.of("docs", "rdr", "code");
+
+    /**
+     * True when the live collection {@code coll} holds file-routed content, read from its registry row's
+     * {@code content_type}, never from its name (RDR-229 item 12: a minted label carries no prefix). A collection with no
+     * registry row has no readable content type: {@code memo} records it as {@code null} so the caller can refuse the
+     * row, and this returns false. {@code memo} holds one answer per collection per census.
+     */
+    private static boolean fileRoutedByRow(DSLContext ctx, String tenant, String coll, Map<String, Boolean> memo) {
+        if (!memo.containsKey(coll)) {
+            Boolean answer;
+            try {
+                answer = FILE_ROUTED_CONTENT_TYPES.contains(CollectionRegistry.require(ctx, tenant, coll).contentType());
+            } catch (UnregisteredCollectionException e) {
+                answer = null;
+            }
+            memo.put(coll, answer);
+        }
+        return Boolean.TRUE.equals(memo.get(coll));
+    }
+
     /** Splits the live pre-filter rows into the rewrite, merge and refused classes (each sorted by tumbler). */
     private static void classifyStaleNotes(DSLContext ctx, String tenant, List<org.jooq.Record3<String, String, String>> rows,
                                            List<StaleNote> rewrite, List<StaleNote> merge, List<StaleNote> refused) {
         List<StaleNote> candidates = new ArrayList<>();
+        Map<String, Boolean> fileRoutedByCollection = new HashMap<>();   // coll -> file-routed; null = no registry row
         for (var r : rows) {
             String tumbler = r.value1();
             String uri = r.value2();
@@ -4396,8 +4419,11 @@ public final class CatalogRepository {
             boolean hasTitleSlash = uri.indexOf('/', scheme.length()) >= 0;
             if (x == null || x.isEmpty() || coll.isBlank() || !hasTitleSlash) {
                 refused.add(new StaleNote(tumbler, uri, coll, null, "malformed", null));
-            } else if (NoteUri.isFileRoutedCollection(coll)) {
+            } else if (fileRoutedByRow(ctx, tenant, coll, fileRoutedByCollection)) {
                 refused.add(new StaleNote(tumbler, uri, coll, null, "file_routed_collection", null));
+            } else if (fileRoutedByCollection.get(coll) == null) {
+                // No registry row: the content type cannot be read, so the row is never proven a note. Refused, not guessed.
+                refused.add(new StaleNote(tumbler, uri, coll, null, "unregistered_collection", null));
             } else {
                 candidates.add(new StaleNote(tumbler, uri, coll,
                     NoteUri.NOTE + coll + uri.substring(scheme.length() + x.length()), null, null));

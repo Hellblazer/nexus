@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
 import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_HIGHLIGHTS;
@@ -502,6 +503,84 @@ class NoteUriRepairTest {
         assertThat(r.get("rewritten")).isEqualTo(0);
         assertThat(docUri(f.tenant, "nc")).isEqualTo(f.nx(f.x1, "nc"));
         assertThat(tumblers(sampleOf(r).get("refused"))).containsExactly("nc");
+    }
+
+    // ── RDR-229 P2.9: a live collection's routing reads its row, never its name ──
+
+    /** A collection with a prefix-free, minted-style label ({@code c<digits>}) and an explicit content type. */
+    private String registerLabel(String tenant, String contentType) throws Exception {
+        String label = "c" + (700000 + SEQ.incrementAndGet());
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, tenant, label);
+            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))
+                .execute();
+        }
+        return label;
+    }
+
+    @Test
+    void census_aPrefixFreeLabelWithAFileRoutedContentTypeIsRefused_asFileRoutedCollection() throws Exception {
+        for (String contentType : List.of("docs", "rdr", "code")) {
+            Fx f = new Fx("label-" + contentType);
+            String label = registerLabel(f.tenant, contentType);
+            seedNote(f.tenant, "n1", label, f.nx(f.x1, "odd"));
+
+            Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
+
+            assertThat(r.get("refused_file_routed_collection")).as(contentType).isEqualTo(1);
+            assertThat(r.get("rewrite")).as(contentType).isEqualTo(0);
+            assertThat(byTumbler(sampleOf(r).get("refused"), "n1").get("reason"))
+                .as(contentType).isEqualTo("file_routed_collection");
+        }
+    }
+
+    @Test
+    void census_aPrefixFreeLabelWithKnowledgeContentTypeIsARewriteCandidate() throws Exception {
+        Fx f = new Fx("label-knowledge");
+        String label = registerLabel(f.tenant, "knowledge");
+        seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
+
+        assertThat(r.get("rewrite")).isEqualTo(1);
+        assertThat(r.get("refused")).isEqualTo(0);
+        assertThat(byTumbler(sampleOf(r).get("rewrite"), "n1").get("new_uri")).isEqualTo(f.nx(label, "alpha"));
+    }
+
+    @Test
+    void census_aPrefixedNameWithAKnowledgeRowIsACandidate_theRowDecidesNotTheName() throws Exception {
+        Fx f = new Fx("name-lies");
+        String name = "docs__lies-" + SEQ.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, f.tenant, name);
+            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, "knowledge")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant).and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                .execute();
+        }
+        seedNote(f.tenant, "n1", name, f.nx(f.x1, "alpha"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
+
+        assertThat(r.get("rewrite")).isEqualTo(1);
+        assertThat(r.get("refused_file_routed_collection")).isEqualTo(0);
+    }
+
+    @Test
+    void census_aLiveRowWhoseCollectionHasNoRegistryRow_isRefusedNotRewritten_andDoesNotFailTheCensus() throws Exception {
+        Fx f = new Fx("unregistered");
+        seedNote(f.tenant, "ok", f.y, f.nx(f.x1, "fine"));
+        seedNote(f.tenant, "un", "c999" + SEQ.incrementAndGet(), f.nx(f.x1, "orphan"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+        assertThat(r.get("rewrite")).isEqualTo(1);
+        assertThat(r.get("refused")).isEqualTo(1);
+        assertThat(byTumbler(sampleOf(r).get("refused"), "un").get("reason")).isEqualTo("unregistered_collection");
+        assertThat(docUri(f.tenant, "un")).as("never rewritten").isEqualTo(f.nx(f.x1, "orphan"));
+        assertThat(docUri(f.tenant, "ok")).isEqualTo(f.nx(f.y, "fine"));
     }
 
     // ── chains and the chroma:// twin ─────────────────────────────────────────
