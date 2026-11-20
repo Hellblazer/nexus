@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-252 (bead nexus-igea9): the ack of a develop red carries the poster's IDENTITY ID in ``from``, never a name.
 
-``nx group ack-times`` and the engine's count match an ack on the identity that owns the red. A row posted by hand
-with ``from=marginalia`` (the session alias, tuple b18af4e1, 2026-11-20) was counted as no ack. Every client path
-that writes a ``kind=ack`` row to a ``board/ci/<topic>--owner`` subspace therefore stamps ``from`` with the caller's
-own identity, whatever the caller typed, and refuses a caller with no identity rather than write a name.
+The engine counts an ack by the row's sender-session stamp, mapped through the session index to the owner's identity;
+it never reads ``from``. ``from`` is the label ``nx group ack-times`` and people read. A row posted by hand with
+``from=marginalia`` (the session alias, tuple b18af4e1, 2026-11-20) still stopped the hand-off, and only ack-times
+counted it as no ack. Every client path that writes a ``kind=ack`` row to a ``board/ci/<topic>--owner`` subspace
+therefore stamps ``from`` with the caller's own identity (the token record's), whatever the caller typed, and refuses
+a caller with no identity rather than write a name.
 
-All against a fake transport: the stamp is client-side, so no engine and no tenant are needed. The identity is
-patched at ``nexus.ci_ack.own_identity``, the one place the client resolves it for this rule.
+All against a fake transport: the stamp is client-side, so no engine and no tenant are needed. Most tests patch the
+identity at ``nexus.ci_ack.own_identity``; ``TestTheRealResolver`` drives the real one through token-file fixtures.
 """
 from __future__ import annotations
 
@@ -71,6 +73,8 @@ class _Wire:
         if request.url.path.endswith("/rd"):
             return httpx.Response(200, json={"tuples": self.rows, "order": "desc", "limit": 300})
         self.sent.append(json.loads(request.content))
+        if request.url.path.endswith("/ack"):
+            return httpx.Response(200, json={"reply_id": "c" * 64})
         return httpx.Response(200, json={"id": "b" * 64})
 
 
@@ -171,19 +175,107 @@ def test_the_mcp_tuple_out_restamps_and_refuses_the_same_way(wire: _Wire, identi
     assert "identity" in refused and len(wire.sent) == 1, refused
 
 
+
+# ── an ack that rides on a claim's reply is written by the store's ack(), not out() ────────────────────────
+
+
+def _reply(subspace: str, dims: dict[str, str]) -> Any:
+    from nexus.db.t2.records import ReplySpec  # noqa: PLC0415
+
+    return ReplySpec(subspace=subspace, keys=TOPIC_KEY, dims=dims, body="x")
+
+
+def test_an_ack_reply_to_an_owner_subspace_is_restamped_like_an_out(wire: _Wire, identity: list[str]) -> None:
+    wire.store.ack("claim-1", "i5", _reply(OWNER_SUBSPACE, _ack_dims(**{"from": "marginalia"})))
+    assert wire.sent[0]["reply"]["dims"] == _ack_dims(), "the reply is an out to the engine, so it is stamped as one"
+    identity[:] = []
+    with pytest.raises(ValueError, match="identity"):
+        wire.store.ack("claim-2", "i5", _reply(OWNER_SUBSPACE, _ack_dims()))
+    assert len(wire.sent) == 1, "a refused reply sends nothing"
+
+
+def test_an_ack_with_no_reply_or_a_reply_elsewhere_needs_no_identity(wire: _Wire, identity: list[str]) -> None:
+    identity[:] = []
+    wire.store.ack("claim-1", "i5")
+    wire.store.ack("claim-2", "i5", _reply("mailbox/i9", {"kind": "ack", "from": "marginalia"}))
+    assert wire.sent[1]["reply"]["dims"] == {"kind": "ack", "from": "marginalia"}
+
+
+# ── the real resolver: the token record, and nothing else ─────────────────────────────────────────────────
+
+
+class TestTheRealResolver:
+    """No patching of ``own_identity``: the token file the process names, read the way ``nx group`` reads it."""
+
+    @pytest.fixture(autouse=True)
+    def _token_state(self) -> Any:
+        from nexus.identity import token_header  # noqa: PLC0415
+
+        token_header.reset_for_tests()
+        yield
+        token_header.reset_for_tests()
+
+    @staticmethod
+    def _token(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, **over: Any) -> None:
+        record = {"identity": "i5", "generation": 1, "pid": 1, "started_at": 1, "token": "t-secret",
+                  "session_id": "3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", **over}
+        path = tmp_path / "1.1.token"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(path))
+
+    def test_a_usable_token_file_names_the_identity_and_the_store_stamps_it(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, wire: _Wire,
+    ) -> None:
+        self._token(tmp_path, monkeypatch)
+        wire.store.out(OWNER_SUBSPACE, TOPIC_KEY, _ack_dims(**{"from": "marginalia"}), nonce="n1")
+        assert wire.sent[0]["dims"]["from"] == "i5"
+
+    def test_a_token_file_with_no_token_is_no_identity(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, wire: _Wire,
+    ) -> None:
+        self._token(tmp_path, monkeypatch, token=None)
+        with pytest.raises(ValueError, match="identity"):
+            wire.store.out(OWNER_SUBSPACE, TOPIC_KEY, _ack_dims(), nonce="n1")
+
+    def test_a_session_bound_identity_is_not_a_fallback(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch, wire: _Wire,
+    ) -> None:
+        """A shared-T1 child with no token of its own must not land on its parent's session-bound identity."""
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(tmp_path / "absent.token"))
+        monkeypatch.setattr("nexus.tuple_directory._own_identity", lambda _sd, _pid: "i9")
+        with pytest.raises(ValueError, match="identity"):
+            wire.store.out(OWNER_SUBSPACE, TOPIC_KEY, _ack_dims(), nonce="n1")
+        assert wire.sent == []
+
+    def test_a_resolver_failure_is_raised_not_read_as_no_identity(
+        self, monkeypatch: pytest.MonkeyPatch, wire: _Wire,
+    ) -> None:
+        def broken() -> Any:
+            raise RuntimeError("the token reader drifted")
+
+        monkeypatch.setattr("nexus.identity.token_header.current", broken)
+        with pytest.raises(RuntimeError, match="drifted"):
+            wire.store.out(OWNER_SUBSPACE, TOPIC_KEY, _ack_dims(), nonce="n1")
+
+
 # ── the helper the aura text names: nx ci ack <sha prefix> ────────────────────────────────────────────────
 
+SHA_NEW = "bb" * 20
+EP1, EP2 = "2026-11-20T10:00:00Z", "2026-11-20T14:00:00Z"
 
-def _owner_row(sha: str, at: str, kind: str = "owner", **body: Any) -> dict[str, Any]:
+
+def _owner_row(sha: str, at: str, *, episode_at: str | None = None, kind: str = "owner", owner: str | None = ME,
+               **body: Any) -> dict[str, Any]:
+    fields = {"owner": owner, "episode_at": episode_at or at, **body}
     return {"id": f"{kind}-{at}".ljust(64, "0"), "subspace": OWNER_SUBSPACE, "keys": TOPIC_KEY, "created_at": at,
-            "dims": {"kind": kind, "from": "engine", "sha": sha}, "body": json.dumps(body)}
+            "dims": {"kind": kind, "from": "engine", "sha": sha}, "body": json.dumps(fields)}
 
 
 def _open_red(wire: _Wire) -> None:
-    """Newest first: a refresh row of the open red naming a second tip, its first row, and an older red's clear."""
+    """Newest first: the open red's refresh row (a second tip of it), its first row, a clear, an older red."""
     wire.rows = [
-        _owner_row("f" * 40, "2026-11-20T14:20:00Z", owner=ME, refresh=True, suspects=[SHA]),
-        _owner_row(SHA, "2026-11-20T14:10:00Z", owner=ME, refresh=False),
+        _owner_row("f" * 40, "2026-11-20T14:20:00Z", episode_at=EP2, refresh=True, suspects=["9" * 40]),
+        _owner_row(SHA, "2026-11-20T14:10:00Z", episode_at=EP2, refresh=False),
         _owner_row("e" * 40, "2026-11-20T10:30:00Z", kind="clear"),
         _owner_row("d" * 40, "2026-11-20T10:00:00Z", owner="i9"),
     ]
@@ -210,16 +302,51 @@ def test_nx_ci_ack_resolves_a_sha_prefix_against_the_open_reds_tips(wire: _Wire,
     assert _ack([SHA[:7]], wire, monkeypatch).exit_code == 0
     assert wire.sent[-1]["dims"]["sha"] == SHA, "the prefix is spelled out in full before it is posted"
     assert _ack(["f" * 7], wire, monkeypatch).exit_code == 0
-    assert wire.sent[-1]["dims"]["sha"] == "f" * 40, "a tip named by a refresh row counts as one"
+    assert wire.sent[-1]["dims"]["sha"] == "f" * 40, "the sha of a refresh row is a tip of its red"
 
 
-@pytest.mark.parametrize("arg", ["abc", "not-hex", "d" * 40, "d" * 7, "1234567"])
+@pytest.mark.parametrize("arg", ["abc", "not-hex", "d" * 40, "d" * 7, "1234567", "9" * 7])
 def test_nx_ci_ack_refuses_a_sha_that_is_no_tip_of_the_open_red(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch, arg: str) -> None:
-    """Too short, not hex, the sha of a red a clear row already ended, and one that was never a red: nothing is posted."""
+    """Too short, not hex, the sha of a red a clear row already ended, one never a red, and a SUSPECT a row names
+    (the engine counts a red tip only, and a suspect may be untested or green): nothing is posted."""
     _open_red(wire)
     result = _ack([arg], wire, monkeypatch)
     assert result.exit_code != 0, result.output
     assert wire.sent == []
+
+
+def test_nx_ci_ack_acks_only_the_current_red_when_two_reds_have_no_clear_between(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new episode_at on a row that is neither a refresh nor a hand-on starts a new red (ack-times' own split), clear
+    or no clear: the older red's sha is no longer one to acknowledge."""
+    wire.rows = [
+        _owner_row(SHA_NEW, "2026-11-20T14:10:00Z", episode_at=EP2),
+        _owner_row(SHA, "2026-11-20T10:05:00Z", episode_at=EP1, refresh=True),
+        _owner_row("a" * 40, "2026-11-20T10:00:00Z", episode_at=EP1),
+    ]
+    refused = _ack([SHA[:7]], wire, monkeypatch)
+    assert refused.exit_code != 0 and wire.sent == [], refused.output
+    assert _ack([SHA_NEW[:7]], wire, monkeypatch).exit_code == 0
+    assert wire.sent[-1]["dims"]["sha"] == SHA_NEW
+
+
+def test_nx_ci_ack_keeps_a_hand_off_rows_sha_in_the_open_red(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine stamps a hand-off with a NEW episode_at; reason=handoff is what ties it to the open red."""
+    wire.rows = [
+        _owner_row(SHA_NEW, "2026-11-20T14:40:00Z", episode_at="2026-11-20T14:40:00Z", reason="handoff"),
+        _owner_row(SHA, "2026-11-20T14:10:00Z", episode_at=EP2, owner="i9"),
+    ]
+    assert _ack([SHA[:7]], wire, monkeypatch).exit_code == 0, "the first row's tip is still a tip of the red"
+
+
+def test_nx_ci_ack_refuses_an_ambiguous_prefix_and_names_the_tips(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    wire.rows = [
+        _owner_row("abcdef0" + "1" * 33, "2026-11-20T14:20:00Z", episode_at=EP2, refresh=True),
+        _owner_row("abcdef0" + "2" * 33, "2026-11-20T14:10:00Z", episode_at=EP2),
+    ]
+    result = _ack(["abcdef0"], wire, monkeypatch)
+    assert result.exit_code != 0 and "ambiguous" in result.output, result.output
+    assert wire.sent == []
+    assert _ack(["abcdef01"], wire, monkeypatch).exit_code == 0, "a longer prefix settles it"
 
 
 def test_nx_ci_ack_says_so_when_no_red_is_open(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,6 +354,38 @@ def test_nx_ci_ack_says_so_when_no_red_is_open(wire: _Wire, identity: list[str],
     result = _ack([SHA[:7]], wire, monkeypatch)
     assert result.exit_code != 0 and "no open red" in result.output, result.output
     assert wire.sent == []
+
+
+def test_nx_ci_ack_refuses_a_caller_who_is_not_the_reds_owner_and_names_the_owner(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ack from next up, a stale seat or a delegated child posts cleanly and counts for nobody: the silent
+    no-count the verb exists to remove."""
+    wire.rows = [_owner_row(SHA, "2026-11-20T14:10:00Z", episode_at=EP2, owner="i9", owner_alias="tamsin", next=ME)]
+    result = _ack([SHA[:7]], wire, monkeypatch)
+    assert result.exit_code != 0 and wire.sent == []
+    assert "owned by i9 (tamsin)" in result.output and f"an ack from {ME} counts for nobody" in result.output, result.output
+
+
+def test_nx_ci_ack_refuses_a_red_that_has_no_owner(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    wire.rows = [_owner_row(SHA, "2026-11-20T14:10:00Z", episode_at=EP2, owner=None, reason="escalated")]
+    result = _ack([SHA[:7]], wire, monkeypatch)
+    assert result.exit_code != 0 and "no owner" in result.output and wire.sent == [], result.output
+
+
+def test_nx_ci_ack_follows_the_latest_owner_row_after_a_hand_off(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    wire.rows = [
+        _owner_row(SHA, "2026-11-20T14:40:00Z", episode_at="2026-11-20T14:40:00Z", reason="handoff", owner=ME),
+        _owner_row(SHA, "2026-11-20T14:10:00Z", episode_at=EP2, owner="i9"),
+    ]
+    assert _ack([SHA[:7]], wire, monkeypatch).exit_code == 0, "handed to the caller: it owns the red now"
+
+
+def test_nx_ci_ack_refuses_the_first_owner_once_the_red_was_handed_away(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    wire.rows = [
+        _owner_row(SHA, "2026-11-20T14:40:00Z", episode_at="2026-11-20T14:40:00Z", reason="handoff", owner="i9"),
+        _owner_row(SHA, "2026-11-20T14:10:00Z", episode_at=EP2, owner=ME),
+    ]
+    result = _ack([SHA[:7]], wire, monkeypatch)
+    assert result.exit_code != 0 and "owned by i9" in result.output and wire.sent == [], result.output
 
 
 def test_nx_ci_ack_refuses_without_an_identity_and_says_how_to_check(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,3 +402,26 @@ def test_nx_ci_ack_takes_a_topic_and_keeps_the_develop_default(wire: _Wire, iden
     assert wire.sent[-1]["subspace"] == "board/ci/halcyon-main--owner"
     assert wire.sent[-1]["keys"] == {"topic": "halcyon-main--owner"}
     assert _ack([SHA, "--topic", "nexus-develop"], wire, monkeypatch).exit_code != 0, "a topic names its --owner post"
+
+
+# ── what the code and the docs say about who counts an ack ─────────────────────────────────────────────────
+
+
+def test_the_sites_that_describe_the_stamp_say_the_engine_counts_the_sender_session_not_from() -> None:
+    """Review r1 (2026-11-20): the code and docs said the engine matches `from`. It does not: it maps the row's
+    sender-session stamp through the session index. `from` is the label ack-times and people read."""
+    from pathlib import Path  # noqa: PLC0415
+
+    from nexus import ci_ack  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parent.parent
+    assert "never reads" in (ci_ack.__doc__ or "") and "_out_raw" in (ci_ack.__doc__ or "")
+    assert "sender-session" in (root / "src/nexus/procedures/ci_red_notice.lua").read_text(encoding="utf-8")
+    for doc in ("docs/auras.md", "docs/cli-reference.md"):
+        text = (root / doc).read_text(encoding="utf-8")
+        assert "counted by no read of this board" not in text or "sender" in text, doc
+        assert "a name in `from` counts as no ack" not in text, doc
+        assert "an ack carrying a name was counted as no ack" not in text, doc
+    assert "sender-session" in (root / "docs/auras.md").read_text(encoding="utf-8")
+    assert "identity" in (mcp_core.tuple_out.__doc__ or "") and "--owner" in (mcp_core.tuple_out.__doc__ or "")
+    assert "--owner" in (root / "docs/tuple-space.md").read_text(encoding="utf-8").split("`board/ci/<topic>` (RDR-220)")[1][:3000]

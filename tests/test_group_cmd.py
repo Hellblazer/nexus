@@ -468,8 +468,10 @@ def test_from_wire_names_the_unreadable_record_as_a_groups_error() -> None:
 SHA1, SHA2, SHA3 = "a" * 40, "b" * 40, "c" * 40
 
 
-def _row(kind: str, at: str, sha: str, who: str = "engine", **body: Any) -> Any:
-    return SimpleNamespace(id=f"{kind}{at}", created_at=at, dims={"from": who, "kind": kind, "sha": sha}, body=json.dumps(body))
+def _row(kind: str, at: str, sha: str, who: str = "engine", sender_session: str | None = None, **body: Any) -> Any:
+    return SimpleNamespace(id=f"{kind}{at}{who}{sender_session or ''}", created_at=at,
+                           dims={"from": who, "kind": kind, "sha": sha}, body=json.dumps(body),
+                           sender_session=sender_session)
 
 
 class _Tuples:
@@ -528,8 +530,8 @@ def test_ack_times_names_the_owner_by_alias_and_falls_back_to_the_id() -> None:
     assert "acked by halcyon at" in text and "acked by i6 at" in text and "acked by i4" not in text
 
 
-def _with_lookup(env: GroupEnv, lookup: Any) -> GroupEnv:
-    return dataclasses.replace(env, alias_lookup=lookup)
+def _with_lookups(env: GroupEnv, alias: Any = None, session: Any = None) -> GroupEnv:
+    return dataclasses.replace(env, alias_lookup=alias, session_lookup=session)
 
 
 def _ack_times(env: GroupEnv) -> list[dict[str, Any]]:
@@ -539,66 +541,173 @@ def _ack_times(env: GroupEnv) -> list[dict[str, Any]]:
 
 
 _RED = dict(owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False)
+SESS_OWNER, SESS_OTHER = "3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", "4e5c8bb0-2792-4cd2-8c6c-1b0aeddfe264"
 
 
-def test_an_ack_posted_under_the_session_alias_counts_as_the_owners_ack_by_the_rows_own_stamped_pair() -> None:
-    """nexus-igea9, tuple b18af4e1 (2026-11-20): a hand post carried from=marginalia, not the identity id. The owner row
-    the engine stamped names that alias beside the owner (owner_alias), so the ack resolves with no lookup at all."""
+def _times(rows: list[Any], alias: Any = None, session: Any = None, **kw: Any) -> list[dict[str, Any]]:
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    return _ack_times(_with_lookups(_env(wire, tuples=_Tuples(rows), **kw), alias, session))
+
+
+class _Lookup:
+    """A name or session lookup that records what it was asked and answers from a table (or raises what the table holds)."""
+
+    def __init__(self, table: dict[str, Any]) -> None:
+        self.table, self.asked = table, []
+
+    def __call__(self, key: str) -> dict[str, Any]:
+        self.asked.append(key)
+        answer = self.table[key]
+        if isinstance(answer, Exception):
+            raise answer
+        return {"identity": answer}
+
+
+def _api_error(status: int) -> Exception:
+    from nexus.identity.bind_client import IdentityApiError  # noqa: PLC0415
+
+    return IdentityApiError(status, "x", "no")
+
+
+def test_the_engines_rule_an_ack_counts_when_its_sender_session_maps_to_the_owner_whatever_from_says() -> None:
+    """nexus-igea9, tuple b18af4e1 (2026-11-20): from=marginalia, sender_session the owner's. The engine counts the
+    stamp through the session index and never reads `from`, so ack-times does too."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia", sender_session=SESS_OWNER),
+    ]
+    sessions = _Lookup({SESS_OWNER: "i4"})
+    [red] = _times(rows, session=sessions)
+    assert (red["acked_at"], red["minutes"], red["acked_by"]) == ("2026-11-19T10:07:00Z", 7.0, "i4")
+    assert sessions.asked == [SESS_OWNER]
+
+
+def test_a_from_naming_the_owner_does_not_count_when_the_sender_session_is_another_identitys() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OTHER),
+    ]
+    [red] = _times(rows, session=_Lookup({SESS_OTHER: "i5"}))
+    assert red["acked_at"] is None, "the stamp says i5, and the engine would count nobody"
+
+
+def test_an_ack_whose_session_the_index_does_not_know_counts_for_nobody_as_in_the_engine() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OTHER),
+    ]
+    [red] = _times(rows, session=_Lookup({SESS_OTHER: _api_error(404)}))
+    assert red["acked_at"] is None
+
+
+def test_a_transient_lookup_error_is_noted_on_stderr_and_never_cached_as_nobody() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:05:00Z", SHA1, who="marginalia", sender_session=SESS_OWNER),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia", sender_session=SESS_OWNER),
+    ]
+    answers: list[Any] = [_api_error(503), "i4"]
+
+    def flaky(sid: str) -> dict[str, Any]:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return {"identity": answer}
+
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), session=flaky)
+    result = _run(env, "ack-times", "push-train", "--json")
+    [red] = json.loads(result.stdout)["reds"]
+    assert red["acked_at"] == "2026-11-19T10:07:00Z", "the second ack asked again: the failure was not remembered as nobody"
+    assert "1 acks could not be resolved; counts may be low" in result.stderr, result.stderr
+
+
+def test_a_clean_run_prints_no_resolution_note() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json")
+    assert "could not be resolved" not in result.stderr
+
+
+def test_a_session_is_asked_once_however_many_acks_it_posted_and_the_cheap_checks_come_first() -> None:
+    """Acks outside the red's window, for a sha that is no tip, or before any owner row ask nobody; a session that
+    posted three acks is asked once. Falsifiable: drop the cache, or look up before the checks, and `asked` grows."""
+    rows = [
+        _row("ack", "2026-11-19T09:00:00Z", SHA1, who="x", sender_session="5f6d9cc1-38a3-4de3-9d7d-2c1bfee0f375"),
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:01:00Z", SHA3, who="x", sender_session="6a7e0dd2-49b4-4ef4-8e8e-3d2c0ff1a486"),
+        _row("ack", "2026-11-19T10:03:00Z", SHA1, who="x", sender_session=SESS_OTHER),
+        _row("ack", "2026-11-19T10:04:00Z", SHA1, who="x", sender_session=SESS_OTHER),
+        _row("ack", "2026-11-19T10:05:00Z", SHA1, who="x", sender_session=SESS_OTHER),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="x", sender_session=SESS_OWNER),
+    ]
+    sessions = _Lookup({SESS_OTHER: "i5", SESS_OWNER: "i4"})
+    [red] = _times(rows, session=sessions)
+    assert red["acked_at"] == "2026-11-19T10:07:00Z"
+    assert sessions.asked == [SESS_OTHER, SESS_OWNER], "the early, no-tip and no-owner acks asked nobody; i5's session once"
+
+
+def test_an_ack_with_no_sender_session_falls_back_to_the_stamped_pair_of_its_from() -> None:
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED, owner_alias="marginalia", next_alias="tamsin"),
         _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia"),
     ]
-    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    [red] = _ack_times(_env(wire, tuples=_Tuples(rows)))
-    assert (red["acked_at"], red["minutes"], red["acked_by"]) == ("2026-11-19T10:07:00Z", 7.0, "i4"), "reported as the identity"
+    [red] = _times(rows)
+    assert (red["acked_at"], red["acked_by"]) == ("2026-11-19T10:07:00Z", "i4")
 
 
-def test_an_alias_ack_on_a_row_with_no_stamped_pair_resolves_through_the_identity_service() -> None:
-    """An older engine's owner row has no owner_alias: the identity service's alias route (the resolver `nx send`
-    uses) is asked, once per name, and never for a value that is already an identity id."""
+def test_an_ack_with_no_sender_session_and_no_stamped_pair_resolves_through_the_identity_service_once_per_name() -> None:
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
-        _row("ack", "2026-11-19T10:05:00Z", SHA1, who="marginalia"),
-        _row("ack", "2026-11-19T10:06:00Z", SHA1, who="marginalia"),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _row("ack", "2026-11-19T10:03:00Z", SHA1, who="tamsin"),
+        _row("ack", "2026-11-19T10:04:00Z", SHA1, who="tamsin"),
+        _row("ack", "2026-11-19T10:05:00Z", SHA1, who="i5"),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia"),
     ]
-    asked: list[str] = []
+    names = _Lookup({"tamsin": "i5", "marginalia": "i4"})
+    [red] = _times(rows, alias=names)
+    assert red["acked_at"] == "2026-11-19T10:07:00Z" and red["acked_by"] == "i4"
+    assert names.asked == ["tamsin", "marginalia"], "tamsin once; the id i5 is never looked up"
 
-    def lookup(name: str) -> dict[str, Any]:
-        asked.append(name)
-        return {"identity": "i4", "state": "live"}
 
-    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    [red] = _ack_times(_with_lookup(_env(wire, tuples=_Tuples(rows)), lookup))
-    assert red["acked_at"] == "2026-11-19T10:05:00Z" and red["acked_by"] == "i4"
-    assert asked == ["marginalia"], "one lookup for the name, none for the id"
+@pytest.mark.parametrize("who", ["3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", "a" + "0" * 16, "../i4", "x/y", "a b", ""])
+def test_a_from_that_is_no_name_is_never_put_in_a_url(who: str) -> None:
+    """A session id, an agent id or an unsafe string is skipped before any lookup (mailbox_send's own guard)."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who=who),
+    ]
+    names = _Lookup({})
+    [red] = _times(rows, alias=names)
+    assert red["acked_at"] is None and names.asked == []
 
 
 @pytest.mark.parametrize("how", ["lookup-says-another-identity", "stamped-pair-says-another-identity", "unknown-name", "lookup-fails"])
-def test_an_alias_ack_does_not_count_unless_it_resolves_to_the_owner(how: str) -> None:
+def test_a_name_ack_does_not_count_unless_it_resolves_to_the_owner(how: str) -> None:
     stamped = {"next_alias": "tamsin"} if how == "stamped-pair-says-another-identity" else {}
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED, **stamped),
         _row("ack", "2026-11-19T10:07:00Z", SHA1, who="tamsin"),
     ]
+    # In the stamped case the lookup WOULD name the owner: only the stamped pair (tamsin is next up, i5) keeps it from counting.
+    answer = {"lookup-says-another-identity": "i5", "stamped-pair-says-another-identity": "i4",
+              "unknown-name": _api_error(404), "lookup-fails": RuntimeError("no identity routes")}[how]
+    names = _Lookup({"tamsin": answer})
+    [red] = _times(rows, alias=names)
+    assert red["acked_at"] is None and red["minutes"] is None
+    if how == "stamped-pair-says-another-identity":
+        assert names.asked == [], "the red's own stamped pair decided it, before any lookup"
 
-    def lookup(name: str) -> dict[str, Any]:
-        if how == "lookup-fails":
-            raise RuntimeError("the engine has no identity routes")
-        return {"identity": "i5"} if how == "lookup-says-another-identity" else {"identity": ""}
 
-    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    [red] = _ack_times(_with_lookup(_env(wire, tuples=_Tuples(rows)), lookup))
-    assert red["acked_at"] is None and red["minutes"] is None, "tamsin is i5 (or nobody), and i5 is not the owner"
-
-
-def test_an_alias_ack_with_no_lookup_at_all_is_left_uncounted_rather_than_guessed() -> None:
+def test_a_name_with_no_lookup_at_all_is_left_uncounted_rather_than_guessed() -> None:
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
         _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia"),
     ]
-    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    [red] = _ack_times(_env(wire, tuples=_Tuples(rows)))
+    [red] = _times(rows)
     assert red["acked_at"] is None
 
 
