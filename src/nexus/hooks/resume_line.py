@@ -48,9 +48,10 @@ class _Result(NamedTuple):
 
 
 def _open_store() -> Any:
-    """The identity scope store, through the session's own T1 base. It never creates a session: if ``identity_scratch()``
-    fails (no identity, or no T1 lease for the new session id yet), the error reaches the caller, which logs the ``error``
-    outcome and prints nothing."""
+    """The identity scope store. It needs no T1 session lease (the engine admits an identity-scope call with no session
+    token) and creates no session, so it works at SessionStart(clear), before the new session id has a lease. If
+    ``identity_scratch()`` fails (no identity, or the engine is not answering), the error reaches the caller, which logs the
+    ``error`` outcome and prints nothing."""
     from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: only a clear start pays for it
 
     return identity_scratch()

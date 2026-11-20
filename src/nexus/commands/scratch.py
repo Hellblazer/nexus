@@ -84,15 +84,15 @@ def _t1():
     traceback (nexus-gff3g).
     """
     try:
-        base = get_t1_database()
         if _identity_scope():
             from nexus.identity.scratch_scope import IdentityScopeError, identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
             try:
-                return identity_scratch(base)
+                # No session base: the identity scope needs no session lease and never creates a session (nexus-hczdo).
+                return identity_scratch()
             except IdentityScopeError as exc:
                 raise click.ClickException(str(exc)) from exc
-        return base
+        return get_t1_database()
     except T1ServerNotFoundError as exc:
         raise click.ClickException(
             f"{exc}\n\n"
