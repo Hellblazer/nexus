@@ -729,11 +729,16 @@ in exactly two cases: a `quarantine-`
 name with `'live'`, or any other name with `'quarantine'`. `'dormant'` and
 `'disputed'` are admin states independent of the name (hygiene-002 marks
 rows `'disputed'`), so they never disagree. `upsertCollection` refuses,
-for every caller, a new row whose name and state disagree. So the engine's
+for every caller of it, a new row whose name and state disagree. So the engine's
 quarantine mint passes `'quarantine'`, and a re-embed target cannot carry
 the prefix. The SQL movers register the sibling as `'quarantine'`
 themselves, and `POST /v1/vectors/gc/quarantine-orphans` refuses a
-`quarantine_collection` without the prefix. The import refuses as above.
+`quarantine_collection` without the prefix. The ETL import does not go
+through `upsertCollection`, and it is the one exemption from that pairing
+refusal: it passes its own prefix-evidence check instead (above, and the
+import residual below), which refuses only an explicit `'quarantine'` with
+no prefix evidence and lands a row with evidence as `'quarantine'`, a
+plain-named one included.
 The production census found no existing row that breaks the pairing (T2
 `nexus_rdr/229-p1.2-census-2026-11-20`).
 
@@ -746,7 +751,8 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   reapable and manifest-less census routes, reaper routing,
   `holdsRowsOf`, the collection delete cascade, and both ends of rename
   and rehome (a new target has no row yet). Whether the fallback is still
-  needed once names are minted labels is a Phase 3 question.
+  needed once names are minted labels is decided at P3.8 (minting,
+  nexus-p2m1x.28), which registers every new collection with a row.
 - *The import's prefix evidence.* An imported legacy row with a plain
   name, a `quarantine-` content type and no `lifecycle_state` lands as
   `'quarantine'`. It is a migration source, which item 9 forbids
@@ -769,8 +775,10 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   route (`POST /v1/catalog/collections/upsert`) also registers `live` only,
   and refuses a new row named `quarantine-...` with a 400. The engine's
   own callers of `upsertCollection` and the SQL movers are not subject to
-  these two client rules, and neither is the ETL import. All of them are
-  subject to the pairing check above. Two refusals of the same class read
+  these two client rules, and neither is the ETL import. The engine's own
+  callers are subject to the pairing check above, and the SQL movers
+  register only prefixed siblings; the ETL import passes its
+  prefix-evidence check instead (the import residual). Two refusals of the same class read
   the prefix: re-embed refuses a `quarantine-` target before registering
   a new row, and the gc quarantine-orphans route refuses a mover sibling
   without it.
@@ -794,7 +802,18 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   `ChunkKeyAllowlistCheck`, `ChunkKeySweep`) still exempt a `quarantine-`
   name from the allow-list. A CHECK constraint cannot read
   `catalog_collections`, so reading the row here would mean a trigger.
-  This is deferred to the RDR author's ruling (nexus-p2m1x.10's notes).
+  It is a permanent residual (the RDR author's ruling, 2026-11-20,
+  nexus-p2m1x.10's notes), with no trigger: the prefix is engine-minted,
+  and the pairing rule makes it carry the `'quarantine'` state on every new
+  row. The exception is the import's plain-named quarantine row (the import
+  residual above): the CHECK reads the name, so it does not exempt that
+  row, and its chunks must satisfy the allow-list. That is accepted rather
+  than refused at import. No engine path moves chunks into such a row (the
+  reaper mints only `quarantine-` siblings), and RDR-236's sweep strips
+  retired document keys from `quarantine-` rows too, because a restore
+  copies them into a live collection where the CHECK applies. So a
+  plain-named quarantine row loses nothing a prefixed one keeps after the
+  sweep. `ImportedPlainNamedQuarantineAllowListTest` pins it.
 - *The client's row-less fallback.* `nexus.db.rows.lifecycle`
   judges a name with no row, or a row with no state, by its prefix, at
   each of the client's bypass checks (census note `QUAR_NOROW`, a
@@ -1516,7 +1535,7 @@ decides. Inferred, not read: the P2.8 test for that row is not yet written.
 **12. Routing by content type reads the row (closes the fourth class).**
 No name parsing comes back for these sites. Each prefix test becomes a test
 of the row's `content_type`, read through the source its caller already
-has. The routing class is 23 sites plus the `taxonomy__` half of the 12
+has. The routing class is 24 sites plus the `taxonomy__` half of the 12
 `_BYPASS_SCHEMA_PREFIXES` tests, 35 client tests, and one engine site,
 `NoteUri.isFileRoutedCollection`: 36 in all (the census counts 24 and 12, so
 36 client tests and 37 with the engine site, by adding `topic_route.is_prose`;
