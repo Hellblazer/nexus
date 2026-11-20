@@ -27,8 +27,11 @@ def rdr_hook_mod():
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_state():
-    """``rdr_verb`` is one shared module, so its module-level run state must not leak between tests."""
+def _reset_module_state(monkeypatch):
+    """``rdr_verb`` is one shared module, so its module-level run state must not leak between tests. ``_run`` starts
+    the T2 fetch thread before anything a test stubs, so the read under it answers empty here and no thread opens the
+    engine (the storage-touch guard's thread_touch)."""
+    monkeypatch.setattr("nexus.db.t2_reads.rdr_rows", lambda project: [])
     state = (rdr_hook_module._RESOLUTION_FAILURES, rdr_hook_module._T2_ROWS_CACHE, rdr_hook_module._T2_LATE, rdr_hook_module._T2_PENDING)
     for each in state:
         each.clear()

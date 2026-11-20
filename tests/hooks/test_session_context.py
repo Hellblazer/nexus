@@ -347,6 +347,8 @@ class TestWhatStaysAlwaysOnBesidesTheIndex:
     def test_each_start_records_one_session_start_line_for_the_denominator(self, monkeypatch, tmp_path: Path) -> None:
         self._env(monkeypatch, tmp_path)
         monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "/work/myproject" if args[:2] == ["git", "rev-parse"] else None)
+        monkeypatch.setattr(board_due, "due_lines", lambda sid: [])  # with a session id: no engine from a thread
+        monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: [])
         session_context.run({"session_id": "s-1", "source": "clear"})
         session_context.run(None)
         lines = [json.loads(ln) for ln in (tmp_path / "config" / "logs" / "brief.log").read_text(encoding="utf-8").splitlines()]
