@@ -389,7 +389,7 @@ def doctor_cmd(
             could_not_check = True
 
     if uri_residue:
-        from nexus.catalog import uri_residue_doctor as _ur  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost
+        from nexus.catalog.rdr229 import uri_residue_doctor as _ur  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost
 
         report = _ur.check_uri_residue()
         if as_json:

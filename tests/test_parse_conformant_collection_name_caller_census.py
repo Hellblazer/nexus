@@ -192,6 +192,17 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         "seen."
     ),
     (
+        "src/nexus/catalog/rdr229/collection_row_census.py",
+        (
+            "try:",
+            "return parse_conformant_collection_name(origin), m is not None",
+        ),
+    ): (
+        "RDR-229 P1.2 (nexus-p2m1x.2): the one-off collections-census. It measures how many registry rows disagree "
+        "with their names, so it must parse the name to compare; a row read would make the measurement vacuous. A "
+        "measurement tool, deleted before Phase 4 removes the parser (P1.R / Phase 4)."
+    ),
+    (
         "src/nexus/db/t3.py",
         (
             "if is_conformant_collection_name(name):",

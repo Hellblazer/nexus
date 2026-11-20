@@ -29,6 +29,9 @@ DOCS_V2 = "docs__99-1__bge-base-en-v15-768__v2"
 KNOW = "knowledge__e2esub__bge-base-en-v15-768__v1"
 CODE_BAD = "code__99-2__bge-base-en-v15-768__v1"          # its row says content_type docs: a mismatch
 MINTED = "c123"
+TIE_LEGACY = "e2e-tie-label"                              # registered FIRST (older), name sorts after TIE_CONF
+TIE_CONF = "docs__99-6__bge-base-en-v15-768__v1"          # same tuple and version, registered after: NAME ASC picks it
+NOVER = "e2e-nover"                                       # a live row with an empty model_version
 OLD = "docs__99-4__bge-base-en-v15-768__v1"               # tombstone whose successor row is deleted below
 NEW = "docs__99-4__bge-base-en-v15-768__v2"
 
@@ -54,6 +57,11 @@ def _seed(tenant: str) -> None:
                                 legacy_grandfathered=False)
         cat.register_collection(CODE_BAD, content_type="docs", owner_id="99-2", embedding_model=model)
         cat.register_collection(MINTED, content_type="code", owner_id="99-3", embedding_model=model,
+                                legacy_grandfathered=True)
+        cat.register_collection(TIE_LEGACY, content_type="docs", owner_id="99-6", embedding_model=model,
+                                legacy_grandfathered=False)
+        cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model)
+        cat.register_collection(NOVER, content_type="docs", owner_id="99-7", embedding_model=model, model_version="",
                                 legacy_grandfathered=True)
         cat.register_collection(OLD, content_type="docs", owner_id="99-4", embedding_model=model)
         cat.register_collection(NEW, content_type="docs", owner_id="99-4", embedding_model=model, model_version="v2")
@@ -133,19 +141,38 @@ def test_the_residue_row_and_the_census_on_a_local_engine(t2_service_env) -> Non
     res = runner.invoke(main, ["catalog", "collections-census", "--tenant-label", "local-e2e"])
     _show("=== nx catalog collections-census ===\n" + res.output)
     assert res.exit_code == 0, res.output
-    cj = _json_of(runner.invoke(main, ["catalog", "collections-census", "--tenant-label", "local-e2e", "--json"]).output)
+    cj = json.loads(runner.invoke(main, ["catalog", "collections-census", "--tenant-label", "local-e2e", "--json"]).stdout)
     _show("=== nx catalog collections-census --json ===\n" + json.dumps(cj, indent=1, sort_keys=True))
     rv = cj["row_vs_name"]
     assert rv["content_type"]["mismatch"] == 1
     assert [x["name"] for x in rv["rows_that_disagree"]] == [CODE_BAD]
     assert rv["rows_that_disagree"][0]["differences"] == {"content_type": {"row": "docs", "name": "code"}}
-    assert {LABEL, LABEL2, MINTED} <= set(rv["not_conformant_names"])
+    assert {LABEL, LABEL2, MINTED, TIE_LEGACY, NOVER} <= set(rv["not_conformant_names"])
     assert cj["label_clash"]["clashing_names"] == 0, "the registry's primary key makes a live clash impossible today"
     mt = cj["multi_candidate_tuples"]
-    assert [t["candidates"] for t in mt["with_grandfathered_filter"]["tuples"]] == [[DOCS, DOCS_V2]]
-    assert sorted(t["candidates"] for t in mt["without_grandfathered_filter"]["tuples"]) == [
-        [DOCS, DOCS_V2], [LABEL, LABEL2]]
+    names = lambda groups: sorted([c["name"] for c in t["candidates"]] for t in groups["tuples"])  # noqa: E731
+    assert names(mt["with_grandfathered_filter"]) == sorted([[DOCS, DOCS_V2], [TIE_CONF, TIE_LEGACY]])
+    assert names(mt["without_grandfathered_filter"]) == sorted([[DOCS, DOCS_V2], [LABEL, LABEL2], [TIE_CONF, TIE_LEGACY]])
+    assert all(c["model_version"] for t in mt["with_grandfathered_filter"]["tuples"] for c in t["candidates"])
     assert mt["ambiguous_only_without_the_filter"] == 1, "the 99-5 tuple is ambiguous only once the grandfathered filter goes"
+    tied = mt["tied_at_top_version"]["with_grandfathered_filter"]
+    assert [t["tied"] for t in tied["tuples"]] == [[TIE_CONF, TIE_LEGACY]], "only the 99-6 tuple ties at its top version"
+    wc = mt["winner_changes_when_filter_dropped"]
+    assert [(t["winner_with_filter"], t["winner_without_filter"]) for t in wc["tuples"]] == [(LABEL2, LABEL)]
+    assert wc["tuples_that_only_gain_a_winner"]["count"] == 2, "the c123 and e2e-nover tuples hold only grandfathered rows"
+    p14 = mt["p14_created_at_tie_break"]
+    _show("=== P1.4 tie-break ===\n" + json.dumps(p14, indent=1, sort_keys=True))
+    assert p14["tied_tuples_with_filter"] == 1
+    assert p14["tied_candidates_without_created_at"] == 0, "list_collections carries created_at"
+    [diff] = p14["created_at_winner_differs"]["tuples"]
+    assert diff["winner_name_asc"] == TIE_CONF and diff["winner_created_at_then_name"] == TIE_LEGACY
+    assert diff["created_at_winner_is_legacy_or_nonconformant"] is True and diff["conformant_siblings"] == [TIE_CONF]
+    assert p14["created_at_winner_is_legacy_or_nonconformant_count"] == 1
+    uv = cj["unusable_model_versions"]
+    assert uv["count"] == 1 and uv["empty"] == 1 and [x["name"] for x in uv["rows"]] == [NOVER]
+    nc = {x["name"]: x for x in rv["not_conformant_rows"]}
+    assert nc[NOVER]["empty_fields"] == ["model_version"] and nc[NOVER]["legacy_grandfathered"] is True
+    assert nc[LABEL]["empty_fields"] == [] and nc[LABEL]["content_type"] == "docs"
     assert cj["minted_form_names"]["names"] == [MINTED]
     assert cj["dangling_tombstones"]["rows"] == [{"name": OLD, "superseded_by": NEW}]
     assert cj["dangling_tombstones"]["dangling"] == 1

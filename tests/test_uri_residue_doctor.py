@@ -18,7 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.aspect_readers import FILE_ROUTED_PREFIXES
-from nexus.catalog import uri_residue_doctor as ur
+from nexus.catalog.rdr229 import uri_residue_doctor as ur
 from nexus.catalog.engine_reads import uri_segments
 from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable
 from nexus.cli import main
@@ -34,8 +34,20 @@ def g(table: str, scheme: str, segment: str, collection: str, content_type: str,
             "content_type": content_type, "rows": rows}
 
 
+#: Every attribute a reader double was asked for besides the census read. A walk of the catalog would show here even if
+#: the row's own code swallowed the error the double raised (a broad ``except`` cannot hide a recorded read).
+WALKED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _no_walk():
+    WALKED.clear()
+    yield
+    assert WALKED == [], f"the row read {WALKED} besides the one census read: it must never walk the catalog"
+
+
 class _Reader:
-    """The one read a row may make. Anything else (a walk of the catalog) raises."""
+    """The one read a row may make. Any other attribute read is recorded in :data:`WALKED` and raises."""
 
     def __init__(self, groups=(), *, capped=False, raises=None):
         self._groups, self._capped, self._raises = list(groups), capped, raises
@@ -48,7 +60,8 @@ class _Reader:
         return {"count": len(self._groups), "limit": limit, "capped": self._capped, "groups": self._groups}
 
     def __getattr__(self, name):
-        raise AssertionError(f"the uri_residue row read {name!r}: it must make the one census read and no walk")
+        WALKED.append(name)
+        raise AttributeError(name)
 
 
 # ── the verdict on fixtures: one row of every shape the RDR names ───────────────────────────────────────────────
@@ -157,7 +170,12 @@ def test_a_capped_answer_is_not_checked_because_its_counts_would_be_lower_bounds
 def test_a_reader_without_the_method_is_not_checked_and_never_walks() -> None:
     class Old:
         def all_documents(self, *a, **k):  # pragma: no cover - must not be reached
-            raise AssertionError("walked the catalog")
+            WALKED.append("all_documents")
+            return []
+
+        def list_scoped(self, *a, **k):  # pragma: no cover - must not be reached
+            WALKED.append("list_scoped")
+            return []
 
     report = ur.check_uri_residue(reader=Old())
     assert report["status"] == ur.NOT_APPLICABLE and ur.is_not_checked(report)
@@ -184,11 +202,34 @@ def test_no_catalog_is_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── gating decision: the row warns and never fails ──────────────────────────────────────────────────────────────
 
 
-def test_the_row_never_reports_a_fail() -> None:
+def test_the_row_never_reports_a_fail_and_is_not_a_gating_row() -> None:
     """RDR-229 calls it a pre-flight, but P2.10's repair move is what clears it, so a FAIL would exit ``nx doctor``
-    non-zero on installs that cannot yet clear it. The decision is :data:`GATES`."""
-    assert ur.GATES is False
+    non-zero on installs that cannot yet clear it. The decision is :data:`doctor._GATING_SUPPLEMENTARY_CHECKS`."""
+    assert "uri-residue" not in doctor_mod._GATING_SUPPLEMENTARY_CHECKS
     assert ur.check_uri_residue(reader=_Reader(_fixture()))["status"] == ur.WARN
+    assert not hasattr(ur, "GATES")
+
+
+def test_the_other_bucket_is_keyed_by_the_engines_content_type_so_attribute_less_rows_show() -> None:
+    groups = [g("catalog_documents", "chroma", KNOW, KNOW, "knowledge", 7),
+              g("catalog_documents", "chroma", "ghost", "ghost", "", 6),
+              g("document_highlights", "chroma", "other", "elsewhere", "unknown", 2)]
+    report = ur.check_uri_residue(reader=_Reader(groups))
+    by_type = report["counts"]["catalog_documents"]["chroma_prefix_free"]["other_by_content_type"]
+    assert by_type == {"knowledge": {"rows": 7, "segment_not_collection": 0},
+                       ur.NO_CONTENT_TYPE: {"rows": 6, "segment_not_collection": 0}}
+    assert report["totals"]["chroma_prefix_free_other_by_content_type"] == {
+        "knowledge": {"rows": 7, "segment_not_collection": 0},
+        ur.NO_CONTENT_TYPE: {"rows": 6, "segment_not_collection": 0},
+        "unknown": {"rows": 2, "segment_not_collection": 2}}
+    text = "\n".join(ur.render_text(report))
+    assert ur.NO_CONTENT_TYPE in text and "knowledge" in text
+
+
+def test_the_unsupported_text_names_the_edge_allowlist_for_a_cloud_client() -> None:
+    exc = EngineRouteUnavailable("/uri_segment_census", ur.FLAG, EngineRouteUnavailable.UNSUPPORTED)
+    reason = ur.check_uri_residue(reader=_Reader(raises=exc))["reason"]
+    assert "0.1.199" in reason and "conexus edge" in reason and ur.FLAG in reason
 
 
 # ── rendering ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -202,6 +243,17 @@ def test_render_names_the_counts_and_the_split() -> None:
     assert "segment is not its collection" in text
     assert "nx-note://" in text
     assert "P2.10" in text, "names the repair that clears it"
+
+
+def test_a_pass_render_prints_the_other_bucket_and_the_file_routed_total_too() -> None:
+    groups = [g("catalog_documents", "chroma", KNOW, KNOW, "knowledge", 40),
+              g("catalog_documents", "chroma", DOCS, DOCS, "docs", 11)]
+    report = ur.check_uri_residue(reader=_Reader(groups))
+    assert report["status"] == ur.PASS
+    lines = ur.render_text(report)
+    text = "\n".join(lines)
+    assert lines[0].startswith("uri-residue: PASS")
+    assert "any other collection: 40" in text and "file-routed segment" in text and ": 11" in text
 
 
 def test_render_not_checked_says_why() -> None:

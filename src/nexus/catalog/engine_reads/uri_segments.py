@@ -4,7 +4,7 @@
 The route groups the tenant's source-URI rows by ``(table, scheme, segment, collection)`` and returns each group's
 row count with the content type its collection's registry row holds: the ``chroma://`` rows of ``catalog_documents``,
 ``document_aspects`` and ``document_highlights``, and their ``nx-note://`` rows. The engine does no classification;
-:mod:`nexus.catalog.uri_residue_doctor` decides which groups are residue with ``aspect_readers.FILE_ROUTED_PREFIXES``.
+:mod:`nexus.catalog.rdr229.uri_residue_doctor` decides which groups are residue with ``aspect_readers.FILE_ROUTED_PREFIXES``.
 One answer replaces a client walk of the catalog (RDR-241). Body: ``{count, limit, capped, groups}``, each group
 ``{table, scheme, segment, collection, content_type, rows}``; ``count`` is every group and ``capped`` means the list
 holds fewer."""

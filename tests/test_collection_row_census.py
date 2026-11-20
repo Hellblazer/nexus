@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-229 P1.2 (nexus-p2m1x.2), deliverable A: the read-only census of registry rows against their names.
 
-``nexus.catalog.collection_row_census.census`` is pure: it takes the registry rows ``GET /collections/list`` returns
+``nexus.catalog.rdr229.collection_row_census.census`` is pure: it takes the registry rows ``GET /collections/list`` returns
 (every state, tombstones included) and answers the five questions of the bead. The fixtures below hold one row of
 every shape the bead names: a mismatched row, a label clash, a multi-candidate tuple counted with and without the
 grandfathered filter, a ``c123`` name and a dangling tombstone. ``nx catalog collections-census`` makes the one read
@@ -14,7 +14,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from nexus.catalog import collection_row_census as crc
+from nexus.catalog.rdr229 import collection_row_census as crc
 from nexus.cli import main
 
 NOW = "2026-11-20T00:00:00Z"
@@ -149,7 +149,7 @@ def test_a_tuple_with_two_candidates_is_counted_by_both_forms() -> None:
     assert mt["without_grandfathered_filter"]["count"] == 1
     [t] = mt["with_grandfathered_filter"]["tuples"]
     assert t == {"content_type": "docs", "owner_id": "1-2", "embedding_model": "voyage-context-3",
-                 "candidates": [a["name"], b["name"]]}
+                 "candidates": [{"name": a["name"], "model_version": "v1"}, {"name": b["name"], "model_version": "v2"}]}
     assert mt["ambiguous_only_without_the_filter"] == 0
 
 
@@ -160,7 +160,8 @@ def test_the_grandfathered_filter_changes_the_count() -> None:
     mt = r["multi_candidate_tuples"]
     assert mt["with_grandfathered_filter"]["count"] == 0, "collectionForTuple drops the grandfathered slug today"
     assert mt["without_grandfathered_filter"]["count"] == 1, "D5 drops that filter, so this tuple becomes ambiguous"
-    assert mt["without_grandfathered_filter"]["tuples"][0]["candidates"] == ["docs__1-2__voyage-context-3__v1", "legacy-slug"]
+    assert [c["name"] for c in mt["without_grandfathered_filter"]["tuples"][0]["candidates"]] == [
+        "docs__1-2__voyage-context-3__v1", "legacy-slug"]
     assert mt["ambiguous_only_without_the_filter"] == 1
 
 
@@ -273,8 +274,9 @@ def reader(monkeypatch: pytest.MonkeyPatch) -> _Reader:
 def test_the_command_prints_json_from_one_unfiltered_read(reader: _Reader) -> None:
     result = CliRunner().invoke(main, ["catalog", "collections-census", "--json", "--tenant-label", "local-e2e"])
     assert result.exit_code == 0, result.output
-    body = json.loads(result.output)
-    assert body["tenant_label"] == "local-e2e" and body["registry"]["live"] == 3
+    body = json.loads(result.stdout)
+    assert body["tenant_label"] == "local-e2e" and body["tenant_label_verified"] is False
+    assert "unverified" in result.stderr and body["registry"]["live"] == 3
     assert body["minted_form_names"]["names"] == ["c5"]
     assert reader.calls == [(None, None)], "every state, no filter: tombstones are needed for the dangling count"
 
@@ -294,3 +296,156 @@ def test_the_command_refuses_an_unreadable_registry(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: Boom())
     result = CliRunner().invoke(main, ["catalog", "collections-census", "--json"])
     assert result.exit_code != 0 and "engine down" in result.output, "an unread registry is an error, never an empty census"
+
+
+# ── fix round 1: versions, ties, the P1.4 tie-break, non-conformant rows, unusable versions ──────────────────────
+
+
+def _legacy(name: str, created: str = "", **kw) -> dict:
+    r = row(name, "docs", "1-2", "voyage-context-3", **kw)
+    r["created_at"] = created
+    return r
+
+
+def _good_at(created: str, version: str = "v1", **kw) -> dict:
+    r = good(version=version, **kw)
+    r["created_at"] = created
+    return r
+
+
+def test_each_candidate_carries_its_model_version() -> None:
+    r = report([good(version="v1"), good(version="v3")])
+    cands = r["multi_candidate_tuples"]["with_grandfathered_filter"]["tuples"][0]["candidates"]
+    assert cands == [{"name": "docs__1-2__voyage-context-3__v1", "model_version": "v1"},
+                     {"name": "docs__1-2__voyage-context-3__v3", "model_version": "v3"}]
+
+
+def test_a_tuple_tied_at_the_top_version_is_listed_and_a_lower_version_is_not_a_tie() -> None:
+    a = good(version="v2")
+    b = row("docs__1-2__voyage-context-3__v2x", "docs", "1-2", "voyage-context-3", "v2")   # same version, another name
+    low = good(version="v1")
+    r = report([a, b, low])
+    tied = r["multi_candidate_tuples"]["tied_at_top_version"]["with_grandfathered_filter"]
+    assert tied["count"] == 1
+    [t] = tied["tuples"]
+    assert t["tied"] == sorted([a["name"], b["name"]]) and low["name"] not in t["tied"]
+    assert t["top_version"] == "v2" and t["winner_name_asc"] == a["name"]
+    only_versions = report([good(version="v1"), good(version="v2")])
+    assert only_versions["multi_candidate_tuples"]["tied_at_top_version"]["with_grandfathered_filter"]["count"] == 0
+
+
+def test_the_tie_at_the_top_is_counted_with_and_without_the_grandfathered_filter() -> None:
+    conformant = good()
+    slug = _legacy("legacy-slug", grandfathered=True)
+    r = report([conformant, slug])
+    tied = r["multi_candidate_tuples"]["tied_at_top_version"]
+    assert tied["with_grandfathered_filter"]["count"] == 0
+    assert tied["without_grandfathered_filter"]["count"] == 1
+
+
+def test_a_tuple_whose_winner_changes_when_the_grandfathered_filter_is_dropped_is_listed() -> None:
+    conformant = good(version="v1")          # wins today (only candidate with the filter)
+    slug = _legacy("aaa-slug", grandfathered=True)   # v-less (version 0): loses on version... make it win on version
+    slug["model_version"] = "v1"            # ties at v1, and "aaa-slug" < "docs__..." so NAME ASC picks it once unfiltered
+    r = report([conformant, slug])
+    wc = r["multi_candidate_tuples"]["winner_changes_when_filter_dropped"]
+    assert wc["count"] == 1
+    assert wc["tuples"][0]["winner_with_filter"] == conformant["name"]
+    assert wc["tuples"][0]["winner_without_filter"] == "aaa-slug"
+
+
+def test_a_tuple_of_only_grandfathered_rows_gains_a_winner_and_is_counted_apart() -> None:
+    r = report([_legacy("only-slug", grandfathered=True)])
+    wc = r["multi_candidate_tuples"]["winner_changes_when_filter_dropped"]
+    assert wc["count"] == 0 and wc["tuples_that_only_gain_a_winner"]["count"] == 1
+
+
+def test_p14_the_created_at_winner_differs_when_the_older_row_has_the_higher_name() -> None:
+    older = _good_at("2026-01-01T00:00:00Z", owner="1-2")
+    older["name"], older["model_version"] = "docs__1-2__voyage-context-3__v1z", "v1"
+    newer = _good_at("2026-06-01T00:00:00Z")
+    r = report([older, newer])
+    p14 = r["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    assert p14["tied_tuples_with_filter"] == 1
+    d = p14["created_at_winner_differs"]
+    assert d["count"] == 1
+    [t] = d["tuples"]
+    assert t["winner_name_asc"] == newer["name"] and t["winner_created_at_then_name"] == older["name"]
+    assert t["created_at"] == {older["name"]: "2026-01-01T00:00:00Z", newer["name"]: "2026-06-01T00:00:00Z"}
+    assert "switch_condition" in p14 and "zero" in p14["switch_condition"]
+
+
+def test_p14_marks_a_legacy_created_at_winner_and_names_its_conformant_sibling() -> None:
+    conformant = _good_at("2026-06-01T00:00:00Z", version="v1")
+    legacy = _legacy("legacy-label", "2026-01-01T00:00:00Z", version="v1")   # not grandfathered, non-conformant name
+    r = report([conformant, legacy])
+    p14 = r["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    [t] = p14["created_at_winner_differs"]["tuples"]
+    assert t["winner_name_asc"] == conformant["name"], "'d' sorts before 'l'"
+    assert t["winner_created_at_then_name"] == "legacy-label"
+    assert t["created_at_winner_is_legacy_or_nonconformant"] is True
+    assert t["conformant_siblings"] == [conformant["name"]]
+    assert p14["created_at_winner_is_legacy_or_nonconformant_count"] == 1
+
+
+def test_p14_count_is_zero_when_name_and_created_at_agree() -> None:
+    first = _good_at("2026-01-01T00:00:00Z", version="v1")
+    second = row("docs__1-2__voyage-context-3__v1b", "docs", "1-2", "voyage-context-3", "v1")
+    second["created_at"] = "2026-06-01T00:00:00Z"
+    p14 = report([first, second])["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    assert p14["tied_tuples_with_filter"] == 1 and p14["created_at_winner_differs"]["count"] == 0
+
+
+def test_p14_flags_tied_candidates_with_no_created_at() -> None:
+    a, b = _good_at(""), _good_at("2026-01-01T00:00:00Z")
+    b["name"] = "docs__1-2__voyage-context-3__v1b"
+    p14 = report([a, b])["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    assert p14["tied_candidates_without_created_at"] == 1
+
+
+def test_non_conformant_live_names_list_their_attributes_and_flag_the_empty_ones() -> None:
+    r = report([row("legacy-a", "docs", "o", "voyage-context-3", "v1", grandfathered=True),
+                row("legacy-b", "", "o", "", "", grandfathered=False)])
+    rows = {x["name"]: x for x in r["row_vs_name"]["not_conformant_rows"]}
+    assert rows["legacy-a"] == {"name": "legacy-a", "content_type": "docs", "embedding_model": "voyage-context-3",
+                                "model_version": "v1", "legacy_grandfathered": True, "empty_fields": []}
+    assert rows["legacy-b"]["legacy_grandfathered"] is False
+    assert rows["legacy-b"]["empty_fields"] == ["content_type", "embedding_model", "model_version"]
+
+
+def test_live_rows_with_an_empty_or_malformed_model_version_are_counted_and_labelled() -> None:
+    r = report([good(), row("a", "docs", "1-2", "m", ""), row("b", "docs", "1-2", "m", "version1"),
+                row("c", "docs", "1-2", "m", "v7", superseded_by="x")])   # a tombstone is not live
+    uv = r["unusable_model_versions"]
+    assert (uv["count"], uv["empty"], uv["malformed"]) == (2, 1, 1)
+    assert [x["name"] for x in uv["rows"]] == ["a", "b"]
+    assert "P1.4" in uv["label"] and "empty" in uv["label"]
+
+
+def test_the_text_names_the_new_counts(reader: _Reader) -> None:
+    result = CliRunner().invoke(main, ["catalog", "collections-census"])
+    assert result.exit_code == 0, result.output
+    for needle in ("tied at the TOP version", "winner changes when the grandfathered filter is dropped",
+                   "P1.4 TIE-BREAK", "model_version is empty or not v<digits>"):
+        assert needle in result.output, needle
+
+
+def test_created_at_orders_by_instant_not_by_spelling() -> None:
+    """``2026-11-20 09:56:57+00`` and ``2026-11-20T10:00:00Z`` are in instant order though ' ' sorts before 'T'; a
+    string compare would call the later one older when the spellings are swapped."""
+    older = _good_at("2026-11-20T08:00:00Z")                # 'T' spelling, earlier instant
+    older["name"] = "docs__1-2__voyage-context-3__v1z"
+    newer = _good_at("2026-11-20 09:56:57.054349+00")       # ' ' spelling, later instant
+    p14 = report([older, newer])["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    [t] = p14["created_at_winner_differs"]["tuples"]
+    assert t["winner_created_at_then_name"] == older["name"]
+    assert p14["tied_candidates_with_unreadable_created_at"] == 0
+
+
+def test_an_unreadable_created_at_is_counted_and_sorts_last() -> None:
+    a, b = _good_at("not a time"), _good_at("2026-01-01T00:00:00Z")
+    b["name"] = "docs__1-2__voyage-context-3__v1b"
+    p14 = report([a, b])["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    assert p14["tied_candidates_with_unreadable_created_at"] == 1
+    [t] = p14["created_at_winner_differs"]["tuples"]
+    assert t["winner_created_at_then_name"] == b["name"]

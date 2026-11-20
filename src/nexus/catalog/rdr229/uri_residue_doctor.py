@@ -21,9 +21,9 @@ READ ONLY, and no catalog walk (RDR-241): one engine read, ``GET /v1/catalog/uri
 rows server-side (:mod:`nexus.catalog.engine_reads.uri_segments`). This module classifies the groups with
 ``aspect_readers.FILE_ROUTED_PREFIXES`` and its segment test, so the prefix list is not copied.
 
-GATING. The row WARNs and never fails: ``GATES`` is False. RDR-229 calls it a pre-flight, but it is information for
-P2.10, and no command that clears the residue ships before P2.10's move registers. A FAIL would make ``nx doctor``
-exit non-zero on every install that carries any, with no remedy to run.
+GATING. The row WARNs and never fails, and is not in ``doctor._GATING_SUPPLEMENTARY_CHECKS``. RDR-229 calls it a
+pre-flight, but it is information for P2.10, and no command that clears the residue ships before P2.10's move
+registers. A FAIL would make ``nx doctor`` exit non-zero on every install that carries any, with no remedy to run.
 
 One report dict, like :mod:`nexus.catalog.sensitivity_doctor`'s: ``{"name", "status", "reason", "rows_examined",
 "counts", "totals"}``. ``status`` is ``not_applicable`` (a ``reason`` starting "not checked:" could not look: the
@@ -50,15 +50,15 @@ PASS = "pass"
 WARN = "warn"
 NOT_CHECKED_PREFIX = "not checked:"
 
-#: See the module docstring, GATING.
-GATES: bool = False
-
 #: The engine release that carries ``GET /v1/catalog/uri_segment_census``.
 ROUTE_ENGINE = "0.1.199"
 
 #: A collection is file-typed when its content type's name prefix (``<content_type>__``) is file-routed: the types
 #: of :data:`FILE_ROUTED_PREFIXES`, never a second list.
 FILE_TYPED_CONTENT_TYPES: frozenset[str] = frozenset(p.removesuffix("__") for p in FILE_ROUTED_PREFIXES)
+
+#: The key of the ``other_by_content_type`` bucket for a collection whose registry row is missing or has no content type.
+NO_CONTENT_TYPE = "(no content type)"
 
 _COUNT_PAIR = {"rows": 0, "segment_not_collection": 0}
 
@@ -69,7 +69,7 @@ def _pair() -> dict[str, int]:
 
 def _empty_table() -> dict[str, Any]:
     return {
-        "chroma_prefix_free": {"file_typed": _pair(), "other": _pair()},
+        "chroma_prefix_free": {"file_typed": _pair(), "other": _pair(), "other_by_content_type": {}},
         "note_prefix_free_in_file_typed": _pair(),
         "chroma_file_routed_segment": 0,
     }
@@ -90,6 +90,13 @@ def classify(groups: list[dict]) -> tuple[dict[str, dict], dict[str, Any], int]:
                 table["chroma_file_routed_segment"] += rows
                 continue
             bucket = table["chroma_prefix_free"]["file_typed" if file_typed else "other"]
+            if not file_typed:
+                # keyed by the content type the engine reports, so a row with no registry row ('') is visible
+                by_type = table["chroma_prefix_free"]["other_by_content_type"].setdefault(
+                    grp["content_type"] or NO_CONTENT_TYPE, _pair())
+                by_type["rows"] += rows
+                if segment != grp["collection"]:
+                    by_type["segment_not_collection"] += rows
         else:
             if file_routed or not file_typed:
                 continue
@@ -100,6 +107,7 @@ def classify(groups: list[dict]) -> tuple[dict[str, dict], dict[str, Any], int]:
     totals = {
         "chroma_prefix_free_file_typed": _pair(),
         "chroma_prefix_free_other": _pair(),
+        "chroma_prefix_free_other_by_content_type": {},
         "note_prefix_free_in_file_typed": _pair(),
         "chroma_file_routed_segment": 0,
     }
@@ -110,6 +118,10 @@ def classify(groups: list[dict]) -> tuple[dict[str, dict], dict[str, Any], int]:
                          ("note_prefix_free_in_file_typed", table["note_prefix_free_in_file_typed"])):
             for k in _COUNT_PAIR:
                 totals[key][k] += src[k]
+        for ct, pair in table["chroma_prefix_free"]["other_by_content_type"].items():
+            agg = totals["chroma_prefix_free_other_by_content_type"].setdefault(ct, _pair())
+            for k in _COUNT_PAIR:
+                agg[k] += pair[k]
     return counts, totals, examined
 
 
@@ -130,8 +142,8 @@ def is_not_checked(report: dict) -> bool:
 def _unavailable(exc: EngineRouteUnavailable) -> str:
     if exc.reason == EngineRouteUnavailable.UNSUPPORTED:
         return (f"this engine does not answer GET /v1/catalog{uri_segments.ROUTE}; engine-service {ROUTE_ENGINE} or later "
-                f"does (it advertises {FLAG} on GET /version). Re-run after the engine upgrade; the catalog is not walked "
-                "instead.")
+                f"does (it advertises {FLAG} on GET /version), or, for a cloud client, the conexus edge does not yet list "
+                f"{FLAG}. Re-run after the engine upgrade; the catalog is not walked instead.")
     return exc.describe() + "; re-run to retry."
 
 
@@ -187,27 +199,31 @@ def _pair_text(p: dict) -> str:
     return f"{p['rows']} (segment is not its collection: {p['segment_not_collection']})"
 
 
+def _by_type_text(by_type: dict) -> str:
+    return ", ".join(f"{ct}: {_pair_text(p)}" for ct, p in sorted(by_type.items())) or "none"
+
+
 def render_text(report: dict, *, limit: int = 50) -> list[str]:  # noqa: ARG001 — same signature as the sibling rows
-    """The row as text lines: one verdict line, then, for a finding, the per-table counts and what clears them."""
+    """The row as text lines: one verdict line, then, for a finding or a pass, the per-table counts; a finding also
+    says what clears them."""
     status = report["status"]
     if status == NOT_APPLICABLE:
         head = "not checked" if is_not_checked(report) else "N/A"
         return [f"{LABEL}: {head} ({report['reason'].removeprefix(NOT_CHECKED_PREFIX).strip()})"]
-    if status == PASS:
-        return [f"{LABEL}: PASS ({report['reason']})"]
-    lines = [f"{LABEL}: WARN ({report['reason']})"]
+    lines = [f"{LABEL}: {'PASS' if status == PASS else 'WARN'} ({report['reason']})"]
     for table, c in report["counts"].items():
+        pf = c["chroma_prefix_free"]
         lines.append(f"  {table}:")
-        lines.append(f"    chroma:// with a prefix-free segment, code/docs/rdr collection: "
-                     f"{_pair_text(c['chroma_prefix_free']['file_typed'])}")
-        lines.append(f"    chroma:// with a prefix-free segment, any other collection: "
-                     f"{_pair_text(c['chroma_prefix_free']['other'])}")
+        lines.append(f"    chroma:// with a prefix-free segment, code/docs/rdr collection: {_pair_text(pf['file_typed'])}")
+        lines.append(f"    chroma:// with a prefix-free segment, any other collection: {_pair_text(pf['other'])}"
+                     f" [by content type: {_by_type_text(pf['other_by_content_type'])}]")
         lines.append(f"    nx-note:// with a prefix-free segment, code/docs/rdr collection: "
                      f"{_pair_text(c['note_prefix_free_in_file_typed'])}")
         lines.append(f"    chroma:// with a file-routed segment (nx catalog backfill-source-uri repairs these): "
                      f"{c['chroma_file_routed_segment']}")
-    lines.append(
-        "  Nothing clears these rows yet: RDR-229 P2.10's repair move restores a file-routed segment to the rows whose "
-        "segment is their own collection, and leaves the rest counted. Record these counts before it runs. This row "
-        "never fails the sweep.")
+    if status == WARN:
+        lines.append(
+            "  Nothing clears these rows yet: RDR-229 P2.10's repair move restores a file-routed segment to the rows "
+            "whose segment is their own collection, and leaves the rest counted. Record these counts before it runs. "
+            "This row never fails the sweep.")
     return lines
