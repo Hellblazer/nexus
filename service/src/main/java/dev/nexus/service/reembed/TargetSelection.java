@@ -7,6 +7,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.regex.Pattern;
 
 /**
@@ -20,7 +23,8 @@ import java.util.regex.Pattern;
  * lifecycle state is {@code live} (collectionForTuple excludes only quarantine; a dormant or disputed row is not
  * a move target, so it reads as absent here) and it is not {@code legacy_grandfathered}. A candidate that is not superseded wins; a superseded
  * one is chosen only when no non-superseded candidate exists. Among the pool, the highest numeric
- * {@code model_version} wins, then the lexically lower name ({@code collectionForTuple}'s tie order).
+ * {@code model_version} wins, then the first registered ({@code created_at} ascending, compared as instants), then the
+ * lexically lower name: {@code collectionForTuple}'s tie order (nexus-p2m1x.4), pinned against it by a parity test.
  *
  * <p><b>Decision</b> ({@link #decide}) turns the selection into one of four outcomes for the job's start:
  * register the target ({@link Register}); use a live row ({@link UseLive}); revive a superseded row
@@ -47,7 +51,15 @@ public final class TargetSelection {
     /** A catalog collection row: the fields of {@code CatalogRepository}'s list-route row that selection reads. */
     public record CollectionRow(String name, String contentType, String ownerId, String embeddingModel,
                                 String modelVersion, boolean legacyGrandfathered, String supersededBy,
-                                String lifecycleState) {
+                                String lifecycleState, String createdAt) {
+
+        /** A row with no registration stamp: it ties on age with every other, so the name decides. */
+        public CollectionRow(String name, String contentType, String ownerId, String embeddingModel,
+                             String modelVersion, boolean legacyGrandfathered, String supersededBy,
+                             String lifecycleState) {
+            this(name, contentType, ownerId, embeddingModel, modelVersion, legacyGrandfathered, supersededBy,
+                lifecycleState, "");
+        }
 
         /** The row as {@code CatalogRepository#listCollections} returns it (the keys of its map shape). */
         public static CollectionRow fromMap(Map<String, Object> m) {
@@ -55,7 +67,7 @@ public final class TargetSelection {
                 str(m.get("name")), str(m.get("content_type")), str(m.get("owner_id")),
                 str(m.get("embedding_model")), str(m.get("model_version")),
                 Boolean.TRUE.equals(m.get("legacy_grandfathered")),
-                str(m.get("superseded_by")), str(m.get("lifecycle_state")));
+                str(m.get("superseded_by")), str(m.get("lifecycle_state")), str(m.get("created_at")));
         }
 
         boolean superseded() {
@@ -101,11 +113,35 @@ public final class TargetSelection {
         }
     }
 
+    /**
+     * A {@code created_at} as the list route renders it (a Postgres timestamptz as text, {@code 2026-01-01
+     * 00:00:00.5+00}, offset {@code +00}, {@code -08} or {@code +05:30}) as an instant, so rows whose
+     * text differs in fraction or offset still order by time. A blank or unparseable stamp sorts last, so the
+     * name decides among such rows.
+     */
+    static Instant registeredAt(String createdAt) {
+        if (createdAt == null || createdAt.isBlank()) {
+            return Instant.MAX;
+        }
+        String iso = createdAt.trim().replace(' ', 'T');
+        if (OFFSET_HOURS_ONLY.matcher(iso).find()) {
+            iso = iso + ":00";
+        }
+        try {
+            return OffsetDateTime.parse(iso).toInstant();
+        } catch (DateTimeParseException e) {
+            return Instant.MAX;
+        }
+    }
+
+    private static final Pattern OFFSET_HOURS_ONLY = Pattern.compile("[+-][0-9]{2}$");
+
     /** The target row for the tuple, per the class comment. */
     public static Result select(List<CollectionRow> rows, String contentType, String ownerId,
                                 String embeddingModel) {
         Comparator<CollectionRow> order = Comparator
             .comparingInt((CollectionRow r) -> versionNumber(r.modelVersion())).reversed()
+            .thenComparing((CollectionRow r) -> registeredAt(r.createdAt()))
             .thenComparing(CollectionRow::name);
         List<CollectionRow> candidates = rows.stream()
             .filter(r -> contentType.equals(r.contentType()))
