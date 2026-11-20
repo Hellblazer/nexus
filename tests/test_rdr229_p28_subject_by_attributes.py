@@ -328,7 +328,7 @@ _BLANK = {**_row("notes-from-2024", "code", "1-7", version=""), "legacy_grandfat
 def test_find_collection_answers_a_blank_version_row_with_no_version(monkeypatch) -> None:
     """The lead's row: ``legacy_grandfathered`` true, a NON-conformant name (a slug) and an empty
     ``model_version``. ``version_from_for_tuple_row`` raised on it; the row is now answered as it is,
-    with ``model_version=None`` (RDR-229 line <TBD>)."""
+    with ``model_version=None`` (RDR-229 Technical Design item 11 (legacy_grandfathered goes, D5): "the P2.8 test for that row is not yet written")."""
     cat = _client(monkeypatch, {("code", "1-7", _MODEL): _BLANK})
     got = cat.find_collection("code", "1-7", _MODEL)
     assert got is not None
@@ -351,7 +351,7 @@ def test_collection_for_returns_a_blank_version_row_as_it_is(monkeypatch) -> Non
 
 
 def test_collection_for_with_a_bump_refuses_a_blank_version_row(monkeypatch) -> None:
-    """The refusal names both fixes: set the row's model_version, or re-register the collection (RDR-229 line <TBD>)."""
+    """The refusal names both fixes: set the row's model_version, or re-register the collection (RDR-229 Technical Design item 11 (legacy_grandfathered goes, D5): "the P2.8 test for that row is not yet written")."""
     cat = _client(monkeypatch, {("code", "1-7", _MODEL): _BLANK})
     with pytest.raises(ValueError, match="set the row's model_version, or re-register the collection"):
         cat.collection_for("code", "1.7", _MODEL, bump=True)
