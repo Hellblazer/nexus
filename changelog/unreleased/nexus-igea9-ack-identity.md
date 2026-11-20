@@ -1,7 +1,4 @@
 ### Fixed
 
 - **An ack of a develop red now always carries the poster's identity id (RDR-252, nexus-igea9).** An ack posted by hand with `from=<session alias>` was counted by `nx group ack-times` as no ack (2 of 6 reds instead of 3 of 3). Every client write of a `kind=ack` row to a `board/ci/<topic>--owner` subspace (`nx tuple out`, the `tuple_out` MCP tool, `nx ci ack`) now stamps `from` with the caller's own identity id, logging one info line when it replaces what was typed, and refuses a caller with no identity. `nx group ack-times` resolves a `from` that is a name before it matches: through the `owner_alias` and `next_alias` the engine stamped on that red's owner rows, and for any other name through the identity service's name route, so an old row counts as the owner's ack and one whose name is another identity's does not.
-
-### Added
-
-- **`nx ci ack <sha> [--topic nexus-develop--owner]`.** Posts the ack of a red develop as the caller's identity, resolving a 7-digit sha prefix against the open red's tips. The `ci_develop_red` aura's state line now ends `Ack: nx ci ack <sha7>`, which fits the 200-character line at every input, where the old hint dropped itself on a long one.
+- **New verb `nx ci ack <sha> [--topic nexus-develop--owner]`.** Posts the ack of a red develop as the caller's identity, resolving a 7-digit sha prefix against the open red's tips. The `ci_develop_red` aura's state line now ends `Ack: nx ci ack <sha7>`, which fits the 200-character line at every input, where the old hint dropped itself on a long one.
