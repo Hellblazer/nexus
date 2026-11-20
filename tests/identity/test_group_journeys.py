@@ -16,6 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from unittest import mock
 
 import pytest
 from click.testing import CliRunner
@@ -232,7 +233,7 @@ def _stamp_engine_rows(world: World, subspace: str) -> None:
     import subprocess  # noqa: PLC0415 -- deferred: only this row seeds through SQL
 
     state = world.state
-    sql = ("WITH stamped AS (UPDATE nexus.tuples SET dims = jsonb_set(dims, '{from}', '\"engine\"') "
+    sql = ("WITH stamped AS (UPDATE nexus.tuples SET dims = jsonb_set(dims, '{from}', '\"engine\"'), sender_session = NULL "
            f"WHERE subspace = '{subspace}' AND dims->>'from' = '{_ENGINE_SEED}' RETURNING 1) "
            "SELECT count(*) FROM stamped")
     proc = subprocess.run([str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
@@ -254,7 +255,12 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
             # a client write of from=engine on board/ci is refused (RDR-252, 403 reserved_dim): an engine row is
             # posted under a stand-in sender and stamped from=engine below, as the stamper's repository write leaves it
             sender = _ENGINE_SEED if who == "engine" else who
-            store.out(subspace, {"topic": key}, {"from": sender, "kind": kind, "sha": sha}, json.dumps(body), nonce=uuid.uuid4().hex)
+            # an ack on an --owner topic is stamped with the poster's identity and refused from a process with none
+            # (nexus.ci_ack); this seed posts through one service-token store, so each ack is signed as its named poster
+            signed = mock.patch("nexus.ci_ack.counted_identity", return_value=who) if kind == "ack" else contextlib.nullcontext()
+            with signed:
+                store.out(subspace, {"topic": key}, {"from": sender, "kind": kind, "sha": sha}, json.dumps(body),
+                          nonce=uuid.uuid4().hex)
 
         def minutes_ago(n: int) -> str:
             return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - n * 60))
