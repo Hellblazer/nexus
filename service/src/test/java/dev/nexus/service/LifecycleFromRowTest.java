@@ -352,18 +352,19 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void anImportedPlainNameWithAQuarantineContentTypeAndAnExplicitLiveState_isRefused() throws Exception {
-        // The content_type is prefix evidence on the import path, so it contradicts an explicit 'live' as a
-        // quarantine- name would.
+    void anImportedPlainNameWithAQuarantineContentTypeAndAnExplicitLiveState_importsAsQuarantine_andIsNamed()
+            throws Exception {
+        // linda 2026-11-20: prefix evidence (here the content_type) plus 'live' imports as 'quarantine', named in the
+        // result. No writer is known to produce this shape (CollectionRegistration#stateCorrectedOnImport's source
+        // analysis); it is handled as the revived-sibling shape is.
         String t = newTenant();
         String plain = col("a8i");
-        Map<String, Object> bad = reg(plain, "live");
-        bad.put("content_type", "quarantine-knowledge");
+        Map<String, Object> row = reg(plain, "live");
+        row.put("content_type", "quarantine-knowledge");
 
-        assertThatThrownBy(() -> repo.importCollection(t, bad))
-            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(plain)
-            .hasMessageContaining("lifecycle_state=live");
-        assertThat(state(t, plain)).isNull();
+        var result = repo.importCollectionsBatchReport(t, List.of(row));
+        assertThat(result.stateCorrected()).containsExactly(plain);
+        assertThat(state(t, plain)).isEqualTo("quarantine");
     }
 
     @Test
@@ -388,18 +389,25 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aNewImportedRowWhoseNameSaysQuarantineAndStateSaysLiveIsRefused_namingTheRow_andNothingIsStored() throws Exception {
+    void aRevivedQuarantineSibling_quarantineNameWithStateLive_importsAsQuarantine_andIsNamed() throws Exception {
+        // The shape the v0.1.109-111 ghost-sweep gap could leave on a local install (linda 2026-11-20): demoted to
+        // dormant, revived to live, and missed by hygiene-005-3's dormant-only promotion.
         String t = newTenant();
-        String bad = prefixed(col("a8"));
+        String revived = prefixed(col("a8"));
+        String revivedSingle = prefixed(col("a8s"));
         String good = col("a8g");
 
-        assertThatThrownBy(() -> repo.importCollection(t, reg(bad, "live")))
-            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(bad).hasMessageContaining("lifecycle_state");
-        assertThatThrownBy(() -> repo.importCollectionsBatch(t, List.of(reg(good, "live"), reg(bad, "live"))))
-            .as("the batch is refused whole, and counts the rows").isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining(bad).hasMessageContaining("1 row");
-        assertThat(state(t, bad)).isNull();
-        assertThat(state(t, good)).isNull();
+        var result = repo.importCollectionsBatchReport(t, List.of(reg(good, "live"), reg(revived, "live")));
+        assertThat(result.imported()).isEqualTo(2);
+        assertThat(result.stateCorrected()).as("the corrected row is named, the clean one is not").containsExactly(revived);
+        assertThat(state(t, revived)).isEqualTo("quarantine");
+        assertThat(state(t, good)).isEqualTo("live");
+
+        repo.importCollection(t, reg(revivedSingle, "live"));
+        assertThat(state(t, revivedSingle)).as("the single-row import applies the same rule").isEqualTo("quarantine");
+
+        var again = repo.importCollectionsBatchReport(t, List.of(reg(revived, "live")));
+        assertThat(again.stateCorrected()).as("an existing row is skipped, so nothing is corrected twice").isEmpty();
     }
 
     @Test

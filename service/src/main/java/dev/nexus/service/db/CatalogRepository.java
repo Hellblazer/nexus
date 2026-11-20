@@ -13518,7 +13518,20 @@ public final class CatalogRepository {
      * regardless of dedupe).
      */
     public int importCollectionsBatch(String tenant, List<Map<String, Object>> rows) {
-        if (rows == null || rows.isEmpty()) return 0;
+        return importCollectionsBatchReport(tenant, rows).imported();
+    }
+
+    /**
+     * The result of an ETL collection import: the rows sent, and the NEW rows whose {@code live} state was corrected
+     * to {@code quarantine} because their name or content_type carries the prefix
+     * ({@link CollectionRegistration#stateCorrectedOnImport}, RDR-229 P2.5). The route returns both; an existing row
+     * is skipped and never named.
+     */
+    public record ImportCollectionsResult(int imported, List<String> stateCorrected) {}
+
+    /** {@link #importCollectionsBatch}, also naming the rows whose state it corrected. */
+    public ImportCollectionsResult importCollectionsBatchReport(String tenant, List<Map<String, Object>> rows) {
+        if (rows == null || rows.isEmpty()) return new ImportCollectionsResult(0, List.of());
         return tenantScope.withTenant(tenant, ctx -> {
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
             for (var coll : rows) unique.put(s(coll, "name"), coll);
@@ -13545,6 +13558,8 @@ public final class CatalogRepository {
                 deduped.stream().map(c -> s(c, "name")).toList());
             List<Map<String, Object>> fresh = deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList();
             CollectionRegistration.requireStatesAgreeWithNames(fresh);
+            List<String> corrected = fresh.stream().filter(CollectionRegistration::stateCorrectedOnImport)
+                .map(c -> s(c, "name")).toList();
 
             final int cols = 12;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
@@ -13576,8 +13591,14 @@ public final class CatalogRepository {
                       .doNothing()
                       .execute();
             }
-            return rows.size();
+            corrected.forEach(name -> logStateCorrected(tenant, name));
+            return new ImportCollectionsResult(rows.size(), corrected);
         });
+    }
+
+    private static void logStateCorrected(String tenant, String name) {
+        log.warn("event=collection_import_state_corrected tenant={} name={} from=live to=quarantine "
+                 + "reason=prefix-evidence", tenant, name);
     }
 
     /** The names among {@code names} that already have a {@code catalog_collections} row for {@code tenant}. */
@@ -13618,6 +13639,9 @@ public final class CatalogRepository {
             return;
         }
         CollectionRegistration.requireStatesAgreeWithNames(List.of(coll));
+        if (CollectionRegistration.stateCorrectedOnImport(coll)) {
+            logStateCorrected(tenant, s(coll, "name"));
+        }
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,

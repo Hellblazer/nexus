@@ -3106,8 +3106,13 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        repo.importCollectionsBatch(tenant, rows);
-        HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
+        var result = repo.importCollectionsBatchReport(tenant, rows);
+        // RDR-229 P2.5: state_corrected (additive) names the new rows imported as quarantine although they carried
+        // live (CollectionRegistration#stateCorrectedOnImport); an older engine omits it, which reads as none.
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("imported", result.imported());
+        out.put("state_corrected", result.stateCorrected());
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 
     /**

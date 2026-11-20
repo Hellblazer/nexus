@@ -58,13 +58,49 @@ public final class CollectionRegistration {
         return requested;
     }
 
-    /** The import row's {@code lifecycle_state}: its own when it carries one, else the prefix rule (migration fallback). */
+    /**
+     * The import row's {@code lifecycle_state}: its own when it carries one, else the prefix rule (migration fallback).
+     * A row carrying {@code live} against prefix evidence imports as {@code quarantine} ({@link
+     * #stateCorrectedOnImport}).
+     */
     static String lifecycleStateForImport(Map<String, Object> coll) {
+        if (stateCorrectedOnImport(coll)) {
+            return "quarantine";
+        }
         String explicit = explicitLifecycleState(coll);
         if (explicit != null) {
             return explicit;
         }
         return hasImportPrefixEvidence(coll) ? "quarantine" : "live";
+    }
+
+    /**
+     * True for an import row that carries {@code live} while its name or content_type starts {@code quarantine-}: it
+     * imports as {@code quarantine} instead of being refused, and the import names it (the route's
+     * {@code state_corrected} field and one WARN line per row; linda 2026-11-20).
+     *
+     * <p>Where such a row can come from (read 2026-11-20, so the next reader need not redo it):
+     * <ul>
+     *   <li>A {@code quarantine-} content_type had one writer: hygiene-002-2's {@code gc_quarantine_orphans} took
+     *       {@code v_seg[1]}, the first {@code __} segment of the sibling NAME, and inserted it with
+     *       {@code 'quarantine'} (nexus-uxd2a). So that content_type only ever sat under a {@code quarantine-} name,
+     *       and every registration path before P2.5 (upsertCollection, this import, the SQL sibling insert) stored
+     *       {@code 'quarantine'} for a new row whose name or content_type carried the prefix.</li>
+     *   <li>A plain name could only inherit a {@code quarantine-} content_type through a copying rename, and rename
+     *       refuses a quarantine source (the name guard before P2.5, the row since). So the plain-name shape has no
+     *       known producer; it is handled the same way so an unknown export cannot strand a batch.</li>
+     *   <li>The real shape: between engine v0.1.109 and v0.1.111 the ghost sweep demoted quarantine siblings to
+     *       {@code dormant} and could revive one to {@code live} (its dormant-to-live arm).
+     *       hygiene-005-3 promoted back only rows still {@code dormant} ({@code AND c.lifecycle_state = 'dormant'}),
+     *       so a revived sibling stayed {@code live} under its {@code quarantine-} name. P1.2's census found none on
+     *       either production tenant; it cannot see local installs or their old exports.</li>
+     * </ul>
+     *
+     * <p>Only the import route reaches this ({@code POST /v1/catalog/import/collection}): no engine path and no
+     * released client calls it, and it retires with RDR-187 .11, so the WARN line is the visible record in practice.
+     */
+    static boolean stateCorrectedOnImport(Map<String, Object> coll) {
+        return "live".equals(explicitLifecycleState(coll)) && hasImportPrefixEvidence(coll);
     }
 
     /**
@@ -110,7 +146,8 @@ public final class CollectionRegistration {
      * Refuses an import batch holding a NEW row whose EFFECTIVE {@code lifecycle_state} ({@link
      * #lifecycleStateForImport}: the row's own, else the prefix fallback) contradicts the row's prefix evidence. On
      * this path the evidence is the name OR the content_type carrying {@code quarantine-}, the same two disjuncts the
-     * fallback reads: a prefixed row with {@code live}, or an unprefixed row with {@code quarantine}, is refused.
+     * fallback reads. After {@link #stateCorrectedOnImport} a prefixed row is never {@code live}, so what is refused is
+     * an unprefixed row with an explicit {@code quarantine}: it has no legacy evidence behind it.
      *
      * <p>A plain name with a {@code quarantine-} content_type and no state therefore lands as {@code quarantine}. An
      * imported legacy row is a migration source, and RDR-229 item 9 forbids stranding it; P2.1's
@@ -134,8 +171,8 @@ public final class CollectionRegistration {
         }
         if (!bad.isEmpty()) {
             throw new IllegalArgumentException("refusing the import: " + bad.size() + " row(s) whose lifecycle_state "
-                + "contradicts its prefix (a row whose name or content_type starts quarantine- cannot be 'live', any other "
-                + "row cannot be 'quarantine'): "
+                + "has no quarantine- evidence behind it (a row whose name and content_type are both plain cannot be "
+                + "'quarantine'): "
                 + String.join(", ", bad.size() > 10 ? bad.subList(0, 10) : bad) + (bad.size() > 10 ? ", ..." : ""));
         }
     }
