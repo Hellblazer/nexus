@@ -376,7 +376,7 @@ def _resolve_repo_collection(
     """
     if cat is not None:
         try:
-            return cat.collection_for_repo(repo, content_type).render()
+            return cat.collection_for_repo(repo, content_type).label
         except LookupError:
             # Owner not registered; fall through to synthesis.
             _log.debug(

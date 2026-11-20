@@ -1321,6 +1321,38 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
         )
 
 
+def _knowledge_subject_label(t3: object, subject: str, model: str, rendered: str) -> "str | None":
+    """The label of the knowledge collection registered for *subject*, found by its
+    row's attributes, never by rendering (RDR-229 P2.8, item 5).
+
+    A knowledge collection's row carries its subject as ``owner_id``
+    (``docs/collections.md``; ``catalog-044`` exempts it from the owner rewrite),
+    so ``find_collection('knowledge', subject, model)`` finds it whatever shape
+    its label has. Answers the label only when it differs from *rendered*, the
+    name the resolution below would try first: a row under the rendered name
+    leaves that resolution, with its legacy fallbacks, exactly as it was.
+
+    The row comes from the process's catalog, which need not be *t3*'s tenant,
+    so a label *t3* does not hold is not answered. ``None`` (the name resolution
+    stands) when *t3* has no ``find_collection``, no row backs the subject, or
+    the read fails.
+    """
+    finder = getattr(t3, "find_collection", None)
+    if finder is None:
+        return None
+    try:
+        row = finder("knowledge", subject, model)
+        if row is None or row.label == rendered:
+            return None
+        if not t3.collection_exists(row.label):  # type: ignore[attr-defined]
+            _log.debug("t3_collection_name_subject_row_not_in_store", subject=subject, label=row.label)
+            return None
+    except Exception:  # noqa: BLE001 — the row read is a first source; the name resolution below answers without it, as before P2.8
+        _log.warning("t3_collection_name_subject_row_read_failed", subject=subject, exc_info=True)
+        return None
+    return row.label
+
+
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
     allow_placeholder: bool = False,
@@ -1517,6 +1549,12 @@ def t3_collection_name(
         return promoted
     if user_arg == promoted:
         return promoted
+    if ct == "knowledge":
+        found = _knowledge_subject_label(
+            t3, owner_segment, _resolve_promoted_model_token(ct, for_write=False), promoted,
+        )
+        if found is not None:
+            return found
     try:
         if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
             # nexus-9n485 observability: collection_exists() alone can't

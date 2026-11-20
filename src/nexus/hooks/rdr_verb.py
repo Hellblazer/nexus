@@ -261,7 +261,7 @@ def _resolve_rdr_collection(repo_root: Path) -> str | None:
         def _lookup() -> str | None:
             cat = make_catalog_reader()
             try:
-                return cat.collection_for_repo(repo_root, "rdr").render()
+                return cat.collection_for_repo(repo_root, "rdr").label
             except LookupError:
                 return None  # owner not registered yet, fall through
 
