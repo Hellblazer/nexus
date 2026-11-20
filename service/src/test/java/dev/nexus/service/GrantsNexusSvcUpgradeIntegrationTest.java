@@ -245,7 +245,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // a changeset that registers a move writes into the registry, so the includes that register one (and the policy that
         // follows) are as unborn as the registry itself in the old state; the new boot applies them
         for (String registering : List.of("vectors-064-register-model-version-repair-move.xml",
-                "vectors-065-catalog-collections-owner-read.xml")) {
+                "vectors-065-catalog-collections-owner-read.xml",
+                "catalog-049-note-uri-residue.xml")) {
             String include = "<include file=\"db/changelog/" + registering + "\"/>";
             assertThat(master).as("the master includes " + registering).contains(include);
             master = master.replace(include, "");

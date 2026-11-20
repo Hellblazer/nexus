@@ -112,11 +112,19 @@ class CollectionNameSqlLiveBodyGateTest {
      * made the shape the literal, so the same nine sites are {@code dunder-literal}. RDR-229 P2.6 (vectors-063,
      * nexus-p2m1x.11) removed all eleven: the three functions read the collection's catalog row, so every entry
      * reached zero and was removed.
+     *
+     * <p>RDR-229 P2.10 (nexus-p2m1x.15) RAISES it by three, the one exception to reduce-only: {@code catalog-049-1}
+     * redefines {@code nexus.catalog_reconcile_commit} with {@code NoteUri.moveTo}'s rule, which tests the old collection
+     * against the three frozen file-routed prefixes ({@code rdr__}, {@code docs__}, {@code code__}). That is the URI-string
+     * classifier over the frozen list (RDR-229 item 12 keeps it; {@code NoteUri.isFileRoutedCollection} is its engine twin),
+     * not a read of a content type out of a name, but the literals are counted all the same. The three distinct literals
+     * are the whole list, and they stay while the frozen list does.
      */
-    static final Map<String, Integer> NAME_PARSING_CENSUS = Map.of();
+    static final Map<String, Integer> NAME_PARSING_CENSUS = Map.of(
+        "nexus.catalog_reconcile_commit|" + DUNDER_LITERAL, 3);
 
-    /** Pinned total; lowered with {@link #NAME_PARSING_CENSUS} (a test asserts the two agree). 11 -> 0 at P2.6. */
-    static final int NAME_PARSING_TOTAL_CEILING = 0;
+    /** Pinned total; lowered with {@link #NAME_PARSING_CENSUS} (a test asserts the two agree). 11 -> 0 at P2.6, 0 -> 3 at P2.10. */
+    static final int NAME_PARSING_TOTAL_CEILING = 3;
 
     /** The functions the RDR rewrites, each with the changelog that last defines it: the scan must resolve all three. */
     static final Map<String, String> REQUIRED_LIVE = Map.of(
