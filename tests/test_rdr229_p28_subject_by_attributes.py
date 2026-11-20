@@ -24,7 +24,7 @@ import pytest
 import nexus.catalog.factory as factory
 import nexus.corpus as corpus
 import nexus.repo_identity as repo_identity
-from nexus.catalog.collection_attributes import CollectionAttributes
+from nexus.catalog.collection_name import CollectionAttributes
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.corpus import CollectionRegistryUnreadableError, _resolve_promoted_model_token, t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, _process_default_tenant
@@ -193,6 +193,33 @@ def test_a_row_whose_label_is_the_rendered_name_keeps_the_existing_resolution() 
     promoted = f"knowledge__field-notes__{_resolve_promoted_model_token('knowledge', for_write=False)}__v1"
     t3 = _T3({"knowledge__field-notes"}, {("knowledge", "field-notes"): _attrs(promoted, "field-notes")})
     assert t3_collection_name("field-notes", t3=t3) == "knowledge__field-notes"
+
+
+def test_an_existing_conformant_collection_wins_over_a_row_with_another_label() -> None:
+    """The row is consulted only after the conformant collection is found empty:
+    when it exists, the answer stays the conformant name and no catalog read is made."""
+    promoted = f"knowledge__field-notes__{_resolve_promoted_model_token('knowledge', for_write=False)}__v1"
+    t3 = _T3({promoted, "notes-from-2024"}, _ROWS)
+    assert t3_collection_name("field-notes", t3=t3) == promoted
+    assert t3_collection_name("field-notes", t3=t3, for_write=True) == promoted
+    assert t3.calls == []
+
+
+def test_an_existing_conformant_collection_needs_no_readable_registry_to_write() -> None:
+    promoted = f"knowledge__field-notes__{_resolve_promoted_model_token('knowledge', for_write=False)}__v1"
+
+    class _Broken(_T3):
+        def find_collection(self, *a):  # type: ignore[override]
+            raise httpx.ConnectError("down")
+
+    assert t3_collection_name("field-notes", t3=_Broken({promoted}), for_write=True) == promoted
+
+
+def test_a_row_is_found_before_the_legacy_two_segment_name() -> None:
+    """With the conformant name empty, the subject's row answers ahead of the
+    ``knowledge__<subject>`` fallback (the row is the registered collection)."""
+    t3 = _T3({"knowledge__field-notes", "notes-from-2024"}, _ROWS)
+    assert t3_collection_name("field-notes", t3=t3) == "notes-from-2024"
 
 
 def test_a_failed_row_read_falls_back_to_the_name_resolution() -> None:

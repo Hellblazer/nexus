@@ -14,9 +14,11 @@ grandfathering invariant.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import httpx
 import structlog
 
 from nexus.corpus import (
@@ -27,6 +29,8 @@ from nexus.corpus import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
@@ -210,3 +214,157 @@ def version_from_for_tuple_row(
             "expected 'v<N>' with N >= 1"
         )
     return int(digits)
+
+
+@dataclass(frozen=True)
+class CollectionAttributes:
+    """One catalog collection row (RDR-229 item 1).
+
+    The name a collection is registered under is its *label*: an existing
+    collection's name becomes its label unchanged, whatever shape it has.
+    Callers that hold a :class:`CollectionAttributes` read the label and the
+    attributes from the row and never parse them out of the name.
+
+    ``collection_id`` is ``None`` until the engine carries the surrogate key
+    (RDR-229 P3.1), and for a name that is about to be minted. ``label`` is the
+    registered name; until the engine sends a separate label field it is the
+    row's ``name``.
+    """
+
+    collection_id: int | None
+    label: str
+    content_type: str
+    owner_id: str
+    embedding_model: str
+    model_version: int
+    dimension: int | None
+    lifecycle_state: str | None
+
+    @classmethod
+    def from_for_tuple(
+        cls, row: dict, *, content_type: str, owner_id: str, embedding_model: str,
+    ) -> "CollectionAttributes":
+        """The attributes of a ``/collections/for_tuple`` row for the requested tuple.
+
+        Raises ``ValueError`` when the row is for another tuple or carries a
+        malformed version (:func:`version_from_for_tuple_row`), or has no name.
+        """
+        label = row.get("label") or row.get("name")
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"for_tuple answered a row with no name: {row!r}")
+        version = version_from_for_tuple_row(
+            row, content_type=content_type, owner_id=owner_id, embedding_model=embedding_model,
+        )
+        cid = row.get("collection_id")
+        dim = row.get("dimension")
+        state = row.get("lifecycle_state")
+        return cls(
+            collection_id=cid if isinstance(cid, int) and not isinstance(cid, bool) else None,
+            label=label,
+            content_type=content_type,
+            owner_id=owner_id,
+            embedding_model=embedding_model,
+            model_version=version,
+            dimension=dim if isinstance(dim, int) and not isinstance(dim, bool) else None,
+            lifecycle_state=state if isinstance(state, str) and state else None,
+        )
+
+    @classmethod
+    def minted(
+        cls, *, label: str, content_type: str, owner_id: str, embedding_model: str, model_version: int,
+    ) -> "CollectionAttributes":
+        """Attributes for a name about to be registered: no row backs it yet."""
+        return cls(
+            collection_id=None, label=label, content_type=content_type, owner_id=owner_id,
+            embedding_model=embedding_model, model_version=model_version,
+            dimension=None, lifecycle_state=None,
+        )
+
+
+def find_collection_row(
+    get: Callable[..., Any], content_type: str, owner_id: str, embedding_model: str,
+) -> "CollectionAttributes | None":
+    """The registered collection for ``(content_type, owner_id, embedding_model)``.
+
+    RDR-229 item 1, through ``GET /collections/for_tuple`` read with *get* (the
+    catalog client's ``_get``). *owner_id* is the row's owner segment (a
+    knowledge collection's subject). ``None`` on a 404: no row backs the tuple.
+    Any other failure raises, so a caller never takes an unreadable registry for
+    an empty one and mints over it. A row for a different tuple, or with a
+    malformed version, raises ``ValueError``.
+    """
+    try:
+        row = get(
+            "/collections/for_tuple",
+            content_type=content_type,
+            owner_id=owner_id,
+            embedding_model=embedding_model,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return None
+        raise
+    if not row:
+        return None
+    return CollectionAttributes.from_for_tuple(
+        row, content_type=content_type, owner_id=owner_id, embedding_model=embedding_model,
+    )
+
+
+def collection_for_repo_row(
+    repo: "Path",
+    content_type: str,
+    *,
+    bump: bool,
+    owner_for_repo: Callable[[str], Any],
+    tuple_registered: Callable[[str, Any, str], bool],
+    find_collection: Callable[[str, str, str], "CollectionAttributes | None"],
+) -> "CollectionAttributes":
+    """The collection *repo*'s *content_type* chunks go to, as its catalog row.
+
+    RDR-229 P2.8 (item 5): a registered tuple answers its row, so a repo whose
+    collection is registered under a legacy slug gets that label back instead of
+    the conformant name a render would produce. A new tuple, or *bump*, has no
+    row for the name it needs, so it renders one (the mint class; the engine
+    mints labels from P3.8). The catalog client passes its ``owner_for_repo``,
+    ``_tuple_registered`` and ``find_collection``.
+
+    Mirrors canonical ``_DocumentOps.collection_for_repo``: look up the owner by
+    repo_hash, then resolve the embedding model.
+    """
+    from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — circular-dep avoidance
+    from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — circular-dep avoidance
+
+    _, repo_hash = _repo_identity(repo)
+    owner = owner_for_repo(repo_hash)
+    if owner is None:
+        raise LookupError(
+            f"collection_for_repo: no owner registered for repo_hash {repo_hash!r} "
+            f"(repo {repo!s}). Call ensure_owner_for_repo() first."
+        )
+    # nexus-o5x2c: THE chokepoint (see resolve_write_embedding_model's docstring
+    # for the full truth table) -- grandfathers onto a pre-existing bge/minilm
+    # registration when local.embed_model is voyage-shaped and no key is
+    # configured, instead of crashing. The hot path for `nx index repo` on an
+    # ALREADY catalog-registered repo (live-repro'd bug).
+    embedding_model = resolve_write_embedding_model(
+        content_type,
+        collection_exists=lambda token: tuple_registered(content_type, owner, token),
+    )
+    owner_id = owner_segment_for_tumbler(owner)
+    if not owner_id:
+        raise ValueError(
+            f"collection_for_repo: cannot derive owner_id segment from owner {owner!r}"
+        )
+    row = find_collection(content_type, owner_id, embedding_model)
+    if row is not None and not bump:
+        return row
+    version = row.model_version + 1 if row is not None else 1
+    return CollectionAttributes.minted(
+        label=CollectionName(
+            content_type=content_type, owner_id=owner_id,
+            embedding_model=embedding_model, model_version=version,
+        ).render(),
+        content_type=content_type, owner_id=owner_id,
+        embedding_model=embedding_model, model_version=version,
+    )

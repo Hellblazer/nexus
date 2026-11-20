@@ -5,12 +5,15 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import click
 import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
+
+if TYPE_CHECKING:
+    from nexus.catalog.collection_name import CollectionAttributes
 
 _log = structlog.get_logger(__name__)
 
@@ -1385,7 +1388,7 @@ def _knowledge_subject_label(
     When the row cannot be read, a read falls back to the name resolution and a
     write raises :class:`CollectionRegistryUnreadableError`.
     """
-    from nexus.catalog.collection_attributes import CollectionAttributes  # noqa: PLC0415 — circular-dep avoidance (catalog)
+    from nexus.catalog.collection_name import CollectionAttributes  # noqa: PLC0415 — circular-dep avoidance (catalog)
 
     if finder is None:
         return None
@@ -1422,6 +1425,11 @@ def t3_collection_name(
     Auto-promotion satisfies ``T3Database``'s strict-naming guard
     (RDR-103 Phase 5) while preserving the operator habit of typing
     short ``--collection`` arguments.
+
+    RDR-229 P2.8: a knowledge subject whose conformant collection holds nothing
+    is found by its catalog row (``t3.find_collection``, or the *subject_finder*
+    a t3-less writer passes), so a label of any shape resolves; a write that
+    cannot read the row raises :class:`CollectionRegistryUnreadableError`.
 
     nexus-hmxi: when *t3* is supplied, the resolver checks for an
     existing T3 collection at the user-typed name BEFORE returning
@@ -1610,13 +1618,6 @@ def t3_collection_name(
         return promoted
     if user_arg == promoted:
         return promoted
-    if ct == "knowledge":
-        found = _knowledge_subject_label(
-            getattr(t3, "find_collection", None), owner_segment,
-            _resolve_promoted_model_token(ct, for_write=False), promoted, for_write=for_write,
-        )
-        if found is not None:
-            return found
     try:
         if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
             # nexus-9n485 observability: collection_exists() alone can't
@@ -1640,6 +1641,17 @@ def t3_collection_name(
                         "queryable."
                     ),
                 )
+            # RDR-229 P2.8: the conformant name holds nothing, so a knowledge subject
+            # registered under another label is found by its catalog row before the
+            # name fallbacks below. An existing conformant collection never gets here,
+            # so the common case makes no catalog read.
+            if ct == "knowledge":
+                found = _knowledge_subject_label(
+                    getattr(t3, "find_collection", None), owner_segment,
+                    _resolve_promoted_model_token(ct, for_write=False), promoted, for_write=for_write,
+                )
+                if found is not None:
+                    return found
             if t3.collection_exists(user_arg):  # type: ignore[attr-defined]
                 return user_arg
             # Bare-prefix legacy fallback (#535 / nexus-6mr0): when the
@@ -1718,6 +1730,10 @@ def t3_collection_name(
                     # cleanly by the for_write recompute at the bottom
                     # of this function, so the caller sees ONE raise,
                     # not a probe-time one).
+    except CollectionRegistryUnreadableError:
+        # A write that cannot read the subject's row refuses; the best-effort probe
+        # below must not swallow it into a rendered name.
+        raise
     except Exception:  # noqa: BLE001 — best-effort collection_exists probe; falls through to auto-promoted shape on any backend failure
         # collection_exists probe is best-effort. On failure (cloud
         # quota error, transient network) fall through to the
