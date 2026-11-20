@@ -647,10 +647,11 @@ def scan_file(
         id(n.value) for n in ast.walk(tree)
         if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
     }
-    scopes: list[ast.AST] = [tree] + [
+    scopes: list[ast.AST] = [tree]
+    scopes.extend(
         n for n in ast.walk(tree)
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
+    )
     for scope in scopes:
         nodes = _scope_nodes(scope)
         binds, fsub = _scope_bindings(nodes, consts)
@@ -670,6 +671,8 @@ def scan_file(
                     (node.lineno, s) for s in _compare_shapes(node, fsub, dunders)
                 )
     for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant):
+            continue
         text_value = _str_const(node)
         if text_value is None or id(node) in docstrings:
             continue
