@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CatalogDocumentMoveTest {
 
-    private static final String SVC_ROLE = "svc_doc_move_test";
+    private static final String SVC_ROLE = "svc_catalog_doc_move_test";
     private static final String SVC_PASS = "svc_doc_move_pass";
     /** A routable (bge-768) collection, so a manifest row can be seeded against a real chunk. */
     private static final String COLL = "knowledge__docmove__bge-base-en-v15-768__v1";
