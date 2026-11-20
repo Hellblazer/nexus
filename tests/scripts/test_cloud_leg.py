@@ -216,6 +216,11 @@ def test_a_ledger_that_is_not_a_file_is_an_error(tmp_path: Path) -> None:
         cl.build_plan("r0123456abc", None, None)
 
 
+# In the lint bucket: an additive wire entry naming a route ROUTE_MAP lacks turned develop red
+# twice on 2026-11-20 because this ran only in the default suite, which the pre-push `-m lint` run does not reach.
+# So the default `uv run pytest` loop no longer runs it: run it with `-m lint` (or `-m ""`). CI runs it in the lint
+# leg on a code push and in the docs-readers lane on a docs-only push (select_docs_reader_tests.py picks this file).
+@pytest.mark.lint
 def test_every_route_in_the_live_ledger_maps_and_emptying_the_map_turns_it_red(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     live = REPO_ROOT / "docs" / "wire-contract-pending.md"
     entries = cl.ledger_entries(live)
