@@ -26,6 +26,10 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.taxonomy_cmd import taxonomy
+from nexus.mcp_infra import get_collection_row as _REAL_GET_COLLECTION_ROW
+
+#: ``strict`` of every fake row read this test made (the fixture below clears it).
+_STRICT_SEEN: list[bool] = []
 
 # A code__-named collection whose row says knowledge, and the mirror image.
 CODE_NAMED_KNOWLEDGE_ROW = "code__1-1__bge-base-en-v15-768__v1"
@@ -44,9 +48,11 @@ _ROWS: dict[str, dict[str, str]] = {
 def _rows(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Fake the row seam; returns the list of names it was asked about."""
     asked: list[str] = []
+    _STRICT_SEEN.clear()
 
     def _get_collection_row(name: str, *, refresh: bool = True, strict: bool = False):
         asked.append(name)
+        _STRICT_SEEN.append(strict)
         return _ROWS.get(name)
 
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _get_collection_row)
@@ -207,3 +213,87 @@ def test_audit_collection_default_threshold_reads_the_row() -> None:
     report = store.audit_collection(CODE_NAMED_KNOWLEDGE_ROW)
     assert report.threshold == 0.50
     assert report.below_threshold_count == 2
+
+
+# ── the fix round (review r1 I1, S5, S6, S9; critique r1 S2) ────────────────
+
+
+def test_the_row_read_is_strict() -> None:
+    """``strict=True`` is what makes an unreadable listing distinguishable from NoRow: dropping it
+    turns Unreadable into a silent NoRow with the same value and no log (review S6)."""
+    from nexus.projection_threshold import projection_threshold
+
+    projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    assert _STRICT_SEEN == [True]
+
+
+def test_the_real_row_read_reports_an_unreadable_listing_as_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the real ``get_collection_row`` with a listing that raises ``ServiceNotReadyError``:
+    the answer carries ``source == "unreadable"`` (not ``"no_row"``) and the warning fires."""
+    import nexus.mcp_infra as mi
+    import nexus.projection_threshold as pt
+
+    def _down(*_a, **_kw):
+        raise mi.ServiceNotReadyError("the service is not answering")
+
+    monkeypatch.setattr(mi, "get_collection_row", _REAL_GET_COLLECTION_ROW)
+    monkeypatch.setattr(mi, "_refresh_collections_cache_if_stale", _down)
+    monkeypatch.setattr(pt, "_unreadable_logged", False, raising=False)
+    events: list[str] = []
+    monkeypatch.setattr(pt._log, "warning", lambda event, **_kw: events.append(event))
+
+    answer = pt.resolve_projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    assert answer.source == "unreadable"
+    assert answer.value == 0.70, "the name derivation still answers"
+    assert events == ["projection_threshold_row_unreadable"]
+
+
+def test_resolve_names_where_the_answer_came_from() -> None:
+    from nexus.projection_threshold import resolve_projection_threshold
+
+    row = resolve_projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    no_row = resolve_projection_threshold(UNREGISTERED_LEGACY)
+    assert (row.value, row.source) == (0.50, "row")
+    assert (no_row.value, no_row.source) == (0.55, "no_row")
+
+
+def test_a_successful_read_rearms_the_unreadable_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second outage after a recovery logs again (review S9)."""
+    import nexus.projection_threshold as pt
+
+    up = {"ok": False}
+
+    def _flaky(name: str, *, refresh: bool = True, strict: bool = False):
+        if not up["ok"]:
+            raise RuntimeError("catalog listing unreadable")
+        return _ROWS.get(name)
+
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _flaky)
+    monkeypatch.setattr(pt, "_unreadable_logged", False, raising=False)
+    events: list[str] = []
+    monkeypatch.setattr(pt._log, "warning", lambda event, **_kw: events.append(event))
+
+    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    assert events == ["projection_threshold_row_unreadable"]
+    up["ok"] = True
+    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    up["ok"] = False
+    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
+    assert events == ["projection_threshold_row_unreadable"] * 2
+
+
+def test_prune_projection_below_posts_match_exact_only_when_asked() -> None:
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+
+    bodies: list[dict] = []
+    store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+    store._post = lambda path, body, **_kw: bodies.append(body) or {"removed": 3}  # type: ignore[method-assign]
+    assert store.prune_projection_below("code__x", 0.7) == 3
+    assert store.prune_projection_below("code__x", 0.7, exact=True) == 3
+    assert bodies == [
+        {"source_collection_prefix": "code__x", "min_similarity": 0.7},
+        {"source_collection_prefix": "code__x", "min_similarity": 0.7, "match": "exact"},
+    ]
