@@ -897,7 +897,8 @@ class TestSocketPathReserve:
         # The root is length-checked as the absolute path it becomes: on Windows that gains a drive ("C:").
         drive = os.path.splitdrive(os.path.abspath("/"))[0]
         root = drive + "/" + "a" * (room - 1 - len(drive))
-        assert sub.choose_pg_root(env={"NX_TEST_PG_ROOT": root}) == Path(root)
+        # _SOCKET_PATH_MAX is the Linux limit; macOS's is four bytes lower (_socket_path_max).
+        assert sub.choose_pg_root(env={"NX_TEST_PG_ROOT": root}, system="Linux") == Path(root)
 
     def test_the_actual_path_is_checked_when_the_dir_is_made(
         self, tmp_path, monkeypatch,

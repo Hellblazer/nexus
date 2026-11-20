@@ -17,6 +17,7 @@ The server's own log is *pglog* (``-l``). ``tests/test_pg_ctl_start.py`` lints
 from __future__ import annotations
 
 import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -28,9 +29,15 @@ import pytest
 PG_CTL_STDOUT = "pg_ctl.out"
 PG_CTL_STDERR = "pg_ctl.err"
 
-#: Bytes a unix socket path may use: ``sun_path`` holds 108 on Linux and 104 on macOS, each
-#: including the terminating NUL.
-SUN_PATH_MAX = 103 if sys.platform == "darwin" else 107
+def sun_path_max(system: str | None = None) -> int:
+    """Bytes a unix socket path may use on *system* (default: this one): ``sun_path`` holds 108 on
+    Linux and 104 on macOS, each including the terminating NUL. The one source of the figure:
+    ``tests/_engine_substrate.py`` derives its root-length limit from it."""
+    return 103 if (platform.system() if system is None else system) == "Darwin" else 107
+
+
+#: This platform's limit, read by :func:`check_socket_dir` (``sun_path_limit_lifted`` replaces it).
+SUN_PATH_MAX = sun_path_max()
 #: The socket file Postgres puts in its ``-k`` directory, at the widest port.
 _SOCKET_FILE = "/.s.PGSQL.65535"
 

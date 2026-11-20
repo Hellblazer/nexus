@@ -42,7 +42,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-echo "nexus-ui654: sweeping stale nexus_t2_substrate_pg_* clusters (tempdir and tmpfs roots)"
+echo "nexus-ui654: sweeping stale nexus_t2_substrate_pg_* clusters (tempdir, tmpfs and macOS /tmp roots)"
 
 uv run python - <<'PY'
 import sys
