@@ -113,3 +113,11 @@ def test_a_row_for_another_tuple_is_loud(monkeypatch, field, value) -> None:
     cat = _client(monkeypatch, _row(**{field: value}))
     with pytest.raises(ValueError, match="for_tuple answered"):
         cat.collection_for("code", _OWNER, _MODEL)
+
+
+def test_a_row_with_no_readable_version_logs_the_warning_once(monkeypatch) -> None:
+    """The version is read once per call: a second read logged the unreadable warning twice."""
+    cat = _client(monkeypatch, _row(name="notes-from-2024", model_version="", legacy_grandfathered=True))
+    with capture_logs() as logs:
+        cat.collection_for("code", _OWNER, _MODEL)
+    assert [e["event"] for e in logs].count("collection_for_row_model_version_unreadable") == 1
