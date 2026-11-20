@@ -96,8 +96,14 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
-from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler, version_from_for_tuple_row
-from nexus.catalog.collection_attributes import CollectionAttributes
+from nexus.catalog.collection_name import (
+    CollectionAttributes,
+    CollectionName,
+    collection_for_repo_row,
+    find_collection_row,
+    owner_segment_for_tumbler,
+    version_from_for_tuple_row,
+)
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
@@ -3966,83 +3972,20 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *,
         bump: bool = False,
     ) -> "CollectionAttributes":
-        """The collection *repo*'s *content_type* chunks go to, as its catalog row.
-
-        RDR-229 P2.8 (item 5): a registered tuple answers its row, so a repo
-        whose collection is registered under a legacy slug gets that label back
-        instead of the conformant name a render would produce. A new tuple, or
-        ``bump``, has no row for the name it needs, so it renders one (the mint
-        class; the engine mints labels from P3.8).
-        """
-        # Mirrors canonical _DocumentOps.collection_for_repo:
-        # look up the owner by repo_hash, then resolve the embedding model.
-        from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — circular-dep avoidance
-        from nexus.corpus import resolve_write_embedding_model  # noqa: PLC0415 — circular-dep avoidance
-
-        _, repo_hash = _repo_identity(repo)
-        owner = self.owner_for_repo(repo_hash)
-        if owner is None:
-            raise LookupError(
-                f"collection_for_repo: no owner registered for repo_hash {repo_hash!r} "
-                f"(repo {repo!s}). Call ensure_owner_for_repo() first."
-            )
-        # nexus-o5x2c: THE chokepoint (see resolve_write_embedding_model's
-        # docstring for the full truth table) — grandfathers onto a
-        # pre-existing bge/minilm registration when local.embed_model is
-        # voyage-shaped and no key is configured, instead of crashing.
-        # This is the hot path for `nx index repo` on an ALREADY
-        # catalog-registered repo (live-repro'd bug).
-        embedding_model = resolve_write_embedding_model(
-            content_type,
-            collection_exists=lambda token: self._tuple_registered(
-                content_type, owner, token,
-            ),
-        )
-        owner_id = owner_segment_for_tumbler(owner)
-        if not owner_id:
-            raise ValueError(
-                f"collection_for_repo: cannot derive owner_id segment from owner {owner!r}"
-            )
-        row = self.find_collection(content_type, owner_id, embedding_model)
-        if row is not None and not bump:
-            return row
-        version = row.model_version + 1 if row is not None else 1
-        return CollectionAttributes.minted(
-            label=CollectionName(
-                content_type=content_type, owner_id=owner_id,
-                embedding_model=embedding_model, model_version=version,
-            ).render(),
-            content_type=content_type, owner_id=owner_id,
-            embedding_model=embedding_model, model_version=version,
+        """The collection *repo*'s *content_type* chunks go to, as its catalog row
+        (RDR-229 P2.8): see :func:`nexus.catalog.collection_name.collection_for_repo_row`."""
+        return collection_for_repo_row(
+            repo, content_type, bump=bump, owner_for_repo=self.owner_for_repo,
+            tuple_registered=self._tuple_registered, find_collection=self.find_collection,
         )
 
     def find_collection(
         self, content_type: str, owner_id: str, embedding_model: str,
     ) -> "CollectionAttributes | None":
-        """The registered collection for ``(content_type, owner_id, embedding_model)``.
-
-        RDR-229 item 1, through ``GET /collections/for_tuple``. *owner_id* is the
-        row's owner segment (a knowledge collection's subject). ``None`` on a 404:
-        no row backs the tuple. Any other failure raises, so a caller never takes
-        an unreadable registry for an empty one and mints over it. A row for a
-        different tuple, or with a malformed version, raises ``ValueError``.
-        """
-        try:
-            row = self._get(
-                "/collections/for_tuple",
-                content_type=content_type,
-                owner_id=owner_id,
-                embedding_model=embedding_model,
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return None
-            raise
-        if not row:
-            return None
-        return CollectionAttributes.from_for_tuple(
-            row, content_type=content_type, owner_id=owner_id, embedding_model=embedding_model,
-        )
+        """The registered collection for ``(content_type, owner_id, embedding_model)``,
+        or ``None`` on a 404 (RDR-229 item 1):
+        see :func:`nexus.catalog.collection_name.find_collection_row`."""
+        return find_collection_row(self._get, content_type, owner_id, embedding_model)
 
     def supersede_collection(
         self,
