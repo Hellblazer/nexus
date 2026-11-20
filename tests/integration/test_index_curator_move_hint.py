@@ -13,12 +13,14 @@ row with no ``meta.content_hash``, an alias row, an engine without the move flag
 file, which returns at the staleness check before any writer and so asks the metadata route nothing."""
 from __future__ import annotations
 
+import functools
 import shlex
 import shutil
 import subprocess
 from pathlib import Path
 
 import httpx
+import pymupdf
 import pytest
 from click.testing import CliRunner
 
@@ -27,6 +29,7 @@ from nexus.catalog.factory import make_catalog_reader
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
+from nexus.pipeline_stages import UploadRun
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
 from tests.integration.test_rdr223_pdf_journey import _FakeChunker, _FakeExtractor
 
@@ -50,10 +53,21 @@ def _fake_pdf_extraction(monkeypatch, t2_service_env):
     monkeypatch.setenv("NX_NO_TELEMETRY", "1")
 
 
-def _pdf(root: Path, body: bytes = b"%PDF-1.4 hinted\n%%EOF\n", name: str = "x.pdf") -> Path:
+@functools.cache
+def _openable_pdf(text: str = "hinted") -> bytes:
+    """A one-page PDF pymupdf can open, as the same bytes every call: the default route (``--streaming auto``) streams
+    only a PDF it can open, and falls back to the all-at-once route for one it cannot."""
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), text)
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+def _pdf(root: Path, body: bytes | None = None, name: str = "x.pdf") -> Path:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(body)
+    path.write_bytes(_openable_pdf() if body is None else body)
     return path.resolve()
 
 
@@ -65,10 +79,12 @@ def _md(root: Path, text: str = "# Heading\n\nBody of the hinted markdown, uniqu
     return path.resolve()
 
 
-def _index(kind: str, path: Path, corpus: str, *flags: str):
+def _index(kind: str, path: Path, corpus: str, *flags: str, streaming: str | None = "never"):
+    """``nx index pdf|md``. A PDF run forces the all-at-once route unless ``streaming`` names another mode, or is None
+    (no flag: the command's default, ``auto``, which is the streaming pipeline)."""
     args = ["index", kind, str(path), "--corpus", corpus, *flags]
-    if kind == "pdf":
-        args += ["--streaming", "never"]
+    if kind == "pdf" and streaming is not None:
+        args += ["--streaming", streaming]
     return CliRunner().invoke(main, args)
 
 
@@ -95,18 +111,18 @@ class _ByMetaSpy:
         monkeypatch.setattr(HttpCatalogClient, "documents_by_meta", counted)
 
 
-def _moved(kind: str, tmp_path: Path, corpus: str) -> tuple[Path, Path, str, object]:
+def _moved(kind: str, tmp_path: Path, corpus: str, *, streaming: str | None = "never") -> tuple[Path, Path, str, object]:
     """Index a file under ``a/``, move it to ``b/``, index it again: ``(old, new, old tumbler, the second run)``."""
     make = _pdf if kind == "pdf" else _md
     old = make(tmp_path / "a")
-    first = _index(kind, old, corpus)
+    first = _index(kind, old, corpus, streaming=streaming)
     assert first.exit_code == 0, first.output
     assert _hint_lines(first) == [], "the first registration of a file hints nothing"
     old_tumbler = _tumbler(old)
     new = tmp_path / "b" / old.name
     new.parent.mkdir(parents=True)
     shutil.move(str(old), str(new))
-    return old, new.resolve(), old_tumbler, _index(kind, new.resolve(), corpus)
+    return old, new.resolve(), old_tumbler, _index(kind, new.resolve(), corpus, streaming=streaming)
 
 
 # ── the hint ────────────────────────────────────────────────────────────────
@@ -130,6 +146,26 @@ def test_moved_pdf_prints_dry_run_hint_on_registering_run(tmp_path):
     assert dry.exit_code == 0, dry.output
     assert "(dry run)" in dry.output and "absorbed (trashed): 1" in dry.output
     assert _tumbler(new) != old_tumbler, "the dry run changed nothing"
+
+
+@pytest.mark.parametrize("streaming", [None, "auto", "always"], ids=["default-flag", "auto", "always"])
+def test_moved_pdf_on_the_streaming_pipeline_prints_the_hint_as_the_last_line(tmp_path, monkeypatch, streaming):
+    """The command's DEFAULT route (``--streaming auto``) is the streaming pipeline, whose stamp site is
+    ``UploadRun.open_writer`` on the uploader thread, not ``_write_chunks_with_owner_rows``. Every other PDF test in
+    this file forces ``--streaming never``; this one runs the route a user gets, and shows the writer it stamps from."""
+    opened: list[str] = []
+    original = UploadRun.open_writer
+
+    def spy(self, *args, **kwargs):
+        opened.append(kwargs.get("doc_id", ""))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(UploadRun, "open_writer", spy)
+    _old, new, old_tumbler, second = _moved("pdf", tmp_path, _unique("hint-stream"), streaming=streaming)
+    assert opened, "non-vacuity: the run went through the streaming writer"
+    assert second.exit_code == 0, second.output
+    assert _hint_lines(second) == [f"{_HINT}{old_tumbler} --new-path {shlex.quote(str(new))}"]
+    assert second.output.rstrip("\n").splitlines()[-1] == _hint_lines(second)[0], "the hint is the last line"
 
 
 def test_moved_md_prints_dry_run_hint_on_registering_run(tmp_path):
