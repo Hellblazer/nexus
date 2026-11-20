@@ -64,11 +64,19 @@ public final class CollectionRegistration {
         if (explicit != null) {
             return explicit;
         }
+        return hasImportPrefixEvidence(coll) ? "quarantine" : "live";
+    }
+
+    /**
+     * The import path's prefix evidence: the row's name or its content_type starts {@code quarantine-}. It is both the
+     * state fallback for a row that carries none and what {@link #requireStatesAgreeWithNames} checks a carried state
+     * against (a migration source, RDR-229 item 9; a named residual of item 2).
+     */
+    private static boolean hasImportPrefixEvidence(Map<String, Object> coll) {
         String contentType = CatalogRepository.s(coll, "content_type");
         String name = CatalogRepository.s(coll, "name");
-        boolean quarantine = (contentType != null && contentType.startsWith(QuarantineOrigin.PREFIX))
-                          || (name != null && name.startsWith(QuarantineOrigin.PREFIX));
-        return quarantine ? "quarantine" : "live";
+        return (contentType != null && contentType.startsWith(QuarantineOrigin.PREFIX))
+            || (name != null && name.startsWith(QuarantineOrigin.PREFIX));
     }
 
     /**
@@ -77,7 +85,10 @@ public final class CollectionRegistration {
      * (hygiene-002 marks rows {@code disputed}, and an export holding one must still import).
      */
     private static boolean disagrees(String name, String state) {
-        boolean prefixed = name != null && name.startsWith(QuarantineOrigin.PREFIX);
+        return disagrees(name != null && name.startsWith(QuarantineOrigin.PREFIX), state);
+    }
+
+    private static boolean disagrees(boolean prefixed, String state) {
         return prefixed ? "live".equals(state) : "quarantine".equals(state);
     }
 
@@ -97,10 +108,18 @@ public final class CollectionRegistration {
 
     /**
      * Refuses an import batch holding a NEW row whose EFFECTIVE {@code lifecycle_state} ({@link
-     * #lifecycleStateForImport}: the row's own, else the prefix fallback from its name or content_type) contradicts
-     * its name: a {@code quarantine-} name with {@code live}, or a plain name with {@code quarantine}, a plain name
-     * with a {@code quarantine-} content_type and no state included (review, linda 2026-11-20).
-     * Loud and whole: the import's response is a bare count with no per-row report, so the batch is refused with one
+     * #lifecycleStateForImport}: the row's own, else the prefix fallback) contradicts the row's prefix evidence. On
+     * this path the evidence is the name OR the content_type carrying {@code quarantine-}, the same two disjuncts the
+     * fallback reads: a prefixed row with {@code live}, or an unprefixed row with {@code quarantine}, is refused.
+     *
+     * <p>A plain name with a {@code quarantine-} content_type and no state therefore lands as {@code quarantine}. An
+     * imported legacy row is a migration source, and RDR-229 item 9 forbids stranding it; P2.1's
+     * {@code CatalogEtlImportNonStrandingTest} is the pre-declared check of that shape (linda 2026-11-20, reversing her
+     * round-1 ruling for the import path, which had refused it). It stays safe because lifecycle is read from the
+     * row: such a row behaves as quarantine everywhere. It is a named residual of RDR-229 item 2. The client route,
+     * {@link #requireNameAgreesWithState} and the re-embed check keep the name-only pairing.
+     *
+     * <p>Loud and whole: the import's response is a bare count with no per-row report, so the batch is refused with one
      * {@link IllegalArgumentException} (a 400) that counts and names the rows, and nothing is stored, as the
      * content_type guard already refuses a batch.
      */
@@ -109,13 +128,14 @@ public final class CollectionRegistration {
         for (Map<String, Object> coll : newRows) {
             String state = lifecycleStateForImport(coll);
             String name = CatalogRepository.s(coll, "name");
-            if (disagrees(name, state)) {
+            if (disagrees(hasImportPrefixEvidence(coll), state)) {
                 bad.add("'" + name + "' (lifecycle_state=" + state + ")");
             }
         }
         if (!bad.isEmpty()) {
             throw new IllegalArgumentException("refusing the import: " + bad.size() + " row(s) whose lifecycle_state "
-                + "contradicts the name (a quarantine- name cannot be 'live', any other name cannot be 'quarantine'): "
+                + "contradicts its prefix (a row whose name or content_type starts quarantine- cannot be 'live', any other "
+                + "row cannot be 'quarantine'): "
                 + String.join(", ", bad.size() > 10 ? bad.subList(0, 10) : bad) + (bad.size() > 10 ? ", ..." : ""));
         }
     }

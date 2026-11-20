@@ -314,19 +314,55 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aNewImportedRowWhoseContentTypeSaysQuarantineButWhoseNameIsPlainAndStateAbsentIsRefused_namingTheRow()
-            throws Exception {
-        // Review (blocker): the EFFECTIVE state (the content_type prefix fallback included) is what is judged.
+    void anImportedPlainNameWithAQuarantineContentTypeAndNoState_landsAsQuarantine() throws Exception {
+        // linda 2026-11-20, reversing her round-1 ruling for the import path: a legacy row in an ETL import is a
+        // migration source (RDR-229 item 9), and P2.1's CatalogEtlImportNonStrandingTest pins that this shape lands as
+        // quarantine. On the import path a quarantine- content_type is prefix evidence, as the name is.
         String t = newTenant();
         String plain = col("a8c");
-        Map<String, Object> bad = reg(plain, null);
-        bad.put("content_type", "quarantine-knowledge");
+        String plainBatch = col("a8c2");
+        Map<String, Object> legacy = reg(plain, null);
+        legacy.put("content_type", "quarantine-knowledge");
+        Map<String, Object> legacyBatch = reg(plainBatch, null);
+        legacyBatch.put("content_type", "quarantine-knowledge");
+
+        repo.importCollection(t, legacy);
+        repo.importCollectionsBatch(t, List.of(legacyBatch));
+
+        assertThat(state(t, plain)).isEqualTo("quarantine");
+        assertThat(state(t, plainBatch)).isEqualTo("quarantine");
+    }
+
+    @Test
+    void anImportedPlainNameWithAPlainContentTypeAndAnExplicitQuarantineState_isRefused() throws Exception {
+        // The refusal linda kept: an explicit 'quarantine' on a plain name with a plain content_type has no legacy
+        // evidence behind it, so it is a contradiction, not a migration source.
+        String t = newTenant();
+        String plain = col("a8h");
+        Map<String, Object> bad = reg(plain, "quarantine");
+        assertThat(bad.get("content_type").toString()).as("guard: the content_type is plain")
+            .doesNotStartWith("quarantine-");
 
         assertThatThrownBy(() -> repo.importCollection(t, bad))
             .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(plain)
             .hasMessageContaining("lifecycle_state=quarantine");
         assertThatThrownBy(() -> repo.importCollectionsBatch(t, List.of(bad)))
             .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(plain).hasMessageContaining("1 row");
+        assertThat(state(t, plain)).isNull();
+    }
+
+    @Test
+    void anImportedPlainNameWithAQuarantineContentTypeAndAnExplicitLiveState_isRefused() throws Exception {
+        // The content_type is prefix evidence on the import path, so it contradicts an explicit 'live' as a
+        // quarantine- name would.
+        String t = newTenant();
+        String plain = col("a8i");
+        Map<String, Object> bad = reg(plain, "live");
+        bad.put("content_type", "quarantine-knowledge");
+
+        assertThatThrownBy(() -> repo.importCollection(t, bad))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(plain)
+            .hasMessageContaining("lifecycle_state=live");
         assertThat(state(t, plain)).isNull();
     }
 
