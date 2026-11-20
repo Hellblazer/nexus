@@ -1224,6 +1224,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("claimant must not be empty")
         _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
         _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
+        reply = ci_ack.stamp_ack_reply(reply)  # an ack of a develop red riding on a reply names its poster by identity
         if reply is not None:
             _check_field_size("reply.subspace", reply.subspace, _MAX_SUBSPACE_BYTES)
             for k, v in (reply.keys or {}).items():

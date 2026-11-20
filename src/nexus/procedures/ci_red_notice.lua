@@ -53,8 +53,9 @@ if not string.match(reason, "^[a-z][a-z_]*$") or #reason > 32 then
 end
 
 local head = "Develop is red at " .. string.sub(sha, 1, 7)
--- The owner acknowledges with `nx ci ack <sha7>`, which posts the row from the caller's own identity id (an ack
--- carrying a name is counted as no ack, nexus-igea9). The hint is a fixed short form, so it always fits whole.
+-- The owner acknowledges with `nx ci ack <sha7>`, which posts the row with the caller's own identity id in `from`
+-- (nexus-igea9). The engine counts the row's sender-session stamp, not `from`; `from` is the label `nx group
+-- ack-times` and people read. The hint is a fixed short form, so it always fits whole.
 local acknowledge = " Ack: nx ci ack " .. string.sub(sha, 1, 7) .. "."
 local escalated = reason == "escalated"
 

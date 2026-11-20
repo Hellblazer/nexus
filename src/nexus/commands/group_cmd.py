@@ -14,7 +14,6 @@ from __future__ import annotations
 import functools
 import json
 import statistics
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,16 +21,14 @@ from typing import Any
 
 import click
 
-from nexus import groups
+from nexus import ci_reds, groups
+from nexus.ci_reds import AckResolver
 from nexus.groups import GROUP_NAME, GroupRecord, GroupsClient, GroupsError, GroupsUnavailableError, NoIdentityError
 
 _RECONNECT = ("The MCP server reads group membership once, when it starts: reconnect it (/mcp) or restart the session "
               "for the auras that load by group to take effect.")
 _PAGE = 300
 _MAX_ROWS = 10_000
-#: The owner-row reasons the engine posts for a hand-on; each carries a new ``episode_at`` and continues the open red.
-_HAND_ON_REASONS = ("handoff", "escalated")
-_IDENTITY_ID = re.compile(r"i[0-9]+")
 
 
 @dataclass
@@ -43,10 +40,12 @@ class GroupEnv:
     client: GroupsClient
     caller: Callable[[], str | None]
     tuples: Callable[[], Any]
-    #: The identity service's name lookup (``IdentityClient.alias``: a name in, ``{"identity": ...}`` out), which
-    #: ``ack-times`` asks about an ack whose ``from`` is a name. None: such an ack resolves only through the owner
-    #: rows' own stamped pairs, and otherwise counts for nobody.
+    #: The identity service's session route (``IdentityClient.session``: a session id in, ``{"identity": ...}`` out),
+    #: which ``ack-times`` asks to map an ack's sender-session stamp to the identity the engine counts it for. And its
+    #: name route (``IdentityClient.alias``), asked about the ``from`` of an ack that carries no stamp. None: that
+    #: lookup is not made (a name then resolves only through the owner rows' own stamped pairs).
     alias_lookup: Callable[[str], Mapping[str, Any]] | None = None
+    session_lookup: Callable[[str], Mapping[str, Any]] | None = None
 
     @classmethod
     def real(cls) -> GroupEnv:
@@ -55,10 +54,10 @@ class GroupEnv:
 
             return HttpTupleStore()
 
-        from nexus.tuple_directory import identity_alias_lookup  # noqa: PLC0415 — deferred: CLI startup cost
+        from nexus.tuple_directory import identity_alias_lookup, identity_session_lookup  # noqa: PLC0415 — deferred: CLI startup cost
 
         return cls(client=GroupsClient.from_config(), caller=groups.own_identity_id, tuples=tuples,
-                   alias_lookup=identity_alias_lookup())
+                   alias_lookup=identity_alias_lookup(), session_lookup=identity_session_lookup())
 
 
 def _env(ctx: click.Context) -> GroupEnv:
@@ -316,13 +315,6 @@ def list_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
 # ── ack-times ───────────────────────────────────────────────────────────────
 
 
-def _instant(text: str | None) -> datetime | None:
-    try:
-        return datetime.fromisoformat(text) if text else None
-    except ValueError:
-        return None
-
-
 def _rows(store: Any, subspace: str, topic: str) -> tuple[list[Any], bool]:
     """The rows of *subspace*, oldest first, paged with the ``since`` cursor until an empty page (the engine may cap a
     read below ``_PAGE``, so a short page is not the last), at most ``_MAX_ROWS`` so a board read stays a bounded call.
@@ -338,80 +330,26 @@ def _rows(store: Any, subspace: str, topic: str) -> tuple[list[Any], bool]:
     return out, bool(store.rd(subspace, {"topic": topic}, n=1, since=since))
 
 
-def _json_body(row: Any) -> dict[str, Any]:
-    try:
-        body = json.loads(row.body or "{}")
-    except ValueError:
-        return {}
-    return body if isinstance(body, dict) else {}
+def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict[str, Any]]:
+    """One entry per red of an ``--owner`` subspace, from its owner, clear and ack rows (:func:`nexus.ci_reds.split`
+    says how rows make reds; a hand-off's ``reason`` ties it to the open red, not its new ``episode_at``).
 
-
-def _name_resolver(lookup: Callable[[str], Mapping[str, Any]] | None) -> Callable[[str], str | None]:
-    """A name to its identity id through the identity service's name route, asked once per name (a failure, an
-    unknown or retired name, or an answer that is no identity id is None, and is remembered too)."""
-    seen: dict[str, str | None] = {}
-
-    def resolve(name: str) -> str | None:
-        if lookup is None:
-            return None
-        if name not in seen:
-            try:
-                found = str(lookup(name).get("identity") or "")
-            except Exception:  # noqa: BLE001 -- a name the service cannot place counts for nobody; the read goes on
-                found = ""
-            seen[name] = found if _IDENTITY_ID.fullmatch(found) else None
-        return seen[name]
-
-    return resolve
-
-
-def reds_from(rows: list[Any], resolve_name: Callable[[str], str | None] | None = None) -> list[dict[str, Any]]:
-    """One entry per red of an ``--owner`` subspace, from its owner, clear and ack rows.
-
-    A red begins at an owner row that is neither a refresh nor a hand-on, and lasts to the next clear row or the next
-    red's first row. Its later owner rows continue it: a refresh keeps the red's ``episode_at``, but a hand-off or an
-    escalation is stamped by the engine with a NEW ``episode_at`` (``OwnerDecision.handOn`` passes ``in.now()``), so
-    ``reason`` (``handoff`` or ``escalated``) is what ties such a row to the open red, not its ``episode_at``. An ack
-    counts as the engine counts it (RDR-252 "Acknowledgement"): inside the red, from the identity the latest owner row
-    named as owner at the ack's time (an ack from one the red was handed away from does not, and none counts once the
-    red is escalated with no owner), and for the sha of any red tip of the red. The ack is matched on the row's
-    ``dims.from``, which the poster writes (the engine matches the row's sender-session stamp; the two agree for an
-    honest owner, and this read is a calibration aid, not the engine's count). A ``from`` that is a name, not an
-    identity id (an ack posted by hand before the client stamped it, tuple b18af4e1), is resolved first: through the
-    red's own owner rows, which carry the ``owner_alias`` and ``next_alias`` the engine stamped beside each id, and
-    for any other name through *resolve_name* (the identity service, the record of who holds a name). A name that
-    resolves to no one, or to another identity, counts for nobody. ``minutes`` runs from the first row's
-    ``episode_at`` to the first counting ack; a red with none has ``acked_at`` null. ``handoffs`` counts the hand-ons,
-    the escalation included, as the engine's own counter does.
+    An ack counts as the engine counts it (RDR-252 "Acknowledgement"): inside the red, for the identity the latest owner
+    row named as owner at the ack's time (an ack from one the red was handed away from does not, and none counts once
+    the red is escalated with no owner), and for the sha of any red tip of the red. *Who* posted it is what the engine
+    reads, the sender-session stamp mapped through the session index; ``dims.from`` is only a label, used when the row
+    carries no stamp or *resolver* cannot ask the session route (:meth:`nexus.ci_reds.AckResolver.poster`). The cheap
+    checks, an owner and a tip, come before any lookup. ``minutes`` runs from the first row's ``episode_at`` to the
+    first counting ack; a red with none has ``acked_at`` null. ``handoffs`` counts the hand-ons, the escalation
+    included, as the engine's own counter does.
     """
-    ordered = sorted(rows, key=lambda r: (r.created_at or "", r.id))
-    reds: list[dict[str, Any]] = []
-    open_red: dict[str, Any] | None = None
-    acks: list[tuple[datetime, Any]] = []
-    for row in ordered:
-        at = _instant(row.created_at)
-        if at is None:
-            continue
-        kind = (row.dims or {}).get("kind")
-        if kind == "owner":
-            body = _json_body(row)
-            key = body.get("episode_at") or row.created_at
-            if open_red is not None and (body.get("reason") in _HAND_ON_REASONS or key == open_red["key"]):
-                open_red["rows"].append((at, row, body))
-            else:
-                open_red = {"key": key, "rows": [(at, row, body)], "cleared": None}
-                reds.append(open_red)
-        elif kind == "clear":
-            if open_red is not None:
-                open_red["cleared"] = at
-                open_red = None
-        elif kind == "ack":
-            acks.append((at, row))
+    resolver = resolver or AckResolver()
+    reds, acks = ci_reds.split(rows)
     out: list[dict[str, Any]] = []
     for index, red in enumerate(reds):
-        episode, cleared = red["rows"], red["cleared"]
+        episode, cleared = red.rows, red.cleared
         start = episode[0][0]
-        end = cleared if cleared is not None else (reds[index + 1]["rows"][0][0] if index + 1 < len(reds) else None)
+        end = cleared if cleared is not None else (reds[index + 1].rows[0][0] if index + 1 < len(reds) else None)
         tips = {(r.dims or {}).get("sha") for _, r, _ in episode} | {s for _, _, b in episode for s in (b.get("suspects") or [])}
         acked: tuple[datetime, Any] | None = None
         acked_alias: str | None = None
@@ -423,22 +361,22 @@ def reds_from(rows: list[Any], resolve_name: Callable[[str], str | None] | None 
                 continue
             current = [b for t, _, b in episode if t <= at][-1:]
             owner = current[0].get("owner") if current else None
-            poster = (ack.dims or {}).get("from")
-            if poster and not _IDENTITY_ID.fullmatch(poster):
-                poster = stamped.get(poster) or (resolve_name(poster) if resolve_name else None)
-            if owner and poster == owner and (ack.dims or {}).get("sha") in tips:
+            if not owner or (ack.dims or {}).get("sha") not in tips:
+                continue
+            poster = resolver.poster(ack, stamped)
+            if poster == owner:
                 acked = (at, ack)
                 acked_alias = current[0].get("owner_alias")
                 acked_by = poster
                 break
-        began = _instant(red["key"]) or start
+        began = ci_reds.instant(red.key) or start
         first = episode[0]
         out.append({
-            "sha": (first[1].dims or {}).get("sha"), "episode_at": red["key"], "reason": first[2].get("reason"),
+            "sha": (first[1].dims or {}).get("sha"), "episode_at": red.key, "reason": first[2].get("reason"),
             "owner": episode[-1][2].get("owner"),
             # RDR-252 (engine 0.1.198): the alias the engine stamped beside the id; null from an older engine's row.
             "owner_alias": episode[-1][2].get("owner_alias"),
-            "handoffs": sum(1 for _, _, b in episode[1:] if b.get("reason") in _HAND_ON_REASONS and not b.get("refresh")),
+            "handoffs": sum(1 for _, _, b in episode[1:] if b.get("reason") in ci_reds.HAND_ON_REASONS and not b.get("refresh")),
             "acked_at": acked[1].created_at if acked else None, "acked_by": acked_by if acked else None,
             "acked_by_alias": acked_alias if acked else None,
             "minutes": round((acked[0] - began).total_seconds() / 60, 1) if acked else None,
@@ -457,7 +395,9 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
 
     The Day 2 calibration read for the group's ``ack_deadline`` (RDR-252: review the default against the distribution
     after the first 20 reds or 30 days). It reads the ``--owner`` post of each served topic (``board/ci/<topic>--owner``)
-    and counts an ack the way the engine does: the ack of the identity that owned the red at that time, for a red tip.
+    and counts an ack the way the engine does: the ack whose sender-session stamp maps, through the identity service's
+    session index, to the identity that owned the red at that time, for a red tip (``from`` is read only for a row with
+    no stamp). A lookup that fails for a reason other than "not known" is noted on standard error.
     """
     env = _env(ctx)
     record = GroupRecord.from_wire(env.client.read(name))
@@ -465,7 +405,7 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     if not topics:
         raise click.ClickException(f"{name} serves no topic, so it has no owner post to read")
     store = env.tuples()
-    resolve_name = _name_resolver(env.alias_lookup)
+    resolver = AckResolver(env.alias_lookup, env.session_lookup)
     reds: list[dict[str, Any]] = []
     for topic in topics:
         subspace = f"board/ci/{topic}--owner"
@@ -475,7 +415,9 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
             raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
         if truncated:
             click.echo(f"note: stopped at {len(rows)} rows of {subspace}; later reds are not shown", err=True)
-        reds.extend({"topic": topic, **red} for red in reds_from(rows, resolve_name))
+        reds.extend({"topic": topic, **red} for red in reds_from(rows, resolver))
+    if resolver.unresolved:
+        click.echo(f"note: {resolver.unresolved} acks could not be resolved; counts may be low", err=True)
     if as_json:
         click.echo(json.dumps({"group": name, "reds": reds}, indent=2, sort_keys=True))
         return

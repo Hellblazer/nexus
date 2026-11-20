@@ -2,7 +2,6 @@
 """``nx ci``: CI wakes read from the CI board (nexus-1d6pz.11.4)."""
 from __future__ import annotations
 
-import json
 import math
 import re
 import time
@@ -11,7 +10,7 @@ from typing import Any, NoReturn
 
 import click
 
-from nexus import ci_ack, ci_wait
+from nexus import ci_ack, ci_reds, ci_wait
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
@@ -237,25 +236,13 @@ def _at_deadline(sha: str, gh_repo: str, branch: str, subspace: str, timeout_min
     return f"{line} (no board row: the wake was dropped; read from GitHub)", code
 
 
-def _open_red_tips(store: Any, subspace: str, topic: str) -> set[str]:
-    """The red-tip shas of the red open on *subspace*: the ``sha`` of each owner row since the newest clear row, and the
-    ``suspects`` those rows carry. Empty when the newest row of either kind is a clear, or there is none."""
-    tips: set[str] = set()
-    for row in store.rd(subspace, {"topic": topic}, n=_ACK_READ_ROWS, order="desc"):
-        kind = (row.dims or {}).get("kind")
-        if kind == "clear":
-            break
-        if kind != "owner":
-            continue
-        if sha := (row.dims or {}).get("sha"):
-            tips.add(str(sha).lower())
-        try:
-            body = json.loads(row.body or "{}")
-        except ValueError:
-            body = {}
-        for suspect in (body.get("suspects") or []) if isinstance(body, dict) else []:
-            tips.add(str(suspect).lower())
-    return {t for t in tips if re.fullmatch(r"[0-9a-f]{7,64}", t)}
+def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | None:
+    """The red open on *subspace*: the last red the rows split into (:func:`nexus.ci_reds.split`, the split
+    ``nx group ack-times`` uses), unless a clear row ended it. A red the newest owner row's ``episode_at`` replaced is
+    not open even with no clear row between."""
+    rows = store.rd(subspace, {"topic": topic}, n=_ACK_READ_ROWS, order="desc")
+    reds, _ = ci_reds.split(list(rows))
+    return reds[-1] if reds and reds[-1].cleared is None else None
 
 
 @ci_group.command(name="ack")
@@ -265,11 +252,13 @@ def _open_red_tips(store: Any, subspace: str, topic: str) -> set[str]:
 def ci_ack_cmd(sha: str, topic: str) -> None:
     """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
 
-    SHA is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the red open on
-    board/ci/<TOPIC> (the owner rows since the last clear), so a sha that is no tip of it is refused. The row is
-    `kind=ack`, `from=<your identity id>` (never a name: the engine and `nx group ack-times` count an ack by the
-    identity that owns the red), the full sha and a fresh nonce. With no identity the command refuses; `nx identity
-    show` says whether this session holds one.
+    SHA is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on
+    board/ci/<TOPIC>: the shas its owner rows carry, since its first row (a red that a newer one replaced, or a clear row
+    ended, is not open). The command refuses a sha that is no such tip, an ambiguous prefix, and a caller who is not the
+    red's current owner (an ack from anyone else counts for nobody, so posting one would only look like an ack). The row
+    is `kind=ack`, `from=<your identity id>` (never a name), the full sha and a fresh nonce. The engine counts an ack by
+    the sender-session stamp the board gives the row, which is this session's. With no identity the command refuses;
+    `nx identity show` says whether this session holds one.
     """
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
         raise click.ClickException(f"{sha!r} is not a commit sha: give 7 to 40 hex digits")
@@ -281,11 +270,20 @@ def ci_ack_cmd(sha: str, topic: str) -> None:
     subspace = f"board/ci/{topic}"
     try:
         store = _store()
-        tips = _open_red_tips(store, subspace, topic)
+        red = _current_red(store, subspace, topic)
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
         raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
-    if not tips:
+    if red is None:
         raise click.ClickException(f"no open red on {subspace}: nothing to acknowledge")
+    latest = red.rows[-1][2]
+    owner = latest.get("owner")
+    if not owner:
+        raise click.ClickException(f"the red on {subspace} has no owner; an ack from {identity} counts for nobody")
+    if owner != identity:
+        named = f"{owner} ({latest['owner_alias']})" if latest.get("owner_alias") else str(owner)
+        raise click.ClickException(f"the red is owned by {named}; an ack from {identity} counts for nobody")
+    tips = {str((row.dims or {}).get("sha") or "").lower() for _, row, _ in red.rows}
+    tips = {t for t in tips if re.fullmatch(r"[0-9a-f]{7,64}", t)}
     found = sorted(t for t in tips if t.startswith(sha.lower()))
     if len(found) != 1:
         named = ", ".join(sorted(t[:7] for t in tips))

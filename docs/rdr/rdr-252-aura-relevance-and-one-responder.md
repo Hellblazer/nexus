@@ -627,10 +627,12 @@ is unchanged posts a refreshed row: the new sha, the current row's owner,
 refresh after an `escalated` row carries `reason=escalated`. A hand-off row
 carries `reason=handoff`.
 
-**Acknowledgement.** The owner writes `from=<identity id> kind=ack sha=<sha>`
-(stamped) to `board/ci/nexus-develop--owner` with an ordinary tool, MCP or a
-shell `nx`; either carries the identity. An ack counts when the session index
-maps its stamp to the current owner identity and its `sha` is any red tip
+**Acknowledgement.** The owner posts `kind=ack sha=<sha>` to
+`board/ci/nexus-develop--owner` with `nx ci ack <sha7>`, the MCP `tuple_out`
+tool or a shell `nx tuple out`; the client sets `from` to the caller's own
+identity id (a typed value is replaced; a caller with no identity is refused).
+The engine never reads `from`: an ack counts when the session index maps its
+sender-session stamp to the current owner identity and its `sha` is a red tip
 since the last green, so an ack carries across a refreshed row. An ack from
 an identity the red was handed away from does not count. The deadline is a timer in the
 stamper, in the engine: if no such ack arrives by the deadline counted from
@@ -1128,3 +1130,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-19: wording matched to the reviewed Step 4 code (nexus-igea9.7): a server that loaded with no identity gates its group-gated auras once more when the identity lease adopts its first identity; every other change waits for a reconnect; Test Plan line added.
 - 2026-11-19: wording matched to the reviewed engine 0.1.198 code (nexus-igea9, b300a8550, 76bbd34d4; grant 3): the owner row carries `owner_alias` and `next_alias`, read at stamp time, absent for an identity with none or on a failed read; the notice shows the alias, else the id; the aliases count inside the 1024-byte cap, suspects cut first.
 - 2026-11-20: engine fixes for the close critique's S2 and S3 (nexus-igea9; grant 3): the deadline rebuild retries failed pairs until a full census, a stamper error arms its deadline and escalates at it, a failing evaluation falls back to the current owner row, and `from=engine` is engine-only (client writes refused with `reserved_dim`; a prior row counts as state only with a null sender session). `board-ci.yaml` `from.engine` documents the refusal.
+- 2026-11-20: `nx ci ack` and the client stamp of `from` on an ack (nexus-igea9; grant 3): `nx group ack-times` resolves an ack's poster the way the engine does, the sender-session stamp through the session index, and reads `from` (a name through the red's `owner_alias`/`next_alias`, then the identity service) only for a row with no stamp. The engine counts the sender stamp; a hand ack with a session alias stopped the hand-off on red ae619ef56 and only ack-times missed it.
