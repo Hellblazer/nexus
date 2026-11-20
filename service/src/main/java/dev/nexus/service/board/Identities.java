@@ -18,6 +18,29 @@ public record Identities(Map<String, String> identityOfStamp, Map<String, Presen
     public record Presence(String state, String lease, String kind) {
     }
 
+    /**
+     * The identity the owner decision counts a {@code sender_session} stamp for, read through the same rule as
+     * {@link BoardReads#identities}: the session index maps the stamp to an identity, and a delegated identity is
+     * counted as its parent. Null when the stamp is absent or the index does not map it. One read each of the
+     * session index and the identity's liveness, outside any lock.
+     */
+    public static String countedIdentity(dev.nexus.service.db.IdentityRepository identities, String tenant, String stamp) {
+        if (stamp == null || stamp.isBlank()) {
+            return null;
+        }
+        var mapped = identities.sessionIdentity(tenant, stamp);
+        if (mapped.isEmpty()) {
+            return null;
+        }
+        String id = mapped.get().identity();
+        return parentIfDelegated(id, identities.liveness(tenant, id).orElse(null));
+    }
+
+    /** The identity an id is counted as: its parent when it is a delegated identity with one, else itself. */
+    static String parentIfDelegated(String id, dev.nexus.service.db.IdentityRepository.Liveness l) {
+        return l != null && "delegated".equals(l.kind()) && l.parent() != null ? l.parent() : id;
+    }
+
     public static final String LIVE = "live";
     public static final String UNLEASED = "unleased";
 
