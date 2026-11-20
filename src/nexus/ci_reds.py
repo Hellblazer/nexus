@@ -11,12 +11,12 @@ no sender stamp, a readable body for an owner row), as in the engine's own ``isS
 
 **Who posted an ack** (:class:`AckResolver`). The engine counts an ack when the row's sender-session stamp, mapped through
 the session index (a delegated identity to its parent), names the current owner; it never reads ``from``. So the
-resolver asks the session route first, and reads ``from`` (an identity id as written, a name through the red's own
-stamped pairs and then the identity service) only for an ack that carries no sender session. Only the service's own
-"unknown session" (404 ``unknown_session``), "unknown name" (404 ``unknown_name``) or a retired name (410) is a definite
-"nobody". Anything else (a failed call, a 404 from an engine with no such route, a stamp that is no session id, a
-delegated identity whose parent cannot be read) counts the ack in :attr:`AckResolver.unresolved` and is never
-remembered, so one transient error cannot make an ack read as no ack for the rest of the run.
+resolver asks the session route and nothing else: an ack with no stamp (a tenant credential with no session), or whose
+stamp the index does not know, counts for nobody, whatever ``from`` says, as it does in the engine. Only the service's
+own "unknown session" (404 ``unknown_session``) is a definite "nobody". Anything else (a failed call, a 404 from an
+engine with no such route, a stamp that is no session id, no session route to ask, a delegated identity whose parent
+cannot be read) counts the ack in :attr:`AckResolver.unresolved` and is never remembered, so one transient error cannot
+make an ack read as no ack for the rest of the run.
 """
 from __future__ import annotations
 
@@ -26,12 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from nexus.tuple_directory import (
-    SAFE_NAME_RE,
-    looks_like_agent_id,
-    looks_like_identity_id,
-    looks_like_session_id,
-)
+from nexus.tuple_directory import looks_like_identity_id, looks_like_session_id
 
 #: The owner-row reasons the engine posts for a hand-on; each carries a new ``episode_at`` and continues the open red.
 HAND_ON_REASONS = ("handoff", "escalated")
@@ -118,20 +113,19 @@ class _Unresolvable(Exception):
 class AckResolver:
     """Names the identity an ack row counts for. *session_lookup* is the identity service's session route
     (``IdentityClient.session``), *identity_lookup* its record route (``IdentityClient.show``, read for the parent of a
-    delegated identity) and *alias_lookup* its name route (``IdentityClient.alias``); each takes a key and answers a
-    mapping. Any may be None (a test, or an engine with no identity routes).
+    delegated identity); each takes a key and answers a mapping. Either may be None (a test, or an engine with no
+    identity routes).
 
     :attr:`unresolved` counts the ACKS whose poster could not be named for a reason other than "the service does not
-    know it": a failed or refused lookup, a stamp that is no session id, a delegated identity whose parent could not be
-    read. None of those is remembered, so one transient error cannot make an ack read as no ack for the rest of the run."""
+    know it": a failed or refused lookup, no session route to ask, a stamp that is no session id, a delegated identity
+    whose parent could not be read. None of those is remembered, so one transient error cannot make an ack read as no ack
+    for the rest of the run."""
 
-    alias_lookup: Lookup | None = None
     session_lookup: Lookup | None = None
     identity_lookup: Lookup | None = None
     #: Acks whose poster could not be resolved (see the class docstring).
     unresolved: int = 0
     _failures: int = 0
-    _names: dict[str, str | None] = field(default_factory=dict)
     _sessions: dict[str, str | None] = field(default_factory=dict)
 
     def _ask(self, cache: dict[str, str | None], key: str, fetch: Callable[[str], str],
@@ -154,11 +148,6 @@ class AckResolver:
         answers 404 to any id."""
         return getattr(exc, "status", None) == 404 and getattr(exc, "code", None) == "unknown_session"
 
-    @staticmethod
-    def _final_name(exc: Any) -> bool:
-        status, code = getattr(exc, "status", None), getattr(exc, "code", None)
-        return (status == 404 and code == "unknown_name") or status == 410
-
     def _fetch_session(self, session_id: str) -> str:
         assert self.session_lookup is not None
         answer = self.session_lookup(session_id)
@@ -179,42 +168,23 @@ class AckResolver:
 
     def session(self, session_id: str) -> str | None:
         """The identity the session index maps *session_id* to, a delegated identity mapped to its parent. None for an
-        unknown session; and None, counted as a failure, for a stamp that is no session id or an answer that could not
-        be had."""
-        if self.session_lookup is None:
-            return None
-        if not looks_like_session_id(session_id):
+        unknown session; and None, counted as a failure, for no route to ask, a stamp that is no session id or an answer
+        that could not be had."""
+        if self.session_lookup is None or not looks_like_session_id(session_id):
             self._failures += 1
             return None
         return self._ask(self._sessions, session_id, self._fetch_session, self._final_session)
 
-    def name(self, name: str) -> str | None:
-        """The identity holding *name* now. A session id, an agent id or a string that is no safe name is never put in a
-        URL (``mailbox_send``'s own guard)."""
-        lookup = self.alias_lookup
-        if (lookup is None or not SAFE_NAME_RE.fullmatch(name or "") or looks_like_session_id(name)
-                or looks_like_agent_id(name)):
-            return None
-        return self._ask(self._names, name, lambda n: str(lookup(n).get("identity") or ""), self._final_name)
 
-    def poster(self, ack: Any, stamped: Mapping[str, str]) -> str | None:
-        """The identity *ack* counts for. The sender-session stamp decides when the row has one and sessions can be
-        asked (the engine's rule); otherwise ``from``: an identity id as written, a name through *stamped* (the red's own
-        ``owner_alias``/``next_alias`` pairs), then the identity service. Counts the ack in :attr:`unresolved` when a
-        lookup it needed failed."""
+    def poster(self, ack: Any) -> str | None:
+        """The identity *ack* counts for: the one its sender-session stamp maps to (a delegated child to its parent), as the
+        engine counts it. An ack with no stamp counts for nobody and ``from`` is never read. Counts the ack in
+        :attr:`unresolved` when the lookup it needed failed."""
+        sender = getattr(ack, "sender_session", None)
+        if not sender:
+            return None
         failures = self._failures
-        who = self._poster(ack, stamped)
+        who = self.session(str(sender))
         if self._failures > failures:
             self.unresolved += 1
         return who
-
-    def _poster(self, ack: Any, stamped: Mapping[str, str]) -> str | None:
-        sender = getattr(ack, "sender_session", None)
-        if sender and self.session_lookup is not None:
-            return self.session(str(sender))
-        who = (ack.dims or {}).get("from")
-        if not who:
-            return None
-        if looks_like_identity_id(who):
-            return who
-        return stamped.get(who) or self.name(who)

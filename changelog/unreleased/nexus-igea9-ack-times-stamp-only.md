@@ -1,0 +1,3 @@
+### Fixed
+
+- **`nx group ack-times` counts an ack exactly when the engine does: by its sender-session stamp alone (RDR-252, nexus-igea9).** An ack with no stamp (a tenant credential holds no session), or whose stamp maps to no identity, counts for nobody, whatever its `from` says; before, the client fell back to `from` for a row with no stamp, so a hand-typed `from=<owner id>` counted in `ack-times` and not in the engine. The `from` fallback, and the identity service's name route that served it, are removed from the reader. A failed or refused session lookup is still noted on standard error and never remembered as nobody; a stamped ack on a host with no session route to ask is now noted the same way.

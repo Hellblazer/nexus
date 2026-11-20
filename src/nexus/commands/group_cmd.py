@@ -41,10 +41,8 @@ class GroupEnv:
     caller: Callable[[], str | None]
     tuples: Callable[[], Any]
     #: The identity service's session route (``IdentityClient.session``: a session id in, ``{"identity": ...}`` out),
-    #: which ``ack-times`` asks to map an ack's sender-session stamp to the identity the engine counts it for. And its
-    #: name route (``IdentityClient.alias``), asked about the ``from`` of an ack that carries no stamp. None: that
-    #: lookup is not made (a name then resolves only through the owner rows' own stamped pairs).
-    alias_lookup: Callable[[str], Mapping[str, Any]] | None = None
+    #: which ``ack-times`` asks to map an ack's sender-session stamp to the identity the engine counts it for. None: no
+    #: stamped ack can be resolved, and each is noted as unresolved.
     session_lookup: Callable[[str], Mapping[str, Any]] | None = None
     #: The identity record route (``IdentityClient.show``), read for the parent of a delegated identity: the engine counts
     #: a delegated child's ack for its parent, and the session route names only the child.
@@ -58,11 +56,10 @@ class GroupEnv:
             return HttpTupleStore()
 
         from nexus.tuple_directory import (  # noqa: PLC0415 — deferred: CLI startup cost
-            identity_alias_lookup, identity_record_lookup, identity_session_lookup)
+            identity_record_lookup, identity_session_lookup)
 
         return cls(client=GroupsClient.from_config(), caller=groups.own_identity_id, tuples=tuples,
-                   alias_lookup=identity_alias_lookup(), session_lookup=identity_session_lookup(),
-                   identity_lookup=identity_record_lookup())
+                   session_lookup=identity_session_lookup(), identity_lookup=identity_record_lookup())
 
 
 def _env(ctx: click.Context) -> GroupEnv:
@@ -342,8 +339,8 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
     An ack counts as the engine counts it (RDR-252 "Acknowledgement"): inside the red, for the identity the latest owner
     row named as owner at the ack's time (an ack from one the red was handed away from does not, and none counts once
     the red is escalated with no owner), and for the sha of any red tip of the red. *Who* posted it is what the engine
-    reads, the sender-session stamp mapped through the session index; ``dims.from`` is only a label, used when the row
-    carries no stamp or *resolver* cannot ask the session route (:meth:`nexus.ci_reds.AckResolver.poster`). The cheap
+    reads, the sender-session stamp mapped through the session index; ``dims.from`` is only a label and is never read, so
+    an ack with no stamp counts for nobody (:meth:`nexus.ci_reds.AckResolver.poster`). The cheap
     checks, an owner and a tip, come before any lookup. ``minutes`` runs from the first row's ``episode_at`` to the
     first counting ack; a red with none has ``acked_at`` null. ``handoffs`` counts the hand-ons, the escalation
     included, as the engine's own counter does.
@@ -361,8 +358,6 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
         acked: tuple[datetime, Any] | None = None
         acked_alias: str | None = None
         acked_by: str | None = None
-        # The names this red's own rows stamped: the engine wrote each beside its id when it posted the row.
-        stamped = {str(b[f"{who}_alias"]): str(b[who]) for _, _, b in episode for who in ("owner", "next") if b.get(who) and b.get(f"{who}_alias")}
         for at, ack in acks:
             if at < start or (end is not None and at >= end):
                 continue
@@ -370,7 +365,7 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
             owner = current[0].get("owner") if current else None
             if not owner or (ack.dims or {}).get("sha") not in tips:
                 continue
-            poster = resolver.poster(ack, stamped)
+            poster = resolver.poster(ack)
             if poster == owner:
                 acked = (at, ack)
                 acked_alias = current[0].get("owner_alias")
@@ -403,8 +398,8 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     The Day 2 calibration read for the group's ``ack_deadline`` (RDR-252: review the default against the distribution
     after the first 20 reds or 30 days). It reads the ``--owner`` post of each served topic (``board/ci/<topic>--owner``)
     and counts an ack the way the engine does: the ack whose sender-session stamp maps, through the identity service's
-    session index, to the identity that owned the red at that time, for a red tip (``from`` is read only for a row with
-    no stamp). A lookup that fails for a reason other than "not known" is noted on standard error.
+    session index, to the identity that owned the red at that time, for a red tip (``from`` is never read, so an ack with
+    no stamp, or one whose stamp maps to no identity, counts for nobody). A lookup that fails for a reason other than "not known" is noted on standard error.
     """
     env = _env(ctx)
     record = GroupRecord.from_wire(env.client.read(name))
@@ -412,7 +407,7 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     if not topics:
         raise click.ClickException(f"{name} serves no topic, so it has no owner post to read")
     store = env.tuples()
-    resolver = AckResolver(env.alias_lookup, env.session_lookup, env.identity_lookup)
+    resolver = AckResolver(env.session_lookup, env.identity_lookup)
     reds: list[dict[str, Any]] = []
     for topic in topics:
         subspace = f"board/ci/{topic}--owner"

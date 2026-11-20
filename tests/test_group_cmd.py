@@ -466,6 +466,9 @@ def test_from_wire_names_the_unreadable_record_as_a_groups_error() -> None:
 # ── ack-times ───────────────────────────────────────────────────────────────
 
 SHA1, SHA2, SHA3 = "a" * 40, "b" * 40, "c" * 40
+#: A session the identity index maps to each identity: an ack counts only through its sender-session stamp (the engine's rule).
+SESSIONS = {"i4": "3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", "i5": "4e5c8bb0-2792-4cd2-8c6c-1b0aeddfe264",
+            "i6": "5f6d9cc1-38a3-4de3-9d7d-2c1bfee0f375"}
 
 
 def _row(kind: str, at: str, sha: str, who: str = "engine", sender_session: str | None = None, **body: Any) -> Any:
@@ -486,23 +489,37 @@ class _Tuples:
         return rows[: min(n, self.cap) if self.cap else n]
 
 
+def _ack(at: str, sha: str, who: str) -> Any:
+    """An ack by identity *who*, stamped with its session as the engine stamps a client's write; `from` is its label."""
+    return _row("ack", at, sha, who=who, sender_session=SESSIONS[who])
+
+
+def _index() -> Any:
+    """The identity service's session route, answering for the sessions of :data:`SESSIONS`."""
+    return _Lookup({sid: who for who, sid in SESSIONS.items()})
+
+
+def _stamped(env: GroupEnv) -> GroupEnv:
+    return _with_lookups(env, session=_index())
+
+
 def test_ack_times_reports_per_red_the_sha_episode_ack_time_and_minutes() -> None:
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _ack("2026-11-19T10:07:00Z", SHA1, "i4"),
         _row("clear", "2026-11-19T10:30:00Z", SHA1),
         # a second red: handed off, and the first owner's late ack does not count
         _row("owner", "2026-11-19T12:00:05Z", SHA2, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T12:00:00Z", refresh=False),
         # the engine's hand-off row carries a NEW episode_at (OwnerDecision.handOn passes in.now()), not the red's
         _row("owner", "2026-11-19T12:20:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T12:20:00Z", refresh=False, handoffs=1),
-        _row("ack", "2026-11-19T12:25:00Z", SHA2, who="i4"),
-        _row("ack", "2026-11-19T12:41:00Z", SHA2, who="i5"),
+        _ack("2026-11-19T12:25:00Z", SHA2, "i4"),
+        _ack("2026-11-19T12:41:00Z", SHA2, "i5"),
         # a third red nobody acknowledged yet
         _row("owner", "2026-11-19T14:00:05Z", SHA3, owner="i4", next="i5", reason="no_record", episode_at="2026-11-19T14:00:00Z", refresh=False),
     ]
     tuples = _Tuples(rows)
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    result = _run(_env(wire, tuples=tuples), "ack-times", "push-train", "--json")
+    result = _run(_stamped(_env(wire, tuples=tuples)), "ack-times", "push-train", "--json")
     assert result.exit_code == 0, result.output
     reds = json.loads(result.stdout)["reds"]
     assert [(r["sha"], r["episode_at"], r["acked_at"], r["minutes"], r["acked_by"]) for r in reds] == [
@@ -518,20 +535,20 @@ def test_ack_times_names_the_owner_by_alias_and_falls_back_to_the_id() -> None:
     identity with no live alias) is shown by its id, and the JSON carries null for the alias."""
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, owner="i4", owner_alias="halcyon", next="i5", next_alias="tamsin", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _ack("2026-11-19T10:07:00Z", SHA1, "i4"),
         _row("owner", "2026-11-19T12:00:05Z", SHA2, owner="i6", next=None, reason="earliest_suspect", episode_at="2026-11-19T12:00:00Z", refresh=False),
-        _row("ack", "2026-11-19T12:09:00Z", SHA2, who="i6"),
+        _ack("2026-11-19T12:09:00Z", SHA2, "i6"),
     ]
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
+    reds = json.loads(_run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train", "--json").stdout)["reds"]
     assert [(r["owner"], r["owner_alias"], r["acked_by"], r["acked_by_alias"]) for r in reds] == [
         ("i4", "halcyon", "i4", "halcyon"), ("i6", None, "i6", None)]
-    text = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train").output
+    text = _run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train").output
     assert "acked by halcyon at" in text and "acked by i6 at" in text and "acked by i4" not in text
 
 
-def _with_lookups(env: GroupEnv, alias: Any = None, session: Any = None, identity: Any = None) -> GroupEnv:
-    return dataclasses.replace(env, alias_lookup=alias, session_lookup=session, identity_lookup=identity)
+def _with_lookups(env: GroupEnv, session: Any = None, identity: Any = None) -> GroupEnv:
+    return dataclasses.replace(env, session_lookup=session, identity_lookup=identity)
 
 
 def _ack_times(env: GroupEnv) -> list[dict[str, Any]]:
@@ -541,12 +558,12 @@ def _ack_times(env: GroupEnv) -> list[dict[str, Any]]:
 
 
 _RED = dict(owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False)
-SESS_OWNER, SESS_OTHER = "3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", "4e5c8bb0-2792-4cd2-8c6c-1b0aeddfe264"
+SESS_OWNER, SESS_OTHER = SESSIONS["i4"], SESSIONS["i5"]
 
 
-def _times(rows: list[Any], alias: Any = None, session: Any = None, identity: Any = None, **kw: Any) -> list[dict[str, Any]]:
+def _times(rows: list[Any], session: Any = None, identity: Any = None, **kw: Any) -> list[dict[str, Any]]:
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    return _ack_times(_with_lookups(_env(wire, tuples=_Tuples(rows), **kw), alias, session, identity))
+    return _ack_times(_with_lookups(_env(wire, tuples=_Tuples(rows), **kw), session, identity))
 
 
 class _Lookup:
@@ -625,10 +642,10 @@ def test_a_transient_lookup_error_is_noted_on_stderr_and_never_cached_as_nobody(
 def test_a_clean_run_prints_no_resolution_note() -> None:
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _ack("2026-11-19T10:07:00Z", SHA1, "i4"),
     ]
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    result = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json")
+    result = _run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train", "--json")
     assert "could not be resolved" not in result.stderr
 
 
@@ -650,65 +667,56 @@ def test_a_session_is_asked_once_however_many_acks_it_posted_and_the_cheap_check
     assert sessions.asked == [SESS_OTHER, SESS_OWNER], "the early, no-tip and no-owner acks asked nobody; i5's session once"
 
 
-def test_an_ack_with_no_sender_session_falls_back_to_the_stamped_pair_of_its_from() -> None:
+@pytest.mark.parametrize("who", ["i4", "marginalia", "tamsin", SESSIONS["i4"], ""])
+def test_an_ack_with_no_sender_stamp_counts_for_nobody_whatever_its_from_says(who: str) -> None:
+    """nexus-igea9 (the engine's ack half): the engine counts an ack only when its session stamp maps to the
+    owner. A null stamp (a tenant credential with no session) counts for nobody, even with `from` naming the owner by id,
+    by its stamped alias, or by a session id; nothing is asked, and nothing is noted as unresolved."""
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED, owner_alias="marginalia", next_alias="tamsin"),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia"),
-    ]
-    [red] = _times(rows)
-    assert (red["acked_at"], red["acked_by"]) == ("2026-11-19T10:07:00Z", "i4")
-
-
-def test_an_ack_with_no_sender_session_and_no_stamped_pair_resolves_through_the_identity_service_once_per_name() -> None:
-    rows = [
-        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
-        _row("ack", "2026-11-19T10:03:00Z", SHA1, who="tamsin"),
-        _row("ack", "2026-11-19T10:04:00Z", SHA1, who="tamsin"),
-        _row("ack", "2026-11-19T10:05:00Z", SHA1, who="i5"),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia"),
-    ]
-    names = _Lookup({"tamsin": "i5", "marginalia": "i4"})
-    [red] = _times(rows, alias=names)
-    assert red["acked_at"] == "2026-11-19T10:07:00Z" and red["acked_by"] == "i4"
-    assert names.asked == ["tamsin", "marginalia"], "tamsin once; the id i5 is never looked up"
-
-
-@pytest.mark.parametrize("who", ["3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", "a" + "0" * 16, "../i4", "x/y", "a b", ""])
-def test_a_from_that_is_no_name_is_never_put_in_a_url(who: str) -> None:
-    """A session id, an agent id or an unsafe string is skipped before any lookup (mailbox_send's own guard)."""
-    rows = [
-        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
         _row("ack", "2026-11-19T10:07:00Z", SHA1, who=who),
     ]
-    names = _Lookup({})
-    [red] = _times(rows, alias=names)
-    assert red["acked_at"] is None and names.asked == []
+    sessions = _Lookup({})
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), session=sessions), "ack-times", "push-train", "--json")
+    [red] = json.loads(result.stdout)["reds"]
+    assert red["acked_at"] is None and red["acked_by"] is None and red["minutes"] is None
+    assert sessions.asked == [] and "could not be resolved" not in result.stderr, result.stderr
 
 
-@pytest.mark.parametrize("how", ["lookup-says-another-identity", "stamped-pair-says-another-identity", "unknown-name", "lookup-fails"])
-def test_a_name_ack_does_not_count_unless_it_resolves_to_the_owner(how: str) -> None:
-    stamped = {"next_alias": "tamsin"} if how == "stamped-pair-says-another-identity" else {}
-    rows = [
-        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED, **stamped),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="tamsin"),
-    ]
-    # In the stamped case the lookup WOULD name the owner: only the stamped pair (tamsin is next up, i5) keeps it from counting.
-    answer = {"lookup-says-another-identity": "i5", "stamped-pair-says-another-identity": "i4",
-              "unknown-name": _api_error(404, "unknown_name"), "lookup-fails": RuntimeError("no identity routes")}[how]
-    names = _Lookup({"tamsin": answer})
-    [red] = _times(rows, alias=names)
-    assert red["acked_at"] is None and red["minutes"] is None
-    if how == "stamped-pair-says-another-identity":
-        assert names.asked == [], "the red's own stamped pair decided it, before any lookup"
-
-
-def test_a_name_with_no_lookup_at_all_is_left_uncounted_rather_than_guessed() -> None:
+def test_an_ack_whose_stamp_maps_to_no_identity_counts_for_nobody_silently() -> None:
+    """A minted session no identity holds: 404 unknown_session is the service's own answer, so nobody, with no note."""
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="marginalia"),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OTHER),
     ]
-    [red] = _times(rows)
+    sessions = _Lookup({SESS_OTHER: _api_error(404, "unknown_session")})
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), session=sessions), "ack-times", "push-train", "--json")
+    [red] = json.loads(result.stdout)["reds"]
+    assert red["acked_at"] is None and "could not be resolved" not in result.stderr, result.stderr
+
+
+def test_a_stamp_that_maps_to_the_owner_counts_and_an_earlier_null_stamped_ack_does_not() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:05:00Z", SHA1, who="i4"),
+        _ack("2026-11-19T10:07:00Z", SHA1, "i4"),
+    ]
+    [red] = _times(rows, session=_index())
+    assert (red["acked_at"], red["acked_by"], red["minutes"]) == ("2026-11-19T10:07:00Z", "i4", 7.0)
+
+
+def test_a_stamped_ack_with_no_session_route_to_ask_is_noted_as_unresolved_not_counted() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _ack("2026-11-19T10:07:00Z", SHA1, "i4"),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json")
+    [red] = json.loads(result.stdout)["reds"]
     assert red["acked_at"] is None
+    assert "1 ack could not be resolved; counts may be low" in result.stderr, result.stderr
 
 
 def test_ack_times_text_names_an_unacknowledged_red_and_a_group_serving_nothing_is_an_error() -> None:
@@ -727,9 +735,9 @@ def test_ack_times_with_no_reds_says_so_and_skips_a_refresh_row_as_a_new_red() -
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=False),
         _row("owner", "2026-11-19T10:05:05Z", SHA2, owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-11-19T10:00:00Z", refresh=True),
-        _row("ack", "2026-11-19T10:09:00Z", SHA2, who="i4"),
+        _ack("2026-11-19T10:09:00Z", SHA2, "i4"),
     ]
-    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
+    reds = json.loads(_run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train", "--json").stdout)["reds"]
     assert [(r["sha"], r["minutes"]) for r in reds] == [(SHA1, 9.0)], "a refresh row keeps its episode, and an ack of any red tip of it counts"
 
 
@@ -741,12 +749,12 @@ def test_a_hand_off_and_an_escalation_continue_the_open_red_whatever_episode_at_
         _row("owner", "2026-11-19T10:25:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T10:25:00Z", refresh=False, handoffs=1),
         _row("owner", "2026-11-19T10:30:05Z", SHA2, owner="i5", next=None, reason="handoff", episode_at="2026-11-19T10:25:00Z", refresh=True, handoffs=1),
         _row("owner", "2026-11-19T10:50:05Z", SHA2, owner=None, next=None, reason="escalated", episode_at="2026-11-19T10:50:00Z", refresh=False, handoffs=2),
-        _row("ack", "2026-11-19T10:55:00Z", SHA2, who="i5"),     # i5 is no longer the owner: does not count
+        _ack("2026-11-19T10:55:00Z", SHA2, "i5"),     # i5 is no longer the owner: does not count
         _row("clear", "2026-11-19T11:10:00Z", SHA2),
         _row("owner", "2026-11-19T13:00:05Z", SHA3, owner="i4", next="i5", reason="no_record", episode_at="2026-11-19T13:00:00Z", refresh=False, handoffs=0),
     ]
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    reds = json.loads(_run(_env(wire, tuples=_Tuples(rows)), "ack-times", "push-train", "--json").stdout)["reds"]
+    reds = json.loads(_run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train", "--json").stdout)["reds"]
     assert [(r["sha"], r["episode_at"], r["handoffs"], r["acked_at"], r["cleared_at"]) for r in reds] == [
         (SHA1, "2026-11-19T10:00:00Z", 2, None, "2026-11-19T11:10:00Z"),
         (SHA3, "2026-11-19T13:00:00Z", 0, None, None)], "one red with both hand-ons counted, then the next red"
@@ -905,7 +913,7 @@ def test_a_delegated_childs_parent_that_cannot_be_read_is_unresolved_and_noted_n
              "record-has-no-parent": {"kind": "delegated"}}
     records = None if how == "no-record-lookup" else _Lookup({"i8": table[how]})
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), None, _Lookup({SESS_OTHER: {"identity": "i8", "kind": "delegated"}}), records)
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), _Lookup({SESS_OTHER: {"identity": "i8", "kind": "delegated"}}), records)
     result = _run(env, "ack-times", "push-train", "--json")
     assert json.loads(result.stdout)["reds"][0]["acked_at"] is None
     assert "2 acks could not be resolved; counts may be low" in result.stderr, result.stderr
@@ -917,12 +925,12 @@ def test_an_ack_of_a_suspect_that_is_no_red_tip_does_not_count() -> None:
     """The engine counts a red tip only; a suspect an owner row names may be untested or green."""
     rows = [
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED, suspects=[SHA2]),
-        _row("ack", "2026-11-19T10:07:00Z", SHA2, who="i4"),
+        _ack("2026-11-19T10:07:00Z", SHA2, "i4"),
     ]
-    [red] = _times(rows)
+    [red] = _times(rows, session=_index())
     assert red["acked_at"] is None
-    rows[1] = _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4")
-    assert _times(rows)[0]["acked_at"] == "2026-11-19T10:07:00Z"
+    rows[1] = _ack("2026-11-19T10:07:00Z", SHA1, "i4")
+    assert _times(rows, session=_index())[0]["acked_at"] == "2026-11-19T10:07:00Z"
 
 
 def test_an_owner_or_clear_row_a_session_wrote_is_not_state_as_in_the_engine() -> None:
@@ -933,9 +941,9 @@ def test_an_owner_or_clear_row_a_session_wrote_is_not_state_as_in_the_engine() -
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
         _row("clear", "2026-11-19T10:02:00Z", SHA1, who="i9", sender_session=SESS_OTHER),
         _row("owner", "2026-11-19T10:03:00Z", SHA3, who="i9", sender_session=SESS_OTHER, **forged),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+        _ack("2026-11-19T10:07:00Z", SHA1, "i4"),
     ]
-    reds = _times(rows)
+    reds = _times(rows, session=_index())
     assert [(r["sha"], r["owner"], r["cleared_at"], r["acked_at"]) for r in reds] == [(SHA1, "i4", None, "2026-11-19T10:07:00Z")]
 
 
@@ -956,7 +964,7 @@ def test_a_404_that_is_not_unknown_session_is_unresolved_and_noted_not_nobody() 
         _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OWNER),
     ]
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), None, _Lookup({SESS_OWNER: _api_error(404, None)}))
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), _Lookup({SESS_OWNER: _api_error(404, None)}))
     result = _run(env, "ack-times", "push-train", "--json")
     assert json.loads(result.stdout)["reds"][0]["acked_at"] is None
     assert "1 ack could not be resolved; counts may be low" in result.stderr
@@ -969,27 +977,6 @@ def test_a_sender_stamp_that_is_no_uuid_is_unresolved_and_noted_not_silently_nob
     ]
     sessions = _Lookup({})
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), None, sessions), "ack-times", "push-train", "--json")
+    result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), sessions), "ack-times", "push-train", "--json")
     assert json.loads(result.stdout)["reds"][0]["acked_at"] is None and sessions.asked == []
     assert "1 ack could not be resolved" in result.stderr
-
-
-def test_a_name_route_404_with_no_code_is_unresolved_while_a_retired_name_is_final() -> None:
-    rows = [
-        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="tamsin"),
-    ]
-    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), _Lookup({"tamsin": _api_error(404, None)}))
-    assert "1 ack could not be resolved" in _run(env, "ack-times", "push-train", "--json").stderr
-    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), _Lookup({"tamsin": _api_error(410, "renamed")}))
-    assert "could not be resolved" not in _run(env, "ack-times", "push-train", "--json").stderr, "a retired name is final"
-
-
-def test_with_no_session_lookup_an_ack_that_carries_a_stamp_is_read_by_its_from() -> None:
-    rows = [
-        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
-        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OWNER),
-    ]
-    [red] = _times(rows)
-    assert red["acked_by"] == "i4" and red["acked_at"] == "2026-11-19T10:07:00Z"
