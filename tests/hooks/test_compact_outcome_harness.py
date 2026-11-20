@@ -607,7 +607,13 @@ class TestNothingRunsTheGateAutomatically:
         cells = sum(len(co.DEFAULT_ARMS[s]) for s in sc.DEFAULT_SCENARIOS)
         sessions = cells * co.DEFAULT_RUNS
         assert (cells, sessions) == (10, 150)
-        fragment = (REPO / "changelog" / "unreleased" / "compact-outcome-gate.md").read_text(encoding="utf-8")
+        # The fragment exists until a release folds it into CHANGELOG.md and deletes it; read whichever holds it.
+        frag_path = REPO / "changelog" / "unreleased" / "compact-outcome-gate.md"
+        if frag_path.exists():
+            fragment = frag_path.read_text(encoding="utf-8")
+        else:
+            changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+            fragment = next(line for line in changelog.splitlines() if "tests/e2e/compact-outcome-gate.sh" in line)
         for text in (co.__doc__ or "", GATE_SH.read_text(encoding="utf-8"), fragment):
             assert "150 sessions" in text and "$38" in text and "$12" in text, text[:80]
 
