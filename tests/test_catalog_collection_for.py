@@ -348,33 +348,30 @@ def test_collection_for_ignores_grandfathered_rows(catalog) -> None:
 
 @pytest.mark.t2_tenant
 def test_collection_for_conformant_row_with_empty_model_version(catalog) -> None:
-    """Defensive: a conformant name registered without the
-    ``model_version`` kwarg has ``legacy_grandfathered = 0`` and an
-    empty ``model_version`` text. ``CAST(SUBSTR("", 2) AS INTEGER)``
-    yields 0; the new-tuple branch returns ``v1`` regardless. When a
-    legitimate ``v1`` row coexists, ``MAX`` correctly returns 1 and
-    ``bump=True`` returns ``v2``.
+    """A row whose ``model_version`` is really ``''`` (the column is NOT NULL
+    DEFAULT '' and an upsert never rewrites it; ``register_collection``'s own
+    default is ``v1``, so ``model_version=""`` is passed explicitly to bypass it).
+
+    RDR-229 P1.4: the client reads the row's version, so an empty one falls
+    back to the returned conformant name's version, with a warning
+    (``collection_for_row_model_version_empty``), until P1.2's census
+    (nexus-p2m1x.2) reads zero such rows. ``bump=True`` then adds one.
     """
+    from structlog.testing import capture_logs
+
+    name = "code__1-7__voyage-code-3__v3"
     catalog.register_collection(
-        "code__1-7__voyage-code-3__v1",  # conformant, model_version omitted
-        content_type="code",
-        owner_id="1-7",
-        embedding_model="voyage-code-3",
+        name, content_type="code", owner_id="1-7",
+        embedding_model="voyage-code-3", model_version="",
     )
-    catalog.register_collection(
-        "code__1-7__voyage-code-3__v1",  # idempotent re-register WITH version
-        content_type="code",
-        owner_id="1-7",
-        embedding_model="voyage-code-3",
-        model_version="v1",
-    )
-    name = catalog.collection_for(
-        content_type="code",
-        owner="1.7",
-        embedding_model="voyage-code-3",
-        bump=True,
-    )
-    assert name.model_version == 2
+    assert catalog.collection_for("code", "1.7", "voyage-code-3").model_version == 3
+    with capture_logs() as logs:
+        bumped = catalog.collection_for(
+            content_type="code", owner="1.7", embedding_model="voyage-code-3", bump=True,
+        )
+    assert bumped.model_version == 4
+    assert [e["collection"] for e in logs
+            if e["event"] == "collection_for_row_model_version_empty"] == [name]
 
 
 # ── Schema: compound index for version-bump lookup ───────────────────────

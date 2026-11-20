@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import structlog
+
 from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     CONTENT_TYPES,
@@ -26,6 +28,8 @@ from nexus.corpus import (
 
 if TYPE_CHECKING:
     from nexus.catalog.tumbler import Tumbler
+
+_log = structlog.get_logger(__name__)
 
 
 def owner_segment_for_tumbler(tumbler: str | Tumbler) -> str:
@@ -138,3 +142,55 @@ class CollectionName:
             embedding_model=embedding_model,
             model_version=int(parsed["model_version"][1:]),
         )
+
+
+def version_from_for_tuple_row(
+    row: dict, *, content_type: str, owner_id: str, embedding_model: str,
+) -> int:
+    """The existing collection version of a ``/collections/for_tuple`` row.
+
+    RDR-229 P1.4: the version is the ROW's ``model_version`` (``"v<N>"``,
+    N >= 1), not a parse of its name, so a legacy-slug name that carries no
+    version still resolves. Raises ``ValueError`` when
+
+    - the row's ``content_type``, ``owner_id`` or ``embedding_model`` differ
+      from the requested tuple (the engine resolved some other tuple),
+    - ``model_version`` is missing or non-empty and malformed (``"v0"`` included).
+
+    An EMPTY ``model_version`` (the column is ``NOT NULL DEFAULT ''`` and an
+    upsert never rewrites it, so such rows exist and cannot be repaired by
+    re-registering) falls back to the returned conformant name, with a warning;
+    a row whose name cannot parse either raises.
+
+    The fallback is temporary: P1.2's production census (nexus-p2m1x.2) counts
+    rows with an empty ``model_version``, and the fallback comes out once that
+    count reads zero.
+    """
+    got = (row.get("content_type"), row.get("owner_id"), row.get("embedding_model"))
+    want = (content_type, owner_id, embedding_model)
+    if got != want:
+        raise ValueError(
+            f"for_tuple answered {row.get('name')!r} for tuple {want!r}, but the row "
+            f"carries (content_type, owner_id, embedding_model) = {got!r}"
+        )
+    raw = row.get("model_version")
+    if raw == "":
+        name = row.get("name")
+        try:
+            version = CollectionName.parse(name).model_version  # type: ignore[arg-type]
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(
+                f"collection row {name!r} has an empty model_version and a name that "
+                "does not carry one"
+            ) from exc
+        if version < 1:
+            raise ValueError(f"collection row {name!r} has an empty model_version and name version v0")
+        _log.warning("collection_for_row_model_version_empty", collection=name)
+        return version
+    digits = raw[1:] if isinstance(raw, str) and raw.startswith("v") else ""
+    if not (digits.isascii() and digits.isdigit()) or int(digits) < 1:
+        raise ValueError(
+            f"collection row {row.get('name')!r} has a malformed model_version {raw!r}; "
+            "expected 'v<N>' with N >= 1"
+        )
+    return int(digits)

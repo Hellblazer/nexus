@@ -115,7 +115,12 @@ def _mock_catalog_client(monkeypatch, *, registered_model: str | None):
             if registered_model is not None and model == registered_model:
                 return httpx.Response(
                     200,
-                    json={"name": f"code__1-1__{model}__v1"},
+                    json={
+                        "name": f"code__1-1__{model}__v1", "model_version": "v1",
+                        "content_type": params.get("content_type"),
+                        "owner_id": params.get("owner_id"),
+                        "embedding_model": model,
+                    },
                 )
             return httpx.Response(404, json={"error": "not found"})
         return httpx.Response(200, json={})

@@ -494,7 +494,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             self._send_json({"collections": [{
                 "name": "code__test__voyage-code-3__v1", "content_type": "code",
                 "owner_id": "1.1", "embedding_model": "voyage-code-3",
-                "model_version": "1", "display_name": "code__test__voyage-code-3__v1",
+                "model_version": "v1", "display_name": "code__test__voyage-code-3__v1",
                 "legacy_grandfathered": False, "superseded_by": "", "superseded_at": "",
                 "created_at": "2026-07-01T00:00:00+00:00",
                 # RDR-204 Phase 2 (nexus-ft04v.24/.16): collRow carries the
@@ -517,7 +517,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "owner_id": "1.1",
                     "content_type": "code",
                     "embedding_model": "voyage-code-3",
-                    "model_version": "1",
+                    "model_version": "v1",
                     "display_name": name,
                     # legacy_grandfathered: JSON boolean on the wire since
                     # catalog-031 (collRow's column is boolean now); derived
@@ -545,7 +545,15 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 rows = FakeCatalogHandler.embedding_profile_rows
                 self._send_json({"profile": rows, "count": len(rows)})
         elif op == "/collections/for_tuple":
-            self._send_json({"name": "code__test__voyage-code-3__v1"})
+            # The engine's row: the requested tuple echoed, plus the row's own
+            # model_version ("v<N>"); collection_for refuses a row of another tuple.
+            params = self._query_params()
+            self._send_json({
+                "name": "code__test__voyage-code-3__v1", "model_version": "v1",
+                "content_type": params.get("content_type", "code"),
+                "owner_id": params.get("owner_id", "test"),
+                "embedding_model": params.get("embedding_model", "voyage-code-3"),
+            })
         elif op == "/collections/owner-root":
             params = self._query_params()
             name = params.get("name")

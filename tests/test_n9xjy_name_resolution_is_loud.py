@@ -3,8 +3,10 @@
 
 The client half of the owner-1.1 stranding. The engine's ``collectionForTuple``
 resolved a contested tuple to its ``quarantine-`` sibling (nexus-bc7ps); the
-client's version oracle parsed that name with the real ``CollectionName.parse``
-and raised ``ValueError`` (``quarantine-code`` is not a content type); and both
+client's version oracle then (before RDR-229 P1.4, nexus-p2m1x.4, which reads
+the row's ``model_version`` instead) parsed that name with the real
+``CollectionName.parse`` and raised ``ValueError`` (``quarantine-code`` is not
+a content type); and both
 resolver wrappers absorbed that ``ValueError`` in a bare ``except Exception`` at
 DEBUG and returned a path-derived synthesized name. The indexer then repointed
 every document of the repo to it: ``code__1-1`` -> ``code__nexus-571b8edd``,
@@ -13,7 +15,10 @@ logged.
 
 Both wrappers now let anything that is not ``LookupError`` propagate. The fake
 catalog below stands in for the transport only: the ``ValueError`` it raises
-comes from the real parser on the real name the engine returned.
+comes from the real parser on the real name the engine returned. Since P1.4
+``HttpCatalogClient.collection_for`` no longer parses that name (see
+``tests/test_p2m1x4_for_tuple_version.py``); the fake below stands in for a
+resolver that still does, so the wrappers' propagation contract stays pinned.
 """
 from __future__ import annotations
 
@@ -36,8 +41,9 @@ SYNTH_OWNER = "nexus-571b8edd"
 class _ResolverReturnsQuarantineSibling:
     """A catalog whose version oracle got the quarantine sibling back.
 
-    Mirrors the failing frame of ``HttpCatalogClient.collection_for``: the
-    resolver's returned name goes through the real ``CollectionName.parse``,
+    Mirrors the failing frame ``HttpCatalogClient.collection_for`` had before
+    RDR-229 P1.4 (it now reads the row): the resolver's returned name goes
+    through the real ``CollectionName.parse``,
     which is where the ``ValueError`` originates. Nothing here fabricates the
     exception.
     """
