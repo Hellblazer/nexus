@@ -135,4 +135,28 @@ class NoteUriCorpusTest {
             assertThat(dsl.renderInlined(NoteUri.namesCollection(uri, coll))).as(coll).isEqualTo("false");
         }
     }
+
+    /**
+     * RDR-229 P2.9 retires {@code isFileRoutedCollection} in the same engine cut: {@code moveTo} and {@code namesCollection}
+     * classify the old collection as the URI's segment (what {@code isNote} classifies), and only the stale-note repair's
+     * live-collection test still calls it.
+     */
+    @Test
+    void onlyTheStaleNoteRepairCallsTheRetiringLiveCollectionTest() throws IOException {
+        java.nio.file.Path main = java.nio.file.Path.of("src", "main", "java");
+        List<String> callers = new ArrayList<>();
+        try (var files = java.nio.file.Files.walk(main)) {
+            for (java.nio.file.Path f : (Iterable<java.nio.file.Path>) files.filter(x -> x.toString().endsWith(".java"))::iterator) {
+                int n = 0;
+                for (String line : java.nio.file.Files.readAllLines(f)) {
+                    String t = line.strip();
+                    boolean prose = t.startsWith("*") || t.startsWith("//") || t.startsWith("/*");
+                    if (!prose && line.contains("isFileRoutedCollection(") && !line.contains("boolean ")) n++;
+                }
+                if (n > 0) callers.add(f.getFileName() + "=" + n);
+            }
+        }
+        assertThat(callers).as("non-vacuity: the stale-note repair's call is found").isNotEmpty();
+        assertThat(callers).containsExactly("CatalogRepository.java=1");
+    }
 }

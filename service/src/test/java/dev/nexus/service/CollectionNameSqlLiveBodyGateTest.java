@@ -103,6 +103,10 @@ class CollectionNameSqlLiveBodyGateTest {
 
     static final String DUNDER_LITERAL = "dunder-literal";
     static final String QUARANTINE_LITERAL = "quarantine-literal";
+    static final String URI_CLASSIFIER_LITERAL = "uri-classifier-literal";
+
+    /** The frozen file-routed prefixes, as the engine's {@code NoteUri.FILE_ROUTED_PREFIXES} lists them. */
+    static final List<String> FROZEN_PREFIXES = List.of("rdr__", "docs__", "code__");
 
     /**
      * The measured census: {@code function|shape} to expression count (overloads of one name summed), at develop
@@ -112,19 +116,23 @@ class CollectionNameSqlLiveBodyGateTest {
      * made the shape the literal, so the same nine sites are {@code dunder-literal}. RDR-229 P2.6 (vectors-063,
      * nexus-p2m1x.11) removed all eleven: the three functions read the collection's catalog row, so every entry
      * reached zero and was removed.
-     *
-     * <p>RDR-229 P2.10 (nexus-p2m1x.15) RAISES it by three, the one exception to reduce-only: {@code catalog-049-1}
-     * redefines {@code nexus.catalog_reconcile_commit} with {@code NoteUri.moveTo}'s rule, which tests the old collection
-     * against the three frozen file-routed prefixes ({@code rdr__}, {@code docs__}, {@code code__}). That is the URI-string
-     * classifier over the frozen list (RDR-229 item 12 keeps it; {@code NoteUri.isFileRoutedCollection} is its engine twin),
-     * not a read of a content type out of a name, but the literals are counted all the same. The three distinct literals
-     * are the whole list, and they stay while the frozen list does.
      */
-    static final Map<String, Integer> NAME_PARSING_CENSUS = Map.of(
-        "nexus.catalog_reconcile_commit|" + DUNDER_LITERAL, 3);
+    static final Map<String, Integer> NAME_PARSING_CENSUS = Map.of();
 
-    /** Pinned total; lowered with {@link #NAME_PARSING_CENSUS} (a test asserts the two agree). 11 -> 0 at P2.6, 0 -> 3 at P2.10. */
-    static final int NAME_PARSING_TOTAL_CEILING = 3;
+    /**
+     * The URI-string classifier's literals, pinned apart from the name-parsing census (RDR-229 P2.10, nexus-p2m1x.15, as
+     * the Python parse census keeps a {@code uri-classifier} class beside its routing class). A literal that is exactly one
+     * of the frozen file-routed prefixes ({@code rdr__}, {@code docs__}, {@code code__}) is the classifier of
+     * {@code NoteUri.isNote} on a URI segment, which RDR-229 item 12 keeps on its frozen list; it reads no content type out
+     * of a collection name, so it is not a name parse and must not hold the name-parsing total above zero when P2.6 empties
+     * it. {@code catalog-049-1} redefines {@code nexus.catalog_reconcile_commit} with {@code NoteUri.moveTo}'s rule, which
+     * tests the old collection's segment against those three prefixes. They stay while the frozen list does.
+     */
+    static final Map<String, Integer> URI_CLASSIFIER_CENSUS = Map.of(
+        "nexus.catalog_reconcile_commit|" + URI_CLASSIFIER_LITERAL, 3);
+
+    /** Pinned total; lowered with {@link #NAME_PARSING_CENSUS} (a test asserts the two agree). 11 -> 0 at P2.6. */
+    static final int NAME_PARSING_TOTAL_CEILING = 0;
 
     /** The functions the RDR rewrites, each with the changelog that last defines it: the scan must resolve all three. */
     static final Map<String, String> REQUIRED_LIVE = Map.of(
@@ -535,11 +543,22 @@ class CollectionNameSqlLiveBodyGateTest {
     }
 
     /** Name-parsing expressions in one body, by shape (a shape that is absent has no entry). Comments are already blank. */
+    private static boolean hasDunder(String lit) {
+        return lit.contains("__") || lit.contains("\\_\\_");
+    }
+
     static Map<String, Integer> expressions(String body) {
         int dunder = 0;
         int quarantine = 0;
+        int classifier = 0;
         for (String lit : literals(body)) {
-            if (lit.contains("__") || lit.contains("\\_\\_")) dunder++;
+            if (hasDunder(lit)) {
+                // a literal whose only "__" are the frozen prefixes, bare or quoted inside a dollar-quoted statement body,
+                // is the URI-string classifier (counted apart); any other "__" keeps it a name parse
+                String rest = FROZEN_PREFIXES.contains(lit) ? "" : lit;
+                for (String p : FROZEN_PREFIXES) rest = rest.replace("'" + p + "'", "");
+                if (hasDunder(rest)) dunder++; else classifier++;
+            }
             if (lit.startsWith("quarantine-")) quarantine++;
         }
         Matcher a = ASSEMBLED_SEPARATOR.matcher(body);
@@ -547,6 +566,7 @@ class CollectionNameSqlLiveBodyGateTest {
         Map<String, Integer> out = new TreeMap<>();
         if (dunder > 0) out.put(DUNDER_LITERAL, dunder);
         if (quarantine > 0) out.put(QUARANTINE_LITERAL, quarantine);
+        if (classifier > 0) out.put(URI_CLASSIFIER_LITERAL, classifier);
         return out;
     }
 
@@ -622,7 +642,11 @@ class CollectionNameSqlLiveBodyGateTest {
         assertEveryChangelogIncluded(dirFiles, includes);
         Resolution r = resolveRealTree(includes);
         assertNonVacuous(r, REQUIRED_LIVE, INCLUDES_FLOOR, LIVE_FUNCTIONS_FLOOR);
-        Map<String, Integer> actual = census(r.live);
+        Map<String, Integer> everything = census(r.live);
+        Map<String, Integer> actual = new TreeMap<>(everything);
+        actual.keySet().removeIf(k -> k.endsWith("|" + URI_CLASSIFIER_LITERAL));
+        Map<String, Integer> classifier = new TreeMap<>(everything);
+        classifier.keySet().removeIf(k -> !k.endsWith("|" + URI_CLASSIFIER_LITERAL));
         int total = actual.values().stream().mapToInt(Integer::intValue).sum();
         long names = r.live.values().stream().map(Live::name).distinct().count();
         Map<String, List<String>> overloaded = new TreeMap<>();
@@ -641,6 +665,9 @@ class CollectionNameSqlLiveBodyGateTest {
         assertThat(checkCensus(actual, NAME_PARSING_CENSUS))
             .as("RDR-229 item 4: live plpgsql bodies that parse a collection name. REGRESSION = a new site; "
                 + "STALE FINGERPRINT = a site removed without lowering the pin")
+            .isEmpty();
+        assertThat(checkCensus(classifier, URI_CLASSIFIER_CENSUS))
+            .as("the URI-string classifier's frozen-prefix literals, pinned apart from the name-parsing census")
             .isEmpty();
         assertThat(NAME_PARSING_CENSUS.values().stream().mapToInt(Integer::intValue).sum())
             .as("NAME_PARSING_TOTAL_CEILING equals the declared census: lowered in the same edit as any reduction")
