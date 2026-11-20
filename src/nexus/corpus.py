@@ -1332,28 +1332,61 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
         )
 
 
+SubjectFinder = Callable[[str, str, str], "CollectionAttributes | None"]
+"""``(content_type, owner_id, embedding_model) -> the registered row or None``:
+what :meth:`nexus.db.http_vector_client.HttpVectorClient.find_collection` and
+:func:`catalog_subject_finder` answer."""
+
+
+def catalog_subject_finder() -> SubjectFinder:
+    """A :data:`SubjectFinder` that reads the catalog registry row, and nothing else
+    (RDR-229 P2.8, item 5).
+
+    For the writers that hold no T3 handle (``nx index md``, ``nx index pdf``,
+    ``nx dt index``). It reads
+    ``make_catalog_reader().find_collection(...)`` for the process-default tenant
+    and closes the reader as ``HttpVectorClient.find_collection`` does. It never
+    probes T3 names, so the nexus-hmxi rule (indexers do not grandfather onto
+    legacy names) is untouched. The reader is built per call, never at
+    construction. A failed read raises; :func:`t3_collection_name` turns it into
+    :class:`CollectionRegistryUnreadableError` on a write.
+    """
+
+    def find(content_type: str, owner_id: str, embedding_model: str) -> "CollectionAttributes | None":
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+        reader = make_catalog_reader()
+        try:
+            return reader.find_collection(content_type, owner_id, embedding_model)  # type: ignore[union-attr]
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+
+    return find
+
+
 def _knowledge_subject_label(
-    t3: object, subject: str, model: str, rendered: str, *, for_write: bool,
+    finder: "SubjectFinder | None", subject: str, model: str, rendered: str, *, for_write: bool,
 ) -> "str | None":
     """The label of the knowledge collection registered for *subject*, found by its
     row's attributes, never by rendering (RDR-229 P2.8, item 5).
 
     A knowledge collection's row carries its subject as ``owner_id``
     (``docs/collections.md``; ``catalog-044`` exempts it from the owner rewrite),
-    so ``find_collection('knowledge', subject, model)`` finds it whatever shape
+    so ``finder('knowledge', subject, model)`` finds it whatever shape
     its label has. Answers the label only when it differs from *rendered*, the
     name the resolution below would try first: a row under the rendered name
     leaves that resolution, with its legacy fallbacks, exactly as it was.
 
-    ``None`` (the name resolution stands) when *t3* has no ``find_collection``
-    or no row backs the subject. *t3*'s ``find_collection`` answers only for its
+    ``None`` (the name resolution stands) when *finder* is ``None`` or no row
+    backs the subject. A store's ``find_collection`` answers only for its
     own tenant (:meth:`nexus.db.http_vector_client.HttpVectorClient.find_collection`).
     When the row cannot be read, a read falls back to the name resolution and a
     write raises :class:`CollectionRegistryUnreadableError`.
     """
     from nexus.catalog.collection_attributes import CollectionAttributes  # noqa: PLC0415 — circular-dep avoidance (catalog)
 
-    finder = getattr(t3, "find_collection", None)
     if finder is None:
         return None
     try:
@@ -1373,7 +1406,7 @@ def _knowledge_subject_label(
 
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
-    allow_placeholder: bool = False,
+    allow_placeholder: bool = False, subject_finder: "SubjectFinder | None" = None,
 ) -> str:
     """Resolve a --collection argument to a T3 collection name.
 
@@ -1557,6 +1590,16 @@ def t3_collection_name(
     promoted = f"{ct}__{owner_segment}__{_resolve_promoted_model_token(ct, for_write=False)}__v1"
 
     if t3 is None:
+        # RDR-229 P2.8: a t3-less writer that passed a ``subject_finder`` finds the
+        # subject's registered collection by its row before it renders a name. No
+        # finder, no read: every other t3-less caller stays pure.
+        if ct == "knowledge" and subject_finder is not None:
+            found = _knowledge_subject_label(
+                subject_finder, owner_segment, _resolve_promoted_model_token(ct, for_write=False),
+                promoted, for_write=for_write,
+            )
+            if found is not None:
+                return found
         if for_write:
             # Pure write-shaped call with no t3 to probe against (e.g.
             # the indexers) — no legacy collection could possibly be
@@ -1569,8 +1612,8 @@ def t3_collection_name(
         return promoted
     if ct == "knowledge":
         found = _knowledge_subject_label(
-            t3, owner_segment, _resolve_promoted_model_token(ct, for_write=False), promoted,
-            for_write=for_write,
+            getattr(t3, "find_collection", None), owner_segment,
+            _resolve_promoted_model_token(ct, for_write=False), promoted, for_write=for_write,
         )
         if found is not None:
             return found
