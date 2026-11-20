@@ -39,9 +39,6 @@ QUAR_NOROW: str = (
 ROUTE: str = (
     "Picks behaviour by the name's content-type prefix; P2.9 reads the row's content_type instead."
 )
-WM_P24: str = (
-    "Taxonomy threshold keyed by the name's prefix; becomes a row read at P2.4."
-)
 WM_P22: str = (
     'RDR-204 (b) read-path model read from the name; becomes a resolve_collection Row read at P2.2.'
 )

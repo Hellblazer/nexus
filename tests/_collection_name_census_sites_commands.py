@@ -16,7 +16,6 @@ from tests._collection_name_census_notes import (
     MINT_A,
     ROUTE,
     WM_P22,
-    WM_P24,
 )
 from tests._collection_name_census_scan import Site as S
 
@@ -174,13 +173,4 @@ SITES: tuple[S, ...] = (
     S('src/nexus/commands/taxonomy_cmd.py',
       ('exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])', 'names = [n for n in names if not any(fnmatch(n, pat) for pat in exclude)]'),
       'fnmatch', 'label-pattern', LABEL),
-    S('src/nexus/commands/taxonomy_cmd.py',
-      ('if resolved_threshold is None and source_collection:', 'resolved_threshold = default_projection_threshold(source_collection)'),
-      'primitive_call', 'holdover', WM_P24),
-    S('src/nexus/commands/taxonomy_cmd.py',
-      ('targets = [', '(prefix, threshold if threshold is not None else default_projection_threshold(prefix + "x"))'),
-      'primitive_call', 'holdover', WM_P24),
-    S('src/nexus/commands/taxonomy_cmd.py',
-      ('threshold if threshold is not None', 'else default_projection_threshold(src)'),
-      'primitive_call', 'holdover', WM_P24),
 )

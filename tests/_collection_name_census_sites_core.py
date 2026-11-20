@@ -25,7 +25,6 @@ from tests._collection_name_census_notes import (
     ROUTE,
     ROUTE_DEFAULT,
     WM_P22,
-    WM_P24,
 )
 from tests._collection_name_census_scan import Site as S
 
@@ -141,9 +140,6 @@ SITES: tuple[S, ...] = (
     S('src/nexus/db/t2/http_taxonomy_store.py',
       ('})', 'return write_with_registration_retry(collection, _do_import, registrar=self._catalog_registrar)["id"]'),
       'primitive_call', 'mint', MINT_REG),
-    S('src/nexus/db/t2/http_taxonomy_store.py',
-      ('threshold if threshold is not None', 'else default_projection_threshold(collection)'),
-      'primitive_call', 'holdover', WM_P24),
     S('src/nexus/db/t2/http_taxonomy_store.py',
       ('from nexus.corpus import write_with_registration_retry  # noqa: PLC0415 — circular-dep avoidance (corpus)', 'r = write_with_registration_retry('),
       'primitive_call', 'mint', MINT_REG),
@@ -330,6 +326,9 @@ SITES: tuple[S, ...] = (
     S('src/nexus/plans/runner.py',
       ('from nexus.corpus import index_model_for_collection  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)', 'return index_model_for_collection(collection)'),
       'primitive_call', 'holdover', WM_P22),
+    S('src/nexus/projection_threshold.py',
+      ('return threshold_for_content_type(row["content_type"])', 'return default_projection_threshold(collection_name)'),
+      'primitive_call', 'mint', MINT_NOROW),
     S('src/nexus/reembed_job.py',
       ('name = f"{content_type}__{owner.replace(\'.\', \'-\')}__{target_model}__v1"', 'if not is_conformant_collection_name(name):'),
       'primitive_call', 'mint', MINT_A),
