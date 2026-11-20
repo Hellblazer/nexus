@@ -22,8 +22,10 @@ rows server-side (:mod:`nexus.catalog.engine_reads.uri_segments`). This module c
 ``aspect_readers.FILE_ROUTED_PREFIXES`` and its segment test, so the prefix list is not copied.
 
 GATING. The row WARNs and never fails, and is not in ``doctor._GATING_SUPPLEMENTARY_CHECKS``. RDR-229 calls it a
-pre-flight, but it is information for P2.10, and no command that clears the residue ships before P2.10's move
-registers. A FAIL would make ``nx doctor`` exit non-zero on every install that carries any, with no remedy to run.
+pre-flight, but it is information, and this row is where the residue is COUNTED: P2.10's repair moves
+(``rdr229-residue-*``) restore a file-routed segment where they can and skip, silently, a row whose new value a live
+document already holds, so what a move leaves behind is read here, from the census, and not from the move. A FAIL would
+make ``nx doctor`` exit non-zero on every install that carries any, for a state the moves may already be clearing.
 
 One report dict, like :mod:`nexus.catalog.sensitivity_doctor`'s: ``{"name", "status", "reason", "rows_examined",
 "counts", "totals"}``. ``status`` is ``not_applicable`` (a ``reason`` starting "not checked:" could not look: the
@@ -223,7 +225,8 @@ def render_text(report: dict, *, limit: int = 50) -> list[str]:  # noqa: ARG001 
                      f"{c['chroma_file_routed_segment']}")
     if status == WARN:
         lines.append(
-            "  Nothing clears these rows yet: RDR-229 P2.10's repair move restores a file-routed segment to the rows "
-            "whose segment is their own collection, and leaves the rest counted. Record these counts before it runs. "
-            "This row never fails the sweep.")
+            "  RDR-229 P2.10's repair moves (data moves rdr229-residue-*, run by the engine in the background) restore a "
+            "file-routed segment to the rows whose segment is their own collection; a row whose new value a live document "
+            "holds is skipped, and the rest stay in this count. Re-run this row after the moves complete: what it still "
+            "counts is what they did not clear. This row never fails the sweep.")
     return lines
