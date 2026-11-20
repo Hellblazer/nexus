@@ -74,6 +74,7 @@ def _resolve_dt_collection(
     ``T3Database.get_or_create_collection`` accepts them.
     """
     from nexus.corpus import (  # noqa: PLC0415 — command-local import
+        catalog_subject_finder,
         resolve_write_embedding_model,
         t3_collection_name,
     )
@@ -85,7 +86,7 @@ def _resolve_dt_collection(
         # catalog Document had already been registered. ``nx index pdf``
         # normalises its --collection through the same resolver; this
         # path must too.
-        return t3_collection_name(collection, for_write=True)
+        return t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
     owner = corpus.replace("_", "-")
     content_type = "knowledge" if ext == ".pdf" else "docs"
     suffix = f"{owner}-papers" if ext == ".pdf" else owner
