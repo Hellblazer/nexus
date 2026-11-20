@@ -69,9 +69,10 @@ def row_the_heartbeat_reread_follows_a_cross_seat_switch_when_the_marker_is_lost
     assert world.identity(alpha)["state"] == "unheld" and world.identity(gamma)["holder"]["pid"] == 100
 
 
-def row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_only_from_its_own_token_file(world: World) -> None:
-    """``/branch`` runs no hook: the registry file gets a new session id the index does not know. On its next
-    renewal the server maps it through the registry's pid and startedAt and appends the ``fork`` row."""
+def row_a_branch_appends_a_fork_row_after_one_renewal_of_grace_and_a_marker_is_adopted_only_from_its_own_token_file(world: World) -> None:
+    """``/branch`` runs no hook: the registry file gets a new session id the index does not know. The first renewal
+    that sees it waits (a /clear's hook may still be binding it); the second maps it through the registry's pid and
+    startedAt and appends the ``fork`` row."""
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "sid-1")
@@ -79,6 +80,9 @@ def row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_
     lease.tick()
 
     world.registry(100, 100_000, T0, session_id="branch-sid", name="alpha")
+    world.now += HEARTBEAT_S
+    assert not lease.tick().forked, "one renewal of grace: a /clear's hook may still be binding this id"
+    assert world.events(alpha) == ["start"]
     world.now += HEARTBEAT_S
     report = lease.tick()
     assert report.forked and lease.session_id == world.q("branch-sid")
@@ -94,6 +98,25 @@ def row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_
     own = str(token_path(world.identity_dir, 100, 100_000))
     assert not lease.adopt_marker(identity=alpha, generation=1, token_file=str(world.identity_dir / "999.999.token"))
     assert lease.adopt_marker(identity=cleared.identity, generation=1, token_file=own) and lease.session_id == world.q("sid-2")
+
+
+def row_a_renewal_between_clears_registry_write_and_its_hook_sends_no_fork(world: World) -> None:
+    """nexus-hczdo, develop run 44659989781: on /clear Claude writes the new session id into its registry file before
+    the SessionStart hook binds it. A renewal in that gap saw an id the index did not know and appended a ``fork``
+    row, so one /clear left ``start, fork, clear``. The id is now given one renewal of grace, and the hook binds it."""
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    world.hook(100, "startup", "sid-1")
+    lease = _lease(world, 100)
+    lease.tick()
+
+    world.registry(100, 100_000, T0, session_id="sid-2", name="alpha")   # /clear: the registry first
+    world.now += HEARTBEAT_S
+    assert not lease.tick().forked, "the renewal in the gap waits for the hook"
+    world.hook(100, "clear", "sid-2")                                    # then the hook binds the new id
+    world.now += HEARTBEAT_S
+    assert not lease.tick().forked, "the hook bound it: the index knows it now"
+    assert world.events(alpha) == ["start", "clear"]
 
 
 def row_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_claude_has_exited(world: World) -> None:
@@ -132,6 +155,7 @@ def row_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_
 ROWS = (
     row_a_fresh_server_reads_its_token_file_renews_each_minute_and_a_sleep_lapses_and_revives_without_a_generation_change,
     row_the_heartbeat_reread_follows_a_cross_seat_switch_when_the_marker_is_lost,
-    row_a_branch_appends_a_fork_row_on_the_next_renewal_and_a_marker_is_adopted_only_from_its_own_token_file,
+    row_a_branch_appends_a_fork_row_after_one_renewal_of_grace_and_a_marker_is_adopted_only_from_its_own_token_file,
+    row_a_renewal_between_clears_registry_write_and_its_hook_sends_no_fork,
     row_a_superseded_server_stops_writing_and_says_so_and_end_is_sent_only_when_claude_has_exited,
 )
