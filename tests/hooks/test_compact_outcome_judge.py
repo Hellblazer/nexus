@@ -274,6 +274,7 @@ class TestHookEvidence:
         ok = {"directive_count": 2}
         assert self.problem("directive", ok) is None
         assert "narrow directive alone" in self.problem("directive")                  # the hook's copy only: no overlay
+        assert "narrow directive alone" in self.problem("directive", {"directive_count": 3})   # exactly the hook's + the overlay's
         assert "narrow directive alone" in self.problem("directive", {**ok, "has_overlay_list": True})
         assert "narrow directive alone" in self.problem("directive", {**ok, "has_broad": True})
         assert self.problem("broad", {"has_broad": True}) is None

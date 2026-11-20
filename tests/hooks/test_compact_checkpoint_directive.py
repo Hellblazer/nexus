@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import json
 import sys
 from datetime import datetime, timedelta, timezone
@@ -21,10 +22,12 @@ SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" /
 SID = "11111111-2222-3333-4444-555555555555"
 
 #: The three sentences, as the hook must say them. Pinned in full: a reword is a change to the directive.
-ACT = "act on any board thread or summary item that has nothing to wait on."
+ACT = ("act on any open item that has nothing to wait on (a board thread, or a summary item the board, git or "
+       "beads still show open).")
 WAIT = "If all you are doing is waiting on a running task, say what you are waiting on."
-PACING = "Never start work the user held back or asked you to wait on."
-DIRECTIVE = f"After this compaction: {ACT} {WAIT} {PACING}"
+PACING = ("Never start work the user held back or asked you to wait on, work that needs the user's approval, or work "
+          "another session owns.")
+DIRECTIVE = f"After this compaction, once you have done what the user last asked: {ACT} {WAIT} {PACING}"
 
 
 @pytest.fixture()
@@ -106,6 +109,32 @@ class TestOpenWorkDirective:
         ctx = _inject(mod, monkeypatch)
         assert "no working-state checkpoint" in ctx
         assert ctx.count(DIRECTIVE) == 1
+
+    def test_a_checkpoint_with_no_usable_stamp_carries_it_once(self, mod, checkpoints, monkeypatch) -> None:
+        (checkpoints / f"{SID}.md").write_text(
+            f"# Compaction checkpoint\n\n- session: {SID}\n- trigger: auto\n\n## Working state\n\nx\n", encoding="utf-8"
+        )
+        ctx = _inject(mod, monkeypatch)
+        assert "no working-state checkpoint" in ctx
+        assert ctx.count(DIRECTIVE) == 1
+
+    def test_a_checkpoint_an_earlier_compaction_already_injected_carries_it_once(self, mod, checkpoints, monkeypatch) -> None:
+        _write(checkpoints, "x")
+        first = _inject(mod, monkeypatch)
+        assert first.count(DIRECTIVE) == 1
+        sidecar = checkpoints / f"{SID}{mod._INJECTED_SUFFIX}"
+        assert sidecar.is_file()
+        old = sidecar.stat().st_mtime - 3600
+        os.utime(sidecar, (old, old))                    # an EARLIER compaction's inject, not this one's
+        ctx = _inject(mod, monkeypatch)
+        assert "no working-state checkpoint" in ctx
+        assert ctx.count(DIRECTIVE) == 1
+
+    def test_a_resume_start_that_restores_a_checkpoint_carries_no_directive(self, mod, checkpoints, monkeypatch) -> None:
+        """"After this compaction" is false on a resume, a fork or a startup: the directive is compact-only."""
+        _write(checkpoints, "x")
+        ctx = _inject(mod, monkeypatch, source="resume")
+        assert DIRECTIVE not in ctx and "After this compaction" not in ctx
 
     def test_the_notice_still_tells_the_session_to_recover_its_state_before_acting(
         self, mod, checkpoints, monkeypatch

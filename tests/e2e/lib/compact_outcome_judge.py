@@ -349,7 +349,7 @@ def hook_evidence_problem(arm: str, injected: dict, checkpoint_written: bool, un
     # overlay's narrow line shows up as a SECOND copy; the broad line and the list come only from the overlay.
     has = {k: injected.get(k) for k in ("has_broad", "has_overlay_list")}
     narrow = int(injected.get("directive_count") or 0)
-    if arm == "directive" and not (narrow >= 2 and not has["has_broad"] and not has["has_overlay_list"]):
+    if arm == "directive" and not (narrow == 2 and not has["has_broad"] and not has["has_overlay_list"]):
         return "the directive arm's injection is not the real checkpoint plus the narrow directive alone"
     if arm == "broad" and not (has["has_broad"] and narrow <= 1 and not has["has_overlay_list"]):
         return "the broad arm's injection is not the real checkpoint plus the broad directive alone"

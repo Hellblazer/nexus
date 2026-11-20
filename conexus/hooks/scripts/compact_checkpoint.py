@@ -185,15 +185,20 @@ _OMIT_SECTIONS = ("### Ready beads", "### nx memory", "### Feedback memories")
 #: Kept subsections, in file order after the board entry. A hard cut takes the tail.
 _KEEP_ORDER = ("### In-progress beads", "### Uncommitted", "### Open PRs", "### Recent commits")
 _STUB_BODY = "[no pre-compaction checkpoint for this compaction]"
-#: Said once in every inject that emits context, the restored checkpoint and the no-restore notice alike. The
-#: transcript census (T2 nexus/post-compaction-resumption-census-2026-11-19) traced the real post-compaction
-#: misses to threads that were all blocked while the one unblocked item sat only in the summary, and to a
-#: session that waited on a background task without saying so. The last sentence keeps it from overriding
-#: the user's own pacing.
+#: Said once in every COMPACT inject that emits context, the restored checkpoint and the no-restore notice alike
+#: (never on a resume, fork or startup, where "after this compaction" is false). The transcript census (T2
+#: nexus/post-compaction-resumption-census-2026-11-19) traced the real post-compaction misses to threads that were
+#: all blocked while the one unblocked item sat only in the summary, and to a session that waited on a background
+#: task without saying so. Each clause is a brake as much as a push (review, T1 directive-critic): it waits until
+#: the user's last ask is done, acts on a summary item only when the board, git or beads still show it open (the
+#: summary is not the state of record), and never starts work the user held back, work that needs the user's
+#: approval, or work another session owns.
 _RESUME_DIRECTIVE = (
-    "After this compaction: act on any board thread or summary item that has nothing to wait on. "
+    "After this compaction, once you have done what the user last asked: act on any open item that has nothing to "
+    "wait on (a board thread, or a summary item the board, git or beads still show open). "
     "If all you are doing is waiting on a running task, say what you are waiting on. "
-    "Never start work the user held back or asked you to wait on."
+    "Never start work the user held back or asked you to wait on, work that needs the user's approval, or work "
+    "another session owns."
 )
 _ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"
 #: Suffix of the per-session sidecar inject writes: the ``written:`` stamp it last emitted.
@@ -1311,8 +1316,9 @@ def run_inject(payload: dict) -> str:
             # nexus-3lcda).
             lead += (". The state may have changed since it was written, and the checkpoint may "
                      "predate this compaction: check git, beads and the board before acting on it.")
+    directive = f"{_RESUME_DIRECTIVE}\n\n" if compact else ""
     intro = (f"{lead} The state lives in version control, beads and the threads board, "
-             f"not in the summary.\n\n{_RESUME_DIRECTIVE}\n\n")
+             f"not in the summary.\n\n{directive}")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
     context = _fit(intro + body, footer)
     _emit_context(context)
