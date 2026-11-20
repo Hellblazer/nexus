@@ -169,7 +169,7 @@ class CatalogReconcileCommitInvariantsTest extends CatalogReconcileTestBase {
     }
 
     @Test
-    void aCollectionMove_rewritesANoteUriInItsOwnSpelling_andRefusesACollision() {
+    void aCollectionMove_rewritesANxNoteUriLeavesTheLegacySpelling_andRefusesACollision() {
         String t = tenantWithOwner();
         String note = seed(t, OWNER, "thing", Map.of("source_uri", "nx-note://knowledge__a/thing",
             "physical_collection", "knowledge__a"));
@@ -185,7 +185,9 @@ class CatalogReconcileCommitInvariantsTest extends CatalogReconcileTestBase {
             present(2, "f.py").set("physical_collection", "knowledge__b"));
 
         assertThat(col(t, note, "source_uri")).isEqualTo("nx-note://knowledge__b/thing");
-        assertThat(col(t, legacy, "source_uri")).as("the row's own spelling is kept").isEqualTo("chroma://knowledge__b/other");
+        assertThat(col(t, legacy, "physical_collection")).as("the document itself moved").isEqualTo("knowledge__b");
+        assertThat(col(t, legacy, "source_uri")).as("RDR-229 P2.10: a chroma:// value is not moved, it keeps its segment")
+            .isEqualTo("chroma://knowledge__a/other");
         assertThat(col(t, file, "source_uri")).as("a file:// URI is untouched").isEqualTo("file:///r/f.py");
 
         // a live document already holds the rewritten URI: the whole commit is refused
