@@ -499,10 +499,12 @@ def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | 
 
 
 def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
-    """Return the conformant collection name for ``(repo, content_type)``.
+    """Return the collection name for ``(repo, content_type)``.
 
     Catalog-aware path: when the catalog is initialized and the repo
-    owner is registered, returns the catalog-minted conformant name.
+    owner is registered, returns the label the collection is registered
+    under, whatever its shape, or a newly rendered conformant name when no
+    row exists yet (RDR-229 P2.8).
 
     Unregistered-owner path: synthesizes a conformant name from the
     path-derived ``<basename>-<hash8>`` identity so the ad-hoc workflow

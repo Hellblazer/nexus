@@ -356,7 +356,8 @@ def _sanitise_owner_segment(name: str) -> str:
 def _resolve_repo_collection(
     repo: Path, content_type: str, *, cat: Any = None,
 ) -> str:
-    """Return the conformant collection name for ``(repo, content_type)``.
+    """Return the collection name for ``(repo, content_type)``: the registered
+    label when a catalog row exists (RDR-229 P2.8), else a conformant name.
 
     Catalog-aware path: when ``cat`` is supplied AND has an owner
     registered for ``repo``, returns the catalog-minted
