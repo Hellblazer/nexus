@@ -1314,6 +1314,12 @@ def check_staleness(
       ``pdf`` use). Every ``nx index repo`` call site passes a cache, so this
       is reached only by a direct caller.
 
+    In the cached mode a stored model must equal *embedding_model* unless
+    ``cache.model_known`` is False (RDR-229 P2.3): the run could not read the
+    collection's catalog row, *embedding_model* is the name's guess, and the
+    content hash alone decides, as ``doc_indexer._stored_model_is_current`` does
+    for ``nx index md`` / ``pdf``.
+
     Args:
         col: Collection handle. Used only by the per-file mode.
         source_file: Path (or string) of the source file being checked.

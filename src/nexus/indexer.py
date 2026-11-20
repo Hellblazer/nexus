@@ -481,6 +481,16 @@ def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | 
     *legacy_model* is what a name that carries no model token (a legacy name) answers
     when no row does: the model the local embedder reports, or the docs collection's
     for the rdr one; ``None`` leaves such a name to the calibrated derivation.
+
+    A collection that is registered but holds no chunk yet is not in the listing the row
+    comes from, so it reads as no row and answers the name (``embedding_model_row_preferred``
+    has the same limit): a collection renamed with its data is visible, an empty one is not.
+
+    The pre-index registration loop registers whatever this answers. When the read failed
+    and the row's model differs from the name's guess (a rename left them apart), the engine
+    can refuse that registration (``EmbeddingProfileMismatchError``) and the run stops
+    loudly; registration is not skipped, because a skip would write into a collection the
+    run never confirmed. A row that agrees with the guess, the usual case, is unaffected.
     """
     from nexus.doc_indexer import _target_model  # noqa: PLC0415 — circular-dep avoidance (nexus.doc_indexer imports this module)
 
@@ -5496,24 +5506,6 @@ def _run_index(
         if _migrate_writer is not None:
             _migrate_writer.close()
 
-    # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk is the
-    # model that EMBEDDED it, and the engine embeds by the collection's registry
-    # row (EmbedderRouter.resolveEmbedderStrict), not by the name and not by the
-    # Python EF (without the ``[local]`` extra the EF falls back to MiniLM while a
-    # bge-768 collection is written). RDR-229 P2.3 (nexus-p2m1x.8): so the target
-    # model is the row's, with the three outcomes ``nx index md`` / ``pdf`` have
-    # (``_repo_target_model``): the row's model; no row (a new collection), or a
-    # row with no model, the name's own token (the registration loop below gives
-    # such a collection a row holding it); a row read that failed, the name's model
-    # flagged as a guess, so the unchanged-content skip lets the hash decide. A
-    # rename keeps the source row's model under the new name, so a conformant
-    # name's token and its row can disagree: the row wins. Resolved here, after
-    # the legacy-name migration, so it follows the final names. A non-conformant
-    # (legacy) name carries no token, so in local mode it keeps the Python EF's
-    # name unless the row answers.
-    code_model, code_model_known = _repo_target_model(db, code_collection, legacy_model=local_model)
-    docs_model, docs_model_known = _repo_target_model(db, docs_collection, legacy_model=local_model)
-
     # nexus-27u7: defer T3 collection creation to the per-content-type
     # branches that actually have files. Pre-fix the indexer
     # unconditionally created both ``code__`` and ``docs__`` collections
@@ -5536,9 +5528,39 @@ def _run_index(
         (_migrated_names.get("rdr") or _repo_collection_or_legacy(repo, "rdr"))
         if have_rdr_files else None
     )
-    # nexus-s80u9: the rdr collection's own model labels its chunks, as the docs
-    # collection's does its own; a legacy name keeps the docs label it always had.
-    # Row first, as above (RDR-229 P2.3).
+    # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk is the
+    # model that EMBEDDED it, and the engine embeds by the collection's registry
+    # row (EmbedderRouter.resolveEmbedderStrict), not by the name and not by the
+    # Python EF (without the ``[local]`` extra the EF falls back to MiniLM while a
+    # bge-768 collection is written). RDR-229 P2.3 (nexus-p2m1x.8): so the target
+    # model is the row's, with the three outcomes ``nx index md`` / ``pdf`` have
+    # (``_repo_target_model``): the row's model; no row (a new collection), or a
+    # row with no model, the name's own token (the registration loop below gives
+    # such a collection a row holding it); a row read that failed, the name's model
+    # flagged as a guess, so the unchanged-content skip lets the hash decide. A
+    # rename keeps the source row's model under the new name, so a conformant
+    # name's token and its row can disagree: the row wins. Resolved here, after
+    # the legacy-name migration, so it follows the final names, and only for a
+    # collection this run has files for: a collection with none reads no row, so
+    # an unreachable listing adds no failed read and no warning for it. A
+    # non-conformant (legacy) name carries no token, so in local mode it keeps the
+    # Python EF's name unless the row answers; the rdr collection's keeps the docs
+    # one's.
+    if _migrated_names:
+        # A migration renamed collections (the data plane moves the rows with them)
+        # and the shared collections cache the row read goes through was filled,
+        # for up to a minute, before: it has no row for a new name.
+        from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
+
+        invalidate_collections_cache()
+    if have_code_files:
+        code_model, code_model_known = _repo_target_model(db, code_collection, legacy_model=local_model)
+    else:
+        code_model, code_model_known = local_model or "", True
+    if have_docs_files:
+        docs_model, docs_model_known = _repo_target_model(db, docs_collection, legacy_model=local_model)
+    else:
+        docs_model, docs_model_known = local_model or "", True
     if rdr_col_name is not None:
         rdr_model, rdr_model_known = _repo_target_model(db, rdr_col_name, legacy_model=docs_model)
     else:

@@ -16,7 +16,7 @@ MINT_A: str = (
     'RDR-204 (a): the name is a user argument, a rename target or one nx is about to register; no row exists yet. Empties at Phase 3.'
 )
 MINT_REG: str = (
-    "Registration seam: derives the new row's attributes from the name because no row exists yet (RDR-204 (a)). Empties at Phase 3."
+    "Registration seam: derives the new row's content type and owner from the name because no row exists yet (RDR-204 (a)); the model it registers is the caller's resolved one where it has one (nx index repo: the row's, RDR-229 P2.3). Empties at Phase 3."
 )
 MINT_NOROW: str = (
     'Item 1 NoRow/Unreadable outcome: reads the row first and answers with the mint-class name derivation only when no row answers. Stays until P3.8.'
