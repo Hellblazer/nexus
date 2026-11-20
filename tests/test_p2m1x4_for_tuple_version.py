@@ -97,9 +97,9 @@ def test_an_empty_row_version_with_a_v0_name_raises(monkeypatch) -> None:
 def test_an_empty_row_version_with_a_slug_name_is_answered_as_it_is(monkeypatch) -> None:
     """Engine 0.1.200 (RDR-229 P2.8): a grandfathered slug row with a blank version can win its
     tuple. It is returned unchanged; only a bump refuses (tests/test_rdr229_p28_subject_by_attributes.py)."""
-    cat = _client(monkeypatch, _row(name="a-legacy-slug", model_version=""))
+    cat = _client(monkeypatch, _row(name="notes-from-2024", model_version="", legacy_grandfathered=True))
     got = cat.collection_for("code", _OWNER, _MODEL)
-    assert got.render() == "a-legacy-slug"
+    assert got.render() == "notes-from-2024"
     with pytest.raises(ValueError, match="model_version"):
         cat.collection_for("code", _OWNER, _MODEL, bump=True)
 
