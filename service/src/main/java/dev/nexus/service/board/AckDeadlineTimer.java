@@ -108,10 +108,10 @@ public final class AckDeadlineTimer {
         for (Key key : java.util.List.copyOf(armed.keySet())) {
             if (key.tenant().equals(tenant)) {
                 cancel(key);
-                failures.remove(key);
                 n++;
             }
         }
+        failures.keySet().removeIf(key -> key.tenant().equals(tenant));
         return n;
     }
 

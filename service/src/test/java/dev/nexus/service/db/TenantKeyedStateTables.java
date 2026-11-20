@@ -105,6 +105,7 @@ final class TenantKeyedStateTables {
         keyed.put("ChunkReaper.resumeExpiry", REAPER);
         // RDR-252 Step 3 (nexus-igea9): the owner stamper's armed ack deadlines, one scheduled task per (tenant, base topic).
         keyed.put("AckDeadlineTimer.armed", "AckDeadlineTimer");
+        keyed.put("AckDeadlineTimer.failures", "AckDeadlineTimer");
         keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
         TenantKeyedStateCoverageEntries.fill(keyed, notKeyed);   // nexus-7fku2.1.2: TaxonomyCoverage and its invalidation helper
         keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
@@ -792,7 +793,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
         // RDR-252 Step 3 (nexus-igea9): the owner stamper. Everything below is a value read or built for one evaluation
         // (a record's components, a holder of a function or of the timer); none outlives the call that built it
-        // except the timer's armed map, which is keyed above and cleared by the AckDeadlineTimer evictor.
+        // except the timer's armed and failures maps, which are keyed above and cleared by the AckDeadlineTimer evictor.
         String evaluation = "a component of a value record built for one owner evaluation and dropped with it; "
             + "it is not stored";
         for (String f : List.of(

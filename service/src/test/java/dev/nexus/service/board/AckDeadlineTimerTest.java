@@ -266,6 +266,32 @@ class AckDeadlineTimerTest {
     }
 
     @Test
+    void evictingATenantAlsoClearsItsFailureCount() {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AckDeadlineTimer.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            ManualScheduler sched = new ManualScheduler();
+            AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> {
+                throw new IllegalStateException("boom");
+            });
+            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
+            for (int i = 0; i < 11; i++) {
+                sched.tasks.getLast().task().run();
+            }
+
+            timer.evictTenant("t1");
+            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
+            sched.tasks.getLast().task().run();   // the 12th failure overall, but the first since the eviction
+
+            assertThat(logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR)).isEmpty();
+        } finally {
+            logger.detachAppender(logs);
+        }
+    }
+
+    @Test
     void evictingATenantCancelsItsDeadlinesAndLeavesOthers() {
         ManualScheduler sched = new ManualScheduler();
         List<String> fired = new ArrayList<>();
