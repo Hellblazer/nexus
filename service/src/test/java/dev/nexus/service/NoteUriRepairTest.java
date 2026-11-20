@@ -666,6 +666,61 @@ class NoteUriRepairTest {
     }
 
     @Test
+    void apply_aRetypeOfTheCollectionBlocksUntilTheRepairCommits_andTheRowIsRewrittenOnceAsKnowledge() throws Exception {
+        Fx f = new Fx("share-lock");
+        String label = registerLabel(f.tenant, "knowledge");
+        seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        java.util.concurrent.atomic.AtomicReference<Throwable> retypeInsideTheRepair = new java.util.concurrent.atomic.AtomicReference<>();
+        CatalogRepository.setNoteUriRepairHookForTests(stage -> {
+            if (!stage.equals("checked")) return;      // past the lock, the re-read and the holder check: only the UPDATE is left
+            try (Connection other = pg.createConnection("")) {
+                other.setAutoCommit(true);
+                var dsl = DSL.using(other, SQLDialect.POSTGRES);
+                dsl.select(DSL.function("set_config", String.class, DSL.val("lock_timeout"), DSL.val("400ms"), DSL.val(false)))
+                    .fetch();
+                try {
+                    dsl.update(CATALOG_COLLECTIONS)
+                        .set(CATALOG_COLLECTIONS.CONTENT_TYPE, "docs")
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))
+                        .execute();
+                } catch (Throwable t) {
+                    retypeInsideTheRepair.set(t);
+                }
+            } catch (java.sql.SQLException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+        assertThat(retypeInsideTheRepair.get()).as("the retype waited on the repair's share lock and timed out")
+            .isNotNull().hasStackTraceContaining("lock timeout");
+        assertThat(r.get("rewritten")).isEqualTo(1);
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(label, "alpha"));
+        CatalogRepository.setNoteUriRepairHookForTests(null);
+        setContentType(f.tenant, label, "docs");      // the retype lands once the repair has committed
+        Map<String, Object> again = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+        assertThat(again.get("rewritten")).as("rewritten once, never again").isEqualTo(0);
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(label, "alpha"));
+    }
+
+    @Test
+    void census_moreCollectionsThanOneContentTypeQueryHolds_allBecomeCandidates() throws Exception {
+        Fx f = new Fx("many");
+        int n = 501;
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            for (int i = 0; i < n; i++) PgContainerHelper.insertCollection(dsl, f.tenant, coll("many" + i + "-" + f.tenant));
+        }
+        for (int i = 0; i < n; i++) seedNote(f.tenant, "m" + i, coll("many" + i + "-" + f.tenant), f.nx(f.x1, "t" + i));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
+
+        assertThat(r.get("rewrite")).isEqualTo(n);
+        assertThat(r.get("refused")).isEqualTo(0);
+    }
+
+    @Test
     void census_aLiveRowWhoseCollectionHasNoRegistryRow_isRefusedNotRewritten_andDoesNotFailTheCensus() throws Exception {
         Fx f = new Fx("unregistered");
         String gone = "c999" + SEQ.incrementAndGet();
