@@ -62,7 +62,9 @@ leader (halcyon, set up by Sam on 2026-11-07) and rules in a T2 memo
 order), review pairs, a release crew (Sam and halcyon) and RDR co-authors. A
 session is often in several at once. None of these exists in the system:
 membership, leader and assignments live in messages and prose, so no tool and
-no aura can ask "who is in this, who leads it, who owns this task". Some
+no aura can ask "who is in this, who leads it, who owns this task" (built here:
+membership and the leader; for a develop red, the owner post; typed assignments
+cut at gate round 1). Some
 raid mechanics already run without the name: the restart script's "ready
 file written" exchange is a ready check, a CI post is a raid-wide warning,
 and halcyon's queue line is an assignment note.
@@ -252,11 +254,13 @@ such as `board/ci/nexus-develop--done`; a **template** is the engine's schema
 for a family of subspaces, naming its fields (**dims**, short typed fields
 the engine can match on) and its free-text **body**. The **stamp**,
 `sender_session`, is the session id the engine records on a write made with a
-session token. For an identity-token write, accepted RDR-253 does not yet
-say what the stamp holds; its Step 2 bead recommends the current session id
-from the latest binding row (`nexus_rdr/252-research-5` F7). This RDR needs
-a session id the engine's session index (`session/<session id>`) maps to an
-identity and generation, and states that as a requirement on RDR-253 Step 2. A **wake** is a channel notice that interrupts an idle
+session token. For an identity-token write, RDR-253 now says what the stamp
+holds ("With an identity token, a tuple's `sender_session` is the session id of
+the identity's newest binding row under the token's generation, so a send after
+`/clear` carries the new session id", `rdr-253-session-identity.md:743`), which
+is the session id this RDR needs, one the engine's session index
+(`session/<session id>`) maps to an identity and generation. This RDR stated
+that as a requirement on RDR-253 Step 2 (`nexus_rdr/252-research-5` F7). A **wake** is a channel notice that interrupts an idle
 session. A **lease** is a claim on a tuple that lapses unless renewed.
 
 ### Technical Design
@@ -360,8 +364,16 @@ group's one role.
 
 First groups, made explicit from what runs today: `push-train` (leader
 halcyon), and ad hoc push windows, review pairs and the release crew as
-needed. The restart script's ready check becomes a group operation: "every
-member of group X, report ready".
+needed. The restart script's ready check becomes a group operation:
+`claude-restart-sessions --ask-ready --group X` asks, and `--status --group X`
+reports, only the live sessions whose names are the aliases of X's live
+members, read from the engine roster (`nx group list X --json`). It prints how
+many members it covers and names each one it does not, with its state and why
+(no alias, no live session here, a Desktop binding or session, left out by
+`--skip` or `--only`, or not on this tmux server), so a ready exit cannot hide
+who was never asked. The restart itself never takes a group, and a group round
+replaces the round file, so a restart after it still refuses for every session
+the group round never asked (shipped in v8.5.3).
 
 **Liveness.** The stamper asks RDR-253's liveness read, which applies the
 300-second rule to the last renewal rather than trusting a stored `live`
@@ -837,8 +849,15 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
 - [x] Sam accepts the model (groups, stamped owner, three states and the escalated one, local
   actions) and answers the open questions (2026-11-16; gate round 1 answers
   the same day).
-- [ ] The `push-train` group's shape agreed with halcyon.
-- [ ] RDR-253 Phase 1 Steps 1 to 3 landed: identity records and the session
+- [x] The `push-train` group's shape agreed with halcyon. Evidence: halcyon
+  formed it on 2026-11-20 (`nx group list push-train --json` read 2026-11-20:
+  `"formed_at": "2026-11-20T05:19:53.537938Z"`, `"leader": "i12"` (halcyon),
+  `"serves": ["nexus-develop"]`, `"ack_deadline": 20`, `"live": true`; the
+  members joined by 05:20:31Z; plan in T2 `nexus/rdr252-activation-plan-852-2026-11-20`).
+- [x] RDR-253 Phase 1 Steps 1 to 3 landed (evidence: RDR-253's Revision History
+  of 2026-11-17, "wording amended to match the reviewed Step 1 code" (nexus-hczdo.1.1),
+  "Step 2 code" (nexus-hczdo.1.2) and "Step 3 code" (nexus-hczdo.1.4), each a
+  grant 3 amendment): identity records and the session
   index, the membership table with its routes and check, identity tokens, and the client resolver
   with Bash-child token files. Requirements on them, passed to those steps:
   memberships in a permanent table listed by identity and by group (Step 1);
@@ -1049,6 +1068,14 @@ None.
   subspace.
 - The engine refuses a client write with `from=engine` to a `board/ci` topic, on
   `out`, `mode=replace` and an `ack` reply.
+- The group ready check: `--ask-ready --group` asks only a group's live
+  members and `--status --group` reports only them; each member it did not
+  cover is named with its state and why; a blank, unknown, disbanded or
+  member-less group refuses in one line; the restart takes no group and a
+  restart after a group round still refuses
+  (`tests/scripts/test_claude_restart_sessions_group.py`, for example
+  `test_ask_ready_with_a_group_names_the_members_it_did_not_cover` and
+  `test_a_restart_after_a_group_round_still_wants_every_session_asked`).
 
 ## Validation
 
@@ -1182,5 +1209,6 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-20: `nx ci ack` and the client stamp of `from` on an ack (nexus-igea9; grant 3): `nx group ack-times` resolves an ack's poster by the sender-session stamp through the session index, a delegated child to its parent (read from the child's identity record, and noted as unresolved when the credential cannot read it), and never reads `from` (see the 2026-11-20 line below for the null stamp); it counts red tips and the engine's own owner and clear rows as the engine does, but it is a client read of the identity service, not the engine's count. The engine counts the sender stamp; a hand ack with a session alias stopped the hand-off on red ae619ef56 and only ack-times missed it.
 - 2026-11-20: `nx group ack-times` counts an ack only when its sender-session stamp maps (nexus-igea9; grant 3, wording matched to the engine's confirmed ack half): an ack with a null stamp, or one that maps to no identity (404 `unknown_session`), counts for nobody whatever its `from` says, and is counted as ignored (`ignored_acks` per red in `--json`, one note on standard error, never in `minutes`) when it is on a red tip inside the red; a stamp that is not a session id, a host with no session route to ask, and a failed or refused lookup are noted as unresolved (counts may be low) and never remembered; the ack counts for nobody in each case. The `from` fallback (an identity id as written, a name through `owner_alias`/`next_alias`, then the identity service's name route) is removed, so a hand-typed `from=<owner id>` no longer counts in ack-times where the engine counts nothing.
 - 2026-11-20: wording matched to the reviewed carry-forward engine code (conexus-lru2; grant 3): a tip's verdict reads the `--done` row's `branch_outcome` (the tip's outcome folded with the latest earlier result of a path-filtered workflow such as Service CI) ahead of `outcome`, so a Service CI red a later sha never re-ran keeps the red episode open; a per-sha failure is never overridden, an unrecognised `branch_outcome` is no verdict, and a row without it whose body carries a null, trimmed or not-all-`success` `carried` list has no verdict for a per-sha success (a carried skipped or neutral does not pass; a body with neither `carried` nor `carried_n` reads as before); the stamper logs `board_done_no_verdict` with the reason `carry_failed`, `carried_not_green`, `cancelled` or `unknown`.
+- 2026-11-20: wording matched to the reviewed code (nexus-igea9, close critique r2 S1, S3 and observations; grant 3): the restart script's ready check is `claude-restart-sessions --ask-ready --group X` and `--status --group X` (live members here, matched by alias, uncovered members named with a state, the restart takes no group, a group round replaces the round file; v8.5.3), with a Test Plan line; Gap 1 says what was built (membership, the leader, the develop red's owner post; typed assignments cut at gate round 1), the title unchanged; the two Prerequisites ticked with their evidence (push-train formed 2026-11-20, RDR-253 Steps 1 to 3 landed); and the stamp's meaning cites RDR-253 now that it says it.
 - 2026-11-21: wording matched to the reviewed fail-safe fix (nexus-igea9; grant 3): when the fail-safe's identity read fails, a red with an ack row on its tip is retried every 30 seconds without end (the twelfth failure of a topic's hand-off since its last success, cancel or eviction, and every twelfth after, raises the log event `board_ack_deadline_stuck`), and a red with no ack row is escalated at once with `owner` null; Test Plan line added.
 - 2026-11-21: the fail-safe's hold-off narrowed to the owner's stamped ack (nexus-igea9; grant 3): when the liveness read fails, only an ack row with a sender session whose `from` is the row's owner, on the row's tip and at or after the row, holds the escalation off; a non-owner's ack and an ack with no sender session escalate at once with `owner` null. The known transition (pre-0.1.200 ack rows with a typed `from` escalate with `owner` null under the compound fault) and the check's narrowness against the normal deadline count are recorded in the fail-safe text; the Test Plan line is matched.
