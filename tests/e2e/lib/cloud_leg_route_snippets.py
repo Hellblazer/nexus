@@ -22,9 +22,10 @@ print(store.ack(claimed[1], "@identity@"))
 
 FOR_TUPLE = r"""
 from nexus.commands.catalog import _get_catalog
-# RDR-229 P1.4: collection_for reads the next version from the for_tuple row (the probe subject's tuple; a
-# missing row answers 404 and the client falls back to v1, so the route is exercised either way).
-print(_get_catalog().collection_for("knowledge", "cloud-leg-probe", "voyage-context-3"))
+# RDR-229 P1.4: collection_for reads the next version from the for_tuple row. Its owner is a tumbler (the client
+# derives the owner segment from it and raises before any request on a subject name), so the probe names owner
+# 1.9999, which no tenant registers: the route answers 404 and the client falls back to v1, a read either way.
+print(_get_catalog().collection_for("knowledge", "1.9999", "voyage-context-3"))
 """
 
 URI_SEGMENTS = r"""
