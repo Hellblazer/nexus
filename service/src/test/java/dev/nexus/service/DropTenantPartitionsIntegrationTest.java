@@ -717,27 +717,35 @@ class DropTenantPartitionsIntegrationTest {
     }
 
     /**
-     * Inside the open transaction after the call, the drop holds no lock on another tenant's leaf beyond RowShare.
-     * RowShare is the one the manifest delete's statement triggers take on every chunks leaf (their locking read of
-     * nexus.chunks cannot be pruned at plan time) and it conflicts with nothing but ACCESS EXCLUSIVE; what must be
-     * absent is the AccessShare a catalog walk over the partition tree (pg_partition_tree) took on every leaf and held to
-     * commit, and any lock that conflicts with another tenant's index build, vacuum or drop.
+     * Inside the open transaction after the call: the drop holds no lock of any mode on another tenant's
+     * taxonomy_centroids leaf, and on another tenant's chunks leaf nothing but AccessShare and RowShare. Those two are
+     * the ones the manifest delete's statement triggers take on every chunks leaf (their locking read of nexus.chunks
+     * cannot be pruned at plan time); they conflict with nothing but ACCESS EXCLUSIVE, so they do not stop another
+     * tenant's index build, vacuum or serialized drop. What must be absent is the AccessShare lock a catalog walk over
+     * the partition tree (pg_partition_tree) took on every leaf of both roots and held to commit.
      */
     @Test
-    void theDropHoldsNoLockOnAnotherTenantsLeafBeyondTheDeleteTriggersRowShare() throws Exception {
+    void theDropHoldsNoLockOnAnotherTenantsLeafBeyondTheDeleteTriggers() throws Exception {
         final String TA = "p225-drop-nolock";
         try (Connection su = pg.createConnection("")) {
             seed(dsl(su), TA, 16000L);
         }
         try (Connection a = admin(); Connection obs = pg.createConnection("")) {
-            java.util.Set<String> bystander = new java.util.HashSet<>();
-            for (String leaf : leaves(dsl(obs), TB)) bystander.add("nexus." + leaf);
-            assertThat(bystander).isNotEmpty();
+            java.util.Set<String> chunksLeaves = new java.util.HashSet<>();
+            java.util.Set<String> centroidsLeaves = new java.util.HashSet<>();
+            for (String leaf : leaves(dsl(obs), TB)) {
+                (leaf.startsWith("taxonomy_centroids_") ? centroidsLeaves : chunksLeaves).add("nexus." + leaf);
+            }
+            assertThat(chunksLeaves).isNotEmpty();
+            assertThat(centroidsLeaves).isNotEmpty();
             a.setAutoCommit(false);
             PartitionScratch.dropTenantPartitions(dsl(a), TA);
-            assertThat(relationLocks(obs, backendPid(a)).stream()
-                .filter(l -> bystander.contains(l.relation()) && !l.mode().equals("RowShareLock")).toList())
-                .as("locks other than RowShare held by the drop on the bystander tenant's leaves").isEmpty();
+            List<RelLock> held = relationLocks(obs, backendPid(a));
+            assertThat(held.stream().filter(l -> centroidsLeaves.contains(l.relation())).toList())
+                .as("locks held by the drop on the bystander tenant's taxonomy_centroids leaves").isEmpty();
+            assertThat(held.stream().filter(l -> chunksLeaves.contains(l.relation())
+                    && !l.mode().equals("AccessShareLock") && !l.mode().equals("RowShareLock")).toList())
+                .as("locks beyond the delete triggers' on the bystander tenant's chunks leaves").isEmpty();
             a.rollback();
         }
     }
