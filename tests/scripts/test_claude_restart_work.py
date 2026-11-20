@@ -270,3 +270,19 @@ def test_a_journal_that_cannot_be_written_never_changes_the_verdict(crs, monkeyp
     _ready_session(crs, monkeypatch, manifest, now)
     monkeypatch.setattr(crs, "session_work", lambda s: [])
     assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 0
+
+
+def test_a_dry_run_and_the_second_installed_call_write_no_journal_lines(crs, monkeypatch, tmp_path) -> None:
+    """Review r2: ``go_gate`` is called again after ``--nx`` installed (``installed=True``) and with ``dry_run=True`` by
+    previews; each wrote a set of lines, so one restart round was journalled two or three times. One set per round."""
+    now = time.time()
+    found, manifest = _one_target(now)
+    rounds = tmp_path / "rounds.jsonl"
+    monkeypatch.setattr(crs, "READY_LOG", rounds)
+    _ready_session(crs, monkeypatch, manifest, now)
+    monkeypatch.setattr(crs, "session_work", lambda s: ["agent agent:a1"])
+    crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9", dry_run=True)
+    assert not rounds.exists(), "a dry run decides nothing"
+    crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9")
+    crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9", installed=True)
+    assert len(rounds.read_text(encoding="utf-8").splitlines()) == 1, "the second call, after --nx installed, adds none"

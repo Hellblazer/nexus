@@ -3094,7 +3094,8 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
         problem, lines = bad_round, []
     else:
         rows = readiness(found, manifest, now, max_age, caller_pane)
-        record_round(manifest, rows, now, forced=force)
+        if not dry_run and not installed:      # one set of lines per restart round: not a preview, not the call after --nx
+            record_round(manifest, rows, now, forced=force)
         lines = [f"{r['name']}: {r['blocker']}" for r in rows if r["blocker"]]
         problem = f"{len(lines)} of {len(rows)} session(s) are not ready (round {manifest['stamp']})" if lines else ""
     if not problem:

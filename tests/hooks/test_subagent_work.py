@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """A dispatched agent is background work its identity owns (RDR-253 Step 6 part 1, nexus-hczdo): SubagentStart registers
-``kind=agent`` with ref ``agent:<agent id>``, SubagentStop marks it ``done``. Register and done only, once each: no
+``kind=agent`` with ref ``agent:<agent id>``, SubagentStop removes the row. Register and remove only, once each: no
 per-step write. A hook never blocks the dispatch or the stop (a failed label is a False and a log line)."""
 from __future__ import annotations
 
@@ -85,14 +85,14 @@ def test_a_failed_registration_never_blocks_the_dispatch(monkeypatch: pytest.Mon
     assert result.stdout and "Claimant id: a220cf773a02bf4d7" in result.stdout
 
 
-def test_the_stop_verb_marks_done_for_an_agent_that_gets_no_t1_nudge(labels: list) -> None:
+def test_the_stop_verb_removes_the_row_of_an_agent_that_gets_no_t1_nudge(labels: list) -> None:
     """web-fetch and the other NO_T1_AGENTS are never nudged, but SubagentStart registered them: their row must end."""
     stop = {**START, "agent_type": "web-fetch", "agent_transcript_path": "/no/such/transcript"}
     assert nudge.run(stop).stdout in (None, "")
     assert labels == [("agent", REF, "forget")]
 
 
-def test_the_stop_verb_marks_done_even_when_the_transcript_is_unreadable(labels: list) -> None:
+def test_the_stop_verb_removes_the_row_even_when_the_transcript_is_unreadable(labels: list) -> None:
     nudge.run({**START, "agent_transcript_path": "/no/such/transcript"})
     assert labels == [("agent", REF, "forget")]
 

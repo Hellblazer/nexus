@@ -1206,8 +1206,10 @@ identity directory's `work-owners/`), it was last written before the current hol
 started, or nobody wrote it for 12 hours; a hand-registered row has the last two only.
 A wait is judged an earlier session's only when its ref is a session id (a UUID). The
 restart script reads every row, marks a stale one and does not block on it, and journals
-each gate decision (one JSON line per session) so the measure, ready rounds that answered
-ready while running work a restart cut off, can be counted.
+each gate decision (per-session gate decisions: one JSON line per session with its round,
+whether it was ready, its blockers, its work rows and the stale ones; a preview and the call
+after `--nx` write none). That is the record the measure reads; it does not count what a restart
+then cut off.
 
 ### Phase 2: Retirement
 

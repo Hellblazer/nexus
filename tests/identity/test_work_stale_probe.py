@@ -376,9 +376,12 @@ def test_owner_records_live_in_a_private_directory(box: Box) -> None:
     assert records.is_dir() and (records.stat().st_mode & 0o077) == 0, "0700: nobody else reads who runs what"
 
 
-def test_owner_records_are_pruned_by_liveness_never_by_age(box: Box) -> None:
-    """Review item 5: a standing wait older than two weeks lost its record to the old mtime rule; a record whose process is
-    gone (and a leaked .tmp of a dead writer) must go."""
+def test_a_dead_process_record_is_kept_until_the_ttl_reads_its_row_stale_and_a_live_one_is_kept_whatever_its_age(box: Box) -> None:
+    """Review r2 ship-blocker: the prune used to unlink a record the moment its process was gone, and every registration (the
+    directory is shared by all identities) ran it, so a SIGKILLed ``nx ci wait`` lost its witness to the next unrelated
+    registration and read live (blocking the ready check) for up to 12 hours. A gone-process record is the row's only
+    witness until the TTL rule takes over, so it is pruned only once its file is older than ROW_TTL_S. A leaked .tmp of a
+    dead writer still goes at once."""
     import time as _time
 
     from nexus.identity import work
@@ -386,19 +389,77 @@ def test_owner_records_are_pruned_by_liveness_never_by_age(box: Box) -> None:
     host = box.procs.host
     box.procs.start(300, "2026-11-17T09:00:00Z", registry=False)
     box.procs.start(301, "2026-11-17T09:00:00Z", registry=False)
-    work.record_owner(box.identity_dir, "i1", "wait", "alive", pid=300, start="2026-11-17T09:00:00Z", host=host)
-    work.record_owner(box.identity_dir, "i1", "wait", "dead", pid=301, start="2026-11-17T09:00:00Z", host=host)
+    box.procs.start(302, "2026-11-17T09:00:00Z", registry=False)
+    for ref, pid in (("alive", 300), ("dead-new", 301), ("dead-old", 302)):
+        work.record_owner(box.identity_dir, "i1", "wait", ref, pid=pid, start="2026-11-17T09:00:00Z", host=host)
     box.procs.stop(301)
+    box.procs.stop(302)
     records = box.identity_dir / work.OWNER_DIR_NAME
-    ancient = _time.time() - 90 * 86400
-    for f in records.glob("*.json"):
-        os.utime(f, (ancient, ancient))
+    for ref, age in (("alive", 90 * 86400), ("dead-old", work.ROW_TTL_S + 3600)):
+        path = work._owner_path(box.identity_dir, "i1", "wait", ref)
+        os.utime(path, (_time.time() - age, _time.time() - age))
     leaked_dead, leaked_live = records / "abc.301.tmp", records / "def.300.tmp"
     leaked_dead.write_text("x", encoding="utf-8")
     leaked_live.write_text("x", encoding="utf-8")
     work.record_owner(box.identity_dir, "i1", "wait", "third", pid=300, start="2026-11-17T09:00:00Z", host=host, procs=box.procs)
     assert work.read_owner(box.identity_dir, "i1", "wait", "alive") is not None, "ninety days old, its process runs: kept"
-    assert work.read_owner(box.identity_dir, "i1", "wait", "dead") is None, "its process is gone: pruned"
+    assert work.read_owner(box.identity_dir, "i1", "wait", "dead-new") is not None, "its process is gone but the TTL has not taken over: kept"
+    assert work.read_owner(box.identity_dir, "i1", "wait", "dead-old") is None, "gone and past the TTL: the TTL rule reads its row stale, so it goes"
     assert not leaked_dead.exists() and leaked_live.exists()
 
 
+def test_a_killed_waits_row_stays_stale_after_an_unrelated_registration_and_the_purge_drops_it(box: Box) -> None:
+    """Review r2 ship-blocker, end to end: dead wait A, then another registration (which prunes), then the ready check's view
+    and the limit's purge both still see A as stale."""
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    early(box, i1)
+    host = box.procs.host
+    box.procs.start(300, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.start(301, "2026-11-17T09:00:00Z", registry=False)
+    seed(box, i1, "wait", "ci:develop@aaaa", age_s=60)
+    work.record_owner(box.identity_dir, i1, "wait", "ci:develop@aaaa", pid=301, start="2026-11-17T09:00:00Z", host=host)
+    box.procs.stop(301)                                                           # SIGKILLed: it never wrote its end
+    seed(box, i1, "wait", "ci:develop@bbbb", age_s=60)
+    work.record_owner(box.identity_dir, i1, "wait", "ci:develop@bbbb", pid=300, start="2026-11-17T09:00:00Z", host=host, procs=box.procs)
+    got = listed(box)
+    assert got[("wait", "ci:develop@aaaa")] is True, "the dead wait is still stale: its witness survived the other registration"
+    assert got[("wait", "ci:develop@bbbb")] is False
+    for n in range(198):
+        box.engine.put_work(i1, "labrun", f"d{n}", "done")
+    assert work.register(box.engine, i1, "labrun", "fresh", probe=box.env()).state == "running"
+    left = {k[2] for k in box.engine.work if k[0] == i1}
+    assert "ci:develop@aaaa" not in left and "ci:develop@bbbb" in left, "the purge dropped the dead wait and kept the live one"
+
+
+def test_a_refused_kind_is_asked_again_after_ten_minutes(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review r2: a long-lived MCP server that learned ``bad_kind`` from an old engine kept refusing the agent kind for its
+    whole life, so an engine upgrade never reached it. The refusal lapses (10 minutes)."""
+    from nexus.identity import work
+    from nexus.identity.bind_client import IdentityApiError
+
+    i1 = box.running_seat("alpha", 100)
+    now = [1000.0]
+    monkeypatch.setattr(work, "_monotonic", lambda: now[0])
+    engine_new = [False]
+    calls: list[str] = []
+    real_put = box.engine.put_work
+
+    def put(identity, kind, ref, state="running"):
+        calls.append(ref)
+        if not engine_new[0]:
+            raise IdentityApiError(400, "bad_kind", "kind must be one of ['labrun']", {})
+        return real_put(identity, kind, ref, state)
+
+    box.engine.put_work = put                                                    # type: ignore[method-assign]
+    assert work.register_own("agent", "agent:a1", client=box.engine, identity=i1, purge=False) is False
+    now[0] += 599
+    assert work.register_own("agent", "agent:a2", client=box.engine, identity=i1, purge=False) is False
+    assert calls == ["agent:a1"], "inside the window the process does not ask"
+    engine_new[0] = True
+    now[0] += 2
+    assert work.register_own("agent", "agent:a3", client=box.engine, identity=i1, purge=False) is True
+    assert calls == ["agent:a1", "agent:a3"], "past it, the upgraded engine is asked and answers"
+    assert work.register_own("agent", "agent:a4", client=box.engine, identity=i1, purge=False) is True

@@ -19,6 +19,14 @@ counted as alive; an ended, released, gone or unknown identity is not alive). A 
 alive is stale: :func:`running`, :func:`live_owners`, :func:`may_stop_lines` and the restart script's readiness report
 all ignore it, so a crashed session's work is never read as busy forever. A ``done`` row never blocks anything.
 
+A running ``wait``, ``labrun``, ``agent`` or ``watcher`` row of a live identity has three more witnesses
+(:func:`process_stale_why`, in order). **The probe:** its process is gone or was replaced, read from a ``<host>:<pid>:<started>``
+ref (``lab-remote``'s) or from the owner record a long-lived registrar writes under the identity directory
+(:func:`record_owner`; a gone process's record is kept until the TTL reads the row stale, so the next registration cannot
+take its witness). **The ghost rule:** a row nothing vouches for that was last written before its holder began (a restart
+with the work in flight never ends it) is stale. **The TTL:** a row nobody wrote for 12 hours (:data:`ROW_TTL_S`) is stale.
+A hand-registered row has the last two. The restart script lists a stale row and does not block on it.
+
 **Who may stop it.** :func:`may_stop_lines` is the one check behind worktree removal and tmux cleanup: a resource is
 stopped only when no identity other than the caller owns it with ``running`` work and a live holder, never by name
 pattern or by a process listing. A resource no row names is unowned and is said to be.
@@ -239,10 +247,17 @@ def record_owner(directory: Path, identity: str, kind: str, ref: str, *, pid: in
 
 
 def prune_owner_records(records: Path, procs: Any) -> None:
-    """Remove the owner records whose process is gone or was replaced, and the ``<hash>.<pid>.tmp`` a writer that died
-    mid-write left. By liveness, never by age: a standing wait older than any cutoff still has its record while it runs. A
-    record of another host, or one whose process cannot be judged, is kept. Best effort."""
+    """Remove the ``<hash>.<pid>.tmp`` a writer that died mid-write left, and the owner records whose process is gone or was
+    replaced AND whose file is older than :data:`ROW_TTL_S`. A live process keeps its record however old (a standing wait
+    older than any cutoff still runs). A record whose process is gone is the row's only witness (``its process is gone``)
+    until the TTL rule reads the row stale by itself, so it is kept that long: this runs on every registration, the
+    directory is shared by every identity, and a SIGKILLed ``nx ci wait`` would otherwise lose its witness to the next
+    unrelated registration and read live for 12 hours. A record of another host, or one whose process cannot be judged,
+    is kept. Best effort."""
+    import time  # noqa: PLC0415 — deferred: only a registration's prune needs it
+
     here = getattr(procs, "host", "")
+    expired = time.time() - ROW_TTL_S
     for path in list(records.glob("*")):
         try:
             if path.suffix == ".tmp":
@@ -254,7 +269,7 @@ def prune_owner_records(records: Path, procs: Any) -> None:
                 start = record.get("start")
                 judged, gone = _process_gone(procs, here, str(record.get("host") or ""), int(record["pid"]),
                                              start=start if isinstance(start, str) else None, began=None)
-                if judged and gone:
+                if judged and gone and path.stat().st_mtime < expired:
                     path.unlink()
         except (OSError, ValueError, TypeError, KeyError):
             continue
@@ -403,9 +418,27 @@ def _call(fn: Callable[..., Any], *args: Any) -> Any:
 LABEL_TIMEOUT_S = 2.0
 
 
-#: Kinds an engine answered ``bad_kind`` for in this process (an engine from before the kind): not asked again, so a process
-#: pays one failed call per kind, not one per dispatch.
-_REFUSED_KINDS: set[str] = set()
+#: Kinds an engine answered ``bad_kind`` for in this process (an engine from before the kind), with the monotonic instant
+#: the refusal lapses: not asked again meanwhile, so a process pays one failed call per kind per window, not one per
+#: dispatch. It lapses (:data:`REFUSAL_TTL_S`) because a long-lived MCP server outlives an engine upgrade.
+_REFUSED_KINDS: dict[str, float] = {}
+REFUSAL_TTL_S = 600.0
+
+
+def _monotonic() -> float:
+    import time  # noqa: PLC0415 — deferred (a seam for tests)
+
+    return time.monotonic()
+
+
+def _refused(kind: str) -> bool:
+    until = _REFUSED_KINDS.get(kind)
+    if until is None:
+        return False
+    if _monotonic() < until:
+        return True
+    del _REFUSED_KINDS[kind]
+    return False
 
 
 def reset_for_tests() -> None:
@@ -430,7 +463,7 @@ def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = Non
     process (:func:`record_owner`), written when the row goes running and removed when it goes done. A hook, whose process
     exits at once, passes none, and passes ``purge=False``: at the 200-row limit it is refused rather than spend its few
     seconds deleting rows (:func:`register`)."""
-    if kind in _REFUSED_KINDS:
+    if _refused(kind):
         return False
     try:
         who = identity or caller_identity()
@@ -457,7 +490,7 @@ def forget_own(kind: str, ref: str, *, client: Any = None, identity: str | None 
     """Remove this identity's row: the end of work that leaves nothing to show (a dispatched agent: the ready check ignores a
     done row, and one done row per dispatch would fill the 200-row limit). True when the row is gone (there was none, too).
     Same failure rule as :func:`register_own`."""
-    if kind in _REFUSED_KINDS:
+    if _refused(kind):
         return False
     try:
         who = identity or caller_identity()
@@ -479,7 +512,7 @@ def forget_own(kind: str, ref: str, *, client: Any = None, identity: str | None 
 
 def _note_refusal(kind: str, exc: BaseException) -> None:
     if isinstance(exc, IdentityApiError) and exc.code == "bad_kind":
-        _REFUSED_KINDS.add(kind)
+        _REFUSED_KINDS[kind] = _monotonic() + REFUSAL_TTL_S
 
 
 def _probe_env(owner_dir: Path | None, procs: Any) -> Any:

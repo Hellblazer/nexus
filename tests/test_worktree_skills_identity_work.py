@@ -97,3 +97,11 @@ def test_the_rdr_and_the_cli_reference_name_the_registrars_the_agent_kind_and_th
     cli = " ".join(ref.split())
     assert "`wait`, `watcher`, `labrun` or `agent` row" in cli and "restart-ready-rounds.jsonl" in cli
     assert "never a stale row" not in cli and "neither does a `wait` row" not in cli, "the two false sentences are gone"
+    assert "can be counted" not in " ".join(rdr.split()), "the RDR says what the journal records and no more"
+    assert "per-session gate decisions" in " ".join(rdr.split())
+    from tests._changelog import changelog_text  # noqa: PLC0415 — the entry lives in a fragment until a release folds it
+
+    entry = " ".join(changelog_text().split())
+    assert "the SubagentStop verb removes the row" in entry, "the stop removes the agent's row, it does not mark it done"
+    docstring = (root / "src" / "nexus" / "identity" / "work.py").read_text(encoding="utf-8").split('"""')[1]
+    assert all(w in docstring for w in ("owner record", "before its holder", "12 hours")), "the module docstring names the witnesses"
