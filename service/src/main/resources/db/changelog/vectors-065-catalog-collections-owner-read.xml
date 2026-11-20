@@ -19,6 +19,10 @@
     DrivingTableIsolationCheck refuses boot if a permissive policy other than tenant_isolation on a driving table of
     nexus.data_moves applies to the serving role, which covers a membership granted after this ran.
 
+    LOCK TIMEOUT. CREATE POLICY and DROP POLICY take a lock on catalog_collections that waits behind any open transaction on it, and
+    a boot walk that waits forever is a boot that does not serve; the changeset runs under SET LOCAL lock_timeout = '5s', as
+    catalog-044 does, so a busy table fails the walk fast instead.
+
     The policy is DDL: CREATE POLICY and DROP POLICY IF EXISTS count toward migration_ddl_per_worker (tests/ddl_ceiling.toml).
     No DATA EFFECT: a policy definition, no row read or written. Rollback drops the policy.
 -->
@@ -34,6 +38,7 @@
         </preConditions>
         <comment>Owner-read SELECT policy catalog_collections_owner_read on nexus.catalog_collections for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
         <sql splitStatements="false" stripComments="false">
+SET LOCAL lock_timeout = '5s';
 DROP POLICY IF EXISTS catalog_collections_owner_read ON nexus.catalog_collections;
 CREATE POLICY catalog_collections_owner_read ON nexus.catalog_collections
     FOR SELECT TO CURRENT_USER USING (true);

@@ -3,6 +3,7 @@
 package dev.nexus.service.datamove;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -15,6 +16,7 @@ import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.TestHttp;
 import dev.nexus.service.db.AdminDdlSession;
 import dev.nexus.service.db.DrivingTableIsolationCheck;
+import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
@@ -28,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
+import java.lang.reflect.Method;
 import java.sql.DriverManager;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -48,9 +51,12 @@ import java.util.stream.Collectors;
  *
  * <p>The red run is the registration: before vectors-064 existed every scenario failed at "the walk registers the move".
  * What each assertion is meant to catch, not run by hand: drop {@code t.model_version = ''} from the template and the
- * "already set" row is rewritten (its xmin moves); loosen the name pattern to {@code ~ '__v[0-9]+$'} and the {@code __v1x},
- * legacy and quarantine names are rewritten; put the INSERT into a changeset that also UPDATEs {@code catalog_collections}
- * and the walk test sees every row's xmin move.
+ * "already set" row is rewritten (its xmin moves); loosen the name pattern to {@code ~ '__v[0-9]+$'} and the negative fixtures
+ * ({@code docs____m__v1}, {@code docs__o__1m__v1}, {@code docs__a__b__m__v1}) are rewritten; drop its end anchor and
+ * {@code __v1x} is rewritten; put the INSERT into a changeset that also UPDATEs {@code catalog_collections} and the walk test
+ * sees every row's xmin move. The two quarantine scenarios of nexus-f3yqd.2.23 review round 1 were red before the template
+ * took the {@code quarantine-} prefix (the sibling stayed '' and stopped matching its origin); their negative halves, like the
+ * negative fixtures, pass by construction and are guarded by the loosening above.
  */
 class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBase {
 
@@ -81,6 +87,13 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
     private static final String LEGACY_TWO_SEGMENT = "docs__default";
     private static final String QUARANTINE = "quarantine-code__1-2__voyage-code-3__v1";
     private static final String SUFFIX_NOT_A_VERSION = "docs__1-6__voyage-context-3__v1x";
+    // names the grammar must refuse: an empty owner, a model that starts with a digit, an owner with a doubled underscore run
+    private static final String EMPTY_OWNER = "docs____m__v1";
+    private static final String DIGIT_MODEL = "docs__o__1m__v1";
+    private static final String DOUBLED_UNDERSCORE_OWNER = "docs__a__b__m__v1";
+    private static final String Q_ORIGIN = "docs__1-7__bge-base-en-v15-768__v1";
+    // a registered quarantine sibling of Q_ORIGIN by row attributes, under a name that is not the reaper's (quarantine- + origin)
+    private static final String Q_SIBLING = "quarantine-docs__sib-7__bge-base-en-v15-768__v1";
     private static final String G_ALREADY_SET = "rdr__1-4__voyage-context-3__v4";
     private static final String O_V1 = "docs__1-5__voyage-context-3__v1";
 
@@ -117,6 +130,7 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
      * scenario starts from no run of the label (nor of its copy) and no seeded row.
      */
     private void removeSeededRowsAndRuns() {
+        ctx().deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.in(TENANTS)).execute();
         ctx().deleteFrom(CATALOG_COLLECTIONS).where(CC_TENANT.in(TENANTS)).execute();
         for (String move : List.of(LABEL, "copy-of-" + LABEL)) {
             for (String run : new ArrayList<>(activeRuns(move))) {
@@ -157,6 +171,9 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
         seed(ACME, LEGACY_TWO_SEGMENT, "");
         seed(ACME, QUARANTINE, "");
         seed(ACME, SUFFIX_NOT_A_VERSION, "");
+        seed(ACME, EMPTY_OWNER, "");
+        seed(ACME, DIGIT_MODEL, "");
+        seed(ACME, DOUBLED_UNDERSCORE_OWNER, "");
         seed(GLOBEX, A_V1, "");            // the same name as acme's row, on another tenant
         seed(GLOBEX, G_ALREADY_SET, "v9");
         seed(ORPHAN, O_V1, "");
@@ -201,18 +218,22 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
         assertThat(acme.get(A_ALREADY_SET)).as("a row already set keeps its own value").isEqualTo("v7");
         assertThat(acme.get(NON_CONFORMANT)).as("not conformant: left as found").isEmpty();
         assertThat(acme.get(LEGACY_TWO_SEGMENT)).as("legacy two-segment name: left as found").isEmpty();
-        assertThat(acme.get(QUARANTINE)).as("quarantine-prefixed: not conformant under corpus.py's rule, left as found").isEmpty();
+        assertThat(acme.get(QUARANTINE)).as("a quarantine- sibling of a conformant name is repaired with its origin").isEqualTo("v1");
         assertThat(acme.get(SUFFIX_NOT_A_VERSION)).as("__v1x is not a version suffix").isEmpty();
+        assertThat(acme.get(EMPTY_OWNER)).as("an empty owner is not conformant").isEmpty();
+        assertThat(acme.get(DIGIT_MODEL)).as("a model that starts with a digit is not conformant").isEmpty();
+        assertThat(acme.get(DOUBLED_UNDERSCORE_OWNER)).as("an owner with a doubled underscore run is not conformant").isEmpty();
         assertThat(versions(GLOBEX)).containsEntry(A_V1, "v1").containsEntry(G_ALREADY_SET, "v9");
         assertThat(versions(ORPHAN)).containsEntry(O_V1, "v1");
 
         // the move wrote the repaired rows and nothing else: every row it left alone keeps its xmin
         var after = xmins();
         for (String untouched : List.of(ACME + "/" + A_ALREADY_SET, ACME + "/" + NON_CONFORMANT, ACME + "/" + LEGACY_TWO_SEGMENT,
-                ACME + "/" + QUARANTINE, ACME + "/" + SUFFIX_NOT_A_VERSION, GLOBEX + "/" + G_ALREADY_SET)) {
+                ACME + "/" + SUFFIX_NOT_A_VERSION, ACME + "/" + EMPTY_OWNER, ACME + "/" + DIGIT_MODEL,
+                ACME + "/" + DOUBLED_UNDERSCORE_OWNER, GLOBEX + "/" + G_ALREADY_SET)) {
             assertThat(after.get(untouched)).as("%s was not written", untouched).isEqualTo(before.get(untouched));
         }
-        for (String repaired : List.of(ACME + "/" + A_V1, ACME + "/" + A_V3, GLOBEX + "/" + A_V1, ORPHAN + "/" + O_V1)) {
+        for (String repaired : List.of(ACME + "/" + A_V1, ACME + "/" + A_V3, ACME + "/" + QUARANTINE, GLOBEX + "/" + A_V1, ORPHAN + "/" + O_V1)) {
             assertThat(after.get(repaired)).as("%s was written", repaired).isNotEqualTo(before.get(repaired));
         }
 
@@ -221,7 +242,8 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
         versions(ACME).forEach((name, v) -> {
             if (v.isEmpty()) leftEmpty.add(name);
         });
-        assertThat(leftEmpty).containsExactlyInAnyOrder(NON_CONFORMANT, LEGACY_TWO_SEGMENT, QUARANTINE, SUFFIX_NOT_A_VERSION);
+        assertThat(leftEmpty).containsExactlyInAnyOrder(NON_CONFORMANT, LEGACY_TWO_SEGMENT, SUFFIX_NOT_A_VERSION, EMPTY_OWNER, DIGIT_MODEL,
+            DOUBLED_UNDERSCORE_OWNER);
     }
 
     // ── 2. registered once, and the walk writes no catalog_collections row ──────────────────────────────────
@@ -377,19 +399,74 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
     // ── 6. the verification gates completion ────────────────────────────────────────────────────────────────
 
     @Test
-    void aConformantEmptyRowPutBackAfterTheRuns_failsTheMove_andANonConformantOneDoesNot() {
+    void aNonConformantEmptyRowPutBackDoesNotFailTheMove_aConformantOneDoes() {
         seedCensusShape();
         runToCompletion();
-        // reopen the move and put a conformant empty back in a chunk that is already done
+
+        // reopen the move and put a NON-conformant empty back: the verification does not look for it
+        reopen();
+        seed(ACME, "gate-probe-125", "");
+        assertThat(productionWorker().runCycle()).isEqualTo(1);
+        assertThat(completedAt(LABEL)).as("a non-conformant empty is not an old-shape row: the move completes").isNotNull();
+        assertThat(failedAt()).isNull();
+
+        // reopen it and put a conformant empty back in a chunk that is already done
+        reopen();
+        seed(ACME, "code__1-9__voyage-code-3__v1", "");
+        assertThat(productionWorker().runCycle()).isEqualTo(1);
+        assertThat(completedAt(LABEL)).as("a verification that finds the row does not complete the move").isNull();
+        assertThat(failedAt()).as("it fails it, permanently").isNotNull();
+    }
+
+    private void reopen() {
         ctx().update(table("nexus", "data_moves")).set(COMPLETED_AT, (java.time.OffsetDateTime) null)
             .where(LABEL_FIELD.eq(LABEL)).execute();
-        seed(ACME, "code__1-9__voyage-code-3__v1", "");
+    }
 
-        assertThat(productionWorker().runCycle()).isEqualTo(1);
+    private java.time.OffsetDateTime failedAt() {
+        return ctx().select(FAILED_AT).from(table("nexus", "data_moves")).where(LABEL_FIELD.eq(LABEL)).fetchOne(FAILED_AT);
+    }
 
-        assertThat(completedAt(LABEL)).as("a verification that finds the row does not complete the move").isNull();
-        assertThat(ctx().select(FAILED_AT).from(table("nexus", "data_moves")).where(LABEL_FIELD.eq(LABEL))
-            .fetchOne(FAILED_AT)).as("it fails it, permanently").isNotNull();
+    // ── 6b. quarantine siblings are repaired with their origins ─────────────────────────────────────────────
+
+    @Test
+    void anOriginAndItsQuarantineSiblingAtEmpty_endAtTheSameVersion_andStillMatchThroughQuarantineOrigin() throws Exception {
+        seed(ACME, Q_ORIGIN, "");
+        seed(ACME, Q_SIBLING, "");
+        // the sibling is the origin's by row attributes (owner, model, version, content type), not by the reaper's name
+        ctx().update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "1-7")
+            .where(CC_TENANT.eq(ACME)).and(CC_NAME.eq(Q_SIBLING)).execute();
+        PgContainerHelper.insertChunks(ctx(), ACME, Q_SIBLING, List.of("ab".repeat(32)), List.of("quarantined"),
+            List.of(new float[768]), List.of(Map.of()));
+        assertThat(quarantineRowsOf(ACME, Q_ORIGIN)).as("non-vacuity: before the move both are '' and match").isEqualTo(1);
+
+        runToCompletion();
+
+        assertThat(versions(ACME)).containsEntry(Q_ORIGIN, "v1").containsEntry(Q_SIBLING, "v1");
+        assertThat(quarantineRowsOf(ACME, Q_ORIGIN)).as("after the move the pair still matches").isEqualTo(1);
+    }
+
+    @Test
+    void aQuarantineSiblingWhoseOriginPartIsNotConformant_staysEmpty() {
+        seed(ACME, "quarantine-gate-probe-124", "");
+        seed(ACME, "quarantine-" + EMPTY_OWNER, "");
+        seed(ACME, "quarantine-" + DIGIT_MODEL, "");
+        seed(ACME, A_V1, "");
+
+        runToCompletion();
+
+        assertThat(versions(ACME)).containsEntry(A_V1, "v1")
+            .containsEntry("quarantine-gate-probe-124", "")
+            .containsEntry("quarantine-" + EMPTY_OWNER, "")
+            .containsEntry("quarantine-" + DIGIT_MODEL, "");
+    }
+
+    /** {@code QuarantineOrigin.countRowsOf}, package-private in the engine: the quarantine rows that are {@code origin}'s. */
+    private int quarantineRowsOf(String tenant, String origin) throws Exception {
+        Method m = Class.forName("dev.nexus.service.db.QuarantineOrigin")
+            .getDeclaredMethod("countRowsOf", DSLContext.class, String.class, String.class);
+        m.setAccessible(true);
+        return (Integer) m.invoke(null, ctx(), tenant, origin);
     }
 
     // ── 7. the service role is not widened, and the boot check passes ───────────────────────────────────────

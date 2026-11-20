@@ -76,7 +76,7 @@ class CatalogModelVersionRepairMoveShapeTest {
         assertThat(Pattern.compile("\\$1").matcher(sql).results().count()).as("$1 twice in the verification, nowhere else").isEqualTo(2);
         assertThat(sql).doesNotContainPattern("\\$[2-9]");
         // the template and the verification name the same conformant-name rule
-        var rule = Pattern.compile("'\\^\\(code\\|docs\\|rdr\\|knowledge\\)__\\[a-zA-Z0-9-\\]\\+\\(_\\[a-zA-Z0-9-\\]\\+\\)\\*__\\[a-z\\]\\[a-z0-9-\\]\\*__v\\[0-9\\]\\+\\$'");
+        var rule = Pattern.compile("'\\^\\(quarantine-\\|\\)\\(code\\|docs\\|rdr\\|knowledge\\)__\\[a-zA-Z0-9-\\]\\+\\(_\\[a-zA-Z0-9-\\]\\+\\)\\*__\\[a-z\\]\\[a-z0-9-\\]\\*__v\\[0-9\\]\\+\\$'");
         assertThat(rule.matcher(sql.replace("''", "'")).results().count()).as("the rule, in the template and in the verification").isEqualTo(2);
         assertThat(cs.getElementsByTagNameNS("*", "comment").item(0).getTextContent()).contains("DATA EFFECT:");
     }
