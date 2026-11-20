@@ -40,6 +40,17 @@
 # first. Measurement only: nothing here changes conexus/hooks. Unit tests (no claude, in the default suite):
 # tests/hooks/test_compact_outcome_harness.py.
 #
+# WHAT A RESULT DOES NOT TELL YOU (review 2026-11-19, T2 nexus/critique-compact-outcome-gate-r2-2026-11-19):
+#   * It covers MID-TURN compactions only. The real misses in the transcript census were IDLE compactions (the
+#     compaction ~55 min after the last turn ended, no turn running); a SessionStart:compact injection cannot start a
+#     turn, so a gate win or loss predicts nothing about those. Measure them on real transcripts instead.
+#   * The exit code judges ONE arm (--gate-arm, default real) against control and bad. It never compares a candidate
+#     directive with the shipped hook; for that contrast, read the per-arm counts and intervals, not the exit code.
+#   * The waiting scenario's "says what it waits on" check cannot fail as written (the final ask names the wait); only
+#     its invented-work half discriminates. The CALIBRATION line compares unlike rates and is a prompt, not a test.
+#   * One live probe (sonnet, 2026-11-19) cost $0.75 and compacted twice in the final turn (NOISE): --pre-target is
+#     still uncalibrated, and the default matrix is ~150 sessions. Run one run-one first and multiply.
+#
 # SPIKE (Claude Code 2.1.318, 2026-11-04), how a compaction is forced:
 #   * `claude -p --resume <id> "/compact"` works (trigger "manual", compact_boundary event, the checkpoint
 #     hooks fire) but the process ends, so a background shell dies and there is no post-compaction turn.

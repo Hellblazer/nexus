@@ -26,6 +26,8 @@ session carries on from it by itself, the shape of a real mid-turn compaction. N
 Known gaps against a real session, stated so a gate result is not read as more than it is: the model has not seen the board
 before the compaction (a real session wrote it), the transcript has no peer or agent traffic, and one operator's habits
 (the standing "work without asking" mandate) decide how strongly the summary carries the open work.
+These are mid-turn compactions only: the census's real misses were idle compactions (no turn running), which no
+SessionStart:compact injection can start a turn from. See the WHAT A RESULT DOES NOT TELL YOU block of the wrapper.
 """
 from __future__ import annotations
 
