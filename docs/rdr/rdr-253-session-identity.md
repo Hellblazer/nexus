@@ -119,6 +119,14 @@ all be unstamped (`nexus_rdr/252-fix-check-cee51c460fc1`).
 - **RDR-252** (aura groups and one responder, draft): parked until this lands;
   its memberships, owners and push records name identities.
 - **RDR-245** (structured asks): asks are filed under the asking seat.
+- **RDR-238** (memory curation, closed): a seat's `identity/<id>` project is an
+  ordinary T2 project, no new tier. `nx memory curate --t2` and `--cold` read the
+  `identity/*` projects beside the repository's own, and the cold section credits a
+  transcript `memory_get` of `identity/<id>/<title>` to the project `identity/<id>`.
+  The use measure is RDR-238's: transcript reads, not `access_count`.
+- **RDR-209** (heat graduation, closed in part): `identity/*` projects are excluded
+  from any graduation or promotion that rides the T2 heat counter, whatever a later
+  phase builds; a seat's notes are its own standing context and do not graduate.
 
 ## Context
 
@@ -717,6 +725,7 @@ already gone.
 | Membership `identity_memberships` | table, `IdentityHandler`, the `/v1/identity/<id>/memberships` routes | the owner only | join, leave and role change | ownership and generation |
 | Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `delete`, `restore`, `summaries` on an entry carrying an `identity: <id>` line | ownership and generation, read against the stored entry whether it is quarantined or not; a new entry may name only the writer's own identity, and a write that removes or changes the line is refused (the identity line is immutable); a rollup `summaries` counts as the fenced operation on each of its sources; `put_or_merge` never merges into a fenced entry (a legacy entry with no `identity:` line still merges); `replaces` checks the entry it replaces; the tenant-wide sweeps `expire` and `reap` skip such entries |
 | Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`, on the scope with `session_id` `identity:<id>`; `session/close` never closes the scope (it answers `deleted` 0) and `sweep` excludes it | ownership and generation |
+| Per-identity notes | T2 memory, project `identity/<id>` | the seat itself, and only its own project (client check) | not engine-fenced: the engine takes a write to this project from any caller. The client refuses `put`, `put_or_merge`, `put_replacing`, `import_entry`, `import_entries_batch`, `delete` by project and title and `insert_summary` unless the caller's token file names the seat that owns the project | the caller's kind (seat only) and the project's owner; the id-keyed paths (`delete` by id, `merge_memories`, `restore`), raw HTTP and a process with no Claude ancestor are not covered |
 
 Reads are not checked, a delegated child's included. Every other subspace, project and scope keeps its
 current rule: the stamp is a label (JDR-002), and `ScratchHandler`'s existing
@@ -763,14 +772,17 @@ timeout, a spawn failure, a cancellation); if the dispatcher dies, renewal stops
 delegated identity lapses, and the SessionStart sweep (or `nx identity alive`)
 finds the dispatcher process gone and records `gone`. The hook also deletes the
 token files in that directory whose dispatcher is gone. A delegated
-identity reads its parent's identity-owned state and writes only its own.
+identity reads its parent's identity-owned state and writes only its own. It keeps no
+identity notes: its `identity/<id>` writes, and `nx memory put --mine`, are refused (it
+reads its parent's notes with `--mine`).
 Agent-tool subagents keep the parent's seat with an `agent` label: their MCP
 calls carry nothing that tells them from the parent's (Critical Assumption 3;
 Sam accepted this narrowing on 2026-11-16). They get delegation once Claude
 Code sends `claudecode/agentId` on tool calls, re-checked on each upgrade.
 
 **Retention.** Seats, their aliases and their identity records are
-permanent. Ephemeral and delegated identities are tombstoned 30 days after
+permanent, and so are a seat's `identity/<id>` notes: the retention sweep below does
+not prune that project. Ephemeral and delegated identities are tombstoned 30 days after
 they end, or after 30 days spent lapsed with their holder gone (a crashed
 session's identity; a seat that lapses in a sleep and revives is not
 counted), and an `unleased` ephemeral 30 days after the holder check finds
@@ -848,7 +860,17 @@ restart script's promote.
   `session_id` is `identity:<id>`, which needs no new table or changeset. T2
   holds what is permanent:
   records a seat writes carry its identity, and a seat's own notes live in
-  project `identity/<id>`, keyed by id so a rename moves nothing.
+  project `identity/<id>`, keyed by id so a rename moves nothing. Only a seat
+  writes them, and only its own project: the client refuses the write from an
+  ephemeral or delegated identity, from a seat to another identity's project and
+  when the caller's kind cannot be learned, before any request (RDR-253 Step 6
+  part 3). **`identity/<id>` is client-guarded, not engine-fenced**: the engine
+  fences only `threads`, so a caller that never goes through the client store
+  (raw HTTP, a process with no Claude ancestor) is not stopped, and the id-keyed
+  paths (`delete` by id, `merge_memories`, `restore`) are not covered. SessionStart
+  prints one line of up to five titles, `Your notes (identity/i5): a, b, c (+2 more)`;
+  the conexus `nexus` skill carries the where-it-goes table. Retired if unused 30
+  days after the release that first carries it, by transcript `memory_get` reads.
 - **Memberships and push records.** Memberships are the `identity_memberships`
   table, written through the `/v1/identity/<id>/memberships` routes: a join
   keeps `joined_at` on a role change, a leave is idempotent, and the list reads
@@ -1145,6 +1167,12 @@ the membership routes; work registration through the work routes; the three live
 removal, sandbox and tmux cleanup, the restart readiness check) moved onto
 `nx identity alive`.
 
+Part 3, per-identity T2 notes (bead nexus-hczdo, 8.5.3): the client guard on `identity/<id>`
+(seats only, own project only; `put`, `put_or_merge`, `put_replacing`, `import_entry`,
+`import_entries_batch`, `delete` by project and title, `insert_summary`), the SessionStart
+line (one line, at most 300 bytes), `nx memory curate` over `identity/*`, the where-it-goes
+table in the conexus `nexus` skill, and a 30-day retire rule.
+
 ### Phase 2: Retirement
 
 Remove the four-tier resolver, the `current_session` file, `directory/<name>`
@@ -1259,6 +1287,15 @@ None.
   them; its token file is gone and an `end` row present after every way its
   dispatch ends, a cancellation while its identity is being created included.
 - Reboot: identity, aliases and bindings survive; `--revive` rebinds.
+- Per-identity notes (part 3): a seat writes its own `identity/<id>` through every
+  project-keyed store write; an ephemeral or delegated identity (also with a lapsed
+  token), a seat writing another seat's project, and a caller whose kind the engine did
+  not answer are refused before any request; a promote takes effect without a restart;
+  a caller with no token file is not refused. SessionStart adds one line of at most 300
+  bytes and nothing for an empty project, no identity, an error or an over-budget read;
+  the identity is found through the token file that lists the session or, when the bind has
+  not listed it yet, through the hook's Claude ancestor. `nx memory curate` lists the
+  `identity/*` projects and credits `identity/<id>/<title>` reads to `identity/<id>`.
 
 ## Validation
 
@@ -1373,3 +1410,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: wording matched to the reviewed engine 0.1.198 promote code (nexus-hczdo B4b, 71f0e972a, f85aa29eb; grant 3; reviews T2 `nexus/review-d288f22ec-rdr252-alias-b4b-2026-11-19` and `nexus/critique-d288f22ec-rdr252-alias-b4b-2026-11-19`): promote retitles the threads entry in the same transaction on both routes; on a taken title rename refuses and promote keeps the old title (`board_retitle: title_taken`).
 - 2026-11-19: wording matched to the reviewed lease fork-race fix (grant 3; bead nexus-hczdo, develop run 44659989781; reviews T2 `nexus/review-0feb06c39-nexus-hczdo-2026-11-20-r1` and `nexus/critique-forkrace-2026-11-19-r1`): an unknown registry session id gets one renewal of grace before its `fork` row, so a `/clear` whose hook binds within it leaves no `fork` row.
 - 2026-11-20: wording matched to the reviewed token-file fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/review-token-file-restart-2026-11-20-r1` and `nexus/critique-token-file-restart-2026-11-20-r1`): the token file name comes from the registry's current `startedAt`, read on every call, so a process that outlives an in-place `/restart` follows it to the new file; a registry or token file that cannot be read is read once more after about 10 ms; the identity token goes only on identity-scope scratch writes, and a write's 401 re-reads the file once; Test Plan line for the long-lived process across an in-place `/restart`.
+- 2026-11-20: wording amended to match the reviewed Step 6 part 3 code (grant 3), bead nexus-hczdo (reviews T2 `nexus/review-47774ae08-nexus-hczdo-2026-11-20` and `nexus/critique-step6-part3-2026-11-20-r1`): per-identity T2 notes are guarded by the client, not fenced by the engine (seats only, own project only, the seven project-keyed store writes, the id-keyed paths not covered); a delegated identity keeps none and `--mine` writes from it are refused; retention does not prune `identity/<id>`; RDR-238 curate reads `identity/*`, the use measure is transcript reads; RDR-209 graduation excludes `identity/*`.
