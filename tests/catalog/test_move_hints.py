@@ -305,3 +305,51 @@ def test_the_owner_kind_is_read_once_per_owner_per_run(new_pdf):
     reader = _Reader(here=_entry("1.1.9", str(new_pdf)))
     _record_many(reader, 4)
     assert reader.calls.count("get_owner_by_prefix") == 1 and reader.calls.count("documents_by_meta") == 4
+
+
+class _Clock:
+    """An injected clock: time moves only when the test (or a reader call) moves it."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class _SlowReader(_Reader):
+    """Every metadata query takes ``cost`` seconds of the injected clock."""
+
+    def __init__(self, clock: _Clock, cost: float, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.clock, self.cost = clock, cost
+
+    def documents_by_meta(self, **kwargs):
+        self.clock.now += self.cost
+        return super().documents_by_meta(**kwargs)
+
+
+def test_time_before_the_first_stamp_does_not_spend_the_budget(new_pdf):
+    """GH #1571 shape: extraction and embedding take longer than the budget before the writer first stamps. The budget
+    counts time spent in hint queries, not the command's wall clock, so the first file is still asked about and the
+    hint prints."""
+    clock = _Clock()
+    old = _entry("1.1.3", "/gone/x.pdf")
+    reader = _SlowReader(clock, 0.1, here=_entry("1.1.9", str(new_pdf)), rows=[old])
+    with hints.run_scope(budget_s=30.0, clock=clock) as scope:
+        clock.now += 600.0  # ten minutes of MinerU before the first stamp
+        hints.record_curator_hint("1.1.9", "a" * 64, reader=reader)
+        lines = scope.drain()
+    assert reader.calls.count("documents_by_meta") == 1
+    assert lines == [hints.document_move_line("1.1.3", str(new_pdf))]
+
+
+def test_time_between_files_does_not_spend_the_budget_but_query_time_does(new_pdf):
+    """A ``--dir`` batch spends long stretches between files; only the seconds inside hint queries add up."""
+    clock = _Clock()
+    reader = _SlowReader(clock, 4.0, here=_entry("1.1.9", str(new_pdf)))
+    with hints.run_scope(budget_s=10.0, clock=clock):
+        for i in range(6):
+            clock.now += 300.0  # five minutes of indexing between two files
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+    assert reader.calls.count("documents_by_meta") == 3, "4 s a file: three files fit under 10 s, the fourth finds it spent"

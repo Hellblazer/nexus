@@ -11,10 +11,13 @@ Three rules hold for every hint:
 * FAIL OPEN. A hint is advisory. Every catalog query it makes runs inside :func:`fail_open`, which logs and drops an
   exception (a refusal, a timeout, an engine without the route) and returns the caller's default. A hint never
   changes an exit code and never stops an index run.
-* BOUNDED. The renamed-repository hint stops asking when its time budget (:data:`HINT_BUDGET_S`) is spent. The curator
-  hint, which runs inside the write path once per newly written file, asks about at most
-  :data:`CURATOR_HINT_MAX_FILES` files per run, shares one :data:`HINT_BUDGET_S` budget across them, reads each owner's
-  kind once per run, and stops asking for the rest of the run after its first failed query.
+* BOUNDED. The renamed-repository hint stops asking when its time budget (:data:`HINT_BUDGET_S`, measured from when the
+  hint starts) is spent. The curator hint, which runs inside the write path once per newly written file, asks about at
+  most :data:`CURATOR_HINT_MAX_FILES` files per run, reads each owner's kind once per run, stops asking for the rest of
+  the run after its first failed query, and shares one :data:`HINT_BUDGET_S` budget across the files that counts ONLY
+  the seconds spent inside its own catalog queries: extraction, chunking and embedding before the first stamp, and the
+  time between the files of a ``--dir`` batch, never spend it. A run that did not check every file ends its hints with
+  one line saying how many it checked.
 * PROBE FIRST. No query is made, and no line is printed, unless the engine reports the move routes
   (:func:`engine_supports_moves`): a client never prints a command its engine refuses.
 * NOT A SINGLETON. The curator hint is recorded from deep inside the single-file writers
@@ -99,22 +102,28 @@ class Budget:
 
 class HintCollector:
     """The hint lines of one run, in the order recorded, each once, and the run's bound on what the curator hint may
-    ask: a run-wide time budget, a cap on the files it asks about, and a stop after the first failed query. Thread-safe:
-    the uploader of a streaming PDF run records from its own thread."""
+    ask: a budget of query time, a cap on the files it asks about, and a stop after the first failed query. Thread-safe:
+    the uploader of a streaming PDF run records from its own thread.
 
-    def __init__(self, budget_s: float = HINT_BUDGET_S) -> None:
+    The budget is the SUM of the seconds spent inside the curator hint's catalog queries (:meth:`timed`), not the time
+    since the scope opened: a run whose extraction takes minutes before its first stamp, or a ``--dir`` batch that
+    spends minutes between files, has spent none of it."""
+
+    def __init__(self, budget_s: float = HINT_BUDGET_S, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._lock = threading.Lock()
         self._lines: list[str] = []
-        self._budget = Budget(budget_s)
+        self._budget_s = budget_s
+        self._clock = clock
+        self._query_s = 0.0
         self._asked = 0
         self._stopped = False
         self._owner_is_curator: dict[str, bool] = {}
 
     def admit(self) -> bool:
-        """May the curator hint ask about one more file? No once a query failed, the run's time is spent, or
+        """May the curator hint ask about one more file? No once a query failed, the query-time budget is spent, or
         :data:`CURATOR_HINT_MAX_FILES` files were asked about. Counts the file it admits."""
         with self._lock:
-            if self._stopped or self._budget.spent() or self._asked >= CURATOR_HINT_MAX_FILES:
+            if self._stopped or self._query_s >= self._budget_s or self._asked >= CURATOR_HINT_MAX_FILES:
                 return False
             self._asked += 1
             return True
@@ -125,7 +134,20 @@ class HintCollector:
             self._stopped = True
 
     def budget_spent(self) -> bool:
-        return self._budget.spent()
+        """Has the curator hint spent its query-time budget?"""
+        with self._lock:
+            return self._query_s >= self._budget_s
+
+    @contextlib.contextmanager
+    def timed(self) -> Iterator[None]:
+        """Count the seconds spent inside the block against the query-time budget."""
+        started = self._clock()
+        try:
+            yield
+        finally:
+            elapsed = max(self._clock() - started, 0.0)
+            with self._lock:
+                self._query_s += elapsed
 
     def owner_is_curator(self, prefix: str, lookup: Callable[[str], bool]) -> bool:
         """Whether owner *prefix* is a curator owner, read once per run (*lookup* is called on a first sight)."""
@@ -160,13 +182,14 @@ def active_collector() -> HintCollector | None:
 
 
 @contextlib.contextmanager
-def run_scope(budget_s: float = HINT_BUDGET_S) -> Iterator[HintCollector]:
-    """Open the collector for one command run, with *budget_s* seconds for its curator queries. A nested scope reuses
-    the outer one (the outer run prints)."""
+def run_scope(budget_s: float = HINT_BUDGET_S, *, clock: Callable[[], float] = time.monotonic) -> Iterator[HintCollector]:
+    """Open the collector for one command run, with *budget_s* seconds of query time for its curator hint (the time it
+    spends inside its own catalog queries, not the time since the scope opened). A nested scope reuses the outer one
+    (the outer run prints)."""
     global _open_collector
     with _scope_lock:
         outer = _open_collector
-        collector = outer if outer is not None else HintCollector(budget_s)
+        collector = outer if outer is not None else HintCollector(budget_s, clock=clock)
         _open_collector = collector
     try:
         yield collector
@@ -294,8 +317,9 @@ def curator_hint_lines(reader: Any, doc_id: str, content_hash: str, collector: H
 def record_curator_hint(doc_id: str, content_hash: str, *, reader: Any = None) -> None:
     """Record the curator hints of a document the writer has just stamped, into the open run's collector. Does nothing
     (and queries nothing) when no :func:`run_scope` is open. Fail-open, and bounded per run: it asks about at most
-    :data:`CURATOR_HINT_MAX_FILES` files, stops when the run's time budget (:data:`HINT_BUDGET_S`) is spent, and stops
-    for the rest of the run after the first query that fails."""
+    :data:`CURATOR_HINT_MAX_FILES` files, stops when the seconds spent in its own queries reach :data:`HINT_BUDGET_S`
+    (time spent elsewhere in the run does not count), and stops for the rest of the run after the first query that
+    fails."""
     collector = active_collector()
     if collector is None or not doc_id or not content_hash or not collector.admit():
         return
@@ -303,7 +327,8 @@ def record_curator_hint(doc_id: str, content_hash: str, *, reader: Any = None) -
     def _lines() -> list[str]:
         return curator_hint_lines(_reader(reader), doc_id, content_hash, collector)
 
-    lines = fail_open("curator", _lines, default=None)
+    with collector.timed():
+        lines = fail_open("curator", _lines, default=None)
     if lines is None:
         collector.stop()
         return
