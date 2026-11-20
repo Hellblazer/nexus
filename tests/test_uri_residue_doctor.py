@@ -24,9 +24,9 @@ from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable
 from nexus.cli import main
 from nexus.commands import doctor as doctor_mod
 
-DOCS = "docs__1-2__voyage-context-3__v1"
-CODE = "code__1-3__voyage-code-3__v1"
-KNOW = "knowledge__sub__voyage-context-3__v1"
+DOCS = "docs__1-2__minilm-l6-v2-384__v1"
+CODE = "code__1-3__bge-base-en-v15-768__v1"
+KNOW = "knowledge__sub__minilm-l6-v2-384__v1"
 
 
 def g(table: str, scheme: str, segment: str, collection: str, content_type: str, rows: int) -> dict:
@@ -112,7 +112,7 @@ def test_counts_every_shape_the_rdr_names_per_table() -> None:
 @pytest.mark.parametrize("prefix", FILE_ROUTED_PREFIXES)
 def test_the_prefix_test_is_aspect_readers_not_a_copy(prefix: str) -> None:
     """Each prefix of ``FILE_ROUTED_PREFIXES`` makes a segment file-routed, so it is never counted as prefix-free."""
-    seg = f"{prefix}1-9__voyage-code-3__v1"
+    seg = f"{prefix}1-9__bge-base-en-v15-768__v1"
     groups = [g("catalog_documents", "chroma", seg, seg, prefix.rstrip("_"), 3),
               g("catalog_documents", "nx-note", seg, seg, prefix.rstrip("_"), 3)]
     report = ur.check_uri_residue(reader=_Reader(groups))
