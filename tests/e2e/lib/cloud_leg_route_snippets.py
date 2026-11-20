@@ -52,3 +52,9 @@ name = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
 _get_catalog().register_collection(name)
 print(name)
 """
+PRUNE_PROJECTION = r"""
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+# RDR-229 P2.4: a destructive route, probed so that it cannot delete: the name matches no collection and the floor
+# is 0.0 (no stored similarity is below it), so a healthy route answers {"removed": 0}.
+print(HttpTaxonomyStore().prune_projection_below("cloudleg-@label@", 0.0))
+"""
