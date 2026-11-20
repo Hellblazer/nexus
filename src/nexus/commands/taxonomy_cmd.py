@@ -3121,12 +3121,12 @@ def _prune_targets(taxonomy: Any, threshold: float | None) -> list[tuple[str, fl
     When that would delete rows the longer collection's own (lower) threshold
     keeps, the shorter one is skipped and said so, rather than over-deleting.
     """
-    from nexus.mcp_infra import get_collection_names  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.mcp_infra import get_live_collection_names  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     names = set(taxonomy.get_distinct_collections())
     try:
-        names.update(get_collection_names())
+        names.update(get_live_collection_names())
     except Exception:  # noqa: BLE001 - recovery sweep: an unreadable listing narrows it to the collections with topics, it does not stop it
         _log.warning("taxonomy_prune_listing_unreadable", exc_info=True)
     ordered = sorted(names)
