@@ -22,6 +22,7 @@ from nexus.indexer import _index_pdf_file
 from nexus.pdf_extractor import PDFExtractor
 from tests._mineru_rearm import mineru_importorskip
 from tests.conftest import set_credentials
+from tests._mineru_cache import shared_mineru_extraction  # noqa: F401 - the fixture, opted into below
 
 
 
@@ -332,6 +333,7 @@ def pdf_git_repo(tmp_path_factory: pytest.TempPathFactory, simple_pdf: Path) -> 
 
 
 @pytest.mark.t2_tenant
+@pytest.mark.usefixtures("shared_mineru_extraction")  # one real MinerU run per distinct PDF (suite audit item 4)
 class TestIndexPdfFileForceReEmbedDecoupled:
     """nexus-4jj40 sibling (shakedown 2026-09-15): the PDF per-file fallback
     passed ``force`` as ``force_re_embed``, so a plain --force paid for a full
@@ -377,6 +379,7 @@ class TestIndexPdfFileForceReEmbedDecoupled:
 
 
 @pytest.mark.t2_tenant
+@pytest.mark.usefixtures("shared_mineru_extraction")  # one real MinerU run per distinct PDF (suite audit item 4)
 class TestIndexPdfFileGitMetadata:
     """AC-S5: _index_pdf_file writes no flat ``git_*`` keys, even inside a real repo.
 
