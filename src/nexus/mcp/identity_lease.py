@@ -155,6 +155,7 @@ class IdentityLease:
         self._token_lapsed = False
         self._last_wall: float | None = None      # the wall clock at the last tick, to see a step backwards
         self._fork_sid: str | None = None         # the session id of the fork row in flight, for a once-per-id warning
+        self._unknown_sid: str | None = None      # an unknown registry session id seen once: it gets one renewal of grace
         self._fork_warned: set[str] = set()
         self._started = clock()
         self._next_heartbeat = 0.0
@@ -438,6 +439,13 @@ class IdentityLease:
         except IdentityApiError as exc:
             if exc.status != 404:
                 raise
+        if self._unknown_sid != sid:
+            # One renewal of grace (develop run 44659989781): on /clear Claude writes the new id into its registry file
+            # before the SessionStart hook binds it, and a fork row sent in that gap doubled the /clear's row. A /branch
+            # runs no hook, so its id is still unknown at the next renewal and gets its fork row then.
+            self._unknown_sid = sid
+            return
+        self._unknown_sid = None
         with self._lock:
             identity, generation, prior, held = self.identity, self.generation, self.session_id, self.token
         try:
