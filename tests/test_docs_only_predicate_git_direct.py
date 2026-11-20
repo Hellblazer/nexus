@@ -16,8 +16,9 @@ Two test families:
   dorny at all, its outputs contract (`code`) is untouched, and every
   downstream consumer (service-jar, test, test-lint, test-mode-census,
   pytest-gate) still reads `needs.changes.outputs.code` the same way. The
-  OTHER dorny usages (CA-3 x2, engine-service-build, write-seam-gate) must
-  still use dorny -- that family is deliberately unchanged.
+  OTHER dorny usages (CA-3 x2, write-seam-gate) must still use dorny --
+  that family is deliberately unchanged (engine-service-build left it at
+  suite audit item 8 for the changes job's svc step).
 * Behavioural tests -- extract the `gate` step's literal `run:` block (same
   discipline as test_dorny_guard_shell_logic.py: the ACTUAL text a runner
   would execute, not a hand-copied duplicate that could drift), substitute
@@ -375,6 +376,21 @@ def test_push_mixed_diff_resolves_false(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     before = _commit(repo, {"seed.txt": "x"}, "seed")
     _commit(repo, {"docs/rdr/117-thing.md": "hi", "src/nexus/foo.py": "code"}, "mixed update")
+    script = _render(_gate_script(), _values("push", before_sha=before))
+    proc, outputs = _run_in(repo, script)
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert outputs.get("code") == "true"
+
+
+def test_push_rename_of_code_into_docs_is_code_not_docs_only(tmp_path: Path) -> None:
+    """A rename lists only its destination under git's default rename detection, so moving src/ into docs/
+    read as docs-only and skipped the matrix (code review of suite audit item 8). The source path counts."""
+    repo = _init_repo(tmp_path)
+    _commit(repo, {"src/nexus/foo.py": "a module body long enough to be detected as the same file\n" * 4}, "seed")
+    before = _git(repo, "rev-parse", "HEAD").strip()
+    (repo / "docs").mkdir(exist_ok=True)
+    _git(repo, "mv", "src/nexus/foo.py", "docs/foo.py")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "move")
     script = _render(_gate_script(), _values("push", before_sha=before))
     proc, outputs = _run_in(repo, script)
     assert proc.returncode == 0, (proc.stdout, proc.stderr)

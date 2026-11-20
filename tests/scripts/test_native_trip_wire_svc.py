@@ -9,9 +9,13 @@ skipped. Every doubt answers ``true``; an empty diff between two good commits fa
 """
 from __future__ import annotations
 
+import http.server
 import importlib.util
+import json
 import subprocess
 import sys
+import threading
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -131,6 +135,63 @@ def test_a_pull_request_diffs_from_the_merge_base_and_needs_no_lookup(repo: Path
     _commit(repo, "service/pom.xml")
     assert _decide(repo, event="pull_request", base=base, lookup=never)[0] is True
     assert _decide(repo, event="pull_request", base=ZERO, lookup=never)[0] is True
+
+
+@pytest.mark.parametrize("src", ["service/src/Old.java", ".github/actions/maven-cache/action.yml"])
+def test_a_rename_out_of_an_input_runs(repo: Path, src: str) -> None:
+    """git's default rename detection lists only the destination; the source path must count."""
+    _commit(repo, src, "a body long enough for git to call this a rename\n" * 4)
+    before = _git(repo, "rev-parse", "HEAD")
+    (repo / "docs").mkdir(exist_ok=True)
+    _git(repo, "mv", src, "docs/moved.txt")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "move")
+    svc, why = _decide(repo, before=before)
+    assert svc is True and src in why, why
+
+
+def test_a_pull_request_diff_is_three_dot_from_the_merge_base(repo: Path) -> None:
+    """A base that moved on after the branch point must not count its own changes (`..` would)."""
+    fork = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "pr")
+    _commit(repo, "docs/x.md")
+    _git(repo, "checkout", "-q", "-")
+    base = _commit(repo, "service/landed-on-base.java")
+    _git(repo, "checkout", "-q", "pr")
+    assert _git(repo, "merge-base", base, "HEAD") == fork
+    svc, why = _decide(repo, event="pull_request", base=base, lookup=None)
+    assert svc is False, why
+
+
+def test_the_check_run_lookup_reads_githubs_payload_by_name(tmp_path: Path) -> None:
+    """check_runs_lookup against a local server speaking the REST shape: the path, the check_name filter, the
+    bearer, and the ``check_runs`` list. A wrong key or parameter here would make every push build forever."""
+    seen: dict[str, str] = {}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            u = urllib.parse.urlparse(self.path)
+            seen.update(path=u.path, name=urllib.parse.parse_qs(u.query).get("check_name", [""])[0],
+                        auth=self.headers.get("Authorization", ""))
+            body = json.dumps({"total_count": 2, "check_runs": [
+                {"name": gate.TRIP_WIRE_CHECK, "status": "completed", "conclusion": "skipped"},
+                {"name": gate.TRIP_WIRE_CHECK, "status": "in_progress", "conclusion": None}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # noqa: D401
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        lookup = gate.check_runs_lookup("o/r", "tok-123", api=f"http://127.0.0.1:{srv.server_address[1]}")
+        assert lookup("abc123") == [("completed", "skipped"), ("in_progress", None)]
+    finally:
+        srv.shutdown()
+    assert seen == {"path": "/repos/o/r/commits/abc123/check-runs", "name": gate.TRIP_WIRE_CHECK,
+                    "auth": "Bearer tok-123"}
 
 
 def test_an_empty_diff_between_two_good_commits_fails(repo: Path) -> None:

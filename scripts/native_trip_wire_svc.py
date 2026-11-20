@@ -19,7 +19,9 @@ the ``changes`` job, and the trip-wire's job-level ``if:`` skips the whole job o
    answering ``false``, never from a failed ``needs``. A base that also carries a failed run is uncovered.
 
 An unusable base (all zeros, empty, not in the checkout), a failed check-run read, or a base whose run failed,
-timed out or was cancelled answers ``true``. An empty changed-file list between two good commits is a broken range,
+timed out or was cancelled answers ``true``. One residual is accepted: a base whose run is still queued or running
+counts as covered, so if that run later fails, clean pushes made meanwhile have already skipped; the failed commit
+stays red on its own run, and the next push that changes an input builds. An empty changed-file list between two good commits is a broken range,
 not "nothing changed": exit 1, never a skip (the PR #1464 class, ci.yml ``changes`` job).
 
 Standard library only: it runs under the runner's bare python3.
@@ -89,7 +91,9 @@ def decide(*, repo: Path, event: str, before: str = "", base: str = "", lookup: 
         if not _reachable(repo, before):
             return True, f"push base {before!r} is not usable here (a first push or a rewritten tip)"
         rng = [before, "HEAD"]
-    changed = [p for p in _git(repo, "diff", "--name-only", *rng).splitlines() if p]
+    # --no-renames: a rename's source path counts too (moving a file out of service/ changes the build);
+    # -z: no core.quotepath quoting, so a non-ASCII path still starts with its prefix.
+    changed = [p for p in _git(repo, "diff", "--no-renames", "--name-only", "-z", *rng).split("\0") if p]
     if not changed:
         raise MalformedRange(f"no changed file between {' '.join(rng)}: the range is broken, not empty")
     hits = [p for p in changed if any(p.startswith(x) for x in INPUT_PREFIXES)]

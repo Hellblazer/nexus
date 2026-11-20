@@ -217,8 +217,9 @@ jobs:
     # cost and never skips something that needed to run. THIS job is the one
     # place an emptiness bug bought a false NEGATIVE (a skip that shouldn't
     # have happened), which is why it alone gets the git-direct treatment —
-    # do not "unify" the CA-3 / write-seam-gate / svc jobs onto this pattern;
-    # they were never the ones that broke.
+    # do not "unify" the CA-3 / write-seam-gate jobs onto this pattern;
+    # they were never the ones that broke. (The trip-wire's svc gate did
+    # break, always true on develop, and moved here: suite audit item 8.)
     name: doc-only fast lane predicate
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -283,7 +284,8 @@ jobs:
               echo "code=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            CHANGED_FILES="$(git diff --name-only "${BASE_SHA}...HEAD")"
+            # --no-renames: a rename's SOURCE counts too (src/ moved into docs/ is not docs-only).
+            CHANGED_FILES="$(git diff --no-renames --name-only "${BASE_SHA}...HEAD")"
           else
             # PUSH events: diff against the previous position of THIS SAME
             # branch (github.event.before), preserving the same-branch
@@ -304,7 +306,7 @@ jobs:
               echo "code=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            CHANGED_FILES="$(git diff --name-only "${BEFORE_SHA}" HEAD)"
+            CHANGED_FILES="$(git diff --no-renames --name-only "${BEFORE_SHA}" HEAD)"
           fi
 
           if [ -z "$CHANGED_FILES" ]; then
@@ -418,7 +420,7 @@ jobs:
             echo "::warning::no usable diff base ('$BASE'); selecting every integration file"
             mode="all"
           else
-            CHANGED="$(git diff --name-only "${RANGE[@]}")"
+            CHANGED="$(git diff --no-renames --name-only "${RANGE[@]}")"
             if grep -qxE 'scripts/(select_affected_integration_tests|assert_integration_affected_ran)\.py' <<< "$CHANGED"; then
               mode="all"
             fi
