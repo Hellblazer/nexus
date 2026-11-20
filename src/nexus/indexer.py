@@ -935,6 +935,13 @@ def _migrate_legacy_collections(
                     ),
                 )
                 data_plane_succeeded = True
+                # The shared collections cache the run's row read goes through was
+                # filled before the rename and has no row for the new name (RDR-229
+                # P2.3): drop it here, where a rename happened, so a steady-state run
+                # pays no extra listing.
+                from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
+
+                invalidate_collections_cache()
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_migration_data_plane_failed",
@@ -5546,13 +5553,6 @@ def _run_index(
     # non-conformant (legacy) name carries no token, so in local mode it keeps the
     # Python EF's name unless the row answers; the rdr collection's keeps the docs
     # one's.
-    if _migrated_names:
-        # A migration renamed collections (the data plane moves the rows with them)
-        # and the shared collections cache the row read goes through was filled,
-        # for up to a minute, before: it has no row for a new name.
-        from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
-
-        invalidate_collections_cache()
     if have_code_files:
         code_model, code_model_known = _repo_target_model(db, code_collection, legacy_model=local_model)
     else:
