@@ -16,9 +16,13 @@ The transport is a fake; the client, its row reader and its error are the real o
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import httpx
 import pytest
 
+from nexus.catalog.collection_name import RESOLVABLE_LIFECYCLE_STATES
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 _OWNER = "1.1"
@@ -80,3 +84,25 @@ def test_a_row_without_the_field_resolves_as_before(monkeypatch) -> None:
     del row["lifecycle_state"]
     cat = _client(monkeypatch, row)
     assert cat.collection_for("code", _OWNER, _MODEL).model_version == 2
+
+
+_CATALOG_REPOSITORY = (
+    Path(__file__).resolve().parent.parent
+    / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service" / "db" / "CatalogRepository.java"
+)
+
+
+def _engine_lifecycle_states() -> set[str]:
+    text = _CATALOG_REPOSITORY.read_text(encoding="utf-8")
+    match = re.search(r"LIFECYCLE_STATES\s*=\s*java\.util\.Set\.of\(([^)]*)\)", text)
+    assert match, "CatalogRepository.LIFECYCLE_STATES was not found: the constant moved or changed shape"
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
+
+
+def test_the_resolvable_states_are_the_engines_states_less_quarantine() -> None:
+    """RESOLVABLE_LIFECYCLE_STATES is a client copy of the engine's vocabulary (hygiene-002's CHECK, mirrored by
+    CatalogRepository.LIFECYCLE_STATES). A state the engine adds is refused by every client that does not know it
+    (an unknown state is a ValueError, by design), so adding one must fail here until the client decides on it."""
+    engine = _engine_lifecycle_states()
+    assert "quarantine" in engine, "guard: the engine vocabulary still names quarantine"
+    assert RESOLVABLE_LIFECYCLE_STATES == engine - {"quarantine"}

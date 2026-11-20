@@ -9956,7 +9956,7 @@ public final class CatalogRepository {
      * nexus-kk4ut) since this is exactly the caller-facing single-row read
      * the client's opt-in decision consults; see {@link #collRowWithAspects}.
      * {@link #collectionForTuple} is a routing lookup, not a caller-facing
-     * row read, and keeps {@link #collRow}'s original 10-key shape.
+     * row read: {@link #collRow}'s 10 keys plus {@code lifecycle_state} (11, RDR-229 P2.5).
      */
     public Map<String, Object> getCollection(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -10060,7 +10060,8 @@ public final class CatalogRepository {
      * columns that did not exist when {@link #collRow} was first written — via
      * {@link #collRowWithLifecycle}, which also carries {@code aspects_enabled}
      * (RDR bead nexus-l46pu). {@link #collectionForTuple} is NOT touched by
-     * either bead and keeps {@link #collRow}'s original 10-key shape; {@link
+     * either bead; it carries {@link #collRow}'s 10 keys plus {@code lifecycle_state}
+     * (11, RDR-229 P2.5); {@link
      * #getCollection} carries {@code aspects_enabled} too (see its own javadoc)
      * but not {@code dimension}/{@code lifecycle_state}.
      *
@@ -13639,9 +13640,6 @@ public final class CatalogRepository {
             return;
         }
         CollectionRegistration.requireStatesAgreeWithNames(List.of(coll));
-        if (CollectionRegistration.stateCorrectedOnImport(coll)) {
-            logStateCorrected(tenant, s(coll, "name"));
-        }
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
@@ -13666,6 +13664,10 @@ public final class CatalogRepository {
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
               .doNothing()
               .execute();
+        // Logged once the row is stored, as the batch path does: importModelVersion above can still refuse.
+        if (CollectionRegistration.stateCorrectedOnImport(coll)) {
+            logStateCorrected(tenant, s(coll, "name"));
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════

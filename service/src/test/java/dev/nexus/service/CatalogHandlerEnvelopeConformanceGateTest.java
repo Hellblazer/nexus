@@ -434,7 +434,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/import/document", "handleImportDocument"),
         neither("/import/link", "handleImportLink"),
         neither("/import/chunk", "handleImportChunk"),
-        neither("/import/collection", "handleImportCollection"),
+        // RDR-229 P2.5: answers {"imported": N, "state_corrected": [...]}, a named array that
+        // reports which rows the import corrected; it gates no destructive decision.
+        collectionExempt("/import/collection", "handleImportCollection", REPORT_ONLY),
 
         // ── Coverage analytics ───────────────────────────────────────────
         collectionExempt("/coverage", "handleCoverage", SMALL_FIXED_CARDINALITY),

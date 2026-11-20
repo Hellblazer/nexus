@@ -365,6 +365,65 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
         var result = repo.importCollectionsBatchReport(t, List.of(row));
         assertThat(result.stateCorrected()).containsExactly(plain);
         assertThat(state(t, plain)).isEqualTo("quarantine");
+
+        String plainSingle = col("a8j");
+        Map<String, Object> single = reg(plainSingle, "live");
+        single.put("content_type", "quarantine-knowledge");
+        repo.importCollection(t, single);
+        assertThat(state(t, plainSingle)).as("the single-row import applies the same rule").isEqualTo("quarantine");
+    }
+
+    @Test
+    void everyCorrectedRowGetsOneWarnLine_andOnlyOnceItIsStored() throws Exception {
+        // linda 2026-11-20: the correction is visible as one WARN per row. The single-row path logs after its insert,
+        // so a row the insert refuses is never reported as corrected.
+        String t = newTenant();
+        String revivedBatch = prefixed(col("a8w"));
+        String revivedSingle = prefixed(col("a8x"));
+        String clean = col("a8y");
+        Map<String, Object> refused = reg(prefixed(col("a8z")), "live");
+        refused.remove("model_version");
+        refused.put("name", "quarantine-not-conformant-a8z");
+
+        var logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(dev.nexus.service.db.CatalogRepository.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            repo.importCollectionsBatch(t, List.of(reg(revivedBatch, "live"), reg(clean, "live")));
+            repo.importCollection(t, reg(revivedSingle, "live"));
+            assertThatThrownBy(() -> repo.importCollection(t, refused))
+                .as("guard: the insert refuses a row with no version and a name that carries none")
+                .isInstanceOf(IllegalArgumentException.class);
+        } finally {
+            logger.detachAppender(logs);
+            logs.stop();
+        }
+        var warned = logs.list.stream()
+            .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.contains("event=collection_import_state_corrected"))
+            .toList();
+        assertThat(warned).hasSize(2);
+        assertThat(warned).anySatisfy(m -> assertThat(m).contains("name=" + revivedBatch));
+        assertThat(warned).anySatisfy(m -> assertThat(m).contains("name=" + revivedSingle));
+        assertThat(warned).noneSatisfy(m -> assertThat(m).contains(clean));
+        assertThat(warned).noneSatisfy(m -> assertThat(m).contains("a8z"));
+    }
+
+    @Test
+    void forTupleEmitsTheRowsOwnState_notAConstant() throws Exception {
+        // linda 2026-11-20: the for_tuple row's lifecycle_state is the column, so a dormant row says dormant (and
+        // resolves; the client lets dormant and disputed through). A hard-coded "live" fails here.
+        String t = newTenant();
+        String dormant = col("a8d2");
+        repo.upsertCollection(t, reg(dormant, "dormant"));
+
+        var row = repo.collectionForTuple(t, "knowledge", "o", "minilm-l6-v2-384");
+        assertThat(row).as("guard: the dormant row resolves the tuple").isNotNull();
+        assertThat(row.get("name")).isEqualTo(dormant);
+        assertThat(row.get("lifecycle_state")).isEqualTo("dormant");
     }
 
     @Test
