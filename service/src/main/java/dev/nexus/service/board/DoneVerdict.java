@@ -10,8 +10,10 @@ import java.util.Set;
 
 /**
  * The verdict a {@code board/ci/<base>--done} row carries: the tip sha and {@code success}, {@code failure} or
- * {@code cancelled}. It is {@code dims.outcome} when present (the adapter writes it once its FOLD_RESULT_DIMS switch
- * is on); otherwise it is derived from the {@code runs} conclusions in the body with the template's rules: any run
+ * {@code cancelled}. It is {@code dims.branch_outcome} when present and not blank (the adapter's carry-forward of a
+ * path-filtered workflow's last result on the branch, written once its FOLD_BRANCH_OUTCOME switch is on, so a Service
+ * CI red that a later sha never re-ran still stands); else {@code dims.outcome} when present (the per-sha fold,
+ * written once its FOLD_RESULT_DIMS switch is on); otherwise it is derived from the {@code runs} conclusions in the body with the template's rules: any run
  * that concluded failure, timed_out, startup_failure or action_required is a failure; else a run with an unknown
  * conclusion (including the old two-element entries), or a body whose {@code n} counts more runs than it lists
  * (trailing entries dropped), leaves no verdict; else a run that concluded cancelled or stale
@@ -50,7 +52,10 @@ public final class DoneVerdict {
         if (sha == null || sha.isBlank()) {
             return Optional.empty();
         }
-        String outcome = row.dim("outcome");
+        String outcome = row.dim("branch_outcome");
+        if (outcome == null || outcome.isBlank()) {
+            outcome = row.dim("outcome");
+        }
         if (outcome == null || outcome.isBlank()) {
             outcome = derive(body);
         }

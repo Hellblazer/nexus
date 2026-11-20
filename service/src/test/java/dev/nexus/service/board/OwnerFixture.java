@@ -114,6 +114,20 @@ final class OwnerFixture {
         return this;
     }
 
+    /** A done row with {@code dims.outcome} and {@code dims.branch_outcome}; a null {@code branchOutcome} omits the dim. */
+    OwnerFixture doneBranch(String sha, String outcome, String branchOutcome) {
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", "github");
+        dims.put("kind", "sha");
+        dims.put("sha", sha);
+        dims.put("outcome", outcome);
+        if (branchOutcome != null) {
+            dims.put("branch_outcome", branchOutcome);
+        }
+        dones.add(new BoardRow("d" + (++seq), tick(), dims, "{\"state\":\"concluded\",\"sha\":\"" + sha + "\"}", null));
+        return this;
+    }
+
     /** A done row before the adapter's result dims: the verdict is in {@code runs} only. */
     OwnerFixture doneRuns(String sha, String... conclusions) {
         Map<String, String> dims = new LinkedHashMap<>();

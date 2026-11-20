@@ -77,6 +77,20 @@ final class StamperEnv implements AutoCloseable {
         stamper.afterOut(tenant, "board/ci/" + topic, dims, body);
     }
 
+    /** A {@code --done} write that carries {@code dims.branch_outcome} too, and the hook after it. */
+    void doneBranch(String tenant, String base, String sha, String outcome, String branchOutcome) {
+        String topic = base + "--done";
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", "github");
+        dims.put("kind", "sha");
+        dims.put("sha", sha);
+        dims.put("outcome", outcome);
+        dims.put("branch_outcome", branchOutcome);
+        String body = "{\"state\":\"concluded\",\"sha\":\"" + sha + "\"}";
+        tuples.out(tenant, "board/ci/" + topic, Map.of("topic", topic), dims, body, UUID.randomUUID().toString(), null, null);
+        stamper.afterOut(tenant, "board/ci/" + topic, dims, body);
+    }
+
     /** The write only, for a test that runs the hook itself. */
     void doneRowOnly(String tenant, String base, String sha, String outcome) {
         String topic = base + "--done";

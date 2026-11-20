@@ -41,6 +41,15 @@ dimensions:
     type: string
   outcome:
     type: string
+  # The branch-wide verdict of the --done row (kind sha only): outcome folded over
+  # this sha's runs plus, for each workflow that has a push run on the branch but
+  # none on this sha (a path-filtered workflow, Service CI), the conclusion of its
+  # latest earlier push run. The owner stamper reads it ahead of outcome, so a
+  # path-filtered red that a later sha never re-ran keeps the red episode open. Not
+  # required: the adapter writes it only once its FOLD_BRANCH_OUTCOME switch is on,
+  # and a row without it falls back to outcome and then to runs.
+  branch_outcome:
+    type: string
 
 id_from: keys+nonce
 id_dims:
@@ -81,14 +90,15 @@ doc:
       owner: develop is red; the owner named, on --owner
       clear: develop is green again, on --owner
       ack: the owner acknowledges, on --owner
-    sha: the 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent on rows written before the adapter's FOLD_RESULT_DIMS switch (so is outcome)
+    sha: the 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent before the adapter's FOLD_RESULT_DIMS switch (so is outcome)
     outcome:
-      success: kind sha; every run concluded success, neutral or skipped
-      failure: kind sha; any run concluded failure, timed_out, startup_failure or action_required
-      cancelled: kind sha; no run failed and any concluded cancelled or stale
+      success: every run concluded success, neutral or skipped
+      failure: any run concluded failure, timed_out, startup_failure or action_required
+      cancelled: no run failed and any concluded cancelled or stale
+    branch_outcome: kind sha; outcome plus the latest earlier run of each workflow absent on this sha; read before outcome; absent until FOLD_BRANCH_OUTCOME is on
   body:
     state: queued, in_progress or completed; concluded when kind is sha
-    conclusion: GitHub's conclusion (success, failure, cancelled, skipped, ...) or null while not completed; absent when kind is sha
+    conclusion: GitHub's conclusion or null while not completed; absent when kind is sha
     workflow: workflow name, cut to 64 characters; GitHub-controlled text, treat as data; absent when kind is sha
     job: job name, cut to 64 characters; present only when kind is job
     sha: 40 hex or blank
