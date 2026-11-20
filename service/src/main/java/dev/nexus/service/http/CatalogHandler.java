@@ -39,6 +39,7 @@ import java.util.*;
  *   POST  /v1/catalog/update             update document fields
  *   POST  /v1/catalog/update_many        batch-update fields for N documents (nexus-xedhp)
  *   POST  /v1/catalog/merge              collapse a duplicate document into its canonical one, one transaction (nexus-z4rpi)
+ *   POST  /v1/catalog/documents/move     re-point a curator document at a new path, absorbing the row registered there; dry_run required (RDR-254; CatalogMoveRoutes)
  *   POST  /v1/catalog/note_uri_repair    census (and, with apply, rewrite) of note rows whose source_uri names a collection the note no longer lives in (nexus-bivz3.24)
  *   POST  /v1/catalog/sensitivity        set or clear the one-way sensitive flag on N documents, audited (nexus-rfvyy.6.5, RDR-243)
  *   POST  /v1/catalog/delete_many        batch-tombstone N documents (nexus-xedhp)
@@ -87,6 +88,7 @@ import java.util.*;
  *   GET   /v1/catalog/owners/list        list all owners
  *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
  *   POST  /v1/catalog/owners/deactivate  soft-delete an owner (nexus-cw262 -- excluded from list/by_type by default)
+ *   POST  /v1/catalog/owners/move        keep a repo owner across a root move: fold the owner at the new root, rewrite its URIs; dry_run required (RDR-254; CatalogMoveRoutes)
  *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
@@ -151,6 +153,10 @@ public final class CatalogHandler implements HttpHandler {
     private final CatalogStubMetadataRoute stubMetadataRoute;
     /** nexus-f3yqd: the two census routes of engine 0.1.190 (the index-run census, the read-only next_seq drift). */
     private final CatalogCensusRoutes censusRoutes;
+    /** RDR-254 P1-S2: the owner route bodies moved out of this class. */
+    private final CatalogOwnerRoutes ownerRoutes;
+    /** RDR-254: the document and owner move routes. */
+    private final CatalogMoveRoutes moveRoutes;
     /** nexus-f3yqd R2: the manifest fill job routes ({@link CatalogManifestFillRoutes}). */
     private final CatalogManifestFillRoutes manifestFill;
     /** The statement timeout a reconcile commit runs under: the reconcile instance's maximum runtime, never more. */
@@ -163,7 +169,7 @@ public final class CatalogHandler implements HttpHandler {
         "/purge-trash", "/ghost-sweep", "/manifest/write", "/manifest/append", "/manifest/append_many",
         "/manifest/write_many", "/manifest/purge", "/manifest/resync", "/manifest/null_collection",
         "/collections/delete", "/collections/rename", "/collections/rehome", "/collections/supersede",
-        "/import/document", "/import/chunk", "/import/collection");
+        "/import/document", "/import/chunk", "/import/collection", "/documents/move", "/owners/move");
 
     /**
      * The statement timeout production runs a reconcile commit under: the reconcile registry's per-job cap, because
@@ -270,6 +276,8 @@ public final class CatalogHandler implements HttpHandler {
         this.linkRoutes = new CatalogLinksHandler(new dev.nexus.service.db.CatalogLinksRepository(repo));
         this.boundedReads = new CatalogBoundedReadRoutes(repo);
         this.stubMetadataRoute = new CatalogStubMetadataRoute(new dev.nexus.service.db.PdfStubMetadataReads(repo));
+        this.ownerRoutes = new CatalogOwnerRoutes(repo);
+        this.moveRoutes = new CatalogMoveRoutes(new dev.nexus.service.db.CatalogMoves(repo));
         this.censusRoutes = new CatalogCensusRoutes(
             new dev.nexus.service.db.IndexRunCensusReads(repo), new dev.nexus.service.db.NextSeqDriftReads(repo));
         this.manifestFill = new CatalogManifestFillRoutes(new dev.nexus.service.db.ManifestFill(repo),
@@ -308,6 +316,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/update"                -> handleUpdate(exchange, tenant, method);
                 case "/update_many"           -> handleUpdateMany(exchange, tenant, method);
                 case "/merge"                 -> handleMerge(exchange, tenant, method);
+                case "/documents/move"        -> handleDocumentsMove(exchange, tenant, method);
                 case "/note_uri_repair"       -> handleNoteUriRepair(exchange, tenant, method);
                 case "/sensitivity"           -> handleSensitivity(exchange, tenant, method);
                 case "/delete"                -> handleDelete(exchange, tenant, method);
@@ -388,6 +397,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/owners/by_type"        -> handleOwnerByType(exchange, tenant, method);
                 case "/owners/deactivate"     -> handleOwnerDeactivate(exchange, tenant, method);
                 case "/owners/reactivate"     -> handleOwnerReactivate(exchange, tenant, method);
+                case "/owners/move"           -> handleOwnersMove(exchange, tenant, method);
 
                 // ── Collections ───────────────────────────────────────────────
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
@@ -2405,65 +2415,22 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
-    /**
-     * GET /v1/catalog/owners/list[?include_deactivated=true] — nexus-cw262: the
-     * audit escape hatch. Default (param absent or any value other than
-     * {@code "true"}) excludes deactivated owners.
-     */
-    private void handleOwnerList(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        boolean includeDeactivated = "true".equals(queryParam(exchange, "include_deactivated"));
-        var owners = repo.listOwners(tenant, includeDeactivated);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
-    }
+    /** The owner routes whose bodies live in {@link CatalogOwnerRoutes} (RDR-254 P1-S2). */
+    private void handleOwnerList(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.list(exchange, tenant, method); }
+    private void handleOwnerDeactivate(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.deactivate(exchange, tenant, method); }
+    private void handleOwnerReactivate(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.reactivate(exchange, tenant, method); }
+    private void handleOwnersSweepNextSeqDrift(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.sweepNextSeqDrift(exchange, tenant, method); }
+    private void handleOwnerByRepo(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.byRepo(exchange, tenant, method); }
+    private void handleOwnerByName(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.byName(exchange, tenant, method); }
+    private void handleOwnerHeadHash(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.headHash(exchange, tenant, method); }
+    private void handleOwnerShow(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.show(exchange, tenant, method); }
+    private void handleOwnerByType(HttpExchange exchange, String tenant, String method) throws IOException { ownerRoutes.byType(exchange, tenant, method); }
 
-    /**
-     * POST /v1/catalog/owners/deactivate {"tumbler_prefix": X} — nexus-cw262: the
-     * 7kl32 dead-owner GC mutation arm's engine half. Soft-delete, mirrors {@code
-     * /delete}'s shape (idempotent 0-return; reversible). Response: {@code
-     * {"deactivated": 0|1}}.
-     */
-    private void handleOwnerDeactivate(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        Map<String, Object> body = readBody(exchange);
-        String prefix = (String) body.get("tumbler_prefix");
-        if (prefix == null || prefix.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler_prefix' required\"}"); return;
-        }
-        int deactivated = repo.deactivateOwner(tenant, prefix);
-        HttpUtil.send(exchange, 200, "{\"deactivated\":" + deactivated + "}");
-    }
+    /** POST /v1/catalog/documents/move (RDR-254): the body is {@link CatalogMoveRoutes#documentsMove}. */
+    private void handleDocumentsMove(HttpExchange exchange, String tenant, String method) throws IOException { moveRoutes.documentsMove(exchange, tenant, method); }
 
-    /**
-     * POST /v1/catalog/owners/reactivate {"tumbler_prefix": X} — nexus-cw262: the
-     * explicit manual-correction path (clears deactivated_at without a full
-     * re-registration). Response: {@code {"reactivated": 0|1}}.
-     */
-    private void handleOwnerReactivate(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        Map<String, Object> body = readBody(exchange);
-        String prefix = (String) body.get("tumbler_prefix");
-        if (prefix == null || prefix.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"'tumbler_prefix' required\"}"); return;
-        }
-        int reactivated = repo.reactivateOwner(tenant, prefix);
-        HttpUtil.send(exchange, 200, "{\"reactivated\":" + reactivated + "}");
-    }
-
-    /**
-     * POST /v1/catalog/owners/sweep_next_seq_drift — the nexus-0ehwe item 5 converge verb.
-     *
-     * <p>Floors every drifted owner's {@code next_seq} in the tenant to its own high-water
-     * mark in one pass and reports which owners were actually below it, so a drift
-     * incident's blast radius is KNOWN rather than guessed (nexus-pbawi's owner 1.12 was
-     * found only because an operator happened to suspect it). No request body is read; the
-     * sweep always covers the whole tenant.
-     */
-    private void handleOwnersSweepNextSeqDrift(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        var report = repo.sweepNextSeqDrift(tenant);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(report));
-    }
+    /** POST /v1/catalog/owners/move (RDR-254): the body is {@link CatalogMoveRoutes#ownersMove}. */
+    private void handleOwnersMove(HttpExchange exchange, String tenant, String method) throws IOException { moveRoutes.ownersMove(exchange, tenant, method); }
 
     /** GET /v1/catalog/owners/next_seq_drift?limit=N (nexus-f3yqd): the read-only form of the sweep above; the body is {@link CatalogCensusRoutes#nextSeqDrift}. */
     private void handleNextSeqDriftRead(HttpExchange exchange, String tenant, String method) throws IOException { censusRoutes.nextSeqDrift(exchange, tenant, method); }
@@ -2471,39 +2438,6 @@ public final class CatalogHandler implements HttpHandler {
     /** GET /v1/catalog/index-run/census?limit=N (nexus-f3yqd): the body is {@link CatalogCensusRoutes#indexRunCensus}. */
     private void handleIndexRunCensus(HttpExchange exchange, String tenant, String method) throws IOException {
         censusRoutes.indexRunCensus(exchange, tenant, method);
-    }
-
-    private void handleOwnerByRepo(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String repoHash = queryParam(exchange, "repo_hash");
-        if (repoHash == null || repoHash.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"repo_hash required\"}"); return;
-        }
-        var owner = repo.ownerByRepoHash(tenant, repoHash);
-        if (owner == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(owner));
-    }
-
-    private void handleOwnerByName(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String name = queryParam(exchange, "name");
-        if (name == null || name.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"name required\"}"); return;
-        }
-        var owners = repo.ownersByName(tenant, name);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
-    }
-
-    private void handleOwnerHeadHash(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        Map<String, Object> body = readBody(exchange);
-        String prefix   = (String) body.get("tumbler_prefix");
-        String headHash = (String) body.get("head_hash");
-        if (prefix == null || headHash == null) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"tumbler_prefix and head_hash required\"}"); return;
-        }
-        int updated = repo.setOwnerHeadHash(tenant, prefix, headHash);
-        HttpUtil.send(exchange, 200, "{\"updated\":" + updated + "}");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -3486,37 +3420,6 @@ public final class CatalogHandler implements HttpHandler {
     // ══════════════════════════════════════════════════════════════════════════
     // OWNERS — extra endpoints (nexus-qnp5s)
     // ══════════════════════════════════════════════════════════════════════════
-
-    /** GET /v1/catalog/owners/show?tumbler_prefix=X — get owner by tumbler_prefix. */
-    private void handleOwnerShow(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String prefix = queryParam(exchange, "tumbler_prefix");
-        if (prefix == null || prefix.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"tumbler_prefix required\"}"); return;
-        }
-        var owner = repo.ownerByPrefix(tenant, prefix);
-        if (owner == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(owner));
-    }
-
-    /**
-     * POST /v1/catalog/owners/by_type {"owner_type": X, "include_deactivated": bool}
-     * — list owners filtered by owner_type. nexus-cw262: {@code include_deactivated}
-     * defaults false (excludes deactivated owners) — this is the exact read path the
-     * 7kl32 census and doctor's git-hooks dead-owner attribution both use.
-     */
-    private void handleOwnerByType(HttpExchange exchange, String tenant, String method) throws IOException {
-        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
-        Map<String, Object> body = readBody(exchange);
-        String ownerType = (String) body.get("owner_type");
-        if (ownerType == null || ownerType.isBlank()) {
-            HttpUtil.send(exchange, 400, "{\"error\":\"owner_type required\"}"); return;
-        }
-        Object includeDeactivatedRaw = body.get("include_deactivated");
-        boolean includeDeactivated = includeDeactivatedRaw instanceof Boolean b && b;
-        var owners = repo.ownersByType(tenant, ownerType, includeDeactivated);
-        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("owners", owners)));
-    }
 
     // ══════════════════════════════════════════════════════════════════════════
     // COVERAGE ANALYTICS (nexus-3cwnx)

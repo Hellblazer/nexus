@@ -220,6 +220,28 @@ def row_the_real_token_resolution_writes_with_the_process_own_token_and_a_shell_
             client.close()
 
 
+#: The stand-in sender an engine row is posted under before :func:`_stamp_engine_rows` makes it ``from=engine``.
+_ENGINE_SEED = "engine-seed"
+
+
+def _stamp_engine_rows(world: World, subspace: str) -> None:
+    """Make the rows posted as ``_ENGINE_SEED`` on *subspace* read ``from=engine``, the way the engine's stamper leaves
+    them (it writes through the repository, never the route, which refuses the dim to every client). The tuple id is
+    the keys and the nonce, so the dims change leaves every row's id alone. Run as the cluster admin, which RLS does
+    not bind."""
+    import subprocess  # noqa: PLC0415 -- deferred: only this row seeds through SQL
+
+    state = world.state
+    sql = ("WITH stamped AS (UPDATE nexus.tuples SET dims = jsonb_set(dims, '{from}', '\"engine\"') "
+           f"WHERE subspace = '{subspace}' AND dims->>'from' = '{_ENGINE_SEED}' RETURNING 1) "
+           "SELECT count(*) FROM stamped")
+    proc = subprocess.run([str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+                           "-U", state["pg_user"], "-d", "nexus_t2_substrate", "-v", "ON_ERROR_STOP=1", "-At", "-c", sql],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, f"stamping the engine rows failed: {proc.stderr}"
+    assert proc.stdout.strip() == "5", f"expected the seed's 5 engine rows, got {proc.stdout!r}"
+
+
 def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was_handed_away_from(world: World) -> None:
     store = HttpTupleStore(base_url=world.base_url, tenant="default", _token=os.environ["NX_SERVICE_TOKEN"])
     with contextlib.ExitStack() as stack:
@@ -229,7 +251,10 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
         subspace, key = f"board/ci/{topic}--owner", f"{topic}--owner"
 
         def post(kind: str, sha: str, who: str, **body: Any) -> None:
-            store.out(subspace, {"topic": key}, {"from": who, "kind": kind, "sha": sha}, json.dumps(body), nonce=uuid.uuid4().hex)
+            # a client write of from=engine on board/ci is refused (RDR-252, 403 reserved_dim): an engine row is
+            # posted under a stand-in sender and stamped from=engine below, as the stamper's repository write leaves it
+            sender = _ENGINE_SEED if who == "engine" else who
+            store.out(subspace, {"topic": key}, {"from": sender, "kind": kind, "sha": sha}, json.dumps(body), nonce=uuid.uuid4().hex)
 
         def minutes_ago(n: int) -> str:
             return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - n * 60))
@@ -245,6 +270,8 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
         post("ack", s2, alpha.identity)                                  # the red was handed away from alpha: this does not count
         post("ack", s2, beta.identity)
         post("owner", s3, "engine", owner=alpha.identity, next=beta.identity, reason="no_record", episode_at=e3, refresh=False, handoffs=0)
+
+        _stamp_engine_rows(world, subspace)
 
         result = _cli(alpha, "ack-times", name, "--json")
         assert result.exit_code == 0, result.output

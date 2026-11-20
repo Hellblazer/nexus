@@ -118,8 +118,10 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         ('"""', "parsed = parse_conformant_collection_name(name)"),
     ): (
         "CollectionName.parse: the render path's own parse counterpart. "
-        "Pre-existing single caller (http_catalog_client.py's "
-        "collection_for) unaffected by this bead."
+        "Its one caller is version_from_for_tuple_row's temporary fallback "
+        "for a row with an empty model_version (RDR-229 P1.4, nexus-p2m1x.4; "
+        "http_catalog_client.py's collection_for reads the row, no longer the "
+        "name). Unaffected by nexus-ft04v.27."
     ),
     (
         "src/nexus/commands/collection.py",
@@ -417,3 +419,31 @@ def test_retired_sites_are_documented() -> None:
     reader (and a future regression) has something concrete to check
     against, independent of the exact-allowlist assertion above."""
     assert len(RETIRED_SITES) == 10, RETIRED_SITES
+
+
+def test_every_direct_caller_is_also_a_labelled_site_of_the_widened_census() -> None:
+    """RDR-229 P1.1 (nexus-p2m1x.1): this census's callers come in to the
+    widened client census. ``parse_conformant_collection_name`` is a parser
+    root of the derived helper set, so each allowlisted caller outside
+    ``corpus.py`` (whose own helper calls are not counted) must be a
+    ``primitive_call`` site there carrying a class."""
+    from tests import _collection_name_census_scan as scan  # noqa: PLC0415 — keeps the two census modules independent at import time
+    from tests._collection_name_census_ledger import LEDGER  # noqa: PLC0415
+
+    assert _TARGET in scan.live_parser_helpers()
+    resolved, problems = scan.resolve_sites(REPO_ROOT, list(LEDGER))
+    assert not problems
+    by_file, _problems = _resolve_allowed_callers()
+    outside = {
+        (rel, lineno): content
+        for rel, linenos in by_file.items() if rel != scan.CORPUS_REL
+        for lineno, content in linenos.items()
+    }
+    assert outside, "no allowlisted caller outside corpus.py: the check proved nothing"
+    missing = sorted(
+        f"{rel}:{lineno}" for rel, lineno in outside
+        if (rel, lineno, "primitive_call") not in resolved
+    )
+    assert not missing, (
+        f"allowlisted direct caller(s) with no class in the widened census: {missing}"
+    )

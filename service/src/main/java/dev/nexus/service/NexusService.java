@@ -905,7 +905,7 @@ public final class NexusService {
                 t.setDaemon(true);
                 return t;
             });
-        if (boardOwner != null) { boardOwner.start(this.sweepScheduler, this::reaperTenants); }   // RDR-252 Step 3: deadline timer and its rebuild
+        if (boardOwner != null) { boardOwner.start(this.sweepScheduler, new dev.nexus.service.board.BoardOwnerTenants(this::reaperTenants, () -> listTupleSweepTenants(SweepBounds.STATEMENT_TIMEOUT).stream().map(TupleTenantCursor::tenantId).toList())); }   // RDR-252 Step 3: deadline timer and its rebuild
         // The first pass runs ChunkReaper.INITIAL_DELAY after boot, not a full interval (nexus-d94qm, the tuple sweep's
         // sibling): with a six-hour first delay an engine that lives less than six hours never expires T1 rows.
         this.t1SweepTask = surviving("t1_scheduled_sweep_failed", () -> runScheduledSweep(OffsetDateTime.now(ZoneOffset.UTC)));

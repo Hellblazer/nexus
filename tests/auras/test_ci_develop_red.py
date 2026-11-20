@@ -437,7 +437,9 @@ class _Recorder:
         return True
 
 
-def _offer(row_dims: dict[str, str]) -> _Recorder:
+def _offer(row_dims: dict[str, str], *, sender_session: str | None = None, stamp_known: bool = True) -> _Recorder:
+    """Offer one board row. The default is the engine's own write: the stamp rendered and null (``sender_session``
+    is the session the engine stamped on a client's write, so a row the engine wrote itself carries none)."""
     from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
     from nexus.db.t2.records import TupleRow  # noqa: PLC0415
 
@@ -447,7 +449,8 @@ def _offer(row_dims: dict[str, str]) -> _Recorder:
     body = '{"owner": "i7", "next": null, "reason": "earliest_suspect", "refresh": false}'
     rt.offer(aura.subspace, [TupleRow(
         id="t1", subspace=aura.subspace, template="", keys={}, dims=row_dims, body=body, claim_state=None, claimant=None,
-        lease_until=None, attempts=0, consumed_at=None, consumed_by=None, expires_at=None, created_at=None)])
+        lease_until=None, attempts=0, consumed_at=None, consumed_by=None, expires_at=None, created_at=None,
+        sender_session=sender_session, sender_session_known=stamp_known)])
     assert rt.wait_idle(30)
     return rec
 
@@ -463,6 +466,75 @@ def test_an_owner_row_from_any_other_writer_fires_nothing(writer: str) -> None:
     dims = {"kind": "owner", "sha": SHA, **({"from": writer} if writer else {})}
     rec = _offer(dims)
     assert rec.runs == [] and rec.sets == [] and rec.removes == []
+
+
+SESSION = "5f0c1a2e-8b34-4d6f-9a10-0c2b7e4d9a31"  # a session id the engine stamped on a client's write
+
+
+@pytest.mark.parametrize("kind", ["owner", "clear"])
+@pytest.mark.parametrize(
+    ("sender_session", "stamp_known"),
+    [(SESSION, True), (None, False), ("", False), ("", True)],
+    ids=["client-stamped", "stamp-not-rendered", "blank-and-not-rendered", "blank-stamp-rendered"],
+)
+def test_a_row_claiming_from_engine_counts_only_when_the_engine_wrote_it(
+    kind: str, sender_session: str | None, stamp_known: bool,
+) -> None:
+    """RDR-252 critique S3: ``from`` is a claim the writer typed, so a client can post ``from=engine``. The engine's
+    own rows carry no ``sender_session``; a row a client posted carries the session the engine stamped, and an engine
+    that does not render the stamp cannot say. Neither fires the aura or clears its block."""
+    rec = _offer({"kind": kind, "sha": SHA, "from": "engine"}, sender_session=sender_session, stamp_known=stamp_known)
+    assert rec.runs == [] and rec.sets == [] and rec.removes == []
+
+
+@pytest.fixture
+def debug_logging():
+    """structlog filters below the configured level before capture_logs sees an event; the line under test is debug."""
+    import logging  # noqa: PLC0415
+
+    import structlog  # noqa: PLC0415
+
+    saved = structlog.get_config()
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG))
+    yield
+    structlog.configure(**saved)
+
+
+def test_a_from_engine_row_ignored_for_its_stamp_is_logged_once_per_row(debug_logging) -> None:
+    """RDR-252 critique S3b: the gate must not go silent. If the engine's own rows ever carried a stamp, the aura would
+    stop firing with no trace; one debug line per (aura, row) names the refusal."""
+    import structlog  # noqa: PLC0415
+
+    with structlog.testing.capture_logs() as logs:
+        _offer({"kind": "owner", "sha": SHA, "from": "engine"}, sender_session=SESSION)
+    refused = [e for e in logs if e["event"] == "aura_from_engine_ignored"]
+    assert len(refused) == 1
+    assert refused[0]["log_level"] == "debug" and refused[0]["aura"] == "ci_develop_red" and refused[0]["tuple_id"] == "t1"
+    assert SESSION not in str(refused[0]), "the line says the row was stamped, not by which session"
+    with structlog.testing.capture_logs() as logs:
+        _offer({"kind": "owner", "sha": SHA, "from": "engine"})  # the engine's own row
+        _offer({"kind": "owner", "sha": SHA, "from": "tamsin"}, sender_session=SESSION)  # not claiming to be the engine
+    assert [e for e in logs if e["event"] == "aura_from_engine_ignored"] == []
+
+
+def test_a_runtime_logs_a_refused_from_engine_row_once_however_often_it_is_offered(debug_logging) -> None:
+    import structlog  # noqa: PLC0415
+    from nexus.auras.runtime import AuraRuntime  # noqa: PLC0415
+    from nexus.db.t2.records import TupleRow  # noqa: PLC0415
+
+    aura = _shipped()
+    rec = _Recorder()
+    rt = AuraRuntime([aura], writer=rec, run=rec.run, identity=ME)
+    row = TupleRow(
+        id="t1", subspace=aura.subspace, template="", keys={}, dims={"kind": "owner", "sha": SHA, "from": "engine"},
+        body="{}", claim_state=None, claimant=None, lease_until=None, attempts=0, consumed_at=None, consumed_by=None,
+        expires_at=None, created_at=None, sender_session=SESSION, sender_session_known=True)
+    with structlog.testing.capture_logs() as logs:
+        for _ in range(3):
+            rt.offer(aura.subspace, [row])
+        assert rt.wait_idle(30)
+    assert [e["event"] for e in logs].count("aura_from_engine_ignored") == 1
+    assert rec.runs == []
 
 
 def test_a_clear_row_from_the_engine_removes_the_block() -> None:

@@ -1258,6 +1258,31 @@ def test_digest_names_the_records_it_skips() -> None:
         f"{OTHER_SESSION}/no-time/0000000000000003"])
 
 
+def test_digest_lists_an_identity_keyed_answer_beside_a_session_keyed_one() -> None:
+    # RDR-253 Step 5 writes an answer record under the asker's identity (`i11/<ask>/<version>`) when its entry has an
+    # identity: line; the digest reads both forms, so a mixed fleet's answers are all shown, none skipped.
+    w = World()
+    w.t2.add("asks", "i11/rdr229-accept-route/4484386a17af0c37", json.dumps(
+        {**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z", "sam_words": "go with your recommendations"}))
+    w.t2.add("asks", f"{OTHER_SESSION}/a-new/0000000000000001", json.dumps(
+        {**js("answer_record_v1.json"), "time": "2026-11-05T17:00:00Z"}))
+    out = w.run("digest").output
+    assert "rdr229-accept-route" in out and "go with your recommendations" in out, out
+    assert "a-new" in out and "skipped" not in out, out
+    listing = json.loads(w.run("list", "--json").stdout)
+    assert listing["digest_skipped"] == []
+    assert {e["asker"] for e in listing["digest"]} == {"i11", OTHER_SESSION}
+
+
+def test_digest_still_skips_near_miss_asker_shapes() -> None:
+    w = World()
+    for asker in ("i", "I11", "i11x", "ix1"):
+        w.t2.add("asks", f"{asker}/a-new/0000000000000001", json.dumps(
+            {**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z"}))
+    skipped = json.loads(w.run("list", "--json").stdout)["digest_skipped"]
+    assert skipped == sorted(f"{a}/a-new/0000000000000001" for a in ("i", "I11", "i11x", "ix1"))
+
+
 def test_digest_with_only_skipped_records_still_says_so() -> None:
     w = World()
     w.t2.add("asks", "stray title", "x")

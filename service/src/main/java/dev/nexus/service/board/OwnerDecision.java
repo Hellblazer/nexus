@@ -142,9 +142,11 @@ public final class OwnerDecision {
 
     /**
      * A stamper error posts the leader as owner with {@code reason=stamper_error}, for a red tip {@code sha} with no
-     * open owner row at that tip and a live serving group; otherwise nothing.
+     * open owner row at that tip and a live serving group; otherwise nothing. The row runs the acknowledgement deadline
+     * like every owner row (RDR-252): {@code episode_at} plus the topic's deadline, so a red whose evaluation failed is
+     * still handed on, or escalated, when nobody acknowledges it; the deadline's own evaluation re-reads the rows.
      */
-    public static Decision stamperError(GroupView group, String sha, List<BoardRow> owners, Instant now) {
+    public static Decision stamperError(GroupView group, String base, String sha, List<BoardRow> owners, Instant now) {
         if (group == null || sha == null) {
             return Decision.none();
         }
@@ -153,7 +155,61 @@ public final class OwnerDecision {
             return Decision.none();
         }
         return new Decision(new Post("owner", sha,
-            body(group.leader(), null, REASON_STAMPER_ERROR, List.of(), 0, now, false, 0)), null);
+            body(group.leader(), null, REASON_STAMPER_ERROR, List.of(), 0, now, false, 0)),
+            now.plus(Duration.ofMinutes(group.deadlineMinutes(base))));
+    }
+
+    /**
+     * The fail-safe for a deadline whose evaluation threw: built only from the current engine owner row, the group and
+     * the liveness facts, with no push chain and no verdicts, so a fault in {@link #decide} cannot defeat it. For an
+     * open row that is not {@code escalated}: not yet due, no post and the deadline to arm at; due, an {@code escalated}
+     * row naming the leader if live, else the first live member, else no one, with {@code handoffs} one higher, the
+     * suspects carried over and no deadline. An ack from the row's owner on the row's own tip ends it. Nothing for an
+     * escalated or clear row, no row, or no live group.
+     */
+    static Decision failSafe(GroupView group, Identities ids, List<BoardRow> owners, String base, Instant now) {
+        BoardRow cur = currentRow(owners);
+        Instant due = rowDeadline(group, base, owners);
+        if (cur == null || due == null) {
+            return Decision.none();
+        }
+        if (now.isBefore(due)) {
+            return new Decision(null, due);
+        }
+        Map<String, Object> body = parse(cur.body());
+        String owner = (String) body.get("owner");
+        for (BoardRow a : owners) {
+            if ("ack".equals(a.kind()) && cur.sha().equals(a.sha()) && owner.equals(ids.identityOf(a.senderSession()))) {
+                return Decision.none();
+            }
+        }
+        String target = ids.live(group.leader()) ? group.leader() : null;
+        for (String m : group.members()) {
+            if (target == null && ids.live(m)) {
+                target = m;
+            }
+        }
+        List<String> suspects = body.get("suspects") instanceof List<?> l ? l.stream().map(String::valueOf).toList() : List.of();
+        int total = body.get("suspects_total") instanceof Number n ? n.intValue() : suspects.size();
+        return new Decision(new Post("owner", cur.sha(),
+            body(target, null, REASON_ESCALATED, suspects, total, now, false, ((Number) body.get("handoffs")).intValue() + 1)), null);
+    }
+
+    /**
+     * When the deadline of the current open owner row falls due, from that row alone ({@code episode_at} plus the
+     * topic's deadline); null when the current row is not an open owner row, is {@code escalated} or names no owner,
+     * or there is no live group.
+     */
+    static Instant rowDeadline(GroupView group, String base, List<BoardRow> owners) {
+        BoardRow cur = currentRow(owners);
+        if (group == null || cur == null || !"owner".equals(cur.kind())) {
+            return null;
+        }
+        Map<String, Object> body = parse(cur.body());
+        if (REASON_ESCALATED.equals(body.get("reason")) || body.get("owner") == null) {
+            return null;
+        }
+        return Instant.parse((String) body.get("episode_at")).plus(Duration.ofMinutes(group.deadlineMinutes(base)));
     }
 
     // ── rows ─────────────────────────────────────────────────────────────────
@@ -198,7 +254,9 @@ public final class OwnerDecision {
         GroupView g = in.group();
         int handoffs = ((Number) curBody.get("handoffs")).intValue();
         String owner = (String) curBody.get("owner");
-        String next = handoffs == 0 ? nextUp(owner, suspects, g, in.ids()) : null;
+        // A stamper_error row shows no next up (Sam is the one after the leader), so it escalates at its deadline.
+        String next = handoffs == 0 && !REASON_STAMPER_ERROR.equals(curBody.get("reason"))
+            ? nextUp(owner, suspects, g, in.ids()) : null;
         if (next != null) {
             return new Decision(new Post("owner", cur.sha(),
                 body(next, null, REASON_HANDOFF, shas(suspects), suspects.size(), in.now(), false, handoffs + 1)), null);
@@ -272,15 +330,21 @@ public final class OwnerDecision {
     private static final Comparator<BoardRow> BY_TIME = Comparator.comparing(BoardRow::createdAt).thenComparing(BoardRow::id);
 
     /**
-     * The newest owner or clear row the engine posted; acks are not state, nor is a row another writer posted, nor an
-     * owner row whose body cannot be read as one (it is treated as absent, never thrown on).
+     * The newest owner or clear row the engine posted; acks are not state, nor is a row another writer posted (one that
+     * says {@code from=engine} but carries a sender session is a client's), nor an owner row whose body
+     * cannot be read as one (it is treated as absent, never thrown on).
      */
     private static BoardRow currentRow(List<BoardRow> owners) {
         return owners.stream().filter(OwnerDecision::isState).max(BY_TIME).orElse(null);
     }
 
     private static boolean isState(BoardRow r) {
-        if (!"engine".equals(r.dim("from"))) {
+        // {@code from} is a dim any writer can set, so it proves nothing. The stamper writes with no sender session, so
+        // a row that carries one (a blank one included: the aura reads the stamp with {@code is None}, and the two must
+        // agree) was written by a client through the route and is not state. This check alone does not prove the engine
+        // wrote a row: a raw-HTTP client with no minted session also has a null stamp. The control is the tuple route,
+        // which refuses a client write that sets from=engine on a board/ci topic (TupleHandler, BoardCiGuard).
+        if (!"engine".equals(r.dim("from")) || r.senderSession() != null) {
             return false;
         }
         if ("clear".equals(r.kind())) {

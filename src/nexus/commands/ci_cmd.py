@@ -116,6 +116,26 @@ def ci_wait_cmd(
     if not _GH_REPO.fullmatch(gh) or any(set(part) <= {"."} for part in gh.split("/")):
         click.echo(f"{sha[:12]} unusable: the GitHub repository must be OWNER/NAME, got {gh!r}")
         raise SystemExit(ci_wait.EXIT_UNUSABLE)
+    from nexus.identity.work import Label  # noqa: PLC0415 — deferred: CLI startup cost
+
+    # RDR-253 Step 6 part 1: the wait is background work the session owns, so a checkpoint and the restart report list
+    # it by identity (kind wait, ref ci:<branch>@<sha>). A label only: written best effort with a short timeout and
+    # ended in the finally below, so it never fails or delays the result. A TERM or HUP ends the row too.
+    label = Label("wait", f"ci:{branch}@{sha}")
+    label.start()
+    try:
+        try:
+            label.arm_sigterm()
+        except Exception:  # noqa: BLE001 — a label never fails the wait it labels (the row still ends in the finally)
+            pass
+        _wait_for_ci(sha, timeout_min, fresh, latest_attempt, repo, branch, gh, park_s)
+    finally:
+        label.finish()
+
+
+def _wait_for_ci(sha: str, timeout_min: float, fresh: bool, latest_attempt: bool, repo: str, branch: str, gh: str,
+                 park_s: int) -> NoReturn:
+    """The wait itself, after ``nx ci wait`` has checked its arguments: always ends in ``SystemExit``."""
     if branch not in ci_wait.BOARD_BRANCHES:
         _github_only(sha, gh, branch, timeout_min * 60)
     subspace = ci_wait.done_subspace(repo, branch)

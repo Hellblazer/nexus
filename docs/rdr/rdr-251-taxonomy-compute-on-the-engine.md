@@ -2,7 +2,7 @@
 title: "Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B)"
 id: RDR-251
 type: Architecture
-status: draft
+status: deferred
 priority: medium
 author: Hal Hildebrand
 reviewed-by: pending
@@ -202,3 +202,4 @@ Not yet run.
 
 - 2026-11-16: created (draft) from RDR-193 Part B when RDR-193 closed, on Sam's
   answer "Close A, move Part B out" (relayed by halcyon).
+- 2026-11-19: deferred (draft -> deferred) on Sam's ruling "go with all of it" (T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`): dormant, so it is deferred instead of held open as a draft.

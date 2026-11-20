@@ -2,7 +2,8 @@
 title: "Heat-Based Graduation Between Memory Tiers"
 id: RDR-209
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-20
 priority: high
 author: Sam
 reviewed-by: self
@@ -146,14 +147,21 @@ Context Management). The fix delivers a phase-close rollup that keeps each
 record's full text in T3 and lists the records in a pointer, and a TTL on the
 records it covers.
 
+Coverage, as shipped: a run is scoped to one RDR, so it reaches only gate
+records tagged `rdr:<NNN>`. The `gate_record` procedure adds that tag only
+when the bead serves an RDR (`src/nexus/procedures/gate_record.lua`, the
+`args.rdr` branch). A record whose bead serves no RDR is in no run's scope and
+stays permanent. How many of the roughly 2,500 that is has not been measured;
+the re-census (nexus-1gdv0.3) counts it.
+
 ## Relationship to Prior RDRs
 
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-057 Progressive Formalization Across Memory Tiers | Origin | It promised graduation on heat and shipped heat-weighted survival instead; §RF-3 records the inversion in its own words. Its rationale for the inversion ("highly accessed entries survive longer") still holds as a survival rule and is not in conflict with graduation; the two compose. Its §Instrumentation questions are Gap 4 here. |
 | RDR-207 Summarization at the T2 Expiry Boundary | Sibling, closed 2026-09-15 | It owns what expiry may destroy: rows are quarantined, and only rows carrying a rollup mark are reaped. Its prerequisite for this RDR is met: the `rolled_up_at` mark exists (`MemoryRepository.java:722`, `:751-756`, `:859`). Phase 3 consumes its quarantine, rollup and reap path unchanged. If the deferred Phase 1 later promotes at rollup time it consumes the same mark. |
-| RDR-238 Memory Curation | Consumer, accepted 2026-11-01 | Its index audit would use Phase 0b's counter for T2 reads; until then it counts reads with RDR-240's `memory` transcript query. It built the `nx memory curate --t2` command that carries Step 4's census flag (shipped). It reads this RDR's Phase 3 close-marker rule. |
-| RDR-240 Procedures as Sandboxed Lua Scripts | Consumer, closed 2026-11-16 | Its `gate_record` procedure writes the tags and the field header Phase 3 reads (Step 0, shipped). Its transcript queries are the read-count source until Phase 0b ships. |
+| RDR-238 Memory Curation | Consumer, accepted 2026-11-01 | Phase 0b's counter has landed (engine-service-v0.1.196, conexus 8.5.0), but its index audit does not read it yet: for T2 it reads `last_accessed` in the window and RDR-240's `memory` transcript query. It built the `nx memory curate --t2` command that carries Step 4's census flag (shipped). It reads this RDR's Phase 3 close-marker rule. |
+| RDR-240 Procedures as Sandboxed Lua Scripts | Consumer, closed 2026-11-16 | Its `gate_record` procedure writes the tags and the field header Phase 3 reads (Step 0, shipped). Its transcript queries are still the read-count source the RDR-238 audit uses; Phase 0b's counter has shipped. |
 | RDR-131 T2 Session Rollup Summaries | Abandoned 2026-09-12 | Its consolidation half moved to RDR-207. Nothing here depends on it. |
 | RDR-132 Scope-Routed T1 to T2 Promotion | Abandoned 2026-09-12 | It concerned namespace routing at the T1 to T2 boundary, not heat. Its abandon reason applies here as a warning: an unresearched stub is not how an idea stays alive, so this RDR carries its measurement plan in scope. |
 | RDR-194 §A14 One TTL Semantics | Precedent | Any post-graduation TTL rule must keep one meaning for `ttl_days` (NULL is permanent, positive is days, zero is rejected). A "shortened" TTL is a smaller positive integer, never a sentinel. Phase 3's 30-day TTL is an ordinary positive integer. |
@@ -293,7 +301,7 @@ claims, each written before the sentences that rest on it.
 
 ### Critical Assumptions
 
-- [ ] A1: heat is a usable signal on the live store. **Status**: Refuted as
+- [x] A1 (resolved: refuted, and Phase 0b built to fix the meaning): heat is a usable signal on the live store. **Status**: Refuted as
   the counter stands (Phase 0 census): the shape is usable, the meaning is
   not, because search tracking stamps every match. **Method**: Spike.
   Consequence: Phases 1 and 2 cannot start on `access_count` as it is. Phase
@@ -327,11 +335,11 @@ claims, each written before the sentences that rest on it.
   live, because `get_all` hides quarantined rows. The null-attribution seed in
   Step 3's tests pins it. How many gate records have a null agent or session:
   not measured.
-- [ ] A2: a promoted row can carry a mark on T2 (`promoted_at`,
+- [deferred: nexus-1gdv0.4, Phases 1 and 2] A2: a promoted row can carry a mark on T2 (`promoted_at`,
   `promoted_to`) without changing any read path. **Status**: Unverified,
   deferred with Phase 1. **Method**: Source Search against `MemoryRepository`
   reads.
-- [ ] A3: the T3 side can receive batch promotions through the existing
+- [deferred: nexus-1gdv0.4, Phases 1 and 2] A3: the T3 side can receive batch promotions through the existing
   `promote` machinery without a new endpoint. **Status**: Unverified, deferred
   with Phase 1. **Method**: Source Search, `commands/memory.py` promote path
   and the T3 put.
@@ -403,7 +411,8 @@ the object, and only new clients send it.
 **Client.** `HttpMemoryStore` gains `search_page(query, project, limit,
 offset, access)` returning the rows and `matching_total`. `search()` keeps its
 signature and behaviour. `search_page` cuts the page itself when the engine
-answers a bare list (A6): rows `[offset:offset+limit]`, total `len(list)`;
+answers a bare list (A6): rows `[offset:offset+min(limit, 10,000)]` (the
+engine's own ceiling), total `len(list)`;
 that engine is an older one that also stamped every match, which the client
 cannot undo. The `T2Database` facade (`__init__.py:529-534`) passes the
 method through. The MCP `memory_search` tool calls it with its own `limit` and
@@ -417,7 +426,12 @@ later CLI `--limit` would use the same two fields.
 **What a read count means after this.** One increment per time a caller
 received the row: in a search page, by title, by id, or by unique title
 prefix. A page requested twice counts twice. A row a caller searched for
-and never saw, because it ranked past the page, is not counted.
+and never saw, because it ranked past the page, is not counted. This holds
+only for a caller that sends a page: `memory_search` from conexus 8.5.0 on,
+against engine-service-v0.1.196 or later. An older client sends no `limit`,
+so on the new engine its searches still stamp every match. The counter records
+no client version, so a count mixes both meanings, per caller, and no date
+separates them.
 
 **Baseline for the re-census.** Counts taken before the deploy stay as they
 were. A re-census that wants the new meaning reads the change since a baseline,
@@ -471,8 +485,8 @@ because bead-to-phase membership lives in the issue tracker, not in T2.
   names phase P by the `-p<N>` / `-phase-<N>` rule of Step 4, a sub-phase such
   as 3a counting toward phase 3; with `--all` whenever it carries the RDR's
   tag), and a listed record whose verdict cannot be read. A `kind:gate` record
-  with neither a `bead:` nor an `rdr:` tag is in no run's scope and is left
-  alone; the census counts it as its own unmapped number. Unmapped records take
+  with no `rdr:` tag, whether or not it has a `bead:` tag, is in no run's scope
+  and is left alone; the census counts it as its own unmapped number. Unmapped records take
   no part in Step 2.3 or Step 3, because both work per bead.
   The cost is one read of the whole project per run, as the census pays; the
   nexus project held 3,158 rows on 2026-09-14 (research-1), and its size today
@@ -863,7 +877,9 @@ pointer reaches the same lookup with less. It stays a recorded alternative.
   **Mitigation**: phases are closed before the run; stated as accepted above.
 - **Risk**: gate records outside the title and tag conventions are missed.
   **Mitigation**: they stay unmapped and keep no TTL; Step 4's census shows
-  them.
+  them. That includes every record whose bead serves no RDR (no `rdr:` tag):
+  no run can select it, and its share is unmeasured until the re-census
+  counts it.
 
 ### Failure Modes
 
@@ -886,7 +902,7 @@ a count of 0.
 - [x] RDR-207 landed (the `rolled_up_at` mark; closed 2026-09-15).
 - [x] Phase 0 census recorded (research-1) and A1 resolved as refuted.
 - [x] Phase 3 Steps 0 and 4 shipped (nexus-qo7ie.1, nexus-qo7ie.28).
-- [ ] Bead filing waits for accept (no new beads while the burn-down runs).
+- [x] Bead filing waits for accept (no new beads while the burn-down runs). Filed after the 2026-11-16 accept: epic nexus-1gdv0.
 
 ### Minimum Viable Validation
 
@@ -945,6 +961,14 @@ the bucket table and a per-row `(id, access_count)` listing with the deploy
 time (a T2 entry, split if it is too long for one). That listing is what the
 re-census subtracts. The counter works without it; only the re-census needs
 it.
+
+As run: the counter shipped in engine-service-v0.1.196 and the client half in
+conexus 8.5.0 (tagged 2026-11-19 about 10:29Z). The baseline was read at the
+next engine deploy window, engine-service-v0.1.197, at 14:33:14Z (T2
+`nexus/rdr209-access-baseline-2026-11-19`; 14,117 rows, the listing equal to
+q1's count). So it lands about four hours after 8.5.0 clients began counting
+under the new meaning. Those hours, and every older client's searches since,
+are inside the deltas the re-census reads, and it says so.
 
 ### Phase 3: Gate-record rollup at phase close (Amendment A1)
 
@@ -1109,7 +1133,10 @@ counter shows a usable tail*. The re-census reads the change in `access_count`
 since the Step 5 baseline, with the queries of research-1, after enough time
 that the deltas mean something; what counts as a usable tail, and the
 threshold, are Sam's call at that point on the bucket table, and are not
-chosen here. Nothing in Phase 0b or Phase 3 depends on these phases, and
+chosen here. The re-census is bead nexus-1gdv0.3, owned by the session that
+closed the baseline bead, due 2026-12-19 (the baseline plus 30 days, a
+planner's interval). Its report to Sam states the mixed-client caveat above
+and the count of gate records with no `rdr:` tag (Gap 6 coverage). Nothing in Phase 0b or Phase 3 depends on these phases, and
 bead nexus-2k66t.1 waits for Phase 1 to be built.
 
 #### Phase 1 (deferred): Criterion and mark
@@ -1393,3 +1420,6 @@ heavy; it is kept because it was a design input Sam was to weigh.
 | 2026-11-19 | Review round 1, blocker 7: a wrong `--beads` or `--project` printed "0 listed", which read as a pass. The output now starts with the rows examined and the `kind:gate` rows seen, and says so when none of the gate rows is in the run; the first live run's counts (nexus-1gdv0.2.17) come from these lines. |
 | 2026-11-19 | Review round 1, wording (nexus-1gdv0.2.16): the Step 1 test-list sentence "no run writes anything to T2" is corrected (the dry run writes one count row; no run changes a gate record's text, tags or timestamp); the count row is in the Day 2 table; "is a mechanism, not a process rule" now says what the code requires (a current, recorded count) and that Sam's word is a process step the skills state; "every other field" is narrowed, because the import route also clears the quarantine stamps, re-stamps the row's identity with the caller and truncates the timestamp to the second; and the cross-scope limit of the restore rule is stated (a restore after a `--phase` run is not protected from a later `--all` run). |
 | 2026-11-19 | First live dry run (nexus-1gdv0.2.17, RDR-249, refused before any write): titles carry the round mid-title, so the trailing-only round read an `-r1` partial and an `-r2` justified of one day as a tie and the partial won. Step 2.3 now reads the round wherever a `-` or the end follows it, with the record's own bead id removed first; the tie rule is unchanged (worse verdict), and the text says the row timestamp is not used. It also records Sam's ruling that a terminal partial rolls up only with his per-bead `--accept-open` stamp. Wording matches the reviewed fix (grant 3). |
+| 2026-11-19 | Phase 0b Steps 2 to 4 shipped: the client `search_page` and the MCP `memory_search` page (7105b368e, 9c20d5bfd, af89ee054) in conexus 8.5.0; the Shipped wire-ledger entry (af91703d2, engine half engine-service-v0.1.196); the `access_count` docs (c69be7afb, then 86d7e0235 after review: the client-version dependency, silent readers, glob and tag searches stamp nothing). Review gate nexus-1gdv0.1.8, both reviewers. |
+| 2026-11-19 | Phase 0b Step 5: the baseline was read at the engine-service-v0.1.197 deploy, 14:33:14Z, about four hours after conexus 8.5.0 (T2 `nexus/rdr209-access-baseline-2026-11-19`, 14,117 rows). The first real gate-rollup ran on RDR-249 on Sam's word: 12 records archived and read back, pointer `gate-records-rdr-249-all`, TTL 30 on the 12, 0 quarantined, 3 unmapped records untouched (nexus-1gdv0.2.17). |
+| 2026-11-20 | Close-time amendment from the rdr-close critique (grant 3, wording matched to shipped code): Gap 6, Step 1 and the Risks name the records with no `rdr:` tag as out of every run's scope and unmeasured; Phase 0b states the page-only meaning holds only for 8.5.0+ clients and records when the baseline was actually taken; the client fallback cut names the 10,000-row ceiling; the RDR-238 and RDR-240 rows say the counter has landed; the deferral names the re-census bead, owner and date. |

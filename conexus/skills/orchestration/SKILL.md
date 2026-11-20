@@ -75,6 +75,7 @@ Task notifications are at-least-once, unbounded-delay, and cross session boundar
 3. Before treating a write-back as missing, confirm the agent has actually terminated. Searching T1 while the agent is still running and treating absence as loss is the recurring false-loss pattern (cdypx, 2026-08-03).
 4. A late notification arriving after recovery work is already complete is informational only. Reconcile it, and CORRECT any recovery note that recorded a now-falsified claim.
 5. Never background-dispatch near a session pause; a live agent at session end cannot be recovered except by hand.
+6. A long job or wait you start by hand (a CI wait loop, a remote suite) has no hook behind it, so register it as work your session owns: `nx identity work register --kind wait --ref <what>` when it starts and `nx identity work done --kind wait --ref <what>` when it ends (`nx identity work run --kind labrun --ref <what> -- <command>` does both for one command). The restart's ready check lists it and asks you before it cuts it off. The label never blocks the job, and a row nothing has written for 12 hours or that predates your session reads stale.
 
 ## Resuming a Worktree Agent After a `/clear` (nexus-xxvv3)
 

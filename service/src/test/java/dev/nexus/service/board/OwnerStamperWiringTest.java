@@ -194,6 +194,138 @@ class OwnerStamperWiringTest {
         assertThat(rows.getFirst().sha()).isEqualTo("X");
     }
 
+    private HttpResponse<String> post(String bearer, Map<String, Object> body) throws Exception {
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/tuples/out")
+            .header("Authorization", "Bearer " + bearer).header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void aClientWriteThatSaysFromEngineToTheBoardIsRefusedAndTheStampersOwnRowsStillLand() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String adapter = "adapter-" + UUID.randomUUID();
+        String client = "client-" + UUID.randomUUID();
+        seedToken(adapter, t, TokenStore.SCOPE_BOARD_CI);
+        seedToken(client, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        String forged = "{\"owner\":\"" + c + "\",\"next\":null,\"reason\":\"earliest_suspect\",\"suspects\":[\"Y\"],"
+            + "\"suspects_total\":1,\"episode_at\":\"2026-01-01T00:00:00Z\",\"refresh\":false,\"handoffs\":0}";
+
+        for (String kind : List.of("owner", "clear")) {
+            for (boolean replace : List.of(false, true)) {
+                var body = new java.util.LinkedHashMap<String, Object>(Map.of("subspace", "board/ci/nexus-develop--owner",
+                    "keys", Map.of("topic", "nexus-develop--owner"), "dims", Map.of("from", "engine", "kind", kind, "sha", "Y"),
+                    "body", forged, "nonce", UUID.randomUUID().toString()));
+                if (replace) {
+                    body.put("mode", "replace");
+                }
+                var r = post(client, body);
+                assertThat(r.statusCode()).as(kind + " replace=" + replace + ": " + r.body()).isEqualTo(403);
+                assertThat(r.body()).contains("reserved_dim");
+            }
+        }
+        var viaAdapter = post(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+            "dims", Map.of("from", "engine", "kind", "sha", "sha", "Y", "outcome", "failure"),
+            "body", "{\"state\":\"concluded\",\"sha\":\"Y\"}", "nonce", UUID.randomUUID().toString()));
+        assertThat(viaAdapter.statusCode()).as("the adapter's credential may not say from=engine either: " + viaAdapter.body()).isEqualTo(403);
+        assertThat(se.ownerRows(t, StamperEnv.BASE)).as("no forged row landed").isEmpty();
+
+        // A member's ack carries its own name, not engine's, and still lands; the stamper's own rows land from=engine.
+        var ack = post(client, Map.of("subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+            "dims", Map.of("from", a, "kind", "ack", "sha", "Y"), "body", "{}", "nonce", UUID.randomUUID().toString()));
+        assertThat(ack.statusCode()).as(ack.body()).isEqualTo(200);
+        out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+            "dims", Map.of("from", "github", "kind", "sha", "sha", "Y", "outcome", "failure"),
+            "body", "{\"state\":\"concluded\",\"sha\":\"Y\"}", "nonce", UUID.randomUUID().toString()));
+        var rows = eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> !r.isEmpty());
+        assertThat(rows).hasSize(1);
+        assertThat(rows.getFirst().from()).isEqualTo("engine");
+        assertThat(rows.getFirst().body()).containsEntry("owner", a);
+    }
+
+    private HttpResponse<String> postTo(String bearer, String path, Map<String, Object> body) throws Exception {
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + bearer).header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void anAckReplyThatSaysFromEngineToTheBoardIsRefusedWithTheClaimStillHeldAndAMembersReplyLands() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String client = "client-" + UUID.randomUUID();
+        seedToken(client, t, TokenStore.SCOPE_TENANT);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        se.form(t, l, a);
+        String inbox = "ackinbox" + UUID.randomUUID().toString().substring(0, 8);
+        var sent = postTo(client, "/v1/tuples/out", Map.of("subspace", "mailbox/" + inbox, "keys", Map.of("to", inbox),
+            "dims", Map.of("from", "someone"), "body", "work", "nonce", UUID.randomUUID().toString()));
+        assertThat(sent.statusCode()).as(sent.body()).isEqualTo(200);
+        var claim = postTo(client, "/v1/tuples/inp", Map.of("subspace", "mailbox/" + inbox, "keys_pattern", Map.of("to", inbox),
+            "claimant", "w", "lease_s", 60));
+        assertThat(claim.statusCode()).as(claim.body()).isEqualTo(200);
+        String claimId = MAPPER.readTree(claim.body()).get("claim_id").asText();
+        String forged = "{\"owner\":\"" + a + "\",\"next\":null,\"reason\":\"earliest_suspect\",\"suspects\":[\"Y\"],"
+            + "\"suspects_total\":1,\"episode_at\":\"2026-01-01T00:00:00Z\",\"refresh\":false,\"handoffs\":0}";
+
+        var refused = postTo(client, "/v1/tuples/ack", Map.of("claim_id", claimId, "claimant", "w", "reply", Map.of(
+            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+            "dims", Map.of("from", "engine", "kind", "owner", "sha", "Y"), "body", forged)));
+
+        assertThat(refused.statusCode()).as(refused.body()).isEqualTo(403);
+        assertThat(refused.body()).contains("reserved_dim");
+        assertThat(se.ownerRows(t, StamperEnv.BASE)).as("no owner row landed").isEmpty();
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 10, null)).as("no row of any kind").isEmpty();
+
+        // The claim is still held by the refused ack: the same claim acks with a member's own name and the reply lands.
+        var allowed = postTo(client, "/v1/tuples/ack", Map.of("claim_id", claimId, "claimant", "w", "reply", Map.of(
+            "subspace", "board/ci/nexus-develop--owner", "keys", Map.of("topic", "nexus-develop--owner"),
+            "dims", Map.of("from", a, "kind", "ack", "sha", "Y"), "body", "{}")));
+        assertThat(allowed.statusCode()).as(allowed.body()).isEqualTo(200);
+        assertThat(se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 10, null))
+            .extracting(r -> r.dims().get("from")).containsExactly(a);
+    }
+
+    @Test
+    void theStampersOwnerAndClearRowsCarryNoSenderSession() throws Exception {
+        // Null sender_session with from=engine is what makes a row the engine's: the route refuses a client's
+        // from=engine, and the client aura accepts one only with a rendered null session. A change that stamps the
+        // engine's writes would silently kill the aura; this fails first.
+        se.env.ids.clock.set(Instant.now());
+        String t = se.tenant();
+        String adapter = "adapter-" + UUID.randomUUID();
+        seedToken(adapter, t, TokenStore.SCOPE_BOARD_CI);
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        se.form(t, l, a, c);
+        se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
+        se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
+        out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+            "dims", Map.of("from", "github", "kind", "sha", "sha", "Y", "outcome", "failure"),
+            "body", "{\"state\":\"concluded\",\"sha\":\"Y\"}", "nonce", UUID.randomUUID().toString()));
+        eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> !r.isEmpty());
+        se.push(t, StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        out(adapter, Map.of("subspace", "board/ci/nexus-develop--done", "keys", Map.of("topic", "nexus-develop--done"),
+            "dims", Map.of("from", "github", "kind", "sha", "sha", "Z", "outcome", "success"),
+            "body", "{\"state\":\"concluded\",\"sha\":\"Z\"}", "nonce", UUID.randomUUID().toString()));
+        eventually(() -> se.ownerRows(t, StamperEnv.BASE), r -> r.size() >= 2);
+
+        var rows = se.tuples.rdp(t, "board/ci/nexus-develop--owner", Map.of(), 50, null).stream()
+            .filter(r -> "engine".equals(r.dims().get("from"))).toList();
+        assertThat(rows).extracting(r -> r.dims().get("kind")).as("the stamper wrote an owner row and a clear row")
+            .containsExactlyInAnyOrder("owner", "clear");
+        assertThat(rows).extracting(dev.nexus.service.db.TupleRepository.TupleRow::senderSession)
+            .as("the engine's rows carry no sender session").containsOnlyNulls();
+    }
+
     /** The identity token a client holds: the one a refresh of its binding returns (the generation it holds now). */
     private String identityToken(String tenant, String id) {
         int generation = ((Number) se.env.ids.show(tenant, id).get("generation")).intValue();

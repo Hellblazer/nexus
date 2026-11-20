@@ -355,11 +355,10 @@ class TestSubagentHookInjection:
             "import os, sys, locale\n"
             "assert sys.flags.utf8_mode == 0 and locale.getpreferredencoding(False).lower() != 'utf-8', "
             "locale.getpreferredencoding(False)\n"
-            "from nexus.hooks import session_context\n"
+            "from nexus import brief\n"
             "from nexus.hooks.subagent_start import _knowledge_map_section, _repo_root\n"
-            "session_context.which = lambda cmd: False\n"
             "sub = _knowledge_map_section(_repo_root(dict(os.environ)))\n"
-            "sess = session_context.run(None).stdout or ''\n"
+            "sess = brief.render('map').text\n"
             "sys.stdout.buffer.write(('SUB:' + sub + '\\nSESS:' + sess).encode('utf-8'))\n"
         )
         env = {
@@ -372,7 +371,7 @@ class TestSubagentHookInjection:
         out = result.stdout.decode("utf-8")
         sub, _, sess = out.partition("\nSESS:")
         assert label in sub, f"SubagentStart dropped or garbled the map: {sub[:300]!r}"
-        assert label in sess, f"SessionStart dropped or garbled the map: {sess[:300]!r}"
+        assert label in sess, f"nx brief map dropped or garbled the map: {sess[:300]!r}"
 
     def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
         """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
@@ -496,18 +495,19 @@ class TestSubagentHookInjection:
 
 
 class TestSessionHookInjection:
-    """Verify the SessionStart hook reads the L1 context cache.
+    """Verify ``nx brief map`` reads the L1 context cache.
 
-    Drives ``nexus.hooks.session_context.run()``, the port of the plugin's
-    ``session_start_hook.py`` (RDR-215 bead nexus-q02nx.21); the plugin copy
-    this used to exec was deleted at nexus-z9cz2. The filename
-    ``nx context refresh`` writes must be the filename this hook reads.
+    SessionStart used to inject the map (``nexus.hooks.session_context.run()``, the port of the plugin's
+    ``session_start_hook.py``, RDR-215 bead nexus-q02nx.21); since the progressive-disclosure change it is the ``map`` topic of
+    :mod:`nexus.brief`, rendered by the same function. The filename ``nx context refresh`` writes must be the filename it
+    reads, and the SessionStart hook must NOT print the map any more (only stat it, for its hygiene block).
     """
 
     def test_hook_emits_knowledge_map(self, tmp_path: Path, monkeypatch) -> None:
-        """SessionStart hook outputs the cached knowledge map content."""
+        """``nx brief map`` outputs the cached knowledge map content; the SessionStart hook does not."""
         import hashlib
 
+        from nexus import brief
         from nexus.hooks import session_context
 
         repo_dir = tmp_path / "fakerepo"
@@ -517,32 +517,31 @@ class TestSessionHookInjection:
         context_dir.mkdir(parents=True)
         repo_hash = hashlib.sha1(str(repo_dir.resolve()).encode()).hexdigest()[:8]
         cache_file = context_dir / f"fakerepo-{repo_hash}.txt"
-        cache_file.write_bytes("## Knowledge Map\n\ncode: Session Topic — résumé (77)\n".encode("utf-8"))
+        cache_file.write_bytes("## Knowledge Map\n\ncode: Session Topic \u2014 r\u00e9sum\u00e9 (77)\n".encode("utf-8"))
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows' home for expanduser
-        # The hook reads from NEXUS_CONFIG_DIR when set, as nexus.context writes
+        # The cache is read from NEXUS_CONFIG_DIR when set, as nexus.context writes it
         # (nexus-3fme8); the suite's fence sets one, so point it here.
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / ".config" / "nexus"))
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
         monkeypatch.chdir(repo_dir)
-        # No nx/bd: the T2 and ready-beads sections are not under test.
-        monkeypatch.setattr(session_context, "which", lambda cmd: False)
 
-        result = session_context.run(None)
-
-        assert result.stdout is not None
-        assert "Session Topic — résumé (77)" in result.stdout, (
-            f"SessionStart hook did not emit Knowledge Map. stdout={result.stdout[:500]}"
+        result = brief.render("map")
+        assert result.ok
+        assert "Session Topic \u2014 r\u00e9sum\u00e9 (77)" in result.text, (
+            f"nx brief map did not emit the Knowledge Map. text={result.text[:500]}"
         )
-
+        monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: [])  # no engine in this test
+        hook = session_context.run(None).stdout or ""
+        assert "Session Topic" not in hook, "the SessionStart hook must not print the map any more"
 
     def test_hook_reads_the_cache_from_nexus_config_dir(self, tmp_path: Path, monkeypatch) -> None:
         """The cache lives where nexus.context writes it, under NEXUS_CONFIG_DIR
         when set. SessionStart looked under ~/.config/nexus regardless, so with
         the override it showed no map (nexus-3fme8). The cache here is only
         under the override, and home is empty."""
-        from nexus.hooks import session_context
+        from nexus import brief
 
         repo_dir = tmp_path / "cfgrepo"
         config_dir = tmp_path / "elsewhere"
@@ -556,11 +555,8 @@ class TestSessionHookInjection:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo_dir))
         monkeypatch.chdir(repo_dir)
-        monkeypatch.setattr(session_context, "which", lambda cmd: False)
 
-        result = session_context.run(None)
-
-        assert "Session Override Topic (8)" in (result.stdout or "")
+        assert "Session Override Topic (8)" in brief.render("map").text
 
 
 class TestRefreshContextL1:

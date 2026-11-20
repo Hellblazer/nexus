@@ -458,12 +458,15 @@ def test_hooks_json_session_end_timeout_covers_service_summary() -> None:
     ~17ms; the service summary moved the budget back up.
     """
     cfg = _read_plugin_hooks_json()
+    # The SessionEnd(clear) group is the resume-pointer writer (RDR-253 Step 6 part 2, 15 s of its own); the summary
+    # runs in the unmatched group, every SessionEnd.
     timeouts = [
         h["timeout"]
         for entry in cfg["hooks"]["SessionEnd"]
+        if not entry.get("matcher")
         for h in entry.get("hooks", [])
     ]
-    assert timeouts == [10], f"expected SessionEnd timeout 10s; got {timeouts!r}"
+    assert timeouts == [10], f"expected the summary's SessionEnd timeout 10s; got {timeouts!r}"
     # The summary's per-request cap must stay well inside the hook budget.
     import inspect
 

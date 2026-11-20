@@ -6,7 +6,8 @@ Every ``nx`` call reads the token file of its nearest Claude ancestor process (a
 MCP server itself) and sends the token in :data:`~nexus.identity.token_contract.IDENTITY_TOKEN_HEADER`:
 
 * only a request the engine FENCES carries the token (:func:`is_fenced`: threads-entry and other memory writes and the
-  mailbox claim operations; identity scratch has its own rule in ``http_scratch_store``). An identity token the engine
+  mailbox claim operations; identity scratch has its own rule in ``http_scratch_store``: its WRITES carry it, its reads
+  never do). An identity token the engine
   cannot resolve is a 401 on every route it rides, and an unfenced read must not depend on it;
 * a process with no Claude ancestor, or an ancestor with no token file, sends none: behaviour is exactly as before;
 * before it sends one, a process whose ``CLAUDE_CODE_SESSION_ID`` is not one the token file lists asks
@@ -22,8 +23,9 @@ MCP server itself) and sends the token in :data:`~nexus.identity.token_contract.
   A fenced write is never retried without a token, which JDR-002's 401 fallback would otherwise do.
 
 The ancestor is discovered once per process, a miss included (a process with no Claude ancestor never walks the
-process table again): the ancestry of a running process does not change. Only the registry lookup that names the token
-file is repeated, since the registry file may not exist yet.
+process table again): the ancestry of a running process does not change. The registry lookup that names the token
+file is repeated on every call, because its answer does change: an in-place ``/restart`` gives the same Claude pid a new
+``startedAt``, hence a new token file, under any process that outlives it (the MCP server may; that it does across an in-place /restart is not yet measured).
 """
 from __future__ import annotations
 
@@ -40,7 +42,6 @@ from nexus.identity.token_file import TokenFile, ancestor_token_path, identity_d
 NX_IDENTITY_TOKEN_ENV = "NX_IDENTITY_TOKEN"
 
 _LOCK = threading.Lock()
-_DISCOVERED: dict[str, Path | None] = {}
 
 
 class GenerationSupersededError(RuntimeError):
@@ -127,34 +128,55 @@ def _discover() -> Path | None:
 
 
 def token_file_path() -> Path | None:
-    """The path of this process's token file. The ancestor is cached; the registry lookup is repeated until it finds the
-    file's name, which it then keeps."""
-    key = (os.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip() or "ancestor"
-    with _LOCK:
-        if _DISCOVERED.get(key) is not None:
-            return _DISCOVERED[key]
-    found = _discover()
-    with _LOCK:
-        _DISCOVERED[key] = found
-    return found
+    """The path of this process's token file, named by the registry file of its Claude ancestor on EVERY call. The
+    ancestor (a pid) is cached; the name is not: an in-place ``/restart`` keeps the pid and gives the registry file a new
+    ``startedAt``, so the next generation's token is in a new file, and a long-lived process (the MCP server) that kept the
+    first name it found kept reading the superseded generation's file (nexus-hczdo). The lookup is one small JSON read."""
+    return _discover()
 
 
 def reset_for_tests() -> None:
     global _RESOLVER_DOWN_UNTIL
     with _LOCK:
         _RESOLVER_DOWN_UNTIL = 0.0
-        _DISCOVERED.clear()
         _ANCESTOR.clear()
         _VERIFIED.clear()
 
 
+#: How long a process waits before it reads its registry and token file ONE more time when the first read found no
+#: usable file (seconds). Claude Code writes its registry file as it restarts, so a read can land mid-write.
+REREAD_DELAY_S: float = 0.01
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _read() -> tuple[Path | None, TokenFile | None]:
+    """The token file path this process's registry names right now, and its record (None where there is no readable one)."""
+    path = token_file_path()
+    return path, (read_token_file(path) if path is not None else None)
+
+
 def current(*, now: float | None = None) -> TokenFile | None:
     """This process's token file record when it holds a token that may be sent now, else None."""
-    path = token_file_path()
-    record = read_token_file(path) if path is not None else None
+    return _current_with_path(now=now)[1]
+
+
+def _current_with_path(*, now: float | None = None) -> tuple[Path | None, TokenFile | None]:
+    path, record = _read()
+    if record is None and has_claude_ancestor():
+        _pause(REREAD_DELAY_S)         # a registry or token file Claude is mid-write on: read once more, by name, never by the last name
+        path, record = _read()
     if record is None or not token_contract.usable(record.token, record.expires_at, now=now):
-        return None
-    return record
+        return path, None
+    return path, record
+
+
+def has_claude_ancestor() -> bool:
+    """Whether this process has a token file to look for: a Claude ancestor, or a delegated child's explicit file. A process
+    with neither has no identity and is never made to wait for one."""
+    return bool((os.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip()) or _ancestor() is not None
 
 
 _MEMORY_WRITES = frozenset({"put", "put_or_merge", "merge", "import", "import_batch", "delete", "summaries", "restore"})
@@ -183,7 +205,7 @@ def is_send(method: str, path: str) -> bool:
     return method.upper() != "GET" and parts[:3] == ["v1", "tuples", "out"]
 
 
-_VERIFIED: set[str] = set()
+_VERIFIED: set[tuple[str, str]] = set()
 _LEASE_OWNER = False
 _RESOLVER_DOWN_UNTIL = 0.0
 #: How long an engine that could not be asked is not asked again (seconds): a session-id check is a courtesy, and a
@@ -205,7 +227,7 @@ def _resolver_client() -> Any:
     return IdentityClient.from_config(timeout=3.0)
 
 
-def _verify_session(record: TokenFile) -> None:
+def _verify_session(record: TokenFile, path: Path | None) -> None:
     """Refuse (raise the resolver's error) when this process's session id indexes to a different identity than its
     token file names: a Bash child started before a cross-seat ``/resume``. A session id the file lists is known
     without asking; an id it does not list (a ``/branch`` the lease has not yet recorded) is asked of the engine,
@@ -215,7 +237,7 @@ def _verify_session(record: TokenFile) -> None:
     sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
     if _LEASE_OWNER or time.monotonic() < _RESOLVER_DOWN_UNTIL:
         return
-    if (not sid or sid == record.session_id or sid in record.session_ids or sid in _VERIFIED
+    if (not sid or sid == record.session_id or sid in record.session_ids or (sid, record.identity) in _VERIFIED
             or (os.environ.get(NX_IDENTITY_TOKEN_ENV) or "").strip()):
         return
     from nexus.identity.resolver import (  # noqa: PLC0415
@@ -239,18 +261,18 @@ def _verify_session(record: TokenFile) -> None:
             close()
     if got is not None and got.identity != record.identity:
         raise IdentityConflictError([*got.answers, Answer(SOURCE_TOKEN_FILE, record.identity, record.generation,
-                                                          str(token_file_path()))])
+                                                          str(path))])
     with _LOCK:
-        _VERIFIED.add(sid)
+        _VERIFIED.add((sid, record.identity))
 
 
 def verified_current() -> TokenFile | None:
     """:func:`current`, after the session check (:func:`_verify_session`): the record of a token this process may send
     for its own session, else None. Raises ``IdentityConflictError`` for a process whose session id names another
     identity than its token file. What a fenced write and a seat call (RDR-253 option 2) both send the token of."""
-    record = current()
+    path, record = _current_with_path()
     if record is not None:
-        _verify_session(record)
+        _verify_session(record, path)
     return record
 
 

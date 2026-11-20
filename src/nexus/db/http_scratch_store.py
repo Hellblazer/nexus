@@ -38,6 +38,7 @@ and returns a :class:`~nexus.types.PromotionReport`.
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
@@ -124,11 +125,36 @@ _RECOVERY_FUTILE_WINDOW_S: float = 60.0
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
 from nexus.db.client_identity import client_identity_headers
-from nexus.identity.token_header import identity_headers, superseded_from_response
+from nexus.identity.token_header import identity_headers, retry_headers_after_401, superseded_from_response
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
 from nexus.correlation import stamp_request
+
+
+# ── Identity scope caps (RDR-253 Step 6) ───────────────────────────────────────
+
+#: The identity scratch scope (``session_id`` of ``identity:<id>``) outlives a session, so its size is bounded here, in
+#: the client: the engine holds no cap (an engine-side one can follow in a later engine release). A put over
+#: :data:`IDENTITY_ENTRY_MAX_BYTES` is refused; a NON-pointer put is refused once the scope holds
+#: :data:`IDENTITY_SCOPE_MAX_ENTRIES` non-pointer entries. The resume pointer (tag :data:`IDENTITY_RESUME_TAG`, content
+#: head ``resume <stamp> | ``) has its own slot and is never refused for the count of the others; its own count is
+#: bounded by the same number so a flood of pointers cannot stand in for the cap. Nothing is ever evicted: a refusal
+#: leaves the scope as it was, and the caller deletes an entry to make room. The check reads the scope first, so two
+#: writers racing can overshoot by a few entries; the bound is a guard against accumulation, not a transaction.
+IDENTITY_ENTRY_MAX_BYTES: int = 2048
+IDENTITY_SCOPE_MAX_ENTRIES: int = 20
+IDENTITY_RESUME_TAG: str = "resume-pointer"
+_IDENTITY_RESUME_HEAD = re.compile(r"^resume [0-9T:Z-]+ \| ")
+
+
+class IdentityScratchCapError(RuntimeError):
+    """An identity-scope put refused by a client-side cap (size or count); nothing was written or evicted."""
+
+
+def is_resume_pointer(tags: str, content: str) -> bool:
+    """True for the one entry shape that has the reserved slot: the tag AND the ``resume <stamp> | `` head."""
+    return IDENTITY_RESUME_TAG in {t.strip() for t in (tags or "").split(",")} and bool(_IDENTITY_RESUME_HEAD.match(content or ""))
 
 
 # ── HttpScratchStore ───────────────────────────────────────────────────────────
@@ -330,14 +356,16 @@ class HttpScratchStore:
             return f"Bearer {token}"
         return static_headers.get("Authorization", "")
 
-    def _authorized_headers(self, payload: dict[str, Any]) -> dict[str, str]:
+    def _authorized_headers(self, payload: dict[str, Any], *, write: bool = True) -> dict[str, str]:
         """The headers every request here carries: the bearer, resolved fresh, plus (RDR-253 Step 3) the identity
-        token of this process's Claude ancestor on a request for the IDENTITY scope (``session_id`` of
-        ``identity:<id>``), the only scratch scope the engine fences. A session-scope request never carries it: an
-        identity token the engine cannot resolve is a 401 on every call, and unfenced scratch must not depend on it.
-        Built once per attempt so a retry never drops the token: a fenced write is refused, never downgraded."""
+        token of this process's Claude ancestor on a WRITE to the IDENTITY scope (``session_id`` of ``identity:<id>``).
+        Only a write is fenced: the engine answers an identity-scope read to anyone (``ScratchHandler.effectiveSession``),
+        and a token the engine cannot resolve is a 401 from ``AuthFilter`` before any handler runs, so a read must never
+        carry one (an unresolvable token in the file would refuse a read the engine allows). A session-scope request never
+        carries it either. Built once per attempt so a retry never drops the token: a fenced write is refused, never
+        downgraded."""
         headers = {"Authorization": self._current_authorization_header()}
-        if str(payload.get("session_id", "")).startswith("identity:"):
+        if write and str(payload.get("session_id", "")).startswith("identity:"):
             headers.update(identity_headers())
         return headers
 
@@ -624,7 +652,7 @@ class HttpScratchStore:
         return at is not None and time.monotonic() - at < _RECOVERY_FUTILE_WINDOW_S
 
     def _retry_after_session_recovery(
-        self, path: str, payload: dict[str, Any], resp: httpx.Response, heal_suffix: str,
+        self, path: str, payload: dict[str, Any], resp: httpx.Response, heal_suffix: str, *, write: bool = True,
     ) -> tuple[httpx.Response, str]:
         """Last rung of the 401 ladder (after the lease re-read and the bearer
         re-mint): a borrowed session whose owner exited gets one recovery
@@ -637,7 +665,7 @@ class HttpScratchStore:
         try:
             resp = self._client.post(
                 path, json=payload,
-                headers=self._authorized_headers(payload),
+                headers=self._authorized_headers(payload, write=write),
             )
         except httpx.HTTPError as exc:
             raise RuntimeError(
@@ -696,6 +724,8 @@ class HttpScratchStore:
         ``scratch_sessions`` / ``{session_id}_{id}``.
         """
         import uuid as _uuid_mod  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+        if self._session_id.startswith("identity:"):
+            self._check_identity_caps(content, tags)
         doc_id = str(_uuid_mod.uuid4())
         if persist:
             flush_project = flush_project or "scratch_sessions"
@@ -715,6 +745,21 @@ class HttpScratchStore:
         }
         resp = self._post("/v1/t1/put", payload)
         return str(resp["id"])
+
+    def _check_identity_caps(self, content: str, tags: str) -> None:
+        """Refuse an identity-scope put the client-side caps forbid (see :data:`IDENTITY_ENTRY_MAX_BYTES`)."""
+        size = len(content.encode("utf-8"))
+        if size > IDENTITY_ENTRY_MAX_BYTES:
+            raise IdentityScratchCapError(
+                f"identity scratch entries are capped at {IDENTITY_ENTRY_MAX_BYTES} bytes; this one is {size}")
+        pointer = is_resume_pointer(tags, content)
+        held = [e for e in self.list_entries()
+                if is_resume_pointer(str(e.get("tags") or ""), str(e.get("content") or "")) == pointer]
+        if len(held) >= IDENTITY_SCOPE_MAX_ENTRIES:
+            kind = "resume pointers" if pointer else "entries"
+            raise IdentityScratchCapError(
+                f"the identity scratch scope holds {len(held)} {kind}, the cap is {IDENTITY_SCOPE_MAX_ENTRIES}; "
+                "delete one first (nothing is evicted for you)")
 
     # ── Read ───────────────────────────────────────────────────────────────────
 
@@ -938,7 +983,7 @@ class HttpScratchStore:
         # critic S4 (nexus-ssqk9): resolve the Authorization header FRESH
         # for this request rather than the client's construction-time
         # default -- see _current_authorization_header's docstring.
-        request_headers = self._authorized_headers(payload)
+        request_headers = self._authorized_headers(payload, write=mutates)
         try:
             resp = self._client.post(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
@@ -948,7 +993,7 @@ class HttpScratchStore:
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload))
+                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload, write=mutates))
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -964,6 +1009,18 @@ class HttpScratchStore:
             edge = self._edge_refusal(path, resp)
             if edge is not None:
                 raise RuntimeError(edge)
+            # RDR-253 Step 3: a write that carried an identity token and got a 401 re-reads the token file once and
+            # resends when it holds a different usable token (the server refreshed it, or the identity was rebound),
+            # as the T2 stores and nx group do. It comes first: a stale identity token is no fault of the session
+            # token or the bearer the ladder below would otherwise heal and blame.
+            if (fresh := retry_headers_after_401(request_headers, path)) is not None:
+                try:
+                    resp = self._client.post(path, json=payload, headers=fresh)
+                except httpx.HTTPError as exc:
+                    raise RuntimeError(
+                        f"HttpScratchStore: network error on identity-token retry {path}: {exc}"
+                    ) from exc
+        if resp.status_code == 401:
             # nexus-g5hzk: the owner rotated the SESSION token; ours went
             # stale. Try that self-heal FIRST (unchanged precedence).
             healed = self._refresh_session_token_from_lease(sent_token)
@@ -991,7 +1048,7 @@ class HttpScratchStore:
                     # request above.
                     resp = self._client.post(
                         path, json=payload,
-                        headers=self._authorized_headers(payload),
+                        headers=self._authorized_headers(payload, write=mutates),
                     )
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
@@ -1000,7 +1057,7 @@ class HttpScratchStore:
             # nexus-k9sec: still 401 with the bearer and the lease excluded --
             # the borrowed session token itself is dead (its owner exited).
             resp, heal_suffix = self._retry_after_session_recovery(
-                path, payload, resp, heal_suffix
+                path, payload, resp, heal_suffix, write=mutates
             )
         self._note_bearer_accepted(resp)
         if not resp.is_success:
@@ -1051,7 +1108,7 @@ class HttpScratchStore:
         """POST *payload* to *path* and return parsed JSON without raising on 404-class."""
         sent_token = getattr(self, "_session_token", "")
         # critic S4 (nexus-ssqk9): see _post's matching comment.
-        request_headers = self._authorized_headers(payload)
+        request_headers = self._authorized_headers(payload, write=False)
         try:
             resp = self._client.post(path, json=payload, headers=request_headers)
         except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadError):
@@ -1060,7 +1117,7 @@ class HttpScratchStore:
             if not self._rebind_from_lease():
                 raise RuntimeError(f"HttpScratchStore: connect failed on {path}")
             try:
-                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload))
+                resp = self._client.post(path, json=payload, headers=self._authorized_headers(payload, write=False))
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"HttpScratchStore: connect failed on retry {path}: {exc}") from exc
         except httpx.HTTPError as exc:
@@ -1089,7 +1146,7 @@ class HttpScratchStore:
                     # the Authorization header FRESH on the retry too.
                     resp = self._client.post(
                         path, json=payload,
-                        headers=self._authorized_headers(payload),
+                        headers=self._authorized_headers(payload, write=False),
                     )
                 except httpx.HTTPError as exc:
                     raise RuntimeError(
@@ -1098,7 +1155,7 @@ class HttpScratchStore:
             # nexus-k9sec: still 401 with the bearer and the lease excluded --
             # the borrowed session token itself is dead (its owner exited).
             resp, heal_suffix = self._retry_after_session_recovery(
-                path, payload, resp, heal_suffix
+                path, payload, resp, heal_suffix, write=False
             )
         self._note_bearer_accepted(resp)
         if resp.status_code == 404:

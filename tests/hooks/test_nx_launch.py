@@ -642,7 +642,8 @@ def test_a_session_with_no_cli_says_one_thing_and_writes_nothing(tmp_path: Path)
     entries = _entries("SessionStart")
     assert len(entries) == 10, [e["args"][-2:] for e in entries]  # 9 + the compact-only inject group (nexus-3lqxv)
     session_end = _entries("SessionEnd")
-    assert len(session_end) == 1 and session_end[0]["args"][-1] == "nx-session-end-launcher", session_end
+    assert [e["args"][-1] for e in session_end][0] == "nx-session-end-launcher" and len(session_end) == 2, session_end
+    assert session_end[1]["args"][-2:] == [str(session_end[1]["args"][-2]), "end"] and "compact_checkpoint.py" in session_end[1]["args"][-2]
     entries = entries + session_end
     assert entries[0]["args"][-1].endswith("/hooks/scripts/nx_setup_notice.py"), "the setup notice is the first entry"
 

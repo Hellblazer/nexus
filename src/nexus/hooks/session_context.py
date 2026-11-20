@@ -9,10 +9,28 @@ same ``SessionStart`` event, as two separate ``hooks.json`` command
 entries, and both stay wired today. ``session-start`` wraps ``nx hook
 session-start`` -- the guidance/imperative emitter, which needs
 ``nexus.session`` and pays for it legitimately. This module wraps the
-OTHER SessionStart script: T2 memory (via the sibling ``t2_prefix_scan.py``
-subprocess), ``bd ready``, the static capabilities block, the RDR-072 L1
-Knowledge Map cache, and the nexus-1if7b hygiene block. Do not conflate the
-two; they are ported separately because they are separately wired.
+OTHER SessionStart script.
+
+**What it prints now (SessionStart progressive disclosure, T2
+nexus/design-sessionstart-progressive-disclosure-2026-11-20).** The rules and the state
+of THIS session, and one index line: the T1 contract, the threads due, the one
+identity-notes line (RDR-253 Step 6 part 3), the fire-only T2 reachability line, ``bd
+prime`` where the beads plugin is off for the project, ONE static index line naming ``nx
+brief <topic>`` and when to load it, and the nexus-1if7b hygiene block. The reference
+blocks that used to follow (the T2 memory scan, ``bd ready``, the capabilities block, the
+RDR-072 L1 Knowledge Map) are rendered by the functions below on demand: ``nx brief`` and
+the ``brief`` MCP tool (:mod:`nexus.brief`) call them, so there is one source and no second
+copy. The hook no longer runs the scan, ``bd ready`` or ``nx``. It still spawns ``git`` once
+(the repo name), calls T2 for the reachability probe, and, with a session id, calls
+``board_due`` and ``identity_notes`` (both read T2). It stats the Knowledge Map cache's mtime
+for the hygiene block and reads nothing from it.
+
+What did NOT move behind a brief, because it is a rule or a failure signal and not context:
+the T2 reachability line (nexus-8fvp2: a T2 that cannot be reached is never silent), and
+``bd prime`` for a project whose beads plugin is off (nexus-dg7i6.4: its only primer). What
+did move and is not repeated at start: the full-prefix MCP rule in the capabilities block
+(``mcp__plugin_conexus_nexus__``), which CLAUDE.md and AGENTS.md carry. The index line is
+static, so a failing ``nx brief`` costs a session that context and never the rest.
 
 **"Move, do not rewrite" (RDR-215 Approach item 9).** The body below is
 carried mechanically from the script: same helper functions, same control
@@ -46,11 +64,11 @@ than silently folded in:
    ``nexus.hooks.t2_prefix_scan`` in-process and no path is resolved.
 
 **Payload: the session id only.** The script never read stdin -- it
-resolves everything from ``CLAUDE_PROJECT_DIR``/``os.getcwd()`` and local
-environment variables. Since nexus-ct74m ``run`` reads one payload field,
+resolved everything from ``CLAUDE_PROJECT_DIR``/``os.getcwd()`` and local
+environment variables (the renders ``nx brief`` calls still do; the hook itself reads ``os.getcwd()`` for the hygiene check). Since nexus-ct74m ``run`` reads one payload field,
 ``session_id``, to find the session's threads board entry and print its due
 threads (``nexus.hooks.board_due``); a payload without one prints no such
-section. Like the T2 section's ``t2_prefix_scan``, that module is imported
+section. Like the identity-notes line's ``identity_notes``, that module is imported
 inside ``run`` and is not stdlib-only: the STDLIB ONLY rule below covers this
 module's own top-level imports, not the sections it defers to.
 
@@ -100,6 +118,19 @@ __all__ = ["run"]
 DEBUG = os.environ.get('NX_HOOK_DEBUG', '0') == '1'
 NX_TIMEOUT = int(os.environ.get('NX_TIMEOUT', '10'))
 BD_TIMEOUT = int(os.environ.get('BD_TIMEOUT', '5'))
+
+
+#: The topics of ``nx brief`` / the ``brief`` MCP tool, in index order (:mod:`nexus.brief` renders them). Held here, with the
+#: index line, because this module is stdlib-only and prints the line on every start.
+BRIEF_TOPICS: tuple[str, ...] = ("memory", "beads", "caps", "map", "rdr", "me")
+
+#: The ONE line SessionStart prints for everything that moved behind ``nx brief``. Static: it names no state, so it cannot
+#: fail, and a brief that does not load leaves the session without that context, never without a rule.
+BRIEF_INDEX_LINE: str = (
+    "More on demand (`nx brief <topic>` or the `brief` MCP tool): "
+    "beads (ready, bd usage) before choosing work; memory (T2 titles), map (topic labels) before researching; "
+    "caps (tool notes) | rdr (RDR counts) | me (your startup note)"
+)
 
 
 def debug(msg: str) -> None:
@@ -193,7 +224,8 @@ _T1_TOP_LINES: list[str] = [
     "T1 survives compaction; a `/clear`, `/resume` or fresh restart starts a new scope, "
     "an idle session is swept after 24 h, and flagged entries land in T2 at session end "
     "and on a move to a new id. A `claude -p` child has its own T1 unless started with "
-    "`share_t1=True`.",
+    "`share_t1=True`. Working notes you want after `/clear` go to `scratch` with "
+    "`scope=identity` and tag `working`; session scope stays the layer your subagents share.",
     "",
 ]
 
@@ -230,29 +262,145 @@ def _build_capabilities_block() -> list[str]:
     ]
 
 
-def run(payload: dict | None) -> HookResult:
-    """Run the SessionStart T2/beads/capabilities/knowledge-map hook.
+def _render_t2_memory(cwd: str) -> list[str]:
+    """The ``## T2 Memory (Active Project)`` block for the repo at *cwd*: the project name from ``git rev-parse
+    --show-toplevel``, the body from :func:`nexus.hooks.t2_prefix_scan.scan` in-process (bead nexus-b5ugt: no plugin path
+    is resolved). ``[]`` when *cwd* is not in a repo or the scan found nothing. Carried from the hook; the caller decides
+    whether ``nx`` is available, as :mod:`nexus.brief` runs inside it."""
+    toplevel = run_command(['git', 'rev-parse', '--show-toplevel'], timeout=5, cwd=cwd)
+    project_name = Path(toplevel).name if toplevel else None
+    if not project_name:
+        return []
+    from nexus.hooks.t2_prefix_scan import scan  # noqa: PLC0415 — deferred: only a real T2 section pays the import
 
-    Carried from ``session_start_hook.py``'s ``main()``: same helpers, same
-    control flow, same env-var names. Two deviations from a literal
-    line-for-line carry are unavoidable and documented in the module
-    docstring above -- the ``HookResult`` return in place of
-    ``print()``/``sys.exit(0)``, and the sibling-script path resolution via
-    :func:`_plugin_root` in place of ``Path(__file__).parent`` (this
-    module's parent directory no longer holds ``t2_prefix_scan.py``).
-    The second of those is gone as of bead nexus-b5ugt: the T2 section
-    calls ``nexus.hooks.t2_prefix_scan`` in-process, so this hook resolves
-    no plugin path at all and ``_plugin_root`` went with it.
-    """
-    project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
+    memory_output = scan(project_name, configure_logging=False)
+    if not memory_output:
+        return []
+    return ["## T2 Memory (Active Project)", memory_output, ""]
+
+
+def _render_bd_prime(project_dir: Path) -> list[str]:
+    """``bd prime``, when the beads plugin's own hook will not run (nexus-dg7i6.4).
+
+    A project can disable the beads plugin to drop its skill-listing entries; its one load-bearing contribution, the
+    SessionStart ``bd prime``, is printed here instead. ``[]`` outside a beads repo, with the plugin on, or when the
+    primer is empty. It runs ``bd prime`` on its own: SessionStart no longer runs ``bd ready`` before it, and
+    ``nx brief beads`` calls it after its own ``bd ready``."""
     cwd = str(project_dir)
+    try:
+        if (project_dir / '.beads').is_dir():
+            from nexus.beads_prime import beads_plugin_enabled  # noqa: PLC0415 — deferred: only a beads repo pays the import
 
+            if not beads_plugin_enabled(project_dir):
+                prime_output = run_command(['bd', 'prime'], timeout=BD_TIMEOUT, cwd=cwd)
+                if prime_output and prime_output.strip():
+                    return [prime_output.strip(), ""]
+    except Exception:  # noqa: BLE001 — a hook must never fail; keep the sections already gathered
+        debug("bd prime section skipped")
+    return []
+
+
+def _render_beads(project_dir: Path) -> list[str]:
+    """The ``## Ready Beads`` block, then ``bd prime`` when it applies. ``[]`` when ``bd`` is not on PATH."""
+    if not which('bd'):
+        debug("bd command not found")
+        return []
+    ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=str(project_dir))
+    lines = _render_ready_beads(ready_output)
+    # A bd that just failed or timed out on `bd ready` is not asked again.
+    if ready_output is not None:
+        lines.extend(_render_bd_prime(project_dir))
+    return lines
+
+
+def _knowledge_map_path(cwd: str) -> str:
+    """The cache file ``nx context refresh`` wrote for the repo at *cwd*: the per-repo file under ``NEXUS_CONFIG_DIR``
+    (nexus-3fme8) when it exists, else the legacy global ``context_l1.txt`` (existing or not: the hygiene block stats it)."""
+    import hashlib  # noqa: PLC0415 — carried verbatim from the script; not a deferred-import optimization
+
+    real = os.path.realpath(cwd)
+    repo_hash = hashlib.sha1(real.encode()).hexdigest()[:8]
+    repo_name = os.path.basename(real)
+    config_dir = os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
+        os.path.expanduser("~"), ".config", "nexus"
+    )
+    per_repo = os.path.join(config_dir, "context", f"{repo_name}-{repo_hash}.txt")
+    return per_repo if os.path.exists(per_repo) else os.path.join(config_dir, "context_l1.txt")
+
+
+def _render_knowledge_map(cwd: str) -> list[str]:
+    """The RDR-072 L1 Knowledge Map: the cache file, verbatim, or ``[]`` when there is none or it cannot be read."""
+    try:
+        path = _knowledge_map_path(cwd)
+        if os.path.exists(path):
+            # UTF-8 as written; the locale default is cp1252 on Windows (nexus-3fme8).
+            with open(path, encoding="utf-8") as f:
+                context_l1 = f.read().strip()
+            if context_l1:
+                return [context_l1, ""]
+    except Exception:  # noqa: BLE001 — carried: a hook must never fail
+        pass  # Non-fatal — hook must never fail
+    return []
+
+
+def repo_names(cwd: str) -> tuple[str, str]:
+    """``(toplevel, main)`` for the repo at *cwd*, from one ``git rev-parse``. *toplevel* is the checkout's own directory
+    name, the T2 project the scan used and the reachability probe asks about; *main* is the parent of the git common
+    dir, the same for every worktree of one repository, and is the ``repo`` of every usage line so a worktree session
+    does not fragment the count. Outside a repo both are *cwd*'s own name."""
+    own = os.path.basename(os.path.realpath(cwd))
+    out = run_command(['git', 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'],
+                      timeout=5, cwd=cwd)
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if not lines:
+        return own, own
+    toplevel = Path(lines[0]).name
+    main = Path(lines[1]).parent.name if len(lines) > 1 and Path(lines[1]).name == ".git" else toplevel
+    return toplevel, main or toplevel
+
+
+def repo_name(cwd: str) -> str:
+    """The checkout's own name (:func:`repo_names`' first half): the T2 project the scan used."""
+    return repo_names(cwd)[0]
+
+
+def _t2_reachability_lines(project: str) -> list[str]:
+    """The fire-only T2 line (:func:`nexus.hooks.t2_prefix_scan.reachability_warning`): ``[]`` when T2 is healthy, and on any
+    failure of the probe itself (a hook never fails)."""
+    try:
+        from nexus.hooks.t2_prefix_scan import reachability_warning  # noqa: PLC0415 — deferred: pays for the T2 client
+
+        warning = reachability_warning(project)
+        return [warning] if warning else []
+    except Exception:  # noqa: BLE001 — a hook must never fail
+        debug("T2 reachability probe skipped")
+        return []
+
+
+def _record_session_start(session_id: str, repo: str, source: str) -> None:
+    """One ``session_start`` line in the usage file: the denominator for the 30-day ``nx brief`` review."""
+    from nexus.hooks import usage_log  # noqa: PLC0415 — deferred with the rest of the optional work
+
+    usage_log.append("session_start", session_id=session_id, repo=repo, source=source)
+
+
+def run(payload: dict | None) -> HookResult:
+    """Run the SessionStart context hook: the T1 contract, the due threads, the identity-notes line, the fire-only T2
+    line, ``bd prime`` where the beads plugin is off, the one ``nx brief`` index line, and the hygiene block.
+
+    Carried from ``session_start_hook.py``'s ``main()``: the ``HookResult`` return in place of ``print()``/``sys.exit(0)``
+    is the one structural deviation. Everything that is reference context (T2 memory, ready beads, the bd primer, the
+    capabilities block, the Knowledge Map) is not computed here any more; see the module docstring.
+    """
     # nexus-mtheb: the T1 contract leads the context.
     output_lines: list[str] = list(_T1_TOP_LINES)
+    project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
+    repo, usage_repo = repo_names(str(project_dir))
 
     # --- Threads board: this session's threads whose due: has come (nexus-ct74m) ---
     # The one use of the payload: its session id finds the session's own board entry.
     session_id = str((payload or {}).get("session_id") or "")
+    _record_session_start(session_id, usage_repo, str((payload or {}).get("source") or ""))
     if session_id:
         try:
             from nexus.hooks.board_due import due_lines  # noqa: PLC0415 — deferred: only a payload with a session id pays
@@ -261,85 +409,23 @@ def run(payload: dict | None) -> HookResult:
         except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
             debug("threads board due section skipped")
 
-    # --- T2 memory context ---
-    if which('nx'):
-        project_name = None
-        toplevel = run_command(['git', 'rev-parse', '--show-toplevel'], timeout=5, cwd=cwd)
-        if toplevel:
-            project_name = Path(toplevel).name
-
-        if project_name:
-            # In-process, like subagent_start's own T2 section (bead
-            # nexus-b5ugt). This was the SECOND consumer of the plugin's
-            # t2_prefix_scan.py and it was missed when the first was
-            # ported -- found by asking what else still executes a plugin
-            # script, not by a failure, because this hook runs on the
-            # command tier where Claude Code sets CLAUDE_PLUGIN_ROOT
-            # correctly, so the subprocess actually worked here. Porting
-            # it anyway: leaving one caller on the script keeps the
-            # script alive, and a plugin-resident script is the thing
-            # RDR-215 is removing.
-            from nexus.hooks.t2_prefix_scan import scan  # noqa: PLC0415 — deferred: only a real T2 section pays the import
-
-            memory_output = scan(project_name)
-            if memory_output:
-                output_lines.append("## T2 Memory (Active Project)")
-                output_lines.append(memory_output)
-                output_lines.append("")
-    else:
-        debug("nx not found on PATH, skipping T2 memory context")
-
-    # --- bd ready ---
-    if which('bd'):
-        ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=cwd)
-        output_lines.extend(_render_ready_beads(ready_output))
-        # --- bd prime, when the beads plugin's own hook will not run ---
-        # nexus-dg7i6.4: a project can disable the beads plugin to drop its
-        # skill-listing entries; its one load-bearing contribution, the
-        # SessionStart `bd prime`, is printed here instead.
-        # A bd that just failed or timed out on `bd ready` is not asked again.
+    # --- The bound identity's own T2 notes: at most ONE line (RDR-253 Step 6 part 3, nexus-hczdo) ---
+    if session_id:
         try:
-            if ready_output is not None and (project_dir / '.beads').is_dir():
-                from nexus.beads_prime import beads_plugin_enabled  # noqa: PLC0415 — deferred: only a beads repo pays the import
+            from nexus.hooks import identity_notes  # noqa: PLC0415 — deferred: only a payload with a session id pays
 
-                if not beads_plugin_enabled(project_dir):
-                    prime_output = run_command(['bd', 'prime'], timeout=BD_TIMEOUT, cwd=cwd)
-                    if prime_output and prime_output.strip():
-                        output_lines.append(prime_output.strip())
-                        output_lines.append("")
-        except Exception:  # noqa: BLE001 — a hook must never fail; keep the sections already gathered
-            debug("bd prime section skipped")
-    else:
-        debug("bd command not found")
+            output_lines.extend(identity_notes.notes_lines(session_id))
+        except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
+            debug("identity notes line skipped")
 
-    # --- Capabilities summary (AI-optimized, minimal tokens) ---
-    output_lines.extend(_build_capabilities_block())
+    # --- Fire-only: a T2 that cannot be reached, or whose newest entry is stale, is never silent (nexus-8fvp2) ---
+    output_lines.extend(_t2_reachability_lines(repo))
 
-    # --- L1 Knowledge Map (RDR-072) — per-repo cached topic labels ---
-    context_l1_path: str | None = None
-    try:
-        import hashlib  # noqa: PLC0415 — carried verbatim from the script; not a deferred-import optimization
-        cwd = os.getcwd()
-        repo_hash = hashlib.sha1(os.path.realpath(cwd).encode()).hexdigest()[:8]
-        repo_name = os.path.basename(os.path.realpath(cwd))
-        # Where nexus.context writes: NEXUS_CONFIG_DIR when set (nexus-3fme8).
-        config_dir = os.environ.get("NEXUS_CONFIG_DIR", "").strip() or os.path.join(
-            os.path.expanduser("~"), ".config", "nexus"
-        )
-        context_dir = os.path.join(config_dir, "context")
-        context_l1_path = os.path.join(context_dir, f"{repo_name}-{repo_hash}.txt")
-        # Fallback to legacy global file
-        if not os.path.exists(context_l1_path):
-            context_l1_path = os.path.join(config_dir, "context_l1.txt")
-        if os.path.exists(context_l1_path):
-            # UTF-8 as written; the locale default is cp1252 on Windows (nexus-3fme8).
-            with open(context_l1_path, encoding="utf-8") as f:
-                context_l1 = f.read().strip()
-            if context_l1:
-                output_lines.append(context_l1)
-                output_lines.append("")
-    except Exception:  # noqa: BLE001 — carried: a hook must never fail
-        pass  # Non-fatal — hook must never fail
+    # --- bd prime where the beads plugin is off: that project's only primer (nexus-dg7i6.4); the ready list is on demand ---
+    output_lines.extend(_render_bd_prime(project_dir))
+
+    # --- Everything else is on demand: one static line names it ---
+    output_lines.append(BRIEF_INDEX_LINE)
 
     # --- Hygiene (nexus-1if7b) — actionable maintenance signals ---
     # Strict "in moderation" surface: emit a section only when there's
@@ -347,11 +433,12 @@ def run(payload: dict | None) -> HookResult:
     # Currently checks one signal (L1 cache staleness > 7 days, which
     # caught nexus-9iw41's 10-day-stale cache). Add more signals only
     # when each pays for the line-count it costs.
-    _emit_hygiene_block(output_lines, context_l1_path)
+    try:
+        _emit_hygiene_block(output_lines, _knowledge_map_path(os.getcwd()))
+    except Exception:  # noqa: BLE001 — a hook must never fail
+        pass
 
-    if output_lines:
-        return HookResult(stdout="\n".join(output_lines))
-    return HookResult()
+    return HookResult(stdout="\n".join(output_lines))
 
 
 def _emit_hygiene_block(output_lines: list, context_l1_path: str | None) -> None:

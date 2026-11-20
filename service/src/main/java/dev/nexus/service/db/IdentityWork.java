@@ -23,7 +23,7 @@ import static dev.nexus.service.jooq.nexus.Tables.IDENTITY_WORK;
  */
 public final class IdentityWork {
 
-    static final Set<String> KINDS = Set.of("watcher", "wait", "labrun", "worktree", "tmux");
+    static final Set<String> KINDS = Set.of("watcher", "wait", "labrun", "worktree", "tmux", "agent");
     static final Set<String> STATES = Set.of("running", "done");
     /** The most work rows one identity may hold; the next registration is refused with 409 {@code work_limit}. */
     static final int MAX_PER_IDENTITY = 200;

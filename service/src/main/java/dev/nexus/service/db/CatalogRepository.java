@@ -3736,7 +3736,7 @@ public final class CatalogRepository {
      * of two overlapping-endpoint calls acquires the lower tumbler's lock
      * first always tries for the higher one next, never the reverse.
      */
-    private static void lockDocumentRowsSorted(DSLContext ctx, String tenant, boolean exclusive, String... tumblers) {
+    static void lockDocumentRowsSorted(DSLContext ctx, String tenant, boolean exclusive, String... tumblers) {
         var distinct = new java.util.TreeSet<String>();
         for (String t : tumblers) {
             if (t != null && !t.isBlank()) distinct.add(t);
@@ -4654,7 +4654,7 @@ public final class CatalogRepository {
      * @return per-outcome counts: how many rows were plainly remapped,
      *         collapsed into an existing link, or dropped as a self-link
      */
-    private LinkRemapCounts remapLinksForMerge(
+    LinkRemapCounts remapLinksForMerge(
         DSLContext ctx, String tenant, String duplicateTumbler, String canonicalTumbler
     ) {
         // STEP 1: self-links -- identified purely by predicate (no read
@@ -10543,8 +10543,13 @@ public final class CatalogRepository {
                        // conformant '1-..' segment and wins the tie (a test documents it). That
                        // changes only WHICH of two same-version names is returned: the only consumers of
                        // /collections/for_tuple, HttpCatalogClient.collection_for and
-                       // _tuple_registered, read the returned name's model_version (or only its
-                       // existence) and re-render the collection name from owner_id themselves.
+                       // _tuple_registered, read the returned ROW's model_version (collection_for, since
+                       // RDR-229 P1.4, nexus-p2m1x.4; it no longer parses the name) or only its
+                       // existence, and re-render the collection name from owner_id themselves.
+                       // The tie STAYS by name (Sam 2026-11-20, T2 nexus/sam-ruling-rdr229-p14-tie-2026-11-20):
+                       // it moves to created_at ascending (the rule collection_id will follow) only after
+                       // P1.2's production census (nexus-p2m1x.2) shows no tuple where a legacy slug is
+                       // older than its conformant sibling. Until then do not change this order.
                        .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
@@ -13736,7 +13741,7 @@ public final class CatalogRepository {
      * transaction, and write one audit row per row actually raised (an already-sensitive row is a no-op and
      * writes nothing). Never lowers a flag.
      */
-    private static void raiseSensitivity(DSLContext ctx, String tenant,
+    static void raiseSensitivity(DSLContext ctx, String tenant,
                                          java.util.Collection<String> tumblers, String reason) {
         if (tumblers.isEmpty()) return;
         var raised = ctx.update(CATALOG_DOCUMENTS)

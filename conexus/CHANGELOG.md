@@ -1,5 +1,16 @@
 # Changelog
 
+## [8.5.3] - 2026-11-20
+
+Plugin version aligned with conexus 8.5.3. These plugin changes become live at this pin.
+
+- `conexus/hooks/scripts/compact_checkpoint.py` -- PreCompact and a new SessionEnd (matcher `clear`) mode write the identity-scratch resume pointer (RDR-253 Step 6 part 2).
+- `conexus/hooks/scripts/_resume_pointer.py` -- new: the one-line resume pointer (thread, worktree, state, waiting_on; at most 1 KB).
+- `conexus/hooks/hooks.json` -- a SessionEnd group with matcher `clear` running `compact_checkpoint.py end` (15 s).
+- `conexus/skills/nexus/SKILL.md` -- a "Where a note goes" table (identity/<id>, project T2, memory files).
+- `conexus/skills/orchestration/SKILL.md` -- a long job or wait started by hand registers itself as work its session owns.
+- `conexus/README.md` -- the new SessionEnd row, and the SessionStart progressive-disclosure `session-context` row and `brief`.
+
 ## [8.5.2] - 2026-11-19
 
 Plugin version aligned with conexus 8.5.2. These plugin changes become live at this pin.

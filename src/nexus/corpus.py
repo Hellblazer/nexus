@@ -813,12 +813,12 @@ def model_version_for_collection_name(collection_name: str) -> str | None:
 #: Regex equivalent of "split at the FIRST '__', or ('', whole-string) when
 #: there is none" -- see :func:`split_candidate_collection_name`. Written as
 #: a regex (like :data:`_CONFORMANT_COLLECTION_RE`) rather than
-#: ``partition("__")``/``"__" in`` specifically so this candidate-string
-#: primitive is INVISIBLE to ``tests/test_collection_name_parse_census.py``'s
-#: AST scan (which watches split/rsplit/partition/rpartition/startswith/
-#: endswith calls and ``"__" in``/``not in`` compares -- a regex ``.match()``
-#: is none of those, exactly like ``is_conformant_collection_name`` and
-#: :func:`model_version_for_collection_name` already dodge the same scan).
+#: ``partition("__")``/``"__" in``, so the primitive hides its parse behind a
+#: function call. ``tests/test_collection_name_parse_census.py`` counts its
+#: callers through the fifth class (the derived helper set: every function in
+#: this module that reaches a parser is a counted helper, RDR-229 Technical
+#: Design item 4); the regex itself is why the census could not see it through
+#: its original four classes.
 #: The non-greedy first group stops at the EARLIEST "__", matching
 #: ``partition``'s first-occurrence semantics exactly; ``re.DOTALL`` so a
 #: newline inside a (pathological) candidate string cannot break the match.
@@ -838,8 +838,9 @@ def split_candidate_collection_name(name: str) -> tuple[str, str]:
     separator" shape check on an ARGUMENT that is not itself necessarily
     an existing collection -- a raw ``"__" in part`` there would re-add a
     counted site to ``tests/test_collection_name_parse_census.py``'s AST
-    scan (mcp/core.py was funnelled to zero by nexus-ft04v.21); this
-    regex-based primitive stays invisible to that scan.
+    scan (mcp/core.py was funnelled to zero by nexus-ft04v.21). Since
+    RDR-229 P1.1 its callers are counted too, as ``primitive_call`` sites
+    of the derived helper set.
 
     RDR-204 Phase 3 repoint (nexus-ft04v.26): this is the shared
     STRING-SHAPE primitive for the handful of corpus.py sites that derive
@@ -881,44 +882,31 @@ def candidate_knowledge_subject(name: str) -> str:
     return subject or rest  # no further "__": the remainder is the subject
 
 
-#: The candidate-string-derivation PRIMITIVES tests/test_collection_name_
-#: parse_census.py's fifth pattern class counts callers of, outside this
-#: module (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 6). SINGLE-
-#: SOURCED here (the census used to hand-duplicate this list as a
-#: literal in the test file, ~400 lines from any of these definitions --
-#: a rename here silently stopped updating that copy, which is exactly
-#: "so a renamed parsing primitive evades it") -- the test imports this
-#: constant directly and additionally asserts every name in it still
-#: resolves to a real function defined in this module, so a rename that
-#: forgets to update this tuple fails loud instead of silently
-#: undercounting.
+#: The three candidate-string-derivation PRIMITIVES (RDR-204 Phase 3 fix
+#: round, nexus-ft04v.28 item 6). They are the NON-VACUITY FLOOR of the
+#: census's derived helper set, not its definition: since RDR-229 P1.1
+#: (nexus-p2m1x.1) ``tests/_collection_name_census_scan.py`` derives the
+#: counted helpers by walking this module's call graph from the parser
+#: definitions (the two regexes and any raw ``"__"`` test), and the census
+#: asserts the derived set contains these three, so a rename that drops one
+#: from the derivation fails loud. The tuple stays single-sourced here; the
+#: test also asserts every name still resolves to a real function.
 #:
-#: Each of these three derives a NAME-LEVEL fact (embedding_model /
-#: model_version / content_type+owner) that COULD instead come from the
-#: authoritative catalog row (:func:`nexus.mcp_infra.get_collection_row`)
-#: -- a caller reaching for one of these where a row is available is
-#: doing exactly what the row-based funnel helpers
-#: (:func:`collection_content_type` / :func:`collection_owner` /
-#: :func:`collection_model`) exist to replace, RDR-204's whole "the row
-#: is authoritative, GH #667" premise. All three are deliberately
-#: REGEX-based (:data:`_LEGACY_SPLIT_RE` / :data:`_CONFORMANT_COLLECTION_RE`),
-#: never a raw ``split``/``partition``/``startswith``/``"__" in`` --
-#: :func:`split_candidate_collection_name`'s own docstring names this
-#: explicitly ("this regex-based primitive stays invisible to that
-#: scan"), which is WHY this fifth class exists as a distinct pattern
-#: from the first four: a name-derivation primitive that hides its own
-#: parsing behind a function call evades a text/AST-shape scan for raw
-#: string operations entirely.
+#: Each derives a NAME-LEVEL fact (embedding_model / model_version /
+#: content_type+owner) that COULD instead come from the authoritative
+#: catalog row (:func:`nexus.mcp_infra.get_collection_row`): a caller
+#: reaching for one where a row is available is doing what the row-based
+#: funnel helpers (:func:`collection_content_type` /
+#: :func:`collection_owner` / :func:`collection_model`) exist to replace,
+#: RDR-204's "the row is authoritative, GH #667" premise. All three are
+#: regex-based (:data:`_LEGACY_SPLIT_RE` / :data:`_CONFORMANT_COLLECTION_RE`).
 #:
 #: :func:`is_conformant_collection_name` / :func:`parse_conformant_collection_name`
-#: are DELIBERATELY excluded, even though they too use a regex
-#: (``_CONFORMANT_COLLECTION_RE``, the SAME one two of the three above
-#: use): they answer "is this STRING itself well-formed" / "what are its
-#: four segments", a question NO catalog row can ever answer (a row
-#: doesn't tell you whether the NAME is conformant-shaped) -- calling
-#: them is never a drift risk the way asking a name for a FIELD a row
-#: could instead supply is. They are the sanctioned, unrestricted public
-#: API; the three below are the ones worth a caller pausing on.
+#: are NOT in this tuple, and are still counted: they are parser roots of the
+#: derived set, because they apply ``_CONFORMANT_COLLECTION_RE`` (RDR-229
+#: P1.1). They answer "is this string well-formed" / "what are its four
+#: segments", which no catalog row can answer, so a caller is classified
+#: (mint, migration source, diagnostic) rather than moved to a row read.
 _CANDIDATE_STRING_PRIMITIVES: tuple[str, ...] = (
     "split_candidate_collection_name",
     "embedding_model_for_collection_name",

@@ -117,6 +117,56 @@ class OwnerDecisionOrderTest {
         assertThat(f.decide().post()).as("the engine's open row at P2 still stands").isNull();
     }
 
+    private static BoardRow stamped(String from, String kind, String sha, String body, String session) {
+        return new BoardRow("zz-" + kind + "-" + session, OwnerFixture.T0.plus(java.time.Duration.ofDays(1)),
+            new java.util.LinkedHashMap<>(Map.of("from", from, "kind", kind, "sha", sha)), body, session);
+    }
+
+    private static final String FORGED_OWNER_BODY =
+        "{\"owner\":\"B\",\"next\":null,\"reason\":\"earliest_suspect\",\"episode_at\":\"2026-01-01T00:00:00Z\",\"handoffs\":0}";
+
+    @Test
+    void aClearRowThatClaimsFromEngineButCarriesASessionStampDoesNotClearALiveRed() {
+        OwnerFixture f = base();
+        f.done("P2", "failure");
+        f.recordNow(f.decide());
+        f.owners.add(stamped("engine", "clear", "P2", "{}", "sForger"));   // a data-scope client wrote it: the engine's rows carry no stamp
+
+        assertThat(f.decide().post()).as("the engine's open row at P2 still stands").isNull();
+    }
+
+    @Test
+    void anOwnerRowThatClaimsFromEngineButCarriesASessionStampIsNotState() {
+        OwnerFixture f = base();
+        f.done("P2", "failure");
+        f.recordNow(f.decide());
+        f.owners.add(stamped("engine", "owner", "ZZ", FORGED_OWNER_BODY, "sForger"));
+
+        assertThat(f.decide().post()).as("the forged row names another tip and owner: it would force a new episode if it counted").isNull();
+    }
+
+    @Test
+    void aBlankSessionStampIsAStampAndTheRowIsNotState() {
+        // The aura reads sender_session with `is None`, so the engine must agree: only null is the engine's.
+        for (String blank : List.of("", " ")) {
+            OwnerFixture f = base();
+            f.done("P2", "failure");
+            f.recordNow(f.decide());
+            f.owners.add(stamped("engine", "clear", "P2", "{}", blank));
+
+            assertThat(f.decide().post()).as("a clear row stamped '" + blank + "' does not clear the live red").isNull();
+        }
+    }
+
+    @Test
+    void aForgedEngineRowAloneIsNotAnOpenRed() {
+        OwnerFixture f = base();
+        f.done("P2", "failure");
+        f.owners.add(stamped("engine", "owner", "P2", FORGED_OWNER_BODY, "sForger"));
+
+        assertThat(f.decide().post()).as("no engine row: the red opens its own episode").isNotNull();
+    }
+
     @Test
     void aMalformedEngineOwnerRowIsTreatedAsAbsentAndNeverThrows() {
         for (String bad : List.of("{}", "not json", "null", "[]", "{\"owner\":5,\"episode_at\":\"x\",\"handoffs\":\"1\"}",

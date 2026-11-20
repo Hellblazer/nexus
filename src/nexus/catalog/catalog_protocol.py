@@ -253,6 +253,12 @@ class CatalogWriter(Protocol):
     def set_sensitivity(self, tumblers, sensitive, *, reason=...) -> object:  # canonical (RDR-243, nexus-rfvyy.6.8)
         ...
 
+    def move_document(self, tumbler, *, new_source_uri, new_file_path, dry_run) -> object:  # canonical (RDR-254)
+        ...
+
+    def move_owner(self, owner, *, new_root, new_repo_hash, dry_run) -> object:  # canonical (RDR-254)
+        ...
+
     def link(self, from_t, to_t, link_type, created_by, *, from_span=..., to_span=..., allow_dangling=..., **meta) -> object:  # canonical DIVERGENT
         ...
 
@@ -356,6 +362,10 @@ CATALOG_WRITE_OPS: tuple[str, ...] = (
     # client method, in the shared set and not _SERVICE_ONLY_WRITE_OPS: missing here it raises AttributeError
     # through the closed _ServiceCatalogWriter and every getattr capability check reads False (nexus-kgos1).
     "set_sensitivity",
+    # RDR-254: the two move routes, whitelisted in the same change that adds the client methods (the
+    # set_sensitivity precedent, nexus-kgos1): an op missing here raises AttributeError through the closed proxy.
+    "move_document",
+    "move_owner",
     "link",
     "link_if_absent",
     "unlink",

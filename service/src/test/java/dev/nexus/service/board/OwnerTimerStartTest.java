@@ -145,6 +145,143 @@ class OwnerTimerStartTest {
     }
 
     @Test
+    void aFailedFirstCensusIsRetriedUntilItSucceedsAndThenArmsTheDeadline() {
+        String[] f = redOnY();
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+        var scheduler = new RecordingScheduler();
+        AtomicInteger census = new AtomicInteger();
+
+        wiring.start(scheduler, () -> {
+            if (census.incrementAndGet() == 1) {
+                throw new IllegalStateException("the tenant census failed: the database is not up yet");
+            }
+            return List.of(f[0]);
+        });
+        scheduler.secondsCalls().getFirst().task().run();
+
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the first census failed: nothing armed").isNull();
+        assertThat(scheduler.secondsCalls()).as("the failed census scheduled another attempt").hasSize(2);
+        assertThat(scheduler.secondsCalls().get(1).delay()).as("with a longer delay").isGreaterThan(BoardOwnerWiring.REBUILD_DELAY_SECONDS);
+
+        scheduler.secondsCalls().get(1).task().run();
+
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the retry armed the open red's deadline")
+            .isEqualTo(episode.plus(DEADLINE));
+        assertThat(scheduler.secondsCalls()).as("a full census ends the retries").hasSize(2);
+    }
+
+    @Test
+    void aTenantTheCensusCannotListMakesTheCensusNotFull() {
+        String[] f = redOnY();
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+
+        assertThat(wiring.rebuild(List.of(f[0]))).as("every tenant read: a full census").isTrue();
+        assertThat(wiring.rebuild(List.of(f[0], "not a tenant id\u0000"))).as("one tenant failed: not a full census").isFalse();
+    }
+
+    private String[] twoRedTopics() {
+        String t = se.tenant();
+        String l = se.env.seat(t, "lead");
+        String a = se.env.seat(t, "alpha");
+        String c = se.env.seat(t, "carol");
+        assertThat(se.env.form(t, l, dev.nexus.service.http.GroupTestEnv.body("push-train", l,
+            List.of("nexus-develop", "nexus-main"))).status()).isEqualTo(200);
+        assertThat(se.env.join(t, a, "push-train", "member").status()).isEqualTo(200);
+        assertThat(se.env.join(t, c, "push-train", "member").status()).isEqualTo(200);
+        for (String base : List.of("nexus-develop", "nexus-main")) {
+            se.push(t, base, "X", "G0", "sess-alpha");
+            se.push(t, base, "Y", "X", "sess-carol");
+            se.done(t, base, "Y", "failure");   // the fixture's stamper has no timer: an owner row, nothing armed
+        }
+        return new String[] {t};
+    }
+
+    @Test
+    void aTopicWhoseRearmFailsIsRetriedAloneWhileTheOtherTopicStaysArmed() {
+        String t = twoRedTopics()[0];
+        var stamper = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock);
+        var calls = new java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>();
+        var healed = new java.util.concurrent.atomic.AtomicBoolean();
+        var wiring = new BoardOwnerWiring(se.tuples, stamper, (tenant, base) -> {
+            calls.computeIfAbsent(base, k -> new AtomicInteger()).incrementAndGet();
+            if (base.equals("nexus-main") && !healed.get()) {
+                throw new IllegalStateException("the rearm of nexus-main failed");
+            }
+            stamper.rearm(tenant, base);
+        }, se.env.ids.clock);
+        var scheduler = new RecordingScheduler();
+        AtomicInteger census = new AtomicInteger();
+
+        wiring.start(scheduler, () -> {
+            census.incrementAndGet();
+            return List.of(t);
+        });
+        scheduler.secondsCalls().getFirst().task().run();
+
+        assertThat(wiring.timer().armedAt(t, "nexus-develop")).as("the healthy topic is armed").isNotNull();
+        assertThat(wiring.timer().armedAt(t, "nexus-main")).as("the failed topic is not").isNull();
+        assertThat(scheduler.secondsCalls()).as("a topic failed: the census is not full and another attempt is scheduled").hasSize(2);
+
+        healed.set(true);
+        scheduler.secondsCalls().get(1).task().run();
+
+        assertThat(wiring.timer().armedAt(t, "nexus-main")).as("the retry armed the failed topic").isNotNull();
+        assertThat(calls.get("nexus-develop")).as("the healthy topic was not re-evaluated by the retry").hasValue(1);
+        assertThat(calls.get("nexus-main")).hasValue(2);
+        assertThat(census).as("the tenants were read once: the retry works from the failed pairs").hasValue(1);
+        assertThat(scheduler.secondsCalls()).as("a full census ends the retries").hasSize(2);
+    }
+
+    @Test
+    void aStuckCensusRaisesOneStableNamedErrorEventAfterTwelveAttemptsAndLogsTheStackOnlyOnTheFirst() {
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+        var scheduler = new RecordingScheduler();
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(BoardOwnerWiring.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            wiring.start(scheduler, () -> {
+                throw new IllegalStateException("down");
+            });
+            for (int i = 0; i < 13; i++) {
+                scheduler.secondsCalls().get(i).task().run();
+            }
+        } finally {
+            logger.detachAppender(logs);
+        }
+
+        var errors = logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR).toList();
+        assertThat(errors).as("one error-level event, at the twelfth attempt").hasSize(1);
+        assertThat(errors.getFirst().getFormattedMessage()).contains("event=board_ack_deadline_rebuild_stuck").contains("attempt=12");
+        var failures = logs.list.stream().filter(e -> e.getFormattedMessage().contains("event=board_ack_deadline_rebuild_failed")).toList();
+        assertThat(failures).hasSize(13);
+        assertThat(failures.getFirst().getThrowableProxy()).as("the first failure carries the stack").isNotNull();
+        assertThat(failures.stream().skip(1).map(e -> e.getThrowableProxy())).as("the later ones do not").containsOnlyNulls();
+    }
+
+    @Test
+    void theRetryDelayDoublesAndStopsGrowingAtTheCap() {
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+        var scheduler = new RecordingScheduler();
+
+        wiring.start(scheduler, () -> {
+            throw new IllegalStateException("down");
+        });
+        for (int i = 0; i < 12; i++) {
+            scheduler.secondsCalls().get(i).task().run();
+        }
+
+        var delays = scheduler.secondsCalls().stream().map(RecordingScheduler.Scheduled::delay).toList();
+        assertThat(delays).as("5 s first, then double, then the cap").startsWith(5L, 10L, 20L, 40L, 80L, 160L, 300L, 300L);
+        assertThat(delays).as("never past the cap").allMatch(d -> d <= BoardOwnerWiring.REBUILD_MAX_DELAY_SECONDS);
+        assertThat(delays).as("one attempt is always waiting").hasSize(13);
+    }
+
+    @Test
     void aRedDoneWriteOnALiveEngineLeavesADeadlineArmed() throws Exception {
         se.env.ids.clock.set(Instant.now());   // the engine reads the system clock: the seats' leases must be fresh by it
         String[] f = redOnY();
@@ -175,6 +312,20 @@ class OwnerTimerStartTest {
         var armed = engineScheduler.deadlines();
         assertThat(armed).as("the rebuild read the engine's tenants and armed the open red").hasSizeGreaterThan(before);
         assertThat(armed.getLast().millis()).isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
+    }
+
+    @Test
+    void theRestartRebuildVisitsATenantThatHoldsNoTokenRowButHasTupleRows() throws Exception {
+        se.env.ids.clock.set(Instant.now());
+        String[] f = redOnY();   // no seedToken: the tenant is in tuple_tenants (its rows) and not in service_tokens
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        RecordingScheduler.Scheduled rebuild = engineScheduler.rebuild();
+        int before = engineScheduler.deadlines().size();
+
+        rebuild.task().run();
+
+        assertThat(engineScheduler.deadlines()).as("the rebuild reached a tenant with owner rows and no token").hasSizeGreaterThan(before);
+        assertThat(engineScheduler.deadlines().getLast().millis()).isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
     }
 
     @Test

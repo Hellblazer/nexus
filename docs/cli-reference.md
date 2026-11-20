@@ -1672,6 +1672,8 @@ nx catalog owners [--include-deactivated] [--json]
 nx catalog owners --census [--include-deactivated] [--json]
 nx catalog owners --census --execute deactivate [--no-dry-run] [--confirm]
 nx catalog owners --execute reactivate --owner <tumbler_prefix> [--no-dry-run] [--confirm]
+nx catalog owners --execute move --document <tumbler> --new-path <file> [--no-dry-run] [--confirm]
+nx catalog owners --execute move --owner <prefix> --new-root <dir> [--no-dry-run] [--confirm]
 ```
 
 Read-only classification of every registered repo owner's on-disk `repo_root` (nexus-7kl32): `healthy` (root exists, has content), `path_vanished` (root does not exist at all — the bench-index-sandbox / throwaway-probe-checkout / stale-worktree debris population), `path_exists_empty` (root is still there but has been emptied out), `not_a_repository` (root is a directory with content, but neither it nor any ancestor holds a `.git` entry and no immediate child is a git directory, so the parent of a bare repository with worktrees or of a `--separate-git-dir` git dir stays `healthy`: an index run pointed at a directory of repositories instead of one of them, nexus-0rjbm), or `unreadable` (existence/contents could not be confirmed, e.g. a permission error — deliberately never folded into `healthy`, same honesty principle as `nx doctor`'s git-hooks fix below). Owners with no `repo_root` set are reported separately and excluded from all five buckets. Since round 3 (T2 21467), classification only ever runs against the CURRENTLY ACTIVE owner set — deactivated owners are excluded from these buckets on every pass (they were already handled) and, if `--include-deactivated` is not passed, only a hidden-count hint is printed. The classification call itself now always fetches the full (active + deactivated) set in one round trip, both to support `--include-deactivated` and to compute the engine-capability signal below without a second call.
@@ -1689,6 +1691,25 @@ Immediately before EACH write, the execute loop RE-VERIFIES that specific owner'
 The mutation arm's availability depends on which engine build the tenant is connected to. `nx catalog owners --census`'s `--json` output reports `mutation_status` as `"available"`, `"unavailable"` (the connected engine confirmed NOT to carry the nexus-cw262 owner-deactivate route — e.g. the live cloud engine before its next tag deploys), or `"unknown"` (no owners to read the signal from either way). The human report and `nx doctor`'s git-hooks fix_suggestion word themselves accordingly — neither ever claims `--execute deactivate` works against an engine confirmed not to support it.
 
 `nx doctor`'s git-hooks check (a `path_vanished`/`path_exists_empty` owner used to render there as a signal-free `ok=True` "could not check") points a dead CATALOG owner, and a catalog owner whose root is not a git repository, at this verb's `--execute deactivate` arm, capability-qualified as above — but a dead owner registered only in the legacy `repos.json` file is invisible to this census (catalog owners only); doctor's suggestion for that case is to edit `repos.json` directly instead.
+
+### nx catalog owners --execute move
+
+```
+nx catalog owners --execute move --document <tumbler> --new-path <file> [--no-dry-run] [--confirm]
+nx catalog owners --execute move --owner <prefix> --new-root <dir> [--no-dry-run] [--confirm]
+```
+
+Keeps an identity when a path moves (RDR-254, GH #1571). A curator document's identity is its path, so a PDF or markdown file that moved and was indexed again from its new path is a second document there, and the first keeps its dead path, its links and its aspects. `--document` works on curator-owned documents only (a repo-owned document moves with its owner), and `--owner` on repo owners only; the engine refuses the other kind. `--document` re-points the old document at the file's new path and absorbs the row already registered there: the old tumbler survives, the new row is trashed, and its links, aspect rows and highlights move onto the survivor. `--owner` does the same for a repository that moved: it re-roots the repo owner at the new directory, folds an owner already registered at the new root into it, and rewrites its documents' `source_uri` to the new root.
+
+A dry run by default, double-gated like the other `owners` mutation arms: it writes only with `--no-dry-run --confirm`, and `--no-dry-run` alone reports. The dry run runs the engine's own transaction and rolls it back, so its counts are the counts the write reports. The report lists the counts the engine answers, one per line: `repointed`, `absorbed (trashed)`, `trashed (folded owner's rows with no counterpart)` (an owner move only), `skipped`, `unchanged`, `aspect rows rewritten`, `aspect rows deleted`, `highlight rows rewritten`, `highlight rows deleted`, `links remapped`, `links collapsed`, `links dropped` and, for `--owner`, `owners folded`; every absorbed document by tumbler, and ends with the exact command that writes, its paths shell-quoted.
+
+The new path must exist: `--new-path` is a file, `--new-root` a directory inside a git work tree. The document's new identity is spelled the way `nx index pdf` and `nx index md` spell it (the resolved absolute path and the raw `file://<abspath>`), so a later index of the file finds the moved row. The owner's new root is the main repository's path and its hash, as `nx index repo` registers them, so a worktree of the repository names the repository. A refusal from the engine (a document that does not exist or is trashed, another live row already holding a target path, a curator owner, a deactivated owner) leaves nothing written.
+
+The engine must carry the move routes (`catalog_move_supported` on `GET /version`); an engine that does not, or whose answer cannot be read, is refused before any move route is called. Until the engine release that carries them the refusal says so ("not yet released").
+
+A sensitive document keeps its flag through a move. A deny rule you wrote against its old path (a client permission rule or a hook that names the file) does not follow it: update the rule for the new path. The deny decisions the client derives from the catalog (the sensitive-file checks that read the flagged documents) follow the catalog, so they name the new path after the move.
+
+A failed write says what is known. A 400 or 409 from the engine means nothing was written. Any other failure (a 5xx, a gateway or edge answer, a timeout or lost connection after the request went out) leaves the outcome unknown: the command says so and tells you to re-run it as a dry run, which is safe, to see what is left to move. The write is never resent automatically.
 
 ### nx catalog backfill-owner-id (removed)
 
@@ -2924,7 +2945,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 - `nx doctor` reports a `memory.quarantine` row: quarantined entries without a mark, entries marked and waiting for `reap`, and the summary count. It is informational: it warns only when it cannot read the memory store at all, and shows "not applicable" on a box with no engine-backed T2.
 - Against an engine older than RDR-207 these verbs exit with "the engine predates RDR-207 quarantine".
 
-**`--mine` (put, get, search, list; RDR-253 Step 6):** work in this identity's own T2 project, `identity/<id>`, instead of `--project`. The project is keyed by the identity's id, never its name, so renaming a seat moves nothing. A delegated `claude -p` child uses its parent's project, as its identity scratch does. Giving both `--mine` and `--project` is a usage error, and `--mine` from a process that holds no identity is an error that says so. `put` takes `--project` or `--mine`.
+**`--mine` (put, get, search, list; RDR-253 Step 6):** work in this identity's own T2 project, `identity/<id>`, instead of `--project`. The project is keyed by the identity's id, never its name, so renaming a seat moves nothing. A delegated `claude -p` child reads its parent's project, as its identity scratch does, and cannot write it: `put --mine` from a delegated child is refused. Only a seat writes `identity/<id>`, and only its own: an ephemeral or delegated identity, and a seat writing another seat's project, are refused by the client before any request (`identity/<id>` is client-guarded, not fenced by the engine). Giving both `--mine` and `--project` is a usage error, and `--mine` from a process that holds no identity is an error that says so. `put` takes `--project` or `--mine`.
 
 **`put` flags:** `--tags`, `--ttl` (default: `permanent`, reversed 2026-09-12 by nexus-473mx: a caller now asks for a clock explicitly; `--ttl 0` is rejected, not coerced), `--merge` (canonical-fact merge: fold into an existing high-overlap entry instead of creating a duplicate, non-destructive), `--merge-threshold FLOAT` (word-set Jaccard threshold for `--merge`, default: `0.5`)
 
@@ -5568,6 +5589,31 @@ A `#`, `##` or `###` heading starts a thread; fields before any heading belong t
 
 ---
 
+## nx brief
+
+Reference context that SessionStart no longer injects, on demand (progressive disclosure: SessionStart prints the T1 contract, the threads due, one identity-notes line, a warning when T2 is unreachable, `bd prime` where the beads plugin is off, and one index line saying when to load each topic; the rest is a topic here). Each topic prints what the hook used to inject, rendered by the same code, for the repo in the working directory. The `brief` MCP tool returns the same text.
+
+```
+nx brief [TOPIC]
+```
+
+With no `TOPIC`, prints the topics and what each holds.
+
+| Topic | Prints |
+|-------|--------|
+| `memory` | T2 notes of this project: titles, newest first, with snippets |
+| `beads` | Ready beads (`bd ready`), and the `bd prime` usage primer when the beads plugin is off for this project |
+| `caps` | notes on the nexus tools: search filters, the MCP tool prefix, pagination, enrich commands |
+| `map` | The Knowledge Map for this repo (the cache `nx context refresh` writes) |
+| `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
+| `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |
+
+A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `event` of `brief_load`, `topic`, `ok`, `bytes`, `source`, `session_id`, `repo`) to `<config>/logs/brief.log`, and every SessionStart appends one `session_start` line (`ts`, `session_id`, `repo`, `source`) to the same file: the denominator. Past 1 MB the file moves to `brief.log.1` (replacing an older one) and a new file starts; two processes crossing the cap together can lose or duplicate a line, which a usage count tolerates.
+
+**The 30-day review.** Owner: marginalia. Due: 30 days after the release that ships this change. Count, per topic, the distinct non-empty `session_id`s with a `brief_load` line over the distinct non-empty `session_id`s with a `session_start` line, for the repos that matter (`repo` is the main repository's name, the same for every worktree of it). A `brief_load` from the MCP tool carries the session id the MCP server started with, so a load after a `/clear` counts under the pre-clear id. Retire a topic loaded in under 5% of sessions; promote one loaded in over 60% back to the always-on block.
+
+---
+
 ## nx context
 
 Project context cache for agent cold-start acceleration. Generates a compact topic map (~200 tokens) from taxonomy data and caches it for injection at session start.
@@ -5588,7 +5634,7 @@ nx context show
 |------|-------------|
 | `--global` | Generate a single global cache (all collections) instead of per-repo |
 
-The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. `nx context show` and the SessionStart hook resolve the per-repo path first, falling back to the global file; the SubagentStart hook no longer falls back to it (`nexus.hooks.subagent_start`) and reads only the per-repo cache. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
+The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. `nx context show`, `nx brief map` and the SessionStart hygiene check resolve the per-repo path first, falling back to the global file; the SubagentStart hook no longer falls back to it (`nexus.hooks.subagent_start`) and reads only the per-repo cache. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
 
 ---
 
@@ -5996,7 +6042,7 @@ Make the ephemeral identity `IDENTITY` a seat named `NAME`. Its binding, scratch
 ### nx identity may-stop
 
 ```
-nx identity may-stop --kind worktree|tmux|watcher|wait|labrun --ref REF
+nx identity may-stop --kind worktree|tmux|watcher|wait|labrun|agent --ref REF
 ```
 
 The check before removing a worktree or killing a tmux server (RDR-253 Step 6). Exit 0 when no live identity other than the caller owns the resource; otherwise exit 3, naming the owner. Ownership is read from the work rows (`nx identity work register`) and liveness from the same holder check `nx identity alive` runs; a name pattern, a process listing or the directory's contents decide nothing. An owner whose holder is gone, ended, released or unknown to the engine is not alive: its `running` row is stale and ignored. A holder that cannot be judged counts as alive. A `done` row never blocks, and a resource no row names is unowned (said so, exit 0). An engine that does not answer is an error: the check fails closed. **Exit status:** 0 no live owner (or unowned); 3 a live identity owns it; 1 any other failure (the engine does not answer, nothing resolves). A script keys on the status, never the text, and treats any nonzero status as "do not stop it". A worktree's `REF` is resolved to its real path, on every `work` verb as well, so a trailing slash, a relative path or a symlinked prefix finds the same row. A caller with no readable identity (none bound, or its token expired) is told it cannot tell whether it is the owner.
@@ -6012,14 +6058,14 @@ nx identity work owners --kind KIND --ref REF
 nx identity work run --kind KIND --ref REF -- COMMAND [ARGS...]
 ```
 
-Background work this session's identity owns (RDR-253 Step 6): `worktree` (the absolute path), `tmux` (the `-L` socket name), `watcher`, `wait` and `labrun`. A work row is a label, not a fenced write: a lab run on another host has no token file. An identity holds at most 200 rows (`409 work_limit`; registering first forgets the identity's own `done` rows once and retries).
+Background work this session's identity owns (RDR-253 Step 6): `worktree` (the absolute path), `tmux` (the `-L` socket name), `watcher`, `wait`, `labrun` and `agent` (a dispatched agent, ref `agent:<agent id>`). A work row is a label, not a fenced write: a lab run on another host has no token file. An identity holds at most 200 rows (`409 work_limit`; a registrar with time first forgets the identity's own `done` rows, its worktree rows whose directory is gone, its waits for an earlier session and its running rows that read stale, and retries once; the SubagentStart hook never purges and is refused instead). The `agent` kind needs engine `identity-005`: an older engine (0.1.198) answers `400 bad_kind`, which a hook logs once per process and ignores, so agent rows begin with the engine release, not the client release.
 
-- `register` writes the caller's row in state `running`; `done` marks it finished (for work with no row it is a no-op that says so); `forget` drops it. A process with no identity registers nothing and exits 0, so a skill or script that labels its work never fails over the label. The creator registers and the same party marks `done`: the `git-worktrees` skill for a worktree (the `finishing-branch` skill marks it done after removing it), `nx tuple wait` for its wait, and `run` for a command.
+- `register` writes the caller's row in state `running`; `done` marks it finished (for work with no row it is a no-op that says so); `forget` drops it. A process with no identity registers nothing and exits 0, so a skill or script that labels its work never fails over the label. The creator registers and the same party ends it: the `git-worktrees` skill for a worktree (the `finishing-branch` skill marks it done after removing it), `nx tuple wait` and `nx ci wait` (kind `wait`, ref `ci:<branch>@<sha>`) for their waits, `run` for a command, `lab-remote` for its `labrun` row (ref `<host>:<pid>:<started>`), and the SubagentStart and SubagentStop hooks for a dispatched agent (the stop removes the row; a `done` row per dispatch would fill the limit). A wait you start by hand is `nx identity work register --kind wait --ref WHAT` and `nx identity work done --kind wait --ref WHAT`; with no process behind it, it is judged by the ghost and 12-hour rules below.
 - `run` registers the work, runs `COMMAND` with this process's streams, marks it `done` when it exits and exits with the command's status (128 plus the signal for a signalled child). SIGTERM and SIGHUP sent to `run` are forwarded to the command, and the row is then marked done. SIGINT is not forwarded: a terminal's Ctrl-C already reaches the command through its process group, and `run` ignores it so it can mark the row done after the command ends. Every part of the label is best effort: an engine that cannot be reached, a refusal or an unexpected answer is logged and the command still runs. A lab run from a session is `nx identity work run --kind labrun --ref LABEL -- lab-remote ...`.
-- `list` shows one identity's rows: `SEAT` (a name or an id), `--session ID`, or the caller's own. **A `running` row of an identity that is not alive is stale**: it is marked so, and `--running` drops it. `--json` prints `{identity, alive, work: [{kind, ref, state, updated_at, stale}]}`.
+- `list` shows one identity's rows: `SEAT` (a name or an id), `--session ID`, or the caller's own. **A `running` row is stale** when its identity is not alive, when it is a worktree whose directory is gone, when it is a `wait` named by a session id (a UUID) the identity no longer holds, or, for a `wait`, `labrun`, `agent` or `watcher`, on the first of three witnesses: (1) its process is gone or was replaced, read from a ref of the form `<host>:<pid>:<started>` or from the owner record a long-lived registrar writes under the identity directory (`work-owners/`); (2) it was last written before the current holder started (a restart with the work in flight never ends it); (3) nobody has written it for 12 hours. A stale row is marked, with its reason, and `--running` drops it. `--json` prints `{identity, alive, work: [{kind, ref, state, updated_at, stale, why}]}` (`why` only on a stale row).
 - `owners` lists every identity that registered a resource and whether each owner's holder is alive.
 
-The restart script's `--status` table and the readiness ask list each target's running work (never a stale row, and not the session's own standing mail wait). A session that replies ready while a running `labrun` or `watcher` row of its live identity is listed is not counted ready, the same as one whose process table still shows a background task (Sam, 2026-11-19); a work list that cannot be read blocks the same way, until it is checked or `--force` is given. A `worktree` or `tmux` row outlives the session and never blocks, and neither does a `wait` row: the session's own standing mail wait is meant to run, and a wait from an earlier session is stale.
+The restart script's `--status` table and the readiness ask list each target's running work, stale rows included and marked `(stale)` (not the session's own standing mail wait). A session that replies ready while a running `wait`, `watcher`, `labrun` or `agent` row of its live identity is listed, and not stale, is not counted ready, the same as one whose process table still shows a background task (Sam, 2026-11-19); a stale row is listed and never blocks. A work list that cannot be read blocks the same way, until it is checked or `--force` is given. A `worktree` or `tmux` row outlives the session and never blocks; the session's own standing mail wait is meant to run and is left out. Every gate decision (not a `--dry-run`, and not the second call after `--nx` installed) appends one JSON line per session (round, session, ready, blockers, work, stale rows) to `restart-ready-rounds.jsonl` beside the script's log; that is all the journal records.
 
 ### nx identity purge
 

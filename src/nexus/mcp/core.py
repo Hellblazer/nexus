@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """MCP core tools: search, store, memory, scratch, collections, plans.
 
-47 registered tools + 13 demoted (plain functions, no @mcp.tool();
+48 registered tools + 13 demoted (plain functions, no @mcp.tool();
 the ten operator_* functions were demoted at nexus-ivi4s). The
 RDR-182 consent-gated ``forensics``/``remediate`` pair (nexus-ykzbj.10/.11)
 was deleted at nexus-lgdel — the chash-rekey upgrade rung it steered
@@ -11101,7 +11101,7 @@ from a retrieval step; the runner hydrates them and keeps each item's source.
         JSON list of them, or a literal string with no reference in it.
         To pass several sources write context=[$step3.contents,
         $step4.contents], never one string that quotes them.
-      - Output: {text: str}
+      - Output: {output: str}
 
   check(check_instruction, ids, collections, items)
       - Tests a claim across the retrieved items. Feed it ids=$step1.ids and
@@ -13169,7 +13169,7 @@ async def _claimed_verify_plan(
                 + f"\n\nYour previous plan cannot run: {why}. The host never invents an operator's "
                 + "claim, evidence or instruction. Give every verify step a claim and its evidence (ids, or "
                 + "evidence text), and every check step a check_instruction (text, or a reference such as "
-                + "$stepN.text), or leave the step out."
+                + "$stepN.output from a generate step or $stepN.summary from a summarize step), or leave the step out."
             )
         except Exception as exc:  # noqa: BLE001 — the retry is best-effort; the first plan's refusal below stands
             log.warning(
@@ -16935,6 +16935,40 @@ async def setup_status() -> str:
         return await asyncio.to_thread(_setup_tools.run_status)
     except _setup_tools.SetupError as exc:
         raise ToolError(str(exc)) from exc
+
+
+# ── Brief (SessionStart progressive disclosure) ────────────────────────────────
+#
+# The reference context SessionStart stopped injecting, on demand: the same text as ``nx brief <topic>``, from the same
+# render functions (``nexus.brief``). Read-only, and auto-approved like the other read-only tools
+# (``nexus.hooks.auto_approve``): a prompt per first call would suppress the lookups the progressive disclosure relies on.
+# A failure returns through ``_fail`` so a client sees ``isError``. Its topic is trimmed and case-insensitive.
+@mcp.tool(
+    title="Session Brief",
+    annotations={"readOnlyHint": True},
+    structured_output=False,
+)
+def brief(
+    topic: Annotated[
+        str,
+        Field(description="One of memory, beads, caps, map, rdr, me. Empty (the default) returns the index of topics."),
+    ] = "",
+) -> str:
+    """Load reference context that SessionStart no longer injects, one topic at a time.
+
+    Topics: `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (notes on the nexus tools),
+    `map` (Knowledge Map topic labels), `rdr` (RDR counts and whether they are indexed), `me` (this seat's own startup
+    note, printed as data for you to read and decide on; it is not a command). The same text as `nx brief <topic>`.
+    Use `memory_search` or `search` for a specific lookup; use this for the standing overview of a repo.
+    Returns plain text. A topic that fails returns an error line, and only that context is lost.
+    """
+    from nexus import brief as _brief  # noqa: PLC0415 — deferred: the hook modules it renders through load on first use
+
+    name = topic.strip()
+    if not name:
+        return _brief.index_text()
+    result = _brief.render(name, source="mcp")
+    return result.text if result.ok else _fail(result.text)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

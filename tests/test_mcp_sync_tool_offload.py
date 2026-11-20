@@ -239,6 +239,7 @@ SYNC_TOOL_WORST_CASE: dict[str, str] = {
     "tuple_in": "parks up to timeout_s, at most the engine's 25 s cap; a cancelled claim still completes",
     "tuple_rd": "parks up to timeout_s, at most the engine's 25 s cap",
     "procedure_run": "a sandboxed Lua run in a worker process, bounded by the runtime's 60 s wall-time limit; a cancelled call keeps its thread until the worker ends",
+    "brief": "one bounded leg per topic: the T2 scan (its own budget), `bd ready` and `bd prime` (5 s each), the RDR summary (the hook's 7 s budget), or one memory read; seconds",
     "store_put": "an embed upsert under the engine's 300 s deadline plus retries and post-store chains: minutes",
 }
 CATALOG_SYNC_TOOLS: frozenset[str] = frozenset(

@@ -14,6 +14,17 @@ effort: low
 | T2 | Persistent | `memory_put`, `memory_get`, `memory_search` | Cross-session state, agent relay notes |
 | T3 | Permanent | `search`, `store_put`, `store_list` | Validated findings, decisions, patterns |
 
+## Where a note goes
+
+| Put it in | When it is |
+|---|---|
+| T2 `identity/<id>` | this seat's own standing context (open questions, recurring commands, what it owns). Seats only |
+| T2 `{repo}` | a fact other sessions need |
+| memory files | Sam's rules |
+| threads board | the public cross-session view |
+
+Write yours: `memory_put(project="identity/<id>", ...)`, `<id>` from `nx identity show`.
+
 ## Common Operations
 
 ```

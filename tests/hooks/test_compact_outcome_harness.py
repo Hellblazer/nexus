@@ -2,6 +2,9 @@
 """The compaction-outcome gate's own machinery (tests/e2e/lib/compact_outcome*.py), without `claude`. The judge, the statistics and the
 hook-evidence rules are pinned in test_compact_outcome_judge.py.
 
+The cases that need a shebang script, a symlink or bash are in test_compact_outcome_harness_posix.py, which the Windows test
+set leaves out; everything here is plain Python and runs on native Windows too.
+
 The live part (a real session through a real automatic compaction) is tests/e2e/compact-outcome-gate.sh and
 is run by hand only: it spends model calls. Nothing here starts `claude` (an autouse fixture makes the
 session class raise and points NX_GATE_CLAUDE at nothing), so this module is safe in the default suite.
@@ -22,13 +25,11 @@ Each pin is chosen so that reverting the code it names fails it.
 from __future__ import annotations
 
 import ast
-import dataclasses
 import fnmatch
 import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tomllib
@@ -36,18 +37,12 @@ from pathlib import Path
 
 import pytest
 
-from tests._platform import IS_WINDOWS
-
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "tests" / "e2e" / "lib"
 HOOK_DIR = REPO / "conexus" / "hooks" / "scripts"
 CHECKPOINT = HOOK_DIR / "compact_checkpoint.py"
 GATE_SH = REPO / "tests" / "e2e" / "compact-outcome-gate.sh"
 SID = "11111111-2222-3333-4444-555555555555"
-
-#: The stub is a shebang script and the scratch plugin's hooks are POSIX commands: the tests that run them
-#: skip on native Windows. The rest of the module is plain Python and runs everywhere.
-posix_only = pytest.mark.skipif(IS_WINDOWS, reason="the gate is POSIX-only (shebang stub nx, live claude)")
 
 
 def _load(name: str):
@@ -270,7 +265,7 @@ def nx_scan(source: str) -> tuple[set[tuple[str, ...]], list[str]]:
     the scan cannot read, as violations.
 
     Two spellings reach nx in compact_checkpoint.py and the scan reads both: ``_run_nx([...], ...)`` (the first argument a LIST
-    LITERAL) and ``subprocess.run([*base, ...])`` (a list literal whose first element is ``*base``). Anything else is a violation:
+    LITERAL; ``run_nx`` is the same call as ``_resume_pointer.py`` spells it through the runner it is handed) and ``subprocess.run([*base, ...])`` (a list literal whose first element is ``*base``). Anything else is a violation:
     a ``_run_nx`` whose first argument is a variable, a keyword or a built list; a subprocess call that is not a list literal
     headed ``*base`` or ``git``; ``os.system``, ``os.popen`` or an ``os.exec*``/``os.spawn*``. A violation fails the test, so a
     spelling the scan cannot see is never silently outside the stub's coverage."""
@@ -291,7 +286,7 @@ def nx_scan(source: str) -> tuple[set[tuple[str, ...]], list[str]]:
         func = node.func
         first = node.args[0] if node.args else None
         where = f"line {node.lineno}"
-        if isinstance(func, ast.Name) and func.id == "_run_nx":
+        if isinstance(func, ast.Name) and func.id in ("_run_nx", "run_nx"):
             if isinstance(first, ast.List):
                 prefixes.add(words(first.elts))
             else:
@@ -347,6 +342,16 @@ class TestStubAnswersEveryHookCall:
         prefixes, violations = nx_scan(CHECKPOINT.read_text(encoding="utf-8"))
         assert prefixes >= self.KNOWN and violations == []
 
+    def test_the_resume_pointers_calls_are_read_and_answered_too(self, tmp_path: Path) -> None:
+        """``_resume_pointer.py`` runs nx through the runner it is handed (``run_nx``): a call spelling the scan reads, so a
+        new verb added there cannot sit outside the stub's coverage (RDR-253 Step 6 part 2)."""
+        source = (HOOK_DIR / "_resume_pointer.py").read_text(encoding="utf-8")
+        prefixes, violations = nx_scan(source)
+        assert violations == [] and prefixes == {("scratch",)}, (prefixes, violations)
+        assert unanswered(prefixes, tmp_path) == []
+        _p, bad = nx_scan(source + "\n\ndef _new(run_nx, line):\n    return run_nx(line, None, 1.0)\n")
+        assert bad, "a run_nx call whose first argument is not a list literal is a violation, not a silent gap"
+
     @pytest.mark.parametrize("spelling", [
         "a = ['memory', 'get']\n_run_nx(a, None, 1.0)",                                  # a list built elsewhere
         "_run_nx(args=['memory', 'get'], cwd=None, timeout=1.0)",                          # keyword form
@@ -368,13 +373,11 @@ class TestStubAnswersEveryHookCall:
                                        "subprocess.run([git, '-C', cwd, 'log'])")
         assert violations == [] and prefixes == {("memory", "get"), ("identity", "work")}
 
-    @posix_only
     @pytest.mark.parametrize("mode", ["full", "empty"])
     def test_the_stub_answers_every_nx_call_the_current_hook_source_can_make(self, tmp_path: Path, mode: str) -> None:
         prefixes = nx_call_prefixes(CHECKPOINT.read_text(encoding="utf-8"))
         assert unanswered(prefixes, tmp_path, mode) == []
 
-    @posix_only
     def test_a_new_hook_call_the_stub_does_not_answer_fails(self, tmp_path: Path) -> None:
         source = CHECKPOINT.read_text(encoding="utf-8") + (
             "\n\ndef _new_call(cwd):\n    return _run_nx(['board', 'sync', '--all'], cwd, 1.0)\n"
@@ -392,92 +395,6 @@ class TestStubAnswersEveryHookCall:
         assert callers == {"_run_nx", "_running_work_section"}
         for name in sorted(_sibling_closure(CHECKPOINT) - {CHECKPOINT.name}):
             assert 'resolve("nx")' not in (HOOK_DIR / name).read_text(encoding="utf-8"), name
-
-
-def _provisioned(tmp_path: Path, arm: str = "real", scenario=OPEN) -> tuple[dict, Path, Path]:
-    """The live run's scratch layout and child env, with a fake Claude config dir naming the session."""
-    iso, repo = tmp_path / "iso", tmp_path / "repo"
-    sc.seed_repo(str(repo), scenario, sc.PLAN_SHORT)
-    co.provision_iso(str(iso), SID, scenario)
-    claude = tmp_path / "claude"
-    (claude / "sessions").mkdir(parents=True)
-    (claude / "sessions" / "4242.json").write_text(json.dumps({"pid": 4242, "sessionId": SID, "name": "demo_session"}), encoding="utf-8")
-    env = co.child_env(str(iso), arm, dict(os.environ))
-    env["CLAUDE_CONFIG_DIR"] = str(claude)
-    return env, iso, repo
-
-
-def _run_hook(mode: str, env: dict, repo: Path, extra: dict | None = None) -> subprocess.CompletedProcess:
-    payload = {"session_id": SID, "cwd": str(repo), "trigger": "auto", "hook_event_name": "PreCompact", **(extra or {})}
-    return subprocess.run([sys.executable, str(CHECKPOINT), mode], input=json.dumps(payload), env=env,
-                          capture_output=True, text=True, encoding="utf-8", timeout=90)
-
-
-def _stub_calls(iso: Path) -> list[dict]:
-    return [json.loads(line) for line in (iso / "stub" / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
-
-
-@posix_only
-class TestStubDrivesTheRealHook:
-    def test_full_stub_puts_the_board_the_checks_and_the_running_work_in_the_checkpoint(self, tmp_path: Path) -> None:
-        env, iso, repo = _provisioned(tmp_path)
-        assert _run_hook("pre", env, repo).returncode == 0
-        ck = (iso / "nexus-config" / "compact-checkpoints" / f"{SID}.md").read_text(encoding="utf-8")
-        assert "Close out the demo repo" in ck and "branch: main" in ck
-        assert "## Board checked against the facts" in ck and "## Running for this session" in ck
-        assert "## Background work this identity still has running" in ck and "watcher.sh" in ck
-        out = _run_hook("inject", env, repo, {"hook_event_name": "SessionStart", "source": "compact"})
-        assert "Close out the demo repo" in json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"]
-
-    @pytest.mark.parametrize("name", ["open", "meanwhile", "waiting", "bounded"])
-    def test_every_scenarios_board_reaches_the_injection_and_every_call_was_answered(self, tmp_path: Path, name: str) -> None:
-        scenario = sc.SCENARIOS[name]
-        env, iso, repo = _provisioned(tmp_path, "real", scenario)
-        assert _run_hook("pre", env, repo).returncode == 0
-        out = _run_hook("inject", env, repo, {"hook_event_name": "SessionStart", "source": "compact"})
-        text = json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"]
-        assert all(w in text for w in scenario.board_words), (scenario.board_words, text[:400])
-        if scenario.indep_marker:
-            assert scenario.indep_marker not in text, "the meanwhile item must live only in the summary"
-        assert all(c["known"] for c in _stub_calls(iso)) and _stub_calls(iso)
-
-    def test_the_board_is_found_by_its_identity_line_first_and_every_call_was_answered(self, tmp_path: Path) -> None:
-        env, iso, repo = _provisioned(tmp_path)
-        _run_hook("pre", env, repo)
-        calls = _stub_calls(iso)
-        argvs = [c["args"] for c in calls]
-        assert all(c["known"] for c in calls)
-        assert argvs[0][:3] == ["memory", "search", f"identity: {sc.IDENTITY}"], argvs
-        for want in (["memory", "get"], ["command-context", "continuation"], ["identity", "work", "list"]):
-            assert any(a[:len(want)] == want for a in argvs), (want, argvs)
-
-    def test_empty_stub_is_the_planted_bad_checkpoint(self, tmp_path: Path) -> None:
-        env, iso, repo = _provisioned(tmp_path, "bad")
-        assert _run_hook("pre", env, repo).returncode == 0
-        ck = (iso / "nexus-config" / "compact-checkpoints" / f"{SID}.md").read_text(encoding="utf-8")
-        assert "Close out the demo repo" not in ck and "alpha" not in ck and "Background work" not in ck
-        assert all(c["known"] for c in _stub_calls(iso))
-
-    @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv, which the wired hook command runs through")
-    def test_the_wired_hook_commands_run_end_to_end_under_the_isolated_env(self, tmp_path: Path) -> None:
-        """hooks.json runs the script through `uv tool run python`: the scratch plugin's own commands, with the scratch
-        UV directories and no network, must write the checkpoint and inject it."""
-        env, _iso, repo = _provisioned(tmp_path)
-        plugin = tmp_path / "plugin"
-        co.build_plugin(str(plugin))
-        hooks = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-
-        def run(event: str, extra: dict) -> str:
-            hook = hooks[event][0]["hooks"][0]
-            argv = [hook["command"], *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in hook["args"])]
-            payload = {"session_id": SID, "cwd": str(repo), "trigger": "auto", "hook_event_name": event, **extra}
-            done = subprocess.run(argv, input=json.dumps(payload), env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
-            assert done.returncode == 0, done.stderr
-            return done.stdout
-
-        assert run("PreCompact", {}) == ""
-        out = run("SessionStart", {"source": "compact"})
-        assert "Close out the demo repo" in json.loads(out)["hookSpecificOutput"]["additionalContext"]
 
 
 class TestIsolation:
@@ -516,58 +433,15 @@ class TestIsolation:
     def test_uv_may_download_no_python(self, tmp_path: Path) -> None:
         assert co.child_env(str(tmp_path / "iso"), "real", {"UV_PYTHON_DOWNLOADS": "automatic"})["UV_PYTHON_DOWNLOADS"] == "never"
 
-    @posix_only
-    def test_the_only_nx_the_session_can_run_is_the_stub_and_the_config_dir_holds_no_secret(self, tmp_path: Path) -> None:
-        env, iso, _repo = _provisioned(tmp_path)
-        assert shutil.which("nx", path=env["PATH"]) == str(iso / "nx-tools" / "gen-1" / "bin" / "nx")
-        config = iso / "nexus-config"
-        files = sorted(p.relative_to(config).as_posix() for p in config.rglob("*") if p.is_file())
-        assert len(files) == 1 and files[0].startswith("identity/") and files[0].endswith(".token"), files
-        record = json.loads((config / files[0]).read_text(encoding="utf-8"))
-        assert record["identity"] == sc.IDENTITY and record["token"] == "" and record["expires_at"] is None
-        # an identity call the stub does not answer: nothing can bind
-        done = subprocess.run(["nx", "identity", "bind"], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
-        assert done.returncode != 0 and [c["known"] for c in _stub_calls(iso)] == [False]
-
-    @posix_only
-    @pytest.mark.parametrize("name", ["open", "meanwhile", "waiting", "bounded"])
-    def test_bd_and_gh_are_failing_stubs_and_no_board_names_a_fact_to_check(self, tmp_path: Path, name: str) -> None:
-        """The hook resolves bd and gh from the PATH its generation layout puts first; today's boards name no bead, run or PR, so
-        none is called, and if one ever does the stub fails instead of reaching the operator's real bd or gh."""
-        env, iso, _repo = _provisioned(tmp_path, "real", sc.SCENARIOS[name])
-        for tool in ("bd", "gh"):
-            assert shutil.which(tool, path=env["PATH"]) == str(iso / "nx-tools" / "gen-1" / "bin" / tool)
-            assert subprocess.run([tool, "list"], env=env, capture_output=True, timeout=30).returncode == 1
-        spec = importlib.util.spec_from_file_location("_session_facts_under_test", HOOK_DIR / "_session_facts.py")
-        sf = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = sf           # a dataclass in the module looks itself up here
-        spec.loader.exec_module(sf)
-        wants = sf.board_wants(sc.SCENARIOS[name].board("sid-1"))
-        assert not any(dataclasses.astuple(wants)), wants
-
-
-class TestGateShell:
-    @posix_only
-    def test_help_prints_before_the_claude_check_and_before_anything_runs(self) -> None:
-        """`-h` with no claude on the machine must print the header, not "claude is not on PATH"."""
-        env = {**os.environ, "NX_GATE_CLAUDE": "/no/such/claude"}
-        done = subprocess.run(["bash", str(GATE_SH), "-h"], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
-        assert done.returncode == 64
-        assert "compact-outcome-gate.sh" in done.stderr and "UNVERIFIED --" not in done.stdout + done.stderr
-        assert "COST AND WALL TIME" in done.stderr
-
-    @posix_only
-    def test_without_claude_the_run_is_unverified_exit_2(self) -> None:
-        env = {**os.environ, "NX_GATE_CLAUDE": "/no/such/claude"}
-        done = subprocess.run(["bash", str(GATE_SH), "--runs", "1"], env=env, capture_output=True, text=True, encoding="utf-8", timeout=60)
-        assert done.returncode == 2 and "UNVERIFIED" in done.stdout
-
 
 class TestNothingRunsTheGateAutomatically:
     NAMES = ("compact-outcome-gate", "compact_outcome")
     OWN = {"tests/e2e/compact-outcome-gate.sh", "tests/hooks/test_compact_outcome_judge.py", "tests/e2e/lib/compact_outcome.py", "tests/e2e/lib/compact_outcome_fix_overlay.py",
            "tests/e2e/lib/compact_outcome_judge.py", "tests/e2e/lib/compact_outcome_scenario.py", "tests/e2e/lib/compact_outcome_stats.py",
-           "tests/hooks/test_compact_outcome_harness.py"}
+           "tests/hooks/test_compact_outcome_harness.py", "tests/hooks/test_compact_outcome_harness_posix.py"}
+
+    #: The one workflow that names a gate module: its `--ignore` leaves the POSIX-only sibling out of the Windows test set.
+    WINDOWS_WORKFLOW = ".github/workflows/windows-pg-bundle-rehearsal.yml"
 
     def test_no_workflow_script_or_other_test_names_the_gate(self) -> None:
         scanned, hits = 0, []
@@ -579,7 +453,10 @@ class TestNothingRunsTheGateAutomatically:
                 if "__pycache__" in rel or rel in self.OWN:
                     continue
                 scanned += 1
-                if any(n in path.read_text(encoding="utf-8", errors="replace") for n in self.NAMES):
+                text = path.read_text(encoding="utf-8", errors="replace")
+                if rel == self.WINDOWS_WORKFLOW:  # it must name the one module it leaves out of the Windows set
+                    text = text.replace("tests/hooks/test_compact_outcome_harness_posix.py", "")
+                if any(n in text for n in self.NAMES):
                     hits.append(rel)
         assert scanned > 200, f"the scan examined {scanned} files: a vacuous scan proves nothing"
         assert hits == []
@@ -658,26 +535,6 @@ class TestOverlay:
             + json.dumps({"type": "user", "message": {"content": "<task-notification>b2 completed</task-notification>"}}) + "\n", encoding="utf-8")
         assert overlay.background_tasks(str(tr)) == []
         assert overlay.render({"tasks": [], "branches": [], "todo": [], "head_branch": "main"}) == ""
-
-    @posix_only
-    def test_the_overlay_files_sit_beside_the_real_checkpoint_without_either_touching_the_other(self, tmp_path: Path) -> None:
-        """The real hook's prune takes only *.md, *.injected and .tmp-* files from the checkpoint directory; the overlay's
-        <session>.openwork.json is none of them, and the overlay's inject deletes only its own file."""
-        env, iso, repo = _provisioned(tmp_path, "fix")
-        directory = iso / "nexus-config" / "compact-checkpoints"
-        script = LIB / "compact_outcome_fix_overlay.py"
-        payload = json.dumps({"session_id": SID, "cwd": str(repo), "transcript_path": ""})
-
-        def overlay_run(verb: str) -> subprocess.CompletedProcess:
-            return subprocess.run([sys.executable, str(script), verb], input=payload, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
-
-        overlay_run("pre")
-        assert (directory / f"{SID}.openwork.json").is_file()
-        assert _run_hook("pre", env, repo).returncode == 0
-        assert (directory / f"{SID}.openwork.json").is_file() and (directory / f"{SID}.md").is_file()
-        text = json.loads(overlay_run("inject").stdout)["hookSpecificOutput"]["additionalContext"]
-        assert "alpha, beta" in text and text.rstrip().endswith(overlay.BROAD_DIRECTIVE)
-        assert (directory / f"{SID}.md").is_file() and not (directory / f"{SID}.openwork.json").exists()
 
 
 class TestScenarioScript:

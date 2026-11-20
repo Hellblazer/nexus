@@ -12,21 +12,29 @@ and only ``NX_IDENTITY_REQUIRE_STEP2=0`` lets it skip (the nexus-moht0 doctrine)
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import time
+import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 
+from nexus.commands import scratch as scratch_cmd
+from nexus.db import t1 as t1_mod
+from nexus.db.http_scratch_store import IDENTITY_SCOPE_MAX_ENTRIES, IdentityScratchCapError
 from nexus.db.t1 import mint_t1_session_token
 from nexus.db.t2.http_memory_store import HttpMemoryStore, identity_project
+from nexus.hooks import resume_line
 from nexus.identity import membership, token_header, work
-from nexus.identity.bind_client import IdentityApiError
+from nexus.identity.bind_client import IdentityApiError, IdentityClient
 from nexus.identity.ops import CallerFacts, IdentityEnv, is_alive
 from nexus.identity.scratch_scope import identity_scratch, scope_owner
 from nexus.identity.token_file import read_token_file, token_path
 from nexus.operators.delegated_identity import DelegatedIdentity
-from tests.identity.conftest import VERSION, World
+from tests.identity.conftest import T0, VERSION, World
 
 T1 = "2026-11-17T09:00:00Z"
 REQUIRE_ENV = "NX_IDENTITY_REQUIRE_STEP2"
@@ -61,6 +69,7 @@ def _as(monkeypatch: pytest.MonkeyPatch, world: World, pid: int) -> None:
 def _nobody(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NX_IDENTITY_TOKEN", raising=False)
     monkeypatch.setattr(token_header, "_discover", lambda: None)
+    monkeypatch.setattr(token_header, "has_claude_ancestor", lambda: False)  # a Claude-ancestored run (a laptop or agent session) must still read as nobody
     token_header.reset_for_tests()
 
 
@@ -246,7 +255,7 @@ def row_the_work_limit_forgets_finished_rows_once_and_registers(world: World) ->
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "s1")
-    current, old = world.q("s1"), world.q("s-old")
+    current, old = world.q("s1"), str(uuid.uuid5(uuid.NAMESPACE_URL, world.q("s-old")))   # an earlier SESSION: a UUID, the shape a wait for one has
     world.client.put_work(alpha, "wait", current, "running")                    # the current session's wait: kept
     world.client.put_work(alpha, "wait", old, "running")                        # a wait from an earlier session: dropped
     for n in range(198):
@@ -260,12 +269,148 @@ def row_the_work_limit_forgets_finished_rows_once_and_registers(world: World) ->
     assert current in refs and old not in refs, "the engine's holder session decides which wait is left over"
 
 
+def row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_token_file(world: World) -> None:
+    """nexus-hczdo: an MCP server outlives an in-place ``/restart``. The restart keeps the Claude pid and gives the
+    registry file a new ``startedAt``, so the generation-2 token lives in ``<pid>.<new startedAt>.token`` while the
+    server's earlier calls had named ``<pid>.<old startedAt>.token``. The server's identity-scope put and list must
+    send generation 2's token, not the still-unexpired generation-1 file's: the engine answers the old token's write
+    ``409 generation_superseded`` (a read passes, a token that resolves is never a 401). Discovery is the real one (the
+    registry names the file), not the ``_discover`` seam."""
+    from nexus.identity import holder
+
+    world.now = time.time()
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    assert world.hook(100, "startup", "s-restart").generation == 1
+    session = _session(world)
+    first = token_path(world.identity_dir, 100, 100_000)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.delenv("NX_IDENTITY_TOKEN", raising=False)
+        monkeypatch.setattr(token_header, "_ancestor", lambda: (100, world.identity_dir))
+        monkeypatch.setattr(holder, "claude_sessions_dir", lambda: world.procs.sessions_dir)
+        token_header.reset_for_tests()
+        assert token_header.token_file_path() == first
+        before = identity_scratch(session, client=world.client)
+        before.put(content="written at generation 1", tags="rdr253")
+
+        world.registry(100, 999_000, T0, session_id="s-restart", name="alpha")    # the in-place /restart: same pid, new startedAt
+        out = world.hook(100, "resume", "s-restart")
+        assert out.generation == 2, out
+        second = token_path(world.identity_dir, 100, 999_000)
+        assert read_token_file(second).token != read_token_file(first).token and first.exists(), "both files are on disk"
+
+        after = identity_scratch(session, client=world.client)                    # the MCP builds a store per call
+        assert [e["content"] for e in after.list_entries()] == ["written at generation 1"]
+        after.put(content="written at generation 2", tags="rdr253")
+        assert sorted(e["content"] for e in after.list_entries()) == ["written at generation 1", "written at generation 2"]
+        assert len(before.list_entries()) == 2, "a store built before the restart reads on the new token too"
+        assert token_header.token_file_path() == second, "the server follows its registry file to the new token file"
+
+
+def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_before(world: World) -> None:
+    """RDR-253 Step 6 part 2: the writer (the real ``nx scratch --scope identity`` commands, driven through
+    ``_resume_pointer.write``) and the reader (``nexus.hooks.resume_line``, its default opener) meet in the engine. The writer
+    leaves one ``resume-pointer`` entry, the next write puts first and prunes the old one, a ``/clear`` binds a new session id,
+    and SessionStart's reader prints exactly that line when a T1 session is available; with none (the new session id's lease
+    is not published yet) it prints nothing and creates no session. Other sources print nothing. The 2 KB and
+    20-entry caps are held against the real store."""
+    script = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "_resume_pointer.py"
+    spec = importlib.util.spec_from_file_location("resume_pointer_journey", script)
+    assert spec and spec.loader
+    rp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rp)
+
+    world.now = time.time()
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    world.hook(100, "startup", "s1")
+    session = _session(world)
+    log: list[tuple[str, str]] = []
+
+    def nx(args, cwd, timeout):
+        """What ``nx`` does for the hook: the real click command, on this world's engine and identity."""
+        result = CliRunner().invoke(scratch_cmd.scratch, args[1:])
+        return result.output, (None if result.exit_code == 0 else f"`nx {' '.join(args[:4])}` exited {result.exit_code}: {result.output.strip()[-160:]}")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _as(monkeypatch, world, 100)
+        monkeypatch.setattr(IdentityClient, "from_config", classmethod(lambda cls: IdentityClient(world.base_url, world._tenant_token)))
+        monkeypatch.setattr(t1_mod, "get_t1_database", lambda *a, **k: session)
+
+        board = "## The thread the seat was on\nref: nexus-row01\nstate: halfway\nworktree: /w/row\nwaiting_on: review\n"
+        first = rp.compose(board, [], "/w/row")
+        assert first and rp.write(first, nx, None, lambda lvl, msg: log.append((lvl, msg))) == "identity", log
+        second = rp.compose(board.replace("halfway", "nearly done"), [], "/w/row")
+        assert rp.write(second, nx, None, lambda lvl, msg: log.append((lvl, msg))) == "identity", log
+        mine = identity_scratch(session, client=world.client)
+        pointers = [e for e in mine.list_entries() if e["tags"] == "resume-pointer"]
+        assert [e["content"] for e in pointers] == [second], "put first, then the earlier pointer is deleted: one remains"
+
+        world.hook(100, "clear", "s2")                                            # /clear: a new session id, the same identity
+        line = resume_line.with_resume_line("GUIDANCE", {"session_id": world.q("s2"), "source": "clear"})
+        assert line and line.startswith("GUIDANCE\n\nResume pointer (identity scratch, written just now): thread: The thread the seat was on")
+        assert "worktree: /w/row" in line and "state: nearly done" in line and "waiting_on: review" in line and line.count("\n") == 2
+        for source in ("resume", "startup", "compact", "fork"):
+            assert resume_line.with_resume_line("GUIDANCE", {"source": source}) == "GUIDANCE", source
+
+        def no_lease(*_a, **_k):
+            raise t1_mod.T1ServerNotFoundError("no T1 session lease resolves for the new session id")
+
+        monkeypatch.setattr(t1_mod, "get_t1_database", no_lease)                   # the new session's lease is not published yet
+        minted: list[str] = []
+        monkeypatch.setattr(t1_mod, "mint_t1_session_token", lambda sid, *, context: minted.append(sid) or {"session_token": "t"})
+        assert resume_line.with_resume_line("GUIDANCE", {"source": "clear"}) == "GUIDANCE", "no lease: nothing printed"
+        assert minted == [], "the reader creates no T1 session to get round a missing lease"
+
+        # the caps, against the real store: 2 KB an entry; 20 non-pointer entries; the pointer's slot is its own
+        with pytest.raises(IdentityScratchCapError, match="2048"):
+            mine.put(content="x" * 2049, tags="working")
+        for n in range(IDENTITY_SCOPE_MAX_ENTRIES):
+            mine.put(content=f"note {n}", tags="working")
+        with pytest.raises(IdentityScratchCapError, match="20"):
+            mine.put(content="the 21st", tags="working")
+        assert rp.write(rp.compose(board, [], "/w/row"), nx, None, lambda lvl, msg: log.append((lvl, msg))) == "identity", log
+        assert len([e for e in mine.list_entries() if e["tags"] == "resume-pointer"]) == 1
+        assert len(mine.list_entries()) == IDENTITY_SCOPE_MAX_ENTRIES + 1
+        assert scope_owner(world.client) == alpha
+
+
+def row_an_agent_is_a_kind_of_work_and_a_wait_for_a_ci_run_survives_the_work_limit_purge(world: World) -> None:
+    """RDR-253 Step 6 part 1 (nexus-hczdo): the real engine accepts ``kind=agent`` (identity-005 widens the CHECK as well
+    as the service's own list) and marks it done in place; an engine from before it answers ``bad_kind``, which the hooks
+    log and carry on past. A ``nx ci wait`` row (``kind=wait``, ref ``ci:<branch>@<sha>``) is not a wait for a session, so
+    the 200-row purge never drops it as a superseded one."""
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    world.hook(100, "startup", "s1")
+    ref = "agent:a220cf773a02bf4d7"
+    assert work.register(world.client, alpha, "agent", ref).state == "running"
+    assert work.mark_done(world.client, alpha, "agent", ref).state == "done"
+    assert [(w.kind, w.ref, w.state) for w in work.owners(world.client, "agent", ref)] == [("agent", ref, "done")]
+    assert work.register_own("agent", "agent:b1", client=world.client, identity=alpha, purge=False) is True
+    _, began = work.holder_facts(world.client, alpha)
+    assert began == 100.0, "the engine's holder view carries the registry's startedAt in milliseconds (pid 100 * 1000)"
+    live = {(w["kind"], w["ref"]): w["stale"] for w in work.list_rows(_env(world), alpha)["work"]}
+    assert live[("agent", "agent:b1")] is False, "written after its holder began: not a ghost (the engine's ISO updated_at parses)"
+    assert work.forget_own("agent", "agent:b1", client=world.client, identity=alpha) is True
+    assert not [w for w in work.owners(world.client, "agent", "agent:b1")], "the stop's forget removed the real row"
+    ci = "ci:develop@0123456789abcdef"
+    work.register(world.client, alpha, "wait", ci)
+    for n in range(198):                                                        # 2 rows above (the done agent, the ci wait) + 198 = the 200-row limit
+        world.client.put_work(alpha, "labrun", f"c{n}", "done" if n < 150 else "running")
+    assert work.register(world.client, alpha, "labrun", "fresh").state == "running", "the purge made room"
+    assert ci in {w.ref for w in work.of(world.client, alpha)}, "a CI wait is not a superseded session wait"
+
+
 ROWS = (
     row_a_membership_write_by_a_non_owner_is_refused_and_the_owners_stays,
     row_identity_scratch_survives_a_clear_and_a_session_close_and_is_refused_to_a_non_owner,
     row_a_delegated_child_reads_its_parents_identity_scratch_and_cannot_write_it,
+    row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_token_file,
+    row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_before,
     row_a_process_with_no_identity_has_no_identity_scratch,
     row_a_note_in_the_identity_project_is_still_found_after_a_rename,
     row_work_rows_follow_the_identity_and_a_crashed_owners_running_row_is_stale,
     row_the_work_limit_forgets_finished_rows_once_and_registers,
+    row_an_agent_is_a_kind_of_work_and_a_wait_for_a_ci_run_survives_the_work_limit_purge,
 )

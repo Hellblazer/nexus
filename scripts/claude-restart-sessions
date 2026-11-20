@@ -127,6 +127,17 @@ hold message to the sessions is a one-way announcement; it asks for no reply.
 eta, stale, no reply, unreadable, not in round), the reply's age, and the session's live idle|busy
 from ~/.claude/sessions/*.json, then the excluded sessions; a round that kept earlier answers names the sessions it
 re-asked and the ones whose answers it kept. Neither restarts anything.
+With --group NAME (on --ask-ready or --status only) the round is about one group: the members are read from the
+engine roster (`nx group list NAME --json`) and a live session is matched to a member by session name, for a member whose
+state is live (an ended or lapsed member's alias may have been taken by a session that is no member; an unleased
+member is a Desktop binding, which cannot be asked from here). Only those sessions
+are asked, listed and reported; --status exits 0 when they are ready, whatever the rest of the round holds (its file
+keeps the other targets). The round prints how many members it covers and each one it does not, with its state and why
+("no alias", "no live session here", a Desktop binding or session, a live session with the name of a member that is
+not live, "left out by --skip", "not in --only", "not on this tmux server"), so a ready exit cannot hide who was never asked. A blank NAME, an unknown, disbanded
+group, one whose roster cannot be read, and one with no live member here, refuse in one line (exit 6) and ask nothing. A
+group round replaces the round file, so a restart after it still refuses for every session the group round never asked.
+The restart takes no group.
 The session that runs the script (the pane in TMUX_PANE) is busy while it runs, so it is exempt
 from the idle requirement only; its ready reply is still required.
 
@@ -157,6 +168,8 @@ run cannot drift from it:
 Usage:
   claude-restart-sessions --ask-ready      # ask every session whether it can be restarted now
   claude-restart-sessions --status         # the round as a table; restarts nothing
+  claude-restart-sessions --ask-ready --group push-train   # ask only the members of a group
+  claude-restart-sessions --status --group push-train      # report only them; restarts nothing
   claude-restart-sessions --revive --dry-run   # after a reboot: list what would come back
   claude-restart-sessions --revive             # resume them in tmux
   claude-restart-sessions --nx 7.84.0     # upgrade nx + plugins to 7.84.0, then restart all
@@ -191,6 +204,10 @@ SESSIONS = Path.home() / ".claude" / "sessions"
 LOG = Path.home() / ".claude" / "restart-sessions.log"
 #: The ready round (--ask-ready): who was asked, who was left out and why, and where each reply goes.
 READY_MANIFEST = Path.home() / ".claude" / "restart-ready.json"
+#: One JSON line per session per gate decision (RDR-253 Step 6, the measure: ready rounds that answered ready while running
+#: work a restart cut off): the round, the session, whether it was ready, its blockers, its work rows and the stale ones.
+#: None: ``restart-ready-rounds.jsonl`` beside LOG (so a test that points LOG elsewhere never writes the real one).
+READY_LOG: Path | None = None
 #: One empty file per mailed ask, created before the send; the mail tells the session to check that it
 #: is an empty regular file (`test -f` and `test ! -s`), a check a default-permission session runs
 #: without a permission prompt, where a read of LOG is denied until someone approves it (nexus-acp8p,
@@ -2536,20 +2553,30 @@ def session_tasks(s: dict) -> list[str] | None:
 WORK_TIMEOUT_S = 5
 
 #: Work that runs under the session and ends with it: a restart cuts these off. A worktree or a tmux server outlives it.
-WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun")
+WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun", "agent")
+
+#: ``session_work`` marks a row that reads stale (its registering process is gone, nobody wrote it for 12 hours, or its
+#: identity is not alive) with this suffix: the report lists it, the ready check does not block on it.
+STALE_MARK = " (stale)"
+
+
+def is_stale(work_line: str) -> bool:
+    return work_line.endswith(STALE_MARK)
 
 
 def session_work(s: dict) -> list[str] | None:
     """The background work the session's identity has registered and is still running (RDR-253 Step 6), one line each,
-    or None when it cannot be read. Read through ``nx identity work list --running``: a running row of an identity whose
-    holder is gone is stale there and never listed, so a crashed session's work does not read as busy. A session with no
-    identity has none. The session's own standing mail wait (kind wait, ref its session id) is meant to run, as with
-    ``session_tasks``, and is left out. The ready check blocks on the wait, watcher and labrun lines (``blocking_work``)."""
+    or None when it cannot be read. Read through ``nx identity work list --json``, which marks a running row stale when its
+    identity is not alive, its registering process is gone or it has not been written for 12 hours: a stale row is
+    listed with ``STALE_MARK`` and never blocks (``blocking_work``), so a crashed session's or a killed ``lab-remote``'s
+    row does not read as busy. A finished (done) row is left out. A session with no identity has none. The session's own
+    standing mail wait (kind wait, ref its session id) is meant to run, as with ``session_tasks``, and is left out. The
+    ready check blocks on the wait, watcher, labrun and agent lines that are not stale (``blocking_work``)."""
     sid = s.get("sessionId") or ""
     if not sid:
         return None
     try:
-        done = _nx_identity("work", "list", "--session", sid, "--running", "--json", timeout=WORK_TIMEOUT_S)
+        done = _nx_identity("work", "list", "--session", sid, "--json", timeout=WORK_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -2566,14 +2593,15 @@ def session_work(s: dict) -> list[str] | None:
         rows = json.loads(done.stdout)["work"]
     except (ValueError, KeyError, TypeError):
         return None
-    return [f"{r['kind']} {r['ref']}" for r in rows if not (r.get("kind") == "wait" and r.get("ref") == sid)]
+    return [f"{r['kind']} {r['ref']}" + (STALE_MARK if r.get("stale") else "")
+            for r in rows if r.get("state", "running") == "running" and not (r.get("kind") == "wait" and r.get("ref") == sid)]
 
 
 def blocking_work(work: list[str] | None) -> list[str]:
-    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a labrun or a watcher (a wait
-    is in the set too, but none arrives: the session's standing wait is left out by ``session_work`` and a wait from an
-    earlier session is stale). A worktree or a tmux server outlives the session, so it never blocks ready."""
-    return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a labrun, a watcher, an agent or
+    a wait (the session's standing wait is left out by ``session_work``) that is not stale. A stale row is listed, never
+    blocking. A worktree or a tmux server outlives the session, so it never blocks ready."""
+    return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION and not is_stale(w)]
 
 
 def work_note(work: list[str] | None) -> str:
@@ -2581,19 +2609,24 @@ def work_note(work: list[str] | None) -> str:
         return "This script could not read the work your identity has registered. "
     if not work:
         return "Your identity has no running work registered. "
-    cut = [w for w in work if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
-    kept = [w for w in work if w not in cut]
+    stale = [w for w in work if is_stale(w)]
+    live = [w for w in work if not is_stale(w)]
+    cut = [w for w in live if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+    kept = [w for w in live if w not in cut]
 
     def shown(rows: list[str]) -> str:
         return "; ".join(rows[:5]) + (f"; and {len(rows) - 5} more" if len(rows) > 5 else "")
 
     out = f"Your identity has {len(work)} running work row(s) registered. "
     if cut:
-        out += (f"A restart cuts off {len(cut)} of them, which run under your session and end with it (a wait, watcher or "
-                f"lab run): {shown(cut)}. Answer not ready unless you can lose them. ")
+        out += (f"A restart cuts off {len(cut)} of them, which run under your session and end with it (a wait, watcher, "
+                f"lab run or dispatched agent): {shown(cut)}. Answer not ready unless you can lose them. ")
     if kept:
         out += (f"{len(kept)} outlive a restart and a restart leaves them alone (a worktree or tmux server): {shown(kept)}. "
                 f"Mark finished ones done or forget them (`nx identity work done|forget`). ")
+    if stale:
+        out += (f"{len(stale)} stale row(s), listed and not blocking (their process is gone or nobody has written them for "
+                f"12 hours): {shown([w[:-len(STALE_MARK)] for w in stale])}. Mark them done or forget them. ")
     return out
 
 
@@ -2694,12 +2727,118 @@ def ask_ready(found: list[dict], stamp: str, sender: str, out: list[dict] | None
     return out
 
 
+#: Seconds ``nx group list`` gets: the engine answers a roster in well under one, and --group must not hang a round.
+GROUP_TIMEOUT_S = 30
+
+
+def _nx_group(*args: str, timeout: float = GROUP_TIMEOUT_S) -> subprocess.CompletedProcess:
+    """``nx group <args>``, as the script itself (no session's identity: a roster read needs none)."""
+    env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
+    return subprocess.run([_nx_binary(), "group", *args], capture_output=True, text=True, timeout=timeout, env=env)
+
+
+def group_roster(name: str) -> tuple[list[dict] | None, str]:
+    """The members of group *name* from the engine roster (``nx group list NAME --json``), or (None, why) as ONE line.
+
+    Each member is ``{"name", "identity", "state"}`` as the roster prints it (name is the member's alias or None; state
+    live, unheld, lapsed, ended or unleased). The group is unknown, unreadable, disbanded, or without one live member that
+    has a name when this refuses. Only a member whose state is ``live`` names a session (``group_names``): an ended or
+    lapsed member's alias may be taken by a session that is no member (RDR-252: the ready check as a group operation)."""
+    try:
+        done = _nx_group("list", name, "--json")
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"group {name}: cannot read the roster ({type(e).__name__}); nothing asked"
+    if done.returncode != 0:
+        said = " ".join((done.stderr or done.stdout or "").split())[:160] or f"nx exit {done.returncode}"
+        return None, f"group {name}: cannot read the roster ({said}); nothing asked"
+    try:
+        body = json.loads(done.stdout)
+        record, rows = body["group"], body["members"]
+        if not isinstance(record, dict) or not isinstance(rows, list):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        return None, f"group {name}: the roster is not the JSON nx group list prints; nothing asked"
+    if record.get("live") is False or record.get("ended_at"):
+        return None, f"group {name} is disbanded; nothing asked"
+    members = [{"name": m["name"] if isinstance(m.get("name"), str) and m["name"] else None,
+                "identity": str(m.get("identity") or "?"), "state": str(m.get("state") or "unknown")}
+               for m in rows if isinstance(m, dict)]
+    if not group_names(members):
+        return None, f"group {name} has no live member with a name; nothing asked"
+    return members, ""
+
+
+def group_names(members: list[dict]) -> frozenset[str]:
+    """The names a session must carry to be one of the group's: the aliases of its live members. An unleased member is
+    a Desktop binding (binder.py sets the lease so), which has no tmux pane and cannot be asked from here; a tmux
+    session carrying its alias is some other session, so it is not matched."""
+    return frozenset(m["name"] for m in members if m["state"] == "live" and m["name"])
+
+
+def paneless_names() -> frozenset[str]:
+    """The names of the live interactive sessions with no tmux pane (Desktop and the like): sessions() leaves them out,
+    and the round cannot ask them."""
+    out = set()
+    for path in sorted(SESSIONS.glob("*.json")):
+        d = read(path) or {}
+        pane = str(d.get("tmux") or "").rsplit(".", 1)[-1]
+        pid = int(d.get("pid", 0) or 0)
+        if d.get("kind") == "interactive" and not pane.startswith("%") and d.get("name") and pid and alive(pid):
+            out.add(d["name"])
+    return frozenset(out)
+
+
+def print_group_coverage(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> None:
+    """With --group: how many roster members the round covers, and each one it does not, with its state and why. The
+    exit code of --status says the covered members are ready; this says who was never asked."""
+    members = getattr(a, "group_members", None)
+    if members is None:
+        return
+    here = {s.get("name") for s in found}
+    gaps = [m for m in members if not (m["state"] == "live" and m["name"] in here)]
+    print(f"group {a.group}: {len(members) - len(gaps)} of {len(members)} member(s) covered here")
+    live_here = {s.get("name"): s for s in listed}
+    off_server = getattr(a, "off_server_names", frozenset())
+    paneless = paneless_names() if gaps else frozenset()
+    for m in gaps:
+        print(f"  {m['name'] or m['identity']} ({m['state']}): {coverage_gap(m, live_here, off_server, paneless, a)}")
+
+
+def coverage_gap(m: dict, live_here: dict[str, dict], off_server: frozenset[str], paneless: frozenset[str],
+                 a: argparse.Namespace) -> str:
+    """Why the round does not cover a member: the first of no alias, a Desktop binding, not live, the tmux server,
+    no pane, no session, --skip, --only. live_here holds the tmux sessions on this server, before --only and --skip."""
+    name = m["name"]
+    if not name:
+        return "no alias"
+    if m["state"] == "unleased":
+        return "a Desktop binding (no tmux pane), cannot be asked from here"
+    if m["state"] != "live":
+        if name in live_here or name in paneless:
+            return "a live session here has this name, but the member is not live, so it is not asked"
+        return "no live session here"
+    if name in off_server:
+        return "not on this tmux server"
+    s = live_here.get(name)
+    if s is None:
+        return "no tmux pane (a Desktop session), cannot be asked from here" if name in paneless else "no live session here"
+    if skipped(name, s["sessionId"], a.skip):
+        return "left out by --skip"
+    return "not in --only"
+
+
 def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespace) -> list[dict]:
-    """Live sessions the round leaves alone, each with why: --skip, outside --only, or no tmux pane (Desktop)."""
+    """Live sessions the round leaves alone, each with why: --skip, outside --only, or no tmux pane (Desktop).
+
+    With --group the question is about the group's members: a session outside it is not listed, and a member
+    the round cannot ask (a Desktop session, no pane) still is."""
     chosen = {s["sessionId"] for s in found}
+    members = getattr(a, "group_names", None)
     out = []
     for s in listed:
         if s["sessionId"] not in chosen:
+            if members is not None and s.get("name") not in members:
+                continue
             out.append({"name": label(s), "sessionId": s["sessionId"],
                         "why": "--skip" if skipped(s.get("name"), s["sessionId"], a.skip) else "not in --only"})
     seen = {s["sessionId"] for s in listed}
@@ -2713,6 +2852,8 @@ def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespa
         seen.add(sid)
         name = d.get("name") or sid[:8]
         if (a.only and name not in a.only) or skipped(d.get("name"), sid, a.skip):
+            continue
+        if members is not None and d.get("name") not in members:
             continue
         out.append({"name": name, "sessionId": sid, "why": ("Desktop session" if d.get("entrypoint") == "claude-desktop"
                                                             else "no tmux pane") + ", cannot be restarted from here"})
@@ -2837,8 +2978,8 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                         row["blocker"] = "said ready, but its background tasks could not be listed; check it, or --force"
                     elif s.get("pane") != caller_pane:
                         # Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): ps AND the work rows. A
-                        # running labrun or watcher row of a live identity is work a restart would cut off (a wait row
-                        # never reaches here: session_work drops the standing one, and --running drops older ones).
+                        # running labrun, watcher or agent row of a live identity is work a restart would cut off (a wait row
+                        # never reaches here: session_work drops the standing one, and a stale row is marked and never blocks).
                         row["work"] = work = session_work(s)
                         cut = blocking_work(work)
                         if cut:
@@ -2848,6 +2989,24 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                             row["blocker"] = "said ready, but its registered work could not be read; check it, or --force"
         rows.append(row)
     return rows
+
+
+def record_round(manifest: dict, rows: list[dict], now: float, *, forced: bool = False) -> None:
+    """Append one JSON line per row of a gate decision to ``READY_LOG``. Best effort: a journal that cannot be written never
+    changes the verdict (the gate's criteria are pre-declared and do not read it)."""
+    path = READY_LOG if READY_LOG is not None else LOG.parent / "restart-ready-rounds.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            for r in rows:
+                work = r.get("work")
+                fh.write(json.dumps({
+                    "at": now, "round": manifest.get("stamp"), "session": r.get("sessionId"), "name": r.get("name"),
+                    "state": r.get("state"), "ready": not r.get("blocker"), "forced": forced,
+                    "blockers": [r["blocker"]] if r.get("blocker") else [], "work": work,
+                    "stale": [w[:-len(STALE_MARK)] for w in work or [] if is_stale(w)]}) + "\n")
+    except (OSError, TypeError, ValueError) as e:
+        log(f"ready journal not written ({path}): {e}")
 
 
 def _ago(seconds: float) -> str:
@@ -2935,6 +3094,8 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
         problem, lines = bad_round, []
     else:
         rows = readiness(found, manifest, now, max_age, caller_pane)
+        if not dry_run and not installed:      # one set of lines per restart round: not a preview, not the call after --nx
+            record_round(manifest, rows, now, forced=force)
         lines = [f"{r['name']}: {r['blocker']}" for r in rows if r["blocker"]]
         problem = f"{len(lines)} of {len(rows)} session(s) are not ready (round {manifest['stamp']})" if lines else ""
     if not problem:
@@ -2986,29 +3147,41 @@ def kept_answers(prev: dict | None, found: list[dict], now: float, max_age: int)
 
 def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> int:
     """--ask-ready and --status. Neither restarts anything."""
+    print_group_coverage(a, listed, found)
     if a.status:
         manifest, why = load_manifest()
         if manifest is None:
-            print(f"{why}; run claude-restart-sessions --ask-ready")
+            print(f"{why}; run claude-restart-sessions --ask-ready" + (f" --group {a.group}" if a.group is not None else ""))
             return 2
         now = time.time()
-        rows = readiness(found, manifest, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
+        # With --group the table and the verdict are about the group's members: the round file keeps every target
+        # (the withdrawal below writes it back), and the view drops the others.
+        members = getattr(a, "group_names", None)
+        view = manifest if members is None else {
+            **manifest, "targets": [t for t in manifest["targets"] if t.get("name") in members],
+            "excluded": [e for e in manifest["excluded"] if e["name"] in members]}
+        rows = readiness(found, view, now, a.ready_max_age, os.environ.get("TMUX_PANE", ""))
         for r, sess in zip(rows, found):  # the ready rows already read it; the others are reported here
             if "work" not in r:
                 r["work"] = session_work(sess)
-        print_table(manifest, rows, a.ready_max_age, now)
+        print_table(view, rows, a.ready_max_age, now)
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
-        withdraw_ready_asks(manifest, {t["sessionId"] for t in manifest["targets"]
+        withdraw_ready_asks(manifest, {t["sessionId"] for t in view["targets"]
                                        if read_reply(t["path"], reply_since(t, manifest), now)[0] != "none"})
         if UNWITHDRAWN:
             print("asks not withdrawn (they expire with their TTL): " + "; ".join(UNWITHDRAWN))
-        problem = round_problem(found, manifest, now, a.ready_max_age)
+        problem = round_problem(found, view, now, a.ready_max_age)
         if problem:
             print(problem)
-        gone = [t.get("name") or t["sessionId"][:8] for t in manifest["targets"]
-                if t["sessionId"] not in {s["sessionId"] for s in found}]
+        read_ids = {s["sessionId"] for s in found}
+        left_ids = {s["sessionId"] for s in listed} | set(getattr(a, "off_server_ids", ()))
+        unread = [t for t in view["targets"] if t["sessionId"] not in read_ids]
+        gone = [t.get("name") or t["sessionId"][:8] for t in unread if t["sessionId"] not in left_ids]
+        left = [t.get("name") or t["sessionId"][:8] for t in unread if t["sessionId"] in left_ids]
         if gone:
             print("in the round but not live now: " + ", ".join(gone))
+        if left:
+            print("in the round but left out of this read (--only, --skip or another tmux server): " + ", ".join(left))
         return 0 if rows and not problem and not any(r["blocker"] for r in rows) else 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     excluded = excluded_sessions(listed, found, a)
@@ -3131,7 +3304,13 @@ def main() -> int:
                          "(see above)")
     ap.add_argument("--status", action="store_true",
                     help="print the ready round as a table (reply, its age, live idle|busy, excluded sessions); "
-                         "restarts nothing; exit 0 only when a restart would be allowed")
+                         "restarts nothing; exit 0 only when a restart would be allowed (with --group: when the "
+                         "group's live members are ready)")
+    ap.add_argument("--group", metavar="NAME", default=None,
+                    help="with --ask-ready or --status: only the live sessions named by the live members of this group "
+                         "(nx group list NAME --json, matched by session name); prints the members it does not cover; "
+                         "restarts nothing. A group round replaces the round file, so a restart after it still wants "
+                         "every session asked")
     ap.add_argument("--ready-max-age", type=int, default=900,
                     help="a ready reply older than this many seconds no longer counts at the restart (default 900)")
     ap.add_argument("--resume", action="store_true",
@@ -3155,6 +3334,13 @@ def main() -> int:
     NO_SLASH = a.no_slash_restart
     KEEP_DEV_CHANNEL = a.keep_dev_channel
     NO_WAKE = a.no_wake
+    if a.group is not None and not (a.ask_ready or a.status):
+        ap.error("--group goes with --ask-ready or --status: it names whose readiness is asked or reported, and "
+                 "the restart itself never takes a group")
+    if a.group is not None and not a.group.strip():
+        # `--group "$GROUP"` with the variable unset: an empty name must never read as no --group, a round of everyone.
+        print("--group needs a group name and the one given is blank; nothing asked")
+        return EXIT_REFUSED
     if a.revive:
         return revive(a)
 
@@ -3168,6 +3354,16 @@ def main() -> int:
     # on another tmux server than the one the plan was made on); the foreground reads the sessions dir.
     listed = [] if a.detached else sessions()
     found = [s for s in listed if (not a.only or s.get("name") in a.only) and not skipped(s.get("name"), s["sessionId"], a.skip)]
+    if a.group is not None:
+        roster, problem = group_roster(a.group)
+        if roster is None:
+            print(problem)
+            return EXIT_REFUSED
+        a.group_members, a.group_names = roster, group_names(roster)
+        found = [s for s in found if s.get("name") in a.group_names]
+        if not found:
+            print(f"group {a.group}: none of its live members ({', '.join(sorted(a.group_names))}) is a live session here")
+            return EXIT_REFUSED
     if a.ask_ready or a.status:
         if not found:
             print("no interactive tmux Claude sessions found")
@@ -3179,6 +3375,8 @@ def main() -> int:
             return EXIT_REFUSED
         if len(hosted) < len(found):
             off = {s["sessionId"] for s in found} - {s["sessionId"] for s in hosted}
+            a.off_server_names = frozenset(s.get("name") for s in listed if s["sessionId"] in off)
+            a.off_server_ids = frozenset(off)
             listed = [s for s in listed if s["sessionId"] not in off]
             print(f"{len(off)} session(s) skipped: not on this tmux server (see the SKIP lines in {LOG})")
         return ready_round(a, listed, hosted)

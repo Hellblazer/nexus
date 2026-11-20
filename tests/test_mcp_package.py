@@ -79,6 +79,10 @@ def test_core_registered_tools():
         # process. Registered always; the plugin's stand-in server offers the same
         # two. Both stay out of auto_approve (tests/hooks/test_permission_request_hooks.py).
         "setup", "setup_status",
+        # SessionStart progressive disclosure (T2 nexus/design-sessionstart-progressive-disclosure-2026-11-20): the
+        # reference context the hook stopped injecting, on demand; the same text as `nx brief <topic>`. Read-only, and
+        # auto-approved (nexus.hooks.auto_approve._ALLOWED_TOOLS).
+        "brief",
     }
     assert expected == tool_names, f"Missing: {expected - tool_names}, Extra: {tool_names - expected}"
 

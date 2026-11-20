@@ -287,6 +287,16 @@ public final class TupleHandler implements HttpHandler {
             return;
         }
         Map<String, String> dims = stringMap((Map<String, Object>) body.get("dims"));
+        // RDR-252 S3: from=engine on the board is the stamper's own mark (it writes through the repository, not this
+        // route), so no client write may carry it, whatever its scope.
+        if (BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(subspace))) {
+            String reserved = BoardCiGuard.reservedDimRefusal(dims);
+            if (reserved != null) {
+                log.info("event=tuples_out_denied subspace={} reason=reserved_dim", subspace);
+                HttpUtil.send(ex, 403, "{\"error\":" + HttpUtil.jsonString(reserved) + ",\"code\":\"reserved_dim\"}");
+                return;
+            }
+        }
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
         Long ttlSeconds = wholeSecondsOrNull("ttl_seconds", body.get("ttl_seconds"));
@@ -500,6 +510,14 @@ public final class TupleHandler implements HttpHandler {
         String claimant = requireString(body, "claimant");
         fence.mailboxClaimById(ex, tenant, claimId);
         TupleRepository.ReplySpec reply = parseReply(body.get("reply"));
+        if (reply != null && BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(reply.subspace()))) {
+            String reserved = BoardCiGuard.reservedDimRefusal(reply.dims());   // a reply is a client write too
+            if (reserved != null) {
+                log.info("event=tuples_ack_denied subspace={} reason=reserved_dim", reply.subspace());
+                HttpUtil.send(ex, 403, "{\"error\":" + HttpUtil.jsonString(reserved) + ",\"code\":\"reserved_dim\"}");
+                return;
+            }
+        }
         // nexus-g2ckl: a reply is stamped with the acker's session, as out stamps its rows (an identity
         // token's current session, else the minted one); never read from the body.
         String senderSession = fence.senderSession(tenant);

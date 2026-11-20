@@ -462,7 +462,9 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
         fake = _FakeTupleStore()
         body = {"owner": "i7", "next": None, "reason": "earliest_suspect", "suspects": [_RED_SHA], "suspects_total": 1,
                 "episode_at": "2026-11-19T01:00:00Z", "refresh": False, "handoffs": 0}
-        fake.seed(owner_subspace, "o1", json.dumps(body), dims={"kind": "owner", "sha": _RED_SHA, "from": "engine"})
+        # sender_session=None: the engine's own write carries no stamp (RDR-252 critique S3).
+        fake.seed(owner_subspace, "o1", json.dumps(body), dims={"kind": "owner", "sha": _RED_SHA, "from": "engine"},
+                  sender_session=None)
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(sid, _fake_store_factory(fake), subs, sender=sender)
         loader = start_for_waiter(waiter, subs, store_ctx=_MemoryDb, cwd=repo)
@@ -550,7 +552,8 @@ def test_a_server_that_starts_with_no_token_loads_the_gated_aura_when_the_lease_
         fake = _FakeTupleStore()
         body = {"owner": "i7", "next": None, "reason": "earliest_suspect", "suspects": [_RED_SHA], "suspects_total": 1,
                 "episode_at": "2026-11-19T01:00:00Z", "refresh": False, "handoffs": 0}
-        fake.seed(owner_subspace, "o1", json.dumps(body), dims={"kind": "owner", "sha": _RED_SHA, "from": "engine"})
+        fake.seed(owner_subspace, "o1", json.dumps(body), dims={"kind": "owner", "sha": _RED_SHA, "from": "engine"},
+                  sender_session=None)
         sender = _FakeSender()
         waiter = channel.ChannelWaiter(sid, _fake_store_factory(fake), subs, sender=sender)
         loader = start_for_waiter(waiter, subs, store_ctx=_MemoryDb, cwd=repo)
@@ -611,7 +614,7 @@ def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(rep
         return TupleRow(
             id=tid, subspace=owner_subspace, template="", keys={}, dims={"kind": kind, "sha": sha, "from": "engine"},
             body=json.dumps(body), claim_state=None, claimant=None, lease_until=None, attempts=0, consumed_at=None,
-            consumed_by=None, expires_at=None, created_at=None,
+            consumed_by=None, expires_at=None, created_at=None, sender_session=None, sender_session_known=True,
         )
 
     ack = f" Ack: post kind=ack sha={sha} to {owner_subspace}."

@@ -403,7 +403,7 @@ def _check_freshness(last_updated: str, stale_days: int) -> str | None:
     return None
 
 
-def scan(project: str) -> str:
+def scan(project: str, *, configure_logging: bool = True) -> str:
     """Return the T2 prefix-scan body for *project* — the same content
     the plugin's ``t2_prefix_scan.py`` printed to stdout, produced
     in-process against the real T2 HTTP client instead of shelling out.
@@ -411,7 +411,8 @@ def scan(project: str) -> str:
     Returns ``""`` when *project* is empty, the engine is reachable but
     has zero matching namespaces (a genuinely empty T2 — fresh install,
     or no entries under this prefix yet; empty is not stale), or nothing
-    ends up rendered. A source-unreachable failure (construction, or the
+    ends up rendered. *configure_logging* is the hook's: pass False from a
+    process that already has its own logging (``nx brief``). A source-unreachable failure (construction, or the
     first ``get_projects_with_prefix`` call) is ALWAYS a visible
     ``WARNING: ...`` line — never a silent no-op, matching the plugin
     mirror's nexus-8fvp2 contract that a reachability failure must never
@@ -446,7 +447,10 @@ def scan(project: str) -> str:
     # were already covered. What this fixes is the bare-subprocess case
     # -- which is what the tests run, and a test harness that silently
     # eats a corrupted envelope is how the defect stays invisible.
-    configure_hook_logging()
+    if configure_logging:
+        # ``nx brief`` and the ``brief`` MCP tool pass False: their process already has its own sink, and
+        # ``configure_hook_logging`` would replace it (the MCP server's, on every call).
+        configure_hook_logging()
 
     timeout = float(
         os.environ.get("NX_T2_SCAN_TIMEOUT_S", str(_DEFAULT_HTTP_TIMEOUT_S))
@@ -463,6 +467,45 @@ def scan(project: str) -> str:
 
     with mint_deadline(scan_budget_s):
         return _scan_with_store(project, timeout, stale_days, scan_budget_s)
+
+
+#: The longest the fire-only reachability line is (UTF-8 bytes): an exception's text is free text, and this line is counted in
+#: the SessionStart byte budget as a conditional line.
+REACHABILITY_LINE_MAX = 240
+
+
+def _one_capped_line(text: str) -> str:
+    flat = " ".join(text.split())
+    data = flat.encode("utf-8")
+    return flat if len(data) <= REACHABILITY_LINE_MAX else data[: REACHABILITY_LINE_MAX - 3].decode("utf-8", "ignore") + "..."
+
+
+def reachability_warning(project: str) -> str:
+    """The SessionStart line that keeps the nexus-8fvp2 contract now that the scan is not injected: ``WARNING: T2 memory
+    unreachable: ...`` when the engine cannot be reached, ``WARNING: T2 memory freshest entry is Nd old ...`` when its newest
+    entry for *project* is past the stale window, and ``""`` when T2 is healthy (the common case). One namespace listing, nothing
+    rendered. For a hook process: it configures hook logging first, as :func:`scan` does."""
+    if not project:
+        return ""
+    configure_hook_logging()
+    timeout = float(os.environ.get("NX_T2_SCAN_TIMEOUT_S", str(_DEFAULT_HTTP_TIMEOUT_S)))
+    stale_days = int(os.environ.get("NX_T2_SCAN_STALE_DAYS", str(_DEFAULT_STALE_DAYS)))
+    from nexus.db.data_token import mint_deadline  # noqa: PLC0415 — deferred with the rest of the client
+
+    with mint_deadline(min(timeout * 2, _DEFAULT_SCAN_BUDGET_S)):
+        try:
+            store = HttpMemoryStore(timeout=timeout)
+        except _UNREACHABLE_EXC as exc:
+            return _one_capped_line(f"WARNING: T2 memory unreachable: {exc}")
+        try:
+            try:
+                namespaces = store.get_projects_with_prefix(project)
+            except _UNREACHABLE_EXC as exc:
+                return _one_capped_line(f"WARNING: T2 memory unreachable: {exc}")
+            freshest = namespaces[0].get("last_updated", "") if namespaces else ""
+            return _one_capped_line(_check_freshness(freshest, stale_days) or "")
+        finally:
+            store.close()
 
 
 def _scan_with_store(project: str, timeout: float, stale_days: int, scan_budget_s: float) -> str:

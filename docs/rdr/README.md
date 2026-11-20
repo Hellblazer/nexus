@@ -185,7 +185,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-164](rdr-164-collection-lifecycle-cascade-consolidation.md) | Collection- and Document-Lifecycle Cascade Consolidation: Replace SQLite-Era Client-Side Cross-Store Orchestration with Postgres-Native Atomic Cascades | Architecture | Closed | 2026-06-21 |
 | [RDR-165](rdr-165-agent-lifecycle-and-operations.md) | Agent Lifecycle & Operations: Document the nexus Agent (engine-service + nx CLI) and the Full Install / Uninstall / Upgrade Story | Documentation | Closed | 2026-06-22 |
 | [RDR-166](rdr-166-managed-service-consumer-journeys.md) | Managed-Service Consumer Journeys: Greenfield Onboarding and Local→Managed Migration to conexus-nexus.com | Architecture | Closed | 2026-06-22 |
-| [RDR-167](rdr-167-cross-tier-observability-correlation.md) | Request Correlation Across Tiers: X-Correlation-ID Propagation and an SLF4J MDC Bridge for the Service Stack | Architecture | Accepted | 2026-06-25 |
+| [RDR-167](rdr-167-cross-tier-observability-correlation.md) | Request Correlation Across Tiers: X-Correlation-ID Propagation and an SLF4J MDC Bridge for the Service Stack | Architecture | Deferred | 2026-06-25 |
 | [RDR-168](rdr-168-service-mode-catalog-interface-conformance.md) | Service-Mode Catalog Interface Conformance: Make HttpCatalogClient a Faithful Drop-In for the Local Catalog, Enforced by a Signature-Conformance Test | Bug Fix | Closed | 2026-06-25 |
 | [RDR-169](rdr-169-docuverse-storage-reference-only-chunks.md) | Docuverse Storage: Reference-Only Chunks — Retention Enum, Nullable Content, Reference-Only Search DTO, and the URI-Resolver / Embed-Without-Store Surface | Architecture | Closed | 2026-06-25 |
 | [RDR-170](rdr-170-migration-application-not-gated-on-package-version.md) | T2 Migration Application Must Not Gate on Package Version: Drop the apply_pending Upper Bound | Architecture | Closed | 2026-06-25 |
@@ -227,7 +227,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-206](rdr-206-tuple-claim-renew-and-reply-in-ack.md) | Tuple Space Claim Renewal and Reply-in-Ack: Close the Two Limits RDR-205 Accepted for v1 | Feature | Closed | 2026-09-11 |
 | [RDR-207](rdr-207-summarization-at-the-t2-expiry-boundary.md) | Summarization at the T2 Expiry Boundary — the Manage Phase RDR-057 Cut | Feature | Closed | 2026-09-12 |
 | [RDR-208](rdr-208-session-id-mail-addressing.md) | Session-Id Mail Addressing: One Mailbox per Session, Names Resolved at Send Time | Architecture | Closed | 2026-09-14 |
-| [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Accepted | 2026-09-14 |
+| [RDR-209](rdr-209-heat-based-graduation-between-memory-tiers.md) | Heat-Based Graduation Between Memory Tiers | Feature | Closed | 2026-09-14 |
 | [RDR-210](rdr-210-dual-mode-local-engine.md) | One Local Engine Serves Both Embedders: bge-768 and Voyage Collections Side by Side | Architecture | Closed | 2026-09-15 |
 | [RDR-211](rdr-211-board-queue-and-lock-tuple-templates.md) | Broadcast Board, Work Queue, and Lock as Tuple-Space Templates | Feature | Closed | 2026-09-15 |
 | [RDR-212](rdr-212-orb-cockpit-surfaces-over-the-tuple-space.md) | ORB Cockpit Surfaces over the Tuple Space | Architecture | Deferred | 2026-09-16 |
@@ -240,7 +240,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Closed | 2026-09-26 |
 | [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
 | [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Closed | 2026-09-27 |
-| [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Accepted | 2026-09-28 |
+| [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Closed | 2026-09-28 |
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Closed | 2026-09-30 |
 | [RDR-225](rdr-225-vector-tables-per-embedding-model.md) | One Vector Table per Embedding Model, with Tenant Isolation | Architecture | Closed | 2026-10-05 |
 | [RDR-226](rdr-226-one-statement-per-leaf-search.md) | Per-Collection Search in One Statement per Leaf | Architecture | Abandoned | 2026-10-08 |
@@ -254,20 +254,20 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-235](rdr-235-aspect-queue-onto-tuple-queue-template.md) | Aspect Extraction Queue onto the Tuple-Space Queue Template, and Why the PDF Pipeline Row Stays | Architecture | Closed | 2026-10-26 |
 | [RDR-236](rdr-236-chunk-row-metadata-normalization.md) | Chunk-row metadata normalization: document fields on the catalog document, position fields on the manifest, the chunk row keeps only what its text determines | Architecture | Accepted | 2026-10-26 |
 | [RDR-237](rdr-237-mineru-only-pdf-extraction-with-a-per-page-fallback-ladder.md) | MinerU-Only PDF Extraction with a Per-Page Fallback Ladder | Architecture | Closed | 2026-10-27 |
-| [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Accepted | 2026-10-31 |
+| [RDR-238](rdr-238-memory-curation.md) | Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves | Feature | Closed | 2026-10-31 |
 | [RDR-239](rdr-239-tuple-space-dictionary.md) | The Tuple-Space Dictionary: Every Template Publishes What It Means, Who Writes It, Who Reads It, and a Post That Validates | Feature | Closed | 2026-10-31 |
 | [RDR-240](rdr-240-procedures-as-sandboxed-lua-scripts.md) | Procedures as Sandboxed Lua Scripts: Run the Fixed Sequence Instead of Recalling It | Feature | Closed | 2026-11-01 |
 | [RDR-241](rdr-241-no-client-walks-of-the-managed-catalog.md) | No Client Walks of the Managed Catalog: the Engine Answers Tenant-Wide Questions and Runs Tenant-Wide Jobs | Architecture | Closed | 2026-11-02 |
 | [RDR-242](rdr-242-sandboxed-lua-runtime.md) | Registered, Approved Lua Scripts in a Sandboxed Runtime: Client-Side, Read-Only First | Architecture | Closed | 2026-11-02 |
 | [RDR-243](rdr-243-first-class-document-sensitivity.md) | First-Class Document Sensitivity: Route, Stamp and Exempt Sensitive Documents from Every LLM and External Surface | Feature | Closed | 2026-11-03 |
 | [RDR-244](rdr-244-public-retrieval-evaluation.md) | Public retrieval evaluation others can run | Feature | Closed | 2026-11-03 |
-| [RDR-245](rdr-245-structured-asks-on-the-threads-board.md) | Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox | Feature | Accepted | 2026-11-05 |
+| [RDR-245](rdr-245-structured-asks-on-the-threads-board.md) | Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox | Feature | Closed | 2026-11-05 |
 | [RDR-246](rdr-246-data-moves-are-background-jobs.md) | Data Moves Run as Batched, Resumable Background Jobs, Never at Engine Boot | Architecture | Accepted | 2026-11-10 |
 | [RDR-247](rdr-247-one-index-per-row.md) | One Index per Row: Index Each Vector Once, Not in Both the Leaf Graph and a Per-Collection Graph | Architecture | Deferred | 2026-11-10 |
 | [RDR-248](rdr-248-cloud-tenant-backup.md) | Cloud-Mode nx backup: an Engine Tenant Export Saved to One File, with a Tested Restore into an Empty Tenant | Feature | Closed | 2026-11-11 |
 | [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Closed | 2026-11-12 |
 | [RDR-250](rdr-250-multi-hop-answers-past-the-six-chunk-budget.md) | Multi-hop answers read past the six-chunk generator budget | Feature | Closed | 2026-11-15 |
-| [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Draft | 2026-11-16 |
+| [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Deferred | 2026-11-16 |
 | [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment | Architecture | Accepted | 2026-11-16 |
 | [RDR-253](rdr-253-session-identity.md) | Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State | Architecture | Accepted | 2026-11-16 |
 | [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Accepted | 2026-11-19 |

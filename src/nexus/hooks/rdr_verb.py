@@ -736,24 +736,45 @@ def run(payload: dict | None) -> HookResult:  # noqa: ARG001 — this hook takes
         _T2_PENDING.clear()
 
 
-def _run() -> HookResult:
+class _Summary:
+    """What the run learned: the count line first, then the notes under it, and everything the fix check reads."""
+
+    __slots__ = ("root", "rdr_files", "repo_name", "statuses", "lines", "healthy")
+
+    def __init__(self, root: Path, rdr_files: list[Path], repo_name: str, statuses: dict[str, str],
+                 lines: list[str], healthy: bool) -> None:
+        self.root = root
+        self.rdr_files = rdr_files
+        self.repo_name = repo_name
+        self.statuses = statuses
+        #: ``lines[0]`` is the count line (healthy: ``... indexed in <collection>``; otherwise a verdict line); the
+        #: rest are the resolution-failure, remedy and late-T2 notes. Never empty.
+        self.lines = lines
+        self.healthy = healthy
+
+
+def _summary(*, configure_logging: bool) -> _Summary | None:
+    """The run's one summary, or None when there is no repo, no RDR directory or no RDR file. Runs inside a budget
+    (:func:`run`, :func:`brief_lines`). *configure_logging* is the hook's: a process that already has its own sink (the
+    CLI, the MCP server) must not have it replaced."""
     root = _repo_root()
     if root is None:
-        return HookResult()
+        return None
 
     rdr_dir = _rdr_dir(root)
     if not rdr_dir.exists():
-        return HookResult()
+        return None
 
     rdr_files = _rdr_files(rdr_dir)
     if not rdr_files:
-        return HookResult()
+        return None
 
     repo_name = _repo_name(root)
-    # Logging is configured BEFORE any worker thread starts: a worker that
-    # logs through an unconfigured structlog writes to stdout, the hook's
-    # decision channel.
-    configure_hook_logging()
+    if configure_logging:
+        # Logging is configured BEFORE any worker thread starts: a worker that
+        # logs through an unconfigured structlog writes to stdout, the hook's
+        # decision channel. Only a repo with an RDR tree pays for it.
+        configure_hook_logging()
     # The slowest leg starts first and runs beside the catalog and T3 legs,
     # so it has the whole budget rather than what they leave over. A failure
     # to start it (an import error) must not cost the rest of the summary:
@@ -807,8 +828,43 @@ def _run() -> HookResult:
     if repo_name in _T2_LATE:
         lines.append(f"     {_T2_LATE_NOTE}")
 
-    lines.extend(_unchecked_fix_edits(
-        root, rdr_files, statuses, _load_gated_commits(repo_name), _load_gated_blobs(repo_name),
-    ))
+    return _Summary(root, rdr_files, repo_name, statuses, lines, healthy=bool(indexed))
 
-    return HookResult(stdout="\n".join(lines))
+
+def _run() -> HookResult:
+    found = _summary(configure_logging=True)
+    if found is None:
+        return HookResult()
+
+    # SessionStart progressive disclosure: a healthy tree has nothing to act on, so its count line is not printed
+    # (``nx brief rdr`` prints it). What stays is every line that asks for an action or says the check was cut short.
+    lines = [ln.strip() for ln in found.lines[1:]] if found.healthy else list(found.lines)
+    lines.extend(_unchecked_fix_edits(
+        found.root, found.rdr_files, found.statuses,
+        _load_gated_commits(found.repo_name), _load_gated_blobs(found.repo_name),
+    ))
+    return HookResult(stdout="\n".join(lines) if lines else None)
+
+
+#: One brief at a time: the run state above (budget, pending fetches, row cache, failure list) is module-global, built for
+#: a process that runs once. ``nx brief rdr`` is one process; the MCP ``brief`` tool is many calls in one.
+_BRIEF_LOCK = threading.Lock()
+
+
+def brief_lines() -> list[str]:
+    """The lines ``nx brief rdr`` prints: the count line (``RDR: N documents (M RDRs: ...)``, healthy or not), then the
+    remedy and late-T2 notes the hook would also print. Not the fix check, which the hook keeps on its own. ``[]`` when
+    the repo has no RDR tree. Runs under the hook's budget, with fresh run state before and after, and never configures
+    logging (the caller's process already has its own)."""
+    global _run_deadline
+    with _BRIEF_LOCK:
+        for state in (_RESOLUTION_FAILURES, _T2_ROWS_CACHE, _T2_LATE, _T2_PENDING):
+            state.clear()
+        _run_deadline = time.monotonic() + _HOOK_BUDGET_S
+        try:
+            found = _summary(configure_logging=False)
+            return list(found.lines) if found is not None else []
+        finally:
+            _run_deadline = None
+            for state in (_RESOLUTION_FAILURES, _T2_ROWS_CACHE, _T2_LATE, _T2_PENDING):
+                state.clear()

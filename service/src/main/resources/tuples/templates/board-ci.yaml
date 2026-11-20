@@ -70,7 +70,7 @@ doc:
     topic: repository name, a dash, and the branch, normalised to the address grammar (for example example-main)
     from:
       github: the adapter
-      engine: the owner stamper
+      engine: the owner stamper (a client write that sets it on a board/ci topic is refused with 403 reserved_dim)
       unknown: a push row with no identity token
       an identity id, for example i7: a row with an identity token
     kind:

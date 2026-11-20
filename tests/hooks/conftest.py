@@ -19,4 +19,16 @@ from __future__ import annotations
 import os
 import sys
 
+import pytest
+
 os.environ.setdefault("NX_HOOK_PYTHON", sys.executable)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_t2_probe_at_session_start(monkeypatch):
+    """``session_context.run`` probes T2 for its fire-only reachability line. A test that runs the hook has no engine, so the
+    probe would print ``WARNING: T2 memory unreachable`` into every output a test compares. Tests of the probe line itself
+    undo this (``monkeypatch.undo()``) or patch ``t2_prefix_scan``."""
+    from nexus.hooks import session_context  # noqa: PLC0415 — deferred: a conftest import would load nexus.hooks for every collection
+
+    monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: [])

@@ -102,6 +102,17 @@ import java.util.stream.Stream;
  */
 class CollectionParseGateTest {
 
+    /** The index just past the text block that opens with {@code """} at {@code open}; the end of the source when unterminated. */
+    static int textBlockEnd(String src, int open) {
+        int i = open + 3;
+        while (i < src.length()) {
+            if (src.charAt(i) == '\\') { i += 2; continue; }
+            if (src.startsWith("\"\"\"", i)) return i + 3;
+            i++;
+        }
+        return src.length();
+    }
+
     /**
      * Comment-blanking identical in shape to {@link
      * dev.nexus.service.db.RawSqlGateTest#blankComments} — duplicated here
@@ -127,6 +138,8 @@ class CollectionParseGateTest {
                 i = end;
             } else if (c == '/' && i + 1 < out.length && out[i + 1] == '/') {
                 while (i < out.length && out[i] != '\n') out[i++] = ' ';
+            } else if (c == '"' && src.startsWith("\"\"\"", i)) {
+                i = textBlockEnd(src, i);  // a text block: its quotes and comment-like text are content
             } else if (c == '"' || c == '\'') {
                 char q = c;
                 i++;
@@ -156,7 +169,20 @@ class CollectionParseGateTest {
         int i = 0;
         int n = blanked.length();
         while (i < n) {
-            if (blanked.charAt(i) != '"') { i++; continue; }
+            char first = blanked.charAt(i);
+            if (first == '\'') {  // a char literal: its content, a quote included, is not a string
+                i++;
+                while (i < n && blanked.charAt(i) != '\'' && blanked.charAt(i) != '\n') i += (blanked.charAt(i) == '\\') ? 2 : 1;
+                i++;
+                continue;
+            }
+            if (first != '"') { i++; continue; }
+            if (blanked.startsWith("\"\"\"", i)) {  // a text block is one literal, quotes inside it included
+                int end = textBlockEnd(blanked, i);
+                out.add(blanked.substring(i, Math.min(end, n)));
+                i = end;
+                continue;
+            }
             int start = i;
             i++;
             while (i < n) {
@@ -262,6 +288,144 @@ class CollectionParseGateTest {
     private static final Map<String, Integer> COLLECTION_SPLIT_CENSUS = Map.of();
 
     private static final int COLLECTION_SPLIT_TOTAL_CEILING = 0;
+
+    // ── RDR-229 P1.3 (nexus-p2m1x.3): the quarantine- prefix ────────────
+
+    /**
+     * The one file and constant that renders the {@code quarantine-} prefix, which the literal census does not count
+     * (RDR-229 Technical Design item 4: "outside the one constant that renders it"). The exemption is the declaration
+     * {@code PREFIX = "quarantine-"} in this file and nothing else in it. {@link #QUARANTINE_RENDERER_DECLARATION} must
+     * match exactly once there, so renaming or deleting the constant fails the gate instead of silently widening it.
+     */
+    static final String QUARANTINE_RENDERER_FILE = "dev/nexus/service/db/QuarantineOrigin.java";
+
+    private static final Pattern QUARANTINE_RENDERER_DECLARATION =
+        Pattern.compile("\\bString\\s+PREFIX\\s*=\\s*\"quarantine-\"");
+
+    /**
+     * Per-file declared count of non-comment string literals (text blocks included) that START with {@code quarantine-}
+     * or hold it after an SQL quote ({@code LIKE 'quarantine-%'}, {@code starts_with(name, 'quarantine-')}), a name
+     * rendered or tested with the prefix, outside {@link #QUARANTINE_RENDERER_FILE}'s one constant. A literal that merely mentions
+     * the word ({@code "/gc/quarantine-restore"}, an error message) is not a name and is not counted. Measured at
+     * develop {@code 1d341b77f}: 6, unchanged by round 1 (no SQL-quoted or text-block spelling exists in the tree).
+     *
+     * <ul>
+     *   <li>{@code ChunkReaper.java} 1: {@code QUARANTINE_PREFIX}, a SECOND constant that renders the same prefix.
+     *       RDR-229 names one constant, so the duplicate counts until it reads {@code QuarantineOrigin.PREFIX};</li>
+     *   <li>{@code CatalogRepository.java} 4: two {@code startsWith("quarantine-")} tests in {@code upsertCollection}
+     *       and two in {@code lifecycleStateForImport}, the sites that derive {@code lifecycle_state} from the name;</li>
+     *   <li>{@code PgVectorRepository.java} 1: {@code "quarantine-" + originCollection} (the reaper's sibling name).</li>
+     * </ul>
+     * Reduce-only, both directions, a file at zero carries no entry (the rule of {@link #COLLECTION_LITERAL_CENSUS}).
+     *
+     * <p>Known limit: a literal that holds the prefix after a JSON quote ({@code "{\"name\":\"quarantine-..."}) is not
+     * counted; only a start-of-literal prefix and an SQL-quoted one are.
+     */
+    private static final Map<String, Integer> QUARANTINE_LITERAL_CENSUS = Map.of(
+        "dev/nexus/service/ChunkReaper.java", 1,
+        "dev/nexus/service/db/CatalogRepository.java", 4,
+        "dev/nexus/service/vectors/PgVectorRepository.java", 1);
+
+    private static final int QUARANTINE_LITERAL_TOTAL_CEILING = 6;
+
+    /**
+     * Reads of the prefix outside declarations and import lines, at develop {@code 1d341b77f}: 35. A literal-only census
+     * would let a reader that goes through a constant escape the gate (RDR-229 research-22 counts 12 places that READ
+     * the prefix; most do not spell the literal), so the reads are pinned too, in six shapes:
+     * <ul>
+     *   <li>{@code isQuarantineName(..)}, {@code QUARANTINE_PREFIX}, {@code QuarantineOrigin.PREFIX} (a bare {@code
+     *       PREFIX} counts inside {@link #QUARANTINE_RENDERER_FILE} and in a file that statically imports it, at each
+     *       use and not at the import);</li>
+     *   <li>{@code requireNotQuarantine(..)}, the refusal every rename, rehome and store-delete route calls (11 call
+     *       sites): it reads the prefix through {@code isQuarantineName}, so a replacement of that predicate has to
+     *       reach these callers too;</li>
+     *   <li>{@code BYPASS_PREFIXES} and {@code bypassPrefixes()}: {@code ChunkKeyPlan.BYPASS_PREFIXES} is {@code
+     *       List.of(QuarantineOrigin.PREFIX, TAXONOMY_PREFIX)}, so every user of it carries the prefix, among them
+     *       {@code ChunkKeyAllowlistCheck}, {@code ChunkKeySweep} and {@code ChunkConstraintAdmin} (the run-time CHECK
+     *       built from the prefix). {@code TAXONOMY_PREFIX} is {@code "taxonomy" + COLLECTION_SEPARATOR}, built from a
+     *       constant, so no literal in the tree holds the {@code taxonomy__} half: this census sees it only through
+     *       the bypass set.</li>
+     * </ul>
+     * By file: ChunkReaper 4, QuarantineOrigin 6, ChunkKeyPlan 6, CatalogRepository 5, CatalogHandler 4,
+     * PgVectorRepository 3, ChashRepository 2, ChunkConstraintAdmin 2, and 1 each in VectorHandler,
+     * ChunkKeyAllowlistCheck and ChunkKeySweep. The first cut pinned 15 (the first three shapes); round 1 added the
+     * other three, which is why this pin moved and the literal pin did not.
+     */
+    private static final Map<String, Integer> QUARANTINE_READ_CENSUS = Map.ofEntries(
+        Map.entry("dev/nexus/service/ChunkReaper.java", 4),
+        Map.entry("dev/nexus/service/db/CatalogRepository.java", 5),
+        Map.entry("dev/nexus/service/db/ChashRepository.java", 2),
+        Map.entry("dev/nexus/service/db/QuarantineOrigin.java", 6),
+        Map.entry("dev/nexus/service/http/CatalogHandler.java", 4),
+        Map.entry("dev/nexus/service/http/VectorHandler.java", 1),
+        Map.entry("dev/nexus/service/vectors/ChunkConstraintAdmin.java", 2),
+        Map.entry("dev/nexus/service/vectors/ChunkKeyAllowlistCheck.java", 1),
+        Map.entry("dev/nexus/service/vectors/ChunkKeyPlan.java", 6),
+        Map.entry("dev/nexus/service/vectors/ChunkKeySweep.java", 1),
+        Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 3));
+
+    private static final int QUARANTINE_READ_TOTAL_CEILING = 35;
+
+    private static final Pattern QUARANTINE_READ = Pattern.compile(
+        "(?<!String\\s{1,40})\\bQUARANTINE_PREFIX\\b"
+        + "|(?<!boolean\\s{1,40})\\bisQuarantineName\\b"
+        + "|(?<!void\\s{1,40})\\brequireNotQuarantine\\b"
+        + "|\\bQuarantineOrigin\\.PREFIX\\b"
+        + "|(?<!List<String>\\s{1,40})\\bBYPASS_PREFIXES\\b"
+        + "|\\bbypassPrefixes\\s*\\(\\s*\\)");
+
+    /** The renderer file's own bare {@code PREFIX}, or a file's after a static import of it: not qualified, not a declaration. */
+    private static final Pattern QUARANTINE_BARE_PREFIX_READ =
+        Pattern.compile("(?<![\\w.])(?<!String\\s{1,40})\\bPREFIX\\b");
+
+    private static final Pattern STATIC_IMPORT_OF_PREFIX =
+        Pattern.compile("(?m)^\\s*import\\s+static\\s+[\\w.]*\\bQuarantineOrigin\\.(?:PREFIX|\\*)\\s*;");
+
+    private static final Pattern IMPORT_LINE = Pattern.compile("(?m)^\\s*import\\s[^;]*;");
+
+    /**
+     * Count of non-comment string literals starting with {@code quarantine-}, with the renderer constant's own
+     * declaration excluded when {@code isRendererFile}. Returns {@code {counted, exempted}}.
+     */
+    static int[] countQuarantineLiterals(String rawSource, boolean isRendererFile) {
+        String blanked = blankComments(rawSource);
+        int exempted = 0;
+        if (isRendererFile) {
+            Matcher d = QUARANTINE_RENDERER_DECLARATION.matcher(blanked);
+            StringBuilder sb = new StringBuilder();
+            while (d.find()) {
+                exempted++;
+                d.appendReplacement(sb, Matcher.quoteReplacement(" ".repeat(d.group().length())));
+            }
+            d.appendTail(sb);
+            blanked = sb.toString();
+        }
+        int count = 0;
+        for (String literal : stringLiterals(blanked)) {
+            if (literal.startsWith("\"quarantine-") || literal.contains("'quarantine-")) count++;
+        }
+        return new int[] {count, exempted};
+    }
+
+    /**
+     * Count of reads of the quarantine prefix, outside declarations and import lines: {@code isQuarantineName},
+     * {@code QUARANTINE_PREFIX}, {@code QuarantineOrigin.PREFIX} (a bare {@code PREFIX} inside {@link
+     * #QUARANTINE_RENDERER_FILE}, or in a file that statically imports it, counted at each use), {@code
+     * requireNotQuarantine}, {@code BYPASS_PREFIXES} and {@code bypassPrefixes()}.
+     */
+    static int countQuarantinePrefixReads(String rawSource, boolean isRendererFile) {
+        String blanked = blankComments(rawSource);
+        boolean staticImport = STATIC_IMPORT_OF_PREFIX.matcher(blanked).find();
+        blanked = IMPORT_LINE.matcher(blanked).replaceAll(m -> " ".repeat(m.group().length()));
+        int count = 0;
+        Matcher m = QUARANTINE_READ.matcher(blanked);
+        while (m.find()) count++;
+        if (isRendererFile || staticImport) {
+            Matcher b = QUARANTINE_BARE_PREFIX_READ.matcher(blanked);
+            while (b.find()) count++;
+        }
+        return count;
+    }
 
     /**
      * Compares an {@code actual} per-file census against a {@code declared}
@@ -393,6 +557,79 @@ class CollectionParseGateTest {
             .isGreaterThanOrEqualTo(declaredTotal);
     }
 
+    /**
+     * RDR-229 P1.3: the quarantine census over the real tree, both classes in both directions, plus the non-vacuity
+     * assertions: the walk saw files, the renderer file was seen with its one exempt declaration, and the literal
+     * scanner found at least the declared total (a broken scanner reports fewer, never an error).
+     */
+    @Test
+    void quarantinePrefixCensus_pinnedAtMeasuredCount() throws IOException {
+        Path root = Path.of("src", "main", "java");
+        assertThat(root).exists();
+
+        Map<String, Integer> literals = new TreeMap<>();
+        Map<String, Integer> reads = new TreeMap<>();
+        int filesWalked = 0;
+        int exemptions = 0;
+        boolean rendererSeen = false;
+        try (Stream<Path> files = Files.walk(root)) {
+            List<Path> javaFiles = files.filter(p -> p.toString().endsWith(".java")).toList();
+            filesWalked = javaFiles.size();
+            for (Path p : javaFiles) {
+                String rel = root.relativize(p).toString().replace(java.io.File.separatorChar, '/');
+                boolean renderer = rel.equals(QUARANTINE_RENDERER_FILE);
+                rendererSeen |= renderer;
+                String src = Files.readString(p);
+                int[] lit = countQuarantineLiterals(src, renderer);
+                int read = countQuarantinePrefixReads(src, renderer);
+                exemptions += lit[1];
+                if (lit[0] > 0) literals.put(rel, lit[0]);
+                if (read > 0) reads.put(rel, read);
+            }
+        }
+        int totalLiterals = literals.values().stream().mapToInt(Integer::intValue).sum();
+        int totalReads = reads.values().stream().mapToInt(Integer::intValue).sum();
+        System.out.println("quarantine census: files=" + filesWalked + " exemptedRendererDeclarations=" + exemptions
+            + " literals=" + totalLiterals + literals + " reads=" + totalReads + reads);
+
+        assertThat(filesWalked).as("the walk over " + root + " must see .java files").isGreaterThan(0);
+        assertThat(rendererSeen).as(QUARANTINE_RENDERER_FILE + " exists: the one constant that renders the prefix").isTrue();
+        assertThat(exemptions).as("the renderer file declares `String PREFIX = \"quarantine-\"` exactly once; zero means the "
+            + "constant was renamed or moved and the exemption no longer names it").isEqualTo(1);
+
+        List<String> violations = new ArrayList<>();
+        violations.addAll(checkCensus("quarantine- literal", literals, QUARANTINE_LITERAL_CENSUS));
+        violations.addAll(checkCensus("quarantine- prefix read", reads, QUARANTINE_READ_CENSUS));
+        assertThat(violations)
+            .as("RDR-229 item 4 quarantine- census (nexus-p2m1x.3): a REGRESSION is a new site that spells or reads the "
+                + "prefix; a STALE FINGERPRINT is a site removed without lowering its entry")
+            .isEmpty();
+        assertThat(totalLiterals).as("QUARANTINE_LITERAL_TOTAL_CEILING is lowered with the census")
+            .isEqualTo(QUARANTINE_LITERAL_TOTAL_CEILING);
+        assertThat(totalReads).as("QUARANTINE_READ_TOTAL_CEILING is lowered with the census")
+            .isEqualTo(QUARANTINE_READ_TOTAL_CEILING);
+
+        int declaredLiterals = QUARANTINE_LITERAL_CENSUS.values().stream().mapToInt(Integer::intValue).sum();
+        int declaredReads = QUARANTINE_READ_CENSUS.values().stream().mapToInt(Integer::intValue).sum();
+        assertThat(totalLiterals).as("non-vacuity: a broken scanner reports fewer literals than the census declares")
+            .isGreaterThanOrEqualTo(declaredLiterals);
+        assertThat(totalReads).as("non-vacuity: a broken scanner reports fewer reads than the census declares")
+            .isGreaterThanOrEqualTo(declaredReads);
+    }
+
+    /** Each total ceiling equals the sum of its declared census, so lowering a census and forgetting its ceiling fails. */
+    @Test
+    void everyCeilingEqualsItsDeclaredCensusSum() {
+        assertThat(COLLECTION_LITERAL_CENSUS.values().stream().mapToInt(Integer::intValue).sum())
+            .isEqualTo(COLLECTION_LITERAL_TOTAL_CEILING);
+        assertThat(COLLECTION_SPLIT_CENSUS.values().stream().mapToInt(Integer::intValue).sum())
+            .isEqualTo(COLLECTION_SPLIT_TOTAL_CEILING);
+        assertThat(QUARANTINE_LITERAL_CENSUS.values().stream().mapToInt(Integer::intValue).sum())
+            .isEqualTo(QUARANTINE_LITERAL_TOTAL_CEILING);
+        assertThat(QUARANTINE_READ_CENSUS.values().stream().mapToInt(Integer::intValue).sum())
+            .isEqualTo(QUARANTINE_READ_TOTAL_CEILING);
+    }
+
     // ── falsification: the detector must actually detect ────────────────
 
     /**
@@ -507,5 +744,198 @@ class CollectionParseGateTest {
             "}");
         assertThat(countDunderLiterals(synthetic)).isEqualTo(3);
         assertThat(countSplitDunderCalls(synthetic)).isEqualTo(1);
+    }
+
+    // ── RDR-229 P1.3 falsification: the quarantine census must detect ───
+
+    @Test
+    void syntheticQuarantineLiteral_failsAsRegression() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    boolean q(String name) { return name.startsWith(\"quarantine-\"); }",
+            "    String sibling(String o) { return \"quarantine-\" + o; }",
+            "}");
+        int found = countQuarantineLiterals(synthetic, false)[0];
+        assertThat(found).isEqualTo(2);
+        assertThat(checkCensus("quarantine- literal", Map.of("Whatever.java", found), Map.of("Whatever.java", 1)))
+            .anyMatch(v -> v.contains("REGRESSION"));
+        assertThat(checkCensus("quarantine- literal", Map.of("Whatever.java", found), Map.of()))
+            .as("a file the census has never seen").anyMatch(v -> v.contains("REGRESSION"));
+    }
+
+    @Test
+    void quarantineLiteralRemovedWithoutLoweringPin_failsAsStaleFingerprint() {
+        int found = countQuarantineLiterals("class W { String s = \"quarantine-\"; }", false)[0];
+        assertThat(found).isEqualTo(1);
+        assertThat(checkCensus("quarantine- literal", Map.of("W.java", found), Map.of("W.java", 2)))
+            .anyMatch(v -> v.contains("STALE FINGERPRINT"));
+    }
+
+    @Test
+    void commentedOutQuarantineLiterals_areNotCounted_andNeitherAreRoutesOrMessages() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    // private static final String OLD = \"quarantine-\";",
+            "    /* String older = \"quarantine-\" + x; */",
+            "    static final String ROUTE = \"/v1/vectors/gc/quarantine-restore\";",
+            "    static final String MSG = \"not its quarantine- sibling\";",
+            "    static final String STATE = \"quarantine\";",
+            "    static final String REAL = \"quarantine-\";",
+            "}");
+        assertThat(countQuarantineLiterals(synthetic, false)[0]).isEqualTo(1);
+    }
+
+    @Test
+    void theRendererConstantIsNotCounted_butASecondConstantIs() {
+        String renderer = "public final class QuarantineOrigin {\n"
+            + "    public static final String PREFIX = \"quarantine-\";\n"
+            + "}";
+        assertThat(countQuarantineLiterals(renderer, true)).as("{counted, exempted}").containsExactly(0, 1);
+
+        String duplicate = "public final class ChunkReaper {\n"
+            + "    private static final String QUARANTINE_PREFIX = \"quarantine-\";\n"
+            + "}";
+        assertThat(countQuarantineLiterals(duplicate, false)).as("a duplicate constant outside the renderer file counts")
+            .containsExactly(1, 0);
+        assertThat(countQuarantineLiterals(duplicate, true)).as("even in the renderer file, only `String PREFIX` is exempt")
+            .containsExactly(1, 0);
+
+        String second = renderer.replace("}", "    static final String OTHER = \"quarantine-x\";\n}");
+        assertThat(countQuarantineLiterals(second, true)).as("a second literal in the renderer file counts")
+            .containsExactly(1, 1);
+    }
+
+    @Test
+    void quarantinePrefixReads_countTheConstantsAndThePredicate_notTheirDeclarations() {
+        String reader = String.join("\n",
+            "class R {",
+            "    private static final String QUARANTINE_PREFIX = \"quarantine-\";",
+            "    boolean a(String n) { return n.startsWith(QUARANTINE_PREFIX); }",
+            "    boolean b(String n) { return QuarantineOrigin.isQuarantineName(n); }",
+            "    String c(String n) { return dev.nexus.service.db.QuarantineOrigin.PREFIX + n; }",
+            "    // QUARANTINE_PREFIX in a comment, isQuarantineName too",
+            "    String other = TAXONOMY_PREFIX + PREFIX;",
+            "}");
+        assertThat(countQuarantinePrefixReads(reader, false)).as("a, b, c; not the declaration, the comment, "
+            + "TAXONOMY_PREFIX or another class's bare PREFIX").isEqualTo(3);
+
+        String renderer = String.join("\n",
+            "public final class QuarantineOrigin {",
+            "    public static final String PREFIX = \"quarantine-\";",
+            "    public static boolean isQuarantineName(String name) { return name != null && name.startsWith(PREFIX); }",
+            "    String sibling(String o) { return PREFIX + o; }",
+            "    boolean again(String n) { return isQuarantineName(n); }",
+            "}");
+        assertThat(countQuarantinePrefixReads(renderer, true)).as("PREFIX twice and the predicate once; neither declaration")
+            .isEqualTo(3);
+        assertThat(countQuarantinePrefixReads(renderer, false)).as("outside the renderer file a bare PREFIX is another constant")
+            .isEqualTo(1);
+    }
+
+    @Test
+    void quarantineReadsAddedBeyondThePin_failAsRegression() {
+        assertThat(checkCensus("quarantine- prefix read", Map.of("W.java", 2), Map.of("W.java", 1)))
+            .anyMatch(v -> v.contains("REGRESSION"));
+        assertThat(checkCensus("quarantine- prefix read", Map.of("W.java", 1), Map.of("W.java", 2)))
+            .anyMatch(v -> v.contains("STALE FINGERPRINT"));
+    }
+
+    // ── RDR-229 P1.3 review round 1: respellings the first cut missed ───
+
+    @Test
+    void sqlQuotedQuarantinePrefix_isCounted_butAMessageOrRouteIsNot() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    static final String A = \"select 1 from t where name like 'quarantine-%'\";",
+            "    static final String B = \"starts_with(collection, 'quarantine-')\";",
+            "    static final String ROUTE = \"/v1/vectors/gc/quarantine-restore\";",
+            "    static final String MSG = \"not its quarantine- sibling\";",
+            "    static final String STATE = \"where lifecycle_state = 'quarantine'\";",
+            "}");
+        assertThat(countQuarantineLiterals(synthetic, false)[0]).isEqualTo(2);
+    }
+
+    @Test
+    void aTextBlockHoldingTheSqlPrefix_isScanned() {
+        String synthetic = String.join("\n",
+            "public final class Whatever {",
+            "    static final String SQL = \"\"\"",
+            "        select 1 from nexus.catalog_collections",
+            "         where name like 'quarantine-%'",
+            "        \"\"\";",
+            "}");
+        assertThat(countQuarantineLiterals(synthetic, false)[0]).isEqualTo(1);
+    }
+
+    @Test
+    void aQuoteInsideATextBlock_doesNotDerailTheLiteralAfterIt() {
+        String sameLine = String.join("\n",
+            "public final class Whatever {",
+            "    static final String T = \"\"\"",
+            "        he said \"hi\" // not a comment",
+            "        \"\"\" + \"quarantine-\";",
+            "}");
+        assertThat(countQuarantineLiterals(sameLine, false)[0]).as("the real literal on the closing line").isEqualTo(1);
+
+        String later = String.join("\n",
+            "public final class Whatever {",
+            "    static final String T = \"\"\"",
+            "        one \" two /* not a comment",
+            "        \"\"\";",
+            "    String sibling(String o) { return \"quarantine-\" + o; }",
+            "}");
+        assertThat(countQuarantineLiterals(later, false)[0]).as("a literal on a later line").isEqualTo(1);
+    }
+
+    @Test
+    void aCharLiteralQuote_doesNotDerailTheLiteralAfterIt() {
+        String synthetic = "class W { boolean q(char c, String n) { return c == '\"' && n.startsWith(\"quarantine-\"); } }";
+        assertThat(countQuarantineLiterals(synthetic, false)[0]).isEqualTo(1);
+    }
+
+    @Test
+    void quarantineReads_alsoCountRequireNotQuarantineAndTheBypassSet() {
+        String reader = String.join("\n",
+            "class R {",
+            "    void a(String n) { QuarantineOrigin.requireNotQuarantine(\"rename\", n); }",
+            "    void b() { for (String p : ChunkKeyPlan.BYPASS_PREFIXES) { use(p); } }",
+            "    void c(ChunkKeyPlan plan) { plan.bypassPrefixes().forEach(this::use); }",
+            "    void d(List<String> bypassPrefixes) { use(bypassPrefixes); }",
+            "}");
+        assertThat(countQuarantinePrefixReads(reader, false))
+            .as("requireNotQuarantine, BYPASS_PREFIXES and bypassPrefixes(); a parameter named bypassPrefixes is not a read")
+            .isEqualTo(3);
+
+        String declarations = String.join("\n",
+            "public final class QuarantineOrigin {",
+            "    public static void requireNotQuarantine(String verb, String name) { }",
+            "}",
+            "record ChunkKeyPlan(List<String> bypassPrefixes) {",
+            "    public static final List<String> BYPASS_PREFIXES = List.of();",
+            "}");
+        assertThat(countQuarantinePrefixReads(declarations, false)).as("declarations are not reads").isZero();
+    }
+
+    @Test
+    void aStaticImportOfPrefix_countsAtEachUse_notAtTheImport() {
+        String reader = String.join("\n",
+            "import static dev.nexus.service.db.QuarantineOrigin.PREFIX;",
+            "class R {",
+            "    String a(String o) { return PREFIX + o; }",
+            "    boolean b(String n) { return n.startsWith(PREFIX); }",
+            "}");
+        assertThat(countQuarantinePrefixReads(reader, false)).isEqualTo(2);
+        assertThat(countQuarantinePrefixReads(reader.replace("import static dev.nexus.service.db.QuarantineOrigin.PREFIX;",
+            "import static dev.nexus.service.db.QuarantineOrigin.*;"), false)).as("a wildcard static import").isEqualTo(2);
+        assertThat(countQuarantinePrefixReads(reader.replace("import static dev.nexus.service.db.QuarantineOrigin.PREFIX;", ""), false))
+            .as("without the import a bare PREFIX is another class's constant").isZero();
+    }
+
+    @Test
+    void theDeclarationLookbehinds_toleratePaddingAndLineBreaks() {
+        String padded = "class C {\n    private static final String   QUARANTINE_PREFIX = \"x\";\n"
+            + "    static boolean\n        isQuarantineName(String n) { return n != null; }\n"
+            + "    static void    requireNotQuarantine(String v, String n) { }\n}";
+        assertThat(countQuarantinePrefixReads(padded, false)).as("padded declarations are not reads").isZero();
     }
 }

@@ -12,6 +12,9 @@ is the client half: the scope a caller reads and writes, and a store bound to it
 * The store is a plain :class:`~nexus.db.http_scratch_store.HttpScratchStore` carrying the session's own minted
   session token and the identity scope as its ``session_id``; ``HttpScratchStore`` attaches the identity token itself
   for an ``identity:`` scope, so a write needs nothing else here.
+* The scope is bounded by the client, not the engine: an entry over 2 KB is refused, and so is a non-pointer put once the
+  scope holds 20 entries (the resume pointer has its own slot); nothing is evicted. The rule is in
+  :mod:`nexus.db.http_scratch_store` (``IDENTITY_ENTRY_MAX_BYTES``, ``IDENTITY_SCOPE_MAX_ENTRIES``).
 * A process with no identity token holds no scope: asking for it is an error naming that, never a quiet fall back to the
   session scope (an entry written to the wrong scope is lost to the reader who looks in the right one).
 """
@@ -35,6 +38,10 @@ def scope_owner(client: Any, *, identity: str | None = None) -> str:
         from nexus.identity import token_header  # noqa: PLC0415 — deferred: leaf import cost
 
         record = token_header.current()
+        if record is None and token_header.has_claude_ancestor():
+            raise IdentityScopeError(
+                "this process's identity token file not readable yet (its Claude process has no token file, or it is being "
+                "rewritten, as it is while Claude restarts): try again in a moment; if it stays so, the session holds no identity")
         if record is None:
             raise IdentityScopeError(
                 "no identity is bound to this process, so it has no identity scratch (it needs a Claude session "

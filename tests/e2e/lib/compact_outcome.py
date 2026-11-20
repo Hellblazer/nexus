@@ -118,7 +118,7 @@ OVERLAY_SCRIPT = "compact_outcome_fix_overlay.py"
 #: its guard (a missing one exits 0 and degrades the checkpoint silently), so the harness test derives this set from the
 #: import statements and fails when it drifts.
 SCRIPT_FILES = ("compact_checkpoint.py", "_cli_lookup.py", "_endpoint_resolve.py", "_exec_path.py",
-                "_identity_lookup.py", "_session_facts.py")
+                "_identity_lookup.py", "_resume_pointer.py", "_session_facts.py")
 #: Variables dropped from the child by name: the parent session's markers that carry no NX_/NEXUS_/CLAUDE_CODE_ prefix.
 PARENT_SESSION_VARS = ("CLAUDECODE", "TMUX", "TMUX_PANE", "CLAUDE_PID")
 #: Variables dropped by prefix, the whole families: none of the parent's nexus, engine, config or Claude session settings reaches
@@ -159,7 +159,7 @@ mode = os.environ.get("NX_STUB_MODE", "full")
 board = os.environ.get("NX_STUB_BOARD", "")
 args = sys.argv[1:]
 KNOWN = (["memory", "search"], ["memory", "get"], ["memory", "list"], ["command-context", "continuation"],
-         ["identity", "work", "list"])
+         ["identity", "work", "list"], ["scratch"])
 known = any(args[:len(k)] == k for k in KNOWN)
 log = os.environ.get("NX_STUB_LOG")
 if log:
@@ -183,6 +183,8 @@ elif args[:2] == ["command-context", "continuation"]:
     st = git("status", "--short")
     print("### Uncommitted\n\n" + (st or "(clean)") + "\n")
     print("### Recent commits\n\n" + git("log", "--oneline", "-8") + "\n")
+elif args[:1] == ["scratch"]:  # the resume pointer (RDR-253 Step 6): list an empty identity scope, accept the put
+    print("No scratch entries." if "list" in args else "Stored: stub")
 else:  # identity work list --running --json: the watcher, as a session that had registered it would show it
     print(json.dumps({"identity": "IDENTITY_HERE", "alive": True, "work": [
         {"kind": "wait", "ref": "./watcher.sh until RELEASE-OK", "state": "running", "stale": False}]}))
@@ -201,6 +203,7 @@ def build_plugin(dest: str, overlay: "str | None" = None) -> list[str]:
             hooks = [h for h in group.get("hooks", []) if HOOK_SCRIPT in json.dumps(h)]
             if hooks:
                 kept.setdefault(event, []).append({**group, "hooks": hooks})
+    kept.pop("SessionEnd", None)  # the resume pointer's `end` mode (RDR-253 Step 6) is no compaction hook: the gate leaves it out
     want = {"PreCompact", "PostCompact", "SessionStart"}
     if set(kept) != want:
         raise SystemExit(f"hooks.json no longer wires {HOOK_SCRIPT} on exactly {sorted(want)}: found {sorted(kept)}")

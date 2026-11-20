@@ -2991,6 +2991,24 @@ def _no_real_claude_version_probe(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_resume_pointer_store(request, monkeypatch):
+    """RDR-253 Step 6 part 2: a SessionStart with source clear reads the newest resume pointer from the
+    identity scratch (``nexus.hooks.resume_line._open_store``). A test that drives that path for anything else (the
+    source passthrough, the verb's field extraction) would reach real storage with no tenant, and on a developer box
+    the identity it resolves is the user's own. Make the opener raise for every test, so the reader prints nothing;
+    tests/hooks/test_resume_line.py injects its own store, and a module that needs the real opener sets
+    ``REAL_RESUME_POINTER_STORE = True``."""
+    if getattr(request.module, "REAL_RESUME_POINTER_STORE", False):
+        return
+    import nexus.hooks.resume_line as resume_line  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    def _refused() -> None:
+        raise RuntimeError("tests/conftest.py: the resume-pointer store is stubbed out")
+
+    monkeypatch.setattr(resume_line, "_open_store", _refused)
+
+
+@pytest.fixture(autouse=True)
 def _mcp_server_process_flag_does_not_leak(monkeypatch):
     """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
     ``session.mark_mcp_server_process()``, and a couple of tests run a
@@ -3001,6 +3019,30 @@ def _mcp_server_process_flag_does_not_leak(monkeypatch):
     import nexus.session as session
 
     monkeypatch.setattr(session, "_mcp_server_process", False)
+
+
+@pytest.fixture(autouse=True)
+def _identity_work_reaches_no_real_engine(monkeypatch):
+    """RDR-253 Step 6 part 1 (nexus-hczdo, labrun_79e): a registrar with no client of its own (``register_own``, which the
+    SubagentStart/Stop hooks, ``nx ci wait``, ``nx tuple wait`` and ``nx identity work run`` write through) opens its
+    engine client with ``nexus.identity.work._new_client``. A suite that runs one of them under a Claude session wrote ~155
+    real identity rows. The seam is refused here for every test, and a test that reached it FAILS at teardown (the registrar
+    swallows the error, so the failure has to come from here). A test that registers passes ``client=`` (a fake engine) or
+    patches ``register_own``/``forget_own``. Also puts the per-process ``bad_kind`` cache back."""
+    from nexus.identity import work  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    reached: list[float] = []
+
+    def refuse(timeout: float):
+        reached.append(timeout)
+        raise RuntimeError("blocked by tests/conftest.py: no test opens a real identity client")
+
+    monkeypatch.setattr(work, "_new_client", refuse)
+    work.reset_for_tests()
+    yield
+    work.reset_for_tests()
+    assert not reached, ("this test reached nexus.identity.work._new_client: a registrar with no client= would write to the "
+                         "real engine. Pass client=<fake engine>, or patch register_own/forget_own.")
 
 
 @pytest.fixture(autouse=True)

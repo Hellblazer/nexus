@@ -391,10 +391,22 @@ guards against a confused model, not a hostile one. JDR-002 says to revisit
 this "in an RDR" when trust needs grow; this RDR is that revisit for group
 writes.
 
+One carve-out, this RDR's own resolution of the close critique's S3: the
+engine's owner and clear rows on `board/ci/<topic>--owner` carry `from=engine`
+and no sender session, and the tuple routes (`out`, including `mode=replace`,
+and an `ack` reply) refuse a client write whose `from` dim is `engine` on a
+`board/ci/<topic>` subspace, with 403 `reserved_dim`, for every credential. The
+stamper writes through the repository, never the route, so `from=engine` is
+engine-only by construction. The owner decision also counts a prior owner or
+clear row only when its `sender_session` is null (a blank stamp is a stamp), the
+test the aura applies; that check alone separates only rows written by a
+session-bearing client before the refusal, because a raw-HTTP client with no
+minted session also has a null stamp.
+
 | Level | What the engine checks | Guards against | Cost |
 |---|---|---|---|
 | 0 (today) | Nothing on these subspaces; readers see the stamp as a label | Nothing; a reader may notice a mismatch | None |
-| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, and for a re-form of a disbanded name (a first write too), the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both, except the audited operator override on a group; RDR-253's `unleased` exception applies to memberships only | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state | One check on `group/*` beside RDR-253's four fenced families |
+| 1 (this RDR, with RDR-253) | On `member/<id>`, RDR-253 Step 2's fence: the writer's identity token names `<id>` and its current generation. On `group/<name>`, the same two checks against the leader: for an existing record, the writer's identity is the stored record's `leader` and its generation is that identity's current one (so a write that changes the leader comes from the current leader); for the first write, and for a re-form of a disbanded name (a first write too), the writer is the `leader` it names, and the write adds its membership. A tokenless write is refused on both, except the audited operator override on a group; RDR-253's `unleased` exception applies to memberships only; on `board/ci/<topic>`, no client write sets `from=engine` | A confused session, and a superseded process of the right identity (after a restart, a resume elsewhere or a take-over), writing group state; a client forging the stamper's owner or clear rows | One check on `group/*` beside RDR-253's four fenced families |
 | 2 (met by level 1) | Only the current process of the leader identity may write | A session that is not the current leader, including a stale process of the leader; not a tenant-token holder who binds the leader's seat | Was "leadership as a claim with `claim_id`, needing a heartbeat"; RDR-253's binding renewal and generation check deliver it, so this RDR adds no separate mechanism for it (`nexus_rdr/252-research-4` F10) |
 | 3 (later) | Per-principal identity, host-attested Desktop sessions (JDR-002's own revisit list) | A second human principal or an agent class the tenant does not trust | Engine and auth work beyond this RDR |
 
@@ -484,7 +496,8 @@ An identity with no live alias gets no field, and a failed alias read posts the
 row with ids alone. Who owns a red is always decided on the ids; a reader
 shows the alias when the row carries one, else the id. The template requires
 `from` and caps a body at 1024 bytes (`nexus_rdr/252-research-4` F8), so the
-stamper's rows carry `from=engine` and list at most the first ten suspects,
+stamper's rows carry `from=engine` and no sender session (the route refuses
+`from=engine` from a client) and list at most the first ten suspects,
 with `suspects_total` giving the full count. The aliases count inside the
 1024 bytes: when they would push the body past it, suspects are dropped from
 the end, down to one, and `suspects_total` keeps the full count.
@@ -510,7 +523,10 @@ the end, down to one, and `suspects_total` keeps the full count.
   gap uses the CI posts' times, so rows past a gap are best effort. When
   several reasons hold, the first in this list is posted (`no_record` before
   `chain_gap`).
-- **A stamper error** posts the leader as owner with `reason=stamper_error`.
+- **A stamper error** posts the leader as owner with `reason=stamper_error`
+  and `next` null. The row runs the acknowledgement deadline like every owner
+  row, so a red whose evaluation failed is escalated when the leader does not
+  acknowledge; with no next up shown, nobody receives a hand-off first.
   If the engine is down, no CI post lands either, so there is no separate
   "stamper down" path. A CI post that never lands (the adapter's write is
   best effort) leaves that run with no owner post; the next run's post
@@ -522,7 +538,9 @@ That scope is per template, so it reaches every `board/ci/<topic>` subspace
 Step 1 adds an engine refusal: a `board-ci`-scoped write to a subspace whose
 topic ends `--owner` or `--push` is refused with 403, leaving the adapter
 only its own posts; owner, clear, ack and push rows come from sessions and
-the stamper.
+the stamper. A second refusal, for every credential: a write to a
+`board/ci/<topic>` subspace whose `from` dim is `engine` is refused with 403
+`reserved_dim` on `out` (including `mode=replace`) and on an `ack` reply.
 The stamper ships in an engine release. Alternative 2 below keeps "every
 session computes" as the fallback design.
 
@@ -620,7 +638,14 @@ the row's `episode_at`, the stamper posts a new owner row naming the next-up ide
 After an engine restart the timer is rebuilt from the latest owner row of
 each red episode that has no counting ack and no newer owner or clear row
 after it, counted from its `episode_at`, so a restart loses no deadline and revives none that a later row
-superseded. The deadline defaults to 20 minutes (Sam, 2026-11-16), set per
+superseded. The rebuild runs five seconds after engine start. If its census does
+not complete (the tenant list, which is every tenant holding a service token or
+tuple rows, a tenant's subspaces, or a topic's re-evaluation failing), it retries
+only what failed after a delay that doubles from ten seconds to a cap of five
+minutes, until one completes; the first failure logs its stack and the twelfth
+attempt raises the error-level event `board_ack_deadline_rebuild_stuck`. A topic
+whose re-evaluation keeps throwing has its deadline armed from its latest owner
+row alone, `episode_at` plus the deadline. The deadline defaults to 20 minutes (Sam, 2026-11-16), set per
 group in the group record's `ack_deadline` and overridden per board topic in
 `ack_deadline_by_topic`. The research gives no basis for any number, so the default is
 calibrated: the push records and acknowledgements give each red's time to
@@ -639,7 +664,11 @@ starts after the row does not see it (`nexus_rdr/252-research-9` F1); it shows
 the next owner, refresh or clear row. The stamper posts no hand-off and no
 second `escalated` row after an
 `escalated` one, and the timer rebuild skips a red whose latest row is
-`escalated`. Unvalidated: the research found no protocol to copy.
+`escalated`. If the evaluation at a deadline throws, the stamper posts the
+`escalated` row from the current owner row alone: the leader if live, else the
+first live member, else no one, with `handoffs` one higher, the row's suspects
+and no deadline; an ack from the row's owner on the row's own tip ends it.
+Unvalidated: the research found no protocol to copy.
 
 **Claims.** Only for work no owner post names, such as rerunning a flaky shard;
 RDR-211's queue as is.
@@ -803,7 +832,8 @@ minutes; a first or new leader a live, leased seat (a new leader also a
 member); the operator override with the tenant credential, allowed only in
 the states named above and written to `gc_audit`; the `serves` checks
 under a per-topic advisory lock; re-forming and disband as above; the refusal of a `board-ci`-scoped write
-to a `--owner` or `--push` subspace; and the level-1 check (the writer's identity is
+to a `--owner` or `--push` subspace, and of any client write that sets
+`from=engine` on a `board/ci` topic; and the level-1 check (the writer's identity is
 the stored record's leader at its current generation; the first write's
 writer is the leader it names), built on RDR-253's identity token and fence
 code. Memberships use RDR-253's permanent membership rows and their fence. The
@@ -828,7 +858,8 @@ to its parent), liveness through RDR-253's lapse-applying read, the suspect set 
 listed), owner and next up, the leader's cases, owner and clear rows with
 `from=engine`; the acknowledgement deadline (group default, per-topic
 override) as a timer rebuilt after a restart from unsuperseded owner rows; a
-stamper error posting the leader; the named reasons; at most two hand-offs,
+stamper error posting the leader with its deadline, and the fail-safe escalation
+when a deadline's evaluation throws; the named reasons; at most two hand-offs,
 then the `escalated` row; refreshed rows for a newer red with the same owner
 and acks carried across them; no owner rows while no live group serves the
 topic (clear rows still posted for a topic with an open owner row);
@@ -879,6 +910,13 @@ None.
 - Owner identity lapsed, owner not a member, no stamped or no mapped push
   record, a chain gap, a stamper error: the leader owns, with the reason.
 - The deadline: no ack names next up; an engine restart keeps the timer.
+- A stamper error arms the deadline and escalates at it, also when the decision
+  throws on every trigger; a restart over such a row re-arms from the row; the
+  restart census retries only failed topics and visits tenants without a token
+  row.
+- A client `out` or `ack` reply with `from=engine` is refused with 403
+  `reserved_dim`, the claim kept; the stamper's owner and clear rows have a null
+  sender session.
 - Next up is never the owner, and skips a lapsed pusher or a non-member.
 - Identity across `/clear`: a push before and an ack after `/clear` both map
   to the same identity; the owner is still woken.
@@ -958,6 +996,8 @@ None.
   serves its trigger topic.
 - The engine refuses a `board-ci`-scoped write to a `--owner` or `--push`
   subspace.
+- The engine refuses a client write with `from=engine` to a `board/ci` topic, on
+  `out`, `mode=replace` and an `ack` reply.
 
 ## Validation
 
@@ -1087,3 +1127,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-18: wording matched to the reviewed Step 2 code (nexus-igea9.2, 5cf9ab46d): the push record's key and `push-<tip>` nonce, the lock released before the write, and the write's time bound.
 - 2026-11-19: wording matched to the reviewed Step 4 code (nexus-igea9.7): a server that loaded with no identity gates its group-gated auras once more when the identity lease adopts its first identity; every other change waits for a reconnect; Test Plan line added.
 - 2026-11-19: wording matched to the reviewed engine 0.1.198 code (nexus-igea9, b300a8550, 76bbd34d4; grant 3): the owner row carries `owner_alias` and `next_alias`, read at stamp time, absent for an identity with none or on a failed read; the notice shows the alias, else the id; the aliases count inside the 1024-byte cap, suspects cut first.
+- 2026-11-20: engine fixes for the close critique's S2 and S3 (nexus-igea9; grant 3): the deadline rebuild retries failed pairs until a full census, a stamper error arms its deadline and escalates at it, a failing evaluation falls back to the current owner row, and `from=engine` is engine-only (client writes refused with `reserved_dim`; a prior row counts as state only with a null sender session). `board-ci.yaml` `from.engine` documents the refusal.

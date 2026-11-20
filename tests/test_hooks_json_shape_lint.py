@@ -127,7 +127,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: 21 -> 22 at nexus-qo7ie.36: `destructive_action_advice.py`, the advise-mode table-driven
 #: guard for the destructive-action bright lines; one PreToolUse entry on
 #: `Bash|Edit|Write|MultiEdit`.
-EXPECTED_CONEXUS_ENTRIES = 22
+#: 22 -> 23 at RDR-253 Step 6 part 2: `compact_checkpoint.py end`, a SessionEnd group whose matcher is `clear` only (the
+#: resume pointer for a /clear in a session that never compacted).
+EXPECTED_CONEXUS_ENTRIES = 23
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"
@@ -171,7 +173,7 @@ NX_HOOK_SHIM = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py"
 
 #: The plugin-resident script that takes one mode word after its path (nexus-3lqxv).
 COMPACT_CHECKPOINT = "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/compact_checkpoint.py"
-COMPACT_CHECKPOINT_MODES = frozenset({"pre", "post", "inject"})
+COMPACT_CHECKPOINT_MODES = frozenset({"pre", "post", "inject", "end"})
 
 #: The handlers bead .21 resolved as plugin-resident (behaviour_census.py
 #: was deleted at cleanup step A1, nexus-0r1uz), plus the one RDR-219 adds

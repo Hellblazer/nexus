@@ -166,6 +166,16 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogSensitiveReads.Page.documents", RESULT);   // nexus-f3yqd: one sensitive-list call's documents
         // nexus-uwggq.2.3-.2.5, .1.5: the RDR-241 Phase 2 catalog read routes, one page or one parsed filter per request
         notKeyed.put("CatalogDocReads.Page.documents", RESULT);
+        notKeyed.put("CatalogMoves.Counts.absorbedTumblers", RESULT);   // RDR-254: one move's absorbed rows
+        notKeyed.put("CatalogMoves.Report.asMap", RESULT);              // RDR-254: one move's report
+        notKeyed.put("CatalogMoves.lockOrderHookForTests", TEST_HOOK);
+        notKeyed.put("CatalogMoves.afterWritesHookForTests", TEST_HOOK);
+        notKeyed.put("CatalogMoves.FoldPlan.pairsT", RESULT);   // RDR-254: the fold read for one owner move
+        notKeyed.put("CatalogMoves.FoldPlan.pairsS", RESULT);   // RDR-254: the fold read for one owner move
+        notKeyed.put("CatalogMoves.FoldPlan.orphans", RESULT);   // RDR-254: the fold read for one owner move
+        notKeyed.put("CatalogMoves.FoldPlan.linked", RESULT);   // RDR-254: the fold read for one owner move
+        notKeyed.put("CatalogMoves.FoldPlan.aliased", RESULT);   // RDR-254: the fold read for one owner move
+        notKeyed.put("CatalogMoves.FoldPlan.withHighlights", RESULT);   // RDR-254: the fold read for one owner move
         notKeyed.put("CatalogDocReads.MetaFilter.equalities", RESULT);
         notKeyed.put("CatalogDocReads.MetaFilter.bounds", RESULT);
         notKeyed.put("CatalogSensitiveLocatorReads.Page.documents", RESULT);
@@ -790,5 +800,12 @@ final class TenantKeyedStateTables {
             + "the per-tenant state is the timer's armed map, which has its own evictor");
         notKeyed.put("AckDeadlineTimer.Key.tenant", "the tenant component of the key of the armed map, a record "
             + "that exists only as that map's key; the map itself is listed as keyed");
+        notKeyed.put("BoardOwnerTenants.tokenTenants", "a supplier of the token tenants, read once per rebuild attempt; "
+            + "it holds no tenant's state");
+        notKeyed.put("BoardOwnerTenants.tupleTenants", "a supplier of the tuple_tenants rows, read once per rebuild "
+            + "attempt; it holds no tenant's state");
+        notKeyed.put("BoardOwnerWiring.Pending.tenant", "a component of a census item (a tenant and a topic whose re-arm "
+            + "failed), held in the list one scheduled rebuild attempt hands to the next; the list ends with the census "
+            + "and keeps no tenant's state: a re-arm of an evicted tenant finds no rows and succeeds");
     }
 }

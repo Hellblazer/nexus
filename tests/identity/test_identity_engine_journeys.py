@@ -27,6 +27,10 @@ from collections.abc import Callable
 import pytest
 
 from nexus.identity import token_header
+
+#: Opt out of ``tests/conftest.py``'s autouse ``_no_real_resume_pointer_store``: the work-engine rows read the resume
+#: pointer through the real opener, against this tenant's engine.
+REAL_RESUME_POINTER_STORE = True
 from tests.identity import (
     test_group_journeys,
     test_identity_step4,

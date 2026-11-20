@@ -987,6 +987,13 @@ class TestRenderSessionStartIsPure:
 
 
 class TestMailboxArmIntegration:
+    @pytest.fixture(autouse=True)
+    def _no_identity_bind(self, monkeypatch) -> None:
+        """session_start() runs the RDR-253 identity bind; under a real Claude ancestor (a laptop or agent session) it
+        reaches the engine with no tenant and the storage-touch guard fails the teardown. These pin the mailbox
+        integration, not the bind, so the bind is switched off the way the hook itself honours it."""
+        monkeypatch.setenv("NX_IDENTITY_BIND", "0")
+
     def test_arm_text_appended_when_available(self, monkeypatch) -> None:
         from unittest.mock import patch as _patch
 

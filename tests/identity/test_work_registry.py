@@ -20,6 +20,13 @@ from tests.test_identity_cmd import Box
 P_REAL = os.path.realpath("/p")
 
 
+def old_session(n: int = 0) -> str:
+    """The id of an EARLIER session (a Claude session id is a UUID: that shape is what makes a wait ref a session's)."""
+    import uuid
+
+    return str(uuid.UUID(int=0xABCDEF0000 + n))
+
+
 @pytest.fixture
 def box(tmp_path: Path) -> Box:
     return Box(tmp_path)
@@ -513,14 +520,14 @@ def test_running_lists_no_gone_worktree_and_no_wait_from_an_earlier_session(box:
     i1 = box.running_seat("alpha", 100)                                  # its holder's session is sid-100
     live_wt, gone_wt = tmp_path / "live", tmp_path / "gone"
     live_wt.mkdir()
-    for kind, ref in (("worktree", str(live_wt)), ("worktree", str(gone_wt)), ("wait", "sid-100"), ("wait", "sid-old")):
+    for kind, ref in (("worktree", str(live_wt)), ("worktree", str(gone_wt)), ("wait", "sid-100"), ("wait", old_session())):
         box.engine.put_work(i1, kind, ref, "running")
     running = json.loads(box.run("work", "list", "i1", "--running", "--json").stdout)["work"]
     assert sorted((r["kind"], r["ref"]) for r in running) == [("wait", "sid-100"), ("worktree", str(live_wt))]
     full = box.run("work", "list", "i1")
     assert full.exit_code == 0
     assert f"{gone_wt}  (stale: the worktree is gone)" in full.output
-    assert "sid-old  (stale: a wait from an earlier session)" in full.output
+    assert f"{old_session()}  (stale: a wait from an earlier session)" in full.output
     assert "sid-100  (stale" not in full.output
 
 
@@ -532,7 +539,7 @@ def test_the_limit_also_forgets_waits_from_an_earlier_session(box: Box) -> None:
     i1 = box.running_seat("alpha", 100)
     box.engine.put_work(i1, "wait", "sid-100", "running")
     for n in range(199):
-        box.engine.put_work(i1, "wait", f"sid-old-{n}", "running")
+        box.engine.put_work(i1, "wait", old_session(n), "running")
     assert work.register(box.engine, i1, "labrun", "fresh").state == "running"
     assert {k[2] for k in box.engine.work if k[0] == i1} == {"sid-100", "fresh"}
 
@@ -540,10 +547,12 @@ def test_the_limit_also_forgets_waits_from_an_earlier_session(box: Box) -> None:
 def test_no_current_session_judges_no_wait_superseded() -> None:
     from nexus.identity.work import wait_superseded
 
-    assert wait_superseded({"kind": "wait", "ref": "s-old"}, "s-new")
-    assert not wait_superseded({"kind": "wait", "ref": "s-old"}, None)
-    assert not wait_superseded({"kind": "wait", "ref": "s"}, "s")
-    assert not wait_superseded({"kind": "labrun", "ref": "s-old"}, "s-new")
+    assert wait_superseded({"kind": "wait", "ref": old_session()}, "s-new")
+    assert not wait_superseded({"kind": "wait", "ref": old_session()}, None)
+    assert not wait_superseded({"kind": "wait", "ref": old_session()}, old_session())
+    assert not wait_superseded({"kind": "labrun", "ref": old_session()}, "s-new")
+    for plain in ("develop-ci", "s-old", "pytest-full", "ci:develop@abc", "wait for peer"):
+        assert not wait_superseded({"kind": "wait", "ref": plain}, "s-new"), f"{plain!r} names no session: it is a hand wait"
 
 
 @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="POSIX signals")

@@ -46,6 +46,11 @@ final class RecordingScheduler extends ScheduledThreadPoolExecutor {
         return calls.stream().filter(s -> s.unit() == TimeUnit.MILLISECONDS).toList();
     }
 
+    /** Every one-shot scheduled in seconds, oldest first: the restart rebuild and each retry {@link BoardOwnerWiring} adds. */
+    List<Scheduled> secondsCalls() {
+        return calls.stream().filter(s -> s.unit() == TimeUnit.SECONDS).toList();
+    }
+
     /** The restart rebuild {@link BoardOwnerWiring#start} schedules, or null. */
     Scheduled rebuild() {
         return calls.stream()

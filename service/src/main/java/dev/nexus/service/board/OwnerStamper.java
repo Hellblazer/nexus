@@ -114,14 +114,80 @@ public final class OwnerStamper implements OwnerOutHook {
         return base.isEmpty() || base.contains("--") ? null : base;
     }
 
-    /** The timer's hand-off: re-decide from fresh rows, and post a hand-off or the escalation when it is due. */
+    /**
+     * The timer's hand-off: re-decide from fresh rows, and post a hand-off or the escalation when it is due. If the
+     * evaluation throws, the fail-safe still escalates a due row from the current owner row alone, so a deterministic
+     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run either throws, and the
+     * timer tries again after its retry delay.
+     */
     public void onDeadline(String tenant, String base) {
-        evaluate(tenant, base, OwnerDecision.Trigger.DEADLINE);
+        try {
+            evaluate(tenant, base, OwnerDecision.Trigger.DEADLINE);
+        } catch (Throwable t) {
+            log.warn("event=board_owner_deadline_evaluation_failed tenant={} base={} error={}; posting the fail-safe row",
+                tenant, base, t.getMessage(), t);
+            failSafe(tenant, base);
+        }
     }
 
-    /** Re-evaluates a topic and arms its deadline (the rebuild at engine start); posts only what is owed. */
+    /**
+     * Re-evaluates a topic and arms its deadline (the rebuild at engine start); posts only what is owed. If the
+     * evaluation throws, the deadline is armed from the current owner row alone ({@code episode_at} plus the topic's
+     * deadline); with no open owner row to arm from, the failure is rethrown for the census to retry.
+     */
     public void rearm(String tenant, String base) {
-        evaluate(tenant, base, OwnerDecision.Trigger.DONE);
+        try {
+            evaluate(tenant, base, OwnerDecision.Trigger.DONE);
+        } catch (Throwable t) {
+            log.warn("event=board_owner_rearm_evaluation_failed tenant={} base={} error={}; arming from the owner row",
+                tenant, base, t.getMessage(), t);
+            if (!armFromRow(tenant, base)) {
+                throw t instanceof RuntimeException r ? r : new IllegalStateException(t);
+            }
+        }
+    }
+
+    /** Arms the topic's deadline from its current owner row alone; false when no open owner row names one. */
+    private boolean armFromRow(String tenant, String base) {
+        return scope.withTenant(tenant, ctx -> {
+            BoardTopicLock.lock(ctx, tenant, base);
+            Instant due = OwnerDecision.rowDeadline(BoardReads.group(groups, identities, tenant, base), base,
+                BoardReads.rows(ctx, tenant, base, "owner"));
+            if (due == null) {
+                return false;
+            }
+            if (timer != null) {
+                timer.arm(tenant, base, due);
+            }
+            return true;
+        });
+    }
+
+    /** The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock; the liveness read may fail soft. */
+    private void failSafe(String tenant, String base) {
+        scope.withTenant(tenant, ctx -> {
+            BoardTopicLock.lock(ctx, tenant, base);
+            List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
+            GroupView group = BoardReads.group(groups, identities, tenant, base);
+            Identities ids;
+            try {
+                ids = group == null ? new Identities(Map.of(), Map.of())
+                    : BoardReads.identities(identities, tenant, List.of(), owners, group);
+            } catch (Throwable t) {
+                // Nobody can be shown live: the row then names no one and wakes every member, as the RDR says for that case.
+                log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
+                ids = new Identities(Map.of(), Map.of());
+            }
+            OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, clock.instant());
+            if (d.post() != null) {
+                post(ctx, tenant, base, d.post());
+                log.warn("event=board_owner_failsafe_row tenant={} base={} sha={}", tenant, base, d.post().sha());
+            }
+            if (timer != null) {
+                timer.arm(tenant, base, d.deadline());
+            }
+            return null;
+        });
     }
 
     // ── one evaluation ───────────────────────────────────────────────────────
@@ -155,10 +221,14 @@ public final class OwnerStamper implements OwnerOutHook {
             scope.withTenant(tenant, ctx -> {
                 BoardTopicLock.lock(ctx, tenant, base);
                 GroupView group = BoardReads.group(groups, identities, tenant, base);
-                OwnerDecision.Decision d = OwnerDecision.stamperError(group, sha,
+                OwnerDecision.Decision d = OwnerDecision.stamperError(group, base, sha,
                     BoardReads.rows(ctx, tenant, base, "owner"), clock.instant());
                 if (d.post() != null) {
                     post(ctx, tenant, base, d.post());
+                    // Armed under the lock, as in evaluate: the row is an owner row and runs the deadline like any other.
+                    if (timer != null) {
+                        timer.arm(tenant, base, d.deadline());
+                    }
                 }
                 return null;
             });

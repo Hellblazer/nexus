@@ -263,6 +263,7 @@ def test_session_context_puts_the_due_section_after_the_t1_lines(monkeypatch: py
 
     monkeypatch.setattr(board_due, "due_lines", fake)
     monkeypatch.setattr(session_context, "which", lambda _cmd: None)
+    monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: [])  # no engine in this test
     out = session_context.run({"session_id": SID}).stdout or ""
     assert seen == [SID]
     t1_end = out.index(session_context._T1_TOP_LINES[-1])
