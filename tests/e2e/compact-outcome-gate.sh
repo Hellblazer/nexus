@@ -2,14 +2,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # tests/e2e/compact-outcome-gate.sh -- after a real compaction, does the model go back to its open work?
 #
-#   tests/e2e/compact-outcome-gate.sh [--runs N] [--arms real,control,bad,fix] [--threshold K]
-#                                     [--gate-arm real] [--min-score 0.8] [--jobs J] [--out DIR] [--keep]
+#   tests/e2e/compact-outcome-gate.sh [--runs 5] [--budget 1.5] [--arms real,control,bad,fix] [--threshold 4]
+#                                     [--gate-arm real] [--min-score 0.8] [--jobs 5] [--out DIR] [--keep]
 #
-# Runs lib/compact_outcome.py matrix (live `claude`, haiku-class, about $0.03 and 1 minute per run).
-# Exit: 0 gate arm reached --threshold and the control and planted-bad arms did not; 1 it did not, or
-# a non-vacuity check failed; 2 UNVERIFIED (claude missing, or a run produced no verdict); 64 usage.
-# Measurement only: nothing here changes conexus/hooks. Mechanics, arms and judging: the docstring of
-# lib/compact_outcome.py. Unit tests (no claude): tests/hooks/test_compact_outcome_harness.py.
+# RUN BY HAND ONLY. This starts real `claude` sessions and spends model calls: nothing in CI, the default pytest
+# run or any other script runs it, and none should. The gate arm is the shipped conexus compaction hooks over a
+# stub nx (see the docstring of lib/compact_outcome.py for the arms, the stub and the scratch plugin).
+#
+# COST AND WALL TIME. Each run is one haiku-class session that stops at --max-budget-usd (this script's
+# --budget, default 1.5). arms x runs sessions: 4 x 5 = 20 by default. Measured 2026-11-04: about $0.03 and one
+# minute per run. Arms go one after another, the runs of an arm in parallel (--jobs): expect 5 to 10 minutes of
+# wall time and well under $1; the ceiling is 20 sessions x --budget x 2 attempts (a NOISE run is retried once).
+#
+# VERDICTS, per run. PASS: a real automatic compaction, then at least --min-score of the open items acted on
+# with no user input. FAIL: it acted on fewer (did one item and ended, or asked). NOISE: no verdict (no
+# automatic compaction seen, the turn did not finish or was refused, the hooks did not run, the arm's injection
+# is not what the arm plants, or the stub nx was asked for a call it does not answer). UNVERIFIED: claude is
+# missing.
+# EXIT. 0: the gate arm reached --threshold passes and the control and planted-bad arms did not. 1: it did
+# not, or a control arm reached the threshold (the gate does not discriminate). 2: UNVERIFIED, any run
+# without a verdict after its retry; never a pass. 64: usage (the gate arm, bad and control must all run;
+# --threshold must be 1..--runs).
+# Measurement only: nothing here changes conexus/hooks. Unit tests (no claude, in the default suite):
+# tests/hooks/test_compact_outcome_harness.py.
 #
 # SPIKE (Claude Code 2.1.318, 2026-11-04), how a compaction is forced:
 #   * `claude -p --resume <id> "/compact"` works (trigger "manual", compact_boundary event, the checkpoint
@@ -37,7 +52,7 @@ args=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) [ $# -ge 2 ] || { echo "--out needs a directory" >&2; exit 64; }; OUT="$2"; shift 2 ;;
-        -h|--help) sed -n '4,14p' "$0" >&2; exit 64 ;;
+        -h|--help) sed -n '3,27p' "$0" >&2; exit 64 ;;
         *) args+=("$1"); shift ;;
     esac
 done

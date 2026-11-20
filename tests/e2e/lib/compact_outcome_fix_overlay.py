@@ -14,6 +14,13 @@ conexus/hooks changes). The gate's `fix` arm adds two hooks beside the real comp
 
 This is the behaviour under test, written down so the gate can run it; the spec for the real change
 is separate and this gate becomes its acceptance test. Standard library only. Never exits non-zero.
+
+Against today's compact_checkpoint.py (checked 2026-11-19): the real checkpoint now lists the session's running
+processes and background work itself ("Running for this session", the identity's work rows) and checks the board
+against the facts, so the overlay's task and branch list overlaps it. What the real hooks still do not say is the
+directive, and that is the part this overlay adds. The overlay keeps its own file, <session>.openwork.json: the real
+hook's prune takes only *.md, *.injected and .tmp-* files, and the overlay's inject deletes only its own file
+(tests/hooks/test_compact_outcome_harness.py pins both). It needs nothing from the plugin's sibling modules.
 """
 from __future__ import annotations
 
