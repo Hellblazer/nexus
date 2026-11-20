@@ -2,7 +2,8 @@
 title: "Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves"
 id: RDR-238
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-20
 priority: high
 author: Sam
 reviewed-by: self
@@ -83,7 +84,10 @@ per memory, files were split from a bundle and never indexed (a few dozen
 files are reachable only through another file), and no one measures any of
 it. Sam: "we need to somehow get that ensconced in our habits." The fix
 delivers checks that run without anyone remembering them, and a measurement
-that says whether the curation helped.
+that says whether the curation helped. (At close the checks are delivered; the
+measurement is pending under nexus-qo7ie.15, and by its confounds its best
+outcome is "no regression observed; A3 stays assumed", never "helped": Phase 2
+Step 3, Close.)
 
 The same drift reaches beyond memory, to anything that keeps running or
 keeping after its purpose ends with nobody assigned to notice. Found on
@@ -95,7 +99,8 @@ and the RDR-205 session ledger, whose writer and readers 7.70.0 deleted while
 its engine template and 40,785 rows stayed (nexus-onjvw). Sam: "we want to be
 sure we're paying attention to things and ensuring we're not generating a lot
 of heat and waste." The fix also delivers a last-use signal, read on a
-schedule, for the four kinds of store the curation report's cold-state
+schedule, for the four kinds of store (six as built, counted singly:
+`src/nexus/memory_curate/cold.py:3`) the curation report's cold-state
 section lists (Technical Design 4): tuple subspaces, T2 namespaces and memory
 files, MCP tools and CLI verbs, and injected context.
 
@@ -809,7 +814,7 @@ content ends with the line `replaces: A`, and the put response echoes A's
 id, title and content; `nx memory restore <id>` brings A back. A `replaces` naming a row in
 another project is refused, and B is not written.
 
-### Phase 1: T2 replacement by deletion (as built, by quarantine)
+### Phase 1 (CLOSED, 2026-11-19): T2 replacement by deletion (as built, by quarantine)
 
 *Amended at close: the steps below say "delete" where the build quarantines;
 Key Discoveries 2026-11-02 rules (Sam's decision of that date).*
@@ -841,7 +846,7 @@ feature until the bitemporal alternative is reconsidered.
 *Run 2026-11-02 as a measurement, with an agent's marks in place of Sam's; the
 stop rule tripped and Sam chose quarantine (Key Discoveries 2026-11-02).*
 
-### Phase 2: The bounded index
+### Phase 2 (CLOSED, 2026-11-19, re-measure pending as nexus-qo7ie.15): The bounded index
 
 #### Step 1: Measure
 
@@ -934,7 +939,7 @@ state whether the window was truncated. A truncated window uses the realised
 main-session count in the expectation. The em dash window (14 days) lies well
 inside retention.
 
-### Phase 3: Habits
+### Phase 3 (CLOSED, 2026-11-19): Habits
 
 #### Step 1: SessionStart check
 
@@ -1069,7 +1074,8 @@ read leaves A3 assumed; a rule whose count exceeds its bound still goes back.
 ### Scope Verification
 
 Gap 1 maps to Phase 1 (engine and client) and the frontmatter field, Gap 2
-to Phase 2 (measure, split, re-measure), and Gap 3 to Phase 3 (Step 1 the
+to Phase 2 (measure, split, re-measure; the re-measure is pending at close
+under nexus-qo7ie.15, see Close), and Gap 3 to Phase 3 (Step 1 the
 SessionStart check, Step 2 `--files`, `--t2` and `--agents`, Step 3
 `--cold`, Step 4 the release step). `--agents` and `--cold` answer Gap 3's
 second paragraph, the drift beyond memory that Sam asked the report to
@@ -1100,7 +1106,9 @@ the report lists it, and any deletion of data rides its own change.
   reads one small directory, prints at most one line and never blocks a
   session.
 - **Measurement.** Phase 2 counts compliance before and after the split
-  with the same `violations` query, so the two are comparable.
+  with the same `violations` query, so the two are comparable. At close only
+  the before count exists; the after count is the dated follow-up
+  (nexus-qo7ie.15, Close).
 
 ### Proportionality
 
@@ -1153,8 +1161,12 @@ em dash line never left the always tier. On 2026-12-09, or 2026-12-10 at the
 latest, the pooled rare-rule read, with the realised window start and any
 truncation recorded and the outcome worded as Phase 2 Step 3 says. Both results
 are appended to the post-mortem. A3 stays assumed; A2 is resolved by Sam's
-decision (Critical Assumptions). The parent bead nexus-qo7ie stays open
-(`bd show nexus-qo7ie.15` lists it open on 2026-11-19; critique finding 6).
+decision (Critical Assumptions). The parent bead nexus-qo7ie stays open as
+the follow-up's parent. nexus-qo7ie.15 is deferred until 2026-11-24, which
+surfaces the first read; nothing in beads surfaces the second. The second read
+is carried by a dated thread on the board of the session that closed this RDR
+(threads/marlowe, due 2026-12-09), and that session re-defers the bead to
+2026-12-09 after the 11-24 read.
 
 One observation from the critique, not acted on here: the always tier grew from
 17 entries at the revised split to 25 in ten days, 955 of the 1,500-token
@@ -1181,3 +1193,4 @@ when the index passes the budget.
 | 2026-11-09 | Phase 2 Step 2 split recorded (nexus-qo7ie.13): 173 memory files, `MEMORY.md` 18,451 to 3,587 bytes, 4 of the 5 measured rules moved (S-8 met), em dash stayed. T2 `nexus/rdr-238-split-2026-11-09`. Entered at close. |
 | 2026-11-09 | Phase 2 critique recorded (nexus-qo7ie.14): not-justified, 2 ship-blockers fixed, `MEMORY.md` revised to 2,612 bytes and 17 entries, 3 confounds on A3 carried into Step 3. T2 `nexus/rdr-238-p2-critique-2026-11-09`. Entered at close. |
 | 2026-11-19 | Close edit (sources: T2 `nexus/critique-5476be38d-nexus-qo7ie-2026-11-20`, which found six Significant and no ship-blocker, and Sam's ruling T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`). S1: Phase 2 Steps 1 and 2, the Phase 2 critique and the A2 and A3 status entered in Key Discoveries and above; A2 marked measured and resolved by Sam's decision, A3 untested at close with follow-up nexus-qo7ie.15 due 2026-12-10, in Critical Assumptions and Assumption Verification. S2: the em dash premise corrected (3.8 per 100, not 11.2); its line never left the always tier, so the 2026-11-24 read is a control. S3: the pooled rare-rule confounds and the outcome wording written into Phase 2 Step 3. S4: Phase 1 shipped quarantine, not deletion; the sites that said "delete" are amended in place and point at the 2026-11-02 entry, Alternative 1's rejection reason corrected, the thirteen-token title backstop, the 409 cases and the K5 limit added to Technical Design 1. S5: the 2026-12-10 read sits at the edge of the transcript retention (read 2026-12-09 or 12-10, record the realised window start). S6: the Close section records the close on 2026-11-19, about 20 days before Phase 2's end. The RDR-240 Phase 1 Step 1 prerequisite is ticked (nexus-qo7ie.31). |
+| 2026-11-19 | Closed as Implemented (`nx rdr set-status`; `closed_date` is the UTC date): close re-critique T2 `nexus/critique-d592663fc-nexus-qo7ie-2026-11-20-r1` found three Significant, fixed here (the pending measurement marked at Gap 3, Scope Verification and Cross-Cutting; the follow-up bead deferred to 2026-11-24 with the second read on a dated board thread; the as-built store count). Closed as Implemented over the partial verdict on Sam's ruling, audit T2 `nexus_rdr/238-close-override-2026-11-19`. Post-mortem: `post-mortem/rdr-238-memory-curation.md`. |
