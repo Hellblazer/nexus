@@ -2,9 +2,11 @@
 """The ack of a develop red names its poster by identity id in ``from`` (RDR-252, bead nexus-igea9).
 
 The engine never reads an ack's ``from``. It counts an ack when the row's sender-session stamp, mapped through the
-session index, names the red's current owner. ``from`` is a label: the one ``nx group ack-times`` and people read, and
-the one the engine is to refuse a mismatch on. A row posted by hand with ``from=<session alias>`` (tuple b18af4e1,
-2026-11-20) still stopped the hand-off, and only ack-times counted it as no ack.
+session index, names the red's current owner. ``from`` is a label: the one ``nx group ack-times`` and people read. The
+client's stamp of it is a HINT, not the truth: from engine 0.1.200 the engine stamps ``from`` itself, as the identity its
+sender session maps to (a delegated child to its parent), and leaves it as sent when nothing maps. A row posted by hand
+with ``from=<session alias>`` (tuple b18af4e1, 2026-11-20) still stopped the hand-off, and only ack-times counted it as
+no ack.
 
 So every client write of a ``kind=ack`` row to a ``board/ci/<topic>--owner`` subspace carries the caller's own identity
 in ``from``, whatever the caller typed. :func:`stamp_ack_from` does it in ``HttpTupleStore._out_raw``, the one place

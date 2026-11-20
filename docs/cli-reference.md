@@ -5788,7 +5788,7 @@ The tuple space is a coordination and metadata store, not a value store: `--body
 | `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
 | `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
 
-An ack of a develop red is the one write whose `from` is not the caller's to choose: a `kind=ack` row on a `board/ci/<topic>--owner` subspace is stamped with the caller's own identity id (the token record's, as `nx group` reads it) whatever `--dim from=` said (one info line logs the replaced value), and refused when the process holds no identity (`nx identity show` says whether it does). The MCP `tuple_out` tool does the same, and so does an `ack` whose reply is such a row. `nx ci ack` is the verb that posts one.
+An ack of a develop red is the one write whose `from` is not the caller's to choose: a `kind=ack` row on a `board/ci/<topic>--owner` subspace is stamped with the caller's own identity id (the token record's, as `nx group` reads it) whatever `--dim from=` said (one info line logs the replaced value), and refused when the process holds no identity (`nx identity show` says whether it does). The MCP `tuple_out` tool does the same, and so does an `ack` whose reply is such a row. The stamp is a hint: the engine counts the row's sender-session stamp, and from engine 0.1.200 stamps `from` itself as the identity that session maps to. `nx ci ack` is the verb that posts one.
 
 ### nx tuple rd
 

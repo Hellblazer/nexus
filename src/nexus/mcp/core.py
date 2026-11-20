@@ -9163,8 +9163,8 @@ def tuple_out(
     project/title or a document id), not the content itself.
 
     A `kind=ack` row on a `board/ci/<topic>--owner` subspace gets `from` set
-    to the caller's own identity id whatever `dims` says; a caller with no
-    identity is refused (RDR-252).
+    to the caller's own identity id whatever `dims` says (a hint: the engine
+    counts the sender session); a caller with no identity is refused (RDR-252).
 
     Idempotent by construction: the tuple id is derived from the
     template's `id_from` fields only, so a retry lands on the same tuple.
