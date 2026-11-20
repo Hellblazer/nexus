@@ -47,4 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/nexus/SKILL.md`: a "Where a note goes" table (identity/<id> is a seat's own standing context, project T2 is for facts other sessions need, memory files are Sam's rules, the threads board is the public view) and the one line on writing `memory_put(project="identity/<id>", ...)` (RDR-253 Step 6 part 3, nexus-hczdo).
+
 ## Deferred to the next client release

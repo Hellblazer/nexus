@@ -14,6 +14,17 @@ effort: low
 | T2 | Persistent | `memory_put`, `memory_get`, `memory_search` | Cross-session state, agent relay notes |
 | T3 | Permanent | `search`, `store_put`, `store_list` | Validated findings, decisions, patterns |
 
+## Where a note goes
+
+| Put it in | When it is |
+|---|---|
+| T2 project `identity/<id>` | this seat's own standing context: its open questions, recurring commands, what it owns. Seats only (an ephemeral or delegated identity is refused). |
+| T2 project `{repo}` | a fact other sessions need |
+| memory files | Sam's rules |
+| the threads board | the public cross-session view of your work |
+
+Write your own: `memory_put(project="identity/<id>", ...)`, with `<id>` from `nx identity show` (CLI: `nx memory put --mine`). SessionStart lists up to five titles as one line, `Your notes (identity/<id>): ...`.
+
 ## Common Operations
 
 ```

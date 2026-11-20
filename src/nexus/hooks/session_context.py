@@ -289,6 +289,15 @@ def run(payload: dict | None) -> HookResult:
     else:
         debug("nx not found on PATH, skipping T2 memory context")
 
+    # --- The bound identity's own T2 notes: at most ONE line (RDR-253 Step 6 part 3, nexus-hczdo) ---
+    if session_id:
+        try:
+            from nexus.hooks import identity_notes  # noqa: PLC0415 — deferred: only a payload with a session id pays
+
+            output_lines.extend(identity_notes.notes_lines(session_id))
+        except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
+            debug("identity notes line skipped")
+
     # --- bd ready ---
     if which('bd'):
         ready_output = run_command(['bd', 'ready'], timeout=BD_TIMEOUT, cwd=cwd)
