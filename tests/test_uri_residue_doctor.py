@@ -276,7 +276,7 @@ def test_nx_catalog_doctor_flag_json(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **k: _Reader(_fixture()))
     result = CliRunner().invoke(main, ["catalog", "doctor", "--uri-residue", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["uri_residue"]["status"] == "warn"
+    assert json.loads(result.stdout)["uri_residue"]["status"] == "warn"
 
 
 def test_nx_doctor_supplementary_sweep_carries_the_row(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
