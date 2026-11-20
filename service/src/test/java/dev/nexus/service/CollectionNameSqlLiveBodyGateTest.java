@@ -125,8 +125,8 @@ class CollectionNameSqlLiveBodyGateTest {
         "nexus.quarantine_restore_chunks", "vectors-053-quarantine-restore-chunk-keys-only.xml",
         "nexus.reaper_expire_client_quarantine", "vectors-056-gc-quarantine-expires-at.xml");
 
-    /** Floors on the real tree (233 includes and 119 live functions at the first run); a scan below them read too little. */
-    static final int INCLUDES_FLOOR = 233;
+    /** Floors on the real tree (234 includes and 119 live functions: 233 at the first run, 234 at develop 118701321); a scan below them read too little. */
+    static final int INCLUDES_FLOOR = 234;
     static final int LIVE_FUNCTIONS_FLOOR = 100;
 
     /**
