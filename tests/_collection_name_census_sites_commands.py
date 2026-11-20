@@ -133,7 +133,7 @@ SITES: tuple[S, ...] = (
       ('# key configured, never silently mints a bge collection.', 'collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())'),
       'primitive_call', 'mint', MINT_A),
     S('src/nexus/commands/index.py',
-      ('if collection is not None:', 'collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())'),
+      ('# A dry run writes nothing, so it needs no readable registry (no row read).', 'collection = t3_collection_name('),
       'primitive_call', 'mint', MINT_A),
     S('src/nexus/commands/index.py',
       ('# raises loud if local.embed_model is voyage-shaped with no key.', 'collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())'),
