@@ -10508,9 +10508,10 @@ public final class CatalogRepository {
      * to INTEGER so ordering is numeric, mirroring the retired local arm's
      * {@code MAX(CAST(SUBSTR(model_version,2) AS INTEGER))} (catalog_docs.py).
      * Malformed/legacy values (empty, no leading {@code v}) fall back to 0 rather
-     * than failing the cast — {@code LEGACY_GRANDFATHERED.eq(false)} already excludes
-     * the rows expected to be non-conformant, but this keeps the ORDER BY itself
-     * total rather than erroring on an unexpected shape.
+     * than failing the cast — a grandfathered or legacy-slug row is such a shape
+     * (RDR-229 P2.8 dropped the {@code legacy_grandfathered} filter, so those rows
+     * now reach this ORDER BY), and the fallback keeps it total rather than
+     * erroring on an unexpected shape.
      */
     // nexus-zrcj7: retired from a raw DSL.field("CASE WHEN {0} ~ ... END", ...)
     // template onto jOOQ's typed CASE builder (DSL.when/.otherwise) plus
@@ -10522,7 +10523,16 @@ public final class CatalogRepository {
             CATALOG_COLLECTIONS.MODEL_VERSION.substring(2).cast(Integer.class))
         .otherwise(0);
 
-    /** Find highest-versioned collection for (content_type, owner_id, embedding_model). */
+    /**
+     * Find highest-versioned collection for (content_type, owner_id, embedding_model).
+     *
+     * <p>RDR-229 P2.8 (nexus-p2m1x.13, engine 0.1.200; lead ruling 2026-11-20): a
+     * {@code legacy_grandfathered} row is a candidate like any other. The filter
+     * {@code legacy_grandfathered = false} used to drop it, so a knowledge collection
+     * registered under a label that is not of the conformant shape, or a legacy slug,
+     * answered 404 and the client could not find it by its tuple. The supersession and
+     * quarantine filters stay; ordering is untouched.
+     */
     public Map<String, Object> collectionForTuple(String tenant, String contentType,
                                                     String ownerId, String embeddingModel) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -10533,7 +10543,6 @@ public final class CatalogRepository {
                        .where(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType)
                               .and(CATALOG_COLLECTIONS.OWNER_ID.eq(ownerId))
                               .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(embeddingModel))
-                              .and(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED.eq(false))
                               .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
                               // nexus-bc7ps: a QUARANTINE sibling is not a candidate.
                               // Without this the tie below falls to NAME DESC and 'q'
@@ -10572,7 +10581,12 @@ public final class CatalogRepository {
                        // its first document's indexed_at, or the migration time, and a rename copies it
                        // onto the successor, so it is the age of the collection's lineage. At an equal
                        // version a later sibling cannot change what an existing tuple resolves to,
-                       // whatever it is called (a higher version still can). P3.1's collection_id (identity) replaces created_at here with the
+                       // whatever it is called (a higher version still can), unless the registration
+                       // carries its own created_at: upsertCollection, importCollectionsBatch and
+                       // doImportCollection take it from the request body on a fresh insert, so an
+                       // import can land an older row. A legacy_grandfathered row is a candidate like
+                       // any other (RDR-229 P2.8, engine 0.1.200, dropped that filter here and in
+                       // TargetSelection), so it ties and wins by the same order. P3.1's collection_id (identity) replaces created_at here with the
                        // same meaning, and TargetSelection (reembed) orders the same way.
                        // An ordering, not a parse of the name (RDR-204, CollectionParseGateTest).
                        // Consumers read the returned row's model_version (HttpCatalogClient.collection_for,
