@@ -61,6 +61,7 @@ def _as(monkeypatch: pytest.MonkeyPatch, world: World, pid: int) -> None:
 def _nobody(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NX_IDENTITY_TOKEN", raising=False)
     monkeypatch.setattr(token_header, "_discover", lambda: None)
+    monkeypatch.setattr(token_header, "has_claude_ancestor", lambda: False)  # a Claude-ancestored run (a laptop or agent session) must still read as nobody
     token_header.reset_for_tests()
 
 

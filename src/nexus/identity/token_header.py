@@ -25,7 +25,7 @@ MCP server itself) and sends the token in :data:`~nexus.identity.token_contract.
 The ancestor is discovered once per process, a miss included (a process with no Claude ancestor never walks the
 process table again): the ancestry of a running process does not change. The registry lookup that names the token
 file is repeated on every call, because its answer does change: an in-place ``/restart`` gives the same Claude pid a new
-``startedAt``, hence a new token file, under a process (the MCP server) that outlives it.
+``startedAt``, hence a new token file, under any process that outlives it (the MCP server may; that it does across an in-place /restart is not yet measured).
 """
 from __future__ import annotations
 
