@@ -2,7 +2,8 @@
 title: "Structured Asks: Typed ask Blocks on the Threads Board, Answered through a Mediator Session or nx ask and Routed to the Asker's Mailbox"
 id: RDR-245
 type: Feature
-status: accepted
+status: closed
+closed_date: 2026-11-20
 accepted_date: 2026-11-06
 priority: medium
 author: Claude (architect-planner, for Sam)
@@ -414,7 +415,7 @@ and leave legacy entries as they parse today:
 
 **Lint.** `nx ask list` prints its findings under "Lint (N)" (and `--json` in
 `lint`); there is no `nx ask lint` command. Each finding names its entry and
-ask and a rule (`_unopened_asks` and `lint`, `threads.py:892-971`):
+ask and a rule (`_unopened_asks` and `lint`, `threads.py:976-1065`):
 
 - `missing-field`: a missing required field.
 - `few-options`: fewer than two options with text (an `option:` line with no
@@ -593,7 +594,7 @@ and refused otherwise.
   neither a readable answer nor a readable batch record are named, not
   hidden, unless the row's own time is older than the 7-day window.
 
-`answer` refuses (`ask.py:852-1030`) when `--expect` differs from the current
+`answer` refuses (`ask.py:852-1028`) when `--expect` differs from the current
 version (and prints the current text), when the ask has `after:`, when the
 entry has neither an `identity:` nor a `session:` line, when (with no identity
 line) its `session:` is not a lower-case canonical UUID, when two or more
@@ -1261,3 +1262,4 @@ dependency, no new surface, no second parser.
 - 2026-11-07: wording amendment to match reviewed code (`nexus-2egi7`, `nexus-wc4jj.15`): per-block end-line code, ask GET headroom, choice range.
 - 2026-11-11: Wording amended to the running code (standing grant 3; drift check against develop 54d356f2a): `after:` conditional only on a real value; no `nx ask lint` (findings print in `nx ask list`) and the full lint rules and fail-safe reads; greyed entries with no usable time, `answered` display; RDR-064 console and bead-fold behaviour; Step 5 now quotes the shipped AGENTS.md paragraph, and the separate Decision 1 CLAUDE.md line was declined; line cites updated to the current files; answer refusals, `show`, digest, `list --json` and batch-record shape; version whitespace rule and `[irreversible]` marker; example version; tmux `held` state and the `after:`-less blocking ask; mediator contract additions; drain-hook match needs `sam_words` and the `(ask answer: <reason>)` line. Sam's decisions U1-U3 recorded (Step 0 cloud only, baseline dropped, metrics by hand query ~2026-11-23).
 - 2026-11-20: wording matched to the running code at close (grant 3; close critique S2): answers route by the entry's `identity:` line when present (RDR-253 Step 5), else by `session:`; the record title, mailbox address, `address_kind` and refusals follow; RDR-253 added to the relationship table; the AGENTS.md opening piece re-quoted from AGENTS.md as it stands. `nx ask digest` now reads identity-keyed records too (close critique S1).
+- 2026-11-20: Closed, Implemented. Sam, 2026-11-19: "go with all of it" (T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`), closing RDRs whose build is done and only a measurement remains; for RDR-245 it supersedes his U3 hold of 2026-11-11 (close after the metrics query). The success-metrics query still runs on 2026-11-23 and its numbers are appended to the post-mortem (`docs/rdr/post-mortem/rdr-245-structured-asks-on-the-threads-board.md`). Close critique partial (0 C, 5 S); S1 and S2 fixed in this change, S3 to S5 recorded in the post-mortem (Sam chose "Fix bug and text, then close").
