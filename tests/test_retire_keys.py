@@ -1502,6 +1502,8 @@ class TestNoAutomaticTrigger:
         "service/src/test/java/dev/nexus/service/ChunkKeySweepIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkKeySweepRootTargetIntegrationTest.java",
         "service/src/test/java/dev/nexus/service/ChunkConstraintRoutesIntegrationTest.java",
+        # RDR-229 P2.5: adds the allow-list CHECK through the route to show an imported plain-named quarantine row is held to it
+        "service/src/test/java/dev/nexus/service/ImportedPlainNamedQuarantineAllowListTest.java",
         "service/src/test/java/dev/nexus/service/db/ManifestWriteRetryGateTest.java",
         "service/src/test/java/dev/nexus/service/db/TenantKeyedStateTables.java",
         "service/src/test/java/dev/nexus/service/db/ChunksWriterLastWrittenAtScanTest.java",
