@@ -28,7 +28,7 @@ def row(name: str, content_type: str, owner: str, model: str, version: str = "v1
             "dimension": 1024, "aspects_enabled": None}
 
 
-def good(content_type="docs", owner="1-2", model="voyage-context-3", version="v1", **kw) -> dict:
+def good(content_type="docs", owner="1-2", model="minilm-l6-v2-384", version="v1", **kw) -> dict:
     return row(f"{content_type}__{owner}__{model}__{version}", content_type, owner, model, version, **kw)
 
 
@@ -40,7 +40,7 @@ def report(rows):
 
 
 def test_agreeing_rows_have_no_disagreement() -> None:
-    r = report([good(), good("code", "1-3", "voyage-code-3")])
+    r = report([good(), good("code", "1-3", "bge-base-en-v15-768")])
     rv = r["row_vs_name"]
     assert rv["live_rows"] == 2 and rv["name_conformant"] == 2
     assert rv["content_type"] == {"compared": 2, "mismatch": 0}
@@ -51,7 +51,7 @@ def test_agreeing_rows_have_no_disagreement() -> None:
 
 
 def test_a_mismatched_row_is_counted_per_field_and_listed_with_both_values() -> None:
-    bad = row("docs__1-2__voyage-context-3__v1", "code", "1-2", "voyage-code-3", "v2")
+    bad = row("docs__1-2__minilm-l6-v2-384__v1", "code", "1-2", "bge-base-en-v15-768", "v2")
     r = report([bad, good("rdr", "1-9")])
     rv = r["row_vs_name"]
     assert rv["content_type"] == {"compared": 2, "mismatch": 1}
@@ -61,30 +61,30 @@ def test_a_mismatched_row_is_counted_per_field_and_listed_with_both_values() -> 
     assert listed["name"] == bad["name"]
     assert listed["differences"] == {
         "content_type": {"row": "code", "name": "docs"},
-        "embedding_model": {"row": "voyage-code-3", "name": "voyage-context-3"},
+        "embedding_model": {"row": "bge-base-en-v15-768", "name": "minilm-l6-v2-384"},
         "model_version": {"row": "v2", "name": "v1"},
     }
 
 
 def test_an_empty_row_value_is_a_mismatch_not_a_skip() -> None:
-    r = report([row("docs__1-2__voyage-context-3__v1", "", "1-2", "voyage-context-3")])
+    r = report([row("docs__1-2__minilm-l6-v2-384__v1", "", "1-2", "minilm-l6-v2-384")])
     assert r["row_vs_name"]["content_type"]["mismatch"] == 1
     assert r["row_vs_name"]["rows_that_disagree"][0]["differences"]["content_type"] == {"row": "", "name": "docs"}
 
 
 def test_an_owner_difference_is_its_own_bucket_and_is_not_a_disagreement() -> None:
-    r = report([row("docs__1-2__voyage-context-3__v1", "docs", "slug-owner", "voyage-context-3")])
+    r = report([row("docs__1-2__minilm-l6-v2-384__v1", "docs", "slug-owner", "minilm-l6-v2-384")])
     rv = r["row_vs_name"]
     assert rv["owner_differences"] == {"compared": 1, "differ": 1, "expected": True,
-                                       "names": ["docs__1-2__voyage-context-3__v1"]}
+                                       "names": ["docs__1-2__minilm-l6-v2-384__v1"]}
     assert rv["rows_that_disagree"] == [], "an owner difference alone is expected, so the row is not listed as a disagreement"
     assert rv["content_type"]["mismatch"] == 0
 
 
 def test_lifecycle_is_quarantine_exactly_when_the_name_starts_with_quarantine() -> None:
-    ok_q = row("quarantine-docs__1-2__voyage-context-3__v1", "docs", "1-2", "voyage-context-3", lifecycle="quarantine")
-    state_no_prefix = good("code", "1-3", "voyage-code-3", lifecycle="quarantine")
-    prefix_no_state = row("quarantine-rdr__1-4__voyage-context-3__v1", "rdr", "1-4", "voyage-context-3", lifecycle="live")
+    ok_q = row("quarantine-docs__1-2__minilm-l6-v2-384__v1", "docs", "1-2", "minilm-l6-v2-384", lifecycle="quarantine")
+    state_no_prefix = good("code", "1-3", "bge-base-en-v15-768", lifecycle="quarantine")
+    prefix_no_state = row("quarantine-rdr__1-4__minilm-l6-v2-384__v1", "rdr", "1-4", "minilm-l6-v2-384", lifecycle="live")
     r = report([ok_q, state_no_prefix, prefix_no_state, good()])
     lc = r["row_vs_name"]["lifecycle"]
     assert lc == {"checked": 4, "mismatch": 2, "quarantine_state_without_prefix": 1, "prefix_without_quarantine_state": 1}
@@ -96,13 +96,13 @@ def test_lifecycle_is_quarantine_exactly_when_the_name_starts_with_quarantine() 
 
 
 def test_a_quarantine_row_is_compared_on_the_name_it_quarantines() -> None:
-    q = row("quarantine-code__1-3__voyage-code-3__v1", "code", "1-3", "voyage-code-3", lifecycle="quarantine")
+    q = row("quarantine-code__1-3__bge-base-en-v15-768__v1", "code", "1-3", "bge-base-en-v15-768", lifecycle="quarantine")
     r = report([q])
     assert r["row_vs_name"]["content_type"] == {"compared": 1, "mismatch": 0}
 
 
 def test_a_name_that_does_not_parse_is_counted_and_not_compared() -> None:
-    r = report([row("legacy-slug", "docs", "o", "voyage-context-3"), row("c123", "code", "1-1", "voyage-code-3")])
+    r = report([row("legacy-slug", "docs", "o", "minilm-l6-v2-384"), row("c123", "code", "1-1", "bge-base-en-v15-768")])
     rv = r["row_vs_name"]
     assert rv["name_not_conformant"] == 2 and rv["not_conformant_names"] == ["c123", "legacy-slug"]
     assert rv["content_type"]["compared"] == 0 and rv["rows_that_disagree"] == []
@@ -110,7 +110,7 @@ def test_a_name_that_does_not_parse_is_counted_and_not_compared() -> None:
 
 
 def test_a_tombstone_is_not_a_live_row() -> None:
-    tomb = row("docs__1-2__voyage-context-3__v1", "code", "1-2", "voyage-code-3", superseded_by="docs__1-2__voyage-context-3__v2")
+    tomb = row("docs__1-2__minilm-l6-v2-384__v1", "code", "1-2", "bge-base-en-v15-768", superseded_by="docs__1-2__minilm-l6-v2-384__v2")
     r = report([tomb, good(version="v2")])
     assert r["registry"] == {"rows": 2, "live": 1, "tombstones": 1}
     assert r["row_vs_name"]["live_rows"] == 1 and r["row_vs_name"]["content_type"]["mismatch"] == 0
@@ -122,7 +122,7 @@ def test_a_tombstone_is_not_a_live_row() -> None:
 def test_two_live_rows_with_one_name_clash() -> None:
     a, b = good(), good(owner="9-9")
     b["name"] = a["name"]
-    r = report([a, b, good("code", "1-3", "voyage-code-3")])
+    r = report([a, b, good("code", "1-3", "bge-base-en-v15-768")])
     assert r["label_clash"] == {"live_names": 2, "clashing_names": 1, "clashes": [{"name": a["name"], "rows": 2}]}
 
 
@@ -142,39 +142,39 @@ def test_distinct_names_never_clash() -> None:
 
 def test_a_tuple_with_two_candidates_is_counted_by_both_forms() -> None:
     a = good(version="v1")
-    b = row("docs__1-2__voyage-context-3__v2", "docs", "1-2", "voyage-context-3", "v2")
-    r = report([a, b, good("code", "1-3", "voyage-code-3")])
+    b = row("docs__1-2__minilm-l6-v2-384__v2", "docs", "1-2", "minilm-l6-v2-384", "v2")
+    r = report([a, b, good("code", "1-3", "bge-base-en-v15-768")])
     mt = r["multi_candidate_tuples"]
     assert mt["with_grandfathered_filter"]["count"] == 1
     assert mt["without_grandfathered_filter"]["count"] == 1
     [t] = mt["with_grandfathered_filter"]["tuples"]
-    assert t == {"content_type": "docs", "owner_id": "1-2", "embedding_model": "voyage-context-3",
+    assert t == {"content_type": "docs", "owner_id": "1-2", "embedding_model": "minilm-l6-v2-384",
                  "candidates": [{"name": a["name"], "model_version": "v1"}, {"name": b["name"], "model_version": "v2"}]}
     assert mt["ambiguous_only_without_the_filter"] == 0
 
 
 def test_the_grandfathered_filter_changes_the_count() -> None:
     conformant = good()
-    slug = row("legacy-slug", "docs", "1-2", "voyage-context-3", grandfathered=True)
+    slug = row("legacy-slug", "docs", "1-2", "minilm-l6-v2-384", grandfathered=True)
     r = report([conformant, slug])
     mt = r["multi_candidate_tuples"]
     assert mt["with_grandfathered_filter"]["count"] == 0, "collectionForTuple drops the grandfathered slug today"
     assert mt["without_grandfathered_filter"]["count"] == 1, "D5 drops that filter, so this tuple becomes ambiguous"
     assert [c["name"] for c in mt["without_grandfathered_filter"]["tuples"][0]["candidates"]] == [
-        "docs__1-2__voyage-context-3__v1", "legacy-slug"]
+        "docs__1-2__minilm-l6-v2-384__v1", "legacy-slug"]
     assert mt["ambiguous_only_without_the_filter"] == 1
 
 
 def test_quarantine_and_tombstoned_rows_are_never_candidates() -> None:
-    q = row("quarantine-docs__1-2__voyage-context-3__v1", "docs", "1-2", "voyage-context-3", lifecycle="quarantine")
-    tomb = row("docs__1-2__voyage-context-3__v0", "docs", "1-2", "voyage-context-3", "v0", superseded_by="x")
+    q = row("quarantine-docs__1-2__minilm-l6-v2-384__v1", "docs", "1-2", "minilm-l6-v2-384", lifecycle="quarantine")
+    tomb = row("docs__1-2__minilm-l6-v2-384__v0", "docs", "1-2", "minilm-l6-v2-384", "v0", superseded_by="x")
     r = report([good(), q, tomb])
     assert r["multi_candidate_tuples"]["with_grandfathered_filter"]["count"] == 0
     assert r["multi_candidate_tuples"]["without_grandfathered_filter"]["count"] == 0
 
 
 def test_a_row_with_an_empty_tuple_component_is_excluded_and_counted() -> None:
-    r = report([row("legacy-a", "", "1-2", "voyage-context-3"), row("legacy-b", "", "1-2", "voyage-context-3")])
+    r = report([row("legacy-a", "", "1-2", "minilm-l6-v2-384"), row("legacy-b", "", "1-2", "minilm-l6-v2-384")])
     mt = r["multi_candidate_tuples"]
     assert mt["rows_without_a_complete_tuple"] == 2
     assert mt["with_grandfathered_filter"]["count"] == 0
@@ -184,9 +184,9 @@ def test_a_row_with_an_empty_tuple_component_is_excluded_and_counted() -> None:
 
 
 def test_live_names_of_the_minted_form_are_listed() -> None:
-    r = report([row("c123", "code", "1-1", "voyage-code-3"), row("c7", "docs", "1-1", "voyage-context-3"),
-                row("c12x", "docs", "1-1", "voyage-context-3"), row("cat", "docs", "1-1", "voyage-context-3"),
-                row("c99", "docs", "1-1", "voyage-context-3", superseded_by="c100"), good()])
+    r = report([row("c123", "code", "1-1", "bge-base-en-v15-768"), row("c7", "docs", "1-1", "minilm-l6-v2-384"),
+                row("c12x", "docs", "1-1", "minilm-l6-v2-384"), row("cat", "docs", "1-1", "minilm-l6-v2-384"),
+                row("c99", "docs", "1-1", "minilm-l6-v2-384", superseded_by="c100"), good()])
     assert r["minted_form_names"] == {"count": 2, "names": ["c123", "c7"]}, "a tombstone named c99 is not live"
 
 
@@ -195,8 +195,8 @@ def test_live_names_of_the_minted_form_are_listed() -> None:
 
 def test_a_tombstone_whose_successor_names_no_row_is_dangling() -> None:
     kept = good(version="v2")
-    ok_tomb = row("docs__1-2__voyage-context-3__v1", "docs", "1-2", "voyage-context-3", superseded_by=kept["name"])
-    dangling = row("docs__1-2__voyage-context-3__v0", "docs", "1-2", "voyage-context-3", "v0", superseded_by="deleted-successor")
+    ok_tomb = row("docs__1-2__minilm-l6-v2-384__v1", "docs", "1-2", "minilm-l6-v2-384", superseded_by=kept["name"])
+    dangling = row("docs__1-2__minilm-l6-v2-384__v0", "docs", "1-2", "minilm-l6-v2-384", "v0", superseded_by="deleted-successor")
     r = report([kept, ok_tomb, dangling])
     assert r["dangling_tombstones"] == {
         "tombstones": 2, "dangling": 1,
@@ -204,9 +204,9 @@ def test_a_tombstone_whose_successor_names_no_row_is_dangling() -> None:
 
 
 def test_a_tombstone_pointing_at_a_tombstone_is_not_dangling_while_that_row_exists() -> None:
-    a = row("a-old", "docs", "1-2", "voyage-context-3", superseded_by="b-mid")
-    b = row("b-mid", "docs", "1-2", "voyage-context-3", superseded_by="c-new")
-    c = row("c-new", "docs", "1-2", "voyage-context-3")
+    a = row("a-old", "docs", "1-2", "minilm-l6-v2-384", superseded_by="b-mid")
+    b = row("b-mid", "docs", "1-2", "minilm-l6-v2-384", superseded_by="c-new")
+    c = row("c-new", "docs", "1-2", "minilm-l6-v2-384")
     assert report([a, b, c])["dangling_tombstones"]["dangling"] == 0
 
 
@@ -230,13 +230,13 @@ def test_an_empty_registry_is_reported_as_empty_not_clean() -> None:
 def test_the_full_fixture_reports_all_five_counts() -> None:
     """The five items of the bead in one registry: each count is non-zero, so none can pass vacuously."""
     a = good()
-    b = row("docs__1-2__voyage-context-3__v2", "docs", "1-2", "voyage-context-3", "v2")
-    slug = row("legacy-slug", "docs", "1-2", "voyage-context-3", grandfathered=True)
-    mism = row("code__1-3__voyage-code-3__v1", "docs", "1-3", "voyage-code-3")
+    b = row("docs__1-2__minilm-l6-v2-384__v2", "docs", "1-2", "minilm-l6-v2-384", "v2")
+    slug = row("legacy-slug", "docs", "1-2", "minilm-l6-v2-384", grandfathered=True)
+    mism = row("code__1-3__bge-base-en-v15-768__v1", "docs", "1-3", "bge-base-en-v15-768")
     clash_a = good("rdr", "1-7")
     clash_b = dict(clash_a, owner_id="other")
-    minted = row("c123", "knowledge", "1-1", "voyage-context-3")
-    dang = row("rdr__1-8__voyage-context-3__v1", "rdr", "1-8", "voyage-context-3", superseded_by="gone")
+    minted = row("c123", "knowledge", "1-1", "minilm-l6-v2-384")
+    dang = row("rdr__1-8__minilm-l6-v2-384__v1", "rdr", "1-8", "minilm-l6-v2-384", superseded_by="gone")
     r = report([a, b, slug, mism, clash_a, clash_b, minted, dang])
     assert r["row_vs_name"]["content_type"]["mismatch"] == 1
     assert r["label_clash"]["clashing_names"] == 1
@@ -266,7 +266,7 @@ class _Reader:
 
 @pytest.fixture
 def reader(monkeypatch: pytest.MonkeyPatch) -> _Reader:
-    r = _Reader([good(), good(version="v2"), row("c5", "docs", "1-1", "voyage-context-3")])
+    r = _Reader([good(), good(version="v2"), row("c5", "docs", "1-1", "minilm-l6-v2-384")])
     monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: r)
     return r
 
@@ -302,7 +302,7 @@ def test_the_command_refuses_an_unreadable_registry(monkeypatch: pytest.MonkeyPa
 
 
 def _legacy(name: str, created: str = "", **kw) -> dict:
-    r = row(name, "docs", "1-2", "voyage-context-3", **kw)
+    r = row(name, "docs", "1-2", "minilm-l6-v2-384", **kw)
     r["created_at"] = created
     return r
 
@@ -316,13 +316,13 @@ def _good_at(created: str, version: str = "v1", **kw) -> dict:
 def test_each_candidate_carries_its_model_version() -> None:
     r = report([good(version="v1"), good(version="v3")])
     cands = r["multi_candidate_tuples"]["with_grandfathered_filter"]["tuples"][0]["candidates"]
-    assert cands == [{"name": "docs__1-2__voyage-context-3__v1", "model_version": "v1"},
-                     {"name": "docs__1-2__voyage-context-3__v3", "model_version": "v3"}]
+    assert cands == [{"name": "docs__1-2__minilm-l6-v2-384__v1", "model_version": "v1"},
+                     {"name": "docs__1-2__minilm-l6-v2-384__v3", "model_version": "v3"}]
 
 
 def test_a_tuple_tied_at_the_top_version_is_listed_and_a_lower_version_is_not_a_tie() -> None:
     a = good(version="v2")
-    b = row("docs__1-2__voyage-context-3__v2x", "docs", "1-2", "voyage-context-3", "v2")   # same version, another name
+    b = row("docs__1-2__minilm-l6-v2-384__v2x", "docs", "1-2", "minilm-l6-v2-384", "v2")   # same version, another name
     low = good(version="v1")
     r = report([a, b, low])
     tied = r["multi_candidate_tuples"]["tied_at_top_version"]["with_grandfathered_filter"]
@@ -362,7 +362,7 @@ def test_a_tuple_of_only_grandfathered_rows_gains_a_winner_and_is_counted_apart(
 
 def test_p14_the_created_at_winner_differs_when_the_older_row_has_the_higher_name() -> None:
     older = _good_at("2026-01-01T00:00:00Z", owner="1-2")
-    older["name"], older["model_version"] = "docs__1-2__voyage-context-3__v1z", "v1"
+    older["name"], older["model_version"] = "docs__1-2__minilm-l6-v2-384__v1z", "v1"
     newer = _good_at("2026-06-01T00:00:00Z")
     r = report([older, newer])
     p14 = r["multi_candidate_tuples"]["p14_created_at_tie_break"]
@@ -390,7 +390,7 @@ def test_p14_marks_a_legacy_created_at_winner_and_names_its_conformant_sibling()
 
 def test_p14_count_is_zero_when_name_and_created_at_agree() -> None:
     first = _good_at("2026-01-01T00:00:00Z", version="v1")
-    second = row("docs__1-2__voyage-context-3__v1b", "docs", "1-2", "voyage-context-3", "v1")
+    second = row("docs__1-2__minilm-l6-v2-384__v1b", "docs", "1-2", "minilm-l6-v2-384", "v1")
     second["created_at"] = "2026-06-01T00:00:00Z"
     p14 = report([first, second])["multi_candidate_tuples"]["p14_created_at_tie_break"]
     assert p14["tied_tuples_with_filter"] == 1 and p14["created_at_winner_differs"]["count"] == 0
@@ -398,16 +398,16 @@ def test_p14_count_is_zero_when_name_and_created_at_agree() -> None:
 
 def test_p14_flags_tied_candidates_with_no_created_at() -> None:
     a, b = _good_at(""), _good_at("2026-01-01T00:00:00Z")
-    b["name"] = "docs__1-2__voyage-context-3__v1b"
+    b["name"] = "docs__1-2__minilm-l6-v2-384__v1b"
     p14 = report([a, b])["multi_candidate_tuples"]["p14_created_at_tie_break"]
     assert p14["tied_candidates_without_created_at"] == 1
 
 
 def test_non_conformant_live_names_list_their_attributes_and_flag_the_empty_ones() -> None:
-    r = report([row("legacy-a", "docs", "o", "voyage-context-3", "v1", grandfathered=True),
+    r = report([row("legacy-a", "docs", "o", "minilm-l6-v2-384", "v1", grandfathered=True),
                 row("legacy-b", "", "o", "", "", grandfathered=False)])
     rows = {x["name"]: x for x in r["row_vs_name"]["not_conformant_rows"]}
-    assert rows["legacy-a"] == {"name": "legacy-a", "content_type": "docs", "embedding_model": "voyage-context-3",
+    assert rows["legacy-a"] == {"name": "legacy-a", "content_type": "docs", "embedding_model": "minilm-l6-v2-384",
                                 "model_version": "v1", "legacy_grandfathered": True, "empty_fields": []}
     assert rows["legacy-b"]["legacy_grandfathered"] is False
     assert rows["legacy-b"]["empty_fields"] == ["content_type", "embedding_model", "model_version"]
@@ -434,7 +434,7 @@ def test_created_at_orders_by_instant_not_by_spelling() -> None:
     """``2026-11-20 09:56:57+00`` and ``2026-11-20T10:00:00Z`` are in instant order though ' ' sorts before 'T'; a
     string compare would call the later one older when the spellings are swapped."""
     older = _good_at("2026-11-20T08:00:00Z")                # 'T' spelling, earlier instant
-    older["name"] = "docs__1-2__voyage-context-3__v1z"
+    older["name"] = "docs__1-2__minilm-l6-v2-384__v1z"
     newer = _good_at("2026-11-20 09:56:57.054349+00")       # ' ' spelling, later instant
     p14 = report([older, newer])["multi_candidate_tuples"]["p14_created_at_tie_break"]
     [t] = p14["created_at_winner_differs"]["tuples"]
@@ -444,7 +444,7 @@ def test_created_at_orders_by_instant_not_by_spelling() -> None:
 
 def test_an_unreadable_created_at_is_counted_and_sorts_last() -> None:
     a, b = _good_at("not a time"), _good_at("2026-01-01T00:00:00Z")
-    b["name"] = "docs__1-2__voyage-context-3__v1b"
+    b["name"] = "docs__1-2__minilm-l6-v2-384__v1b"
     p14 = report([a, b])["multi_candidate_tuples"]["p14_created_at_tie_break"]
     assert p14["tied_candidates_with_unreadable_created_at"] == 1
     [t] = p14["created_at_winner_differs"]["tuples"]
@@ -455,11 +455,11 @@ def test_two_spellings_of_one_instant_tie_and_fall_to_the_name() -> None:
     """Confirmation-round finding: equal instants in T and space spellings must tie, so NAME ASC decides and the
     created_at winner agrees with the name winner (no false 'differs')."""
     rows = [
-        {"name": "docs__1-1__voyage-context-3__v1", "content_type": "docs", "owner_id": "1-1",
-         "embedding_model": "voyage-context-3", "model_version": "v1", "superseded_by": "",
+        {"name": "docs__1-1__minilm-l6-v2-384__v1", "content_type": "docs", "owner_id": "1-1",
+         "embedding_model": "minilm-l6-v2-384", "model_version": "v1", "superseded_by": "",
          "lifecycle_state": "live", "legacy_grandfathered": False, "created_at": "2026-11-20T09:56:57Z"},
         {"name": "zslug", "content_type": "docs", "owner_id": "1-1",
-         "embedding_model": "voyage-context-3", "model_version": "v1", "superseded_by": "",
+         "embedding_model": "minilm-l6-v2-384", "model_version": "v1", "superseded_by": "",
          "lifecycle_state": "live", "legacy_grandfathered": False, "created_at": "2026-11-20 09:56:57+00"},
     ]
     report = crc.census(rows, tenant_label="t", generated_at="2026-11-20T00:00:00Z")

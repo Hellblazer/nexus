@@ -69,6 +69,20 @@ _MIN_FILES_SCANNED = 300
 #: path -> (reason, hit lines in that file today). Re-measure with
 #: ``python -c "from tests.test_rdr231_note_scheme_literals_lint import _scan; print(_scan())"``.
 _ALLOWED: dict[str, tuple[str, int]] = {
+    "src/nexus/catalog/engine_reads/uri_segments.py": (
+        "RDR-229 P1.2 residue pre-flight: names the two schemes the engine's uri_segment_census route groups, "
+        "to FIND residue rows; it builds no identity to store",
+        1,
+    ),
+    "src/nexus/catalog/rdr229/uri_residue_doctor.py": (
+        "RDR-229 P1.2 residue pre-flight (nx doctor uri-residue): classifies chroma:// and nx-note:// rows by "
+        "segment to COUNT residue before P2.10's repair move; reads and reports only, never stores a URI",
+        9,
+    ),
+    "src/nexus/commands/catalog_cmds/doctor.py": (
+        "the nx catalog doctor --uri-residue flag's help text names the schemes the pre-flight counts",
+        1,
+    ),
     "src/nexus/aspect_readers.py": (
         "owns the definitions: NOTE_URI_SCHEME, the legacy chroma:// spelling canonical_note_uri still "
         "accepts on input, and the reader and stat registries keyed by the scheme",
