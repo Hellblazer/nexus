@@ -21,7 +21,9 @@ import java.util.regex.Pattern;
  * <p><b>Selection</b> ({@link #select}) uses {@code CatalogRepository#collectionForTuple}'s order but a narrower
  * filter: a row is a candidate when its content type, owner and embedding model equal the wanted tuple, its
  * lifecycle state is {@code live} (collectionForTuple excludes only quarantine; a dormant or disputed row is not
- * a move target, so it reads as absent here) and it is not {@code legacy_grandfathered}. A candidate that is not superseded wins; a superseded
+ * a move target, so it reads as absent here). A {@code legacy_grandfathered} row is a candidate, as it is for
+ * {@code collectionForTuple} (RDR-229 P2.8, engine 0.1.200: both dropped the filter together, so the two never
+ * disagree on a tuple's winner). A candidate that is not superseded wins; a superseded
  * one is chosen only when no non-superseded candidate exists. Among the pool, the highest numeric
  * {@code model_version} wins, then the first registered ({@code created_at} ascending, compared as instants), then the
  * lexically lower name: {@code collectionForTuple}'s tie order (nexus-p2m1x.4), pinned against it by a parity test.
@@ -148,7 +150,6 @@ public final class TargetSelection {
             .filter(r -> ownerId.equals(r.ownerId()))
             .filter(r -> embeddingModel.equals(r.embeddingModel()))
             .filter(r -> "live".equals(r.lifecycleState()))
-            .filter(r -> !r.legacyGrandfathered())
             .toList();
         var live = candidates.stream().filter(r -> !r.superseded()).min(order);
         if (live.isPresent()) {
