@@ -123,6 +123,9 @@ class _Taxonomy:
     def get_distinct_collections(self) -> list[str]:
         return list(self.distinct)
 
+    def get_projection_counts_by_collection(self) -> dict[str, int]:
+        return {}
+
     def compute_icf_map(self, *, use_cache: bool = True) -> dict:
         return {}
 
