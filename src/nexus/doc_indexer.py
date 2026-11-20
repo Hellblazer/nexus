@@ -1584,7 +1584,7 @@ def _resolve_write_db(t3: Any) -> Any:
 _NO_REGISTRAR = object()
 
 
-def _target_model(db: Any, collection_name: str) -> tuple[str, bool]:
+def _target_model(db: Any, collection_name: str, *, name_model: str | None = None) -> tuple[str, bool]:
     """The model chunks written to *collection_name* through *db* are stamped with and
     compared against for the unchanged-content skip (nexus-7jy5r), and whether the
     catalog was read to decide it (nexus-s8r5o).
@@ -1597,19 +1597,24 @@ def _target_model(db: Any, collection_name: str) -> tuple[str, bool]:
     as it always did there. A row read that FAILED answers the name too, flagged
     ``False``: the skip must not judge a stored stamp against that guess
     (:func:`_stored_model_is_current`).
+
+    *name_model* is what "the name decides" answers in place of the name derivation, for a
+    caller whose name carries no model to derive: ``nx index repo`` keeps a legacy name on
+    the model the local embedder reports (RDR-229 P2.3, nexus-p2m1x.8). It never overrides
+    a row, and the flag is unchanged.
     """
     from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
     # Looked up on the type: a mock store answers any attribute.
     if getattr(type(db), "_resolve_collection_row", None) is None:
-        return index_model_for_collection(collection_name), True
+        return name_model or index_model_for_collection(collection_name), True
     try:
         row = db._resolve_collection_row(collection_name, strict=True)
     except Exception:  # noqa: BLE001 — any failed read is "unreadable", never "no row"; the write goes on with the name's model
         _log.warning("index_target_model_row_unreadable", collection=collection_name, exc_info=True)
-        return embedding_model_for_collection_calibrated(collection_name), False
+        return name_model or embedding_model_for_collection_calibrated(collection_name), False
     model = (row or {}).get("embedding_model")
-    return (str(model) if model else embedding_model_for_collection_calibrated(collection_name)), True
+    return (str(model) if model else name_model or embedding_model_for_collection_calibrated(collection_name)), True
 
 
 def _stored_model_is_current(stored_model: str, target_model: str, model_known: bool) -> bool:

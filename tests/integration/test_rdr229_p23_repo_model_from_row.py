@@ -202,22 +202,35 @@ def _names(u: str, *, code_token: str = ROW_MODEL, docs_token: str = ROW_MODEL) 
 # ── 1. the row's model, not the name's token ─────────────────────────────────
 
 
-def test_repo_chunks_are_stamped_with_the_rows_model_when_it_differs_from_the_names_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The names say ``voyage-*``; both rows hold the engine's bge model, as a rename leaves them.
-    The engine embeds with the row, so the chunks are stamped with the row's model."""
-    u = _unique()
-    names = _names(u, code_token=TOKEN_MODEL, docs_token=DOCS_TOKEN_MODEL)
+def _seeded_divergent_repo(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A repo already indexed once into collections whose rows hold the engine's bge model under names
+    that say ``voyage-*``, as a rename leaves them, with chunks in both (the listing the row comes from
+    carries only collections that hold a chunk, so a collection renamed WITH its data is visible and an
+    empty one still follows its name: ``embedding_model_row_preferred``'s docstring). The seed run reads
+    no row for the empty collections, so it stamps the name's token."""
+    names = _names(_unique(), code_token=TOKEN_MODEL, docs_token=DOCS_TOKEN_MODEL)
     _register_row(names["code"], "code", ROW_MODEL)
     _register_row(names["docs"], "docs", ROW_MODEL)
     repo = _make_repo(tmp_path, {**CODE, **PROSE})
+    assert _run(repo, tmp_path, names)["files_changed"] == 3
+    assert set(_chunk_models(names["code"])) and set(_chunk_models(names["docs"])), "non-vacuity: seeded"
+    return repo, names
+
+
+def test_repo_chunks_are_stamped_with_the_rows_model_when_it_differs_from_the_names_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The names say ``voyage-*``; both rows hold the engine's bge model. The engine embeds with the
+    row, so a run that writes new files stamps them with the row's model, and re-indexes the seed
+    files, stamped with the token, to it."""
+    repo, names = _seeded_divergent_repo(tmp_path)
+    _add_files(repo, {"new.py": "def n():\n    return 'p23 new'\n", "new.md": "# New\n\nP23 new prose.\n"})
 
     stats = _run(repo, tmp_path, names)
 
-    assert stats["files_changed"] == 3
-    assert dict(_chunk_models(names["code"])) and set(_chunk_models(names["code"])) == {ROW_MODEL}
+    assert set(_chunk_models(names["code"])) == {ROW_MODEL}
     assert set(_chunk_models(names["docs"])) == {ROW_MODEL}
+    assert stats["files_changed"] == 5, "the two new files, and the three the seed run stamped with the token"
 
 
 def test_the_unchanged_content_skip_compares_against_the_rows_model(
@@ -226,14 +239,9 @@ def test_the_unchanged_content_skip_compares_against_the_rows_model(
     """Chunks stamped with the row's model are current: a second run writes nothing. Chunks stamped
     with any other model are not: the same run indexes the files again. Both halves, so the skip is
     shown to compare against the row's model and not to skip everything."""
-    u = _unique()
-    names = _names(u, code_token=TOKEN_MODEL, docs_token=DOCS_TOKEN_MODEL)
-    _register_row(names["code"], "code", ROW_MODEL)
-    _register_row(names["docs"], "docs", ROW_MODEL)
-    repo = _make_repo(tmp_path, {**CODE, **PROSE})
-    assert _run(repo, tmp_path, names)["files_changed"] == 3
+    repo, names = _seeded_divergent_repo(tmp_path)
 
-    # Whatever the first run stamped, the row's model is what is stored now.
+    # Whatever the seed run stamped, the row's model is what is stored now.
     assert _restamp(names["code"], ROW_MODEL) > 0 and _restamp(names["docs"], ROW_MODEL) > 0
     assert _run(repo, tmp_path, names)["files_changed"] == 0, "stamped with the row's model: current"
 
@@ -248,17 +256,14 @@ def test_the_registration_the_run_makes_keeps_a_rows_model_that_differs_from_the
     """In a fresh process the run registers each collection before it indexes. It used to register the
     name's token, which the engine's profile refuses (``EmbeddingProfileMismatchError``) unless the
     row holds it. It registers the model it resolved, the row's."""
-    u = _unique()
-    names = _names(u, code_token=TOKEN_MODEL, docs_token=DOCS_TOKEN_MODEL)
-    _register_row(names["code"], "code", ROW_MODEL)
-    _register_row(names["docs"], "docs", ROW_MODEL)
+    repo, names = _seeded_divergent_repo(tmp_path)
     _forget_registration(names["code"])
     _forget_registration(names["docs"])
-    repo = _make_repo(tmp_path, {**CODE, **PROSE})
+    _add_files(repo, {"new.py": "def n():\n    return 'p23 new'\n", "new.md": "# New\n\nP23 new prose.\n"})
 
     stats = _run(repo, tmp_path, names)
 
-    assert stats["files_changed"] == 3
+    assert stats["files_changed"] == 5
     assert set(_chunk_models(names["code"])) == {ROW_MODEL}
 
 
@@ -283,12 +288,7 @@ def test_an_unreadable_row_neither_fails_the_run_nor_reindexes_an_unchanged_file
     """Unreadable: the listing the row comes from answers HTTP 500. The run goes on with the name's
     model flagged as a guess, so a file whose chunks are stamped with another model (the row's, here
     a model the name's token does not carry) and whose content has not changed is not indexed again."""
-    u = _unique()
-    names = _names(u, code_token=TOKEN_MODEL, docs_token=DOCS_TOKEN_MODEL)
-    _register_row(names["code"], "code", ROW_MODEL)
-    _register_row(names["docs"], "docs", ROW_MODEL)
-    repo = _make_repo(tmp_path, {**CODE, **PROSE})
-    assert _run(repo, tmp_path, names)["files_changed"] == 3
+    repo, names = _seeded_divergent_repo(tmp_path)
     assert _restamp(names["code"], ROW_MODEL) > 0 and _restamp(names["docs"], ROW_MODEL) > 0
 
 
