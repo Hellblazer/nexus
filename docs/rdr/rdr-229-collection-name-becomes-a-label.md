@@ -715,17 +715,34 @@ lifecycle (`QuarantineOrigin`, `ChunkReaper` routing, `VectorHandler`,
 `quarantine-` prefix stays on the labels that already have it. The ETL
 import path, which receives rows from another install, takes
 `lifecycle_state` from the imported row when present and falls back to the
-prefix as a migration source.
+prefix as a migration source. A new imported row whose state and name
+disagree (a `quarantine-` name with `live`, or any other name with
+`quarantine`) refuses the whole batch with a message that counts and names
+the rows; rows already registered are skipped first.
 
-Three name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
+Four name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
 
-- *The rename and rehome target guard.* The guard that refuses a rename or
-  rehome INTO a `quarantine-` name reads the target name. No row exists
-  for the target yet, and the engine mints every `quarantine-` label
-  itself. The source side reads the row. Whether the target guard is still
-  needed once names are minted labels is a Phase 3 question.
-- *The engine's own mint.* `PgVectorRepository` builds the sibling label
-  as `"quarantine-" + origin`.
+- *The rename and rehome guard, for an end with no row.* The guard that
+  refuses a rename or rehome of or INTO a quarantine collection reads the
+  row of each end. An end with no row yet (a new target) is judged by its
+  `quarantine-` name, since the engine mints every `quarantine-` label
+  itself. Whether that fallback is still needed once names are minted
+  labels is a Phase 3 question.
+- *The registration-side `quarantine-` prefix refusal: the engine mints the
+  `quarantine-` name; this guard stops a client minting one.* The client
+  route (`POST /v1/catalog/collections/upsert`) also registers `live` only,
+  and refuses a new row named `quarantine-...` with a 400. The engine's
+  own callers of `upsertCollection` and the SQL movers are not subject to
+  it, and neither is the ETL import.
+- *The engine's own mint and the lookups of what it minted.* The mint is
+  `ChunkReaper`'s sibling label (`QuarantineOrigin.PREFIX + name`, passed
+  to the move) and the SQL movers that register that sibling as
+  `'quarantine'` (`vectors-024`, `hygiene-008`). Two lookups build the
+  same label to find a sibling: `PgVectorRepository`'s sibling-name lookup
+  and `QuarantineOrigin`'s untagged-sibling search, which also matches the
+  `quarantine-` content type. `ChunkReaper`'s boot-time floor-exempt
+  warning reads a configured name, when no row is available. All of these
+  use the one constant, `QuarantineOrigin.PREFIX`.
 - *A version read from a conformant name.* One helper,
   `CollectionRegistration.versionOfConformantName`, takes `vN` from a
   conformant name for the ETL import fallback and for the re-embed

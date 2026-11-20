@@ -642,7 +642,7 @@ if [ -f "$BGE_MODEL" ]; then
   # F on the v0.1.109 candidate, before the tag; this script also runs in
   # engine-service-release.yml, where the same 422 would have burned the tag.
   rreg=$(curl -s -o "$SMOKE_TMP/ns-rerank-reg.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-    -d "{\"name\":\"$RCOL\",\"content_type\":\"knowledge\",\"owner_id\":\"nativesmoke\",\"embedding_model\":\"bge-base-en-v15-768\"}" \
+    -d "{\"name\":\"$RCOL\",\"content_type\":\"knowledge\",\"owner_id\":\"nativesmoke\",\"embedding_model\":\"bge-base-en-v15-768\",\"model_version\":\"v1\"}" \
     "$U/v1/catalog/collections/upsert")
   if [ "$rreg" != "200" ]; then
     echo "  FAIL rerank fixture collection register -> $rreg: $(head -c200 "$SMOKE_TMP/ns-rerank-reg.out")"; fail=1

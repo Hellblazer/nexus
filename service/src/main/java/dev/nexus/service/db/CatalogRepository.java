@@ -9719,6 +9719,15 @@ public final class CatalogRepository {
      * re-registration or a revive that sends none still succeeds; a sent version round-trips exactly as sent.
      */
     public void upsertCollection(String tenant, Map<String, Object> coll) {
+        upsertCollection(tenant, coll, false);
+    }
+
+    /**
+     * {@link #upsertCollection(String, Map)} for the CLIENT route ({@code clientRoute} true, set only by
+     * {@code CatalogHandler}): it registers {@code live} collections only, and a NEW row may not take a
+     * {@code quarantine-} name (linda 2026-11-20). Engine-internal callers use the two-argument form.
+     */
+    public void upsertCollection(String tenant, Map<String, Object> coll, boolean clientRoute) {
         tenantScope.withTenant(tenant, ctx -> {
             String name           = s(coll, "name");
             // Raw, nullable/blank — used to key the profile lookup; nne() below still fills the written
@@ -9743,6 +9752,9 @@ public final class CatalogRepository {
             // RDR-229 P2.5: an explicit lifecycle_state is honoured (validated even when the row exists, so a
             // bad value is a 400 whichever branch would have run); none means live.
             String requestedState = CollectionRegistration.explicitLifecycleState(coll);
+            if (clientRoute) {
+                CollectionRegistration.requireClientState(requestedState, name);
+            }
 
             var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.OWNER_ID)
                     .from(CATALOG_COLLECTIONS)
@@ -9789,6 +9801,9 @@ public final class CatalogRepository {
                 // exactly like effectiveModel above.
                 lifecycleState = "live";
             } else {
+                if (clientRoute) {
+                    CollectionRegistration.requireClientNameNotQuarantine(name);
+                }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 String  profileModel     = null;
                 Integer profileDimension = null;
@@ -10668,10 +10683,10 @@ public final class CatalogRepository {
                                                    String newNameEmbeddingModel) {
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
-        // RDR-229 P2.5: the SOURCE exists, so its row decides (registry cache, else one single-column read); the
-        // TARGET is a name with no row yet, so its name is all there is to judge.
-        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, "rename", oldName);
-        QuarantineOrigin.requireNotQuarantineTarget("rename", newName);
+        // RDR-229 P2.5: each end is judged by its row (registry cache, else one single-column read); an end with
+        // no row yet (a new target) keeps the prefix rule.
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldName);
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
             newContentType, newOwnerId, newNameEmbeddingModel);
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
@@ -10702,13 +10717,13 @@ public final class CatalogRepository {
     }
 
     /**
-     * The rename/rehome SOURCE guard, for the HTTP layer (RDR-229 P2.5): refuses an existing collection whose
+     * The rename/rehome guard for the HTTP layer (RDR-229 P2.5), either end: refuses a collection whose
      * catalog row is {@code quarantine}, as {@link #renameCollection} and {@link #rehomeCollection} do themselves
      * (the route answers 400 ahead of the verb's own 409s). Reads the row through {@link CollectionRegistry}
      * (cache, else one short read); a name with no row is judged by its prefix.
      */
-    public void requireNotQuarantineSource(String tenant, String verb, String name) {
-        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, verb, name);
+    public void requireNotQuarantine(String tenant, String verb, String name) {
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, verb, name);
     }
 
     /**
@@ -11660,9 +11675,9 @@ public final class CatalogRepository {
      */
     public RehomeResult rehomeCollection(String tenant, String source, String target) {
         // nexus-wbfpw.71: a re-home UPDATEs chunks.collection with no audit row; refused on a quarantine name.
-        // RDR-229 P2.5: source by its row, target by its name (see renameCollection).
-        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, "rehome", source);
-        QuarantineOrigin.requireNotQuarantineTarget("rehome", target);
+        // RDR-229 P2.5: each end by its row, a row-less target by its prefix (see renameCollection).
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rehome", source);
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rehome", target);
         if (source.equals(target)) {
             throw new RehomeRefused("source and target are the same collection: " + source);
         }
@@ -12176,7 +12191,7 @@ public final class CatalogRepository {
                 String lifecycleState = r.value2();
                 String supersededBy = r.value3();
                 boolean holdsContent = collectionHoldsContent(ctx, tenant, name);
-                if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name)) {
+                if (!holdsContent && QuarantineOrigin.holdsRowsOf(ctx, tenant, name, java.util.Optional.ofNullable(lifecycleState))) {
                     // nexus-wbfpw.71: an ORIGIN whose chunks all sit in quarantine holds no content of its own,
                     // so the ghost branch below would delete its registry row and leave those rows with no live
                     // origin: restore refuses a non-live origin, the engine's expiry skips it, nx t3 gc refuses
@@ -13513,10 +13528,19 @@ public final class CatalogRepository {
                 }
             }
 
+            // RDR-229 P2.5 (review S-import): the model_version and lifecycle_state checks judge a row that will be
+            // INSERTed. A name already registered is a no-op (ON CONFLICT DO NOTHING), so it is left out here and
+            // never reaches them: re-importing an existing legacy row with a blank version is not a 400. One SELECT
+            // of the existing names for the whole batch.
+            Set<String> existing = existingCollectionNames(ctx, tenant,
+                deduped.stream().map(c -> s(c, "name")).toList());
+            List<Map<String, Object>> fresh = deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList();
+            CollectionRegistration.requireStatesAgreeWithNames(fresh);
+
             final int cols = 12;
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
-            for (int start = 0; start < deduped.size(); start += chunkSize) {
-                var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
+            for (int start = 0; start < fresh.size(); start += chunkSize) {
+                var batch = fresh.subList(start, Math.min(start + chunkSize, fresh.size()));
                 var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                         CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                         CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
@@ -13547,6 +13571,13 @@ public final class CatalogRepository {
         });
     }
 
+    /** The names among {@code names} that already have a {@code catalog_collections} row for {@code tenant}. */
+    private static Set<String> existingCollectionNames(DSLContext ctx, String tenant, List<String> names) {
+        return new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(names)))
+            .fetch(CATALOG_COLLECTIONS.NAME));
+    }
+
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
         // ON CONFLICT DO NOTHING: an import never overwrites an existing row (see this
         // method's caller's javadoc for why the old conditional stub-upgrade DO UPDATE
@@ -13565,6 +13596,11 @@ public final class CatalogRepository {
             throw new EmbeddingProfileConflictException(
                 "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
         }
+        // An already registered name is a no-op: skip it before the version and state checks (see the batch).
+        if (!existingCollectionNames(ctx, tenant, List.of(s(coll, "name"))).isEmpty()) {
+            return;
+        }
+        CollectionRegistration.requireStatesAgreeWithNames(List.of(coll));
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,

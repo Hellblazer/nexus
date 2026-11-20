@@ -2654,19 +2654,12 @@ public final class VectorHandler implements HttpHandler {
 
     /**
      * {@code /v1/vectors/manifest-less-census}'s quarantine refusal (RDR-192 S2):
-     * a {@code quarantine-*} collection is out of the census by construction, so
-     * the route 400s rather than silently classifying quarantine rows. Extracted
-     * to a package-private static method so it is directly unit-testable without
-     * an HTTP round trip or a database — same precedent as {@link
-     * #resolveRowLimit}/{@link #clampSampleLimit}, see {@code
-     * VectorHandlerManifestLessCensusRoutingTest}.
+     * a quarantine collection (its catalog row's state, RDR-229 P2.5; a name with no row, its prefix) is out of
+     * the census by construction, so the route 400s rather than silently classifying quarantine rows. Package-private
+     * so {@code VectorHandlerLifecycleGuardTest} can pin it, and {@code VectorHandlerReapableRouteTest} pins the routes.
      */
     static void requireNotQuarantineCollection(PgVectorRepository repo, String tenant, String collection) {
         dev.nexus.service.db.QuarantineOrigin.requireOutOfCensus(collection, repo.lifecycleState(tenant, collection));
-    }
-
-    static void requireNotQuarantineCollection(String collection) {
-        dev.nexus.service.db.QuarantineOrigin.requireOutOfCensus(collection, java.util.Optional.empty());
     }
 
     /**

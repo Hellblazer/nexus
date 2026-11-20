@@ -181,6 +181,33 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void theClientFormRefusesAnyStateButLiveAndANewQuarantineName_whileTheEngineFormStillMintsBoth()
+            throws Exception {
+        // Rules A and B (linda 2026-11-20): the client route registers live only and never a new quarantine- name;
+        // the engine-internal two-argument form (the Java mint) is unchanged.
+        String t = newTenant();
+        String plainQ = col("a4c");
+        String prefixedNew = prefixed(col("a4d"));
+        String prefixedExisting = prefixed(col("a4e"));
+        row(t, prefixedExisting, "quarantine");
+
+        assertThatThrownBy(() -> repo.upsertCollection(t, reg(plainQ, "quarantine"), true))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("lifecycle_state");
+        assertThatThrownBy(() -> repo.upsertCollection(t, reg(plainQ, "dormant"), true))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("lifecycle_state");
+        assertThatThrownBy(() -> repo.upsertCollection(t, reg(prefixedNew, null), true))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(prefixedNew);
+        assertThat(state(t, plainQ)).isNull();
+        assertThat(state(t, prefixedNew)).isNull();
+
+        repo.upsertCollection(t, reg(prefixedExisting, null), true);
+        assertThat(state(t, prefixedExisting)).as("an existing row is not a NEW registration").isEqualTo("quarantine");
+
+        repo.upsertCollection(t, reg(prefixedNew, "quarantine"));
+        assertThat(state(t, prefixedNew)).as("the engine form mints a quarantine- row").isEqualTo("quarantine");
+    }
+
+    @Test
     void anExistingRowKeepsItsStateWhenReRegistered() throws Exception {
         String t = newTenant();
         String name = col("a4");
@@ -228,37 +255,71 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void anImportRowThatCarriesAStateWinsOverThePrefix_andOneWithoutFallsBackToIt() throws Exception {
+    void anImportAcceptsAStateThatAgreesWithTheName_andAnAbsentStateFallsBackToThePrefix() throws Exception {
         String t = newTenant();
-        String explicitQuarantine = col("a6q");
-        String prefixedExplicitLive = prefixed(col("a6l"));
+        String prefixedQuarantine = prefixed(col("a6q"));
+        String plainLive = col("a6l");
+        String plainDormant = col("a6d");
         String prefixedNoState = prefixed(col("a6p"));
         String plainNoState = col("a6n");
+        String batchQuarantine = prefixed(col("a7q"));
+        String batchNoState = prefixed(col("a7p"));
 
-        repo.importCollection(t, reg(explicitQuarantine, "quarantine"));
-        repo.importCollection(t, reg(prefixedExplicitLive, "live"));
+        repo.importCollection(t, reg(prefixedQuarantine, "quarantine"));
+        repo.importCollection(t, reg(plainLive, "live"));
+        repo.importCollection(t, reg(plainDormant, "dormant"));
         repo.importCollection(t, reg(prefixedNoState, null));
         repo.importCollection(t, reg(plainNoState, null));
+        repo.importCollectionsBatch(t, List.of(reg(batchQuarantine, "quarantine"), reg(batchNoState, null)));
 
-        assertThat(state(t, explicitQuarantine)).isEqualTo("quarantine");
-        assertThat(state(t, prefixedExplicitLive)).as("the imported row's state wins").isEqualTo("live");
+        assertThat(state(t, prefixedQuarantine)).as("an imported quarantine row is accepted").isEqualTo("quarantine");
+        assertThat(state(t, plainLive)).isEqualTo("live");
+        assertThat(state(t, plainDormant)).isEqualTo("dormant");
         assertThat(state(t, prefixedNoState)).as("the ETL fallback: the prefix").isEqualTo("quarantine");
         assertThat(state(t, plainNoState)).isEqualTo("live");
+        assertThat(state(t, batchQuarantine)).isEqualTo("quarantine");
+        assertThat(state(t, batchNoState)).isEqualTo("quarantine");
     }
 
     @Test
-    void theBatchImportTakesTheRowsStateToo() throws Exception {
+    void aNewImportedRowWhoseNameSaysQuarantineAndStateSaysLiveIsRefused_namingTheRow_andNothingIsStored() throws Exception {
         String t = newTenant();
-        String explicitQuarantine = col("a7q");
-        String prefixedExplicitLive = prefixed(col("a7l"));
-        String prefixedNoState = prefixed(col("a7p"));
+        String bad = prefixed(col("a8"));
+        String good = col("a8g");
 
-        repo.importCollectionsBatch(t, List.of(reg(explicitQuarantine, "quarantine"),
-            reg(prefixedExplicitLive, "live"), reg(prefixedNoState, null)));
+        assertThatThrownBy(() -> repo.importCollection(t, reg(bad, "live")))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(bad).hasMessageContaining("lifecycle_state");
+        assertThatThrownBy(() -> repo.importCollectionsBatch(t, List.of(reg(good, "live"), reg(bad, "live"))))
+            .as("the batch is refused whole, and counts the rows").isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining(bad).hasMessageContaining("1 row");
+        assertThat(state(t, bad)).isNull();
+        assertThat(state(t, good)).isNull();
+    }
 
-        assertThat(state(t, explicitQuarantine)).isEqualTo("quarantine");
-        assertThat(state(t, prefixedExplicitLive)).isEqualTo("live");
-        assertThat(state(t, prefixedNoState)).isEqualTo("quarantine");
+    @Test
+    void aNewImportedRowWhoseNameIsPlainAndStateSaysQuarantineIsRefused_namingTheRow_andNothingIsStored() throws Exception {
+        String t = newTenant();
+        String bad = col("a9");
+        String bad2 = col("a9b");
+
+        assertThatThrownBy(() -> repo.importCollection(t, reg(bad, "quarantine")))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(bad).hasMessageContaining("lifecycle_state");
+        assertThatThrownBy(() -> repo.importCollectionsBatch(t, List.of(reg(bad, "quarantine"), reg(bad2, "quarantine"))))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(bad).hasMessageContaining(bad2)
+            .hasMessageContaining("2 row");
+        assertThat(state(t, bad)).isNull();
+    }
+
+    @Test
+    void aDisagreeingRowThatIsAlreadyRegisteredIsSkippedNotRefused() throws Exception {
+        String t = newTenant();
+        String name = prefixed(col("a10"));
+        row(t, name, "quarantine");
+
+        repo.importCollection(t, reg(name, "live"));
+        repo.importCollectionsBatch(t, List.of(reg(name, "live")));
+
+        assertThat(state(t, name)).as("an import never overwrites an existing row").isEqualTo("quarantine");
     }
 
     // ── (b) guards on an existing collection read the row ────────────────────
@@ -330,6 +391,33 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
             .satisfies(e -> assertNamesTheSanctionedVerbs(e, rowLessTarget));
         assertThatThrownBy(() -> repo.rehomeCollection(t, x, rowLessTarget))
             .satisfies(e -> assertNamesTheSanctionedVerbs(e, rowLessTarget));
+    }
+
+    @Test
+    void aTargetWhoseRowIsQuarantineIsRefusedWhateverItsName_andAPrefixedTargetWhoseRowIsLiveIsAdmitted()
+            throws Exception {
+        // Review S1: the TARGET guards read the row too (a row-less target keeps the prefix rule).
+        String t = newTenant();
+        String x = col("b5a");
+        row(t, x, "live");
+        chunk(t, x, "one", null);
+        String plainQuarantine = col("b5q");
+        row(t, plainQuarantine, "quarantine");
+
+        assertThatThrownBy(() -> repo.rehomeCollection(t, x, plainQuarantine))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, plainQuarantine));
+        assertThatThrownBy(() -> repo.renameCollection(t, x, plainQuarantine))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, plainQuarantine));
+        assertThatThrownBy(() -> chashRepo.renameCollection(t, x, plainQuarantine))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, plainQuarantine));
+        assertThat(count(t, x)).as("nothing moved").isEqualTo(1);
+
+        String prefixedLive = prefixed(col("b5l"));
+        row(t, prefixedLive, "live");
+        var moved = repo.rehomeCollection(t, x, prefixedLive);
+
+        assertThat(moved.movedChunks()).isEqualTo(1);
+        assertThat(count(t, prefixedLive)).isEqualTo(1);
     }
 
     @Test
@@ -429,7 +517,8 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
         String hex = chunk(t, q, "x", null);
 
         assertThatThrownBy(() -> vectors.quarantineRestore(t, q, q, List.of(hex), ACTOR, false))
-            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantine");
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("the origin collection must be a non-quarantine collection");
     }
 
     // ── (b) the reaper splits its collections by the row, not by the prefix ──

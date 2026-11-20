@@ -218,9 +218,9 @@ public final class ChashRepository {
             throw new IllegalArgumentException("old and new collection must not be empty");
         }
         // nexus-wbfpw.71: a re-home with no audit row; refused on a quarantine collection, source or target.
-        // RDR-229 P2.5: the source's row decides (registry cache, else one short read); the target has no row yet.
-        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, "rename", oldCollection);
-        QuarantineOrigin.requireNotQuarantineTarget("rename", newCollection);
+        // RDR-229 P2.5: each end by its row (registry cache, else one short read); a row-less target, its prefix.
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldCollection);
+        QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newCollection);
         // nexus-wbfpw.66: the manifest re-home below UPDATEs catalog_document_chunks.collection, which
         // fires vectors-021-3's chunk-locking trigger, so this whole transaction is retried on a 40P01
         // (the same wrap CatalogRepository.renameCollectionTxn carries). Everything it produces is the

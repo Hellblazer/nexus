@@ -273,9 +273,11 @@ class CollectionParseGateTest {
      * three to one corpus file.
      *
      * <p>{@code db/CollectionRegistration.java} declares 1 (RDR-229 P2.5 D1, nexus-p2m1x.10): the conformant-name
-     * pattern that gives an ETL import row with no {@code model_version} the {@code vN} of its name. It reads a
-     * name from another install or an older era, a MIGRATION SOURCE in the RDR's classification, and it is the only
-     * place the engine reads a version out of a name; a row with a version never reaches it.
+     * pattern that reads the {@code vN} of a conformant name. It has two callers: the ETL import of a NEW row that
+     * carries no {@code model_version} (a name from another install or an older era, a MIGRATION SOURCE in the RDR's
+     * classification), and {@code ReembedHandler.register}, which reads the version off the target name the client
+     * minted. It is the only place the engine reads a version out of a name, and it is retired at P4 with the name
+     * parsers.
      */
     private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of(
         "dev/nexus/service/db/CollectionRegistration.java", 1,

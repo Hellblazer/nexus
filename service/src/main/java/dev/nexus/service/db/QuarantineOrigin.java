@@ -105,30 +105,17 @@ public final class QuarantineOrigin {
     }
 
     /**
-     * Refuses an EXISTING collection when its catalog row says it is a quarantine collection, naming the sanctioned
-     * verbs (RDR-229 P2.5; the source side of rename and rehome, and store-delete). Where the row comes from:
-     * {@link CollectionRegistry#lifecycleState(TenantScope, String, String)}, the registry cache when the row is
-     * cached, else one single-column read in a short transaction. A name with no row is judged by its prefix.
+     * Refuses a collection that is a quarantine collection, naming the sanctioned verbs (RDR-229 P2.5; store-delete,
+     * and BOTH ends of rename and rehome). The catalog row decides ({@link #isQuarantine}): the registry cache when
+     * the row is cached, else one single-column read in a short transaction. A name with no row, such as a rename or
+     * rehome target not yet registered, is judged by its prefix, as it always was. (The allow-list CHECK, a name
+     * rule, is a separate guard and is not touched.)
      *
      * @param verb what the caller asked for, as the message names it ({@code store-delete}, {@code rename}, ...)
      * @throws IllegalArgumentException when {@code name} is a quarantine collection (a 400 on every route)
      */
-    public static void requireNotQuarantineSource(TenantScope scope, String tenant, String verb, String name) {
+    public static void requireNotQuarantine(TenantScope scope, String tenant, String verb, String name) {
         if (isQuarantine(scope, tenant, name)) {
-            throw refused(verb, name);
-        }
-    }
-
-    /**
-     * Refuses a NEW name that is a quarantine name: the rename or rehome TARGET, which has no catalog row yet, so
-     * its name is all there is to judge (RDR-229 P2.5 keeps this a name test; the allow-list CHECK is the same
-     * kind of name rule and is not touched). A target that already has a row is refused or admitted by the
-     * verb's own state checks, as before.
-     *
-     * @throws IllegalArgumentException when {@code name} starts with the quarantine prefix (a 400 on every route)
-     */
-    public static void requireNotQuarantineTarget(String verb, String name) {
-        if (isQuarantineName(name)) {
             throw refused(verb, name);
         }
     }
@@ -222,7 +209,12 @@ public final class QuarantineOrigin {
      * refuses a non-live origin, the engine's expiry skips it, and {@code nx t3 gc} refuses its name).
      */
     static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin) {
-        return !isQuarantine(ctx, tenant, origin)
+        return holdsRowsOf(ctx, tenant, origin, CollectionRegistry.lifecycleState(ctx, tenant, origin));
+    }
+
+    /** {@link #holdsRowsOf(DSLContext, String, String)} for a caller that already holds the origin's row state. */
+    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin, Optional<String> lifecycleState) {
+        return !isQuarantine(lifecycleState, origin)
             && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null)));
     }
 

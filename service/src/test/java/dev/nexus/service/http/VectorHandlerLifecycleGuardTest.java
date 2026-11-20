@@ -22,7 +22,7 @@ import java.sql.Connection;
  * RDR-229 P2.5 (bead nexus-p2m1x.10) (b): the manifest-less census and the reapable listing refuse a collection
  * whose catalog ROW is {@code lifecycle_state = 'quarantine'}, whatever its name; a prefixed name whose row is
  * {@code live} is admitted; a name with no row is judged by its prefix as before
- * ({@link VectorHandlerManifestLessCensusRoutingTest} pins the row-less rule with no database).
+ * (pinned here too: the row-less cases that used to be database-free tests of the one-argument form).
  */
 class VectorHandlerLifecycleGuardTest extends AtomicWriteTestBase {
 
@@ -78,6 +78,24 @@ class VectorHandlerLifecycleGuardTest extends AtomicWriteTestBase {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatCode(() -> VectorHandler.requireNotQuarantineCollection(vectors, t, col("r")))
             .doesNotThrowAnyException();
+    }
+
+    @Test
+    void aRowLessNameOfThePrefixIsRefusedWithTheQuarantineMessage_andOrdinaryAndBareQuarantineAreAccepted() {
+        String t = newTenant();
+
+        assertThatThrownBy(() -> VectorHandler.requireNotQuarantineCollection(vectors, t,
+                "quarantine-code__x__voyage-code-3__v1"))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantine");
+        assertThatCode(() -> VectorHandler.requireNotQuarantineCollection(vectors, t,
+                "knowledge__x__minilm-l6-v2-384__v1")).doesNotThrowAnyException();
+        // "quarantine" alone (no trailing hyphen) is not the quarantine-collection grammar (docs/collections.md):
+        // a future edit must not widen the prefix test to a bare substring match.
+        assertThatCode(() -> VectorHandler.requireNotQuarantineCollection(vectors, t, "quarantine"))
+            .doesNotThrowAnyException();
+        assertThatThrownBy(() -> VectorHandler.requireNotQuarantineCollection(vectors, t, "quarantine-docs__x__m__v1"))
+            .as("the reapable listing refuses it like the census").isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("quarantine");
     }
 
     @Test

@@ -6773,7 +6773,7 @@ FROM scope s
         // restore, expiry, and the audited collection delete.
         // RDR-229 P2.5: the collection's row decides (registry cache, else one short read); a name with no row is
         // judged by its prefix. dimForCollection below then fills the cache for the rows it admits.
-        dev.nexus.service.db.QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, "store-delete", collection);
+        dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "store-delete", collection);
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -7710,7 +7710,7 @@ FROM scope s
     }
 
     private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection) {
-        String reaperName = "quarantine-" + originCollection;
+        String reaperName = dev.nexus.service.db.QuarantineOrigin.PREFIX + originCollection;
         Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
         List<String> found =
             ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)

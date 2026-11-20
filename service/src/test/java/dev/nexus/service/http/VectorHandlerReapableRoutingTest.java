@@ -40,12 +40,6 @@ class VectorHandlerReapableRoutingTest {
     }
 
     @Test
-    void theListingRefusesAQuarantineCollection_likeTheCensus() {
-        assertThatThrownBy(() -> VectorHandler.requireNotQuarantineCollection("quarantine-docs__x__m__v1"))
-            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantine");
-    }
-
-    @Test
     void afterChashIsAbsentEmptyOrACanonicalHexChash() {
         assertThat(VectorHandler.parseAfterChash(null)).isNull();
         assertThat(VectorHandler.parseAfterChash("")).isNull();

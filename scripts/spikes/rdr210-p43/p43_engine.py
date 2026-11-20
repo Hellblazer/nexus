@@ -188,7 +188,7 @@ class Engine:
     def upsert_collection(self, name: str, content_type: str, owner_id: str, model: str) -> None:
         r = self.post("/v1/catalog/collections/upsert", {
             "name": name, "content_type": content_type,
-            "owner_id": owner_id, "embedding_model": model,
+            "owner_id": owner_id, "embedding_model": model, "model_version": "v1",
         })
         if r.body.get("ok") is not True:
             raise EngineError(r.status, "/v1/catalog/collections/upsert", json.dumps(r.body))

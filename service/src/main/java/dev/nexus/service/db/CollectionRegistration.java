@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -68,6 +69,53 @@ public final class CollectionRegistration {
         boolean quarantine = (contentType != null && contentType.startsWith(QuarantineOrigin.PREFIX))
                           || (name != null && name.startsWith(QuarantineOrigin.PREFIX));
         return quarantine ? "quarantine" : "live";
+    }
+
+    /**
+     * Refuses an import batch holding a NEW row whose explicit {@code lifecycle_state} and name disagree: a
+     * {@code quarantine-} name must say {@code quarantine}, and any other name must not (review, linda 2026-11-20).
+     * Loud and whole: the import's response is a bare count with no per-row report, so the batch is refused with one
+     * {@link IllegalArgumentException} (a 400) that counts and names the rows, and nothing is stored, as the
+     * content_type guard already refuses a batch. A row with no state keeps the prefix fallback and cannot disagree.
+     */
+    static void requireStatesAgreeWithNames(List<Map<String, Object>> newRows) {
+        List<String> bad = new java.util.ArrayList<>();
+        for (Map<String, Object> coll : newRows) {
+            String state = explicitLifecycleState(coll);
+            String name = CatalogRepository.s(coll, "name");
+            if (state != null && (name != null && name.startsWith(QuarantineOrigin.PREFIX)) != "quarantine".equals(state)) {
+                bad.add("'" + name + "' (lifecycle_state=" + state + ")");
+            }
+        }
+        if (!bad.isEmpty()) {
+            throw new IllegalArgumentException("refusing the import: " + bad.size() + " row(s) whose lifecycle_state "
+                + "disagrees with the name (a quarantine- name must be 'quarantine', any other name must not be): "
+                + String.join(", ", bad.size() > 10 ? bad.subList(0, 10) : bad) + (bad.size() > 10 ? ", ..." : ""));
+        }
+    }
+
+    /**
+     * The client route ({@code POST /v1/catalog/collections/upsert}) registers {@code live} collections only
+     * (linda 2026-11-20, rule A): an explicit state other than {@code live} is refused. Engine-internal callers of
+     * {@code upsertCollection} do not pass through here and may name any state.
+     */
+    static void requireClientState(String requestedState, String name) {
+        if (requestedState != null && !"live".equals(requestedState)) {
+            throw new IllegalArgumentException("lifecycle_state '" + requestedState + "' is not accepted when "
+                + "registering collection '" + name + "': this route registers live collections only (send "
+                + "'live' or no lifecycle_state); the engine creates quarantine rows itself");
+        }
+    }
+
+    /**
+     * Rule B (linda 2026-11-20): a NEW client registration may not start with the {@code quarantine-} prefix. The
+     * engine mints that name (the reaper, the SQL movers); this guard stops a client minting one.
+     */
+    static void requireClientNameNotQuarantine(String name) {
+        if (name != null && name.startsWith(QuarantineOrigin.PREFIX)) {
+            throw new IllegalArgumentException("registering collection '" + name + "' is refused: the quarantine- "
+                + "name prefix is the engine's own; a client cannot register a collection under it");
+        }
     }
 
     /** The {@code model_version} a NEW registration sends; blank or absent is refused. */

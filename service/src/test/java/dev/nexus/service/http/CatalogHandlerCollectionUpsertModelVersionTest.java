@@ -127,6 +127,26 @@ class CatalogHandlerCollectionUpsertModelVersionTest extends AtomicWriteTestBase
     }
 
     @Test
+    void reImportingAnExistingLegacyRowWithABlankVersionIsANoOp_notA400() throws Exception {
+        // Review: the version check judges a row that will be INSERTed; a name already registered is skipped first.
+        String t = newTenant();
+        String legacy = "my_legacy_collection_" + seq.incrementAndGet();
+        repo.importCollection(t, row(legacy, "v1"));
+        try (var su = pg.createConnection("")) {
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.MODEL_VERSION, "")
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t)
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(legacy))).execute();
+        }
+
+        repo.importCollection(t, row(legacy, null));
+        repo.importCollectionsBatch(t, List.of(row(legacy, "  ")));
+
+        assertThat(version(t, legacy)).as("an existing row is left as it was").isEmpty();
+    }
+
+    @Test
     void anImportRowThatCarriesAVersionKeepsIt_overTheNamesSuffix() {
         String t = newTenant();
         String name = conformant("keeps", 3);

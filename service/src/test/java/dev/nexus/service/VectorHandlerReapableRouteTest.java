@@ -605,6 +605,25 @@ class VectorHandlerReapableRouteTest {
     }
 
     @Test
+    void aCollectionWhoseRowIsQuarantineIsRefusedByTheReapableAndTheCensusRoutes_whateverItsName() throws Exception {
+        // RDR-229 P2.5: the row decides, not the name. A plain name registered 'quarantine' is out of both routes.
+        String plain = "knowledge__rowq-plain__minilm-l6-v2-384__v1";
+        register(TENANT_A, plain);
+        su(ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.LIFECYCLE_STATE, "quarantine")
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(plain))).execute());
+
+        HttpResponse<String> reapable = post(TOKEN_A, "/v1/vectors/reapable", Map.of("collection", plain));
+        HttpResponse<String> census = post(TOKEN_A, "/v1/vectors/manifest-less-census", Map.of("collection", plain));
+
+        assertThat(reapable.statusCode()).isEqualTo(400);
+        assertThat(reapable.body()).contains("is a quarantine collection");
+        assertThat(census.statusCode()).isEqualTo(400);
+        assertThat(census.body()).contains("is a quarantine collection");
+    }
+
+    @Test
     void badRequestsAreRefused() throws Exception {
         assertThat(post(TOKEN_A, "/v1/vectors/reapable", Map.of()).statusCode())
             .as("collection is required").isEqualTo(400);

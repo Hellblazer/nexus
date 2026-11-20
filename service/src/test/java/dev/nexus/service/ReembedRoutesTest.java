@@ -1069,6 +1069,26 @@ class ReembedRoutesTest {
     }
 
     @Test
+    void aTargetNameThatIsNotConformantIsRefusedByPlanAndStart_andNothingIsRegistered() throws Exception {
+        // Review: the engine reads the target's version off its minted name, so a target to register must be conformant.
+        Tn t = tenant("legacyname");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String legacy = "my_legacy_target_" + t.owner();
+
+        var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy + "\"}");
+        var start = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy + "\"}");
+
+        assertThat(plan.statusCode()).as(plan.body()).isEqualTo(400);
+        assertThat(start.statusCode()).as(start.body()).isEqualTo(400);
+        assertThat(json(plan).get("error").toString()).contains(legacy).contains("conformant");
+        assertThat(json(start).get("error").toString()).contains(legacy).contains("conformant");
+        assertThat(catalog.getCollection(t.tenant(), legacy)).isNull();
+        assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
+    }
+
+    @Test
     void planOfASourceAJobHoldsIsRefusedNamingTheJob() throws Exception {
         Tn t = tenant("planheld");
         UUID jobId = id(startOk(t, t.src()));

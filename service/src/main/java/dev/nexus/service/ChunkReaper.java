@@ -165,7 +165,7 @@ final class ChunkReaper {
     /** A census that read this many TIMES the dry run's total, and at least {@link #CENSUS_GROWTH_WARN_MIN_EXTRA} more, is warned about. */
     private static final int CENSUS_GROWTH_WARN_FACTOR = 2;
     private static final long CENSUS_GROWTH_WARN_MIN_EXTRA = 100;
-    private static final String QUARANTINE_PREFIX = "quarantine-";
+    private static final String QUARANTINE_PREFIX = dev.nexus.service.db.QuarantineOrigin.PREFIX;
     private static final String LIVE = "live";
     /** Per-statement bound for the enumeration, the dry run, the move and the expiry. */
     private static final int STATEMENT_TIMEOUT_MS = 25_000;
