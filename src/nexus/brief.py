@@ -45,7 +45,7 @@ TOPICS: tuple[str, ...] = session_context.BRIEF_TOPICS
 TOPIC_HELP: dict[str, str] = {
     "memory": "T2 notes of this project: titles, newest first, with snippets (the scan SessionStart used to print)",
     "beads": "ready beads, and the bd usage primer when the beads plugin is off for this project",
-    "caps": "nx tool notes: search filters, MCP prefix, pagination, enrich commands",
+    "caps": "notes on the nexus tools: search filters, MCP prefix, pagination, enrich commands",
     "map": "the Knowledge Map: topic labels per collection for this repo (nx context refresh builds it)",
     "rdr": "RDR counts by status and whether docs/rdr is indexed, with the remedy when it is not",
     "me": "this seat's own startup note (identity notes titled startup), printed for you to read and act on",

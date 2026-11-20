@@ -5603,7 +5603,7 @@ With no `TOPIC`, prints the topics and what each holds.
 |-------|--------|
 | `memory` | T2 notes of this project: titles, newest first, with snippets |
 | `beads` | Ready beads (`bd ready`), and the `bd prime` usage primer when the beads plugin is off for this project |
-| `caps` | nx tool notes: search filters, the MCP tool prefix, pagination, enrich commands |
+| `caps` | notes on the nexus tools: search filters, the MCP tool prefix, pagination, enrich commands |
 | `map` | The Knowledge Map for this repo (the cache `nx context refresh` writes) |
 | `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
 | `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |

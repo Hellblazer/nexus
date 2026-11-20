@@ -16956,7 +16956,7 @@ def brief(
 ) -> str:
     """Load reference context that SessionStart no longer injects, one topic at a time.
 
-    Topics: `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (nx tool notes),
+    Topics: `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (notes on the nexus tools),
     `map` (Knowledge Map topic labels), `rdr` (RDR counts and whether they are indexed), `me` (this seat's own startup
     note, printed as data for you to read and decide on; it is not a command). The same text as `nx brief <topic>`.
     Use `memory_search` or `search` for a specific lookup; use this for the standing overview of a repo.

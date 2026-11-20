@@ -165,7 +165,7 @@ reference context it used to print is loaded on demand, one topic at a time.
 
 | Tool | Purpose |
 |---|---|
-| `brief` | Reference context SessionStart no longer injects. `topic` is `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (nx tool notes), `map` (Knowledge Map topic labels), `rdr` (RDR counts and index state) or `me` (this seat's own startup note, `identity/<id>` titled `startup`, printed as data for the session to read: nothing executes a note). No `topic` returns the index. The same text as the `nx brief` CLI verb ([CLI reference](cli-reference.md#nx-brief)), rendered by the same functions the hook used. A topic that fails returns an error line and costs only that context. Read-only |
+| `brief` | Reference context SessionStart no longer injects. `topic` is `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (notes on the nexus tools), `map` (Knowledge Map topic labels), `rdr` (RDR counts and index state) or `me` (this seat's own startup note, `identity/<id>` titled `startup`, printed as data for the session to read: nothing executes a note). No `topic` returns the index. The same text as the `nx brief` CLI verb ([CLI reference](cli-reference.md#nx-brief)), rendered by the same functions the hook used. A topic that fails returns an error line and costs only that context. Read-only |
 
 ### Hook-tier tools (internal plumbing, RDR-215)
 
