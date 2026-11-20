@@ -121,14 +121,25 @@ def run_scope() -> Iterator[HintCollector]:
 
 
 def prints_hints(command: Callable[..., _T]) -> Callable[..., _T]:
-    """Decorate a click command body: open a :func:`run_scope`, and when the command returns normally print the
-    hints it collected, one per line, after its own output. A command that raises prints none (its error is the
-    message). Apply it directly above the ``def``, under the ``click`` decorators."""
+    """Decorate a click command body: open a :func:`run_scope`, and print the hints it collected, one per line, after its
+    own output.
+
+    The hints are printed when the command returns AND when it raises a ``click.ClickException`` (a ``--dir`` batch
+    that ends ``N of M failed``): they describe writes that already completed, and the curator hint is not repeated on
+    a later run, so dropping them with the error would lose them for good. They print before the error message. Any
+    other exception (a bug, an interrupt) prints none: it says nothing is known about what was written. Apply it
+    directly above the ``def``, under the ``click`` decorators."""
 
     @functools.wraps(command)
     def wrapper(*args: Any, **kwargs: Any) -> _T:
+        import click  # noqa: PLC0415 — deferred: the catalog layer stays importable without click
+
         with run_scope() as collector:
-            result = command(*args, **kwargs)
+            try:
+                result = command(*args, **kwargs)
+            except click.ClickException:
+                echo_hints(collector.drain())
+                raise
             echo_hints(collector.drain())
             return result
 

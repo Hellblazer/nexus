@@ -198,15 +198,35 @@ def test_collector_prints_once_at_end():
     assert hints.active_collector() is None, "the scope closed with the command"
 
 
-def test_a_failing_command_prints_no_hint_and_closes_the_scope():
+def test_a_command_that_fails_with_a_click_exception_still_prints_its_hints():
+    """A ``--dir`` batch that ends ``N of M failed`` has already written the files that succeeded; the hints describe
+    those writes, and the curator hint is not repeated on a later run. The error message follows them."""
+
+    @click.command()
+    @hints.prints_hints
+    def cmd():
+        click.echo("indexing...")
+        hints.active_collector().add("the hint")
+        raise click.ClickException("1 of 2 file(s) failed")
+
+    result = CliRunner().invoke(cmd)
+    assert result.exit_code == 1
+    assert result.output.splitlines()[:2] == ["indexing...", "the hint"] and "1 of 2 file(s) failed" in result.output
+    assert hints.active_collector() is None
+
+
+def test_an_unexpected_exception_prints_no_hint_and_closes_the_scope():
+    """Anything that is not a ClickException (a bug, an interrupt) says nothing is known about what was written, so
+    no hint is printed; the scope still closes."""
+
     @click.command()
     @hints.prints_hints
     def cmd():
         hints.active_collector().add("the hint")
-        raise click.ClickException("the run failed")
+        raise RuntimeError("boom")
 
     result = CliRunner().invoke(cmd)
-    assert result.exit_code == 1 and "the hint" not in result.output
+    assert result.exit_code == 1 and isinstance(result.exception, RuntimeError) and "the hint" not in result.output
     assert hints.active_collector() is None
 
 
