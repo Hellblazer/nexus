@@ -354,6 +354,10 @@ Research records (T2 `nexus_rdr/255-research-1` to `-18`, 2026-11-19):
   *Source: arXiv 2603.13774, full text in T3 (255-research-17)*
 - **✅ Verified** (source search) — AgenticScholar's curation came from offline human analysis of query patterns and the knowledge representation, plus a corpus taxonomy built automatically and refined as the corpus grows; it is evaluated on computer-science papers only, and its authors say other domains may need domain-aware planning. Its discovery phase is the human version of the routine this RDR proposes to automate.
   *Source: arXiv 2603.13774, full text in T3 (255-research-18)*
+- **✅ Verified** (spike) — Part 1 of the deciding experiment: on a seeded 45 of the 68 rule-routed test questions, a generic hand-written aggregation plan scores Cust 39.1 against stock 9.9 (paired +0.29, 95% CI 0.18 to 0.40, 26/14/5). The whole gain is on the 33 questions stock declined (22 wins, 0 losses); on the 12 stock answered the two are level. The plan ran with coverage off and its final step sees the question, so the result does not yet separate a better plan from answering where stock withheld.
+  *Source: T2 nexus_rdr/herb-plan-experiment-part1-result-2026-11-19; assetops-kg feature/herb-full-pool ebb4ba7 (255-research-19)*
+- **✅ Verified** (spike) — A retrieval choice that wins on one store loses on another. Plan 10 with the lexical rerank gained recall on HERB (one pooled collection), but on a production store of about 100 collections the pre-registered timing gave a median of 43.7 s against 4.5 s and lost the gold document 11 times with no gains, because a search over all corpora reranks each collection separately and the rerank service rate-limits it. The change was reverted before 8.5.1. Collection count and fan-out are corpus-profile facts a plan composer has to read; a shipped plan cannot fix them as constants.
+  *Source: T2 nexus/plan10-rerank-cloud-timing-result-2026-11-19; ca239f405; GH #1667 comment 7016198283 (255-research-20)*
 
 ### Critical Assumptions
 
@@ -519,7 +523,22 @@ when told about the corpus (part 2).
 ## The Deciding Experiment
 
 Pre-registered before any plan was written
-(T2 `nexus_rdr/herb-plan-experiment-prereg-2026-11-19`). Results are pending.
+(T2 `nexus_rdr/herb-plan-experiment-prereg-2026-11-19`). Part 1 is in; part 2 is
+not run yet.
+
+**Part 1 result** (T2 `nexus_rdr/herb-plan-experiment-part1-result-2026-11-19`,
+finding 19). Only the 68 test questions the shape rule routes were eligible; a
+seeded 45 of them were run, sized from the development effect (11 pairs give 80%
+power). The hand-written plan scores Cust 39.1 against stock 9.9, a paired
+difference of +0.29 with a 95% bootstrap interval of 0.18 to 0.40, 26 wins, 14
+ties, 5 losses. The gain is all on questions stock declined: on those 33 the plan
+wins 22 and loses none; on the 12 stock answered the two are level (36.3 against
+37.2), and on max-count alone stock is ahead. Two confounds stand between this and
+"the plan is better": the plan ran with the coverage boundary off, and its final
+step sees the question while stock's does not. So part 1 shows that a plan can
+answer where stock withholds; it does not yet show that the plan counts better.
+A stock run with coverage off on the same 45 (about $3) separates the two, and it
+decides which row of the table below applies.
 
 - **Split.** Development set: SearchFlow, ActionGenie, AnomalyForce,
   AutoTuneForce, CoachForce (27 questions). Test set: the other 25 products
@@ -685,6 +704,7 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: research findings 19-20 added (plan experiment part 1 result and its confounds; the 8.5.1 cloud rerank timing as a corpus-profile fact); Deciding Experiment records the part 1 result.
 - 2026-11-19: research findings 16-18 added (record-shaped lexical retrieval; AgenticScholar full text: scope/task split, conservative reuse, offline curation); finding 4 marked superseded; Option B gains the scope/task step.
 - 2026-11-19: research finding 15: Gap 2 rewritten from the stock run's telemetry (aggregate questions classified as lookup; category route after eligibility); Option B rewritten.
 - 2026-11-19: research findings 1-14 added; Gap 2 flagged under review; Gap 5 added; open question 7 (RDR-251 split).
