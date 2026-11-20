@@ -323,6 +323,15 @@ def delete_cmd(
         raise click.UsageError("--all and --title are mutually exclusive")
     if entry_id is None and not all_entries and not (project and title):
         raise click.UsageError("provide --id, or --project and --title, or --project and --all")
+    if project and project.startswith("identity/"):
+        # RDR-253 Step 6 part 3: a refused identity/<id> delete is one line before any request, never a traceback.
+        # Delete by --id carries no project and is not covered (the store's id-keyed paths are documented as unguarded).
+        from nexus.identity.notes import IdentityNotesRefused, check_write  # noqa: PLC0415 — deferred: keeps CLI startup light
+
+        try:
+            check_write(project)
+        except IdentityNotesRefused as exc:
+            raise click.ClickException(str(exc)) from exc
 
     with t2_handle() as db:
         if all_entries:

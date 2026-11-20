@@ -232,6 +232,10 @@ def quiet_hook(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     monkeypatch.setattr("nexus.hooks.board_due.due_lines", lambda sid, **k: [])
+    # Confirmation review r2 suggestion 1: the base run calls the real notes_lines, so pin the global logging setup
+    # and the token file, or under a real Claude ancestor (a laptop or agent session) it reaches a real file and engine.
+    monkeypatch.setattr("nexus._hook_runtime._io.configure_hook_logging", lambda *a, **k: None)
+    monkeypatch.setattr("nexus.identity.token_header.token_file_path", lambda: None)
 
 
 def test_session_start_adds_exactly_one_line_when_there_are_notes(monkeypatch, quiet_hook) -> None:

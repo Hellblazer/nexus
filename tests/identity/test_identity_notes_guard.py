@@ -307,3 +307,23 @@ def test_the_cli_reports_the_refusal_as_one_line_never_a_traceback(monkeypatch, 
     out = CliRunner().invoke(memory, ["put", "body", "--mine", "-t", "plan"])
     assert out.exit_code == 1 and "ephemeral" in out.output and "Traceback" not in out.output, out.output
     assert wire.posts == []
+
+
+def test_the_cli_delete_reports_the_refusal_as_one_line_never_a_traceback(monkeypatch, holds) -> None:
+    """Confirmation review r2 suggestion 2: a refused `nx memory delete` of an identity/<id> note was a traceback."""
+    import contextlib
+
+    from click.testing import CliRunner
+
+    from nexus.commands.memory import memory
+    from nexus.identity import token_header
+
+    holds("i5")
+    monkeypatch.setattr(token_header, "current", lambda **k: SimpleNamespace(identity="i5"))
+    engine(monkeypatch, {"kind": "ephemeral"})
+    wire = Wire()
+    db = SimpleNamespace(memory=wire)
+    monkeypatch.setattr("nexus.commands.memory.t2_handle", lambda: contextlib.nullcontext(db))
+    out = CliRunner().invoke(memory, ["delete", "--project", "identity/i5", "--title", "plan", "--yes"])
+    assert out.exit_code == 1 and "ephemeral" in out.output and "Traceback" not in out.output, out.output
+    assert wire.posts == []
