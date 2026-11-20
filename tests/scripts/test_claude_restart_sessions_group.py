@@ -265,6 +265,58 @@ def test_status_with_a_group_names_the_members_it_did_not_cover(env: Env, capsys
                                "i4 (live": "no alias"}
 
 
+def test_a_member_that_is_not_live_whose_alias_a_live_session_carries_says_so(env: Env, capsys) -> None:
+    """An ended member's alias reused by a live session that is no member: the session is here, the member is not."""
+    env.live("alpha")
+    env.live("old")
+    env.group("crew", ["alpha", ("old", "ended")])
+    assert env.run("--ask-ready", "--group", "crew") == 0
+    assert env.mailed == ["alpha"]
+    assert _uncovered(capsys.readouterr().out) == {
+        "old (ended": "a live session here has this name, but the member is not live, so it is not asked"}
+
+
+def test_an_unleased_member_is_matched_and_asked(env: Env, capsys) -> None:
+    """unleased is a live binding whose MCP server cannot renew: the alias is still this identity's, and the local
+    session file proves the session is running, so it is asked like a live member rather than left out."""
+    env.live("alpha")
+    env.live("beta")
+    env.group("crew", ["alpha", ("beta", "unleased")])
+    assert env.run("--ask-ready", "--group", "crew") == 0
+    assert sorted(env.mailed) == ["alpha", "beta"]
+    out = capsys.readouterr().out
+    assert "group crew: 2 of 2 member(s) covered here" in out and _uncovered(out) == {}
+
+
+def test_an_unleased_member_with_no_session_here_says_no_live_session(env: Env, capsys) -> None:
+    env.live("alpha")
+    env.group("crew", ["alpha", ("beta", "unleased")])
+    assert env.run("--ask-ready", "--group", "crew") == 0
+    assert _uncovered(capsys.readouterr().out) == {"beta (unleased": "no live session here"}
+
+
+@pytest.mark.parametrize(("flags", "why"), [(("--skip", "beta"), "left out by --skip"),
+                                            (("--only", "alpha"), "not in --only")])
+def test_a_member_the_round_left_out_by_flag_names_the_flag(env: Env, capsys, flags, why) -> None:
+    env.live("alpha")
+    env.live("beta")
+    env.group("crew", ["alpha", "beta"])
+    assert env.run("--ask-ready", "--group", "crew", *flags) == 0
+    assert env.mailed == ["alpha"]
+    assert _uncovered(capsys.readouterr().out) == {"beta (live": why}
+
+
+def test_a_member_on_another_tmux_server_says_so(env: Env, capsys) -> None:
+    env.live("alpha")
+    env.live("beta")
+    env.group("crew", ["alpha", "beta"])
+    env.monkeypatch.setattr(env.crs, "check_server", lambda found, quiet=False: (
+        FAKE_SERVER, [s for s in found if s["name"] != "beta"], ""))
+    assert env.run("--ask-ready", "--group", "crew") == 0
+    assert env.mailed == ["alpha"]
+    assert _uncovered(capsys.readouterr().out) == {"beta (live": "not on this tmux server"}
+
+
 def test_a_group_whose_members_are_all_covered_prints_no_gaps(env: Env, capsys) -> None:
     env.live("alpha")
     env.live("beta")

@@ -129,10 +129,11 @@ from ~/.claude/sessions/*.json, then the excluded sessions; a round that kept ea
 re-asked and the ones whose answers it kept. Neither restarts anything.
 With --group NAME (on --ask-ready or --status only) the round is about one group: the members are read from the
 engine roster (`nx group list NAME --json`) and a live session is matched to a member by session name, for a member whose
-state is live (an ended or lapsed member's alias may have been taken by a session that is no member). Only those sessions
+state is live or unleased (an ended or lapsed member's alias may have been taken by a session that is no member). Only those sessions
 are asked, listed and reported; --status exits 0 when they are ready, whatever the rest of the round holds (its file
 keeps the other targets). The round prints how many members it covers and each one it does not, with its state and why
-("no live session here", "no alias"), so a ready exit cannot hide who was never asked. A blank NAME, an unknown, disbanded
+("no alias", "no live session here", a live session with the name of a member that is not live, "left out by --skip",
+"not in --only", "not on this tmux server"), so a ready exit cannot hide who was never asked. A blank NAME, an unknown, disbanded
 group, one whose roster cannot be read, and one with no live member here, refuse in one line (exit 6) and ask nothing. A
 group round replaces the round file, so a restart after it still refuses for every session the group round never asked.
 The restart takes no group.
@@ -2746,22 +2747,49 @@ def group_roster(name: str) -> tuple[list[dict] | None, str]:
     return members, ""
 
 
+# A member whose session the round asks: live, or unleased (a live binding whose MCP server cannot renew). An unleased
+# binding still holds its alias, so a session carrying it is that member; the session file proves it is running, and
+# asking it is the safe side, since a ready exit must not leave a running member unasked.
+MATCHED_STATES = frozenset({"live", "unleased"})
+
+
 def group_names(members: list[dict]) -> frozenset[str]:
-    """The names a session must carry to be one of the group's: the aliases of its live members."""
-    return frozenset(m["name"] for m in members if m["state"] == "live" and m["name"])
+    """The names a session must carry to be one of the group's: the aliases of its live (or unleased) members."""
+    return frozenset(m["name"] for m in members if m["state"] in MATCHED_STATES and m["name"])
 
 
-def print_group_coverage(a: argparse.Namespace, found: list[dict]) -> None:
+def print_group_coverage(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> None:
     """With --group: how many roster members the round covers, and each one it does not, with its state and why. The
     exit code of --status says the covered members are ready; this says who was never asked."""
     members = getattr(a, "group_members", None)
     if members is None:
         return
     here = {s.get("name") for s in found}
-    gaps = [m for m in members if not (m["state"] == "live" and m["name"] in here)]
+    gaps = [m for m in members if not (m["state"] in MATCHED_STATES and m["name"] in here)]
     print(f"group {a.group}: {len(members) - len(gaps)} of {len(members)} member(s) covered here")
+    live_here = {s.get("name"): s for s in listed}
+    off_server = getattr(a, "off_server_names", frozenset())
     for m in gaps:
-        print(f"  {m['name'] or m['identity']} ({m['state']}): " + ("no alias" if not m["name"] else "no live session here"))
+        print(f"  {m['name'] or m['identity']} ({m['state']}): {coverage_gap(m, live_here, off_server, a)}")
+
+
+def coverage_gap(m: dict, live_here: dict[str, dict], off_server: frozenset[str], a: argparse.Namespace) -> str:
+    """Why the round does not cover a member: the first of no alias, not a matched state, no session, a flag, the server."""
+    name = m["name"]
+    if not name:
+        return "no alias"
+    if m["state"] not in MATCHED_STATES:
+        if name in live_here or name in off_server:
+            return "a live session here has this name, but the member is not live, so it is not asked"
+        return "no live session here"
+    if name in off_server:
+        return "not on this tmux server"
+    s = live_here.get(name)
+    if s is None:
+        return "no live session here"
+    if skipped(name, s["sessionId"], a.skip):
+        return "left out by --skip"
+    return "not in --only"
 
 
 def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespace) -> list[dict]:
@@ -3064,7 +3092,7 @@ def kept_answers(prev: dict | None, found: list[dict], now: float, max_age: int)
 
 def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> int:
     """--ask-ready and --status. Neither restarts anything."""
-    print_group_coverage(a, found)
+    print_group_coverage(a, listed, found)
     if a.status:
         manifest, why = load_manifest()
         if manifest is None:
@@ -3287,6 +3315,7 @@ def main() -> int:
             return EXIT_REFUSED
         if len(hosted) < len(found):
             off = {s["sessionId"] for s in found} - {s["sessionId"] for s in hosted}
+            a.off_server_names = frozenset(s.get("name") for s in listed if s["sessionId"] in off)
             listed = [s for s in listed if s["sessionId"] not in off]
             print(f"{len(off)} session(s) skipped: not on this tmux server (see the SKIP lines in {LOG})")
         return ready_round(a, listed, hosted)
