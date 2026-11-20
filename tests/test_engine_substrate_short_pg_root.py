@@ -25,6 +25,11 @@ import structlog.testing
 from tests import _engine_substrate as sub
 from tests import _pg_ctl
 
+#: The decisions pinned here are the Darwin /tmp root and the Linux /dev/shm root, built from POSIX paths and
+#: uids; on Windows those paths read as WindowsPath and a SID is not a uid, so the module cannot run there. Windows
+#: itself is untouched by the change (decide_pg_root returns no root off Darwin and Linux).
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX-only: Darwin /tmp and Linux /dev/shm roots, uid ownership")
+
 #: The tempdir from the hellmini failure, as the substrate saw it.
 _LONG_TMP = Path("/Users/hhildebrand/lab-remote/marlowe-p2m1x-6f17406a/.lab-remote/tmp")
 _SHORT_TMP = Path("/var/folders/xx/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/T")
