@@ -336,11 +336,16 @@ def derived_root_uri(file_path: str, source_uri: str, repo_root: str) -> str | N
 
 def count_docs_outside_root(docs: Iterable[Any], repo_root: str) -> int:
     """How many of *docs* the engine's owner move would REWRITE at *repo_root*: root-derived rows whose current
-    ``source_uri`` differs from :func:`derived_root_uri`."""
+    ``source_uri`` differs from :func:`derived_root_uri`. An entry of an unexpected shape (a non-string field) is
+    skipped and logged, so one malformed row costs its own count, not the whole answer."""
     n = 0
     for d in docs:
-        uri = d.source_uri or ""
-        derived = derived_root_uri(d.file_path or "", uri, repo_root)
+        try:
+            uri = d.source_uri or ""
+            derived = derived_root_uri(d.file_path or "", uri, repo_root)
+        except Exception as exc:  # noqa: BLE001 — one malformed catalog entry must not cost the hint or the run
+            _log.warning("move_hints.entry_skipped", error_type=type(exc).__name__, error=str(exc))
+            continue
         if derived is not None and derived != uri:
             n += 1
     return n
@@ -357,7 +362,8 @@ def docs_outside_root_flag(reader: Any, owner_prefix: str, repo_root: str) -> bo
     page = fail_open("outside-root", first_page, reader, owner_prefix, default=None)
     if page is None or not repo_root:
         return None
-    return count_docs_outside_root(page, repo_root) > 0
+    count = fail_open("outside-root-count", count_docs_outside_root, page, repo_root, default=None)
+    return None if count is None else count > 0
 
 
 def rename_hint_lines(reader: Any, new_owner: str, new_root: str, page: list[Any],
@@ -443,7 +449,7 @@ def repo_hints(repo: Path, *, reader: Any = None) -> list[str]:
         return []
     r, prefix, root, page = found
     lines: list[str] = []
-    if count_docs_outside_root(page, root) > 0:
+    if fail_open("outside-root-count", count_docs_outside_root, page, root, default=0) > 0:
         lines.append(owner_move_line(prefix, root))
 
     def _renamed() -> list[str]:

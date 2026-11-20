@@ -191,3 +191,22 @@ def test_flagged_owner_whose_root_the_move_would_refuse_keeps_the_flag_and_gets_
     human = _census(engine)
     assert "Documents outside their root (2):" in human.output
     assert "--execute move" not in human.output
+
+
+def test_a_malformed_catalog_entry_does_not_fail_the_census(healthy_root):
+    """A non-string source_uri on one document: the entry is skipped, the census exits 0, and the other documents of
+    the owner still decide its flag."""
+    engine = HintEngine()
+    engine.add_owner("1.2", str(healthy_root), "h-1.2")
+    _outside(engine, "1.2", str(healthy_root))
+    engine.docs["1.2"][0]["source_uri"] = 12345
+
+    result = _census(engine, "--json")
+    assert result.exit_code == 0, result.output
+    (row,) = json.loads(result.stdout)["healthy"]
+    assert row["docs_outside_root"] is True and row["move_command"].startswith("nx catalog owners --execute move")
+
+    engine.docs["1.2"][1]["source_uri"] = ["not", "a", "string"]
+    result = _census(engine, "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["healthy"][0]["docs_outside_root"] is False, "no readable entry is outside: false"

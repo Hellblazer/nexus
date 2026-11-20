@@ -14,7 +14,7 @@ import structlog
 from tqdm import tqdm
 
 from nexus.catalog.engine_writes.hints import (  # RDR-254: move hints, printed after the run's own output
-    echo_hints as _echo_hints,
+    echo_hints as _echo_hints, fail_open as _fail_open,
     prints_hints as _prints_hints,
     repo_hints as _repo_hints,
 )
@@ -1882,7 +1882,7 @@ def index_repo_cmd(
         # index_repository (see `emit_retry_summary`) so it fires on both
         # success and exception paths — Reviewer A/I-2.
         if not frecency_only:
-            _echo_hints(_repo_hints(path))  # RDR-254 Gaps 2 and 3: read-only, fail-open, repeats until the move is made
+            _echo_hints(_fail_open("repo", _repo_hints, path, default=[]))  # RDR-254 Gaps 2 and 3: read-only, never fails the run
         click.echo("Done.")
 
         # nexus-tp8yk D2b: a manifest write failure / identity drop /

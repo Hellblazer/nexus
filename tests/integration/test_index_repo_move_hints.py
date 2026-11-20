@@ -183,3 +183,30 @@ def test_old_engine_prints_none(repo):
     assert result.exit_code == 0, result.output
     assert _hint_lines(result) == []
     assert set(engine.routes()) == {("GET", "/version")}, "a client never prints a command its engine refuses"
+
+
+def test_a_malformed_catalog_entry_does_not_change_the_exit_code(repo):
+    """The hint computes over what the catalog returned; one entry of an unexpected shape (a non-string source_uri)
+    must cost the hint, never the run. The well-formed entry still produces its line."""
+    engine = HintEngine()
+    root = _new_owner(engine, repo, prefix="1.2", hashes=["h1", "h2"], stale_root=_OLD_ROOT)
+    engine.docs["1.2"][0]["source_uri"] = 12345
+    result = _run(engine, repo)
+    assert result.exit_code == 0, result.output
+    assert "Done." in result.output
+    assert _hint_lines(result) == [hints.owner_move_line("1.2", root)], "the entry that could be read still counts"
+
+
+def test_a_hint_computation_that_raises_does_not_change_the_exit_code(repo, monkeypatch):
+    """Whatever the hint code does with the data, the call site in the command is fail-open: nothing printed, the run
+    ends as it would have."""
+    engine = HintEngine()
+    _new_owner(engine, repo, prefix="1.2", hashes=["h1", "h2"], stale_root=_OLD_ROOT)
+
+    def explode(*args, **kwargs):
+        raise TypeError("unexpected shape")
+
+    monkeypatch.setattr("nexus.commands.index._repo_hints", explode)
+    result = _run(engine, repo)
+    assert result.exit_code == 0, result.output
+    assert "Done." in result.output and _hint_lines(result) == []
