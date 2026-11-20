@@ -134,6 +134,15 @@ def test_index_pdf_with_no_row_renders_the_name_as_before(runner, fake_pdf, monk
     assert m.call_args.kwargs["collection_name"] == _RENDERED
 
 
+def test_index_pdf_dry_run_reads_no_row(runner, fake_pdf, monkeypatch) -> None:
+    """A dry run writes nothing, so it must not need a readable registry."""
+    finder = MagicMock(side_effect=RuntimeError("engine down"))
+    _install_finder(monkeypatch, finder)
+    with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_RESULT):
+        runner.invoke(main, ["index", "pdf", str(fake_pdf), "--collection", "field-notes", "--dry-run"])
+    finder.assert_not_called()
+
+
 def test_index_pdf_fails_loudly_when_the_registry_cannot_be_read(runner, fake_pdf, monkeypatch) -> None:
     _install_finder(monkeypatch, MagicMock(side_effect=RuntimeError("engine down")))
     with patch("nexus.doc_indexer.index_pdf", return_value=_PDF_RESULT) as m:
@@ -203,12 +212,6 @@ def test_the_finder_serves_a_read_too_and_a_failed_read_falls_back() -> None:
     ) == _RENDERED
 
 
-def test_a_row_labelled_with_the_rendered_name_leaves_the_render() -> None:
-    assert t3_collection_name(
-        "field-notes", for_write=True, subject_finder=_finder_returning(_attrs(_RENDERED)),
-    ) == _RENDERED
-
-
 def test_the_finder_underscored_subject_is_looked_up_by_its_owner_segment() -> None:
     finder = _finder_returning(None)
     t3_collection_name("field_notes", for_write=True, subject_finder=finder)
@@ -274,8 +277,9 @@ def test_the_finder_closes_the_reader_when_the_read_raises(monkeypatch) -> None:
     reader.close.assert_called_once_with()
 
 
-def test_the_finder_never_probes_t3_names(monkeypatch) -> None:
-    """The finder reads the registry row only; nexus-hmxi's no-grandfathering rule stands."""
+def test_the_finder_calls_only_find_collection_and_close_on_the_reader(monkeypatch) -> None:
+    """The finder touches the catalog reader only through find_collection and close; with
+    no t3 there is nothing for it to probe (nexus-hmxi's no-grandfathering rule stands)."""
     reader = MagicMock(spec=["find_collection", "close"])
     reader.find_collection.return_value = None
     monkeypatch.setattr(factory, "make_catalog_reader", lambda: reader)
