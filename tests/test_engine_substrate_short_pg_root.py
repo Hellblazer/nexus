@@ -2,7 +2,7 @@
 """A long tempdir on macOS no longer stops the substrate from starting Postgres.
 
 hellmini, 2026-11-20: ``lab-remote`` ran from a worktree whose tempdir was
-``/Users/hhildebrand/lab-remote/<run>/.lab-remote/tmp``, so every cluster's unix
+``/Users/you/xxxxxxx/lab-remote/<run>/.lab-remote/tmp``, so every cluster's unix
 socket path came to 114 bytes, past macOS's 104-byte ``sun_path`` (103 usable),
 and all 3331 tests errored at setup. The chooser knew only Linux's 107 and had no
 fallback. These tests drive the decision with injected inputs (platform, tempdir,
@@ -24,6 +24,7 @@ import structlog.testing
 
 from tests import _engine_substrate as sub
 from tests import _pg_ctl
+from tests._module_seam import setattr_in
 
 #: The decisions pinned here are the Darwin /tmp root and the Linux /dev/shm root, built from POSIX paths and
 #: uids; on Windows those paths read as WindowsPath and a SID is not a uid, so the module cannot run there. Windows
@@ -31,7 +32,7 @@ from tests import _pg_ctl
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX-only: Darwin /tmp and Linux /dev/shm roots, uid ownership")
 
 #: The tempdir from the hellmini failure, as the substrate saw it.
-_LONG_TMP = Path("/Users/hhildebrand/lab-remote/marlowe-p2m1x-6f17406a/.lab-remote/tmp")
+_LONG_TMP = Path("/Users/you/xxxxxxx/lab-remote/marlowe-p2m1x-6f17406a/.lab-remote/tmp")
 _SHORT_TMP = Path("/var/folders/xx/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy/T")
 _TMPFS_MOUNTS = "tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n/dev/nvme0n1p2 / ext4 rw 0 0\n"
 
@@ -319,7 +320,7 @@ class TestTheStartReportsTheFallback:
         # the point of it); pytest's tmp_path is not.
         short = Path(tempfile.mkdtemp(prefix="nxs", dir="/tmp"))
         monkeypatch.setattr(sub, "_SHORT_ROOT_DIR", short)
-        monkeypatch.setattr(sub.platform, "system", lambda: "Darwin")
+        setattr_in(monkeypatch, sub, "platform.system", lambda: "Darwin")
         monkeypatch.setenv(sub._TMP_ORIG_ENV, str(_LONG_TMP))
 
         def _no_room_check(*_a, **_k) -> None:
