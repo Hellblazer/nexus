@@ -14,7 +14,9 @@ through .23) do that, each lowering the pin here. This gate exists FIRST,
 pinned at the count measured BEFORE any of those slices land, so every
 later slice's acceptance is "the pin fell", not a claim nobody can check.
 
-FIVE PATTERN CLASSES. The original four, per RDR-204 Phase 3 item 1
+FIVE PATTERN CLASSES (the pre-P1.1 definition, kept as history; RDR-229
+P1.1 below replaced the fifth class's two named functions with a derived
+helper set and added the shapes it lists). The original four, per RDR-204 Phase 3 item 1
 (docs/rdr/rdr-204-embedding-profile-and-collection-authority.md, sections
 "Implementation Plan / Phase 3" and "Validation / Testing Strategy"):
 ``split("__")`` / ``rsplit("__")``, ``partition("__")`` / ``rpartition("__")``,
@@ -276,9 +278,12 @@ walrus, tuple-unpack and prefix literals, computed prefix constants,
 ``sep="__"`` and a named ``"__"``, ``endswith("__")`` and the hash-suffix leg,
 and it made exclusions shape-specific. The 22 holdovers that first said
 "needs an owner" are RDR-204 class (b) model reads, owned by P2.2 (baton's
-ruling, nexus-p2m1x.7); three that only print a model beside the row's own
-value are diagnostic, and two that already read the row first are mint (the
-NoRow outcome). ``scripts/`` (10 raw sites, T2 ``229-research-21``) stays outside
+ruling, nexus-p2m1x.7): 19 are P2.2 holdovers (including
+``doctor_search._default_model_for``, whose model_drift probe compares two
+name derivations today and sets the exit status, so it is not the ruling's
+print-only exception); the two ``info_cmd`` hits that print the name's model
+beside the row's own value are diagnostic; and ``attribute_collection``,
+which reads the row first, is mint (the NoRow outcome). ``scripts/`` (10 raw sites, T2 ``229-research-21``) stays outside
 ``SRC`` and so outside this gate. Phase 2 lowers the pins by deleting ledger
 entries.
 
@@ -330,7 +335,7 @@ for _site in LEDGER:
 #: entries; nothing here may rise without a ledger entry and a reason.
 PARSE_SITE_PIN: int = 243
 CLASS_PIN: dict[str, int] = {
-    "mint": 107, "holdover": 39, "routing": 36, "diagnostic": 31,
+    "mint": 107, "holdover": 40, "routing": 36, "diagnostic": 30,
     "migration-source": 14, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }

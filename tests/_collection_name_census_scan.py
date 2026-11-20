@@ -68,7 +68,15 @@ matches in both; and a prefix reached only through a call result, a
 ``getattr`` or a dict lookup is invisible. ``scripts/`` is not scanned.
 The hash-suffix leg needs a receiver spelled with ``collection`` in it, so
 ``suffix.rsplit("-", 1)`` on a local derived from a collection name
-(``commands/catalog.py``'s per-file recovery) is not matched.
+(``commands/catalog.py:1945``, the per-file recovery) is not matched.
+Also not matched: a prefix collection wrapped or built at the use site
+(``startswith(tuple(CONST))``, ``startswith(tuple(f"{t}__" for t in T))``, a
+local list or generator of such f-strings); a class-level prefix constant
+(``self.PFX``, the collector reads module bodies only); ``CONST + owner``
+(only a literal ending in ``__`` counts as concat); ``.replace("__", ...)``;
+``rpartition("-")`` on a collection; and a regex parse of a collection name
+outside ``corpus.py`` (``doc/ref_scanner.py``). Over-matches fail loud, not
+silent: ``.count("__")`` on non-name text, or a dunder not in ``_PY_DUNDERS``.
 
 THE LEDGER. Every hit is one site. A site carries one class from
 :data:`CLASSES` (the RDR's five, the two non-parse labels for ``fnmatch``,

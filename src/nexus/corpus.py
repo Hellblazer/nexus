@@ -838,8 +838,9 @@ def split_candidate_collection_name(name: str) -> tuple[str, str]:
     separator" shape check on an ARGUMENT that is not itself necessarily
     an existing collection -- a raw ``"__" in part`` there would re-add a
     counted site to ``tests/test_collection_name_parse_census.py``'s AST
-    scan (mcp/core.py was funnelled to zero by nexus-ft04v.21); this
-    regex-based primitive stays invisible to that scan.
+    scan (mcp/core.py was funnelled to zero by nexus-ft04v.21). Since
+    RDR-229 P1.1 its callers are counted too, as ``primitive_call`` sites
+    of the derived helper set.
 
     RDR-204 Phase 3 repoint (nexus-ft04v.26): this is the shared
     STRING-SHAPE primitive for the handful of corpus.py sites that derive

@@ -203,7 +203,7 @@ SITES: tuple[S, ...] = (
       'primitive_call', 'mint', MINT_NOROW),
     S('src/nexus/doctor_search.py',
       ('from nexus.corpus import voyage_model_for_collection  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe', 'return voyage_model_for_collection(col)'),
-      'primitive_call', 'diagnostic', 'The model_drift probe: it compares the name-derived model with the row-registered embedding_model it reads beside it, and reports a disagreement (RDR-204 (d)).'),
+      'primitive_call', 'holdover', WM_P22),
     S('src/nexus/embed_window.py',
       ('from nexus.corpus import index_model_for_collection, is_conformant_collection_name  # noqa: PLC0415 — deferred; corpus pulls the catalog stack', 'if collection and is_conformant_collection_name(collection):'),
       'primitive_call', 'holdover', WM_P22),
