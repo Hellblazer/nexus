@@ -63,8 +63,10 @@ def identity_project(identity_id: str) -> str:
 
 
 def _check_identity_notes_write(project: str) -> None:
-    """Refuse a write to ``identity/<id>`` from an ephemeral or delegated identity (RDR-253 Step 6 part 3, nexus-hczdo).
-    Costs nothing for any other project."""
+    """Refuse a write to ``identity/<id>`` unless the caller is that seat (RDR-253 Step 6 part 3, nexus-hczdo;
+    :mod:`nexus.identity.notes`). Costs nothing for any other project. Called by every project-keyed write: ``put``,
+    ``put_or_merge``, ``put_replacing``, ``import_entry``, ``import_entries_batch``, ``delete`` by project and title,
+    ``insert_summary``. The id-keyed paths (``delete`` by id, ``merge_memories``, ``restore``) are NOT covered."""
     if project.startswith(IDENTITY_PROJECT_PREFIX):
         from nexus.identity.notes import check_write  # noqa: PLC0415 — deferred: only an identity project pays
 
@@ -407,6 +409,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         Returns:
             The Postgres row id (BIGSERIAL, always positive).
         """
+        _check_identity_notes_write(project)
         payload: dict[str, Any] = {
             "project":      project,
             "title":        title,
@@ -466,6 +469,8 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         """
         if not rows:
             return 0
+        for row_project in sorted({str(r.get("project", "")) for r in rows}):    # one refused row sends none of them
+            _check_identity_notes_write(row_project)
         resp = self._post("/v1/memory/import_batch", {"rows": rows})
         return int(resp.get("imported", 0))
 
@@ -855,6 +860,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if id is not None:
             params: dict[str, Any] = {"id": id}
         elif project is not None and title is not None:
+            _check_identity_notes_write(project)
             params = {"project": project, "title": title}
         else:
             raise ValueError("Provide either id or both project and title.")
@@ -974,6 +980,7 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         quarantined (quarantined with ``ttl`` None): such a row is never marked,
         so ``reap`` never deletes it.
         """
+        _check_identity_notes_write(project)
         payload: dict[str, Any] = {
             "project": project,
             "content": content,

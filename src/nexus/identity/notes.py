@@ -1,19 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Who may write ``identity/<id>``: a seat, and no ephemeral or delegated identity (RDR-253 Step 6 part 3, nexus-hczdo).
+"""Who may write ``identity/<id>``: that seat, and nobody else (RDR-253 Step 6 part 3, nexus-hczdo).
 
-An ephemeral identity ends with its session and a delegated one with its child, so notes written under either orphan
-at once. The engine fences only the ``threads`` project and takes a write to ``identity/<id>`` from any caller, so the
-refusal is the client's: :meth:`~nexus.db.t2.http_memory_store.HttpMemoryStore.put`, ``put_or_merge`` and
-``put_replacing`` call :func:`check_write` before any request, which covers the CLI and the MCP tool alike.
+An ephemeral identity ends with its session and a delegated one with its child, so notes written under either orphan at
+once, and another seat's notes would reach that seat's SessionStart line and its ``nx brief me``. The engine fences only the
+``threads`` project and takes a write to ``identity/<id>`` from any caller, so **the refusal is the client's, and only the
+client's**: ``identity/<id>`` is client-guarded, not engine-fenced. A caller that never goes through
+:class:`~nexus.db.t2.http_memory_store.HttpMemoryStore` (raw HTTP, a process with no Claude ancestor) is not stopped.
 
-* A delegated child is known from its environment (``NX_IDENTITY_TOKEN`` names its token file): no lookup.
-* Any other caller with an identity asks the engine once per process for the identity's ``kind`` and is refused when it is
-  not ``seat``. A kind that cannot be learned refuses too: the write is a durable note and the caller can try again once
-  the engine answers. A failed lookup is never cached as a verdict.
-* A process with no identity (a person at a shell) is not refused: the engine does not fence the project, and a person is
-  not an ephemeral session.
-* A refusal is one line, logged (``identity_notes_write_refused``), and raised as :class:`IdentityNotesRefused`, which the
-  CLI and the MCP tool report as an error. Nothing retries it.
+:func:`check_write` runs first in every project-keyed write of the store: ``put``, ``put_or_merge``, ``put_replacing``,
+``import_entry``, ``import_entries_batch`` (each row's project), ``delete`` by project and title, and ``insert_summary``. The
+id-keyed paths (``delete`` by id, ``merge_memories``, ``restore``) name a row, not a project, and are NOT covered.
+
+* The caller is the identity its token FILE names, whether or not the token has lapsed
+  (:func:`~nexus.identity.token_header.current` answers None for a lapsed token, which is not "no identity"). A process
+  whose Claude ancestor has no token file at all (a person at a shell) holds no identity and is not refused.
+* A delegated child is known from its environment (``NX_IDENTITY_TOKEN``): refused, no lookup.
+* Any other caller asks the engine for its identity's ``kind`` and is refused when it is not ``seat``, or when the kind
+  cannot be learned. Only ``seat`` is remembered for the process (a promote takes effect without a restart); a failed
+  lookup is never a verdict.
+* A seat writes only ``identity/<its own id>``.
+* A refusal is one line, logged (``identity_notes_write_refused``), raised as :class:`IdentityNotesRefused`, which the CLI
+  and the MCP tool report as an error. Nothing retries it.
 """
 from __future__ import annotations
 
@@ -64,10 +71,20 @@ def _kind_of(identity: str) -> str:
     except (IdentityApiError, IdentityUnavailableError, OSError, RuntimeError) as exc:
         _log.warning("identity_notes_kind_lookup_failed", identity=identity, error=f"{type(exc).__name__}: {exc}")
         return ""
-    if kind:
+    if kind == "seat":     # only a seat is remembered: an ephemeral may be promoted while this process runs
         with _LOCK:
             _KINDS[identity] = kind
     return kind
+
+
+def _caller() -> str:
+    """The identity this process's token file names, lapsed token or not; ``""`` when it has no token file."""
+    from nexus.identity import token_header  # noqa: PLC0415 — deferred: only an identity project pays
+    from nexus.identity.token_file import read_token_file  # noqa: PLC0415
+
+    path = token_header.token_file_path()
+    record = read_token_file(path) if path is not None else None
+    return str(record.identity) if record is not None else ""
 
 
 def check_write(project: str) -> None:
@@ -75,14 +92,11 @@ def check_write(project: str) -> None:
     ``identity/<id>`` costs nothing: no import, no lookup."""
     if not project.startswith(IDENTITY_PROJECT_PREFIX) or len(project) == len(IDENTITY_PROJECT_PREFIX):
         return
-    from nexus.identity import token_header  # noqa: PLC0415 — deferred: only an identity project pays
-
-    record = token_header.current()
-    caller = str(getattr(record, "identity", "") or "")
+    caller = _caller()
     if os.environ.get("NX_IDENTITY_TOKEN", "").strip():
         raise _refuse(caller, "a delegated identity keeps no identity notes (they would orphan when the child ends); "
-                              "write the note in project T2 or in your parent's own session")
-    if record is None:
+                              "write the note in project T2")
+    if not caller:
         return
     kind = _kind_of(caller)
     if not kind:
@@ -91,3 +105,6 @@ def check_write(project: str) -> None:
     if kind != "seat":
         raise _refuse(caller, f"this {kind} identity keeps no identity notes (they would orphan when its session ends); "
                               "only a seat does: write the note in project T2, or start the session with a seat")
+    own = f"{IDENTITY_PROJECT_PREFIX}{caller}"
+    if project != own:
+        raise _refuse(caller, f"a seat writes only its own identity notes ({own}), not {project}")
