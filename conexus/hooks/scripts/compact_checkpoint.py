@@ -185,6 +185,16 @@ _OMIT_SECTIONS = ("### Ready beads", "### nx memory", "### Feedback memories")
 #: Kept subsections, in file order after the board entry. A hard cut takes the tail.
 _KEEP_ORDER = ("### In-progress beads", "### Uncommitted", "### Open PRs", "### Recent commits")
 _STUB_BODY = "[no pre-compaction checkpoint for this compaction]"
+#: Said once in every inject that emits context, the restored checkpoint and the no-restore notice alike. The
+#: transcript census (T2 nexus/post-compaction-resumption-census-2026-11-19) traced the real post-compaction
+#: misses to threads that were all blocked while the one unblocked item sat only in the summary, and to a
+#: session that waited on a background task without saying so. The last sentence keeps it from overriding
+#: the user's own pacing.
+_RESUME_DIRECTIVE = (
+    "After this compaction: act on any board thread or summary item that has nothing to wait on. "
+    "If all you are doing is waiting on a running task, say what you are waiting on. "
+    "Never start work the user held back or asked you to wait on."
+)
 _ARCHIVE_STAMP = "%Y%m%dT%H%M%SZ"
 #: Suffix of the per-session sidecar inject writes: the ``written:`` stamp it last emitted.
 _INJECTED_SUFFIX = ".injected"
@@ -1201,7 +1211,8 @@ def _no_restore_notice(session_id: str) -> str:
         "Recover your state before acting on it: read your threads board entry (project threads: the entry "
         "whose `identity:` line names your identity, `nx identity show` prints it; else the one titled "
         f"with your session name, or whose `session:` line is `{session_id}`), then check "
-        "git status, the branch and `bd list --status=in_progress`.\n"
+        "git status, the branch and `bd list --status=in_progress`.\n\n"
+        f"{_RESUME_DIRECTIVE}\n"
     )
 
 
@@ -1301,7 +1312,7 @@ def run_inject(payload: dict) -> str:
             lead += (". The state may have changed since it was written, and the checkpoint may "
                      "predate this compaction: check git, beads and the board before acting on it.")
     intro = (f"{lead} The state lives in version control, beads and the threads board, "
-             "not in the summary.\n\n")
+             f"not in the summary.\n\n{_RESUME_DIRECTIVE}\n\n")
     footer = f"Full checkpoint (with the compact summary): {path}\n"
     context = _fit(intro + body, footer)
     _emit_context(context)

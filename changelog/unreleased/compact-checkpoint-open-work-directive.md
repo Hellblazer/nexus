@@ -1,0 +1,3 @@
+### Changed
+
+- The compaction checkpoint now tells a resumed session to act on any board thread or summary item that has nothing to wait on, and, when all it is doing is waiting on a running task, to say what it waits on. It also says never to start work the user held back or asked it to wait on. The line leads the injected text, both when the checkpoint is restored and when the checkpoint is missing and only the no-restore notice is injected. The transcript census traced the real post-compaction misses to threads that were all blocked while the one unblocked item was named only in the summary, and to a session that waited on a background task without saying so.
