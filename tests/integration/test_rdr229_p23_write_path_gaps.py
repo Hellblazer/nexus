@@ -108,6 +108,7 @@ def test_nx_index_md_reads_the_row_from_the_shared_cache_not_once_per_document(
 ) -> None:
     small = _md_listings(tmp_path, monkeypatch, n=2, existing=existing, non_default_tenant=False)
     large = _md_listings(tmp_path, monkeypatch, n=6, existing=existing, non_default_tenant=False)
+    assert small >= 1, "non-vacuity: the counter saw the listing the row read makes"
     assert large <= small + 2, f"four more documents cost {large - small} more listings"
 
 
@@ -123,6 +124,7 @@ def test_nx_index_md_with_a_non_default_tenant_client_lists_once_per_call(
     to it; it pins the one-per-call bound so a second read per call fails."""
     small = _md_listings(tmp_path, monkeypatch, n=2, existing=existing, non_default_tenant=True)
     large = _md_listings(tmp_path, monkeypatch, n=6, existing=existing, non_default_tenant=True)
+    assert large - small >= 1, "non-vacuity: the other-tenant client listed per call (case 3 engaged)"
     assert large - small <= 6 - 2, f"{large - small} more listings for four more documents: more than one per call"
 
 

@@ -935,13 +935,6 @@ def _migrate_legacy_collections(
                     ),
                 )
                 data_plane_succeeded = True
-                # The shared collections cache the run's row read goes through was
-                # filled before the rename and has no row for the new name (RDR-229
-                # P2.3): drop it here, where a rename happened, so a steady-state run
-                # pays no extra listing.
-                from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
-
-                invalidate_collections_cache()
             except Exception as exc:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_migration_data_plane_failed",
@@ -953,14 +946,21 @@ def _migrate_legacy_collections(
                 result[ct] = legacy
                 continue
 
+            # The shared collections cache the run's row read goes through was
+            # filled before the rename and has no row for the new name (RDR-229
+            # P2.3): drop it where a rename happened, so a steady-state run pays
+            # no extra listing. Outside the data-plane try, so it can never turn a
+            # completed rename into the legacy fallback above.
+            from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
+
+            invalidate_collections_cache()
+
             # Data plane succeeded; data now lives at conformant. From
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
-                    ensure_collection_registered,
-                    is_conformant_collection_name,
-                )
+                from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+
                 # nexus-aotql: routed through the registration seam
                 # (ensure_collection_registered) instead of a direct
                 # writer.register_collection call -- gets the seam's early
@@ -975,37 +975,27 @@ def _migrate_legacy_collections(
                 #
                 # nexus-ft04v.27 / nexus-aotql fix round: reuse the
                 # CollectionName the render above already built instead of
-                # parsing the very name it just rendered back apart --
-                # BOTH branches below, never only the conformant one.
+                # parsing the very name it just rendered back apart.
                 # EXPLICIT kwargs, never bare name-derivation: the generic
                 # seam derivation would recompute embedding_model via the
                 # CURRENT write-intent, which can disagree with the model
                 # this SAME migration just resolved via resolve_write_
-                # embedding_model above. is_conformant_collection_name
-                # decides nothing about WHICH kwargs to pass (both
-                # branches pass the identical explicit set); it exists
-                # only to name the shape distinction, since a pathological
-                # owner_id CollectionName.__post_init__ does not validate
-                # could in principle render a string the regex rejects
-                # even though conformant_name itself is a valid,
-                # fully-derived object -- the code review round 2 fix
-                # (nexus-aotql) closed the actual defect, a bare
-                # register_collection(conformant) in this else branch that
-                # dropped back to name-parsing.
+                # embedding_model above. One call for every rendered name:
+                # a conformance check here used to pick between two arms
+                # that passed the identical explicit set, so it decided
+                # nothing and the second arm was unreachable by any guard
+                # (removed at RDR-229 P2.3, nexus-p2m1x.8; the arm's old
+                # defect, a bare register_collection(conformant) that fell
+                # back to name-parsing, was closed by nexus-aotql).
                 register_kwargs = {
                     "content_type": conformant_name.content_type,
                     "owner_id": conformant_name.owner_id,
                     "embedding_model": conformant_name.embedding_model,
                     "model_version": f"v{conformant_name.model_version}",
                 }
-                if is_conformant_collection_name(conformant):
-                    ensure_collection_registered(
-                        conformant, registrar=lambda: w, kwargs=register_kwargs,
-                    )
-                else:
-                    ensure_collection_registered(
-                        conformant, registrar=lambda: w, kwargs=register_kwargs,
-                    )
+                ensure_collection_registered(
+                    conformant, registrar=lambda: w, kwargs=register_kwargs,
+                )
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",
