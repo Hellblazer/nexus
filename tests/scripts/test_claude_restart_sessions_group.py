@@ -36,6 +36,7 @@ class Env:
         self.mailed: list[str] = []
         self.nx_calls: list[tuple[str, ...]] = []
         self.restarted: list[str] = []
+        self.withdrawn: list[str] = []
         self.tmux: list[list[str]] = []
         self.groups: dict[str, subprocess.CompletedProcess] = {}
 
@@ -44,10 +45,17 @@ class Env:
             {"kind": "interactive", "tmux": "rs:@1.%5", "pid": os.getpid(), "sessionId": f"sid-{name}", "name": name,
              "cwd": "/w", "status": status}), encoding="utf-8")
 
-    def group(self, name: str, members: list[str | None], **record: object) -> None:
+    def desktop(self, name: str) -> None:
+        (self.root / "sessions" / f"{name}.json").write_text(json.dumps(
+            {"kind": "interactive", "pid": os.getpid(), "sessionId": f"sid-{name}", "name": name, "cwd": "/w",
+             "status": "idle", "entrypoint": "claude-desktop"}), encoding="utf-8")
+
+    def group(self, name: str, members: list[str | None | tuple[str | None, str]], **record: object) -> None:
+        """Members are names (state live) or (name, state): the states `nx group list` prints (live, lapsed, ended ...)."""
+        pairs = [m if isinstance(m, tuple) else (m, "live") for m in members]
         body = {"group": {"name": name, "live": True, **record},
-                "members": [{"identity": f"i{n}", "name": m, "role": "member", "state": "live"}
-                            for n, m in enumerate(members, 1)]}
+                "members": [{"identity": f"i{n}", "name": m, "role": "member", "state": st}
+                            for n, (m, st) in enumerate(pairs, 1)]}
         self.groups[name] = subprocess.CompletedProcess([], 0, json.dumps(body), "")
 
     def run(self, *argv: str) -> int:
@@ -99,7 +107,21 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Env:
     monkeypatch.setattr(crs, "session_work", lambda _s: [])
     monkeypatch.setattr(crs, "ensure_seat", lambda _s: "")
     monkeypatch.setattr(crs, "has_channel", lambda _s: True)
-    monkeypatch.setattr(crs, "mail_ask", lambda s, *_a, **_k: e.mailed.append(s["name"]) or True)
+
+    def mail_ask(s, *_a, **_k) -> bool:
+        # A real send records the ask's tuple id for the round file; the status read then withdraws it and rewrites it.
+        e.mailed.append(s["name"])
+        crs.SENT_ASKS[s["sessionId"]] = f"t-{s['name']}"
+        return True
+
+    monkeypatch.setattr(crs, "mail_ask", mail_ask)
+    monkeypatch.setattr(crs, "withdraw_ask", lambda sid, tid="", what="": e.withdrawn.append(tid) or crs.GONE[0])
+
+    def never(*a, **k):
+        pytest.fail(f"the round reached tmux: {a} {k}")
+
+    monkeypatch.setattr(crs, "pane_capture", never)
+    monkeypatch.setattr(crs, "submit", never)
     # Anything that would restart a session or reach a tmux server is a recorded failure, never a call.
     monkeypatch.setattr(crs, "restart", lambda s, *_a, **_k: e.restarted.append(s["name"]) or False)
     monkeypatch.setattr(crs, "tmux", lambda *a: e.tmux.append(["tmux", *a]))
@@ -125,9 +147,8 @@ def test_ask_ready_with_a_group_asks_only_its_live_members(env: Env, capsys) -> 
 def test_a_group_round_does_not_list_the_sessions_outside_the_group(env: Env) -> None:
     env.live("alpha")
     env.live("beta")
-    (env.root / "sessions" / "desk.json").write_text(json.dumps(
-        {"kind": "interactive", "pid": os.getpid(), "sessionId": "sid-desk", "name": "desk", "cwd": "/w",
-         "status": "idle", "entrypoint": "claude-desktop"}), encoding="utf-8")
+    env.desktop("desk")  # a member that cannot be asked
+    env.desktop("other-desk")  # a Desktop session outside the group
     env.group("g", ["alpha", "desk"])
     assert env.run("--ask-ready", "--group", "g") == 0
     excluded = {e["name"] for e in env.manifest()["excluded"]}
@@ -174,14 +195,21 @@ def test_status_with_a_group_blocks_on_a_member_that_has_not_answered(env: Env, 
 
 
 def test_status_with_a_group_keeps_the_other_sessions_in_the_round_file(env: Env) -> None:
-    """--status writes the round file back when it withdraws an answered ask; a group view must not drop the rest."""
+    """--status writes the round file back when it withdraws an answered ask; a group view must not drop the rest.
+
+    Each ask carries a tuple id (the mail stub records one, as a real send does), so the status read withdraws the
+    group's answered asks and rewrites the file: the write-back this test is about really happens."""
     for n in ("alpha", "beta", "gamma"):
         env.live(n)
     assert env.run("--ask-ready") == 0
+    assert {t["name"]: t.get("tuple_id") for t in env.manifest()["targets"]} == {
+        "alpha": "t-alpha", "beta": "t-beta", "gamma": "t-gamma"}
     env.answer("alpha", "beta", "gamma")
     env.group("pair", ["alpha", "beta"])
     assert env.run("--status", "--group", "pair") == 0
-    assert sorted(t["name"] for t in env.manifest()["targets"]) == ["alpha", "beta", "gamma"]
+    assert sorted(env.withdrawn) == ["t-alpha", "t-beta"], "only the group's asks are withdrawn"
+    after = {t["name"]: t.get("tuple_id") for t in env.manifest()["targets"]}
+    assert after == {"alpha": "", "beta": "", "gamma": "t-gamma"}, "the file was rewritten and kept every target"
 
 
 def test_status_with_a_group_names_a_member_that_left_the_round(env: Env, capsys) -> None:
@@ -196,6 +224,64 @@ def test_status_with_a_group_names_a_member_that_left_the_round(env: Env, capsys
     assert "in the round but not live now: beta" in capsys.readouterr().out
 
 
+# ── who the round does not cover (critic S1) ─────────────────────────────────────────────
+
+
+def _roster_with_gaps(env: Env) -> None:
+    env.live("alpha")
+    env.live("outsider")
+    env.group("crew", ["alpha", "omega", ("old", "ended"), (None, "live")])
+
+
+def _uncovered(out: str) -> dict[str, str]:
+    """`  <member> (<state>): <why>` lines, by member."""
+    rows = {}
+    for ln in out.splitlines():
+        if ln.startswith("  ") and "): " in ln:
+            who, why = ln.strip().split("): ", 1)
+            rows[who] = why
+    return rows
+
+
+def test_ask_ready_with_a_group_names_the_members_it_did_not_cover(env: Env, capsys) -> None:
+    _roster_with_gaps(env)
+    assert env.run("--ask-ready", "--group", "crew") == 0
+    out = capsys.readouterr().out
+    assert "group crew: 1 of 4 member(s) covered here" in out
+    assert _uncovered(out) == {"omega (live": "no live session here", "old (ended": "no live session here",
+                               "i4 (live": "no alias"}
+    assert "outsider" not in out
+
+
+def test_status_with_a_group_names_the_members_it_did_not_cover(env: Env, capsys) -> None:
+    _roster_with_gaps(env)
+    assert env.run("--ask-ready", "--group", "crew") == 0
+    env.answer("alpha")
+    capsys.readouterr()
+    assert env.run("--status", "--group", "crew") == 0, "the covered member is ready; the exit code alone hides the rest"
+    out = capsys.readouterr().out
+    assert "group crew: 1 of 4 member(s) covered here" in out
+    assert _uncovered(out) == {"omega (live": "no live session here", "old (ended": "no live session here",
+                               "i4 (live": "no alias"}
+
+
+def test_a_group_whose_members_are_all_covered_prints_no_gaps(env: Env, capsys) -> None:
+    env.live("alpha")
+    env.live("beta")
+    env.group("pair", ["alpha", "beta"])
+    assert env.run("--ask-ready", "--group", "pair") == 0
+    out = capsys.readouterr().out
+    assert "group pair: 2 of 2 member(s) covered here" in out and _uncovered(out) == {}
+
+
+def test_the_help_says_what_an_exit_zero_means_with_a_group(env: Env, capsys) -> None:
+    with pytest.raises(SystemExit):
+        env.run("--help")
+    flat = " ".join(capsys.readouterr().out.split())
+    assert "with --group: when the group's live members are ready" in flat
+    assert "group round replaces the round file" in flat
+
+
 # ── refusals: one line, nothing asked, nothing written ───────────────────────────────────
 
 
@@ -203,7 +289,7 @@ def _refused(env: Env, capsys, *argv: str) -> str:
     env.live("alpha")
     rc = env.run(*argv)
     out = capsys.readouterr().out
-    assert rc != 0
+    assert rc == 6, (rc, out)  # EXIT_REFUSED
     assert len(out.strip().splitlines()) == 1, out
     assert env.mailed == [] and env.restarted == [] and env.tmux == []
     assert not (env.root / "restart-ready.json").exists(), "a refused group round writes no round"
@@ -220,6 +306,40 @@ def test_an_unknown_group_refuses_in_one_line(env: Env, capsys, flag: str) -> No
 def test_an_empty_group_refuses_in_one_line(env: Env, capsys, flag: str) -> None:
     env.group("empty", [])
     assert "empty" in _refused(env, capsys, flag, "--group", "empty")
+
+
+@pytest.mark.parametrize("name", ["", " ", "\t "])
+@pytest.mark.parametrize("flag", ["--ask-ready", "--status"])
+def test_a_blank_group_name_refuses_and_never_becomes_a_round_of_everyone(env: Env, capsys, flag: str, name: str) -> None:
+    """Review F1: `--group "$GROUP"` with the variable unset passed an empty name, which read as no --group at all."""
+    assert "blank" in _refused(env, capsys, flag, "--group", name)
+
+
+def test_a_blank_group_name_without_a_round_flag_is_a_usage_error_too(env: Env, capsys) -> None:
+    env.live("alpha")
+    with pytest.raises(SystemExit) as stop:
+        env.run("--group", "")
+    assert stop.value.code == 2
+    assert "--group goes with --ask-ready or --status" in capsys.readouterr().err
+    assert env.mailed == [] and env.restarted == []
+
+
+@pytest.mark.parametrize("state", ["ended", "lapsed", "unheld"])
+def test_a_member_that_is_not_live_does_not_match_a_session_reusing_its_alias(env: Env, state: str) -> None:
+    """Review F2: the roster names members by alias, and an ended member's alias is free to reuse. Only a live member
+    matches a session; a live non-member session that took the alias of one that is not live is not asked."""
+    env.live("alpha")
+    env.live("beta")  # a session that reuses the alias of the member that left
+    env.group("g", ["alpha", ("beta", state)])
+    assert env.run("--ask-ready", "--group", "g") == 0
+    assert env.mailed == ["alpha"]
+    assert [t["name"] for t in env.manifest()["targets"]] == ["alpha"]
+
+
+def test_a_group_with_no_live_member_refuses_in_one_line(env: Env, capsys) -> None:
+    env.group("gone", [("beta", "ended"), ("gamma", "lapsed")])
+    out = _refused(env, capsys, "--ask-ready", "--group", "gone")
+    assert "gone" in out and "live" in out
 
 
 def test_a_disbanded_group_refuses_in_one_line(env: Env, capsys) -> None:
@@ -289,8 +409,11 @@ def test_the_roster_is_read_through_the_nx_the_script_resolves(env: Env, tmp_pat
     fake.write_text(
         "#!/bin/sh\n"
         f'echo "$@" >> {log}\n'
-        'echo \'{"group": {"name": "g", "live": true}, "members": [{"identity": "i1", "name": "alpha"}, '
-        '{"identity": "i2", "name": null}, {"identity": "i3", "name": "beta"}]}\'\n',
+        'echo \'{"group": {"name": "g", "live": true}, "members": ['
+        '{"identity": "i1", "name": "alpha", "role": "leader", "state": "live"}, '
+        '{"identity": "i2", "name": null, "role": "member", "state": "live"}, '
+        '{"identity": "i3", "name": "beta", "role": "member", "state": "live"}, '
+        '{"identity": "i4", "name": "gone", "role": "member", "state": "ended"}]}\'\n',
         encoding="utf-8")
     fake.chmod(0o755)
     env.monkeypatch.setenv("NX_RESTART_NX", str(fake))
@@ -299,6 +422,8 @@ def test_the_roster_is_read_through_the_nx_the_script_resolves(env: Env, tmp_pat
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     real.exec_module(module)
-    names, problem = module.group_roster("g")
-    assert problem == "" and names == frozenset({"alpha", "beta"})
+    members, problem = module.group_roster("g")
+    assert problem == "" and [(m["name"], m["state"]) for m in members] == [
+        ("alpha", "live"), (None, "live"), ("beta", "live"), ("gone", "ended")]
+    assert module.group_names(members) == frozenset({"alpha", "beta"}), "the ended member's alias names no session"
     assert log.read_text(encoding="utf-8").split() == ["group", "list", "g", "--json"]

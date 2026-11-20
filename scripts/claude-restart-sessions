@@ -128,11 +128,14 @@ eta, stale, no reply, unreadable, not in round), the reply's age, and the sessio
 from ~/.claude/sessions/*.json, then the excluded sessions; a round that kept earlier answers names the sessions it
 re-asked and the ones whose answers it kept. Neither restarts anything.
 With --group NAME (on --ask-ready or --status only) the round is about one group: the members are read from the
-engine roster (`nx group list NAME --json`, the members' names) and matched to live sessions by session name. Only
-those sessions are asked, listed and reported; --status exits 0 when they are ready, whatever the rest of the round
-holds (its file keeps the other targets). An unknown, disbanded or empty group, one whose roster cannot be read, and one
-with no member live here, refuse in one line (exit 6) and ask nothing. A group round replaces the round file, so a
-restart after it still refuses for every session the group round never asked. The restart takes no group.
+engine roster (`nx group list NAME --json`) and a live session is matched to a member by session name, for a member whose
+state is live (an ended or lapsed member's alias may have been taken by a session that is no member). Only those sessions
+are asked, listed and reported; --status exits 0 when they are ready, whatever the rest of the round holds (its file
+keeps the other targets). The round prints how many members it covers and each one it does not, with its state and why
+("no live session here", "no alias"), so a ready exit cannot hide who was never asked. A blank NAME, an unknown, disbanded
+group, one whose roster cannot be read, and one with no live member here, refuse in one line (exit 6) and ask nothing. A
+group round replaces the round file, so a restart after it still refuses for every session the group round never asked.
+The restart takes no group.
 The session that runs the script (the pane in TMUX_PANE) is busy while it runs, so it is exempt
 from the idle requirement only; its ready reply is still required.
 
@@ -2712,12 +2715,13 @@ def _nx_group(*args: str, timeout: float = GROUP_TIMEOUT_S) -> subprocess.Comple
     return subprocess.run([_nx_binary(), "group", *args], capture_output=True, text=True, timeout=timeout, env=env)
 
 
-def group_roster(name: str) -> tuple[frozenset[str] | None, str]:
-    """The member names of group *name* from the engine roster (``nx group list NAME --json``), or (None, why) as ONE line.
+def group_roster(name: str) -> tuple[list[dict] | None, str]:
+    """The members of group *name* from the engine roster (``nx group list NAME --json``), or (None, why) as ONE line.
 
-    A group is unknown, unreadable, disbanded or empty when this refuses. The names are the members' aliases; a
-    session is a member when its name is one of them (RDR-252: the ready check as a group operation). Members
-    with no alias are left out: nothing names a session by them."""
+    Each member is ``{"name", "identity", "state"}`` as the roster prints it (name is the member's alias or None; state
+    live, unheld, lapsed, ended or unleased). The group is unknown, unreadable, disbanded, or without one live member that
+    has a name when this refuses. Only a member whose state is ``live`` names a session (``group_names``): an ended or
+    lapsed member's alias may be taken by a session that is no member (RDR-252: the ready check as a group operation)."""
     try:
         done = _nx_group("list", name, "--json")
     except (OSError, subprocess.SubprocessError) as e:
@@ -2734,10 +2738,30 @@ def group_roster(name: str) -> tuple[frozenset[str] | None, str]:
         return None, f"group {name}: the roster is not the JSON nx group list prints; nothing asked"
     if record.get("live") is False or record.get("ended_at"):
         return None, f"group {name} is disbanded; nothing asked"
-    names = frozenset(m["name"] for m in rows if isinstance(m, dict) and isinstance(m.get("name"), str) and m["name"])
-    if not names:
-        return None, f"group {name} has no members with a name; nothing asked"
-    return names, ""
+    members = [{"name": m["name"] if isinstance(m.get("name"), str) and m["name"] else None,
+                "identity": str(m.get("identity") or "?"), "state": str(m.get("state") or "unknown")}
+               for m in rows if isinstance(m, dict)]
+    if not group_names(members):
+        return None, f"group {name} has no live member with a name; nothing asked"
+    return members, ""
+
+
+def group_names(members: list[dict]) -> frozenset[str]:
+    """The names a session must carry to be one of the group's: the aliases of its live members."""
+    return frozenset(m["name"] for m in members if m["state"] == "live" and m["name"])
+
+
+def print_group_coverage(a: argparse.Namespace, found: list[dict]) -> None:
+    """With --group: how many roster members the round covers, and each one it does not, with its state and why. The
+    exit code of --status says the covered members are ready; this says who was never asked."""
+    members = getattr(a, "group_members", None)
+    if members is None:
+        return
+    here = {s.get("name") for s in found}
+    gaps = [m for m in members if not (m["state"] == "live" and m["name"] in here)]
+    print(f"group {a.group}: {len(members) - len(gaps)} of {len(members)} member(s) covered here")
+    for m in gaps:
+        print(f"  {m['name'] or m['identity']} ({m['state']}): " + ("no alias" if not m["name"] else "no live session here"))
 
 
 def excluded_sessions(listed: list[dict], found: list[dict], a: argparse.Namespace) -> list[dict]:
@@ -3040,10 +3064,11 @@ def kept_answers(prev: dict | None, found: list[dict], now: float, max_age: int)
 
 def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) -> int:
     """--ask-ready and --status. Neither restarts anything."""
+    print_group_coverage(a, found)
     if a.status:
         manifest, why = load_manifest()
         if manifest is None:
-            print(f"{why}; run claude-restart-sessions --ask-ready" + (f" --group {a.group}" if a.group else ""))
+            print(f"{why}; run claude-restart-sessions --ask-ready" + (f" --group {a.group}" if a.group is not None else ""))
             return 2
         now = time.time()
         # With --group the table and the verdict are about the group's members: the round file keeps every target
@@ -3056,8 +3081,6 @@ def ready_round(a: argparse.Namespace, listed: list[dict], found: list[dict]) ->
         for r, sess in zip(rows, found):  # the ready rows already read it; the others are reported here
             if "work" not in r:
                 r["work"] = session_work(sess)
-        if members is not None:
-            print(f"group {a.group}: {len(found)} member session(s) live here")
         print_table(view, rows, a.ready_max_age, now)
         # An answered ask has done its work: take it back out of the session's mailbox (nexus-xwijj).
         withdraw_ready_asks(manifest, {t["sessionId"] for t in view["targets"]
@@ -3193,10 +3216,13 @@ def main() -> int:
                          "(see above)")
     ap.add_argument("--status", action="store_true",
                     help="print the ready round as a table (reply, its age, live idle|busy, excluded sessions); "
-                         "restarts nothing; exit 0 only when a restart would be allowed")
-    ap.add_argument("--group", metavar="NAME", default="",
-                    help="with --ask-ready or --status: only the live sessions named by the members of this group "
-                         "(nx group list NAME --json, matched by session name); restarts nothing")
+                         "restarts nothing; exit 0 only when a restart would be allowed (with --group: when the "
+                         "group's live members are ready)")
+    ap.add_argument("--group", metavar="NAME", default=None,
+                    help="with --ask-ready or --status: only the live sessions named by the live members of this group "
+                         "(nx group list NAME --json, matched by session name); prints the members it does not cover; "
+                         "restarts nothing. A group round replaces the round file, so a restart after it still wants "
+                         "every session asked")
     ap.add_argument("--ready-max-age", type=int, default=900,
                     help="a ready reply older than this many seconds no longer counts at the restart (default 900)")
     ap.add_argument("--resume", action="store_true",
@@ -3220,9 +3246,13 @@ def main() -> int:
     NO_SLASH = a.no_slash_restart
     KEEP_DEV_CHANNEL = a.keep_dev_channel
     NO_WAKE = a.no_wake
-    if a.group and not (a.ask_ready or a.status):
+    if a.group is not None and not (a.ask_ready or a.status):
         ap.error("--group goes with --ask-ready or --status: it names whose readiness is asked or reported, and "
                  "the restart itself never takes a group")
+    if a.group is not None and not a.group.strip():
+        # `--group "$GROUP"` with the variable unset: an empty name must never read as no --group, a round of everyone.
+        print("--group needs a group name and the one given is blank; nothing asked")
+        return EXIT_REFUSED
     if a.revive:
         return revive(a)
 
@@ -3236,15 +3266,15 @@ def main() -> int:
     # on another tmux server than the one the plan was made on); the foreground reads the sessions dir.
     listed = [] if a.detached else sessions()
     found = [s for s in listed if (not a.only or s.get("name") in a.only) and not skipped(s.get("name"), s["sessionId"], a.skip)]
-    if a.group:
-        members, problem = group_roster(a.group)
-        if members is None:
+    if a.group is not None:
+        roster, problem = group_roster(a.group)
+        if roster is None:
             print(problem)
             return EXIT_REFUSED
-        a.group_names = members
-        found = [s for s in found if s.get("name") in members]
+        a.group_members, a.group_names = roster, group_names(roster)
+        found = [s for s in found if s.get("name") in a.group_names]
         if not found:
-            print(f"group {a.group}: none of its members ({', '.join(sorted(members))}) is a live session here")
+            print(f"group {a.group}: none of its live members ({', '.join(sorted(a.group_names))}) is a live session here")
             return EXIT_REFUSED
     if a.ask_ready or a.status:
         if not found:
