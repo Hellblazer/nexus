@@ -1011,7 +1011,7 @@ session of a conversation that belongs to an unheld seat `gamma` switches the
 session to `gamma`. A `claude -p` child of `alpha` that runs `nx identity
 claim alpha --take-over` is refused.
 
-### Phase 1: Identity and the state it owns
+### Phase 1 (CLOSED, 2026-11-19): Identity and the state it owns
 
 All engine work (Steps 1 and 2) ships in one engine release, which Sam cuts.
 The client work ships after it: Steps 3 and 4 together in one conexus
