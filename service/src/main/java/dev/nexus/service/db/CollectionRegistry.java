@@ -365,6 +365,54 @@ public final class CollectionRegistry {
         return refuseIfSuperseded(tenant, collection, lookup(scope, tenant, collection));
     }
 
+    /**
+     * The {@code lifecycle_state} of the {@code (tenant, collection)} row, or empty when the pair has no row
+     * (RDR-229 P2.5). The guards on an existing collection ({@link QuarantineOrigin}, the vector routes, the
+     * reaper's split) ask this instead of testing the {@code quarantine-} name prefix. Unlike {@link #require} it
+     * never throws for a missing row: the caller decides what a row-less name means (the guards judge it by its
+     * prefix, as they always did).
+     *
+     * <p>Source of the answer: the in-process cache when the row is cached (every live, non-retired row a write or
+     * a {@link #lookup} has touched), else ONE single-column {@code SELECT} on the caller's own transaction. A miss
+     * is not cached here: {@link #require} does the guarded fill and needs the dimension; this is a read of one
+     * column and fills nothing, so it adds no cache state and no invalidation duty. A retired (superseded) row is
+     * never cached ({@link #markKnown}), so it is always read.
+     *
+     * <p>Why the cache cannot make the quarantine answer stale: {@code 'quarantine'} is written only at INSERT
+     * (registration, the SQL movers), so a cached answer to "is it quarantine" cannot go stale. The one Java writer
+     * that changes {@code lifecycle_state} in place is the ghost sweep, and it moves a row between {@code live}
+     * and {@code dormant}, which does not change that answer. A future writer that flips {@code lifecycle_state}
+     * to or from {@code 'quarantine'} after INSERT would make this cache wrong and MUST invalidate it
+     * ({@link #evict}).
+     */
+    public static Optional<String> lifecycleState(DSLContext ctx, String tenant, String collection) {
+        if (collection == null) {
+            return Optional.empty();
+        }
+        Optional<CollectionRow> hit = cached(tenant, collection);
+        if (hit.isPresent()) {
+            return Optional.ofNullable(hit.get().lifecycleState());
+        }
+        return Optional.ofNullable(ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(collection)))
+            .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE));
+    }
+
+    /**
+     * {@link #lifecycleState(DSLContext, String, String)} for callers OUTSIDE an open transaction; a cache hit
+     * opens none, a miss opens one short read transaction through {@code scope}.
+     */
+    public static Optional<String> lifecycleState(TenantScope scope, String tenant, String collection) {
+        if (collection == null) {
+            return Optional.empty();
+        }
+        Optional<CollectionRow> hit = cached(tenant, collection);
+        if (hit.isPresent()) {
+            return Optional.ofNullable(hit.get().lifecycleState());
+        }
+        return scope.withTenant(tenant, ctx -> lifecycleState(ctx, tenant, collection));
+    }
+
     private static CollectionRow refuseIfSuperseded(String tenant, String collection, CollectionRow row) {
         if (row.isSuperseded()) {
             throw new CollectionSupersededException(tenant, collection, row.supersededBy());

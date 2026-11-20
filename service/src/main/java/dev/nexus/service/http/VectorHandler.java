@@ -2638,7 +2638,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
-        requireNotQuarantineCollection(collection);
+        requireNotQuarantineCollection(repo, tenant, collection);
         int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_CENSUS_LIMIT));
         int offset = Math.max(0, optInt(body, "offset", 0));
 
@@ -2661,12 +2661,12 @@ public final class VectorHandler implements HttpHandler {
      * #resolveRowLimit}/{@link #clampSampleLimit}, see {@code
      * VectorHandlerManifestLessCensusRoutingTest}.
      */
+    static void requireNotQuarantineCollection(PgVectorRepository repo, String tenant, String collection) {
+        dev.nexus.service.db.QuarantineOrigin.requireOutOfCensus(collection, repo.lifecycleState(tenant, collection));
+    }
+
     static void requireNotQuarantineCollection(String collection) {
-        if (dev.nexus.service.db.QuarantineOrigin.isQuarantineName(collection)) {
-            throw new IllegalArgumentException(
-                "collection " + collection + " is a quarantine collection; quarantine rows "
-                + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");
-        }
+        dev.nexus.service.db.QuarantineOrigin.requireOutOfCensus(collection, java.util.Optional.empty());
     }
 
     /**
@@ -2730,7 +2730,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
-        requireNotQuarantineCollection(collection);
+        requireNotQuarantineCollection(repo, tenant, collection);
         int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_REAPABLE_LIMIT));
         int offset = Math.max(0, optInt(body, "offset", 0));
         Long graceSeconds = parseGraceSeconds(body.get("grace_seconds"));

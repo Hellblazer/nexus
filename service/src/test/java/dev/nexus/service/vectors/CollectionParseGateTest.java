@@ -271,10 +271,17 @@ class CollectionParseGateTest {
      * list mirrors the client's {@code aspect_readers.FILE_ROUTED_PREFIXES}
      * and the backfill predicate, and {@code NoteUriCorpusTest} pins all
      * three to one corpus file.
+     *
+     * <p>{@code db/CollectionRegistration.java} declares 1 (RDR-229 P2.5 D1, nexus-p2m1x.10): the conformant-name
+     * pattern that gives an ETL import row with no {@code model_version} the {@code vN} of its name. It reads a
+     * name from another install or an older era, a MIGRATION SOURCE in the RDR's classification, and it is the only
+     * place the engine reads a version out of a name; a row with a version never reaches it.
      */
-    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of("dev/nexus/service/db/NoteUri.java", 3);
+    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of(
+        "dev/nexus/service/db/CollectionRegistration.java", 1,
+        "dev/nexus/service/db/NoteUri.java", 3);
 
-    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 3;
+    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 4;
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the

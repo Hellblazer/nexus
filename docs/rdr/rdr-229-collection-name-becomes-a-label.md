@@ -717,6 +717,22 @@ import path, which receives rows from another install, takes
 `lifecycle_state` from the imported row when present and falls back to the
 prefix as a migration source.
 
+Three name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
+
+- *The rename and rehome target guard.* The guard that refuses a rename or
+  rehome INTO a `quarantine-` name reads the target name. No row exists
+  for the target yet, and the engine mints every `quarantine-` label
+  itself. The source side reads the row. Whether the target guard is still
+  needed once names are minted labels is a Phase 3 question.
+- *The engine's own mint.* `PgVectorRepository` builds the sibling label
+  as `"quarantine-" + origin`.
+- *A version read from a conformant name.* One helper,
+  `CollectionRegistration.versionOfConformantName`, takes `vN` from a
+  conformant name for the ETL import fallback and for the re-embed
+  target's minted name (Sam's D1, T2
+  `nexus/sam-ruling-rdr229-p12-row-decisions-2026-11-20`). It is a
+  migration source and goes away at P4 with the name parsers.
+
 **3. SQL reads columns.** `chash_conformance_report(dim)` filters manifest
 rows by the manifest's `embedding_model` column (the `vectors-030`
 changeset adds it, lines 786-791) joined to

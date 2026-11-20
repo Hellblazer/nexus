@@ -145,10 +145,12 @@ class CatalogTombstoneProtectedChunkCountTest {
         // the name before calling this route.
         catalogRepo.upsertCollection(TENANT, Map.of("name", COLLECTION_A,
             "content_type", "knowledge", "owner_id", "tombstone-protected-count-a",
-            "embedding_model", "minilm-l6-v2-384"));
+            "embedding_model", "minilm-l6-v2-384",
+            "model_version", "v1"));
         catalogRepo.upsertCollection(TENANT, Map.of("name", COLLECTION_B,
             "content_type", "knowledge", "owner_id", "tombstone-protected-count-b",
-            "embedding_model", "minilm-l6-v2-384"));
+            "embedding_model", "minilm-l6-v2-384",
+            "model_version", "v1"));
 
         registerDoc(DOC_LIVE_ONLY,   "Live Only",   COLLECTION_A);
         registerDoc(DOC_TOMB_ONLY,   "Tomb Only",   COLLECTION_A);

@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The quarantine rows of one ORIGIN collection, found, deleted and retagged inside the caller's transaction
@@ -49,7 +50,11 @@ import java.util.Map;
  */
 public final class QuarantineOrigin {
 
-    /** The name prefix of a quarantine collection; the one predicate the engine's guards share. */
+    /**
+     * The name prefix a quarantine collection is LABELLED with (the reaper's {@code quarantine-<origin>}, the
+     * client's row-derived sibling). Since RDR-229 P2.5 it builds and finds names; whether a collection IS a
+     * quarantine collection is its row's {@code lifecycle_state} ({@link #isQuarantine}).
+     */
     public static final String PREFIX = "quarantine-";
 
     /** Origin collection deleted: its rows were taken out of one sibling. */
@@ -69,26 +74,84 @@ public final class QuarantineOrigin {
     private QuarantineOrigin() {
     }
 
-    /** True for a {@code quarantine-*} collection name. */
-    public static boolean isQuarantineName(String name) {
+    /**
+     * True for a {@code quarantine-*} collection NAME. Private since RDR-229 P2.5: it is the rule for a name that
+     * has no catalog row (a rename or rehome TARGET, where no row exists yet, and a name nothing registered), and
+     * nothing outside this class asks a bare name any more. A collection that has a row is judged by the row.
+     */
+    private static boolean isQuarantineName(String name) {
         return name != null && name.startsWith(PREFIX);
     }
 
     /**
-     * Refuses {@code name} when it is a quarantine collection, naming the sanctioned verbs. Used where an engine
-     * path would move or delete a quarantine collection's chunks with no audit row (store-delete, rename, rehome).
+     * Whether a collection is a quarantine collection, given the {@code lifecycle_state} of its catalog row
+     * ({@link CollectionRegistry#lifecycleState}) or empty when it has none (RDR-229 P2.5). A row decides: a
+     * {@code quarantine-} name whose row is {@code live} is not one, and a name with no prefix whose row says
+     * {@code quarantine} is. With no row the name is judged by its prefix, which is what every guard did before
+     * the row was consulted, so a name nothing registered keeps its old outcome.
+     */
+    public static boolean isQuarantine(Optional<String> lifecycleState, String name) {
+        return lifecycleState.map("quarantine"::equals).orElseGet(() -> isQuarantineName(name));
+    }
+
+    /** {@link #isQuarantine(Optional, String)} with the row read on the caller's own transaction. */
+    public static boolean isQuarantine(DSLContext ctx, String tenant, String name) {
+        return isQuarantine(CollectionRegistry.lifecycleState(ctx, tenant, name), name);
+    }
+
+    /** {@link #isQuarantine(Optional, String)} with the row read through the registry cache or a short read. */
+    public static boolean isQuarantine(TenantScope scope, String tenant, String name) {
+        return isQuarantine(CollectionRegistry.lifecycleState(scope, tenant, name), name);
+    }
+
+    /**
+     * Refuses an EXISTING collection when its catalog row says it is a quarantine collection, naming the sanctioned
+     * verbs (RDR-229 P2.5; the source side of rename and rehome, and store-delete). Where the row comes from:
+     * {@link CollectionRegistry#lifecycleState(TenantScope, String, String)}, the registry cache when the row is
+     * cached, else one single-column read in a short transaction. A name with no row is judged by its prefix.
      *
      * @param verb what the caller asked for, as the message names it ({@code store-delete}, {@code rename}, ...)
      * @throws IllegalArgumentException when {@code name} is a quarantine collection (a 400 on every route)
      */
-    public static void requireNotQuarantine(String verb, String name) {
-        if (isQuarantineName(name)) {
-            throw new IllegalArgumentException(
-                verb + " is refused on the quarantine collection " + name + ": it would move or delete quarantined "
-                + "chunks outside the audited paths. Return chunks to their origin with `nx t3 quarantine restore`, "
-                + "let `nx t3 gc` expire them (client expiry), or delete the whole quarantine collection with "
-                + "collection delete, which writes a gc_audit row.");
+    public static void requireNotQuarantineSource(TenantScope scope, String tenant, String verb, String name) {
+        if (isQuarantine(scope, tenant, name)) {
+            throw refused(verb, name);
         }
+    }
+
+    /**
+     * Refuses a NEW name that is a quarantine name: the rename or rehome TARGET, which has no catalog row yet, so
+     * its name is all there is to judge (RDR-229 P2.5 keeps this a name test; the allow-list CHECK is the same
+     * kind of name rule and is not touched). A target that already has a row is refused or admitted by the
+     * verb's own state checks, as before.
+     *
+     * @throws IllegalArgumentException when {@code name} starts with the quarantine prefix (a 400 on every route)
+     */
+    public static void requireNotQuarantineTarget(String verb, String name) {
+        if (isQuarantineName(name)) {
+            throw refused(verb, name);
+        }
+    }
+
+    /**
+     * The manifest-less census and reapable listing's refusal (RDR-192 MVV (a)): a quarantine collection is out of
+     * both by construction. {@code lifecycleState} is the collection's row state, or empty for a name with no row
+     * (RDR-229 P2.5; such a name is judged by its prefix, as before).
+     */
+    public static void requireOutOfCensus(String collection, Optional<String> lifecycleState) {
+        if (isQuarantine(lifecycleState, collection)) {
+            throw new IllegalArgumentException(
+                "collection " + collection + " is a quarantine collection; quarantine rows "
+                + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");
+        }
+    }
+
+    private static IllegalArgumentException refused(String verb, String name) {
+        return new IllegalArgumentException(
+            verb + " is refused on the quarantine collection " + name + ": it would move or delete quarantined "
+            + "chunks outside the audited paths. Return chunks to their origin with `nx t3 quarantine restore`, "
+            + "let `nx t3 gc` expire them (client expiry), or delete the whole quarantine collection with "
+            + "collection delete, which writes a gc_audit row.");
     }
 
     /**
@@ -159,7 +222,7 @@ public final class QuarantineOrigin {
      * refuses a non-live origin, the engine's expiry skips it, and {@code nx t3 gc} refuses its name).
      */
     static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin) {
-        return !isQuarantineName(origin)
+        return !isQuarantine(ctx, tenant, origin)
             && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null)));
     }
 
@@ -168,7 +231,7 @@ public final class QuarantineOrigin {
      * re-embed plan states it before a job deletes its source (RDR-210 Cutover). A quarantine name has none.
      */
     static int countRowsOf(DSLContext ctx, String tenant, String origin) {
-        return isQuarantineName(origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null));
+        return isQuarantine(ctx, tenant, origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null));
     }
 
     /** The quarantine collections that hold at least one row of {@code origin}, by name. */

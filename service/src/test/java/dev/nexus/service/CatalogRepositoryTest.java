@@ -2521,7 +2521,8 @@ class CatalogRepositoryTest {
         assertThatThrownBy(() -> repo.upsertCollection(TENANT_A, Map.of(
                 "name", name,
                 "content_type", contentType,
-                "owner_id", "cat-noprofile-owner")))
+                "owner_id", "cat-noprofile-owner",
+            "model_version", "v1")))
             .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
             .hasMessageContaining(name)
             .hasMessageContaining("embedding_model")
@@ -2683,7 +2684,8 @@ class CatalogRepositoryTest {
             "name", "code__nexus__voyage-code-3__v0",
             "content_type", "code",
             "owner_id", "nexus-1-1",
-            "embedding_model", "voyage-code-3"
+            "embedding_model", "voyage-code-3",
+            "model_version", "v0"
         ));
         int updated = repo.supersedeCollection(TENANT_A, "code__nexus__voyage-code-3__v0",
             "code__nexus__voyage-code-3__v1", "2026-06-01T00:00:00Z");
@@ -2705,7 +2707,8 @@ class CatalogRepositoryTest {
         String name = "code__chainguard__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "chainguard", "embedding_model", "voyage-code-3"));
+            "owner_id", "chainguard", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
         assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
@@ -2743,7 +2746,8 @@ class CatalogRepositoryTest {
         String name = "code__samestamp__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "samestamp", "embedding_model", "voyage-code-3"));
+            "owner_id", "samestamp", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
         assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
@@ -2770,7 +2774,8 @@ class CatalogRepositoryTest {
         String target = "code__concstamp__voyage-code-3__v2";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "concstamp", "embedding_model", "voyage-code-3"));
+            "owner_id", "concstamp", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
 
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
@@ -2813,7 +2818,8 @@ class CatalogRepositoryTest {
         String name = "code__revive__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "revive", "embedding_model", "voyage-code-3"));
+            "owner_id", "revive", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
         assertThat(repo.supersedeCollection(TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
             .isEqualTo(1);
         // NON-VACUITY: the row really is tombstoned before the re-registration.
@@ -2870,7 +2876,7 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", real, "content_type", contentType,
             "owner_id", owner, "embedding_model", model,
-            "created_at", "2026-06-01T00:00:00Z"));
+            "created_at", "2026-06-01T00:00:00Z", "model_version", "v1"));
         // Seeded through PgContainerHelper.insertCollection, which derives
         // lifecycle_state='quarantine' from the name prefix exactly as
         // gc_quarantine_orphans does in production. upsertCollection does NOT
@@ -2997,7 +3003,8 @@ class CatalogRepositoryTest {
             "name", "knowledge__old__v1",
             "content_type", "knowledge",
             "owner_id", "nexus-1-1",
-            "embedding_model", "voyage-context-3"
+            "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "rn.1", "title", "Rename Test",
             "content_type", "paper", "corpus", "knowledge",
@@ -3929,7 +3936,8 @@ class CatalogRepositoryTest {
             "name", collName,
             "content_type", "knowledge",
             "owner_id", "cor.1",
-            "embedding_model", "voyage-context-3"
+            "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
 
         var result = repo.collectionOwnerRoot(corTenant, collName);
@@ -3958,7 +3966,8 @@ class CatalogRepositoryTest {
         ));
         repo.upsertCollection(tA, Map.of(
             "name", collA, "content_type", "knowledge",
-            "owner_id", "cora.1", "embedding_model", "voyage-context-3"
+            "owner_id", "cora.1", "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
 
         repo.upsertOwner(tB, mapOf(
@@ -3967,7 +3976,8 @@ class CatalogRepositoryTest {
         ));
         repo.upsertCollection(tB, Map.of(
             "name", collB, "content_type", "knowledge",
-            "owner_id", "corb.1", "embedding_model", "voyage-context-3"
+            "owner_id", "corb.1", "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
 
         // tA cannot see tB's collection and vice versa
@@ -5700,7 +5710,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-default__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-default", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-default", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         var coll = repo.getCollection(TENANT_A, name);
         assertThat(coll.get("aspects_enabled")).isNull();
     }
@@ -5710,7 +5721,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-shape__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-shape", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-shape", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         repo.setCollectionAspectsEnabled(TENANT_A, name, true);
 
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
@@ -5725,7 +5737,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-set__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-set", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-set", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         // An untouched row is null (no opinion), not false -- see
         // collection_aspectsEnabled_isNullForANewRegistration.
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
@@ -5755,7 +5768,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-rls__voyage-context-3__v1";
         repo.upsertCollection(TB, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-rls", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-rls", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
 
         // TENANT A attempting to set TENANT B's collection must affect nothing --
         // FORCE ROW LEVEL SECURITY scopes the UPDATE's WHERE to tenant A's own
@@ -5778,7 +5792,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-explicit-false__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-explicit-false", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-explicit-false", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
 
         repo.setCollectionAspectsEnabled(TENANT_A, name, false);
@@ -5794,7 +5809,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-survives-upsert__voyage-context-3__v1";
         Map<String, Object> row = Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-survives-upsert", "embedding_model", "voyage-context-3");
+            "owner_id", "aspects-survives-upsert", "embedding_model", "voyage-context-3",
+            "model_version", "v1");
         repo.upsertCollection(TENANT_A, row);
         repo.setCollectionAspectsEnabled(TENANT_A, name, true);
 

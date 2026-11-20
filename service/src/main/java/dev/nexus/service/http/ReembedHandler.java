@@ -702,7 +702,10 @@ public final class ReembedHandler implements HttpHandler {
                             List<Job> locked) {
         requireRegistrable(tenant, requested, contentType, owner, profileModel, locked);
         String need = needOf(contentType, owner, profileModel);
-        catalog.upsertCollection(tenant, orderedMap("name", requested, "content_type", contentType, "owner_id", owner));
+        // D1 (Sam 2026-11-20): a new row needs a model_version. The client mints the target as <...>__v<n>; the version
+        // is read off that name (a migration-source read), and a name with none is refused by the upsert.
+        catalog.upsertCollection(tenant, orderedMap("name", requested, "content_type", contentType, "owner_id", owner,
+            "model_version", dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested)));
         // The profile gate fixed the model and a trigger may have settled the owner: check what is there now.
         Result registered = TargetSelection.select(rows(tenant, contentType), contentType, owner, profileModel);
         if (registered instanceof Live l && l.name().equals(requested)) {

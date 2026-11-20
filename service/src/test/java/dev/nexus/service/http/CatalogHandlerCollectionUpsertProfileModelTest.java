@@ -45,8 +45,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * profile's value. An EXISTING row is never re-pointed by the profile
  * (Technical Design 1a): a differing model on an existing row is refused the
  * same way, but naming the ROW's own value instead. New rows also get {@code
- * lifecycle_state} ({@code live} unless the {@code quarantine-} prefix
- * convention applies) and {@code dimension} from {@code
+ * lifecycle_state} (the request's, {@code live} when it names none; RDR-229 P2.5
+ * stopped reading the {@code quarantine-} prefix) and {@code dimension} from {@code
  * nexus.embedding_models}; {@code model_version} keeps round-tripping
  * exactly as sent.
  *
@@ -330,16 +330,16 @@ class CatalogHandlerCollectionUpsertProfileModelTest {
             .isEqualTo("voyage-code-3");
     }
 
-    // ── (f) quarantine-prefixed name -> lifecycle_state='quarantine' ────────
+    // ── (f) explicit lifecycle_state='quarantine' (RDR-229 P2.5: not the name prefix) ──
 
     @Test
-    void newCollection_quarantinePrefixedName_getsQuarantineLifecycleState() throws Exception {
+    void newCollection_explicitQuarantineState_getsQuarantineLifecycleState_whateverItsName() throws Exception {
         String tenant = "profile-model-tenant-7";
         String name = "quarantine-code__" + tenant + "__voyage-code-3__v1";
 
         CapturingExchange ex = post("/v1/catalog/collections/upsert",
             "{\"name\":\"" + name + "\",\"content_type\":\"code\","
-            + "\"owner_id\":\"" + tenant + "\",\"model_version\":\"v1\"}");
+            + "\"owner_id\":\"" + tenant + "\",\"model_version\":\"v1\",\"lifecycle_state\":\"quarantine\"}");
         handleWithTenant(ex, tenant);
         assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
 

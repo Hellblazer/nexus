@@ -9706,21 +9706,22 @@ public final class CatalogRepository {
      * a document lands. So the value this method returns for such a collection can differ
      * from the one written here; a knowledge collection is never touched.
      *
-     * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
-     * either the request's {@code content_type} or {@code name} starts with
-     * {@code quarantine-}, else {@code live} (bead nexus-ft04v.8 NOTES: the
-     * simplest answer consistent with bead nexus-ft04v.4's backfill walk,
-     * which derives {@code quarantine} from that same name-prefix
-     * convention — new registrations carry {@code content_type} explicitly,
-     * so both are checked). {@code model_version} keeps round-tripping
-     * exactly as sent; this bead does not touch any client-side parse site
-     * (Phase 3's census).
+     * <p>A NEW row's {@code lifecycle_state} is the request's {@code lifecycle_state} when it carries one
+     * ({@code live}, {@code quarantine}, {@code dormant} or {@code disputed}; anything else is refused with an
+     * {@link IllegalArgumentException}, a 400), else {@code live} (RDR-229 P2.5, nexus-p2m1x.10). The name and
+     * {@code content_type} are no longer read for it: a caller that registers a quarantine collection knows it is
+     * quarantining and says so, and a {@code quarantine-} label is just a label. (Before, either one starting with
+     * {@code quarantine-} made the row {@code quarantine}; the ETL import keeps that rule as its fallback, see
+     * {@link CollectionRegistration#lifecycleStateForImport}.) An existing row's state is never re-pointed.
+     *
+     * <p>A NEW row with a blank or absent {@code model_version} is refused ({@link IllegalArgumentException},
+     * a 400) and nothing is written (D1, Sam 2026-11-20). An existing row's version is never re-pointed, so a
+     * re-registration or a revive that sends none still succeeds; a sent version round-trips exactly as sent.
      */
     public void upsertCollection(String tenant, Map<String, Object> coll) {
         tenantScope.withTenant(tenant, ctx -> {
             String name           = s(coll, "name");
-            // Raw, nullable/blank — used to key the profile lookup and the
-            // quarantine-prefix check; nne() below still fills the written
+            // Raw, nullable/blank — used to key the profile lookup; nne() below still fills the written
             // CONTENT_TYPE column with "" as before when absent.
             String contentType    = s(coll, "content_type");
             String requestedModel = s(coll, "embedding_model");
@@ -9739,6 +9740,10 @@ public final class CatalogRepository {
                     "registering collection '" + name + "' requires content_type; none was supplied");
             }
 
+            // RDR-229 P2.5: an explicit lifecycle_state is honoured (validated even when the row exists, so a
+            // bad value is a 400 whichever branch would have run); none means live.
+            String requestedState = CollectionRegistration.explicitLifecycleState(coll);
+
             var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.OWNER_ID)
                     .from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
@@ -9748,6 +9753,9 @@ public final class CatalogRepository {
             String  effectiveModel;
             Integer effectiveDimension = null;
             String  lifecycleState     = null;
+            // D1 (Sam 2026-11-20): only a NEW row binds its model_version (an existing row's is never re-pointed),
+            // so only the new-row branch below refuses a blank one.
+            String  modelVersion       = nne(s(coll, "model_version"));
 
             if (existingRow != null) {
                 String existingModel = existingRow.value1();
@@ -9781,6 +9789,7 @@ public final class CatalogRepository {
                 // exactly like effectiveModel above.
                 lifecycleState = "live";
             } else {
+                modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 String  profileModel     = null;
                 Integer profileDimension = null;
                 // contentType is already proven non-null/non-blank by the guard above
@@ -9826,9 +9835,7 @@ public final class CatalogRepository {
                             .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(effectiveModel))
                             .fetchOne(EMBEDDING_MODELS.DIMENSION);
                 }
-                boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
-                                  || (name != null && name.startsWith("quarantine-"));
-                lifecycleState = quarantine ? "quarantine" : "live";
+                lifecycleState = requestedState != null ? requestedState : "live";
             }
 
             // nexus-xtmtf: superseded_at / created_at are timestamptz NULL columns after
@@ -9846,7 +9853,7 @@ public final class CatalogRepository {
                .values(tenant,
                        name, nne(contentType),
                        nne(s(coll, "owner_id")), effectiveModel,
-                       nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                       modelVersion, nne(s(coll, "display_name")),
                        nb(bFlag(coll, "legacy_grandfathered"), false),
                        nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                        // hygiene-001 (nexus-tk070.p6a follow-on): created_at is NOT NULL
@@ -10238,7 +10245,9 @@ public final class CatalogRepository {
             //    not three against chunks_384/768/1024 -- the cascade-count key
             //    collapses from three to one along with the table (was
             //    "chunks_384"/"chunks_768"/"chunks_1024").
-            if (QuarantineOrigin.isQuarantineName(name)) {
+            // RDR-229 P2.5: the collection's own row says whether it is a quarantine collection (same ctx; the
+            // row is still there, the registry delete is step 6). A name with no row falls back to its prefix.
+            if (QuarantineOrigin.isQuarantine(ctx, tenant, name)) {
                 // nexus-wbfpw.71: a deliberate delete of a quarantine collection is the audited manual route
                 // for rows whose origin is gone; the audit row carries the chashes the delete removed.
                 int removed = QuarantineOrigin.deleteQuarantineCollectionRows(ctx, tenant, name);
@@ -10659,8 +10668,10 @@ public final class CatalogRepository {
                                                    String newNameEmbeddingModel) {
         // nexus-wbfpw.71: a rename re-homes chunks and registry rows with no audit row, so it is refused on a
         // quarantine collection, as source or as target (the sanctioned verbs are restore and expiry).
-        QuarantineOrigin.requireNotQuarantine("rename", oldName);
-        QuarantineOrigin.requireNotQuarantine("rename", newName);
+        // RDR-229 P2.5: the SOURCE exists, so its row decides (registry cache, else one single-column read); the
+        // TARGET is a name with no row yet, so its name is all there is to judge.
+        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, "rename", oldName);
+        QuarantineOrigin.requireNotQuarantineTarget("rename", newName);
         Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
             newContentType, newOwnerId, newNameEmbeddingModel);
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
@@ -10688,6 +10699,16 @@ public final class CatalogRepository {
             CollectionRegistry.lookup(tenantScope, tenant, newName);
         }
         return counts;
+    }
+
+    /**
+     * The rename/rehome SOURCE guard, for the HTTP layer (RDR-229 P2.5): refuses an existing collection whose
+     * catalog row is {@code quarantine}, as {@link #renameCollection} and {@link #rehomeCollection} do themselves
+     * (the route answers 400 ahead of the verb's own 409s). Reads the row through {@link CollectionRegistry}
+     * (cache, else one short read); a name with no row is judged by its prefix.
+     */
+    public void requireNotQuarantineSource(String tenant, String verb, String name) {
+        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, verb, name);
     }
 
     /**
@@ -11639,8 +11660,9 @@ public final class CatalogRepository {
      */
     public RehomeResult rehomeCollection(String tenant, String source, String target) {
         // nexus-wbfpw.71: a re-home UPDATEs chunks.collection with no audit row; refused on a quarantine name.
-        QuarantineOrigin.requireNotQuarantine("rehome", source);
-        QuarantineOrigin.requireNotQuarantine("rehome", target);
+        // RDR-229 P2.5: source by its row, target by its name (see renameCollection).
+        QuarantineOrigin.requireNotQuarantineSource(tenantScope, tenant, "rehome", source);
+        QuarantineOrigin.requireNotQuarantineTarget("rehome", target);
         if (source.equals(target)) {
             throw new RehomeRefused("source and target are the same collection: " + source);
         }
@@ -13506,7 +13528,7 @@ public final class CatalogRepository {
                     insert = insert.values(tenant,
                             s(coll, "name"), nne(s(coll, "content_type")),
                             nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
-                            nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                            CollectionRegistration.importModelVersion(coll), nne(s(coll, "display_name")),
                             nb(bFlag(coll, "legacy_grandfathered"), false),
                             nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                             // hygiene-001: created_at is NOT NULL now; stamp "now" when
@@ -13515,7 +13537,7 @@ public final class CatalogRepository {
                             // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT
                             // NULL + enum CHECK (hygiene-002) that a fresh INSERT here
                             // 23502'd on before this fix.
-                            lifecycleStateForImport(nne(s(coll, "content_type")), s(coll, "name")));
+                            CollectionRegistration.lifecycleStateForImport(coll));
                 }
                 insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                       .doNothing()
@@ -13523,23 +13545,6 @@ public final class CatalogRepository {
             }
             return rows.size();
         });
-    }
-
-    /**
-     * RDR-204 nexus-ft04v.4/.5: the ONE lifecycle_state rule the ETL import paths
-     * (importCollection/importCollectionsBatch) need on a fresh INSERT — the same
-     * quarantine-prefix convention {@code upsertCollection}'s own new-row branch
-     * and hygiene-002-1's backfill walk both use, minus the embedding_profile
-     * lookup (an ETL import row already carries its own metadata explicitly; there
-     * is no profile to consult). Only ever bound on the VALUES tuple of a fresh
-     * INSERT -- both import methods are ON CONFLICT DO NOTHING now (Sam's
-     * decision, RDR-204 Phase 1: an import never overwrites an existing row), so
-     * an existing row's lifecycle_state is never touched by this method at all.
-     */
-    private static String lifecycleStateForImport(String contentType, String name) {
-        boolean quarantine = (contentType != null && contentType.startsWith("quarantine-"))
-                          || (name != null && name.startsWith("quarantine-"));
-        return quarantine ? "quarantine" : "live";
     }
 
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
@@ -13570,7 +13575,7 @@ public final class CatalogRepository {
            .values(tenant,
                    s(coll, "name"), nne(s(coll, "content_type")),
                    nne(s(coll, "owner_id")), nne(s(coll, "embedding_model")),
-                   nne(s(coll, "model_version")), nne(s(coll, "display_name")),
+                   CollectionRegistration.importModelVersion(coll), nne(s(coll, "display_name")),
                    nb(bFlag(coll, "legacy_grandfathered"), false),
                    nne(s(coll, "superseded_by")), tsOrNull(s(coll, "superseded_at")),
                    // hygiene-001: created_at is NOT NULL now; stamp "now" when the
@@ -13580,7 +13585,7 @@ public final class CatalogRepository {
                    // enum CHECK (hygiene-002) that a fresh INSERT here 23502'd on
                    // before this fix -- same quarantine-prefix rule as
                    // upsertCollection's own new-row branch.
-                   lifecycleStateForImport(nne(s(coll, "content_type")), s(coll, "name")));
+                   CollectionRegistration.lifecycleStateForImport(coll));
         insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
               .doNothing()
               .execute();

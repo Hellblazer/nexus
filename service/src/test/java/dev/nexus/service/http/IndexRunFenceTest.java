@@ -117,7 +117,7 @@ class IndexRunFenceTest {
             PgContainerHelper.ensureTenantPartitions(DSL.using(su, SQLDialect.POSTGRES), TENANT);
         }
         repo.upsertCollection(TENANT, Map.of("name", COLLECTION, "content_type", "knowledge",
-            "owner_id", "irf-owner", "embedding_model", "voyage-context-3"));
+            "owner_id", "irf-owner", "embedding_model", "voyage-context-3", "model_version", "v1"));
     }
 
     @AfterAll

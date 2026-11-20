@@ -1,0 +1,467 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import dev.nexus.service.ChunkReaper.RunResult;
+import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.ChashRepository;
+import dev.nexus.service.db.LadderRepository;
+import dev.nexus.service.db.Rdr192BackfillGate;
+import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.PgVectorRepository.QuarantineRestoreOutcome;
+import dev.nexus.service.vectors.ReaperRepository;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * RDR-229 P2.5 (bead nexus-p2m1x.10), parts (a) and (b): a collection's lifecycle is the
+ * {@code catalog_collections.lifecycle_state} column, set explicitly when the collection is registered, and the
+ * engine's guards on an EXISTING collection read that column instead of testing the {@code quarantine-} name
+ * prefix. A name with no row is still judged by its prefix, as before, so the row-less outcomes are pinned here
+ * too. The TARGET side of the rename and rehome guards (no row exists yet) stays a name test and is pinned as such.
+ *
+ * <p>Fixtures set {@code lifecycle_state} through substrate SQL, never through the code under test, so a guard test
+ * is red for the guard and not for the registration. Real PostgreSQL throughout; each test works in its own tenant.
+ */
+class LifecycleFromRowTest extends AtomicWriteTestBase {
+
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-01T12:00:00Z"), ZoneOffset.UTC);
+    private static final String ACTOR = "test-operator";
+    private static final String SIBLING_DELETE_OP = "quarantine_collection_delete";
+
+    private PgVectorRepository vectors;
+    private ChashRepository chashRepo;
+    private ReaperRepository store;
+    private LadderRepository ladder;
+    private Rdr192BackfillGate gate;
+
+    @BeforeAll
+    void wire() {
+        vectors = new PgVectorRepository(tenantScope, embedder, embedder);
+        chashRepo = new ChashRepository(tenantScope);
+        store = new ReaperRepository(tenantScope);
+        ladder = new LadderRepository(tenantScope);
+        gate = new Rdr192BackfillGate(ladder, ChunkReaper.emptyTenantProbe(store));
+    }
+
+    // ── fixtures ─────────────────────────────────────────────────────────────
+
+    private String newTenant() {
+        return "lfr" + seq.incrementAndGet();
+    }
+
+    private void openGate(String tenant) {
+        ladder.record(tenant, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+    }
+
+    /** A conformant, NON-prefixed name. */
+    private String col(String tag) {
+        return "knowledge__" + tag + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+    }
+
+    private static String prefixed(String name) {
+        return "quarantine-" + name;
+    }
+
+    /** A registration payload as the upsert route takes it; {@code state} null leaves the key out. */
+    private static Map<String, Object> reg(String name, String state) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", name);
+        m.put("content_type", "knowledge");
+        m.put("owner_id", "o");
+        m.put("embedding_model", "minilm-l6-v2-384");
+        m.put("model_version", "v1");
+        if (state != null) m.put("lifecycle_state", state);
+        return m;
+    }
+
+    /** Registers {@code name} through substrate SQL with exactly {@code state}, whatever the name says. */
+    private void row(String tenant, String name, String state) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, name);
+            int n = ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, state)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(name))).execute();
+            assertThat(n).as("fixture row %s", name).isEqualTo(1);
+        }
+    }
+
+    /** One chunk in an already registered collection, tagged for {@code originTag} when non-null. */
+    private String chunk(String tenant, String collection, String seed, String originTag) throws Exception {
+        String hex = Chash.ofText(collection + "/" + seed).toHex();
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("title", seed);
+        meta.put("quarantined_at", "2026-09-01T00:00:00Z");
+        if (originTag != null) meta.put("origin_collection", originTag);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, collection, List.of(hex),
+                List.of(seed + " text"), List.of(new float[384]), List.of(meta));
+        }
+        return hex;
+    }
+
+    private String state(String tenant, String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                .fetchOne(CATALOG_COLLECTIONS.LIFECYCLE_STATE);
+        }
+    }
+
+    private int count(String tenant, String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNKS,
+                CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)));
+        }
+    }
+
+    private ChunkReaper reaper(String tenant) {
+        return new ChunkReaper(store, vectors, repo, gate, () -> List.of(tenant), ChunkReaper.Settings.defaults(),
+            CLOCK);
+    }
+
+    private static void assertNamesTheSanctionedVerbs(Throwable e, String name) {
+        assertThat(e).isInstanceOf(IllegalArgumentException.class);
+        assertThat(e.getMessage()).contains(name).contains("nx t3 quarantine restore").contains("nx t3 gc");
+    }
+
+    // ── (a) registration takes an explicit lifecycle_state ───────────────────
+
+    @Test
+    void registrationHonoursAnExplicitLifecycleState_underANameWithNoPrefix() throws Exception {
+        String t = newTenant();
+        String name = col("a1");
+
+        repo.upsertCollection(t, reg(name, "quarantine"));
+
+        assertThat(state(t, name)).isEqualTo("quarantine");
+    }
+
+    @Test
+    void aRegistrationThatNamesNoStateIsLive_evenWhenItsNameOrContentTypeCarriesThePrefix() throws Exception {
+        String t = newTenant();
+        String plain = col("a2p");
+        String byName = prefixed(col("a2n"));
+        String byContentType = col("a2c");
+        Map<String, Object> ct = reg(byContentType, null);
+        ct.put("content_type", "quarantine-knowledge");
+
+        repo.upsertCollection(t, reg(plain, null));
+        repo.upsertCollection(t, reg(byName, null));
+        repo.upsertCollection(t, ct);
+
+        assertThat(state(t, plain)).isEqualTo("live");
+        assertThat(state(t, byName)).as("the prefix is no longer read at registration").isEqualTo("live");
+        assertThat(state(t, byContentType)).as("nor is a content_type prefix").isEqualTo("live");
+    }
+
+    @Test
+    void aStateOutsideTheVocabularyIsRefusedAsABadRequest() {
+        String t = newTenant();
+        assertThatThrownBy(() -> repo.upsertCollection(t, reg(col("a3"), "frozen")))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("frozen");
+    }
+
+    @Test
+    void anExistingRowKeepsItsStateWhenReRegistered() throws Exception {
+        String t = newTenant();
+        String name = col("a4");
+        repo.upsertCollection(t, reg(name, "live"));
+
+        repo.upsertCollection(t, reg(name, "quarantine"));
+
+        assertThat(state(t, name)).as("an existing row is never re-pointed").isEqualTo("live");
+    }
+
+    @Test
+    void theEngineQuarantineMintRegistersTheSiblingAsQuarantine() throws Exception {
+        // The reaper's move (nexus.reaper_quarantine_chunks) inserts the sibling's registry row with
+        // lifecycle_state 'quarantine' literally; nothing here derives it from the name.
+        String t = newTenant();
+        openGate(t);
+        String origin = col("a5");
+        row(t, origin, "live");
+        chunk(t, origin, "orphan", null);
+
+        RunResult run = reaper(t).runOnce(Duration.ZERO);
+
+        assertThat(run.tenant(t).collection(origin).moved()).isEqualTo(1);
+        assertThat(state(t, prefixed(origin))).isEqualTo("quarantine");
+    }
+
+    @Test
+    void theOtherSqlMoverRegistersItsSiblingAsQuarantine_soTheLiveDefaultOfAnUpsertCannotHideAMoverRegression()
+            throws Exception {
+        // nexus.gc_quarantine_orphans (the client's move) inserts the sibling row itself; with the upsert's
+        // prefix inference gone, this is what keeps a mover's sibling 'quarantine'.
+        String t = newTenant();
+        String origin = col("a5b");
+        row(t, origin, "live");
+        String orphan = chunk(t, origin, "orphan", null);
+        ReapableFixtures.agePastGrace(pg, t, origin);   // gc selects orphans with the 30 day grace
+        String sibling = prefixed(origin);
+
+        var outcome = vectors.quarantineOrphans(t, origin, sibling, "2026-08-10T00:00:00Z", 20);
+
+        assertThat(outcome.moved()).isEqualTo(1L);
+        assertThat(count(t, sibling)).isEqualTo(1);
+        assertThat(state(t, sibling)).isEqualTo("quarantine");
+        assertThat(orphan).isNotNull();
+    }
+
+    @Test
+    void anImportRowThatCarriesAStateWinsOverThePrefix_andOneWithoutFallsBackToIt() throws Exception {
+        String t = newTenant();
+        String explicitQuarantine = col("a6q");
+        String prefixedExplicitLive = prefixed(col("a6l"));
+        String prefixedNoState = prefixed(col("a6p"));
+        String plainNoState = col("a6n");
+
+        repo.importCollection(t, reg(explicitQuarantine, "quarantine"));
+        repo.importCollection(t, reg(prefixedExplicitLive, "live"));
+        repo.importCollection(t, reg(prefixedNoState, null));
+        repo.importCollection(t, reg(plainNoState, null));
+
+        assertThat(state(t, explicitQuarantine)).isEqualTo("quarantine");
+        assertThat(state(t, prefixedExplicitLive)).as("the imported row's state wins").isEqualTo("live");
+        assertThat(state(t, prefixedNoState)).as("the ETL fallback: the prefix").isEqualTo("quarantine");
+        assertThat(state(t, plainNoState)).isEqualTo("live");
+    }
+
+    @Test
+    void theBatchImportTakesTheRowsStateToo() throws Exception {
+        String t = newTenant();
+        String explicitQuarantine = col("a7q");
+        String prefixedExplicitLive = prefixed(col("a7l"));
+        String prefixedNoState = prefixed(col("a7p"));
+
+        repo.importCollectionsBatch(t, List.of(reg(explicitQuarantine, "quarantine"),
+            reg(prefixedExplicitLive, "live"), reg(prefixedNoState, null)));
+
+        assertThat(state(t, explicitQuarantine)).isEqualTo("quarantine");
+        assertThat(state(t, prefixedExplicitLive)).isEqualTo("live");
+        assertThat(state(t, prefixedNoState)).isEqualTo("quarantine");
+    }
+
+    // ── (b) guards on an existing collection read the row ────────────────────
+
+    @Test
+    void storeDeleteRefusesACollectionWhoseRowIsQuarantine_whateverItsName() throws Exception {
+        String t = newTenant();
+        String q = col("b1");
+        row(t, q, "quarantine");
+        String hex = chunk(t, q, "keep", null);
+
+        assertThatThrownBy(() -> vectors.delete(t, q, List.of(hex)))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, q));
+        assertThat(count(t, q)).isEqualTo(1);
+    }
+
+    @Test
+    void storeDeleteAdmitsAPrefixedNameWhoseRowIsLive() throws Exception {
+        String t = newTenant();
+        String c = prefixed(col("b2"));
+        row(t, c, "live");
+        String hex = chunk(t, c, "gone", null);
+
+        int deleted = vectors.delete(t, c, List.of(hex));
+
+        assertThat(deleted).isEqualTo(1);
+        assertThat(count(t, c)).isZero();
+    }
+
+    @Test
+    void storeDeleteOfARowLessNameIsJudgedByItsPrefixAsBefore() {
+        String t = newTenant();
+        String rowLessPrefixed = prefixed(col("b3"));
+
+        assertThatThrownBy(() -> vectors.delete(t, rowLessPrefixed, List.of(Chash.ofText("x").toHex())))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, rowLessPrefixed));
+        assertThatThrownBy(() -> vectors.delete(t, col("b3p"), List.of(Chash.ofText("x").toHex())))
+            .as("a row-less plain name is not a quarantine name: it fails as an unregistered collection")
+            .isNotInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void renameRefusesASourceWhoseRowIsQuarantine_butAdmitsAPrefixedSourceWhoseRowIsLive() throws Exception {
+        String t = newTenant();
+        String q = col("b4q");
+        row(t, q, "quarantine");
+        String l = prefixed(col("b4l"));
+        row(t, l, "live");
+        String target = col("b4t");
+
+        assertThatThrownBy(() -> repo.renameCollection(t, q, col("b4n")))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, q));
+        Map<String, Integer> counts = repo.renameCollection(t, l, target);
+
+        assertThat(counts).containsKey("catalog_collections_superseded");
+        assertThat(state(t, target)).isEqualTo("live");
+    }
+
+    @Test
+    void theRenameTargetIsStillJudgedByItsName_noRowExistsYet() throws Exception {
+        String t = newTenant();
+        String x = col("b5x");
+        row(t, x, "live");
+        String rowLessTarget = prefixed(col("b5t"));
+
+        assertThatThrownBy(() -> repo.renameCollection(t, x, rowLessTarget))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, rowLessTarget));
+        assertThatThrownBy(() -> chashRepo.renameCollection(t, x, rowLessTarget))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, rowLessTarget));
+        assertThatThrownBy(() -> repo.rehomeCollection(t, x, rowLessTarget))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, rowLessTarget));
+    }
+
+    @Test
+    void theChashRenameRefusesASourceWhoseRowIsQuarantine() throws Exception {
+        String t = newTenant();
+        String q = col("b6q");
+        row(t, q, "quarantine");
+        chunk(t, q, "keep", null);
+
+        assertThatThrownBy(() -> chashRepo.renameCollection(t, q, col("b6n")))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, q));
+        assertThat(count(t, q)).isEqualTo(1);
+    }
+
+    @Test
+    void rehomeRefusesASourceWhoseRowIsQuarantine() throws Exception {
+        String t = newTenant();
+        String q = col("b7q");
+        row(t, q, "quarantine");
+        String x = col("b7x");
+        row(t, x, "live");
+        chunk(t, q, "keep", null);
+
+        assertThatThrownBy(() -> repo.rehomeCollection(t, q, x))
+            .satisfies(e -> assertNamesTheSanctionedVerbs(e, q));
+        assertThat(count(t, q)).isEqualTo(1);
+    }
+
+    @Test
+    void deleteOfACollectionWhoseRowIsQuarantineIsTheAuditedQuarantineDelete_whateverItsName() throws Exception {
+        String t = newTenant();
+        String q = col("b8");
+        row(t, q, "quarantine");
+        String a = chunk(t, q, "one", null);
+        String b = chunk(t, q, "two", null);
+
+        Map<String, Integer> counts = repo.deleteCollection(t, q);
+
+        assertThat(counts.get("quarantine_chunks")).isEqualTo(2);
+        assertThat(count(t, q)).isZero();
+        var rows = repo.listGcAudit(t, null, SIBLING_DELETE_OP, 500, 0);
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("collection")).isEqualTo(q);
+        assertThat(rows.get(0).get("chashes").toString()).contains(a).contains(b);
+    }
+
+    @Test
+    void deleteOfAPrefixedNameWhoseRowIsLiveIsAnOriginDelete_notAQuarantineDelete() throws Exception {
+        String t = newTenant();
+        String c = prefixed(col("b9"));
+        row(t, c, "live");
+        chunk(t, c, "one", null);
+
+        Map<String, Integer> counts = repo.deleteCollection(t, c);
+
+        assertThat(counts.get("chunks")).isEqualTo(1);
+        assertThat(counts.get("quarantine_chunks")).as("no quarantine rows were touched").isZero();
+        assertThat(repo.listGcAudit(t, null, SIBLING_DELETE_OP, 500, 0)).isEmpty();
+    }
+
+    @Test
+    void aRestoreNamingASiblingWhoseRowIsQuarantineAcceptsItWithoutThePrefix() throws Exception {
+        String t = newTenant();
+        String origin = col("b10o");
+        row(t, origin, "live");
+        String sibling = col("b10s");
+        row(t, sibling, "quarantine");
+        String hex = chunk(t, sibling, "back", origin);
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, origin, sibling, List.of(hex), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(hex);
+        assertThat(count(t, origin)).isEqualTo(1);
+    }
+
+    @Test
+    void aRestoreNamingALiveSiblingIsRefusedWhateverItsName_andARowLessPlainNameAsNotAQuarantineName()
+            throws Exception {
+        String t = newTenant();
+        String origin = col("b11o");
+        row(t, origin, "live");
+        String liveSibling = prefixed(col("b11s"));
+        row(t, liveSibling, "live");
+        String hex = chunk(t, liveSibling, "x", origin);
+
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, origin, liveSibling, List.of(hex), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("is not a quarantine collection");
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, origin, col("b11p"), List.of(hex), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("must be a quarantine- sibling");
+    }
+
+    @Test
+    void aRestoreIntoAnOriginWhoseRowIsQuarantineIsRefused_whateverItsName() throws Exception {
+        String t = newTenant();
+        String q = col("b12");
+        row(t, q, "quarantine");
+        String hex = chunk(t, q, "x", null);
+
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, q, q, List.of(hex), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantine");
+    }
+
+    // ── (b) the reaper splits its collections by the row, not by the prefix ──
+
+    @Test
+    void theReaperTreatsACollectionWhoseRowIsQuarantineAsASibling_whateverItsName() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String q = col("c1");
+        row(t, q, "quarantine");
+        String hex = chunk(t, q, "aged", null);
+
+        RunResult run = reaper(t).runOnce(Duration.ZERO);
+
+        assertThat(run.tenant(t).collection(q)).as("a quarantine collection is never reaped").isNull();
+        assertThat(run.tenant(t).expiry(q)).as("its expiry ran").isNotNull();
+        assertThat(count(t, q)).isEqualTo(1);
+        assertThat(hex).isNotNull();
+    }
+
+    @Test
+    void theReaperVisitsAPrefixedNameWhoseRowIsLiveAsALiveCollection() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = prefixed(col("c2"));
+        row(t, c, "live");
+        chunk(t, c, "orphan", null);
+
+        RunResult run = reaper(t).runOnce(Duration.ZERO);
+
+        assertThat(run.tenant(t).collection(c)).isNotNull();
+        assertThat(run.tenant(t).collection(c).refusal()).isNull();
+        assertThat(run.tenant(t).expiry(c)).isNull();
+    }
+}

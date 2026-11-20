@@ -2730,8 +2730,9 @@ public final class CatalogHandler implements HttpHandler {
         // small collection, never the contract.
         // nexus-wbfpw.71: refused on a quarantine collection (CatalogRepository.rehomeCollection holds the
         // same guard; here it answers 400 ahead of the rehome verb's own 409s).
-        QuarantineOrigin.requireNotQuarantine("rehome", source);
-        QuarantineOrigin.requireNotQuarantine("rehome", target);
+        // RDR-229 P2.5: the source's row decides; the target has no row yet, so its name is judged.
+        repo.requireNotQuarantineSource(tenant, "rehome", source);
+        QuarantineOrigin.requireNotQuarantineTarget("rehome", target);
         var r = repo.rehomeCollection(tenant, source, target);
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("moved_chunks", r.movedChunks());
@@ -2807,8 +2808,8 @@ public final class CatalogHandler implements HttpHandler {
         }
         // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
         // answer with a different status. CatalogRepository.renameCollection carries the same guard.
-        QuarantineOrigin.requireNotQuarantine("rename", oldName);
-        QuarantineOrigin.requireNotQuarantine("rename", newName);
+        repo.requireNotQuarantineSource(tenant, "rename", oldName);
+        QuarantineOrigin.requireNotQuarantineTarget("rename", newName);
         // nexus-sis0m.3: optional attributes for the new row, derived by the client from the
         // new name (the engine does not parse names, RDR-204). Absent keeps the source's;
         // present must be a non-blank string.

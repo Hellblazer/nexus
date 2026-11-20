@@ -281,7 +281,7 @@ class TenantResetLeakCanaryTest {
             "{\"project\":\"canary\",\"title\":\"t-" + shortId() + "\",\"content\":\"hello " + tenant + "\"}");
         assertThat(mem.statusCode()).as(mem.body()).isEqualTo(200);
         var coll = post("/v1/catalog/collections/upsert", raw,
-            "{\"name\":\"knowledge__canary-" + shortId() + "__voyage-context-3__v1\",\"content_type\":\"knowledge\",\"owner_id\":\"canary\",\"embedding_model\":\"voyage-context-3\"}");
+            "{\"name\":\"knowledge__canary-" + shortId() + "__voyage-context-3__v1\",\"content_type\":\"knowledge\",\"owner_id\":\"canary\",\"embedding_model\":\"voyage-context-3\",\"model_version\":\"v1\"}");
         assertThat(coll.statusCode()).as(coll.body()).isEqualTo(200);
 
         // nexus-csayy.2: an open tenant export session holds the tenant in TenantExportSessions.byOwner.
