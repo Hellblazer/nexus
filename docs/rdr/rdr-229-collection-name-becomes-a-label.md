@@ -720,20 +720,31 @@ disagree (a `quarantine-` name with `live`, or any other name with
 `quarantine`) refuses the whole batch with a message that counts and names
 the rows; rows already registered are skipped first.
 
-Four name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
+Every new row keeps the `quarantine-` prefix and the `'quarantine'` state
+together. `upsertCollection` refuses, for every caller, a new row whose
+name and state disagree, so the engine's quarantine mint passes
+`'quarantine'` and a re-embed target cannot carry the prefix. The SQL
+movers register the sibling as `'quarantine'` themselves. The import
+refuses as above. The production census found no existing row that breaks
+the pairing (T2 `nexus_rdr/229-p1.2-census-2026-11-20`).
 
-- *The rename and rehome guard, for an end with no row.* The guard that
-  refuses a rename or rehome of or INTO a quarantine collection reads the
-  row of each end. An end with no row yet (a new target) is judged by its
-  `quarantine-` name, since the engine mints every `quarantine-` label
-  itself. Whether that fallback is still needed once names are minted
-  labels is a Phase 3 question.
+These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
+
+- *The row-less fallback of `QuarantineOrigin.isQuarantine`.* Every guard
+  and router that asks whether an existing collection is quarantine reads
+  its row, and judges a name with no row by its `quarantine-` prefix. The
+  callers are store-delete, the restore origin and sibling checks, the
+  reapable and manifest-less census routes, reaper routing,
+  `holdsRowsOf`, the collection delete cascade, and both ends of rename
+  and rehome (a new target has no row yet). Whether the fallback is still
+  needed once names are minted labels is a Phase 3 question.
 - *The registration-side `quarantine-` prefix refusal: the engine mints the
   `quarantine-` name; this guard stops a client minting one.* The client
   route (`POST /v1/catalog/collections/upsert`) also registers `live` only,
   and refuses a new row named `quarantine-...` with a 400. The engine's
   own callers of `upsertCollection` and the SQL movers are not subject to
-  it, and neither is the ETL import.
+  these two client rules, and neither is the ETL import. All of them are
+  subject to the pairing check above.
 - *The engine's own mint and the lookups of what it minted.* The mint is
   `ChunkReaper`'s sibling label (`QuarantineOrigin.PREFIX + name`, passed
   to the move) and the SQL movers that register that sibling as
@@ -749,13 +760,33 @@ Four name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   target's minted name (Sam's D1, T2
   `nexus/sam-ruling-rdr229-p12-row-decisions-2026-11-20`). It is a
   migration source and goes away at P4 with the name parsers.
+- *The chunk-key allow-list bypass set.* `ChunkKeyPlan.BYPASS_PREFIXES`
+  and its readers (`ChunkConstraintAdmin`'s `chunks_allow_list` CHECK,
+  `ChunkKeyAllowlistCheck`, `ChunkKeySweep`) still exempt a `quarantine-`
+  name from the allow-list. A CHECK constraint cannot read
+  `catalog_collections`, so reading the row here would mean a trigger.
+  This is deferred to the RDR author's ruling (nexus-p2m1x.10's notes).
+- *The client's row-less fallback.* `nexus.db.collection_lifecycle`
+  judges a name with no row, or a row with no state, by its prefix, at
+  each of the client's bypass checks (census note `QUAR_NOROW`, a
+  migration source). `chunk_quarantine.is_quarantine_sibling_name` stays a
+  name read outside P2.5's scope: its callers are row-less by construction
+  (the backfill of names missing from the registry, the registration
+  retry) or only shape a message. `doctor_edge_probe` tests the prefix
+  behind its own lifecycle filter.
 
 **3. SQL reads columns.** `chash_conformance_report(dim)` filters manifest
 rows by the manifest's `embedding_model` column (the `vectors-030`
 changeset adds it, lines 786-791) joined to
 `nexus.embedding_models.dimension`, instead of nine `split_part` IN-lists
 that also hard-code the model list. The two quarantine functions test
-`lifecycle_state` instead of the prefix.
+`lifecycle_state` instead of the prefix. As built (`vectors-063`), a
+manifest row whose collection has a catalog row is counted through
+`catalog_collections.embedding_model`, which the manifest's own column
+equals by the `fk_catalog_chunks_chunk` and `chunks_collection_fk` foreign
+keys. A row with no catalog row is counted by its own `embedding_model` on
+a separate "no catalog row" line, shown only when non-empty. Those foreign
+keys make such a row unreachable unless they are set aside.
 
 **4. Census gates that can see the surface.** Before any site moves, both
 gates are widened and re-pinned at the measured count:
@@ -1480,8 +1511,11 @@ has. The routing class is 23 sites plus the `taxonomy__` half of the 12
   the `note_tags_array` rung. `exporter.import_collection` reads through its
   `db`'s own row resolver.
 - *The `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`.* P2.5 moves the
-  `quarantine-` half to `lifecycle_state`. P2.9 moves the `taxonomy__` half
-  at the same 12 sites to the row. No writer in `src/nexus` creates a
+  `quarantine-` half to `lifecycle_state`, and in doing so routes all 12
+  sites through one helper, `collection_lifecycle.bypasses_canonical_schema`
+  (P2.5's client commit). P2.9 therefore moves the `taxonomy__` half at that
+  one site to the row. The client census's routing class went from 36 to
+  25 in that commit (`tests/test_collection_name_parse_census.py`). No writer in `src/nexus` creates a
   `taxonomy__` collection, so the half only ever meets legacy names (T2
   `229-research-39`).
 - *The shipped default exclude pattern.* `config.py:1391`
@@ -1888,8 +1922,10 @@ its acceptance is that test green plus the census pin it lowers.
   knowledge collection whose label is not of the conformant shape is found
   by its subject.
 - P2.9 Routing by content type reads the row (item 12): the 24 routing
-  sites (23 and `topic_route.is_prose`) and the `taxonomy__` half of the 12 `_BYPASS_SCHEMA_PREFIXES` tests
-  (T2 `229-research-39`, listed in item 12), the shipped `"code__*"` exclude
+  sites (23 and `topic_route.is_prose`) and the `taxonomy__` half of the `_BYPASS_SCHEMA_PREFIXES` tests
+  (T2 `229-research-39`, listed in item 12; since P2.5 the 12 tests are one
+  helper, `collection_lifecycle.bypasses_canonical_schema`, so this half is
+  one site), the shipped `"code__*"` exclude
   default, and the engine's `isFileRoutedCollection`, which tests a live
   collection. The URI-string classifiers (`NoteUri.isNote`, `canonical`,
   `is_note_uri`, `canonical_note_uri`, `_collection_is_file_routed`,
