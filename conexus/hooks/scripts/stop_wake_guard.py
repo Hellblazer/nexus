@@ -405,10 +405,10 @@ _PEER_NAMES = (
     "reconnect", "reconnects", "reconnected", "resumes", "resumed", "compaction", "compacts", "compacted",
 )
 #: A peer named only as the recipient of the session's own step ("send it to halcyon", "the summary for marlowe")
-#: is not the wake: the step is the session's, and nothing will arrive for it. Not after a wait word ("waiting for
-#: halcyon" is a wait) and not possessive ("halcyon's window" is theirs). Turn-end census, 986abbe7 11-19.
+#: is not the wake: the step is the session's, and nothing will arrive for it. Not possessive ("halcyon's window" is
+#: theirs); a clause with a wait cue is never stripped (:func:`_recipients_stripped`). Turn-end census, 986abbe7 11-19.
 _RECIPIENT_PEER = re.compile(
-    r"(?<!wait )(?<!waits )(?<!waiting )(?<!waited )\b(?:to|for)\s+(?:the\s+)?(?:"
+    r"\b(?:to|for)\s+(?:the\s+)?(?:"
     + "|".join(re.escape(n) for n in ("bob", "linda", "wren", "halcyon", "kimi", "marlowe", "tamsin", "steve",
                                       "steven", "kestrel", "elsinore", "labrun", "peer", "peers"))
     + r")\b(?!'s)",
@@ -483,7 +483,7 @@ _PROMISE = re.compile(
     # switch myself", "Next I'm starting Step 5". Only at the start of a clause, so a relative or subordinate use
     # ("anything I'm doing", "since I'm doing it", "the part I'm working on") is not a step; a negation ("I'm doing
     # nothing") is a restraint.
-    r"|^(?:(?:next|then|now|so)\b[:,]?\s+)?(?:i'm|i am)\s+(?:now\s+|also\s+|next\s+)?(?:doing|starting|writing|fixing|"
+    r"|^(?:(?:next|then|now|so|right|okay|ok|meanwhile)\b[:,]?\s+)?(?:i'm|i am)\s+(?:now\s+|also\s+|next\s+)?(?:doing|starting|writing|fixing|"
     r"drafting|picking up|moving on to)\b(?!\s+(?:to|no|nothing|none|zero|only|little|well|fine|ok|okay)\b)"
     r"|^after that,? comes?\b"
     r"|^next\b[^.]{0,30}\b(?:is|are|comes)\b"
