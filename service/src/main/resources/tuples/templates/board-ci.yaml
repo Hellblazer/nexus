@@ -17,7 +17,8 @@
 #
 # retention_seconds: 259200 (3 days): CI state is read within hours; three
 # days covers a weekend. The adapter also passes a shorter ttl_seconds for
-# queued and in_progress posts.
+# queued and in_progress posts. A topic ending --owner keeps its rows 35 days
+# (retention_by_suffix below).
 #
 # max_live_rows: 5000: about 70 pushes of headroom at the retention ceiling,
 # still bounded against a runaway writer.
@@ -63,6 +64,12 @@ take:
 
 retention_seconds: 259200
 
+# RDR-252 A6 (nexus-igea9.4): the calibration of the acknowledgement deadline reads the first 20 reds or 30 days of
+# --owner rows, so those keep 35 days. Only the --owner subspace: its live count is a few rows a red, and the
+# 5000-row cap counts each subspace, so the other topics (72 posts a push on the base topic) keep three days.
+retention_by_suffix:
+  --owner: 3024000
+
 max_body_bytes: 1024
 
 max_live_rows: 5000
@@ -92,7 +99,7 @@ doc:
       push: a push of develop, on --push
       owner: develop is red; the owner named, on --owner
       clear: develop is green again, on --owner
-      ack: the owner acknowledges, on --owner
+      ack: the owner acknowledges, on --owner; from is stamped with the token's id
     sha: the 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent before the adapter's FOLD_RESULT_DIMS switch (so is outcome)
     outcome:
       success: kind sha; every run concluded success, neutral or skipped

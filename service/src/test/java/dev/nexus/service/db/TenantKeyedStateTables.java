@@ -700,6 +700,7 @@ final class TenantKeyedStateTables {
             "TemplateSchema.keyValues",
             "TemplateSchema.keys",
             "TemplateSchema.nameSegments",
+            "TemplateSchema.retentionBySuffix",
             "TemplateSchemaParser.ParsedKeys.names",
             "TemplateSchemaParser.ParsedKeys.values"
         )) {
