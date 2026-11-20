@@ -16,6 +16,7 @@ The fake transport answers with the engine's row shape (``collRow``).
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -25,8 +26,8 @@ import nexus.corpus as corpus
 import nexus.repo_identity as repo_identity
 from nexus.catalog.collection_attributes import CollectionAttributes
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.corpus import _resolve_promoted_model_token, t3_collection_name
-from nexus.db.http_vector_client import HttpVectorClient
+from nexus.corpus import CollectionRegistryUnreadableError, _resolve_promoted_model_token, t3_collection_name
+from nexus.db.http_vector_client import HttpVectorClient, _process_default_tenant
 
 _MODEL = "bge-base-en-v15-768"
 
@@ -194,13 +195,6 @@ def test_a_row_whose_label_is_the_rendered_name_keeps_the_existing_resolution() 
     assert t3_collection_name("field-notes", t3=t3) == "knowledge__field-notes"
 
 
-def test_a_row_label_this_store_does_not_hold_is_not_answered() -> None:
-    """The row comes from the process's catalog, which need not be this store's
-    tenant: a label the store does not hold leaves the name resolution."""
-
-    assert t3_collection_name("field-notes", t3=_T3({"knowledge__field-notes"}, _ROWS)) == "knowledge__field-notes"
-
-
 def test_a_failed_row_read_falls_back_to_the_name_resolution() -> None:
 
     class _Broken(_T3):
@@ -229,8 +223,13 @@ def test_without_t3_the_resolver_stays_pure() -> None:
     assert t3_collection_name("field-notes").startswith("knowledge__field-notes__")
 
 
-def test_the_vector_client_reads_the_row_through_the_catalog_reader(monkeypatch) -> None:
+def _vector_client(tenant: str) -> HttpVectorClient:
+    vc = object.__new__(HttpVectorClient)
+    vc._tenant = tenant
+    return vc
 
+
+def test_the_vector_client_reads_its_own_tenants_row_through_the_catalog_reader(monkeypatch) -> None:
     seen: list = []
 
     class _Reader:
@@ -242,6 +241,50 @@ def test_the_vector_client_reads_the_row_through_the_catalog_reader(monkeypatch)
             seen.append("closed")
 
     monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: _Reader())
-    got = HttpVectorClient.find_collection("knowledge", "field-notes", _MODEL)
-    assert got.label == "notes-from-2024"
+    vc = _vector_client(_process_default_tenant())
+    assert vc.find_collection("knowledge", "field-notes", _MODEL).label == "notes-from-2024"
     assert seen == [("knowledge", "field-notes", _MODEL), "closed"]
+
+
+def test_a_vector_client_for_another_tenant_never_reads_the_default_catalog(monkeypatch) -> None:
+    """The reader is the process default's tenant (nexus-fryrd): a client for
+    another tenant answers no row instead of the default tenant's."""
+    def _boom(**kw):
+        raise AssertionError("the default catalog was read for another tenant")
+
+    monkeypatch.setattr(factory, "make_catalog_reader", _boom)
+    assert _vector_client("tenant-b").find_collection("knowledge", "field-notes", _MODEL) is None
+
+
+@pytest.mark.parametrize("exc", [httpx.ConnectError("down"), ValueError("for_tuple answered a malformed row")])
+def test_a_write_refuses_when_the_subject_row_cannot_be_read(exc) -> None:
+    """A write must not take an unreadable registry for an empty one and mint
+    the rendered name over the subject's real collection (item 1, Unreadable)."""
+    class _Broken(_T3):
+        def find_collection(self, *a):  # type: ignore[override]
+            raise exc
+
+    with pytest.raises(CollectionRegistryUnreadableError, match="field-notes"):
+        t3_collection_name("field-notes", t3=_Broken({"knowledge__field-notes"}), for_write=True)
+
+
+def test_a_mock_store_answers_the_name_resolution() -> None:
+    """A test double whose find_collection answers something other than a row
+    (a MagicMock) leaves the name resolution as it was."""
+    t3 = MagicMock()
+    t3.collection_exists.side_effect = lambda name: name == "knowledge__field-notes"
+    assert t3_collection_name("field-notes", t3=t3) == "knowledge__field-notes"
+
+
+def test_the_no_row_repo_path_reads_for_tuple_once(monkeypatch) -> None:
+    calls: list[str] = []
+    cat = _repo_client(monkeypatch, {})
+    real_get = cat._get
+
+    def counting_get(path, **kw):
+        calls.append(path)
+        return real_get(path, **kw)
+
+    monkeypatch.setattr(cat, "_get", counting_get)
+    cat.collection_for_repo(Path("/repo"), "code")
+    assert calls.count("/collections/for_tuple") == 1
