@@ -2896,8 +2896,9 @@ def project_cmd(
                     f"{len(plan.refused)} refused: the catalog row could not be read, so the "
                     "threshold would be a guess from the name; pass --threshold to prune at one you choose."
                 )
-                if not plan.targets:
-                    raise click.ClickException("nothing pruned: every collection's row read was unreadable")
+                raise click.ClickException(
+                    f"{len(plan.refused)} collection(s) refused: the prune is incomplete"
+                )
             return
         if backfill:
             _run_backfill(
@@ -3148,13 +3149,19 @@ def _prune_plan(
     taxonomy: Any, threshold: float | None, *, only: str | None, exact: bool,
 ) -> _PrunePlan:
     """The prune plan for ``--prune-below-threshold`` (RDR-229 P2.4): every collection the
-    live catalog listing names plus every collection holding topics, or just *only* (the
-    single-source form), each at *threshold* when given, else its row's default.
+    live catalog listing names, every collection holding topics and every distinct
+    ``source_collection`` of the projection rows (``get_projection_counts_by_collection``), or
+    just *only* (the single-source form), each at *threshold* when given, else its row's default.
+    The last source matters because the engine's prefix match reaches a collection that has
+    projection rows but no topics and no live row (a retired one) from a shorter name; if that
+    read fails the plan cannot see such a collection, warns in the log, and the engine's
+    exact-name mode is what ends the exposure.
 
     Prune is the one consumer that deletes, so an **unreadable** row read (the listing raised)
     is refused for that collection, with a printed line, unless an explicit *threshold* was
     given: a code__-named collection with a knowledge row would otherwise be pruned at the
-    name's 0.70 instead of 0.50. A NoRow answer (no row backs the name) keeps its name
+    name's 0.70 instead of 0.50. The same refusal applies to a collection with an unreadable
+    EXTENSION, whose guessed threshold would set the floor. A NoRow answer (no row backs the name) keeps its name
     derivation, as the old prefix sweep did. A listing that cannot be read narrows the sweep
     to the collections holding topics; the sweep is a recovery path and does not stop on it.
 
@@ -3175,6 +3182,12 @@ def _prune_plan(
         names.update(get_live_collection_names())
     except Exception:  # noqa: BLE001 - recovery sweep: an unreadable listing narrows it to the collections with topics, it does not stop it
         _log.warning("taxonomy_prune_listing_unreadable", exc_info=True)
+    try:
+        # The engine's prefix match reaches a collection that has projection rows but no topics and no
+        # live row, which neither listing names: its rows come from this distinct source_collection set.
+        names.update(taxonomy.get_projection_counts_by_collection())
+    except Exception:  # noqa: BLE001 - recovery sweep: without it the plan cannot see collections only the projection rows name, and says so
+        _log.warning("taxonomy_prune_projection_sources_unreadable", exc_info=True)
     if only is not None:
         names.add(only)
     ordered = sorted(names)
@@ -3206,9 +3219,20 @@ def _prune_plan(
         if exact:
             targets.append((n, thr))
             continue
+        extensions = [m for m in ordered if m != n and m.startswith(n)]
+        blind = next((m for m in extensions if _answer(m)[1] == "unreadable"), None)
+        if blind is not None:
+            # The floor would come from a threshold guessed from the extension's name.
+            refused.append(n)
+            click.echo(
+                f"  {n}: refused, the catalog row of {blind}, whose name it prefixes, could not be read, "
+                "so the lowest threshold its prune must respect would be a guess; pass --threshold to "
+                "prune at one you choose"
+            )
+            continue
         lowest, lowest_name = thr, None
-        for m in ordered:
-            if m != n and m.startswith(n) and _answer(m)[0] < lowest:
+        for m in extensions:
+            if _answer(m)[0] < lowest:
                 lowest, lowest_name = _answer(m)[0], m
         if lowest_name is not None:
             skipped.append(n)
