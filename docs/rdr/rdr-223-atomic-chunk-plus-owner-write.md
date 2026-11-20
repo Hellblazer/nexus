@@ -151,6 +151,11 @@ nexus-76's store-path and import review.
   transaction. Embedding happens before, outside any transaction; the
   superseded-chunk sweep runs after, in its own. A document that fails writes
   no chunks, because only chashes its own rows reference are inserted.
+  Amended 2026-11-19: that held for the insert but not for the metadata
+  refresh. Until `b43cc8c44` (engine-service-v0.1.194, deployed 2026-11-16),
+  `write_many` also refreshed payload chunks that no registered document's rows
+  list, which reset their reaper grace. It now resolves only listed chunks and
+  answers `chunks_unreferenced` for the rest (`docs/wire-contract-pending.md`).
 - **F-3 (Verified, source).** Append is already one transaction with the same
   lock order. `CatalogRepository.appendManifestChunks` (`:6225`) checks the
   document, takes the sweep gate and the index-run lock, then upserts manifest
@@ -260,6 +265,17 @@ none of them and cannot go stale when one is redefined.
    documents in one request, one transaction per document, as `write_many`
    does. The raced-embed counter (RDR-222, nexus-ulrjq) counts on this path
    too.
+   Amended 2026-11-19: the reaper finds a dropped chunk by its
+   `chunk_orphaned_at` record, and until `vectors-061` (`efbd1d926`, review
+   round `21bf869f5`; engine-service-v0.1.194) the two manifest-drop triggers
+   skipped any chunk written within the last hour. A chunk dropped inside that
+   hour, whose post-commit sweep then failed open on `gate_timeout`, was left
+   ownerless with no record, so nothing reaped it. Every drop is now recorded in
+   the dropping transaction, and a re-listed chunk's record is cleared (Sam,
+   2026-11-15, "(a) Record every drop", on bead nexus-z0o2p.29; reproduced by
+   `OrphanChunkRaceTest`). The cost of the new triggers on a re-index replace is
+   recovered by `301b9451b`: a manifest replace writes only the rows that changed
+   (Sam, 2026-11-15, "Ship now, recover cost later").
 2. **Client-supplied embeddings (engine, needed by import).** Both combined
    routes accept an optional vector per chunk. The engine checks its dimension
    and the collection's embedding model (F-8) and refuses the request on a
@@ -302,7 +318,8 @@ none of them and cannot go stale when one is redefined.
    same failure. A failed re-put leaves the old manifest intact.
 4. **Stop the ownerless route (closes Gap 4).** The route at
    `src/nexus/indexer.py:5598` (as of 2026-09-28) becomes a counted event that writes no chunks,
-   and the registration gap behind it is fixed. No ghost documents.
+   and the registration gap behind it is fixed (planned; see As built: no gap
+   was observed, so no fix was made). No ghost documents.
    As built (`9163f348e`, fix rounds `9dc6f8acd` and `001616071`): a file with
    no catalog document is refused before chunking (`_refuse_identity_less_files`
    in `src/nexus/indexer.py`), and the oversize fallbacks write nothing for it
@@ -440,8 +457,9 @@ none of them and cannot go stale when one is redefined.
    chunk count would read `complete` with the new hash over the old content.
 
    The chunks and owner rows still land in ONE request; only the stamp moves.
-   Cost, measured by request count and not yet by throughput (Phase 2
-   measurement, nexus-z0o2p.26): one stamp request per ChunkBatcher flush
+   Cost, counted in requests; stamp throughput was never measured (an
+   earlier text pointed at nexus-z0o2p.26, which is the staging decision and
+   holds no measurement): one stamp request per ChunkBatcher flush
    (at most `MANIFEST_APPEND_MANY_MAX_DOCS`, 1000, documents), one per import
    page that finishes a document, and one `complete_index_run` per oversize
    file, PDF or note. Recovery differs by path: a repo, PDF, markdown or
@@ -552,7 +570,12 @@ nexus-b50zw closes.
   `upsertReferenceOnlyChunk` was removed outright, so the engine has no writer
   of reference-only rows at all, nexus-z0o2p.36); (c) the time after the write:
   the check says the chash is owned when the write commits, not that it stays
-  owned (the next two sentences). Chunks a supersede drops still lose their owner; they are swept at the
+  owned (the next two sentences); (d) until engine-service-v0.1.194 (deployed
+  2026-11-16), three engine holes, each fixed on nexus-z0o2p.29: `write_many`
+  refreshing unlisted chunks, an append keeping one row of two at one position
+  while inserting both chunks (now a 400 naming the position, `b43cc8c44`), and
+  a drop inside the one-hour window left unrecorded (`vectors-061`, see
+  Technical Design 1). Chunks a supersede drops still lose their owner; they are swept at the
   document's last batch. After a crash they stay ownerless until the RDR-192
   reaper removes them (nexus-2x9xa, all prefixes since Sam's 2026-09-30
   decision), or `nx t3 gc` does.
@@ -774,11 +797,23 @@ other-collection-only buckets, net of known dispositions; conexus then retires
 its FINDING path (conexus-ekg5). Quarantine and tombstoned-owner rows are
 permanent, correct residents of the census and never read zero.
 
-Sam ruled on 2026-10-31 (bead nexus-z0o2p.29, still open) that the exit is two
+Sam ruled on 2026-10-31 (bead nexus-z0o2p.29) that the exit is two
 consecutive weeks of no growth in that census, counted from about 2026-11-15.
 Readings taken before then are confounded by the reaper's sweep. The 48
 supersede-residue chunks found on 2026-09-30 (`nexus_rdr/223-research-16`) go
 into the census baseline, so they do not read as growth.
+
+Amended 2026-11-19: once `vectors-061` was live (engine-service-v0.1.194,
+2026-11-16 07:13Z), every drop is recorded, so the no-manifest bucket became
+the reaper's queue and grows until the 30-day grace ages its first candidates
+(about 2026-12-02). The 2026-11-16 census read CLEAN (0 unlisted orphans,
+other-collection-only flat at 10, no-manifest 1078, all within reaper grace).
+Sam ruled the same day, "Wait for the drain": after 2026-12-02 bob reads the
+reaper (bead nexus-z0o2p.29, deferred to 2026-12-09). If raw no-manifest levels
+off or falls and `reaper_quarantine` rows appear, the exit is met; if it keeps
+climbing past the grace, it is a leak to chase. RDR-223 closes before that read
+under Sam's 2026-11-19 ruling (T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`),
+and the read's result is appended to the post-mortem.
 
 ### New Dependencies
 
@@ -786,6 +821,13 @@ None.
 
 ## Test Plan
 
+- **Scenario** (added 2026-11-19, as built in `OrphanChunkRaceTest`): one
+  append whose rows carry the same position twice; a manifest drop inside the
+  one-hour window whose sweep times out; a `write_many` payload chunk no
+  registered document lists — **Verify**: the append answers 400 naming the
+  position and writes nothing; the dropped chunk has a `chunk_orphaned_at`
+  record; the unlisted chunk is neither embedded nor refreshed and is counted in
+  `chunks_unreferenced`.
 - **Scenario**: client killed between two appends with chunks — **Verify**:
   no chunk this run wrote is without an owner.
 - **Scenario**: append with chunks carrying known and content-changed chashes
@@ -936,6 +978,15 @@ unless stated.
 - `scripts/sql/livec_census.sql`
 
 ## Revision History
+
+- 2026-11-19: Close-time amendment (close critique of 2026-11-19, Significant
+  findings 1, 3 and 4). F-2, Technical Design 1, Consequences (d), the Test Plan
+  and Day 2 Operations record the three engine holes found and fixed on
+  nexus-z0o2p.29 (`b43cc8c44`, `efbd1d926`, `21bf869f5`, cost recovered by
+  `301b9451b`; engine-service-v0.1.194, deployed 2026-11-16) and Sam's
+  2026-11-15 and 2026-11-16 rulings. Technical Design 6 no longer cites a
+  throughput measurement that does not exist. Technical Design 4's plan
+  sentence is marked as planned, against its As-built block.
 
 - 2026-10-31: Closure-critique amendment (T2 `nexus_rdr/223-closure-critique-2026-10-31`,
   findings S1 to S3). The `store-put` retirement (nexus-nt76j, `38f4167be`,
