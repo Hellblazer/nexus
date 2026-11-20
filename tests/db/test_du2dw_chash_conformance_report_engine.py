@@ -152,15 +152,15 @@ class TestChashConformanceReportWiring:
         )
         assert after_row["non_conformant"] == 0
 
-    def test_unrecognized_model_token_is_invisible_by_the_same_in_list_caveat(
+    def test_a_name_with_an_unrecognized_model_token_is_counted_by_its_row(
         self, t2_service_env,
     ) -> None:
-        """Same known routing caveat as manifest_orphans (nexus-h1zu0): a
-        collection whose model token is outside every dim's IN-list is
-        invisible to this function. Documented here as a pinned behavior,
-        not a silent surprise — mirrors
-        test_unrecognized_model_token_surfaces_in_unroutable_against_real_engine
-        in the manifest_orphans sibling file."""
+        """RDR-229 P2.6 (vectors-063) retired the nexus-h1zu0 routing caveat
+        this test used to pin. The function no longer reads the model token
+        out of the collection name. It counts a manifest row under its
+        collection's catalog row's embedding_model, so a name whose token is
+        outside every model list is counted at the dimension its row names
+        (768 here, the model this collection registers under), not dropped."""
         seq = _next_seq()
         collection = f"knowledge__du2dw-tok-{seq}__some-unrecognized-legacy-token-9000__v1"
         cat = ActiveCatalog()
@@ -194,11 +194,10 @@ class TestChashConformanceReportWiring:
             r["total"] for r in after["tables"]
             if r["table_name"] == "nexus.catalog_document_chunks"
         )
-        assert after_total == before_total, (
-            "an unrecognized model token's manifest row must NOT be "
-            "counted by any dim's IN-list-scoped catalog_document_chunks "
-            "total — this is the same nexus-h1zu0 routing caveat "
-            "manifest_orphans has, carried forward deliberately"
+        assert after_total == before_total + 1, (
+            "a manifest row is counted by its collection row's model, whatever "
+            "the name's token says (RDR-229 P2.6): the old name-parsing "
+            "function's unrecognized-token caveat must not come back"
         )
 
     def test_unsupported_dim_raises_value_error_client_side(self) -> None:
