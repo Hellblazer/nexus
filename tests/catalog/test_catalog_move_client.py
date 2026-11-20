@@ -43,8 +43,8 @@ def _recording(posts: list, reply: dict | None = None, status: int = 200):
 # ── the floor ───────────────────────────────────────────────────────────────
 
 
-def test_refusal_says_not_yet_released_while_floor_is_none() -> None:
-    assert floors.CATALOG_MOVE_MIN_ENGINE_VERSION is None, "the floor is filled in only by 254-P5-S1"
+def test_refusal_says_not_yet_released_while_floor_is_none(monkeypatch) -> None:
+    monkeypatch.setattr(floors, "CATALOG_MOVE_MIN_ENGINE_VERSION", None)  # pinned: 254-P5-S1 fills the real one
     cat = _client(lambda r: httpx.Response(200, json={"release_version": "0.1.150"}))
     with pytest.raises(CatalogMoveUnsupportedError) as exc:
         require_catalog_move(cat, what="nx catalog owners --execute move")

@@ -8,6 +8,7 @@ pinned Java-side and in tests/commands/test_catalog_owners_move.py against the s
 from __future__ import annotations
 
 import ast
+import json
 import shlex
 from pathlib import Path
 
@@ -117,6 +118,22 @@ def test_a_timeout_or_lost_connection_on_the_write_says_it_may_have_completed(wr
     assert len(writer.calls) == 1 and writer.closed
 
 
+@pytest.mark.parametrize("exc", [
+    json.JSONDecodeError("Expecting value", "<html>", 0),  # a 200 whose body is not JSON
+    RuntimeError("POST /documents/move answered with no JSON object; refusing to guess what moved"),  # empty 200
+])
+def test_an_unreadable_answer_to_a_write_says_the_outcome_is_unknown(writer, pdf, exc) -> None:
+    def unreadable(kw):
+        raise exc
+
+    writer.behaviour = unreadable
+    result = _move(pdf, "--no-dry-run", "--confirm")
+    assert result.exit_code != 0 and isinstance(result.exception, SystemExit) and "Traceback" not in result.output
+    assert "may have completed server-side" in result.output and "re-running is safe" in result.output
+    assert "Nothing was written" not in result.output
+    assert len(writer.calls) == 1 and writer.closed
+
+
 def test_a_timeout_on_a_dry_run_says_nothing_was_written_by_it(writer, pdf) -> None:
     def lost(kw):
         raise httpx.ReadTimeout("slow")
@@ -220,3 +237,22 @@ def test_only_owner_move_calls_a_move_route_and_the_capability_check_comes_first
     assert len(inside) == len(hits) == 2, "both move calls sit in run_move"
     check = _calls(run_move, {"require_catalog_move"})
     assert len(check) == 1 and check[0].lineno < min(c.lineno for c in inside)
+
+
+def test_the_raw_move_posts_are_reached_only_through_the_client_methods() -> None:
+    """The wire functions behind the client methods, and a raw post to either route, have no other caller,
+    so the scan above cannot be stepped around."""
+    raw, routes = {"post_document_move", "post_owner_move"}, ("/documents/move", "/owners/move")
+    callers, literal_sites = {}, []
+    for path in sorted(_SRC.rglob("*.py")):
+        rel = path.relative_to(_SRC).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        hits = _calls(tree, raw)
+        if hits:
+            callers[rel] = hits
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in routes:
+                literal_sites.append(rel)
+    assert set(callers) == {"catalog/http_catalog_client.py"}, sorted(callers)
+    assert set(literal_sites) <= {"catalog/engine_writes/move.py"}, sorted(set(literal_sites))
+    assert literal_sites, "the route literals live in engine_writes/move.py; finding none means the scan broke"

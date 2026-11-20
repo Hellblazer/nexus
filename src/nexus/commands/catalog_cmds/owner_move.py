@@ -132,8 +132,9 @@ def _failure(exc: httpx.HTTPStatusError, *, will_act: bool) -> click.ClickExcept
     return click.ClickException(f"The dry run failed: {exc}. A dry run writes nothing; re-running it is safe.")
 
 
-def _transport_failure(exc: httpx.TransportError, *, will_act: bool) -> click.ClickException:
-    """A timeout or lost connection: the engine may or may not have finished. ``nx catalog``'s precedent
+def _transport_failure(exc: Exception, *, will_act: bool) -> click.ClickException:
+    """A timeout, a lost connection, or an answer the client cannot read (a non-JSON or empty 200): the
+    request went out and the engine may or may not have finished. ``nx catalog``'s precedent
     (``_service_timeout_error``): say it may have completed, and that running again is safe."""
     if will_act:
         return click.ClickException(
@@ -200,6 +201,8 @@ def run_move(*, document: str | None, new_path: str | None, owner: str | None, n
     except httpx.HTTPStatusError as exc:
         raise _failure(exc, will_act=will_act) from exc
     except httpx.TransportError as exc:  # a timeout is one: the write is never resent, so say what is unknown
+        raise _transport_failure(exc, will_act=will_act) from exc
+    except (ValueError, RuntimeError) as exc:  # a 200 the client cannot read (non-JSON, or no JSON object)
         raise _transport_failure(exc, will_act=will_act) from exc
     finally:
         writer.close()
