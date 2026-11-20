@@ -2,7 +2,7 @@
 title: "Request Correlation Across Tiers: X-Correlation-ID Propagation and an SLF4J MDC Bridge for the Service Stack"
 id: RDR-167
 type: Architecture
-status: accepted
+status: deferred
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -1152,3 +1152,4 @@ option, full OpenTelemetry, stays rejected, and the JSON appender is not built u
   - Phase 3: a JSON encoder must keep line-safety and reader compatibility, and Phase 3 must account for the secret mask (`LogMasking` applies it to the pattern layout only).
   - Native: the three converters' `reflect-config.json` entries and the `--initialize-at-build-time` list are in; the native result is pending until the engine-service 0.1.195 release smoke, as for nexus-dngtz.1.9.
   - Line cites re-read in this tree: `logback.xml:17`, `:21`, `Main.java:285`, `:488`, `:612`, `:620`.
+- 2026-11-19: deferred (accepted -> deferred) on Sam's ruling "go with all of it" (T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`): dormant, so it is deferred instead of held open. Phase 1's shipped work stays; open beads under nexus-dngtz carry the deferral.
