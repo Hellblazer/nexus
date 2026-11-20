@@ -800,6 +800,10 @@ final class TenantKeyedStateTables {
             + "the per-tenant state is the timer's armed map, which has its own evictor");
         notKeyed.put("AckDeadlineTimer.Key.tenant", "the tenant component of the key of the armed map, a record "
             + "that exists only as that map's key; the map itself is listed as keyed");
+        notKeyed.put("BoardOwnerTenants.tokenTenants", "a supplier of the token tenants, read once per rebuild attempt; "
+            + "it holds no tenant's state");
+        notKeyed.put("BoardOwnerTenants.tupleTenants", "a supplier of the tuple_tenants rows, read once per rebuild "
+            + "attempt; it holds no tenant's state");
         notKeyed.put("BoardOwnerWiring.Pending.tenant", "a component of a census item (a tenant and a topic whose re-arm "
             + "failed), held in the list one scheduled rebuild attempt hands to the next; the list ends with the census "
             + "and keeps no tenant's state: a re-arm of an evicted tenant finds no rows and succeeds");
