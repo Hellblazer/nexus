@@ -107,19 +107,25 @@ def _spawn(state: dict, dbname: str, log_path: Path, extra_env: dict[str, str]):
 #: every run that lands there: what a loaded host does to the default bound (nexus-y6aj0, a
 #: 6-CPU cgroup with five suites running). The expiry must halt, never ``System.exit``.
 #: Fewer offsets there: each one is an engine boot, and this is the slowest test in the suite.
+#: The fourth field is how many runs must have landed inside init. The full sweeps run in the nightly
+#: slow leg (Sam 2026-11-19, suite audit item 2: one offset per push, the sweeps nightly); the per-push case
+#: is one boot at an offset inside the measured crash window, and proves the exit status and the absence of
+#: a JVM crash, not that this one SIGTERM landed (a single offset cannot promise that on every host).
 _CASES = (
-    pytest.param({}, _OFFSETS_S, "ort_init_shutdown_wait", id="init-fits-the-bound"),
+    pytest.param({}, (0.1,), "ort_init_shutdown_wait", 0, id="one-offset-per-push"),
+    pytest.param({}, _OFFSETS_S, "ort_init_shutdown_wait", _MIN_LANDED, id="init-fits-the-bound",
+                 marks=pytest.mark.slow),
     pytest.param(
         {"NX_ORT_INIT_SHUTDOWN_WAIT_MS": "0"}, (0.05, 0.1, 0.2, 0.3, 0.4),
-        "ort_init_shutdown_halt", id="bound-expires",
+        "ort_init_shutdown_halt", _MIN_LANDED, id="bound-expires", marks=pytest.mark.slow,
     ),
 )
 
 
 @pytest.mark.needs_stamped_jar
-@pytest.mark.parametrize(("extra_env", "offsets", "landed_event"), _CASES)
+@pytest.mark.parametrize(("extra_env", "offsets", "landed_event", "min_landed"), _CASES)
 def test_sigterm_during_bge_init_exits_143_and_never_crashes(
-    tmp_path: Path, extra_env: dict[str, str], offsets: tuple[float, ...], landed_event: str
+    tmp_path: Path, extra_env: dict[str, str], offsets: tuple[float, ...], landed_event: str, min_landed: int
 ) -> None:
     _require_model_or_skip()
     state = ensure_engine()
@@ -170,7 +176,7 @@ def test_sigterm_during_bge_init_exits_143_and_never_crashes(
             f"SIGTERM {offset}s after model init began: rc={rc}, want 143 (-6 is SIGABRT after the "
             f"ORT logging-manager SEGV, nexus-o5xyx.1). log tail:\n{text[-2500:]}"
         )
-    assert landed >= _MIN_LANDED, (
+    assert landed >= min_landed, (
         f"non-vacuity: SIGTERM must have landed inside model init ({landed_event} logged) on >= "
-        f"{_MIN_LANDED} runs, got {landed}: {results}"
+        f"{min_landed} runs, got {landed}: {results}"
     )

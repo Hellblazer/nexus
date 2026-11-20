@@ -542,13 +542,27 @@ jobs:
           import xml.etree.ElementTree as ET
 
           FLOOR = 7
+          # Moved off every push to this leg (Sam 2026-11-19, T2 nexus/sam-ruling-suite-audit-and-cleanup-2026-11-19):
+          # each must run here, not skip, or the move dropped its proof.
+          REQUIRED = (
+              "test_sigterm_during_bge_init_exits_143_and_never_crashes[init-fits-the-bound]",
+              "test_sigterm_during_bge_init_exits_143_and_never_crashes[bound-expires]",
+              "test_e2e_simple_pdf_queryable",
+          )
           root = ET.parse("slow-s6dei.xml").getroot()
           ran = 0
+          ran_names = set()
           for case in root.iter("testcase"):
               if case.find("skipped") is None:
                   ran += 1
+                  ran_names.add(case.get("name", ""))
           print(f"non-skipped slow testcases: {ran} (floor={FLOOR})")
           if ran < FLOOR:
               print(f"VACUOUS: only {ran} non-skipped slow testcases ran, floor is {FLOOR} — prereq skip sweep, gate is broken", file=sys.stderr)
               sys.exit(1)
+          missing = [n for n in REQUIRED if n not in ran_names]
+          if missing:
+              print(f"MOVED TESTS DID NOT RUN (absent or skipped): {missing}", file=sys.stderr)
+              sys.exit(1)
+          print(f"moved tests ran: {list(REQUIRED)}")
           PY

@@ -147,6 +147,9 @@ class TestIndexPdfE2E:
     and AC-E4 (the git-repo wiring) are not about the extractor; they use pymupdf, which does not load
     MinerU's model (about 1 GB a parse on a CI shard, labrun-pex)."""
 
+    # The one real MinerU index runs in the nightly slow leg, where MinerU's weights are primed (Sam 2026-11-19,
+    # suite audit item 3: about 170 s a push on a CI shard). The slow leg's junit check requires it passed there.
+    @pytest.mark.slow
     def test_e2e_simple_pdf_queryable(self, simple_pdf: Path, local_t3, cloud_mode) -> None:
         """AC-E1: simple.pdf indexed → query returns a pdf chunk with distance < 1.0.
 
