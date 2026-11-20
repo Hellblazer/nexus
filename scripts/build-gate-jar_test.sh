@@ -12,7 +12,7 @@ set -u -o pipefail
 # lease at the shared root, where a live peer run may hold it: the suite then
 # waits on that holder instead of finishing (nexus-mntbl). Scrubbed here, like the
 # suites that already do, and pinned by test_shell_suite_wiring.py's
-# TestSuitesIgnoreAnInheritedLeaseRoot.
+# TestSuitesAreGreen (which runs it with the root exported).
 unset NX_BUILD_LEASE_ROOT NX_SUITE_LEASE_WAIT NX_SUITE_LEASE_HELD_BY LAB_CPUS GITHUB_ACTIONS
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

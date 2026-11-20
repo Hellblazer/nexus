@@ -273,20 +273,12 @@ SUITES = [
 ]
 
 
-#: The lease variables a suite must never inherit. CI's lease step exports
-#: NX_BUILD_LEASE_ROOT to every later step, and an nxtest hand run sets it by
-#: design; each suite assumes the lease root is its own fake repo's.
+#: The lease variables a suite must neither depend on nor be harmed by inheriting. CI's lease step
+#: exports NX_BUILD_LEASE_ROOT to every later step, and an nxtest hand run sets it by design; each
+#: suite unsets them and assumes the lease root is its own fake repo's. The base env drops the
+#: operator's values; TestSuitesAreGreen then exports a peer-held root of its own.
 _LEASE_ENV_PREFIXES = ("NX_BUILD_LEASE_ROOT", "NX_SUITE_LEASE_")
 
-#: EVERY suite, not a hand-kept list of the ones known to be sensitive. Measured on
-#: the qwentescence host (nxtest exports NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease,
-#: where another run holds the leases): six suites fail or hang there and the other
-#: five pass. Three of them (build-lease, mvnw-leased, and a since-deleted run.sh guard suite) failed against
-#: an EMPTY inherited root; the other three (release-props-lease,
-#: local_service_gate_guard, build-gate-jar; nexus-mntbl) only fail when the shared
-#: root carries a live holder, which the test below pre-holds. A list of "the
-#: sensitive ones" went stale exactly this way, so a new suite is covered by being
-#: in SUITES (TestSuitesAreGreen runs every one of them with the root exported).
 
 
 def _env_without_lease_vars() -> dict[str, str]:
@@ -323,6 +315,15 @@ class TestSuitesExist:
         assert suite.path.is_file(), f"missing: {suite.path}"
 
 
+#: EVERY suite, not a hand-kept list of the ones known to be sensitive. Measured on
+#: the qwentescence host (nxtest exports NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease,
+#: where another run holds the leases): six suites fail or hang there and the other
+#: five pass. Three of them (build-lease, mvnw-leased, and a since-deleted run.sh guard suite) failed against
+#: an EMPTY inherited root; the other three (release-props-lease,
+#: local_service_gate_guard, build-gate-jar; nexus-mntbl) only fail when the shared
+#: root carries a live holder, which _held_shared_lease_root below pre-holds. A list of "the
+#: sensitive ones" went stale exactly this way, so a new suite is covered by being
+#: in SUITES (TestSuitesAreGreen runs every one of them with the root exported).
 def _held_shared_lease_root(tmp_path: Path) -> tuple[Path, dict[str, list[str]]]:
     """A shared lease root where a live peer holds both leases, as another run does on the shared
     qwentescence host. A suite that inherits the root queues behind this holder and fails; a suite that
@@ -341,7 +342,8 @@ def _held_shared_lease_root(tmp_path: Path) -> tuple[Path, dict[str, list[str]]]
 
 class TestSuitesAreGreen:
     """Each suite runs ONCE, with the documented lease export inherited (suite audit item 6: it used to
-    run twice, scrubbed here and exported in a second class, ~130 s a push). The suites' own ``unset``
+    run twice, scrubbed here and exported in a second class; the second runs were about 218 s of
+    recorded test time per full suite, about 36 s per CI shard). The suites' own ``unset``
     is what makes an inherited root harmless, so one run with the root exported, and a live peer holding
     its leases, proves both that the suite is green and that it neither fails on nor writes into the
     shared root."""
@@ -369,7 +371,8 @@ class TestSuitesAreGreen:
         passed, failed = int(match.group(1)), int(match.group(2))
 
         assert result.returncode == 0, (
-            f"{suite.id} exited {result.returncode} (reported passed={passed} "
+            f"{suite.id} exited {result.returncode} with NX_BUILD_LEASE_ROOT exported to a peer-held root "
+            f"(reported passed={passed} "
             f"failed={failed}) -- the process exit code is the load-bearing "
             "signal here, not stdout content.\n"
             f"--- stdout ---\n{result.stdout}\n"
