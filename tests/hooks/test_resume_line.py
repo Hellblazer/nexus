@@ -222,21 +222,23 @@ class TestRealOpener:
         assert events[0][2]["outcome"] == "error" and "no identity" in events[0][2]["error"]
 
 
-    def test_no_t1_session_for_the_new_session_falls_back_to_a_token_of_its_own(self, monkeypatch, events) -> None:
-        """After ``/clear`` the new session id may have no T1 lease yet (the MCP server publishes it later). The identity-scope
-        read needs only some minted session token, so the opener mints one rather than print nothing."""
-        seen: dict = {}
+    def test_no_t1_session_for_the_new_session_mints_nothing_and_prints_nothing(self, monkeypatch, events) -> None:
+        """After ``/clear`` the new session id may have no T1 lease yet. The reader never creates a session to get round that
+        (marginalia's ruling on the round-1 deviation): a session-creating write on every ``/clear`` was not asked for. The
+        failure is an ``error`` outcome like any other, and nothing is printed."""
+        minted: list[str] = []
+        calls: list[object] = []
 
-        def fake_identity_scratch(base=None, **_k):
-            if base is None:
-                raise RuntimeError("no T1 session resolves for this process")  # what get_t1_database says
-            seen["token"] = base._session_token
-            return Store([NEW])
+        def no_lease(base=None, **_k):
+            calls.append(base)
+            raise RuntimeError("no T1 session resolves for this process")  # what get_t1_database says
 
-        monkeypatch.setattr("nexus.identity.scratch_scope.identity_scratch", fake_identity_scratch)
-        monkeypatch.setattr("nexus.db.t1.mint_t1_session_token", lambda sid, *, context: {"session_token": "minted-tok"})
-        line = rl.resume_line({"source": "clear"}, now=NOW)
-        assert seen == {"token": "minted-tok"} and line is not None and "thread: new" in line
+        monkeypatch.setattr("nexus.identity.scratch_scope.identity_scratch", no_lease)
+        monkeypatch.setattr("nexus.db.t1.mint_t1_session_token", lambda sid, *, context: minted.append(sid) or {"session_token": "t"})
+        assert rl.resume_line({"source": "clear"}, now=NOW) is None
+        assert minted == [], "the reader must never mint a T1 session token"
+        assert calls == [None], "identity_scratch is asked once, with the session's own T1 base, and not retried"
+        assert events[0][2]["outcome"] == "error" and "no T1 session" in events[0][2]["error"]
 
     def test_no_identity_is_not_worked_around_by_minting(self, monkeypatch, events) -> None:
         minted: list[str] = []

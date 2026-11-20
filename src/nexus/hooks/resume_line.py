@@ -48,24 +48,12 @@ class _Result(NamedTuple):
 
 
 def _open_store() -> Any:
-    """The identity scope store. ``identity_scratch()`` borrows the session's own T1 token; after ``/clear`` the new session
-    id may have no T1 lease yet (the MCP server publishes it later) and that raises. An identity-scope READ needs only a
-    minted session token, so a failure other than "no identity" is answered with a token minted here. No identity is no
-    scope: that is never worked around."""
-    import uuid  # noqa: PLC0415 — deferred with the rest: only a clear start pays for it
-    from types import SimpleNamespace  # noqa: PLC0415
+    """The identity scope store, through the session's own T1 base. It never creates a session: if ``identity_scratch()``
+    fails (no identity, or no T1 lease for the new session id yet), the error reaches the caller, which logs the ``error``
+    outcome and prints nothing."""
+    from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: only a clear start pays for it
 
-    from nexus.identity.scratch_scope import IdentityScopeError, identity_scratch  # noqa: PLC0415
-
-    try:
-        return identity_scratch()
-    except IdentityScopeError:
-        raise
-    except Exception:  # noqa: BLE001 — no T1 session for the new session id yet; the fallback below is the answer
-        from nexus.db.t1 import mint_t1_session_token  # noqa: PLC0415
-
-        token = mint_t1_session_token(f"resume-line-{uuid.uuid4()}", context="resume line session token mint")["session_token"]
-        return identity_scratch(SimpleNamespace(_session_token=token))
+    return identity_scratch()
 
 
 def _parse(entry: dict, now: datetime) -> tuple[datetime, str] | None:

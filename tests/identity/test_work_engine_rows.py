@@ -310,8 +310,8 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
     """RDR-253 Step 6 part 2: the writer (the real ``nx scratch --scope identity`` commands, driven through
     ``_resume_pointer.write``) and the reader (``nexus.hooks.resume_line``, its default opener) meet in the engine. The writer
     leaves one ``resume-pointer`` entry, the next write puts first and prunes the old one, a ``/clear`` binds a new session id,
-    and SessionStart's reader prints exactly that line: with a T1 session available, and with none (the new session id's lease
-    is not published yet), which is the case the lease-less fallback exists for. Other sources print nothing. The 2 KB and
+    and SessionStart's reader prints exactly that line when a T1 session is available; with none (the new session id's lease
+    is not published yet) it prints nothing and creates no session. Other sources print nothing. The 2 KB and
     20-entry caps are held against the real store."""
     script = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "_resume_pointer.py"
     spec = importlib.util.spec_from_file_location("resume_pointer_journey", script)
@@ -356,7 +356,10 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
             raise t1_mod.T1ServerNotFoundError("no T1 session lease resolves for the new session id")
 
         monkeypatch.setattr(t1_mod, "get_t1_database", no_lease)                   # the new session's lease is not published yet
-        assert resume_line.with_resume_line("GUIDANCE", {"source": "clear"}) == line, "the opener mints its own token"
+        minted: list[str] = []
+        monkeypatch.setattr(t1_mod, "mint_t1_session_token", lambda sid, *, context: minted.append(sid) or {"session_token": "t"})
+        assert resume_line.with_resume_line("GUIDANCE", {"source": "clear"}) == "GUIDANCE", "no lease: nothing printed"
+        assert minted == [], "the reader creates no T1 session to get round a missing lease"
 
         # the caps, against the real store: 2 KB an entry; 20 non-pointer entries; the pointer's slot is its own
         with pytest.raises(IdentityScratchCapError, match="2048"):
