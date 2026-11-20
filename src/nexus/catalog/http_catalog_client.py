@@ -288,6 +288,7 @@ STUB_METADATA_TIMED_OUT = object()
 STUB_METADATA_TIMEOUT_S = 28.0
 from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
 from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators
+from nexus.catalog.engine_writes import move as _move
 from nexus.catalog.engine_writes.floors import (  # noqa: F401 — re-exported: callers import the floors here
     CATALOG_SENSITIVITY_MIN_ENGINE_VERSION,
     CatalogSensitivityUnsupportedError,
@@ -2010,6 +2011,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             updated.append(int(by_target.pop(t, 0)))  # a repeat of a canonical already reported reads 0
         return {"updated": updated, "targets": targets}
 
+    def move_document(self, tumbler: Tumbler | str, *, new_source_uri: str, new_file_path: str, dry_run: bool) -> dict:
+        """``POST /documents/move`` (RDR-254): see :func:`nexus.catalog.engine_writes.move.post_document_move`.
+        Call :func:`~nexus.catalog.engine_writes.floors.require_catalog_move` first."""
+        return _move.post_document_move(self, tumbler, new_source_uri=new_source_uri,
+                                        new_file_path=new_file_path, dry_run=dry_run)
+
+    def move_owner(self, owner: Tumbler | str, *, new_root: str, new_repo_hash: str, dry_run: bool) -> dict:
+        """``POST /owners/move`` (RDR-254): see :func:`nexus.catalog.engine_writes.move.post_owner_move`.
+        Call :func:`~nexus.catalog.engine_writes.floors.require_catalog_move` first."""
+        return _move.post_owner_move(self, owner, new_root=new_root, new_repo_hash=new_repo_hash, dry_run=dry_run)
+
     def update(self, tumbler: Tumbler | str, **fields: Any) -> None:
         self._post("/update", {"tumbler": str(tumbler), **fields})
 
@@ -3525,6 +3537,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         flags = self._version_flags()
         version = flags.get("release_version") or flags.get("app_version") or ""
         return flags.get("catalog_sensitivity_supported") is True, str(version) if flags else ""
+
+    def supports_catalog_move(self) -> bool:
+        """Does the engine answer ``POST /documents/move`` and ``/owners/move`` (``GET /version``'s
+        ``catalog_move_supported``, RDR-254)? Only a JSON ``true`` counts; a failed or edge-trimmed answer reads False."""
+        return self._version_flags().get("catalog_move_supported") is True
+
+    def catalog_move_probe(self) -> tuple[bool, str]:
+        """``(supported, engine_version)`` from ONE cached ``/version`` read, as :meth:`catalog_sensitivity_probe`
+        gives it, for :func:`~nexus.catalog.engine_writes.floors.require_catalog_move`."""
+        flags = self._version_flags()
+        version = flags.get("release_version") or flags.get("app_version") or ""
+        return flags.get("catalog_move_supported") is True, str(version) if flags else ""
 
     def _traverse(self, payload: dict) -> dict:
         """POST /v1/catalog/traverse and convert wire dicts to typed objects.
