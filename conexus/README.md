@@ -52,7 +52,7 @@ story.
 - **10 agents** matched to task complexity: opus for reasoning, sonnet for implementation, haiku for utility. The three MCP-tool redirect stubs (`knowledge-tidier`, `plan-auditor`, `plan-enricher`) were deleted (nexus-cnzei.4) — call `nx_tidy` / `nx_plan_audit` / `nx_enrich_beads` directly
 - **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
-- **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
+- **Session hooks** — print the T1 contract, due threads and an `nx brief` index at session start (T2 notes, ready beads, the Knowledge Map and tool notes load on demand), prime beads where the beads plugin is off, warn when T2 is unreachable, health-check dependencies
 - **Permission auto-approval** — safe commands and the nexus MCP tools skip the confirmation prompt, except `daemon_uninstall`, `setup` and `setup_status`
 - **Two bundled MCP servers** — `nexus` (46 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 

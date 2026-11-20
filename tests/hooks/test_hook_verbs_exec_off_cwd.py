@@ -78,9 +78,10 @@ def test_session_context_spawns_git_and_bd_off_the_cwd(windows_box, spawned, mon
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     monkeypatch.setattr(session_context, "which", lambda cmd: cmd in {"nx", "bd"})
-    # SessionStart no longer spawns anything (progressive disclosure); the two spawning blocks are the brief's.
+    # SessionStart spawns only the repo-name probe (progressive disclosure); `bd ready` and the scan's project lookup are the brief's.
     session_context.run(None)
-    assert spawned == []
+    assert _heads(spawned) == [GIT], spawned
+    spawned.clear()
     session_context._render_t2_memory(str(tmp_path))
     session_context._render_beads(tmp_path)
     assert _heads(spawned) == [GIT, BD], spawned

@@ -12,16 +12,25 @@ session-start`` -- the guidance/imperative emitter, which needs
 OTHER SessionStart script.
 
 **What it prints now (SessionStart progressive disclosure, T2
-nexus/design-sessionstart-progressive-disclosure-2026-11-20).** Only what is a rule
-or about this session now: the T1 contract, the threads due, the one identity-notes line
-(RDR-253 Step 6 part 3), ONE static index line naming ``nx brief <topic>``, and the
-nexus-1if7b hygiene block. The blocks that used to follow (the T2 memory scan, ``bd
-ready``, the ``bd prime`` primer, the capabilities block and the RDR-072 L1 Knowledge Map)
-are rendered by the functions below on demand: ``nx brief`` and the ``brief`` MCP tool
-(:mod:`nexus.brief`) call them, so there is one source and no second copy. The hook no
-longer spawns ``git``, ``bd`` or ``nx`` or calls T2 at all; it stats the Knowledge Map
-cache's mtime for the hygiene block and reads nothing from it. No rule moved behind a
-brief: the index line is static, so a failing ``nx brief`` costs a session context, never a rule.
+nexus/design-sessionstart-progressive-disclosure-2026-11-20).** The rules and the state
+of THIS session, and one index line: the T1 contract, the threads due, the one
+identity-notes line (RDR-253 Step 6 part 3), the fire-only T2 reachability line, ``bd
+prime`` where the beads plugin is off for the project, ONE static index line naming ``nx
+brief <topic>`` and when to load it, and the nexus-1if7b hygiene block. The reference
+blocks that used to follow (the T2 memory scan, ``bd ready``, the capabilities block, the
+RDR-072 L1 Knowledge Map) are rendered by the functions below on demand: ``nx brief`` and
+the ``brief`` MCP tool (:mod:`nexus.brief`) call them, so there is one source and no second
+copy. The hook no longer runs the scan, ``bd ready`` or ``nx``. It still spawns ``git`` once
+(the repo name), calls T2 for the reachability probe, and, with a session id, calls
+``board_due`` and ``identity_notes`` (both read T2). It stats the Knowledge Map cache's mtime
+for the hygiene block and reads nothing from it.
+
+What did NOT move behind a brief, because it is a rule or a failure signal and not context:
+the T2 reachability line (nexus-8fvp2: a T2 that cannot be reached is never silent), and
+``bd prime`` for a project whose beads plugin is off (nexus-dg7i6.4: its only primer). What
+did move and is not repeated at start: the full-prefix MCP rule in the capabilities block
+(``mcp__plugin_conexus_nexus__``), which CLAUDE.md and AGENTS.md carry. The index line is
+static, so a failing ``nx brief`` costs a session that context and never the rest.
 
 **"Move, do not rewrite" (RDR-215 Approach item 9).** The body below is
 carried mechanically from the script: same helper functions, same control
@@ -118,9 +127,9 @@ BRIEF_TOPICS: tuple[str, ...] = ("memory", "beads", "caps", "map", "rdr", "me")
 #: The ONE line SessionStart prints for everything that moved behind ``nx brief``. Static: it names no state, so it cannot
 #: fail, and a brief that does not load leaves the session without that context, never without a rule.
 BRIEF_INDEX_LINE: str = (
-    "More on demand: `nx brief <topic>` or the `brief` MCP tool: "
-    "memory (T2 titles) | beads (ready, bd usage) | caps (tool notes) | map (topic labels) | "
-    "rdr (RDR counts) | me (your startup note)"
+    "More on demand (`nx brief <topic>` or the `brief` MCP tool): "
+    "beads (ready, bd usage) before choosing work; memory (T2 titles), map (topic labels) before researching; "
+    "caps (tool notes) | rdr (RDR counts) | me (your startup note)"
 )
 
 
@@ -333,9 +342,36 @@ def _render_knowledge_map(cwd: str) -> list[str]:
     return []
 
 
+def repo_name(cwd: str) -> str:
+    """The name of the repo at *cwd*: its ``git rev-parse --show-toplevel`` directory, else *cwd*'s own name. The T2
+    project the scan used, and the ``repo`` of every usage line."""
+    toplevel = run_command(['git', 'rev-parse', '--show-toplevel'], timeout=5, cwd=cwd)
+    return Path(toplevel).name if toplevel else os.path.basename(os.path.realpath(cwd))
+
+
+def _t2_reachability_lines(project: str) -> list[str]:
+    """The fire-only T2 line (:func:`nexus.hooks.t2_prefix_scan.reachability_warning`): ``[]`` when T2 is healthy, and on any
+    failure of the probe itself (a hook never fails)."""
+    try:
+        from nexus.hooks.t2_prefix_scan import reachability_warning  # noqa: PLC0415 — deferred: pays for the T2 client
+
+        warning = reachability_warning(project)
+        return [warning] if warning else []
+    except Exception:  # noqa: BLE001 — a hook must never fail
+        debug("T2 reachability probe skipped")
+        return []
+
+
+def _record_session_start(session_id: str, repo: str, source: str) -> None:
+    """One ``session_start`` line in the usage file: the denominator for the 30-day ``nx brief`` review."""
+    from nexus.hooks import usage_log  # noqa: PLC0415 — deferred with the rest of the optional work
+
+    usage_log.append("session_start", session_id=session_id, repo=repo, source=source)
+
+
 def run(payload: dict | None) -> HookResult:
-    """Run the SessionStart context hook: the T1 contract, the due threads, the identity-notes line, the one
-    ``nx brief`` index line, and the hygiene block.
+    """Run the SessionStart context hook: the T1 contract, the due threads, the identity-notes line, the fire-only T2
+    line, ``bd prime`` where the beads plugin is off, the one ``nx brief`` index line, and the hygiene block.
 
     Carried from ``session_start_hook.py``'s ``main()``: the ``HookResult`` return in place of ``print()``/``sys.exit(0)``
     is the one structural deviation. Everything that is reference context (T2 memory, ready beads, the bd primer, the
@@ -343,10 +379,13 @@ def run(payload: dict | None) -> HookResult:
     """
     # nexus-mtheb: the T1 contract leads the context.
     output_lines: list[str] = list(_T1_TOP_LINES)
+    project_dir = Path(os.environ.get('CLAUDE_PROJECT_DIR', os.getcwd())).resolve()
+    repo = repo_name(str(project_dir))
 
     # --- Threads board: this session's threads whose due: has come (nexus-ct74m) ---
     # The one use of the payload: its session id finds the session's own board entry.
     session_id = str((payload or {}).get("session_id") or "")
+    _record_session_start(session_id, repo, str((payload or {}).get("source") or ""))
     if session_id:
         try:
             from nexus.hooks.board_due import due_lines  # noqa: PLC0415 — deferred: only a payload with a session id pays
@@ -363,6 +402,12 @@ def run(payload: dict | None) -> HookResult:
             output_lines.extend(identity_notes.notes_lines(session_id))
         except Exception:  # noqa: BLE001 — a hook must never fail; keep the rest of the context
             debug("identity notes line skipped")
+
+    # --- Fire-only: a T2 that cannot be reached, or whose newest entry is stale, is never silent (nexus-8fvp2) ---
+    output_lines.extend(_t2_reachability_lines(repo))
+
+    # --- bd prime where the beads plugin is off: that project's only primer (nexus-dg7i6.4); the ready list is on demand ---
+    output_lines.extend(_render_bd_prime(project_dir))
 
     # --- Everything else is on demand: one static line names it ---
     output_lines.append(BRIEF_INDEX_LINE)

@@ -532,6 +532,7 @@ class TestSessionHookInjection:
         assert "Session Topic \u2014 r\u00e9sum\u00e9 (77)" in result.text, (
             f"nx brief map did not emit the Knowledge Map. text={result.text[:500]}"
         )
+        monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: [])  # no engine in this test
         hook = session_context.run(None).stdout or ""
         assert "Session Topic" not in hook, "the SessionStart hook must not print the map any more"
 

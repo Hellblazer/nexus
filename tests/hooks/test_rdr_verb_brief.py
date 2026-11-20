@@ -92,3 +92,33 @@ def test_brief_lines_are_empty_without_an_rdr_tree_and_leave_no_run_state_behind
     _stub_tree(mod, monkeypatch, root, indexed=True)
     assert mod.brief_lines()
     assert mod._run_deadline is None and not mod._T2_PENDING
+
+
+# ── the brief never reconfigures the caller's logging; the hook does ──────────────────────────────────────────
+
+
+def test_brief_lines_never_configure_hook_logging_and_run_does(rdr_hook_mod, tmp_path, monkeypatch) -> None:
+    """``nx brief rdr`` runs in the CLI and, many times, in the MCP server, whose logging sink hook-mode setup would replace.
+    Pinned at the caller (``_summary(configure_logging=False)``), not only at the callee: reverting either call to the default
+    turns this red."""
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    _stub_tree(mod, monkeypatch, root, indexed=True)
+    configured: list[str] = []
+    monkeypatch.setattr(mod, "configure_hook_logging", lambda: configured.append("hook"))
+    assert mod.brief_lines()
+    assert configured == [], "brief_lines reconfigured the process's logging"
+    mod.run(None)
+    assert configured == ["hook"], "the hook verb must configure its own logging before it starts workers"
+
+
+def test_brief_lines_survive_a_configure_hook_logging_that_raises(rdr_hook_mod, tmp_path, monkeypatch) -> None:
+    mod = rdr_hook_mod
+    root = _rdr_tree(tmp_path)
+    _stub_tree(mod, monkeypatch, root, indexed=True)
+
+    def boom() -> None:
+        raise AssertionError("configure_hook_logging called from brief_lines")
+
+    monkeypatch.setattr(mod, "configure_hook_logging", boom)
+    assert mod.brief_lines()[0].startswith("RDR: 1 documents")

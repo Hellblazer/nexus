@@ -5591,7 +5591,7 @@ A `#`, `##` or `###` heading starts a thread; fields before any heading belong t
 
 ## nx brief
 
-Reference context that SessionStart no longer injects, on demand (progressive disclosure: SessionStart prints the T1 contract, the threads due, one identity-notes line and one index line; the rest is a topic here). Each topic prints what the hook used to inject, rendered by the same code, for the repo in the working directory. The `brief` MCP tool returns the same text.
+Reference context that SessionStart no longer injects, on demand (progressive disclosure: SessionStart prints the T1 contract, the threads due, one identity-notes line, a warning when T2 is unreachable, `bd prime` where the beads plugin is off, and one index line saying when to load each topic; the rest is a topic here). Each topic prints what the hook used to inject, rendered by the same code, for the repo in the working directory. The `brief` MCP tool returns the same text.
 
 ```
 nx brief [TOPIC]
@@ -5608,7 +5608,9 @@ With no `TOPIC`, prints the topics and what each holds.
 | `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
 | `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |
 
-A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `topic`, `ok`, `bytes`, `source`) to `<config>/logs/brief.log`, the count a topic's keep-or-drop review reads. Past 1 MB the file moves to `brief.log.1` (replacing an older one) and a new file starts.
+A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `event` of `brief_load`, `topic`, `ok`, `bytes`, `source`, `session_id`, `repo`) to `<config>/logs/brief.log`, and every SessionStart appends one `session_start` line (`ts`, `session_id`, `repo`, `source`) to the same file: the denominator. Past 1 MB the file moves to `brief.log.1` (replacing an older one) and a new file starts; two processes crossing the cap together can lose or duplicate a line, which a usage count tolerates.
+
+**The 30-day review.** Owner: marginalia. Due: 30 days after the release that ships this change. Count, per topic, the distinct `session_id`s with a `brief_load` line over the distinct `session_id`s with a `session_start` line, for the repos that matter. Retire a topic loaded in under 5% of sessions; promote one loaded in over 60% back to the always-on block.
 
 ---
 

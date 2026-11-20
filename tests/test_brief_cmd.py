@@ -54,3 +54,9 @@ def test_the_verb_is_registered_on_the_cli_and_records_its_source_as_cli(tmp_pat
     [line] = (tmp_path / "logs" / "brief.log").read_text(encoding="utf-8").splitlines()
     record = json.loads(line)
     assert record["source"] == "cli" and record["topic"] == "caps" and record["ok"] is True
+
+
+def test_the_topic_choice_is_case_insensitive() -> None:
+    result = CliRunner().invoke(brief_cmd, ["CAPS"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == brief.render("caps", source="cli").text

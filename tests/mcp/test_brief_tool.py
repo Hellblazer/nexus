@@ -2,8 +2,8 @@
 """The ``brief`` MCP tool: the same text as ``nx brief <topic>`` (SessionStart progressive disclosure).
 
 Design of record: T2 nexus/design-sessionstart-progressive-disclosure-2026-11-20. The tool is read-only, answers plain
-text, and fails through ``_fail`` so a client sees ``isError``. It is NOT in the auto-approve allowlist (an open gate
-question, recorded in the build hand-back), so a first call prompts.
+text, fails through ``_fail`` so a client sees ``isError``, and is auto-approved like the other read-only tools (marginalia's
+gate ruling): a prompt per first call would suppress exactly the lookups the progressive disclosure relies on.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from nexus import brief
 from nexus.hooks import auto_approve, session_context
 from nexus.mcp import core
 from nexus.mcp._tool_failure import is_failure
+from tests.hooks.test_permission_request_hooks import _parse_decision, _run_nx_hook
 
 
 def _tool():
@@ -62,8 +63,13 @@ def test_the_tool_records_its_source_as_mcp(tmp_path, monkeypatch) -> None:
     assert json.loads(line)["source"] == "mcp"
 
 
-def test_the_tool_is_not_auto_approved() -> None:
-    """Held out of the allowlist on purpose until the gate decides (it reads T2 titles and bd output, as the hook did
-    on Sam's behalf at session start, but a call on demand is a new surface)."""
+def test_the_tool_is_auto_approved_on_both_events() -> None:
     name = "mcp__plugin_conexus_nexus__brief"
-    assert name not in auto_approve._ALLOWED_TOOLS and name not in auto_approve._ALLOWED_HOOK_TOOLS
+    assert name in auto_approve._ALLOWED_TOOLS
+    assert _parse_decision(_run_nx_hook(name)) == "allow"
+    assert _parse_decision(_run_nx_hook(name, hook_event_name="PermissionRequest")) == "allow"
+
+
+def test_the_topic_is_case_insensitive_over_the_wire_too() -> None:
+    assert core.brief("CAPS") == core.brief("caps")
+    assert core.brief("  Caps ") == core.brief("caps")

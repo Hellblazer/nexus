@@ -9,12 +9,9 @@ plus beads' own memories). nexus disables the plugin per project to take its
 ``session_context`` renders ``bd prime`` itself, but only when the plugin is
 effectively disabled: a user who keeps the plugin must not get PRIME twice.
 
-Since the SessionStart progressive-disclosure change the primer is no longer printed at session start: it is the second
-half of the ``beads`` topic of ``nx brief`` (:func:`nexus.hooks.session_context._render_beads`), under the same conditions.
-
-Effective enablement follows Claude Code's settings precedence for
-``enabledPlugins``: project ``.claude/settings.local.json`` over project
-``.claude/settings.json`` over the user's ``settings.json``.
+Since the SessionStart progressive-disclosure change the ready list is on demand (the ``beads`` topic of ``nx brief``,
+:func:`nexus.hooks.session_context._render_beads`), but the primer stays at session start where the plugin is off: it is that
+project's only primer (marginalia's gate, S2b), printed by ``session_context.run`` through ``_render_bd_prime``.
 """
 from __future__ import annotations
 
@@ -137,11 +134,21 @@ class TestSessionContextPrime:
         assert ["bd", "prime"] not in calls
         assert self.PRIME not in out
 
-    def test_session_start_no_longer_prints_the_primer(self, monkeypatch, tmp_path: Path) -> None:
+    def test_session_start_prints_the_primer_where_the_plugin_is_off_but_never_runs_bd_ready(self, monkeypatch, tmp_path: Path) -> None:
+        """marginalia's gate (S2b): ``bd prime`` is that project's only primer, so it stays at session start; the ready list
+        is the on-demand half."""
         proj = tmp_path / "project"
         (proj / ".beads").mkdir(parents=True)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.chdir(proj)
-        monkeypatch.setattr(session_context, "run_command", lambda *a, **k: pytest.fail(f"spawned {a!r}"))
-        assert "# beads usage" not in (session_context.run(None).stdout or "")
+        calls: list = []
+
+        def fake(args, timeout, cwd=None):
+            calls.append(list(args))
+            return self.PRIME if args == ["bd", "prime"] else None
+
+        monkeypatch.setattr(session_context, "run_command", fake)
+        assert self.PRIME in (session_context.run(None).stdout or "")
+        assert ["bd", "ready"] not in calls

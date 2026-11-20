@@ -21,7 +21,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from nexus import brief
-from nexus.hooks import rdr_verb, session_context, t2_prefix_scan
+from nexus.hooks import rdr_verb, session_context, t2_prefix_scan, usage_log
 
 
 def _seed_map(tmp_path: Path, monkeypatch, body: str = "## Knowledge Map\n\ncode: Session Topic - resume (77)\n") -> Path:
@@ -84,10 +84,18 @@ def test_memory_is_the_t2_scan_for_the_repo_name(tmp_path: Path, monkeypatch) ->
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
     seen: list[str] = []
-    monkeypatch.setattr(t2_prefix_scan, "scan", lambda project, **kw: seen.append(project) or "  fixture-t2-entry - a snippet")
+    kwargs: list[dict] = []
+
+    def fake_scan(project, **kw):
+        seen.append(project)
+        kwargs.append(kw)
+        return "  fixture-t2-entry - a snippet"
+
+    monkeypatch.setattr(t2_prefix_scan, "scan", fake_scan)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
     result = brief.render("memory", cwd=str(repo))
     assert result.ok and seen == ["myproject"]
+    assert kwargs == [{"configure_logging": False}], "the brief must not replace the MCP server's (or the CLI's) log sink"
     assert result.text == "## T2 Memory (Active Project)\n  fixture-t2-entry - a snippet"
 
 
@@ -163,13 +171,20 @@ def test_rdr_without_a_tree_says_so(monkeypatch) -> None:
 
 
 class _Store:
-    def __init__(self, row: dict | None) -> None:
+    def __init__(self, row: dict | None, error: BaseException | None = None) -> None:
         self.row = row
+        self.error = error
+        self.closed = False
         self.asked: list[tuple[str, str]] = []
 
     def get(self, project=None, title=None, **_k):
         self.asked.append((project, title))
+        if self.error:
+            raise self.error
         return self.row
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_me_prints_the_startup_note_of_the_callers_identity_as_data(monkeypatch) -> None:
@@ -183,6 +198,29 @@ def test_me_prints_the_startup_note_of_the_callers_identity_as_data(monkeypatch)
     head = result.text.splitlines()[0]
     assert "identity/i5" in head and "startup" in head
     assert "not executed" in result.text.lower() or "data" in result.text.lower()
+
+
+def test_me_closes_its_store_even_when_the_read_fails(monkeypatch) -> None:
+    """The MCP server is long-lived: a client leaked per call would pile up."""
+    ok, bad = _Store({"title": "startup", "content": "x"}), _Store(None, error=RuntimeError("engine down"))
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    for store in (ok, bad):
+        monkeypatch.setattr(brief, "_open_memory_store", lambda store=store: store)
+        brief.render("me")
+        assert store.closed
+    assert not brief.render("me").ok
+
+
+def test_me_caps_the_note_at_two_kb_with_a_marker(monkeypatch) -> None:
+    store = _Store({"title": "startup", "content": "word " * 2000})
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: store)
+    text = brief.render("me").text
+    body = text.split("\n", 2)[2]
+    assert len(body.encode("utf-8")) <= brief.ME_MAX_BYTES + len("\n(truncated)") and body.endswith("(truncated)")
+    short = _Store({"title": "startup", "content": "a short note"})
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: short)
+    assert "(truncated)" not in brief.render("me").text
 
 
 def test_me_without_a_startup_note_prints_one_line_saying_so(monkeypatch) -> None:
@@ -246,9 +284,11 @@ def _usage_lines(config: Path) -> list[dict]:
     return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
-def test_one_usage_record_per_call_with_topic_ok_and_bytes(tmp_path: Path, monkeypatch) -> None:
+def test_one_usage_record_per_call_with_topic_ok_bytes_session_and_repo(tmp_path: Path, monkeypatch) -> None:
     config = tmp_path / "config"
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+    monkeypatch.setenv("NX_SESSION_ID", "sess-42")
+    monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "/work/myrepo")
     log = _Log()
     monkeypatch.setattr(brief, "_log", log)
     ok = brief.render("caps", source="mcp")
@@ -256,11 +296,23 @@ def test_one_usage_record_per_call_with_topic_ok_and_bytes(tmp_path: Path, monke
     bad = brief.render("caps", source="cli")
     assert [e for e, _ in log.events] == ["brief_load", "brief_load"]
     first, second = (f for _, f in log.events)
-    assert first == {"topic": "caps", "ok": True, "bytes": len(ok.text.encode("utf-8")), "source": "mcp"}
-    assert second == {"topic": "caps", "ok": False, "bytes": len(bad.text.encode("utf-8")), "source": "cli"}
+    assert first == {"topic": "caps", "ok": True, "bytes": len(ok.text.encode("utf-8")), "source": "mcp",
+                     "session_id": "sess-42", "repo": "myrepo"}
+    assert second == {"topic": "caps", "ok": False, "bytes": len(bad.text.encode("utf-8")), "source": "cli",
+                      "session_id": "sess-42", "repo": "myrepo"}
     lines = _usage_lines(config)
-    assert [{k: v for k, v in ln.items() if k != "ts"} for ln in lines] == [first, second]
-    assert all(ln["ts"].endswith("Z") for ln in lines)
+    assert [{k: v for k, v in ln.items() if k not in ("ts", "event")} for ln in lines] == [first, second]
+    assert all(ln["event"] == "brief_load" and ln["ts"].endswith("Z") for ln in lines)
+
+
+def test_a_call_with_no_session_id_still_records_an_empty_one(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    for var in ("NX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("nexus.session.resolve_active_session_id", lambda arg=None: None)
+    brief.render("caps")
+    [line] = _usage_lines(tmp_path)
+    assert line["session_id"] == ""
 
 
 def test_an_unknown_topic_is_recorded_too_with_a_bounded_name(tmp_path: Path, monkeypatch) -> None:
@@ -278,32 +330,21 @@ def test_a_usage_file_that_cannot_be_written_costs_the_brief_nothing(tmp_path: P
     assert brief.render("caps").ok
 
 
-def test_a_full_usage_file_rotates_and_the_new_call_is_still_recorded(tmp_path: Path, monkeypatch) -> None:
-    """Past its cap the file moves to brief.log.1 (replacing an older one) and a fresh file takes the line, so the
-    usage count keeps recording and the two files together never pass twice the cap plus one line."""
-    config = tmp_path / "config"
-    (config / "logs").mkdir(parents=True)
-    path = config / "logs" / "brief.log"
-    older = path.with_name("brief.log.1")
-    older.write_text("old\n", encoding="utf-8")
-    full = "x" * (brief._USAGE_LOG_MAX_BYTES + 1)
-    path.write_text(full, encoding="utf-8")
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+def test_the_brief_writes_through_the_shared_rotating_writer(tmp_path: Path, monkeypatch) -> None:
+    """One writer for ``brief_load`` and ``session_start`` lines (tests/hooks/test_usage_log.py holds the rotation)."""
+    (tmp_path / "logs").mkdir()
+    path = tmp_path / "logs" / "brief.log"
+    path.write_text("x" * (usage_log.MAX_BYTES + 1), encoding="utf-8")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     brief.render("caps")
-    assert older.read_text(encoding="utf-8") == full, "the full file became brief.log.1, replacing the older one"
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1 and json.loads(lines[0])["topic"] == "caps"
+    assert path.with_name("brief.log.1").exists()
+    [line] = _usage_lines(tmp_path)
+    assert line["event"] == "brief_load"
 
 
-def test_a_usage_file_under_its_cap_is_appended_not_rotated(tmp_path: Path, monkeypatch) -> None:
-    config = tmp_path / "config"
-    (config / "logs").mkdir(parents=True)
-    path = config / "logs" / "brief.log"
-    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
-    path.write_text("x" * (brief._USAGE_LOG_MAX_BYTES - 1) + "\n", encoding="utf-8")  # exactly at the cap
-    brief.render("caps")
-    assert not path.with_name("brief.log.1").exists()
-    assert path.read_text(encoding="utf-8").splitlines()[-1].startswith("{")
+def test_a_topic_is_case_insensitive_and_trimmed(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    assert brief.render(" CAPS ") == brief.render("caps")
 
 
 def test_the_project_dir_is_claude_project_dir_like_the_hook(tmp_path: Path, monkeypatch) -> None:

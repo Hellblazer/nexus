@@ -16940,8 +16940,9 @@ async def setup_status() -> str:
 # ── Brief (SessionStart progressive disclosure) ────────────────────────────────
 #
 # The reference context SessionStart stopped injecting, on demand: the same text as ``nx brief <topic>``, from the same
-# render functions (``nexus.brief``). Read-only. Held OUT of auto-approval for now (``nexus.hooks.auto_approve``): whether a
-# call on demand needs no prompt is an open gate question. A failure returns through ``_fail`` so a client sees ``isError``.
+# render functions (``nexus.brief``). Read-only, and auto-approved like the other read-only tools
+# (``nexus.hooks.auto_approve``): a prompt per first call would suppress the lookups the progressive disclosure relies on.
+# A failure returns through ``_fail`` so a client sees ``isError``. Its topic is trimmed and case-insensitive.
 @mcp.tool(
     title="Session Brief",
     annotations={"readOnlyHint": True},

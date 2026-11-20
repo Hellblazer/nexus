@@ -15,6 +15,7 @@ Carries the script-level hygiene and ready-beads/capabilities assertions across 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import time as _time
@@ -208,11 +209,29 @@ class TestRunPrintsNothingThatMoved:
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
         (tmp_path / "project").mkdir()
         monkeypatch.chdir(tmp_path / "project")
-        monkeypatch.setattr(session_context, "which", lambda cmd: pytest.fail(f"which({cmd!r}) at session start"))
-        monkeypatch.setattr(session_context, "run_command", lambda *a, **k: pytest.fail(f"spawned {a!r}"))
-        monkeypatch.setattr(t2_prefix_scan, "scan", lambda project: pytest.fail("the T2 scan ran at session start"))
+        spawned: list[list[str]] = []
+
+        def only_the_repo_name(args, timeout, cwd=None):
+            spawned.append(list(args))
+            return None
+
+        monkeypatch.setattr(session_context, "run_command", only_the_repo_name)
+        monkeypatch.setattr(t2_prefix_scan, "scan", lambda project, **kw: pytest.fail("the T2 scan ran at session start"))
         out = session_context.run(None).stdout or ""
         assert "T2 Memory" not in out and "Ready Beads" not in out and "Capabilities" not in out
+        assert spawned == [["git", "rev-parse", "--show-toplevel"]], "the one spawn is the repo name; no bd, no nx"
+
+    def test_with_a_session_id_the_hook_still_asks_for_due_threads_and_notes(self, monkeypatch, tmp_path: Path) -> None:
+        """The hook no longer runs the T2 scan, but with a session id it still calls ``board_due`` and ``identity_notes``
+        (both read T2): the moved blocks are the scan, beads, caps, the map and the RDR count line, not every T2 read."""
+        asked: list[str] = []
+        monkeypatch.setattr(board_due, "due_lines", lambda sid: asked.append(f"due:{sid}") or [])
+        monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: asked.append(f"notes:{sid}") or [])
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        session_context.run({"session_id": "s-77", "source": "resume"})
+        assert asked == ["due:s-77", "notes:s-77"]
 
     def test_the_hygiene_block_still_fires_on_a_stale_cache_without_reading_it(self, monkeypatch, tmp_path: Path) -> None:
         repo = tmp_path / "fakerepo"
@@ -235,11 +254,18 @@ class TestRunPrintsNothingThatMoved:
 class TestTheIndexLine:
     def test_it_is_one_static_line_naming_every_topic_with_a_gloss(self) -> None:
         line = session_context.BRIEF_INDEX_LINE
-        assert "\n" not in line and len(line.encode("utf-8")) <= 260, len(line.encode("utf-8"))
+        assert "\n" not in line and len(line.encode("utf-8")) <= 300, len(line.encode("utf-8"))
         assert "nx brief" in line and "`brief`" in line
         assert session_context.BRIEF_TOPICS == ("memory", "beads", "caps", "map", "rdr", "me")
         for topic in session_context.BRIEF_TOPICS:
             assert f"{topic} (" in line, f"{topic} has no gloss in the index line"
+
+    def test_it_says_when_to_load_not_only_what_exists(self) -> None:
+        """A menu of nouns does not tell a session when to call. GUIDANCE_IMPERATIVE is frozen, so the trigger lives here."""
+        line = session_context.BRIEF_INDEX_LINE
+        before_work, before_research = line.index("before choosing work"), line.index("before researching")
+        assert line.index("beads") < before_work < line.index("memory") < before_research
+        assert line.index("map") < before_research
 
     def test_it_is_printed_after_the_identity_notes_line_and_before_hygiene(self, monkeypatch, tmp_path: Path) -> None:
         monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: ["Your notes (identity/i5): a, b"])
@@ -251,6 +277,85 @@ class TestTheIndexLine:
         assert out.index("## Due on your") < out.index("Your notes (identity/i5)") < out.index(session_context.BRIEF_INDEX_LINE)
 
 
+class TestWhatStaysAlwaysOnBesidesTheIndex:
+    """Three things were NOT reference context and stay at session start (marginalia's gate, S2): the T2 reachability
+    signal (nexus-8fvp2: never silent), ``bd prime`` where the beads plugin is off (nexus-dg7i6.4: that project's only
+    primer), and the usage denominator line. The first two are fire-only or per-project; none is a brief topic."""
+
+    def _env(self, monkeypatch, tmp_path: Path) -> Path:
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(project))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))  # no beads plugin enabled anywhere
+        monkeypatch.chdir(project)
+        return project
+
+    def test_a_t2_warning_prints_before_the_index_line_and_nothing_prints_when_healthy(self, monkeypatch, tmp_path: Path) -> None:
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: ["WARNING: T2 memory unreachable: refused"])
+        out = session_context.run(None).stdout or ""
+        assert out.index("WARNING: T2 memory unreachable: refused") < out.index(session_context.BRIEF_INDEX_LINE)
+        monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: [])
+        assert "WARNING" not in (session_context.run(None).stdout or "")
+
+    def test_the_probe_is_asked_about_the_repo_name_the_old_scan_used(self, monkeypatch, tmp_path: Path) -> None:
+        self._env(monkeypatch, tmp_path)
+        asked: list[str] = []
+        monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: asked.append(project) or [])
+        monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "/work/myproject" if args[:2] == ["git", "rev-parse"] else None)
+        session_context.run(None)
+        assert asked == ["myproject"]
+
+    def test_the_reachability_lines_are_the_probes_text_or_nothing(self, monkeypatch) -> None:
+        monkeypatch.undo()  # the hooks conftest stubs this function for every other test
+        monkeypatch.setattr(t2_prefix_scan, "reachability_warning", lambda project: f"WARNING for {project}")
+        assert session_context._t2_reachability_lines("p") == ["WARNING for p"]
+        monkeypatch.setattr(t2_prefix_scan, "reachability_warning", lambda project: "")
+        assert session_context._t2_reachability_lines("p") == []
+
+        def boom(project):
+            raise RuntimeError("x")
+
+        monkeypatch.setattr(t2_prefix_scan, "reachability_warning", boom)
+        assert session_context._t2_reachability_lines("p") == [], "a hook never fails"
+
+    def test_bd_prime_stays_always_on_where_the_beads_plugin_is_off(self, monkeypatch, tmp_path: Path) -> None:
+        project = self._env(monkeypatch, tmp_path)
+        (project / ".beads").mkdir()
+        calls: list[list[str]] = []
+
+        def fake(args, timeout, cwd=None):
+            calls.append(list(args))
+            return "# beads primer" if args == ["bd", "prime"] else None
+
+        monkeypatch.setattr(session_context, "run_command", fake)
+        out = session_context.run(None).stdout or ""
+        assert out.index("# beads primer") < out.index(session_context.BRIEF_INDEX_LINE)
+        assert ["bd", "ready"] not in calls, "the ready list stays behind `nx brief beads`"
+
+    def test_bd_prime_is_not_printed_where_the_plugin_is_on_or_outside_a_beads_repo(self, monkeypatch, tmp_path: Path) -> None:
+        project = self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "# beads primer" if args == ["bd", "prime"] else None)
+        assert "# beads primer" not in (session_context.run(None).stdout or ""), "no .beads"
+        (project / ".beads").mkdir()
+        claude = tmp_path / "claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text('{"enabledPlugins": {"beads@beads-marketplace": true}}', encoding="utf-8")
+        assert "# beads primer" not in (session_context.run(None).stdout or ""), "the plugin prints it"
+
+    def test_each_start_records_one_session_start_line_for_the_denominator(self, monkeypatch, tmp_path: Path) -> None:
+        self._env(monkeypatch, tmp_path)
+        monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "/work/myproject" if args[:2] == ["git", "rev-parse"] else None)
+        session_context.run({"session_id": "s-1", "source": "clear"})
+        session_context.run(None)
+        lines = [json.loads(ln) for ln in (tmp_path / "config" / "logs" / "brief.log").read_text(encoding="utf-8").splitlines()]
+        assert [(ln["event"], ln["session_id"], ln["repo"], ln["source"]) for ln in lines] == [
+            ("session_start", "s-1", "myproject", "clear"),
+            ("session_start", "", "myproject", ""),
+        ]
+
+
 # -- the extracted renders: the same text the hook used to print --------------
 
 
@@ -260,15 +365,19 @@ class TestExtractedRenders:
         repo.mkdir()
         subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
         seen: list[str] = []
+        kwargs: list[dict] = []
 
-        def _fake_scan(project: str, **_kw) -> str:
+        def _fake_scan(project: str, **kw) -> str:
             seen.append(project)
+            kwargs.append(kw)
             return f"  entry for {project}"
 
         monkeypatch.setattr(t2_prefix_scan, "scan", _fake_scan)
         lines = session_context._render_t2_memory(str(repo))
         assert lines == ["## T2 Memory (Active Project)", "  entry for myproject", ""]
         assert seen == ["myproject"]
+        # nx brief runs in the CLI and the MCP server, whose logging sink the scan's hook-mode setup would replace
+        assert kwargs == [{"configure_logging": False}]
         assert not hasattr(session_context, "_plugin_root"), "the hook resolves no plugin path (nexus-b5ugt)"
 
     def test_t2_memory_is_empty_when_there_is_no_repo_or_nothing_scanned(self, monkeypatch, tmp_path: Path) -> None:

@@ -18,11 +18,21 @@ What is counted, per start (the always-on set):
 * sn's static ``session-start-section.md``: a plain file read, and not ours, so it is counted separately in the bounded sum.
 * a ``/clear`` start also prints the RDR-253 Step 6 resume line, at its 400-byte cap plus the blank line before it.
 
-Not counted, and why: the beads plugin's own ``bd prime`` (the repo ``.beads/PRIME.md``, 992 bytes) when the plugin is on is the
-plugin's output, not nexus's, and when it is off the primer is the ``beads`` topic of ``nx brief``, no longer printed at start;
-the fire-only notices (setup, preflight failure, mcp-connect timeout, version lockstep, RDR remedy and unchecked-fix lines,
-hygiene), which are zero on a healthy start; and the compaction checkpoint, a state snapshot that fires on ``compact`` only and
-is capped at 8,192 bytes by its own test. Per-event measurements are in the build record.
+Conditional lines, each with its own allowance on top of the ceilings (a start that has one is over the unconditional figure
+by at most that much, and the tests below hold each and all of them together):
+
+* the resume line on ``clear`` (402 B);
+* the fire-only T2 line, ``WARNING: T2 memory unreachable`` or the stale-substrate warning, capped at
+  ``t2_prefix_scan.REACHABILITY_LINE_MAX`` (nexus-8fvp2: T2 trouble is never silent, so the probe survived the scan's move);
+* ``bd prime`` for a project whose beads plugin is off (nexus-dg7i6.4: its only primer), here the 992-byte repo
+  ``.beads/PRIME.md``; with the plugin on it is the plugin's own output and not counted;
+* the three conditional lines the GUIDANCE emitter can add, which the ceilings do NOT measure (the render is called with a clean
+  probe): the stale-MCP NOTE (a running ``nx-mcp`` older than the install), the identity notice (the session's bound identity),
+  and the memory-curation line (``nx memory curate`` is due).
+
+Not counted, and why: the fire-only notices (setup, preflight failure, mcp-connect timeout, version lockstep, RDR remedy and
+unchecked-fix lines, hygiene), which are zero on a healthy start; and the compaction checkpoint, a state snapshot that fires on
+``compact`` only and is capped at 8,192 bytes by its own test. Per-event measurements are in the build record.
 """
 from __future__ import annotations
 
@@ -32,17 +42,21 @@ from unittest.mock import patch
 import pytest
 
 from nexus import brief
-from nexus.hooks import identity_notes, session_context
+from nexus.hooks import identity_notes, session_context, t2_prefix_scan
 
-#: Measured on the progressive-disclosure build: guidance 1,900 B + hook 1,241 B = 3,141 B. Rounded up by about 2%.
-_COMBINED_BUDGET_BYTES = 3200
+#: Measured on the progressive-disclosure build: guidance 1,900 B + hook 1,279 B = 3,179 B. Rounded up by about 2%.
+_COMBINED_BUDGET_BYTES = 3250
 
-#: guidance 1,900 B + hook 1,241 B + sn static 1,143 B = 4,284 B. Rounded up by about 0.4%.
-_BOUNDED_SESSIONSTART_BUDGET_BYTES = 4300
+#: guidance 1,900 B + hook 1,279 B + sn static 1,143 B = 4,322 B. Rounded up by about 1.3%.
+_BOUNDED_SESSIONSTART_BUDGET_BYTES = 4380
 
-#: The hook's own always-on output with the notes line at its worst case: 1,241 B (T1 contract 603 B, the notes line at its
-#: 300 B cap, the 189 B index line, joins). The figure that says the reference blocks stayed out.
-_HOOK_ALWAYS_ON_BUDGET_BYTES = 1300
+#: The hook's own always-on output with the notes line at its worst case: 1,279 B (T1 contract 603 B, the notes line at its
+#: 300 B cap, the 227 B index line with its when-to-load clause, joins). The figure that says the reference blocks stayed out.
+_HOOK_ALWAYS_ON_BUDGET_BYTES = 1340
+
+#: The conditional lines' allowances (see the module docstring). Each is its cap plus the join before it.
+_T2_LINE_ALLOWANCE = t2_prefix_scan.REACHABILITY_LINE_MAX + 1
+_BD_PRIME_REPO_FILE = Path(__file__).resolve().parents[2] / ".beads" / "PRIME.md"
 
 _SN_SESSION_START_SECTION = (
     Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "session-start-section.md"
@@ -61,7 +75,8 @@ def _identity_notes_worst_case() -> list[str]:
     return identity_notes._render("i123", ["x" * 100 + str(i) for i in range(60)], capped=True)
 
 
-def _real_hook_output(monkeypatch, tmp_path: Path, notes: list[str] | None = None) -> str:
+def _real_hook_output(monkeypatch, tmp_path: Path, notes: list[str] | None = None, *, t2_line: list[str] | None = None,
+                      prime: list[str] | None = None) -> str:
     """The real ``session_context.run`` output for a session id, in an empty config dir, with no threads due and the notes
     line *notes* (default: the worst case)."""
     notes = _identity_notes_worst_case() if notes is None else notes
@@ -70,6 +85,8 @@ def _real_hook_output(monkeypatch, tmp_path: Path, notes: list[str] | None = Non
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("nexus.hooks.board_due.due_lines", lambda sid, **k: [])
     monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: list(notes))
+    monkeypatch.setattr(session_context, "_t2_reachability_lines", lambda project: list(t2_line or []))
+    monkeypatch.setattr(session_context, "_render_bd_prime", lambda project_dir: list(prime or []))
     return session_context.run({"session_id": _REAL_SESSION_ID}).stdout or ""
 
 
@@ -131,6 +148,7 @@ def test_the_context_hook_prints_only_the_always_on_set(monkeypatch, tmp_path: P
     assert _bytes(out) > _HOOK_ALWAYS_ON_BUDGET_BYTES * 0.9, f"{_bytes(out)}B: re-measure and lower the ceiling"
     lines = [ln for ln in out.split("\n") if ln]
     assert lines[0].startswith("## T1:") and lines[-1] == session_context.BRIEF_INDEX_LINE
+    assert "before choosing work" in lines[-1], "the index line carries its when-to-load clause"
     for moved in ("## T2 Memory", "## Ready Beads", "## nx Capabilities", "## Knowledge Map"):
         assert moved not in out
 
@@ -198,9 +216,40 @@ def test_the_resume_line_on_clear_is_counted_and_composes_with_the_other_new_lin
         assert resume_line.with_resume_line("", {"source": source}, open_store=lambda: Store()) == "", f"no line on {source}"
 
 
-@pytest.mark.parametrize("topic", session_context.BRIEF_TOPICS)
+@pytest.mark.parametrize("topic", ["memory", "beads", "caps", "map", "rdr", "me"])
 def test_every_moved_block_is_reachable_through_a_brief_topic_the_index_names(topic: str) -> None:
-    """The index line is the only pointer SessionStart leaves; each topic it names must exist in ``nexus.brief`` and each
-    ``nexus.brief`` topic must be named by it (a block that moved and is not named is unreachable)."""
-    assert topic in brief.TOPICS and f"{topic} (" in session_context.BRIEF_INDEX_LINE
-    assert set(brief.TOPICS) == set(session_context.BRIEF_TOPICS)
+    """The index line is the only pointer SessionStart leaves. The topic names are spelled out here, not read back from the same
+    tuple the code uses (an alias of itself cannot fail): each must be a rendered topic of ``nexus.brief`` AND named, with a gloss,
+    in the index line."""
+    assert topic in brief._RENDERERS, f"{topic} is named at session start but nothing renders it"
+    assert f"{topic} (" in session_context.BRIEF_INDEX_LINE, f"{topic} is rendered but the index line does not name it"
+
+
+def test_no_topic_is_rendered_that_the_index_does_not_name() -> None:
+    named = {t for t in brief._RENDERERS if f"{t} (" in session_context.BRIEF_INDEX_LINE}
+    assert named == set(brief._RENDERERS) == {"memory", "beads", "caps", "map", "rdr", "me"}
+
+
+def test_each_conditional_line_at_its_cap_stays_inside_its_allowance(monkeypatch, tmp_path: Path) -> None:
+    """The fire-only T2 line and ``bd prime`` (beads plugin off), each at its worst case, through the real hook."""
+    base = _bytes(_real_hook_output(monkeypatch, tmp_path))
+    worst_t2 = [t2_prefix_scan._one_capped_line("WARNING: T2 memory unreachable: " + "x" * 5000)]
+    assert _bytes(worst_t2[0]) <= t2_prefix_scan.REACHABILITY_LINE_MAX
+    with_t2 = _bytes(_real_hook_output(monkeypatch, tmp_path, t2_line=worst_t2))
+    assert 0 < with_t2 - base <= _T2_LINE_ALLOWANCE, with_t2 - base
+    assert _BD_PRIME_REPO_FILE.exists(), "this repo's own primer is the measured one"
+    prime = [_BD_PRIME_REPO_FILE.read_text(encoding="utf-8").strip(), ""]
+    with_prime = _bytes(_real_hook_output(monkeypatch, tmp_path, prime=prime))
+    assert 0 < with_prime - base <= _bytes(prime[0]) + 2, with_prime - base
+    assert _bytes(prime[0]) < 1100, "a primer this large is its own budget decision"
+
+
+def test_every_conditional_line_together_stays_inside_the_bounded_ceiling_plus_their_allowances(monkeypatch, tmp_path: Path) -> None:
+    """A clear start in a beads-off repo with T2 down: the worst start. It is the sum of the unconditional ceiling and each
+    allowance, nothing hidden (the three conditional guidance lines are named in the module docstring and not measured)."""
+    prime = [_BD_PRIME_REPO_FILE.read_text(encoding="utf-8").strip(), ""]
+    worst_t2 = [t2_prefix_scan._one_capped_line("WARNING: T2 memory unreachable: " + "x" * 5000)]
+    hook = _bytes(_real_hook_output(monkeypatch, tmp_path, t2_line=worst_t2, prime=prime))
+    total = (_bytes(_real_guidance_emitter_output()) + hook + len(_SN_SESSION_START_SECTION.read_bytes()) + 402)
+    ceiling = _BOUNDED_SESSIONSTART_BUDGET_BYTES + 402 + _T2_LINE_ALLOWANCE + _bytes(prime[0]) + 2
+    assert total < ceiling, f"{total}B >= {ceiling}B"

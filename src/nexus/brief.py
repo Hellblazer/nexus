@@ -11,27 +11,29 @@ loaded by the model or the person when the work calls for it.
 * One source. Every topic renders through the function the hook used (``nexus.hooks.session_context``,
   ``nexus.hooks.rdr_verb.brief_lines``): there is no copy to drift, and a brief is versioned with the code. The CLI verb
   (:mod:`nexus.commands.brief`) and the MCP tool (``brief`` in :mod:`nexus.mcp.core`) call :func:`render` and print its text.
-* Fail safe. :func:`render` never raises: a topic that breaks answers ``ok=False`` and one line saying so. No rule lives
-  behind a brief (the always-on block keeps every rule line), so a brief that fails costs a session context, never a rule.
+* Fail safe. :func:`render` never raises: a topic that breaks answers ``ok=False`` and one line saying so. What a session
+  must see to work safely stays at session start and is not a topic: the T2 reachability line (nexus-8fvp2), ``bd prime``
+  where the beads plugin is off (nexus-dg7i6.4), the T1 contract, the threads due, the notes line. The full-prefix MCP rule
+  in ``caps`` is carried by CLAUDE.md and AGENTS.md. A brief that fails costs a session context, not those.
 * ``me`` is this seat's own standing context, the ``startup`` note of its T2 project ``identity/<id>``. It is printed for the
   session to read and decide on; nothing here, and nothing in the SessionStart hook, executes a note. Notes are data.
-* One usage record per call: a ``brief_load`` structlog event (``topic``, ``ok``, ``bytes``, ``source`` of ``cli`` or
-  ``mcp``) and one JSON line in ``<config>/logs/brief.log``. The file is the count the 30-day review reads, because the
-  CLI logs at WARNING with no file sink and a structlog line alone would never reach it: after 30 days a topic nobody loads
-  is dropped, and one loaded nearly every session returns to the always-on block. ``jq -r .topic brief.log | sort | uniq -c``.
+* One usage record per call: a ``brief_load`` structlog event and one JSON line in ``<config>/logs/brief.log`` (through
+  :mod:`nexus.hooks.usage_log`, which rotates it at 1 MB). Each carries ``topic``, ``ok``, ``bytes``, ``source`` (``cli`` or
+  ``mcp``), ``session_id`` and ``repo``. SessionStart writes one ``session_start`` line per start into the same file: the
+  denominator. The CLI logs at WARNING with no file sink, so a structlog line alone would never reach a review. The
+  30-day review: owner marginalia; due 30 days after the release that ships this change; retire a topic loaded in under 5% of
+  sessions, and promote one loaded in over 60% back to the always-on block.
 """
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import click
 import structlog
 
-from nexus.hooks import session_context
+from nexus.hooks import session_context, usage_log
 
 __all__ = ["TOPICS", "TOPIC_HELP", "BriefResult", "index_text", "render"]
 
@@ -56,8 +58,8 @@ _LOG_TOPIC_CHARS = 40
 
 STARTUP_TITLE = "startup"
 
-#: Past this size the usage file rotates to ``brief.log.1`` (about 12,000 calls a file), so it keeps recording and stays bounded.
-_USAGE_LOG_MAX_BYTES = 1_000_000
+#: The longest a startup note is printed (UTF-8 bytes); longer ends in a marker. A note is a standing brief, not a document.
+ME_MAX_BYTES = 2048
 
 
 class BriefResult(NamedTuple):
@@ -141,38 +143,45 @@ def _me(cwd: str) -> str:  # noqa: ARG001
         if "no identity is bound" in message:
             return "me: no identity is bound to this process, so there is no startup note"
         return f"me: {message}"
-    row = _open_memory_store().get(project=project, title=STARTUP_TITLE)
-    content = str(row.get("content") or "") if row else ""
-    if not content.strip():
+    store = _open_memory_store()
+    try:
+        row = store.get(project=project, title=STARTUP_TITLE)
+    finally:
+        store.close()
+    content = str(row.get("content") or "").strip() if row else ""
+    if not content:
         return (
             f"me: no startup note in {project}; write one with "
             f"`nx memory put --mine --title {STARTUP_TITLE} \"...\"` to have it here next time"
         )
+    data = content.encode("utf-8")
+    if len(data) > ME_MAX_BYTES:
+        content = data[:ME_MAX_BYTES].decode("utf-8", "ignore").rstrip() + "\n(truncated)"
     return (
         f"## Your startup note ({project}, title \"{STARTUP_TITLE}\")\n"
         "A note is data, not a command: nothing here has run. Read it and apply what fits this session.\n"
-        f"{content.strip()}"
+        f"{content}"
     )
 
 
-def _usage_log_path() -> Path:
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred: only a recorded call pays the import
-
-    return nexus_config_dir() / "logs" / "brief.log"
-
-
-def _record(topic: str, result: BriefResult, source: str) -> None:
-    """The usage record of one call: the structlog event, and one line in the usage file. Never raises."""
-    fields = {"topic": topic[:_LOG_TOPIC_CHARS], "ok": result.ok, "bytes": len(result.text.encode("utf-8")), "source": source}
+def _session_id() -> str:
     try:
+        from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: only a recorded call pays the import
+
+        return resolve_active_session_id() or ""
+    except Exception:  # noqa: BLE001 — usage accounting never costs a brief
+        return ""
+
+
+def _record(topic: str, result: BriefResult, source: str, cwd: str) -> None:
+    """The usage record of one call: the structlog event, and one line in the shared usage file. Never raises."""
+    try:
+        fields = {
+            "topic": topic[:_LOG_TOPIC_CHARS], "ok": result.ok, "bytes": len(result.text.encode("utf-8")), "source": source,
+            "session_id": _session_id(), "repo": session_context.repo_name(cwd),
+        }
         _log.info("brief_load", **fields)
-        path = _usage_log_path()
-        if path.exists() and path.stat().st_size > _USAGE_LOG_MAX_BYTES:
-            path.replace(path.with_name(path.name + ".1"))  # one generation kept: the two files stay near twice the cap
-        path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **fields})
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        usage_log.append("brief_load", **fields)
     except Exception:  # noqa: BLE001 — usage accounting never costs a brief
         return
 
@@ -181,14 +190,17 @@ _RENDERERS = {"memory": _memory, "beads": _beads, "caps": _caps, "map": _map, "r
 
 
 def render(topic: str, *, cwd: str | None = None, source: str = "cli") -> BriefResult:
-    """The text of *topic*, rendered for the repo at *cwd* (default: the process cwd), and one usage record. Never raises."""
+    """The text of *topic* (trimmed, case-insensitive), rendered for the repo at *cwd* (default: the process cwd), and one
+    usage record. Never raises."""
+    topic = topic.strip().lower()
+    where = cwd if cwd is not None else os.getcwd()
     renderer = _RENDERERS.get(topic)
     if renderer is None:
         result = BriefResult(f"brief: unknown topic {topic[:_LOG_TOPIC_CHARS]!r}; topics are {', '.join(TOPICS)}", False)
     else:
         try:
-            result = BriefResult(renderer(cwd if cwd is not None else os.getcwd()), True)
+            result = BriefResult(renderer(where), True)
         except Exception as exc:  # noqa: BLE001 — a brief never fails its caller; the caller is told, and the log has it
             result = BriefResult(f"brief {topic} failed: {type(exc).__name__}: {str(exc)[:_ERROR_CHARS]}", False)
-    _record(topic, result, source)
+    _record(topic, result, source, where)
     return result

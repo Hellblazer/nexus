@@ -469,6 +469,45 @@ def scan(project: str, *, configure_logging: bool = True) -> str:
         return _scan_with_store(project, timeout, stale_days, scan_budget_s)
 
 
+#: The longest the fire-only reachability line is (UTF-8 bytes): an exception's text is free text, and this line is counted in
+#: the SessionStart byte budget as a conditional line.
+REACHABILITY_LINE_MAX = 240
+
+
+def _one_capped_line(text: str) -> str:
+    flat = " ".join(text.split())
+    data = flat.encode("utf-8")
+    return flat if len(data) <= REACHABILITY_LINE_MAX else data[: REACHABILITY_LINE_MAX - 3].decode("utf-8", "ignore") + "..."
+
+
+def reachability_warning(project: str) -> str:
+    """The SessionStart line that keeps the nexus-8fvp2 contract now that the scan is not injected: ``WARNING: T2 memory
+    unreachable: ...`` when the engine cannot be reached, ``WARNING: T2 memory freshest entry is Nd old ...`` when its newest
+    entry for *project* is past the stale window, and ``""`` when T2 is healthy (the common case). One namespace listing, nothing
+    rendered. For a hook process: it configures hook logging first, as :func:`scan` does."""
+    if not project:
+        return ""
+    configure_hook_logging()
+    timeout = float(os.environ.get("NX_T2_SCAN_TIMEOUT_S", str(_DEFAULT_HTTP_TIMEOUT_S)))
+    stale_days = int(os.environ.get("NX_T2_SCAN_STALE_DAYS", str(_DEFAULT_STALE_DAYS)))
+    from nexus.db.data_token import mint_deadline  # noqa: PLC0415 — deferred with the rest of the client
+
+    with mint_deadline(min(timeout * 2, _DEFAULT_SCAN_BUDGET_S)):
+        try:
+            store = HttpMemoryStore(timeout=timeout)
+        except _UNREACHABLE_EXC as exc:
+            return _one_capped_line(f"WARNING: T2 memory unreachable: {exc}")
+        try:
+            try:
+                namespaces = store.get_projects_with_prefix(project)
+            except _UNREACHABLE_EXC as exc:
+                return _one_capped_line(f"WARNING: T2 memory unreachable: {exc}")
+            freshest = namespaces[0].get("last_updated", "") if namespaces else ""
+            return _one_capped_line(_check_freshness(freshest, stale_days) or "")
+        finally:
+            store.close()
+
+
 def _scan_with_store(project: str, timeout: float, stale_days: int, scan_budget_s: float) -> str:
     """The body of :func:`scan`, run inside the mint deadline."""
     try:

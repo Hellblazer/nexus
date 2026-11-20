@@ -8,7 +8,7 @@ from nexus.hooks.session_context import BRIEF_TOPICS
 
 
 @click.command("brief")
-@click.argument("topic", required=False, type=click.Choice(BRIEF_TOPICS))
+@click.argument("topic", required=False, type=click.Choice(BRIEF_TOPICS, case_sensitive=False))
 def brief_cmd(topic: str | None) -> None:
     """Print context SessionStart does not inject: T2 memory titles, ready beads, tool notes, the Knowledge Map, the RDR count, or your startup note.
 
