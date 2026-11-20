@@ -223,16 +223,16 @@ class NoteUriMvvIntegrationTest {
             Map<String, String> after = noteRows(pg);
             assertThat(after.get(NOTE_TUMBLER)).as("the note follows in its own spelling")
                 .isEqualTo("nx-note://" + C_NEW + "/" + TITLE);
-            assertThat(after.get(RESIDUE_TUMBLER)).as("the residue row follows in its own spelling")
-                .isEqualTo("chroma://" + CODE_NEW + "/" + RESIDUE_PATH);
+            assertThat(after.get(RESIDUE_TUMBLER)).as("RDR-229 P2.10: residue keeps the segment it was written with")
+                .isEqualTo(RESIDUE_URI);
             assertThat(after.get(EXPORT_TUMBLER)).as("an nxexp:// identity is not a collection URI and is not moved")
                 .isEqualTo(EXPORT_NOTE);
             assertThat(aspectUri(pg)).as("the aspect follows the rename")
                 .isEqualTo("nx-note://" + C_NEW + "/" + SOURCE_PATH);
             assertThat(highlightUri(pg)).as("the highlight follows the rename")
                 .isEqualTo("nx-note://" + C_NEW + "/" + TITLE);
-            assertThat(columnsHolding(pg, "chroma://" + CODE + "/")).as("nothing names the old code collection")
-                .isEmpty();
+            assertThat(columnsHolding(pg, "chroma://" + CODE + "/")).as("only the residue row still names the old code collection")
+                .containsExactly("catalog_documents.source_uri");
             assertThat(columnsHolding(pg, "nx-note://" + C + "/")).as("only the export identity still names the old note collection")
                 .containsExactly("catalog_documents.source_uri");
 
@@ -447,6 +447,8 @@ class NoteUriMvvIntegrationTest {
                 .join(tables).on(tSchema.eq(cSchema).and(tTable.eq(cTable)).and(tType.eq("BASE TABLE")))
                 .where(cSchema.eq("nexus"))
                 .and(cType.in("text", "character varying", "jsonb", "json"))
+                // the registry's move texts (RDR-229 P2.10, catalog-049-2) name the scheme to find residue: SQL, not URI data
+                .and(cTable.ne("data_moves"))
                 .fetch();
             assertThat(cols).as("the sweep must see the URI columns it is checking")
                 .anySatisfy(r -> assertThat(r.value2()).isEqualTo("source_uri"));
