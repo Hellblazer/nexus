@@ -8,6 +8,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AspectRepository;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -251,8 +252,8 @@ class NoteUriRepairTest {
         Fx f = new Fx("empty");
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
         for (String k : List.of("stale_live", "rewrite", "merge", "merge_twin", "merge_sibling", "refused",
-                "refused_file_routed_collection", "refused_malformed", "tombstoned", "export_copies",
-                "export_copies_target_moved")) {
+                "refused_file_routed_collection", "refused_malformed", "refused_unregistered_collection",
+                "refused_unproven_content_type", "tombstoned", "export_copies", "export_copies_target_moved")) {
             assertThat(r.get(k)).as(k).isEqualTo(0);
         }
     }
@@ -507,17 +508,38 @@ class NoteUriRepairTest {
 
     // ── RDR-229 P2.9: a live collection's routing reads its row, never its name ──
 
+    private static final List<String> REFUSED_KEYS = List.of("refused_file_routed_collection", "refused_malformed",
+        "refused_unregistered_collection", "refused_unproven_content_type");
+
+    /** Registers {@code name} (any shape) under {@code tenant} with an explicit content type. */
+    private void register(String tenant, String name, String contentType) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, tenant, name);
+            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                .execute();
+        }
+    }
+
+    private void setContentType(String tenant, String name, String contentType) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(name)))
+                .execute();
+        }
+    }
+
     /** A collection with a prefix-free, minted-style label ({@code c<digits>}) and an explicit content type. */
     private String registerLabel(String tenant, String contentType) throws Exception {
         String label = "c" + (700000 + SEQ.incrementAndGet());
-        try (Connection su = pg.createConnection("")) {
-            var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(dsl, tenant, label);
-            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))
-                .execute();
-        }
+        register(tenant, label, contentType);
         return label;
+    }
+
+    private void assertOnlyRefusedKey(Map<String, Object> r, String key, int n) {
+        for (String k : REFUSED_KEYS) assertThat(r.get(k)).as(k).isEqualTo(k.equals(key) ? n : 0);
+        assertThat(r.get("refused")).isEqualTo(n);
     }
 
     @Test
@@ -529,10 +551,27 @@ class NoteUriRepairTest {
 
             Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
 
-            assertThat(r.get("refused_file_routed_collection")).as(contentType).isEqualTo(1);
+            assertOnlyRefusedKey(r, "refused_file_routed_collection", 1);
             assertThat(r.get("rewrite")).as(contentType).isEqualTo(0);
             assertThat(byTumbler(sampleOf(r).get("refused"), "n1").get("reason"))
                 .as(contentType).isEqualTo("file_routed_collection");
+        }
+    }
+
+    @Test
+    void apply_aPrefixFreeFileRoutedLabelLeavesTheUriUntouched() throws Exception {
+        for (String contentType : List.of("docs", "rdr", "code")) {
+            Fx f = new Fx("apply-" + contentType);
+            String label = registerLabel(f.tenant, contentType);
+            seedNote(f.tenant, "n1", label, f.nx(f.x1, "odd"));
+            seedNote(f.tenant, "n2", label, f.nx(f.x1, "odd2"));
+
+            Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+            assertOnlyRefusedKey(r, "refused_file_routed_collection", 2);
+            assertThat(r.get("rewritten")).as(contentType).isEqualTo(0);
+            assertThat(docUri(f.tenant, "n1")).as(contentType).isEqualTo(f.nx(f.x1, "odd"));
+            assertThat(docUri(f.tenant, "n2")).as(contentType).isEqualTo(f.nx(f.x1, "odd2"));
         }
     }
 
@@ -541,10 +580,11 @@ class NoteUriRepairTest {
         Fx f = new Fx("label-knowledge");
         String label = registerLabel(f.tenant, "knowledge");
         seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        seedNote(f.tenant, "n2", label, f.nx(f.x1, "beta"));
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
 
-        assertThat(r.get("rewrite")).isEqualTo(1);
+        assertThat(r.get("rewrite")).isEqualTo(2);
         assertThat(r.get("refused")).isEqualTo(0);
         assertThat(byTumbler(sampleOf(r).get("rewrite"), "n1").get("new_uri")).isEqualTo(f.nx(label, "alpha"));
     }
@@ -553,34 +593,106 @@ class NoteUriRepairTest {
     void census_aPrefixedNameWithAKnowledgeRowIsACandidate_theRowDecidesNotTheName() throws Exception {
         Fx f = new Fx("name-lies");
         String name = "docs__lies-" + SEQ.incrementAndGet() + "__minilm-l6-v2-384__v1";
-        try (Connection su = pg.createConnection("")) {
-            var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(dsl, f.tenant, name);
-            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, "knowledge")
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(f.tenant).and(CATALOG_COLLECTIONS.NAME.eq(name)))
-                .execute();
-        }
+        register(f.tenant, name, "knowledge");
         seedNote(f.tenant, "n1", name, f.nx(f.x1, "alpha"));
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
 
         assertThat(r.get("rewrite")).isEqualTo(1);
-        assertThat(r.get("refused_file_routed_collection")).isEqualTo(0);
+        assertThat(r.get("refused")).isEqualTo(0);
+    }
+
+    @Test
+    void census_aRowTypedAnythingButKnowledgeOrFileRoutedIsRefused_asUnprovenContentType() throws Exception {
+        // 'unknown' is what the hygiene walks leave on a row they could not type; a quarantine type is the other shape.
+        for (String contentType : List.of("unknown", "quarantine-docs")) {
+            Fx f = new Fx("unproven-" + contentType);
+            String label = registerLabel(f.tenant, contentType);
+            String prefixed = "docs__a-" + SEQ.incrementAndGet() + "__minilm-l6-v2-384__v1";
+            register(f.tenant, prefixed, contentType);
+            seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+            seedNote(f.tenant, "n2", prefixed, f.nx(f.x1, "beta"));
+
+            Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+            assertOnlyRefusedKey(r, "refused_unproven_content_type", 2);
+            assertThat(r.get("rewrite")).as(contentType).isEqualTo(0);
+            assertThat(r.get("rewritten")).as(contentType).isEqualTo(0);
+            assertThat(byTumbler(sampleOf(r).get("refused"), "n1").get("reason")).isEqualTo("unproven_content_type");
+            assertThat(byTumbler(sampleOf(r).get("refused"), "n2").get("reason")).isEqualTo("unproven_content_type");
+            assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
+            assertThat(docUri(f.tenant, "n2")).isEqualTo(f.nx(f.x1, "beta"));
+        }
+    }
+
+    @Test
+    void census_aRowTheCacheStillCallsKnowledgeButTheTableCallsDocsIsRefused() throws Exception {
+        Fx f = new Fx("stale-cache");
+        String label = registerLabel(f.tenant, "knowledge");
+        // The registry caches the row it reads, and upsertCollection's ON CONFLICT never evicts it.
+        assertThat(tenantScope.withTenant(f.tenant, ctx -> CollectionRegistry.require(ctx, f.tenant, label)).contentType())
+            .isEqualTo("knowledge");
+        setContentType(f.tenant, label, "docs");
+        assertThat(CollectionRegistry.cached(f.tenant, label)).as("the cache is still warm").isPresent();
+        seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+        assertOnlyRefusedKey(r, "refused_file_routed_collection", 1);
+        assertThat(r.get("rewrite")).isEqualTo(0);
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
+    }
+
+    @Test
+    void apply_aRowFlippedToDocsBetweenTheCensusAndTheLockIsNotRewritten() throws Exception {
+        Fx f = new Fx("flip");
+        String label = registerLabel(f.tenant, "knowledge");
+        seedNote(f.tenant, "n1", label, f.nx(f.x1, "alpha"));
+        CatalogRepository.setNoteUriRepairHookForTests(stage -> {
+            if (stage.equals("locked")) {
+                try {
+                    setContentType(f.tenant, label, "docs");
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }
+        });
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
+
+        assertThat(r.get("rewrite")).as("the census ran before the flip").isEqualTo(1);
+        assertThat(r.get("rewritten")).isEqualTo(0);
+        assertThat(docUri(f.tenant, "n1")).isEqualTo(f.nx(f.x1, "alpha"));
     }
 
     @Test
     void census_aLiveRowWhoseCollectionHasNoRegistryRow_isRefusedNotRewritten_andDoesNotFailTheCensus() throws Exception {
         Fx f = new Fx("unregistered");
+        String gone = "c999" + SEQ.incrementAndGet();
         seedNote(f.tenant, "ok", f.y, f.nx(f.x1, "fine"));
-        seedNote(f.tenant, "un", "c999" + SEQ.incrementAndGet(), f.nx(f.x1, "orphan"));
+        seedNote(f.tenant, "un", gone, f.nx(f.x1, "orphan"));
+        seedNote(f.tenant, "un2", gone, f.nx(f.x1, "orphan2"));
 
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, true, 1000, 5);
 
         assertThat(r.get("rewrite")).isEqualTo(1);
-        assertThat(r.get("refused")).isEqualTo(1);
+        assertOnlyRefusedKey(r, "refused_unregistered_collection", 2);
         assertThat(byTumbler(sampleOf(r).get("refused"), "un").get("reason")).isEqualTo("unregistered_collection");
         assertThat(docUri(f.tenant, "un")).as("never rewritten").isEqualTo(f.nx(f.x1, "orphan"));
+        assertThat(docUri(f.tenant, "un2")).isEqualTo(f.nx(f.x1, "orphan2"));
         assertThat(docUri(f.tenant, "ok")).isEqualTo(f.nx(f.y, "fine"));
+    }
+
+    @Test
+    void census_aDocsNamedCollectionWithNoRegistryRowIsRefused_asUnregistered_notByItsName() throws Exception {
+        Fx f = new Fx("docs-unregistered");
+        String ghost = "docs__ghost-" + SEQ.incrementAndGet() + "__minilm-l6-v2-384__v1";
+        seedNote(f.tenant, "g1", ghost, f.nx(f.x1, "alpha"));
+
+        Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
+
+        assertOnlyRefusedKey(r, "refused_unregistered_collection", 1);
+        assertThat(byTumbler(sampleOf(r).get("refused"), "g1").get("reason")).isEqualTo("unregistered_collection");
     }
 
     // ── chains and the chroma:// twin ─────────────────────────────────────────
