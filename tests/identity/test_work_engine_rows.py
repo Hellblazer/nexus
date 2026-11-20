@@ -26,7 +26,7 @@ from nexus.identity.ops import CallerFacts, IdentityEnv, is_alive
 from nexus.identity.scratch_scope import identity_scratch, scope_owner
 from nexus.identity.token_file import read_token_file, token_path
 from nexus.operators.delegated_identity import DelegatedIdentity
-from tests.identity.conftest import VERSION, World
+from tests.identity.conftest import T0, VERSION, World
 
 T1 = "2026-11-17T09:00:00Z"
 REQUIRE_ENV = "NX_IDENTITY_REQUIRE_STEP2"
@@ -260,10 +260,48 @@ def row_the_work_limit_forgets_finished_rows_once_and_registers(world: World) ->
     assert current in refs and old not in refs, "the engine's holder session decides which wait is left over"
 
 
+def row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_token_file(world: World) -> None:
+    """nexus-hczdo: an MCP server outlives an in-place ``/restart``. The restart keeps the Claude pid and gives the
+    registry file a new ``startedAt``, so the generation-2 token lives in ``<pid>.<new startedAt>.token`` while the
+    server's earlier calls had named ``<pid>.<old startedAt>.token``. The server's identity-scope put and list must
+    send generation 2's token, not the still-unexpired generation-1 file's (a 401 on ``/v1/t1/*``, scope=session
+    working all the while). Discovery is the real one (the registry names the file), not the ``_discover`` seam."""
+    from nexus.identity import holder
+
+    world.now = time.time()
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    assert world.hook(100, "startup", "s-restart").generation == 1
+    session = _session(world)
+    first = token_path(world.identity_dir, 100, 100_000)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.delenv("NX_IDENTITY_TOKEN", raising=False)
+        monkeypatch.setattr(token_header, "_ancestor", lambda: (100, world.identity_dir))
+        monkeypatch.setattr(holder, "claude_sessions_dir", lambda: world.procs.sessions_dir)
+        token_header.reset_for_tests()
+        assert token_header.token_file_path() == first
+        before = identity_scratch(session, client=world.client)
+        before.put(content="written at generation 1", tags="rdr253")
+
+        world.registry(100, 999_000, T0, session_id="s-restart", name="alpha")    # the in-place /restart: same pid, new startedAt
+        out = world.hook(100, "resume", "s-restart")
+        assert out.generation == 2, out
+        second = token_path(world.identity_dir, 100, 999_000)
+        assert read_token_file(second).token != read_token_file(first).token and first.exists(), "both files are on disk"
+
+        after = identity_scratch(session, client=world.client)                    # the MCP builds a store per call
+        assert [e["content"] for e in after.list_entries()] == ["written at generation 1"]
+        after.put(content="written at generation 2", tags="rdr253")
+        assert sorted(e["content"] for e in after.list_entries()) == ["written at generation 1", "written at generation 2"]
+        assert len(before.list_entries()) == 2, "a store built before the restart reads on the new token too"
+        assert token_header.token_file_path() == second, "the server follows its registry file to the new token file"
+
+
 ROWS = (
     row_a_membership_write_by_a_non_owner_is_refused_and_the_owners_stays,
     row_identity_scratch_survives_a_clear_and_a_session_close_and_is_refused_to_a_non_owner,
     row_a_delegated_child_reads_its_parents_identity_scratch_and_cannot_write_it,
+    row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_token_file,
     row_a_process_with_no_identity_has_no_identity_scratch,
     row_a_note_in_the_identity_project_is_still_found_after_a_rename,
     row_work_rows_follow_the_identity_and_a_crashed_owners_running_row_is_stale,
