@@ -111,8 +111,10 @@ class _ByMetaSpy:
         monkeypatch.setattr(HttpCatalogClient, "documents_by_meta", counted)
 
 
-def _moved(kind: str, tmp_path: Path, corpus: str, *, streaming: str | None = "never") -> tuple[Path, Path, str, object]:
-    """Index a file under ``a/``, move it to ``b/``, index it again: ``(old, new, old tumbler, the second run)``."""
+def _moved(kind: str, tmp_path: Path, corpus: str, *, streaming: str | None = "never",
+           between=None) -> tuple[Path, Path, str, object]:
+    """Index a file under ``a/``, move it to ``b/``, index it again: ``(old, new, old tumbler, the second run)``.
+    ``between`` is called after the first run and before the second (to start a spy that counts the second only)."""
     make = _pdf if kind == "pdf" else _md
     old = make(tmp_path / "a")
     first = _index(kind, old, corpus, streaming=streaming)
@@ -122,15 +124,20 @@ def _moved(kind: str, tmp_path: Path, corpus: str, *, streaming: str | None = "n
     new = tmp_path / "b" / old.name
     new.parent.mkdir(parents=True)
     shutil.move(str(old), str(new))
+    if between is not None:
+        between()
     return old, new.resolve(), old_tumbler, _index(kind, new.resolve(), corpus, streaming=streaming)
 
 
 # ── the hint ────────────────────────────────────────────────────────────────
 
 
-def test_moved_pdf_prints_dry_run_hint_on_registering_run(tmp_path):
-    _old, new, old_tumbler, second = _moved("pdf", tmp_path, _unique("hint-pdf"))
+def test_moved_pdf_prints_dry_run_hint_on_registering_run(tmp_path, monkeypatch):
+    spies: list[_ByMetaSpy] = []
+    _old, new, old_tumbler, second = _moved("pdf", tmp_path, _unique("hint-pdf"),
+                                            between=lambda: spies.append(_ByMetaSpy(monkeypatch)))
     assert second.exit_code == 0, second.output
+    assert spies[0].calls == 1, "the registering run asked the metadata route exactly once, for the one file it wrote"
     assert _hint_lines(second) == [f"{_HINT}{old_tumbler} --new-path {shlex.quote(str(new))}"]
     assert second.output.rstrip("\n").splitlines()[-1] == _hint_lines(second)[0], "the hint is the last line"
     assert "--no-dry-run" not in second.output and "--confirm" not in second.output
@@ -309,7 +316,10 @@ def test_failing_metadata_query_leaves_exit_code_unchanged(tmp_path, monkeypatch
     old.unlink()
     new = _pdf(tmp_path / "b")
 
+    reached: list[int] = []
+
     def timeout(self, **kwargs):
+        reached.append(1)
         raise httpx.ReadTimeout("by-meta timed out")
 
     monkeypatch.setattr(HttpCatalogClient, "documents_by_meta", timeout)
@@ -317,4 +327,5 @@ def test_failing_metadata_query_leaves_exit_code_unchanged(tmp_path, monkeypatch
     result = _index("pdf", new, corpus)
     assert result.exit_code == 0, result.output
     assert _hint_lines(result) == []
+    assert len(reached) == 1, "non-vacuity: the patched metadata query was reached, once"
     assert _tumbler(new), "the run registered and indexed the file as it always does"
