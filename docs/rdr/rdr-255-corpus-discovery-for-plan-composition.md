@@ -686,6 +686,16 @@ Not run; this RDR is a draft.
    split: engine compute for clustering, tuples for stage fan-out and
    lifecycle status. Choose, or split.
 
+### Sam's answers (2026-11-19)
+
+1. **When discovery runs:** both. The structural profile (record types, key patterns, field names, collection count and fan-out) is built at index time; the model-backed part (question shapes, facet schemas) runs on demand through `nx corpus profile`. Not lazily on a first question.
+2. **Facet extraction spend:** all records, no ceiling. Discovery extracts facets from every document, not only key-carrying record types, and does not stop to ask on cost. The run should still report what it spent.
+3. **Facet schema owner:** the model proposes a schema per collection and Sam confirms it (accept, edit or reject) before it is used.
+4. **Shipped plans:** shape-generic only. Dataset wording, field names and retrieval settings come from the corpus profile as bindings; `entity-resolution.yml`'s dataset wording moves out of the shipped library.
+5. **Scope:** decided after the coverage-off control. If the plan still wins once both paths may answer, the profile and the gate stay together here; if the gap closes, this RDR keeps the profile alone and the gate is dropped.
+6. **Voyage arm:** held until the coverage-off control is read.
+7. **Where discovery lives:** split. The engine runs the clustering compute; the tuple space carries stage fan-out and lifecycle status, outside the lookup path.
+
 ## References
 
 - T2 `nexus_rdr/herb-full-pool-company-result-2026-11-19`
@@ -704,6 +714,7 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: Sam answered open questions 1-7 (recorded under Open Questions for Sam).
 - 2026-11-19: research findings 19-20 added (plan experiment part 1 result and its confounds; the 8.5.1 cloud rerank timing as a corpus-profile fact); Deciding Experiment records the part 1 result.
 - 2026-11-19: research findings 16-18 added (record-shaped lexical retrieval; AgenticScholar full text: scope/task split, conservative reuse, offline curation); finding 4 marked superseded; Option B gains the scope/task step.
 - 2026-11-19: research finding 15: Gap 2 rewritten from the stock run's telemetry (aggregate questions classified as lookup; category route after eligibility); Option B rewritten.
