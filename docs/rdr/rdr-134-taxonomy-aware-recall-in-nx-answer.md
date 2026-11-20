@@ -2,7 +2,7 @@
 title: "RDR-070 Phase 5: Taxonomy-Aware Recall in nx_answer — Teach the Composed-Retrieval Path to Read the Taxonomy It Already Has"
 id: RDR-134
 type: Architecture
-status: accepted
+status: abandoned
 priority: high
 author: Hal Hildebrand
 reviewed-by: self
@@ -11,7 +11,7 @@ accepted_date: 2026-11-16
 related_issues: [nexus-9napz, nexus-n1908]
 related_rdrs: [RDR-070, RDR-075, RDR-156, RDR-179, RDR-191, RDR-193, RDR-227, RDR-229, RDR-232, RDR-243]
 related_tests: []
-implementation_notes: ""
+implementation_notes: "Abandoned 2026-11-19 (Sam): built and measured, goal not met. Engine route (0.1.197) and the client option shipped dormant; search.topic_route_nx_answer stays off. Both pre-declared checks failed (Results); the fan-out recall problem is still open."
 ---
 
 # RDR-134: RDR-070 Phase 5 — Taxonomy-Aware Recall in nx_answer
@@ -234,7 +234,11 @@ measured in the spike, not as established for the shipped route.
 - **Measured** (`-13`): on the production set, top-1 routing raises NDCG@3 on
   the RDR questions from 0.335 to 0.470 (+0.135; 9 better, 0 worse) with
   recall@10 (share of the grade-3 sources among the top ten documents) 0.817
-  to 0.823. Title questions: 0.500 to 0.538 (1 better, 0 worse). All 33:
+  to 0.823. The 2026-11-19 validation measured the same production call at
+  the same NDCG@3 (0.335) but recall@10 0.777: the two runs differ in engine
+  (0.1.194 against 0.1.197), in corpus content three days apart, and in the
+  client's calibrated pool cut (5b366f0d5), and the gap was not reconciled, so
+  recall figures from the two runs are not comparable. Title questions: 0.500 to 0.538 (1 better, 0 worse). All 33:
   0.375 to 0.487, 10 better, 0 worse.
 - **Verified** (`-13`): the production call `search_cross_corpus`, its rows
   ordered by distance, scores exactly the OFF arm. Unordered, as it returns
@@ -309,23 +313,23 @@ Status as of the close-out (2026-11-19). At the gate the first two were
 ticked as verified and the other three were open; the measurements in Results
 changed all five.
 
-- [ ] Topic routing improves cross-collection retrieval — **Status**: held in
+- [waived: measured, not met; RDR abandoned] Topic routing improves cross-collection retrieval — **Status**: held in
   the client-side spike only, and in-sample (the 25 RDR questions are among
   leg 1's 26; `-10`, `-13`). The engine route did not reproduce it: 0.385
   against the 0.44 bar (`-18`). The `nx_answer` A/B failed (`-17`). —
   **Method**: Spike, then the Minimum Viable Validation and Step 9.
-- [ ] Per-topic centroids are enough; no per-collection summary embedding is
+- [waived: not established; RDR abandoned] Per-topic centroids are enough; no per-collection summary embedding is
   needed — **Status**: held in the client-side spike only, in-sample (`-10`,
   `-13`); the engine route's shortfall against the spike is unexplained (see
   Results). — **Method**: Spike.
-- [ ] Ranking centroids with the query-type vector does at least as well as
+- [waived: not measured, Step 6 not run] Ranking centroids with the query-type vector does at least as well as
   the document-type vector the spike used — **Status**: Documented (`-11`),
   not measured; Step 6, which would have measured it, was not run.
-- [ ] One routed engine request costs at most 1.5 times the latency of the
+- [waived: measured, not met; RDR abandoned] One routed engine request costs at most 1.5 times the latency of the
   same request unrouted — **Status**: measured, not met as measured: 1.66
   times (`-18`), a figure that does not isolate the cost of routing (see
   Results). — **Method**: Minimum Viable Validation.
-- [ ] The gain carries through to `nx_answer`'s answers and holds for
+- [waived: measured, not met; RDR abandoned] The gain carries through to `nx_answer`'s answers and holds for
   questions whose answer is a generic document — **Status**: measured, not
   met: the 15 generic questions lost 0.158 NDCG@3 on a partial run that Sam
   accepted as a FAIL (`-17`). — **Method**: Steps 8 and 9.
@@ -659,7 +663,7 @@ numbers go to Sam. If it misses on quality and Step 6 does not recover it,
 the numbers, the coverage values and the short-row counts go to Sam with
 routing left off.
 
-### Phase 1: Engine route and client option
+### Phase 1 (CLOSED, 2026-11-19): Engine route and client option
 
 #### Step 1: Topic-set search functions
 
@@ -743,7 +747,7 @@ an exact scan. Run the Minimum Viable Validation.
 Rank centroids with a second, document-type query embedding per model group
 and rerun Step 5a. Record the cost of the extra embedding.
 
-### Phase 2: nx_answer wiring and default
+### Phase 2 (CLOSED, 2026-11-19): nx_answer wiring and default
 
 #### Step 7: Plan runner wiring
 
@@ -848,7 +852,8 @@ deferred, and it failed all three bars (Results).
 Six SQL functions (the topic-set search and the coverage count, one of each
 per dimension), a coverage cache over the count, one request field, one capability flag and its edge
 allowlist entry, one setting carried like `chash_allow`, one log event, and
-two benchmark scripts.
+two benchmark scripts. After the close all of it is dormant: kept in the code,
+off by default, with no consumer (Results, Disposition of the problem).
 The design reuses the RDR-156 routes rather than adding an index.
 
 ## References
@@ -879,6 +884,30 @@ Both pre-declared checks ran on 2026-11-19 and both failed. The outcome:
 search-per-collection, the topic-set and coverage functions, the
 `vector_topic_route_supported` flag) and the client option stay in the code,
 and nothing uses them by default.
+
+### Disposition of the problem
+
+The RDR is abandoned, not closed as implemented: Sam's decision
+(2026-11-19), after both checks failed. Against the Problem Statement:
+
+- Gap 1 (nx_answer ignores the taxonomy) stays as it was for every user:
+  with the setting off, no `nx_answer` step reads the taxonomy. The wiring
+  exists (Step 7) and is unused.
+- Gap 2 (no query-time topic selection) is closed in mechanism only: the
+  engine can now select topics per collection at query time, but on this
+  corpus the selection did not improve the production search (0.385 against
+  the 0.44 bar) and hurt `nx_answer` on generic-answer questions.
+- The underlying problem, prose fan-out recall (0.335 NDCG@3 across the
+  production set against 0.591 searched alone, `-13`), is open. No successor
+  RDR or bead owns it yet. The cheaper candidate causes the validation's
+  bead listed (per-collection k, thresholds, rerank) were not tested, so the
+  failure cannot be told apart from a property of the engine route, and the
+  spike's gain may partly reflect its smaller per-collection k (20 against
+  production's 40).
+- The dormant code is kept, not removed; nobody owns removing it. Its five
+  name-keyed sites are noted on RDR-229's epic (nexus-p2m1x), which inherits
+  them. The coverage cache still costs an invalidation on the write routes
+  that drop it, with no consumer while the setting is off.
 
 ### Run order and approval
 
@@ -1117,3 +1146,11 @@ route did not reproduce it.
   the sensitivity field, the Step 1 router decision, the clamp and the
   `topic_route_*` keys, and the stale line cites are corrected; RDR-229 is
   accepted and RDR-193 closed.
+- 2026-11-19: Closed as abandoned (Sam: "Abandoned (Recommended)", after the
+  rdr-close critique returned partial, T2
+  `nexus/critique-768f71f2d-nexus-7fku2.2.7-2026-11-20`). Added the outcome
+  to `implementation_notes`, a gap-by-gap disposition, the dormant-code note
+  and its RDR-229 hand-off (nexus-p2m1x), the recall-baseline caveat, and a
+  changelog line against turning the setting on; open Critical Assumption
+  boxes waived with their status; both phases marked closed. Post-mortem:
+  `post-mortem/rdr-134-taxonomy-aware-recall-in-nx-answer.md`.
