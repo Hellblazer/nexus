@@ -393,6 +393,13 @@ class DropTenantPartitionsIntegrationTest {
     /** A model no partition carries: a search for it prunes every partition, so only the root is locked. */
     private static final String NO_SUCH_MODEL = "p225-no-such-model";
 
+    /** The function's bounds (vectors-063): attempts, per-attempt lock_timeout, and the backoff step (0.2 s x attempt). */
+    private static final int ATTEMPTS = 5;
+    private static final long ATTEMPT_TIMEOUT_MS = 500;
+    private static final long BACKOFF_STEP_MS = 200;
+    /** Five full waits plus the four sleeps between them: 5 x 500 + 200 x (1 + 2 + 3 + 4). */
+    private static final long MIN_GIVE_UP_MS = ATTEMPTS * ATTEMPT_TIMEOUT_MS + BACKOFF_STEP_MS * (ATTEMPTS - 1) * ATTEMPTS / 2;
+
     private static final Condition IS_RELATION_LOCK = DSL.field(DSL.name("locktype"), String.class).eq("relation");
 
     /**
@@ -437,6 +444,11 @@ class DropTenantPartitionsIntegrationTest {
     /** Whether backend {@code pid} is queued for a lock on the root of nexus.chunks. */
     private static boolean waitingForTheRoot(Connection obs, int pid) {
         return relationLocks(obs, pid).stream().anyMatch(l -> !l.granted() && l.relation().equals("nexus.chunks"));
+    }
+
+    /** Whether backend {@code pid} is queued for any relation lock. */
+    private static boolean waitingForAnyLock(Connection obs, int pid) {
+        return relationLocks(obs, pid).stream().anyMatch(l -> !l.granted());
     }
 
     /** The locks of {@code mode} backend {@code pid} holds on anything below the roots of chunks or taxonomy_centroids. */
@@ -499,7 +511,7 @@ class DropTenantPartitionsIntegrationTest {
 
             // The reader goes on into the partitions the drop will detach: it must get them at once.
             dsl(s).select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("lock_timeout"), DSL.val("3s"), DSL.val(true))).fetch();
-            assertThat(dsl(s).fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(CODE_3))).isNotNegative();
+            dsl(s).fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(CODE_3));   // the call returning (inside lock_timeout) is the assertion
             assertThat(locksBelowTheRoots(obs, sPid, below, "AccessShareLock"))
                 .as("the reader now holds partitions below the root (and the lock matching sees them)").isNotEmpty();
             s.commit();
@@ -537,10 +549,11 @@ class DropTenantPartitionsIntegrationTest {
             long t0 = System.nanoTime();
             assertThatThrownBy(() -> PartitionScratch.dropTenantPartitions(dsl(d), TA))
                 .satisfies(t -> assertThat(sqlState(t)).as("lock_not_available").isEqualTo("55P03"))
-                .hasMessageContaining("could not take the root locks without stalling searches")
+                .hasMessageContaining("held a lock it needs; rerun, after index builds finish if one is running")
                 .hasMessageContaining(TA);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-            assertThat(elapsedMs).as("five attempts of 500ms each at least").isGreaterThanOrEqualTo(2500);
+            assertThat(elapsedMs).as("every attempt waits its full lock_timeout and sleeps its backoff before the next")
+                .isGreaterThanOrEqualTo(MIN_GIVE_UP_MS);
             s.rollback();
         }
         try (Connection obs = pg.createConnection("")) {
@@ -553,5 +566,90 @@ class DropTenantPartitionsIntegrationTest {
             assertThat(leaves(dsl(a), TA)).isEmpty();
         }
         assertThat(rowCounts(TA)).allSatisfy((t, n) -> assertThat(n).as("rows left in %s", t).isZero());
+    }
+
+    /**
+     * The cycle a root-first lock alone leaves open: a manifest writer holds RowExclusive on a table that references
+     * chunks and then needs the root for its foreign-key check, while the drop holds the roots and wants that table
+     * to detach. The drop now takes the referencing tables first, so it queues behind the writer holding nothing the
+     * writer needs; the writer reaches the root, commits, and the drop completes. No 40P01 on either side.
+     */
+    @Test
+    void aManifestWriterHoldingTheReferencingTableThenNeedingTheRoot_neverDeadlocksWithTheDrop() throws Exception {
+        final String TA = "p225-drop-writer";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 10000L);
+        }
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try (Connection w = admin(); Connection d = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            w.setAutoCommit(false);
+            PgContainerHelper.lockTable(w, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            int dPid = backendPid(d);
+            Future<Integer> drop = pool.submit(() -> PartitionScratch.dropTenantPartitions(dsl(d), TA));
+            awaitWhileRunning("the drop queued behind the writer", drop, () -> waitingForAnyLock(obs, dPid));
+
+            String writerState = null;
+            try {
+                dsl(w).fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(NO_SUCH_MODEL));   // the foreign-key check's root access
+                w.commit();
+            } catch (RuntimeException e) {
+                writerState = sqlState(e);
+                w.rollback();
+            }
+            assertThat(writerState).as("the writer reaches the root and commits; a deadlock victim would be 40P01").isNull();
+            assertThat(drop.get(30, TimeUnit.SECONDS)).as("the drop completes once the writer is done").isEqualTo(expectedLeaves);
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+        }
+    }
+
+    /**
+     * Index builds (CREATE INDEX CONCURRENTLY), REINDEX CONCURRENTLY and vacuum hold SHARE UPDATE EXCLUSIVE on a
+     * leaf for minutes. The drop locks only its own tenant's partitions, so such a lock on ANOTHER tenant's leaf must
+     * not make it give up.
+     */
+    @Test
+    void aShareUpdateExclusiveLockOnAnotherTenantsLeaf_doesNotBlockTheDrop() throws Exception {
+        final String TA = "p225-drop-othersue";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 11000L);
+        }
+        int expectedLeaves;
+        String bystanderLeaf;
+        try (Connection obs = pg.createConnection("")) {
+            expectedLeaves = modelPartitions(dsl(obs));
+            bystanderLeaf = leaves(dsl(obs), TB).getFirst();
+        }
+        try (Connection s = admin(); Connection d = admin()) {
+            s.setAutoCommit(false);
+            PgContainerHelper.lockTable(s, DSL.table(DSL.name("nexus", bystanderLeaf)),
+                PgContainerHelper.LockMode.SHARE_UPDATE_EXCLUSIVE);
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(d), TA)).isEqualTo(expectedLeaves);
+            s.rollback();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+            assertThat(leaves(dsl(a), TB)).contains(bystanderLeaf);
+        }
+    }
+
+    /** A tenant with no leaves is answered from the catalog: 0, and no lock on either root (nothing to wait for). */
+    @Test
+    void aTenantWithNoLeaves_returnsZeroWithoutLockingTheRoots() throws Exception {
+        try (Connection a = admin(); Connection obs = pg.createConnection("")) {
+            // read the partition names first: once the call holds locks, a catalog read of a partition bound waits for it
+            java.util.Set<String> roots = new java.util.HashSet<>(belowTheRoots(obs));
+            roots.add("nexus.chunks");
+            roots.add("nexus.taxonomy_centroids");
+            a.setAutoCommit(false);
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(a), "p225-no-leaves-at-all")).isZero();
+            assertThat(relationLocks(obs, backendPid(a)).stream().filter(l -> roots.contains(l.relation())).toList())
+                .as("no lock of any mode on either root or anything below it").isEmpty();
+            a.rollback();
+        }
     }
 }

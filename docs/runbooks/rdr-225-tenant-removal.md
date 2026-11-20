@@ -28,9 +28,10 @@ owner is the role the function and its tests are written for.
 -- 1 and 2: delete the tenant's manifest, topic-assignment and orphaned-at rows, then DETACH and DROP its leaf
 -- under every model partition of chunks and taxonomy_centroids. Returns the number of leaves dropped
 -- (two parents x the number of model partitions; 0 on a repeat or for a tenant with no leaves).
-BEGIN;
+-- Run it as ONE autocommit statement, exactly as written: the locks it takes are held until the transaction
+-- commits, so a BEGIN ... COMMIT typed around it by hand keeps every search and manifest write waiting for as long
+-- as you take to type the COMMIT.
 SELECT nexus.drop_tenant_partitions('<tenant>');
-COMMIT;
 
 -- 3: revoke access. A separate, visible statement: removing credentials is an authorization decision.
 BEGIN;
@@ -40,8 +41,16 @@ COMMIT;
 ```
 
 The function takes the same per-tenant advisory lock as `create_tenant_partitions`, so a concurrent leaf creation
-for that tenant waits for it. It sets `lock_timeout = 10s`: if a reader holds one of the leaves, it fails rather
-than queueing writers behind it. Retry when the reader is gone.
+for that tenant waits for it. It reads the tenant's leaves first (none: it returns 0 and locks nothing), then takes
+ACCESS EXCLUSIVE locks on the two roots (`nexus.chunks`, `nexus.taxonomy_centroids`), on the manifest,
+topic-assignment, orphaned-at and collection tables, and on the tenant's own partitions. While it holds them, every
+search and every manifest write waits; uncontended that is milliseconds (the `NOTICE` it raises reports the hold, up to
+function return). Each lock is waited for at most 500 ms, and it tries five times with a short backoff, so a search or a write that arrives while it waits queues for at most 500 ms.
+
+If something holds one of those locks through all five attempts (a search, a manifest write, an index build or a
+vacuum on the tenant's partitions) it gives up with SQLSTATE `55P03` (`lock_not_available`) naming the tenant, and
+changes nothing. That error is retryable: run the statement again, after any index build on the tenant's partitions
+has finished (check `pg_stat_progress_create_index`). Teardown code retries on `55P03` and on `40P01`.
 
 Order matters. A token left in place while the leaves are dropped cannot write (no leaf for its tenant), and the
 leaf-creating trigger fires on token INSERT only, so the leaves do not come back. Deleting tokens first is also

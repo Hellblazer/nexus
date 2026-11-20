@@ -2277,10 +2277,11 @@
     <include file="db/changelog/identity-005-work-kind-agent.xml"/>
 
     <!--
-        nexus.drop_tenant_partitions takes the roots of nexus.chunks and nexus.taxonomy_centroids ACCESS EXCLUSIVE before it
-        detaches any leaf (the 2026-11-20 production deadlock against a search, engine 0.1.199), in five bounded attempts so
-        searches queue behind a waiting request for at most 500 ms at a time; the included file's header has the reasoning.
-        No DATA EFFECT: function definition only. After identity-005, before the grants-nexus-svc.xml runAlways block.
+        nexus.drop_tenant_partitions takes the locks its teardown needs up front (the tables around the leaves, the two roots ONLY and
+        the tenant's own partitions), each waited for at most 500 ms and retried up to five times, then lock_not_available naming
+        the tenant (the 2026-11-20 production deadlock against a search, engine 0.1.199); the included file's header has the
+        reasoning and what the order does and does not promise. DATA EFFECT: none. Function definition only. After identity-005,
+        before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/vectors-063-drop-tenant-partitions-lock-order.xml"/>
 
