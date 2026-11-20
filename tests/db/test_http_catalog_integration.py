@@ -1280,6 +1280,25 @@ class TestETLFidelity:
         assert found.model_version == 1
         assert cat.find_collection("knowledge", "p213-no-such-subject", "bge-base-en-v15-768") is None
 
+    def test_a_grandfathered_slug_with_a_blank_version_is_answered_as_it_is(self, cat) -> None:
+        """RDR-229 P2.8, engine 0.1.200 (RDR-229 line <TBD>): the lead's row through the real engine
+        route: ``legacy_grandfathered`` true, a non-conformant slug name, an empty ``model_version``.
+        ``for_tuple`` answers it; the client answers the row as it is with no version, and only a
+        bump refuses, naming both fixes."""
+        slug = "p213-blank-notes-from-2024"
+        model = "bge-base-en-v15-768"
+        cat.register_collection(
+            slug, content_type="knowledge", owner_id="1-213", embedding_model=model, model_version="",
+        )
+        assert cat.get_collection(slug)["legacy_grandfathered"] is True, "guard: the row is flagged"
+        assert cat.get_collection(slug)["model_version"] == "", "guard: the version is blank"
+
+        found = cat.find_collection("knowledge", "1-213", model)
+        assert found is not None and found.label == slug and found.model_version is None
+        assert cat.collection_for("knowledge", "1.213", model).render() == slug
+        with pytest.raises(ValueError, match="set the row's model_version, or re-register the collection"):
+            cat.collection_for("knowledge", "1.213", model, bump=True)
+
     def test_rename_collection(self, cat) -> None:
         """rename_collection returns the count of DOCUMENTS updated (not collections).
 
