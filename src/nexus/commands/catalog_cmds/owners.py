@@ -130,7 +130,7 @@ _CENSUS_ROW_CAP = 20
 
 #: nexus-cw262: the mutation arms this bead ships. ``reactivate`` added in
 #: round 3 (T2 21467 Critical mitigation (a)) as the undo affordance.
-_MUTATION_ACTIONS = ("deactivate", "reactivate")
+_MUTATION_ACTIONS = ("deactivate", "reactivate", "move")
 
 #: The exact command this module tells an operator to run for the mutation
 #: arm — printed verbatim in both the human report and the JSON payload so
@@ -655,13 +655,18 @@ def _run_reactivate(cat: "CatalogReader", owner_prefix: str, *, will_act: bool, 
         "Mutation arm (nexus-cw262). 'deactivate' requires --census (acts on "
         "path_vanished and not_a_repository owners with 0 live documents). 'reactivate' requires "
         "--owner <tumbler_prefix> (the undo affordance for a deactivate "
-        "misfire, or any manual reversal)."
+        "misfire, or any manual reversal). 'move' (RDR-254) keeps a document's or an owner's identity when "
+        "its path moves: --document <tumbler> --new-path <file>, or --owner <prefix> --new-root <dir>."
     ),
 )
 @click.option(
     "--owner", "owner_prefix", default=None,
-    help="Target tumbler_prefix for --execute reactivate.",
+    help="Target tumbler_prefix for --execute reactivate, or the owner to re-root with --execute move.",
 )
+@click.option("--document", "document", default=None, help="--execute move: the document tumbler to re-point.")
+@click.option("--new-path", "new_path", default=None, help="--execute move --document: the file's new path (must exist).")
+@click.option("--new-root", "new_root", default=None,
+              help="--execute move --owner: the repository's new directory (must be a git work tree).")
 @click.option(
     "--dry-run/--no-dry-run", default=True,
     help="Report-only (default). Use --no-dry-run (with --confirm) to mutate.",
@@ -672,7 +677,8 @@ def _run_reactivate(cat: "CatalogReader", owner_prefix: str, *, will_act: bool, 
 )
 def owners_cmd(
     as_json: bool, do_census: bool, include_deactivated: bool,
-    action: str | None, owner_prefix: str | None, dry_run: bool, confirm: bool,
+    action: str | None, owner_prefix: str | None, document: str | None, new_path: str | None,
+    new_root: str | None, dry_run: bool, confirm: bool,
 ) -> None:
     """List registered owners, or run a root-path census with --census.
 
@@ -690,6 +696,10 @@ def owners_cmd(
           the misfire-recovery path alongside the automatic reactivate a
           live re-registration (e.g. `nx index repo` on a remounted path)
           already performs with no separate command.
+      --execute move --document <tumbler> --new-path <file>
+      --execute move --owner <prefix> --new-root <dir>
+          RDR-254: keep an identity when a path moves. A dry run by default; it prints the counts and the
+          exact command that writes. See docs/cli-reference.md, `nx catalog owners --execute move`.
     """
     if action == "deactivate" and not do_census:
         raise click.ClickException(
@@ -701,6 +711,9 @@ def owners_cmd(
         raise click.ClickException(
             "--execute reactivate requires --owner <tumbler_prefix>."
         )
+    from nexus.commands.catalog_cmds import owner_move  # noqa: PLC0415 — deferred: owner_move imports this module
+
+    owner_move.check_usage(action, document, new_path, owner_prefix, new_root, do_census)
     if as_json and action is not None:
         raise click.ClickException(
             "--json cannot be combined with --execute: the mutation arms "
@@ -708,6 +721,11 @@ def owners_cmd(
             "stdout contract. Run --json alone for the census, then "
             "--execute separately."
         )
+
+    if action == "move":
+        owner_move.run_move(document=document, new_path=new_path, owner=owner_prefix, new_root=new_root,
+                            dry_run=dry_run, confirm=confirm)
+        return
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 

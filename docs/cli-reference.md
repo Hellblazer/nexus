@@ -1672,6 +1672,8 @@ nx catalog owners [--include-deactivated] [--json]
 nx catalog owners --census [--include-deactivated] [--json]
 nx catalog owners --census --execute deactivate [--no-dry-run] [--confirm]
 nx catalog owners --execute reactivate --owner <tumbler_prefix> [--no-dry-run] [--confirm]
+nx catalog owners --execute move --document <tumbler> --new-path <file> [--no-dry-run] [--confirm]
+nx catalog owners --execute move --owner <prefix> --new-root <dir> [--no-dry-run] [--confirm]
 ```
 
 Read-only classification of every registered repo owner's on-disk `repo_root` (nexus-7kl32): `healthy` (root exists, has content), `path_vanished` (root does not exist at all — the bench-index-sandbox / throwaway-probe-checkout / stale-worktree debris population), `path_exists_empty` (root is still there but has been emptied out), `not_a_repository` (root is a directory with content, but neither it nor any ancestor holds a `.git` entry and no immediate child is a git directory, so the parent of a bare repository with worktrees or of a `--separate-git-dir` git dir stays `healthy`: an index run pointed at a directory of repositories instead of one of them, nexus-0rjbm), or `unreadable` (existence/contents could not be confirmed, e.g. a permission error — deliberately never folded into `healthy`, same honesty principle as `nx doctor`'s git-hooks fix below). Owners with no `repo_root` set are reported separately and excluded from all five buckets. Since round 3 (T2 21467), classification only ever runs against the CURRENTLY ACTIVE owner set — deactivated owners are excluded from these buckets on every pass (they were already handled) and, if `--include-deactivated` is not passed, only a hidden-count hint is printed. The classification call itself now always fetches the full (active + deactivated) set in one round trip, both to support `--include-deactivated` and to compute the engine-capability signal below without a second call.
@@ -1689,6 +1691,23 @@ Immediately before EACH write, the execute loop RE-VERIFIES that specific owner'
 The mutation arm's availability depends on which engine build the tenant is connected to. `nx catalog owners --census`'s `--json` output reports `mutation_status` as `"available"`, `"unavailable"` (the connected engine confirmed NOT to carry the nexus-cw262 owner-deactivate route — e.g. the live cloud engine before its next tag deploys), or `"unknown"` (no owners to read the signal from either way). The human report and `nx doctor`'s git-hooks fix_suggestion word themselves accordingly — neither ever claims `--execute deactivate` works against an engine confirmed not to support it.
 
 `nx doctor`'s git-hooks check (a `path_vanished`/`path_exists_empty` owner used to render there as a signal-free `ok=True` "could not check") points a dead CATALOG owner, and a catalog owner whose root is not a git repository, at this verb's `--execute deactivate` arm, capability-qualified as above — but a dead owner registered only in the legacy `repos.json` file is invisible to this census (catalog owners only); doctor's suggestion for that case is to edit `repos.json` directly instead.
+
+### nx catalog owners --execute move
+
+```
+nx catalog owners --execute move --document <tumbler> --new-path <file> [--no-dry-run] [--confirm]
+nx catalog owners --execute move --owner <prefix> --new-root <dir> [--no-dry-run] [--confirm]
+```
+
+Keeps an identity when a path moves (RDR-254, GH #1571). A curator document's identity is its path, so a PDF or markdown file that moved and was indexed again from its new path is a second document there, and the first keeps its dead path, its links and its aspects. `--document` re-points the old document at the file's new path and absorbs the row already registered there: the old tumbler survives, the new row is trashed, and its links, aspect rows and highlights move onto the survivor. `--owner` does the same for a repository that moved: it re-roots the repo owner at the new directory, folds an owner already registered at the new root into it, and rewrites its documents' `source_uri` to the new root.
+
+A dry run by default, double-gated like the other `owners` mutation arms: it writes only with `--no-dry-run --confirm`, and `--no-dry-run` alone reports. The dry run runs the engine's own transaction and rolls it back, so its counts are the counts the write reports. The report lists the counts (`repointed`, `absorbed (trashed)`, `skipped`, `unchanged`, the aspect and highlight rows rewritten or deleted, the links remapped, collapsed or dropped, and for `--owner` the owners folded), every absorbed document by tumbler, and ends with the exact command that writes, its paths shell-quoted.
+
+The new path must exist: `--new-path` is a file, `--new-root` a directory inside a git work tree. The document's new identity is spelled the way `nx index pdf` and `nx index md` spell it (the resolved absolute path and the raw `file://<abspath>`), so a later index of the file finds the moved row. The owner's new root is the main repository's path and its hash, as `nx index repo` registers them, so a worktree of the repository names the repository. A refusal from the engine (a document that does not exist or is trashed, another live row already holding a target path, a curator owner, a deactivated owner) leaves nothing written.
+
+The engine must carry the move routes (`catalog_move_supported` on `GET /version`); an engine that does not, or whose answer cannot be read, is refused before any move route is called. Until the engine release that carries them the refusal says so ("not yet released").
+
+A sensitive document keeps its flag through a move. A deny rule written against its old path (a client permission rule or a hook that names the file) does not follow it: update the rule for the new path.
 
 ### nx catalog backfill-owner-id (removed)
 
