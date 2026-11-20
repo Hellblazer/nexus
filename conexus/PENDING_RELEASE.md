@@ -48,6 +48,7 @@ it is until moved back deliberately.
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 - `conexus/skills/nexus/SKILL.md`: a "Where a note goes" table (identity/<id> is a seat's own standing context, project T2 is for facts other sessions need, memory files are Sam's rules, the threads board is the public view) and the one line on writing `memory_put(project="identity/<id>", ...)` (RDR-253 Step 6 part 3, nexus-hczdo).
+- `conexus/skills/orchestration/SKILL.md`: a line telling a long job or wait started by hand to register itself as work its session owns (`nx identity work register|done --kind wait --ref <what>`), nexus-hczdo.
 
 ## Deferred to the next client release
 - `conexus/hooks/scripts/compact_checkpoint.py`: PreCompact, and the new SessionEnd (matcher `clear`) `end` mode, write the identity-scratch resume pointer (RDR-253 Step 6 part 2) through `_resume_pointer.py`; needs `nx scratch --scope identity`, which 8.5.2's nx does not have, so it ships with the next client release.

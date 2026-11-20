@@ -35,7 +35,6 @@ import re
 import signal
 import subprocess
 import threading
-import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,14 +64,16 @@ ROW_TTL_S = 12 * 3600.0
 #: the second and the registrar read the clock after it began.
 START_SKEW_S = 2
 
+#: Seconds a row may predate its holder's start and still count as written by it (the engine's clock and the registry's
+#: ``startedAt`` are two clocks).
+HOLDER_SKEW_S = 10.0
+
 #: ``<host>:<pid>:<started>``: the ref lab-remote registers its ``labrun`` row under (host = the machine's short name,
 #: pid = lab-remote's own, started = epoch seconds at its start). The ref carries its own probe.
 _PROBE_REF = re.compile(r"^(?P<host>[A-Za-z0-9_-]+):(?P<pid>[0-9]+):(?P<started>[0-9]+)$")
 
 #: Where a registrar that stays alive records its process (see :func:`record_owner`), under the identity directory.
 OWNER_DIR_NAME = "work-owners"
-#: An owner record nothing cleared (its registrar was killed) is removed by the next registration after this long.
-OWNER_RECORD_KEEP_S = 14 * 86400.0
 
 #: Whether an identity (by id) has a live holder: :func:`nexus.identity.ops.is_alive` bound to an env, or a stand-in.
 Alive = Callable[[str], bool]
@@ -99,40 +100,60 @@ class Work:
 # ── the calls ───────────────────────────────────────────────────────────────
 
 
-def register(client: Any, identity: str, kind: str, ref: str, state: str = RUNNING) -> Work:
+def register(client: Any, identity: str, kind: str, ref: str, state: str = RUNNING, *, purge: bool = True,
+             probe: Any = None) -> Work:
     """Register the work, or change its state in place. An identity holds at most 200 rows (``409 work_limit``): the
     first refusal forgets this identity's own ``done`` rows (finished work has no further use), its ``worktree`` rows
     whose path no longer exists on this host (an agent's isolation worktree is removed by the harness, and nothing marks
-    its row done), and its ``wait`` rows for a session it no longer holds (a wait killed by a hangup or SIGKILL never
-    wrote its end), and the call is repeated once."""
+    its row done), its ``wait`` rows for a session it no longer holds (a wait killed by a hangup or SIGKILL never wrote its
+    end) and, when *probe* is given (an object with ``procs``, ``host``, ``identity_dir`` and ``clock``, as
+    :class:`~nexus.identity.ops.IdentityEnv` has), its running rows that read stale (:func:`process_stale_why`: process gone,
+    registered before this session began, not written for 12 hours), so orphans cannot fill the limit; the call is then
+    repeated once. ``purge=False`` raises the refusal instead and deletes nothing: a hook has seconds, the purge is up to
+    ~200 sequential calls."""
     try:
         return Work.of(client.put_work(identity, kind, ref, state))
     except IdentityApiError as exc:
-        if exc.code != "work_limit":
+        if exc.code != "work_limit" or not purge:
             raise
-    session = current_session(client, identity)
+    session, started = holder_facts(client, identity)
     for row in client.work_of(identity):
-        if row.get("state") == DONE or worktree_gone(row) or wait_superseded(row, session):
+        if (row.get("state") == DONE or worktree_gone(row) or wait_superseded(row, session)
+                or (probe is not None and process_stale_why(probe, identity, Work.of(row), holder_started=started))):
             client.remove_work(identity, str(row["kind"]), str(row["ref"]))
     return Work.of(client.put_work(identity, kind, ref, state))
 
 
-def current_session(client: Any, identity: str) -> str | None:
-    """The session id of *identity*'s current holder, or None when it has none or the engine cannot say."""
+def holder_facts(client: Any, identity: str) -> tuple[str | None, float | None]:
+    """``(session id, start in epoch seconds)`` of *identity*'s current holder; None for what it has none of or the engine
+    cannot say. The start is the registry's ``startedAt`` (milliseconds) of the holding Claude process."""
     try:
         holder = client.show(identity).get("holder") or {}
     except (IdentityApiError, IdentityUnavailableError):
-        return None
-    return str(holder["session_id"]) if isinstance(holder, Mapping) and holder.get("session_id") else None
+        return None, None
+    if not isinstance(holder, Mapping):
+        return None, None
+    session = str(holder["session_id"]) if holder.get("session_id") else None
+    began = holder.get("started_at")
+    return session, (began / 1000.0 if isinstance(began, (int, float)) and not isinstance(began, bool) else None)
+
+
+def current_session(client: Any, identity: str) -> str | None:
+    """The session id of *identity*'s current holder, or None when it has none or the engine cannot say."""
+    return holder_facts(client, identity)[0]
+
+
+#: A Claude session id: a UUID. Only a ref of this shape names a session.
+_SESSION_ID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 def wait_superseded(row: Mapping[str, Any], session: str | None) -> bool:
     """A ``wait`` row for a session other than the identity's current one: that wait parked in an earlier session, which
-    has ended or moved, so the row is left over. With no current session known, nothing is judged superseded. Only a
-    session id is judged: a wait labelled for a CI run (``ci:<branch>@<sha>``, ``nx ci wait``) is not about a session, and
-    the liveness probe judges it (:func:`process_stale_why`)."""
+    has ended or moved, so the row is left over. With no current session known, nothing is judged superseded. Only a ref
+    that IS a session id (a UUID) is judged: a hand wait (``nx identity work register --kind wait --ref develop-ci``) and
+    a CI wait (``ci:<branch>@<sha>``) name no session, and the liveness probe judges them (:func:`process_stale_why`)."""
     ref = str(row.get("ref") or "")
-    return row.get("kind") == "wait" and session is not None and ":" not in ref and ref != session
+    return row.get("kind") == "wait" and session is not None and bool(_SESSION_ID.match(ref)) and ref != session
 
 
 def worktree_gone(row: Mapping[str, Any]) -> bool:
@@ -198,24 +219,45 @@ def _owner_path(directory: Path, identity: str, kind: str, ref: str) -> Path:
     return Path(directory) / OWNER_DIR_NAME / (hashlib.sha256(f"{identity}\0{kind}\0{ref}".encode()).hexdigest() + ".json")
 
 
-def record_owner(directory: Path, identity: str, kind: str, ref: str, *, pid: int, start: str | None, host: str) -> None:
+def record_owner(directory: Path, identity: str, kind: str, ref: str, *, pid: int, start: str | None, host: str,
+                 procs: Any = None) -> None:
     """Record the process that registered a row and stays alive while its work runs (``nx ci wait``, ``nx tuple wait``,
     ``nx identity work run``): its pid, its OS start time and the host. The engine row has no column for it, and a hook's
-    process exits at once, so only a registrar that outlives its registration writes one. Removes records older than
-    :data:`OWNER_RECORD_KEEP_S` first (a registrar killed before its end never cleared its own)."""
+    process exits at once, so only a registrar that outlives its registration writes one. The directory is private
+    (``0700``, and the user's ACE on Windows). With *procs* it first prunes what no process owns any more
+    (:func:`prune_owner_records`)."""
+    from nexus._winsec import make_user_dir  # noqa: PLC0415 — deferred: leaf import cost
+
     records = Path(directory) / OWNER_DIR_NAME
-    records.mkdir(parents=True, exist_ok=True)
-    cutoff = time.time() - OWNER_RECORD_KEEP_S
-    for old in records.glob("*.json"):
-        try:
-            if old.stat().st_mtime < cutoff:
-                old.unlink()
-        except OSError:
-            pass
+    make_user_dir(records)
+    if procs is not None:
+        prune_owner_records(records, procs)
     path = _owner_path(directory, identity, kind, ref)
     tmp = path.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps({"pid": pid, "start": start, "host": host}), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def prune_owner_records(records: Path, procs: Any) -> None:
+    """Remove the owner records whose process is gone or was replaced, and the ``<hash>.<pid>.tmp`` a writer that died
+    mid-write left. By liveness, never by age: a standing wait older than any cutoff still has its record while it runs. A
+    record of another host, or one whose process cannot be judged, is kept. Best effort."""
+    here = getattr(procs, "host", "")
+    for path in list(records.glob("*")):
+        try:
+            if path.suffix == ".tmp":
+                writer = path.name.split(".")[-2]
+                if writer.isdigit() and not procs.alive(int(writer)):
+                    path.unlink()
+            elif path.suffix == ".json":
+                record = json.loads(path.read_text(encoding="utf-8"))
+                start = record.get("start")
+                judged, gone = _process_gone(procs, here, str(record.get("host") or ""), int(record["pid"]),
+                                             start=start if isinstance(start, str) else None, began=None)
+                if judged and gone:
+                    path.unlink()
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
 
 
 def read_owner(directory: Path, identity: str, kind: str, ref: str) -> dict[str, Any] | None:
@@ -252,6 +294,18 @@ def _epoch(value: object) -> float | None:
     return None
 
 
+def _same_start(a: str, b: str) -> bool:
+    """Two spellings of one process start: equal, or within :data:`START_SKEW_S` (a Linux ``lstart`` can jitter by a second)."""
+    if a == b:
+        return True
+    from nexus.identity.holder import epoch_seconds  # noqa: PLC0415 — deferred: leaf import cost
+
+    try:
+        return abs(epoch_seconds(a) - epoch_seconds(b)) <= 1.0
+    except ValueError:
+        return False
+
+
 def _process_gone(procs: Any, here: str, host: str, pid: int, *, start: str | None, began: float | None) -> tuple[bool, bool]:
     """``(judged, gone)`` for a process another party recorded. Not judged: the record names another host. Gone: the pid
     runs no longer, or it runs but began at another time than recorded (the pid was reused): by *start* (the OS start time
@@ -265,7 +319,7 @@ def _process_gone(procs: Any, here: str, host: str, pid: int, *, start: str | No
     if now_start is None:
         return True, False
     if start is not None:
-        return True, now_start != start
+        return True, not _same_start(now_start, start)
     if began is not None:
         from nexus.identity.holder import epoch_seconds  # noqa: PLC0415 — deferred: leaf import cost
 
@@ -276,11 +330,15 @@ def _process_gone(procs: Any, here: str, host: str, pid: int, *, start: str | No
     return True, False
 
 
-def process_stale_why(env: IdentityEnv, identity: str, w: Work, *, now: float | None = None) -> str | None:
-    """Why a running row of a probed kind reads stale, or None. Three witnesses, in order. The ref, when it is
+def process_stale_why(env: Any, identity: str, w: Work, *, now: float | None = None,
+                      holder_started: float | None = None) -> str | None:
+    """Why a running row of a probed kind reads stale, or None. Witnesses, in order. The ref, when it is
     ``<host>:<pid>:<started>`` (lab-remote's ``labrun`` row): its process gone or reused. An owner record the registrar
     wrote (:func:`record_owner`): the same. When a process on this host vouches for the row (it runs, and is the one
-    recorded), the row is not stale however old. Otherwise a row nobody has written for :data:`ROW_TTL_S` is stale."""
+    recorded), the row is not stale however old. A row nothing vouches for (an agent's, which a hook registers and whose
+    process exits at once; a hand-registered wait) is a ghost when it was last written before the current holder began
+    (*holder_started*, epoch seconds): a restart with the work in flight never ends it. Otherwise a row nobody has written
+    for :data:`ROW_TTL_S` is stale. *env* is anything with ``procs``, ``host``, ``identity_dir`` and ``clock``."""
     if w.state != RUNNING or w.kind not in PROBED_KINDS:
         return None
     gone_reason = "its process is gone"
@@ -296,6 +354,8 @@ def process_stale_why(env: IdentityEnv, identity: str, w: Work, *, now: float | 
         if judged:
             return gone_reason if gone else None
     written = _epoch(w.updated_at)
+    if written is not None and holder_started is not None and written < holder_started - HOLDER_SKEW_S:
+        return "registered before this session started"
     if written is not None and (now if now is not None else env.clock()) - written > ROW_TTL_S:
         return f"not written for over {int(ROW_TTL_S // 3600)} h"
     return None
@@ -343,28 +403,49 @@ def _call(fn: Callable[..., Any], *args: Any) -> Any:
 LABEL_TIMEOUT_S = 2.0
 
 
+#: Kinds an engine answered ``bad_kind`` for in this process (an engine from before the kind): not asked again, so a process
+#: pays one failed call per kind, not one per dispatch.
+_REFUSED_KINDS: set[str] = set()
+
+
+def reset_for_tests() -> None:
+    _REFUSED_KINDS.clear()
+
+
+def _new_client(timeout: float) -> Any:
+    """The engine client a registrar with no client of its own writes through (a seam: the suite refuses it, so no test
+    writes a row to a real engine, tests/conftest.py ``_identity_work_reaches_no_real_engine``)."""
+    return IdentityClient.from_config(timeout=timeout)
+
+
 def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = None, identity: str | None = None,
-                 timeout: float = LABEL_TIMEOUT_S, owner_dir: Path | None = None, procs: Any = None) -> bool:
+                 timeout: float = LABEL_TIMEOUT_S, owner_dir: Path | None = None, procs: Any = None,
+                 purge: bool = True) -> bool:
     """Register work for *identity* (default: the one this process holds). True when a row was written. No identity, no
     engine, or any refusal gives False and a log line: the work this labels must never fail, or wait on a slow engine,
-    because its label could not be written. An engine that predates a kind (``bad_kind``) is such a refusal.
+    because its label could not be written. An engine that predates a kind (``bad_kind``) is such a refusal, and this
+    process does not ask it for that kind again (:data:`_REFUSED_KINDS`).
 
     *owner_dir* is for a registrar whose process stays alive while its work runs: the row's liveness probe is then this
     process (:func:`record_owner`), written when the row goes running and removed when it goes done. A hook, whose process
-    exits at once, passes none."""
+    exits at once, passes none, and passes ``purge=False``: at the 200-row limit it is refused rather than spend its few
+    seconds deleting rows (:func:`register`)."""
+    if kind in _REFUSED_KINDS:
+        return False
     try:
         who = identity or caller_identity()
         if who is None:
             return False
         owned = client is None
-        engine = IdentityClient.from_config(timeout=timeout) if owned else client
+        engine = _new_client(timeout) if owned else client
         label = norm_ref(kind, ref)
         try:
-            register(engine, who, kind, label, state)
+            register(engine, who, kind, label, state, purge=purge, probe=_probe_env(owner_dir, procs) if purge else None)
         finally:
             if owned:
                 engine.close()
     except Exception as exc:  # noqa: BLE001 — a label never fails its work
+        _note_refusal(kind, exc)
         _log.warning("identity_work_register_failed", kind=kind, ref=ref, state=state, error=f"{type(exc).__name__}: {exc}")
         return False
     if owner_dir is not None:
@@ -372,9 +453,50 @@ def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = Non
     return True
 
 
+def forget_own(kind: str, ref: str, *, client: Any = None, identity: str | None = None, timeout: float = LABEL_TIMEOUT_S) -> bool:
+    """Remove this identity's row: the end of work that leaves nothing to show (a dispatched agent: the ready check ignores a
+    done row, and one done row per dispatch would fill the 200-row limit). True when the row is gone (there was none, too).
+    Same failure rule as :func:`register_own`."""
+    if kind in _REFUSED_KINDS:
+        return False
+    try:
+        who = identity or caller_identity()
+        if who is None:
+            return False
+        owned = client is None
+        engine = _new_client(timeout) if owned else client
+        try:
+            forget(engine, who, kind, norm_ref(kind, ref))
+        finally:
+            if owned:
+                engine.close()
+        return True
+    except Exception as exc:  # noqa: BLE001 — a label never fails its work
+        _note_refusal(kind, exc)
+        _log.warning("identity_work_forget_failed", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def _note_refusal(kind: str, exc: BaseException) -> None:
+    if isinstance(exc, IdentityApiError) and exc.code == "bad_kind":
+        _REFUSED_KINDS.add(kind)
+
+
+def _probe_env(owner_dir: Path | None, procs: Any) -> Any:
+    """What :func:`process_stale_why` needs, for the purge a registrar's call may run at the work limit."""
+    import time  # noqa: PLC0415 — deferred: only the rare purge needs it
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from nexus.identity.holder import Processes  # noqa: PLC0415
+
+    table = procs if procs is not None else Processes()
+    return SimpleNamespace(procs=table, host=table.host, identity_dir=owner_dir if owner_dir is not None else default_owner_dir(),
+                           clock=time.time)
+
+
 def _own_record(owner_dir: Path, identity: str, kind: str, ref: str, state: str, procs: Any) -> None:
     """The owner record of a row this process registered: written when it goes running, removed when it goes done. Best
-    effort: the row is already written, and a record that is missing only leaves the row to the TTL."""
+    effort: the row is already written, and a record that is missing only leaves the row to the ghost and TTL rules."""
     try:
         if state != RUNNING:
             clear_owner(owner_dir, identity, kind, ref)
@@ -383,7 +505,7 @@ def _own_record(owner_dir: Path, identity: str, kind: str, ref: str, state: str,
 
         table = procs if procs is not None else Processes()
         pid = os.getpid()
-        record_owner(owner_dir, identity, kind, ref, pid=pid, start=table.os_start(pid), host=table.host)
+        record_owner(owner_dir, identity, kind, ref, pid=pid, start=table.os_start(pid), host=table.host, procs=table)
     except Exception as exc:  # noqa: BLE001 — as above
         _log.warning("identity_work_owner_record_failed", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
 
@@ -514,7 +636,7 @@ def register_lines(env: IdentityEnv, kind: str, ref: str, state: str = RUNNING, 
         return ["no identity is bound to this process: nothing registered"]
     if state == DONE and not any((w.kind, w.ref) == (kind, ref) for w in _call(of, env.client, identity)):
         return [f"{identity} has no {kind} {ref}: nothing to mark done"]
-    row = _call(register, env.client, identity, kind, ref, state)
+    row = _call(lambda: register(env.client, identity, kind, ref, state, probe=env))
     return [f"{identity} {row.state} {row.kind} {row.ref}"]
 
 
@@ -545,7 +667,7 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
     ``running`` and not stale."""
     identity = _target(env, seat, session, who)
     alive = _call(is_alive, env, identity)
-    current = current_session(env.client, identity)
+    current, started = holder_facts(env.client, identity)
     rows = []
     for w in _call(of, env.client, identity):
         row = {"kind": w.kind, "ref": w.ref}
@@ -558,7 +680,7 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
             elif wait_superseded(row, current):
                 why = "a wait from an earlier session"
             else:
-                why = process_stale_why(env, identity, w)
+                why = process_stale_why(env, identity, w, holder_started=started)
         if only_running and (w.state != RUNNING or why):
             continue
         entry = {"kind": w.kind, "ref": w.ref, "state": w.state, "updated_at": w.updated_at, "stale": bool(why)}
@@ -640,7 +762,7 @@ def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: st
         identity = (who or caller_identity)()
         if identity is not None:
             engine = env() if callable(env) else env
-            register(engine.client, identity, kind, ref, RUNNING)
+            register(engine.client, identity, kind, ref, RUNNING, probe=engine)
             _own_record(engine.identity_dir, identity, kind, ref, RUNNING, engine.procs)
     except Exception as exc:  # noqa: BLE001 — a label never fails its work
         _log.warning("identity_work_run_not_registered", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")

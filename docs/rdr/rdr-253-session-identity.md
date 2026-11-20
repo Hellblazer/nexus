@@ -299,8 +299,9 @@ identity_bindings     identity=<id>  seq  event=start|clear|resume|fork|takeover
 identity_sessions     session_id  identity=<id>  generation=<n>        (the session index)
 identity_counters     one row per tenant; last_n only rises
 identity_memberships  (identity, group)  role=leader|member  joined_at=<UTC>   (RDR-252 re-keys onto this; the join time stays when the role changes)
-identity_work         (identity, kind, ref)  kind=watcher|wait|labrun|worktree|tmux  state=running|done   (background work and owned resources;
-                      state updated in place, no expiry; a label, not fenced)
+identity_work         (identity, kind, ref)  kind=watcher|wait|labrun|worktree|tmux|agent  state=running|done   (background work and owned
+                      resources; state updated in place; a label, not fenced; the row has no expiry, but a running row of a wait, labrun,
+                      agent or watcher reads stale by the Step 6 rules; `agent` needs engine identity-005)
 ```
 
 The identity record holds the current generation and state, so pruning
@@ -892,7 +893,9 @@ restart script's promote.
   `POST /v1/identity/<id>/work`, so the checkpoint lists them by identity after
   a `/clear`. The state is updated in place and the row has no expiry. It is
   a label, not a fenced family: a lab run on another host has no token file.
-  A reverse lookup by (kind, ref), `GET /v1/identity/work?kind=&ref=`, returns
+  The row itself never expires, but readers do not trust a `running` row on its own
+  (the Step 6 stale rule: the identity is not alive, the registering process is
+  gone, the row predates its holder, or nobody wrote it for 12 hours). A reverse lookup by (kind, ref), `GET /v1/identity/work?kind=&ref=`, returns
   all owners of a resource. An identity holds at most 200 work rows (409
   `work_limit`).
   Watchers and waits are Bash children of the seat's process and write as the
@@ -901,12 +904,14 @@ restart script's promote.
   the binding and the holder check. Three consumers move onto it in Phase 1,
   each reading ownership through the work routes, where a session registers what it
   owns (`kind=worktree` with the path, `kind=tmux` with the server name, and
-  its running watchers, waits and lab runs): worktree removal (a worktree is
+  its running watchers, waits and lab runs, and the agents it dispatches): worktree removal (a worktree is
   removed only when its owning identity is not alive, not when `ps` misses
   it); the sandbox and tmux cleanup helpers (a server is stopped only when its
   owning identity's process is gone, never by name pattern); and the restart
   round's readiness check in the restart script (a session reports its
-  work rows in state `running`). Bead ownership stays out:
+  work rows in state `running`; the rows of a kind that ends with the session, `wait`,
+  `watcher`, `labrun` and `agent`, block ready unless they read stale, and a stale row is
+  listed and never blocks). Bead ownership stays out:
   Sam ruled on 2026-10-03 that bead claims cannot name a session (project
   memory `project_bead_claims_cannot_name_a_session`; incident I-42 in
   `nexus_rdr/253-research-1`), so beads keep the git user and the board names
@@ -1185,6 +1190,24 @@ Part 3, per-identity T2 notes (bead nexus-hczdo, 8.5.3): the client guard on `id
 `import_entries_batch`, `delete` by project and title, `insert_summary`), the SessionStart
 line (one line, at most 300 bytes), `nx memory curate` over `identity/*`, the where-it-goes
 table in the conexus `nexus` skill, and a 30-day retire rule.
+
+Part 1 of the registered work (nexus-hczdo) names who registers what: `nx tuple wait`
+(a `wait` for the session id) and `nx ci wait` (a `wait`, ref `ci:<branch>@<sha>`)
+through `Label`, `nx identity work run` (a command's row), `lab-remote` (a `labrun`,
+ref `<host>:<pid>:<started>`), the git-worktrees skill (a `worktree`), and the
+SubagentStart and SubagentStop hooks (an `agent`, ref `agent:<agent id>`; the stop
+removes the row, and neither hook purges at the 200-row limit). The `agent` kind needs
+the engine release that carries changeset `identity-005`: an older engine answers `400
+bad_kind`, which the hooks log once per process and ignore, so agent rows begin with the
+engine release and not the client release. Three witnesses read a running row of a
+`wait`, `labrun`, `agent` or `watcher` as stale: its process is gone or was replaced (the
+`<host>:<pid>:<started>` ref, or the owner record a long-lived registrar writes under the
+identity directory's `work-owners/`), it was last written before the current holder
+started, or nobody wrote it for 12 hours; a hand-registered row has the last two only.
+A wait is judged an earlier session's only when its ref is a session id (a UUID). The
+restart script reads every row, marks a stale one and does not block on it, and journals
+each gate decision (one JSON line per session) so the measure, ready rounds that answered
+ready while running work a restart cut off, can be counted.
 
 ### Phase 2: Retirement
 

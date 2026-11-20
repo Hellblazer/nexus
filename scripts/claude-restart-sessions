@@ -204,6 +204,10 @@ SESSIONS = Path.home() / ".claude" / "sessions"
 LOG = Path.home() / ".claude" / "restart-sessions.log"
 #: The ready round (--ask-ready): who was asked, who was left out and why, and where each reply goes.
 READY_MANIFEST = Path.home() / ".claude" / "restart-ready.json"
+#: One JSON line per session per gate decision (RDR-253 Step 6, the measure: ready rounds that answered ready while running
+#: work a restart cut off): the round, the session, whether it was ready, its blockers, its work rows and the stale ones.
+#: None: ``restart-ready-rounds.jsonl`` beside LOG (so a test that points LOG elsewhere never writes the real one).
+READY_LOG: Path | None = None
 #: One empty file per mailed ask, created before the send; the mail tells the session to check that it
 #: is an empty regular file (`test -f` and `test ! -s`), a check a default-permission session runs
 #: without a permission prompt, where a read of LOG is denied until someone approves it (nexus-acp8p,
@@ -2987,6 +2991,24 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
     return rows
 
 
+def record_round(manifest: dict, rows: list[dict], now: float, *, forced: bool = False) -> None:
+    """Append one JSON line per row of a gate decision to ``READY_LOG``. Best effort: a journal that cannot be written never
+    changes the verdict (the gate's criteria are pre-declared and do not read it)."""
+    path = READY_LOG if READY_LOG is not None else LOG.parent / "restart-ready-rounds.jsonl"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            for r in rows:
+                work = r.get("work")
+                fh.write(json.dumps({
+                    "at": now, "round": manifest.get("stamp"), "session": r.get("sessionId"), "name": r.get("name"),
+                    "state": r.get("state"), "ready": not r.get("blocker"), "forced": forced,
+                    "blockers": [r["blocker"]] if r.get("blocker") else [], "work": work,
+                    "stale": [w[:-len(STALE_MARK)] for w in work or [] if is_stale(w)]}) + "\n")
+    except (OSError, TypeError, ValueError) as e:
+        log(f"ready journal not written ({path}): {e}")
+
+
 def _ago(seconds: float) -> str:
     n = int(seconds)
     return f"{n}s" if n < 120 else f"{n // 60}m" if n < 7200 else f"{n // 3600}h{n % 3600 // 60:02d}m"
@@ -3072,6 +3094,7 @@ def go_gate(found: list[dict], force: bool, max_age: int, now: float | None = No
         problem, lines = bad_round, []
     else:
         rows = readiness(found, manifest, now, max_age, caller_pane)
+        record_round(manifest, rows, now, forced=force)
         lines = [f"{r['name']}: {r['blocker']}" for r in rows if r["blocker"]]
         problem = f"{len(lines)} of {len(rows)} session(s) are not ready (round {manifest['stamp']})" if lines else ""
     if not problem:

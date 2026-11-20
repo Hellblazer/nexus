@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -254,7 +255,7 @@ def row_the_work_limit_forgets_finished_rows_once_and_registers(world: World) ->
     alpha = world.seat("alpha")
     world.process(100, name="alpha")
     world.hook(100, "startup", "s1")
-    current, old = world.q("s1"), world.q("s-old")
+    current, old = world.q("s1"), str(uuid.uuid5(uuid.NAMESPACE_URL, world.q("s-old")))   # an earlier SESSION: a UUID, the shape a wait for one has
     world.client.put_work(alpha, "wait", current, "running")                    # the current session's wait: kept
     world.client.put_work(alpha, "wait", old, "running")                        # a wait from an earlier session: dropped
     for n in range(198):
@@ -386,10 +387,16 @@ def row_an_agent_is_a_kind_of_work_and_a_wait_for_a_ci_run_survives_the_work_lim
     assert work.register(world.client, alpha, "agent", ref).state == "running"
     assert work.mark_done(world.client, alpha, "agent", ref).state == "done"
     assert [(w.kind, w.ref, w.state) for w in work.owners(world.client, "agent", ref)] == [("agent", ref, "done")]
-    assert work.register_own("agent", "agent:b1", client=world.client, identity=alpha) is True
+    assert work.register_own("agent", "agent:b1", client=world.client, identity=alpha, purge=False) is True
+    _, began = work.holder_facts(world.client, alpha)
+    assert began == 100.0, "the engine's holder view carries the registry's startedAt in milliseconds (pid 100 * 1000)"
+    live = {(w["kind"], w["ref"]): w["stale"] for w in work.list_rows(_env(world), alpha)["work"]}
+    assert live[("agent", "agent:b1")] is False, "written after its holder began: not a ghost (the engine's ISO updated_at parses)"
+    assert work.forget_own("agent", "agent:b1", client=world.client, identity=alpha) is True
+    assert not [w for w in work.owners(world.client, "agent", "agent:b1")], "the stop's forget removed the real row"
     ci = "ci:develop@0123456789abcdef"
     work.register(world.client, alpha, "wait", ci)
-    for n in range(197):                                                        # 3 rows above + 197 = the 200-row limit
+    for n in range(198):                                                        # 2 rows above (the done agent, the ci wait) + 198 = the 200-row limit
         world.client.put_work(alpha, "labrun", f"c{n}", "done" if n < 150 else "running")
     assert work.register(world.client, alpha, "labrun", "fresh").state == "running", "the purge made room"
     assert ci in {w.ref for w in work.of(world.client, alpha)}, "a CI wait is not a superseded session wait"

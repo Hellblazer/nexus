@@ -72,3 +72,28 @@ def test_the_pre_push_skill_tells_a_hand_started_long_job_to_register_and_end_it
     assert "nx identity work register --kind wait --ref <what>" in skill
     assert "nx identity work done --kind wait --ref <what>" in skill
     assert skill.index("work register --kind wait") < skill.index("work done --kind wait")
+
+
+def test_the_plugin_orchestration_skill_carries_the_hand_started_job_line() -> None:
+    """Review item 8: the line sat only in the nexus repo's pre-push-review skill, which a session in another repo never
+    reads; the plugin's orchestration skill ships it (conexus/PENDING_RELEASE.md lists the file)."""
+    root = Path(__file__).resolve().parent.parent
+    skill = " ".join((SKILLS / "orchestration" / "SKILL.md").read_text(encoding="utf-8").split())
+    assert "nx identity work register --kind wait --ref <what>" in skill
+    assert "nx identity work done --kind wait --ref <what>" in skill
+    assert "conexus/skills/orchestration/SKILL.md" in (root / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+
+
+def test_the_rdr_and_the_cli_reference_name_the_registrars_the_agent_kind_and_the_stale_witnesses() -> None:
+    """Review item 8 (critic S5): RDR-253 and docs/cli-reference.md said 'no expiry' and listed five kinds."""
+    root = Path(__file__).resolve().parent.parent
+    rdr = (root / "docs" / "rdr" / "rdr-253-session-identity.md").read_text(encoding="utf-8")
+    ref = (root / "docs" / "cli-reference.md").read_text(encoding="utf-8")
+    for text in (rdr, ref):
+        flat = " ".join(text.split())
+        assert "identity-005" in flat and "bad_kind" in flat, "the agent kind needs the engine release"
+        assert "work-owners" in flat and "12 hours" in flat and "current holder" in flat, "the three stale witnesses"
+    assert "kind=watcher|wait|labrun|worktree|tmux|agent" in rdr
+    cli = " ".join(ref.split())
+    assert "`wait`, `watcher`, `labrun` or `agent` row" in cli and "restart-ready-rounds.jsonl" in cli
+    assert "never a stale row" not in cli and "neither does a `wait` row" not in cli, "the two false sentences are gone"

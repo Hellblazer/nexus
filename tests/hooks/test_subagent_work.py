@@ -15,9 +15,11 @@ REF = "agent:a220cf773a02bf4d7"
 
 @pytest.fixture
 def labels(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
+    """What the hooks wrote, as ``(kind, ref, what)``: ``running`` for a registration, ``forget`` for the stop's removal."""
     seen: list[tuple[str, str, str]] = []
     monkeypatch.setattr("nexus.identity.work.register_own",
                         lambda kind, ref, state="running", **k: seen.append((kind, ref, state)) or True)
+    monkeypatch.setattr("nexus.identity.work.forget_own", lambda kind, ref, **k: seen.append((kind, ref, "forget")) or True)
     return seen
 
 
@@ -33,9 +35,11 @@ def test_start_registers_the_agent_running(labels: list) -> None:
     assert labels == [("agent", REF, "running")]
 
 
-def test_stop_marks_the_agent_done(labels: list) -> None:
-    assert subagent_work.mark_done(START) is True
-    assert labels == [("agent", REF, "done")]
+def test_stop_removes_the_agents_row(labels: list) -> None:
+    """Review ship-blocker 2: every dispatch used to leave a done row, so a busy identity reached the 200-row limit by agents
+    alone; the ready check ignores done rows anyway. The stop forgets the row."""
+    assert subagent_work.register_stop(START) is True
+    assert labels == [("agent", REF, "forget")]
 
 
 @pytest.mark.parametrize("payload", [None, {}, {"agent_id": "a1"}, {"agent_type": "conexus:developer"},
@@ -43,7 +47,7 @@ def test_stop_marks_the_agent_done(labels: list) -> None:
 def test_an_event_with_no_agent_id_or_no_agent_type_writes_nothing(labels: list, payload: object) -> None:
     """About 95% of SubagentStop events are harness-internal and carry no agent_type (nexus-zfxo3); hooks.json never
     spawns the stop verb for them, so a start without a type would leave a running row nothing ends."""
-    assert subagent_work.register_start(payload) is False and subagent_work.mark_done(payload) is False
+    assert subagent_work.register_start(payload) is False and subagent_work.register_stop(payload) is False
     assert labels == []
 
 
@@ -52,8 +56,9 @@ def test_a_label_that_fails_is_a_false_never_an_exception(monkeypatch: pytest.Mo
         raise RuntimeError("engine down")
 
     monkeypatch.setattr("nexus.identity.work.register_own", boom)
+    monkeypatch.setattr("nexus.identity.work.forget_own", boom)
     assert subagent_work.register_start(START) is False
-    assert subagent_work.mark_done(START) is False
+    assert subagent_work.register_stop(START) is False
 
 
 @pytest.fixture
@@ -84,12 +89,12 @@ def test_the_stop_verb_marks_done_for_an_agent_that_gets_no_t1_nudge(labels: lis
     """web-fetch and the other NO_T1_AGENTS are never nudged, but SubagentStart registered them: their row must end."""
     stop = {**START, "agent_type": "web-fetch", "agent_transcript_path": "/no/such/transcript"}
     assert nudge.run(stop).stdout in (None, "")
-    assert labels == [("agent", REF, "done")]
+    assert labels == [("agent", REF, "forget")]
 
 
 def test_the_stop_verb_marks_done_even_when_the_transcript_is_unreadable(labels: list) -> None:
     nudge.run({**START, "agent_transcript_path": "/no/such/transcript"})
-    assert labels == [("agent", REF, "done")]
+    assert labels == [("agent", REF, "forget")]
 
 
 def test_a_nudged_agent_runs_one_more_turn_so_its_row_ends_at_the_stop_after_the_nudge(labels: list, tmp_path) -> None:
@@ -99,9 +104,45 @@ def test_a_nudged_agent_runs_one_more_turn_so_its_row_ends_at_the_stop_after_the
     assert out.stdout and "You wrote nothing to T1" in out.stdout
     assert labels == [], "the nudge keeps the agent running: not done yet"
     nudge.run({**START, "agent_transcript_path": str(transcript), "stop_hook_active": True})
-    assert labels == [("agent", REF, "done")]
+    assert labels == [("agent", REF, "forget")]
 
 
 def test_an_orphan_stop_with_no_agent_type_writes_nothing(labels: list) -> None:
     nudge.run({"session_id": "s1", "agent_id": "a1"})
     assert labels == []
+
+
+def test_a_hooks_registration_never_purges_and_a_stop_that_raises_never_costs_the_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review ship-blocker 2 (the hook has 10 s; a purge is up to ~200 sequential calls) and the stop-side try/except that no
+    test could fail before: ``_label`` swallows everything, so the guard in ``run`` is only reached by a raising stop."""
+    seen: list[dict] = []
+    monkeypatch.setattr("nexus.identity.work.register_own", lambda kind, ref, state="running", **k: seen.append(k) or True)
+    subagent_work.register_start(START)
+    assert seen and seen[0].get("purge") is False
+
+    def boom(payload):
+        raise RuntimeError("stop label bug")
+
+    monkeypatch.setattr(subagent_work, "register_stop", boom)
+    out = nudge.run({**START, "agent_transcript_path": "/no/such/transcript"})
+    assert out.stdout in (None, "")
+
+
+def test_a_registration_that_succeeds_leaves_one_structured_log_line(labels: list, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review item 7 (the measure): the hooks logged only failures, so the number of registered agents was unobservable."""
+    events: list[tuple[str, dict]] = []
+
+    class Recorder:
+        def info(self, event: str, **kw) -> None:
+            events.append((event, kw))
+
+        def warning(self, event: str, **kw) -> None:
+            events.append((event, kw))
+
+    monkeypatch.setattr(subagent_work, "_log", Recorder())
+    subagent_work.register_start(START)
+    subagent_work.register_stop(START)
+    assert events == [
+        ("subagent_work_registered", {"agent_id": "a220cf773a02bf4d7", "agent_type": "conexus:developer"}),
+        ("subagent_work_forgotten", {"agent_id": "a220cf773a02bf4d7", "agent_type": "conexus:developer"}),
+    ]

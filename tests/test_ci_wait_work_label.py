@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from nexus import ci_wait
 from nexus.commands import ci_cmd
 from nexus.commands.ci_cmd import ci_group
+from nexus.identity.work import Label
 
 SHA = "a0dc17ec284ffce6d4ff5264a626b7ef8e1a293a"
 
@@ -84,3 +85,14 @@ def test_no_identity_means_no_label_and_the_wait_runs(monkeypatch: pytest.Monkey
     monkeypatch.setattr("nexus.identity.work.register_own", lambda *a, **k: written.append("x") or True)
     monkeypatch.setattr(ci_wait, "find_done_row", lambda *a, **k: None)
     assert _wait("--fresh").exit_code == ci_wait.EXIT_TIMEOUT and written == []
+
+
+def test_a_sigterm_arm_that_raises_never_fails_the_wait(monkeypatch: pytest.MonkeyPatch, labels: list) -> None:
+    """Review item 6: ``label.arm_sigterm()`` sat outside the try, so an exception there failed the wait before it ran."""
+    def boom(self) -> None:
+        raise RuntimeError("signal setup")
+
+    monkeypatch.setattr(Label, "arm_sigterm", boom)
+    monkeypatch.setattr(ci_wait, "find_done_row", lambda *a, **k: None)
+    assert _wait("--fresh").exit_code == ci_wait.EXIT_TIMEOUT
+    assert labels[-1] == ("wait", f"ci:develop@{SHA}", "done"), "and the row still ends"

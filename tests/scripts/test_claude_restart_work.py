@@ -222,3 +222,51 @@ def test_session_work_against_a_real_child_process_serving_list_running(crs, mon
     fake.write_text("#!/bin/sh\necho \"Usage: nx [OPTIONS] COMMAND [ARGS]...\" >&2\n"
                     "echo \"Error: No such command 'identity'. Did you mean 'init'?\" >&2\nexit 2\n", encoding="utf-8")
     assert crs.session_work({"sessionId": "sid-1"}) == [], "an nx older than Step 6 has no registered work"
+
+
+def _one_target(now: float) -> tuple[list[dict], dict]:
+    found = [{"sessionId": "sid-1", "name": "alpha", "pane": "%1", "pid": 1}]
+    manifest = {"stamp": "round-7", "at": now - 120,
+                "targets": [{"sessionId": "sid-1", "path": "/reply", "name": "alpha", "how": "", "marker": ""}], "excluded": []}
+    return found, manifest
+
+
+def _ready_session(crs, monkeypatch, manifest: dict, now: float) -> None:
+    monkeypatch.setattr(crs, "load_manifest", lambda: (manifest, ""))
+    monkeypatch.setattr(crs, "read_reply", lambda *a, **k: ("ok", {"ready": True, "reason": "", "eta": None, "mtime": now - 30}))
+    monkeypatch.setattr(crs, "status", lambda s: "idle")
+    monkeypatch.setattr(crs, "session_tasks", lambda s: [])
+    monkeypatch.setattr(crs, "LOG", Path("/dev/null"))
+
+
+def test_every_gate_decision_leaves_one_jsonl_line_per_session_with_its_blockers_and_stale_rows(crs, monkeypatch, tmp_path) -> None:
+    """Review item 7 (the measure, RDR-253 Step 6: ready rounds that answered ready while running work a restart cut off): the
+    work list lived only in memory. One line per session per gate decision, in the script's state directory."""
+    now = time.time()
+    found, manifest = _one_target(now)
+    rounds = tmp_path / "state" / "rounds.jsonl"
+    monkeypatch.setattr(crs, "READY_LOG", rounds)
+    _ready_session(crs, monkeypatch, manifest, now)
+
+    monkeypatch.setattr(crs, "session_work", lambda s: ["agent agent:a1", "labrun r1 (stale)", "worktree /w"])
+    assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 3
+    monkeypatch.setattr(crs, "session_work", lambda s: ["labrun r1 (stale)"])
+    assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 0, "a stale row alone does not block"
+    lines = [json.loads(x) for x in rounds.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2
+    first, second = lines
+    assert first["round"] == "round-7" and first["session"] == "sid-1" and first["name"] == "alpha" and first["ready"] is False
+    assert first["blockers"] and "agent:a1" in first["blockers"][0] and first["stale"] == ["labrun r1"]
+    assert first["work"] == ["agent agent:a1", "labrun r1 (stale)", "worktree /w"] and isinstance(first["at"], float)
+    assert second["ready"] is True and second["blockers"] == [] and second["stale"] == ["labrun r1"]
+
+
+def test_a_journal_that_cannot_be_written_never_changes_the_verdict(crs, monkeypatch, tmp_path) -> None:
+    now = time.time()
+    found, manifest = _one_target(now)
+    blocked = tmp_path / "file"
+    blocked.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(crs, "READY_LOG", blocked / "rounds.jsonl")             # a path under a regular file
+    _ready_session(crs, monkeypatch, manifest, now)
+    monkeypatch.setattr(crs, "session_work", lambda s: [])
+    assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 0

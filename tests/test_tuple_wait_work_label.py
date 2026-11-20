@@ -168,6 +168,8 @@ def test_the_registrars_engine_calls_carry_a_short_timeout(monkeypatch: pytest.M
         return Fake()
 
     monkeypatch.setattr("nexus.identity.bind_client.IdentityClient.from_config", classmethod(from_config))
+    # the suite refuses the real client seam (tests/conftest.py); this test's own fake client stands behind it
+    monkeypatch.setattr(work, "_new_client", lambda timeout: work.IdentityClient.from_config(timeout=timeout))
     assert work.register_own("wait", "s1", identity="i1") and work.finish_own("wait", "s1", identity="i1")
     assert seen == [work.LABEL_TIMEOUT_S] * 2 and work.LABEL_TIMEOUT_S <= 2.0
 

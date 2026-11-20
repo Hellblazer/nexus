@@ -20,6 +20,13 @@ from tests.test_identity_cmd import Box
 P_REAL = os.path.realpath("/p")
 
 
+def old_session(n: int = 0) -> str:
+    """The id of an EARLIER session (a Claude session id is a UUID: that shape is what makes a wait ref a session's)."""
+    import uuid
+
+    return str(uuid.UUID(int=0xABCDEF0000 + n))
+
+
 @pytest.fixture
 def box(tmp_path: Path) -> Box:
     return Box(tmp_path)
@@ -356,6 +363,7 @@ def test_a_running_row_older_than_the_ttl_is_stale_for_the_kinds_that_end_with_t
     from nexus.identity import work
 
     i1 = box.running_seat("alpha", 100)
+    early(box, i1)
     box.engine.sessions["sid-100"] = (i1, 1)
     for kind in ("wait", "labrun", "agent", "watcher"):
         seed(box, i1, kind, "x:old", age_s=work.ROW_TTL_S + HOUR)
@@ -442,6 +450,7 @@ def test_the_stale_listing_says_why(box: Box) -> None:
     from nexus.identity import work
 
     i1 = box.running_seat("alpha", 100)
+    early(box, i1)
     seed(box, i1, "agent", "agent:old", age_s=work.ROW_TTL_S + HOUR)
     out = box.run("work", "list", "i1").output
     assert "stale" in out and "agent:old" in out and "12 h" in out, out
@@ -497,6 +506,186 @@ def test_work_run_records_its_process_while_the_command_runs_and_clears_it_after
     work.run_command(box.env(), "labrun", "full", ["x"], runner=lambda argv: during.append(work.read_owner(box.identity_dir, i1, "labrun", "full")) or 0)
     assert during[0] is not None and during[0]["pid"] == os.getpid()
     assert work.read_owner(box.identity_dir, i1, "labrun", "full") is None
+
+
+# ── review round 1 (nexus-hczdo) ────────────────────────────────────────────
+
+
+def early(box: Box, identity: str) -> None:
+    """The holder began long before the rows a test seeds (the fake clock sits at 1000 s, holders at pid*1000 ms)."""
+    box.engine.records[identity]["holder"]["started_at"] = -10**12
+
+
+def test_the_skills_literal_hand_wait_is_live_and_blocking_and_survives_the_purge(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ship-blocker 1: ``nx identity work register --kind wait --ref develop-ci`` (the skill's own command, a plain ref) read
+    as 'a wait from an earlier session': stale at once and dropped by the limit's purge while it ran."""
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    early(box, i1)
+    as_caller(monkeypatch, i1)
+    assert box.run("work", "register", "--kind", "wait", "--ref", "develop-ci").exit_code == 0
+    assert listed(box)[("wait", "develop-ci")] is False, "live, so it blocks the ready check"
+    assert "develop-ci" in box.run("work", "list", "i1", "--running").output
+    for n in range(199):
+        box.engine.put_work(i1, "labrun", f"d{n}", "done")
+    assert work.register(box.engine, i1, "labrun", "fresh", probe=box.env()).state == "running"
+    assert (i1, "wait", "develop-ci") in box.engine.work, "the purge left a live hand wait alone"
+
+
+def test_an_agent_row_older_than_the_holders_start_is_a_ghost_and_reads_stale_while_the_identity_is_alive(box: Box) -> None:
+    """Critical 2: a restart with an agent in flight never runs its SubagentStop; the identity re-binds, so the row is neither
+    stale by identity nor probed. It predates this holder's start: it cannot belong to this process."""
+    i1 = box.running_seat("alpha", 100)                       # holder started_at = 100 * 1000 ms
+    box.engine.sessions["sid-100"] = (i1, 1)
+    box.engine.work[(i1, "agent", "agent:ghost")] = ("running", 40.0)
+    box.engine.work[(i1, "agent", "agent:mine")] = ("running", 500.0)
+    box.engine.work[(i1, "wait", "hand-ghost")] = ("running", 40.0)
+    box.engine.work[(i1, "labrun", "hand-mine")] = ("running", 500.0)
+    got = listed(box)
+    assert got[("agent", "agent:ghost")] is True and got[("wait", "hand-ghost")] is True
+    assert got[("agent", "agent:mine")] is False and got[("labrun", "hand-mine")] is False
+    assert "registered before this session started" in box.run("work", "list", "i1").output
+    assert "agent:ghost" not in box.run("work", "list", "i1", "--running").output
+
+
+def test_a_row_with_an_owner_record_is_judged_by_its_process_not_by_the_holders_start(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    box.procs.start(300, "2026-11-17T09:00:00Z", registry=False)
+    box.engine.work[(i1, "wait", "ci:x@y")] = ("running", 40.0)             # older than the holder: but its process runs
+    work.record_owner(box.identity_dir, i1, "wait", "ci:x@y", pid=300, start="2026-11-17T09:00:00Z", host=box.procs.host)
+    assert listed(box)[("wait", "ci:x@y")] is False
+
+
+def test_the_purge_also_drops_stale_running_rows_so_orphans_cannot_fill_the_limit(box: Box) -> None:
+    from nexus.identity import holder, work
+
+    i1 = box.running_seat("alpha", 100)
+    early(box, i1)
+    clock = box.env().clock()
+    began = holder.epoch_seconds("2026-11-17T09:00:00Z")
+    box.procs.start(400, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.start(401, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.stop(401)
+    live_ref, dead_ref = f"{box.procs.host}:400:{began}", f"{box.procs.host}:401:{began}"
+    box.engine.work[(i1, "labrun", live_ref)] = ("running", clock - 60)
+    box.engine.work[(i1, "labrun", dead_ref)] = ("running", clock - 60)
+    box.engine.work[(i1, "agent", "agent:fresh")] = ("running", clock - 60)
+    for n in range(197):
+        box.engine.work[(i1, "agent", f"agent:orphan{n}")] = ("running", clock - work.ROW_TTL_S - HOUR)
+    row = work.register(box.engine, i1, "worktree", "/wt/new", probe=box.env())
+    assert row.state == "running"
+    left = {k[2] for k in box.engine.work if k[0] == i1}
+    assert left == {live_ref, "agent:fresh", "/wt/new"}, "the TTL-old orphans and the dead process's row went; live ones stayed"
+
+
+def test_a_registration_with_purge_off_is_refused_at_the_limit_and_deletes_nothing(box: Box) -> None:
+    """Ship-blocker 2: the SubagentStart hook has 10 s and the purge is up to ~200 sequential calls: hooks never purge."""
+    from nexus.identity import work
+    from nexus.identity.bind_client import IdentityApiError
+
+    i1 = box.running_seat("alpha", 100)
+    for n in range(200):
+        box.engine.put_work(i1, "labrun", f"w{n}", "done")
+    with pytest.raises(IdentityApiError) as err:
+        work.register(box.engine, i1, "agent", "agent:a1", purge=False)
+    assert err.value.code == "work_limit" and not box.engine.ids_called("remove_work") and not box.engine.ids_called("work_of")
+    assert work.register_own("agent", "agent:a1", client=box.engine, identity=i1, purge=False) is False
+    assert box.engine.ids_called("remove_work") == [], "a hook's registration never deletes a row"
+
+
+def test_forgetting_an_agent_row_removes_it_and_a_second_forget_is_a_no_op(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    work.register(box.engine, i1, "agent", "agent:a1")
+    assert work.forget_own("agent", "agent:a1", client=box.engine, identity=i1) is True
+    assert (i1, "agent", "agent:a1") not in box.engine.work
+    assert work.forget_own("agent", "agent:a1", client=box.engine, identity=i1) is True, "nothing to remove is not a failure"
+    assert work.forget_own("agent", "agent:a1", client=box.engine, identity=None) is False
+
+
+def test_an_engine_that_refuses_a_kind_is_asked_once_per_process(box: Box) -> None:
+    """Review item 8: on an engine from before the kind, every dispatch cost two failed calls (start and stop)."""
+    from nexus.identity import work
+    from nexus.identity.bind_client import IdentityApiError
+
+    i1 = box.running_seat("alpha", 100)
+    calls: list[str] = []
+
+    def refuse(identity, kind, ref, state="running"):
+        calls.append(kind)
+        raise IdentityApiError(400, "bad_kind", "kind must be one of ['labrun']", {})
+
+    box.engine.put_work = refuse                                       # type: ignore[method-assign]
+    for n in range(3):
+        assert work.register_own("agent", f"agent:a{n}", client=box.engine, identity=i1, purge=False) is False
+    assert work.forget_own("agent", "agent:a0", client=box.engine, identity=i1) is False
+    assert calls == ["agent"], "one failed call, then the process knows"
+    assert work.register_own("labrun", "x", client=box.engine, identity=i1) is False and calls == ["agent", "labrun"], "per kind"
+
+
+def test_an_iso_updated_at_from_the_real_engine_reads_the_ttl_too(box: Box) -> None:
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    early(box, i1)
+    box.engine.work[(i1, "agent", "agent:old")] = ("running", "1969-12-31T00:00:00.123456Z")     # the clock sits at 1000 s
+    box.engine.work[(i1, "agent", "agent:new")] = ("running", "1970-01-01T00:10:00Z")
+    got = listed(box)
+    assert got[("agent", "agent:old")] is True and got[("agent", "agent:new")] is False
+
+
+def test_an_owner_record_survives_one_second_of_lstart_jitter(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    early(box, i1)
+    box.procs.start(300, "2026-11-17T09:00:01Z", registry=False)
+    seed(box, i1, "wait", "ci:j@k", age_s=60)
+    work.record_owner(box.identity_dir, i1, "wait", "ci:j@k", pid=300, start="2026-11-17T09:00:00Z", host=box.procs.host)
+    assert listed(box)[("wait", "ci:j@k")] is False, "one second apart is the same process"
+    box.procs.start(300, "2026-11-17T09:00:30Z", registry=False)
+    assert listed(box)[("wait", "ci:j@k")] is True, "half a minute apart is another process"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+def test_owner_records_live_in_a_private_directory(box: Box) -> None:
+    from nexus.identity import work
+
+    work.record_owner(box.identity_dir, "i1", "wait", "x", pid=1, start=None, host="h", procs=box.procs)
+    records = box.identity_dir / work.OWNER_DIR_NAME
+    assert records.is_dir() and (records.stat().st_mode & 0o077) == 0, "0700: nobody else reads who runs what"
+
+
+def test_owner_records_are_pruned_by_liveness_never_by_age(box: Box) -> None:
+    """Review item 5: a standing wait older than two weeks lost its record to the old mtime rule; a record whose process is
+    gone (and a leaked .tmp of a dead writer) must go."""
+    import time as _time
+
+    from nexus.identity import work
+
+    host = box.procs.host
+    box.procs.start(300, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.start(301, "2026-11-17T09:00:00Z", registry=False)
+    work.record_owner(box.identity_dir, "i1", "wait", "alive", pid=300, start="2026-11-17T09:00:00Z", host=host)
+    work.record_owner(box.identity_dir, "i1", "wait", "dead", pid=301, start="2026-11-17T09:00:00Z", host=host)
+    box.procs.stop(301)
+    records = box.identity_dir / work.OWNER_DIR_NAME
+    ancient = _time.time() - 90 * 86400
+    for f in records.glob("*.json"):
+        os.utime(f, (ancient, ancient))
+    leaked_dead, leaked_live = records / "abc.301.tmp", records / "def.300.tmp"
+    leaked_dead.write_text("x", encoding="utf-8")
+    leaked_live.write_text("x", encoding="utf-8")
+    work.record_owner(box.identity_dir, "i1", "wait", "third", pid=300, start="2026-11-17T09:00:00Z", host=host, procs=box.procs)
+    assert work.read_owner(box.identity_dir, "i1", "wait", "alive") is not None, "ninety days old, its process runs: kept"
+    assert work.read_owner(box.identity_dir, "i1", "wait", "dead") is None, "its process is gone: pruned"
+    assert not leaked_dead.exists() and leaked_live.exists()
 
 
 # ── memberships (the fence is the engine's; the engine rows check the real one) ──
@@ -706,14 +895,14 @@ def test_running_lists_no_gone_worktree_and_no_wait_from_an_earlier_session(box:
     i1 = box.running_seat("alpha", 100)                                  # its holder's session is sid-100
     live_wt, gone_wt = tmp_path / "live", tmp_path / "gone"
     live_wt.mkdir()
-    for kind, ref in (("worktree", str(live_wt)), ("worktree", str(gone_wt)), ("wait", "sid-100"), ("wait", "sid-old")):
+    for kind, ref in (("worktree", str(live_wt)), ("worktree", str(gone_wt)), ("wait", "sid-100"), ("wait", old_session())):
         box.engine.put_work(i1, kind, ref, "running")
     running = json.loads(box.run("work", "list", "i1", "--running", "--json").stdout)["work"]
     assert sorted((r["kind"], r["ref"]) for r in running) == [("wait", "sid-100"), ("worktree", str(live_wt))]
     full = box.run("work", "list", "i1")
     assert full.exit_code == 0
     assert f"{gone_wt}  (stale: the worktree is gone)" in full.output
-    assert "sid-old  (stale: a wait from an earlier session)" in full.output
+    assert f"{old_session()}  (stale: a wait from an earlier session)" in full.output
     assert "sid-100  (stale" not in full.output
 
 
@@ -725,7 +914,7 @@ def test_the_limit_also_forgets_waits_from_an_earlier_session(box: Box) -> None:
     i1 = box.running_seat("alpha", 100)
     box.engine.put_work(i1, "wait", "sid-100", "running")
     for n in range(199):
-        box.engine.put_work(i1, "wait", f"sid-old-{n}", "running")
+        box.engine.put_work(i1, "wait", old_session(n), "running")
     assert work.register(box.engine, i1, "labrun", "fresh").state == "running"
     assert {k[2] for k in box.engine.work if k[0] == i1} == {"sid-100", "fresh"}
 
@@ -733,10 +922,12 @@ def test_the_limit_also_forgets_waits_from_an_earlier_session(box: Box) -> None:
 def test_no_current_session_judges_no_wait_superseded() -> None:
     from nexus.identity.work import wait_superseded
 
-    assert wait_superseded({"kind": "wait", "ref": "s-old"}, "s-new")
-    assert not wait_superseded({"kind": "wait", "ref": "s-old"}, None)
-    assert not wait_superseded({"kind": "wait", "ref": "s"}, "s")
-    assert not wait_superseded({"kind": "labrun", "ref": "s-old"}, "s-new")
+    assert wait_superseded({"kind": "wait", "ref": old_session()}, "s-new")
+    assert not wait_superseded({"kind": "wait", "ref": old_session()}, None)
+    assert not wait_superseded({"kind": "wait", "ref": old_session()}, old_session())
+    assert not wait_superseded({"kind": "labrun", "ref": old_session()}, "s-new")
+    for plain in ("develop-ci", "s-old", "pytest-full", "ci:develop@abc", "wait for peer"):
+        assert not wait_superseded({"kind": "wait", "ref": plain}, "s-new"), f"{plain!r} names no session: it is a hand wait"
 
 
 @pytest.mark.skipif(not hasattr(__import__("signal"), "SIGHUP"), reason="POSIX signals")

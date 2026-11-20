@@ -211,7 +211,7 @@ def run(payload: dict | None) -> HookResult:
     """Return the nudge envelope when a real agent stops with no T1 put.
 
     Also the agent's end as registered work (RDR-253 Step 6 part 1, nexus-hczdo): SubagentStart wrote ``kind=agent``
-    running, and this stop writes ``done`` (:func:`nexus.hooks.subagent_work.mark_done`), for every agent type that has
+    running, and this stop removes that row (:func:`nexus.hooks.subagent_work.register_stop`), for every agent type that has
     one, the ``NO_T1_AGENTS`` too. A nudged agent runs one more turn, so its row ends at the stop after the nudge.
     Best effort, after the verdict is made: a failed label changes nothing about the stop."""
     result = never_fail(lambda: _decide(payload), "subagent-stop-t1-nudge", payload=lambda: payload, module=__name__)
@@ -219,7 +219,7 @@ def run(payload: dict | None) -> HookResult:
         try:
             from nexus.hooks import subagent_work  # noqa: PLC0415 — stdlib-only at module scope; deferred so an orphan stop pays nothing
 
-            subagent_work.mark_done(payload)
+            subagent_work.register_stop(payload)
         except Exception:  # noqa: BLE001 — a label never costs the stop
             pass
     return result

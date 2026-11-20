@@ -123,8 +123,11 @@ def ci_wait_cmd(
     # ended in the finally below, so it never fails or delays the result. A TERM or HUP ends the row too.
     label = Label("wait", f"ci:{branch}@{sha}")
     label.start()
-    label.arm_sigterm()
     try:
+        try:
+            label.arm_sigterm()
+        except Exception:  # noqa: BLE001 — a label never fails the wait it labels (the row still ends in the finally)
+            pass
         _wait_for_ci(sha, timeout_min, fresh, latest_attempt, repo, branch, gh, park_s)
     finally:
         label.finish()
