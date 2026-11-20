@@ -42,6 +42,7 @@ import nexus.indexer as idx
 import nexus.mcp_infra as mi
 from nexus.corpus import discard_cached_registration, ensure_collection_registered
 from nexus.db.http_vector_client import HttpVectorClient
+from nexus.db.local_ef import LocalEmbeddingFunction
 from nexus.doc_indexer import index_markdown
 from nexus.registry import RepoRegistry
 
@@ -86,6 +87,7 @@ def _make_repo(root: Path, files: dict[str, str]) -> Path:
     repo = root / f"repo-{uuid.uuid4().hex[:8]}"
     repo.mkdir()
     for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         (repo / rel).write_text(text, encoding="utf-8")
     _git(repo, "init", "-q")
     _git(repo, "add", ".")
@@ -95,6 +97,7 @@ def _make_repo(root: Path, files: dict[str, str]) -> Path:
 
 def _add_files(repo: Path, files: dict[str, str]) -> None:
     for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         (repo / rel).write_text(text, encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "more")
@@ -271,8 +274,13 @@ def test_a_new_collection_with_no_row_takes_the_names_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """NoRow: nothing registers the collection before the run, so no row backs it and the name's own
-    token answers (the engine's profile model here, as it always did)."""
+    token answers. The token is the engine's profile model: a row-less collection is registered by the
+    run with the model it resolved, and the engine refuses a registration that is not its profile model,
+    so no other token can be tested on this engine. The test still tells the token from the local
+    embedder's model (the Python EF reports another one here), which is what a NoRow answered from the
+    embedder would stamp."""
     u = _unique()
+    assert LocalEmbeddingFunction().model_name != ROW_MODEL, "non-vacuity: the embedder's model is not the token"
     names = _names(u)
     repo = _make_repo(tmp_path, {**CODE, **PROSE})
 
@@ -303,14 +311,14 @@ def test_an_unreadable_row_neither_fails_the_run_nor_reindexes_an_unchanged_file
 
 # ── 2. Critical Assumption 2: no extra round trip per document ────────────────
 
-#: What FOUR more documents (two code, two prose) cost a run over the two-document run, as ``(requests,
-#: collection listings)``: the most observed on develop 63825559a BEFORE the change, when the run read
-#: no row at all (eight runs: requests 7 or 8, listings 1 or 2; which one depends on what ran earlier in
-#: the process). The listings are not zero: a flush registers its collection and that invalidates the
-#: shared collections cache, so the cache refills. The row read is one read of that cache per run, never
-#: one per document: a read per document would add four listings, so the change must not raise either
-#: number. A pin: it only falls.
-MAX_EXTRA_FOR_FOUR_DOCS: tuple[int, int] = (8, 2)
+#: How many more collection listings FOUR more documents may cost a run than two, over and above the
+#: baseline. Measured on develop 63825559a BEFORE the change, when the run read no row: 1 or 2 more (eight
+#: runs; a flush registers its collection, which invalidates the shared collections cache, so the cache
+#: refills, and how many times depends on the flush grouping). The row read is one read of that cache per
+#: run, never one per document: a read per document would add FOUR to the baseline, so a margin of 3 over
+#: the small run's count catches it with room on both sides. The total request count is not pinned: it
+#: moves with every unrelated write-path change and says nothing about the row read.
+LISTING_MARGIN_FOR_FOUR_DOCS: int = 3
 
 
 def _doc_set(n: int, tag: str) -> dict[str, str]:
@@ -355,17 +363,13 @@ def test_the_row_read_adds_no_request_per_document(
 ) -> None:
     """Critical Assumption 2. The run reads each collection's row from the shared collections cache, once
     per run, not once per document. Measured at the transport, on a collection that exists and on one
-    with no row yet: the requests and the collection listings four more documents cost do not exceed
-    what they cost before the change."""
+    with no row yet: the collection listings do not grow with the documents (``nx index md``, the
+    per-document path, is measured in ``test_rdr229_p23_write_path_gaps.py``)."""
     small = _requests_for_run(tmp_path, monkeypatch, n_docs=2, existing=existing)
     large = _requests_for_run(tmp_path, monkeypatch, n_docs=6, existing=existing)
-    kind = "existing" if existing else "new"
-    extra, extra_listings = large.total() - small.total(), large.listing() - small.listing()
-    max_extra, max_extra_listings = MAX_EXTRA_FOR_FOUR_DOCS
-    assert extra_listings <= max_extra_listings, (
-        f"four more documents cost {extra_listings} more collection listings; before the change {max_extra_listings}")
-    assert extra <= max_extra, (
-        f"four more documents cost {extra} more requests; before the change {max_extra}")
+    assert large.listing() <= small.listing() + LISTING_MARGIN_FOR_FOUR_DOCS, (
+        f"listings grew from {small.listing()} (two documents) to {large.listing()} (six): "
+        "the row is read per document")
 
 
 # ── 3. a listing outage during nx index md ────────────────────────────────────
