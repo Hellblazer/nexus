@@ -1663,6 +1663,7 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = parseBody(raw);
         String collection           = requireString(body, "collection");
         String quarantineCollection = requireString(body, "quarantine_collection");
+        dev.nexus.service.db.QuarantineOrigin.requireMoverSibling(quarantineCollection);
         String quarantinedAt        = requireString(body, "quarantined_at");
         // nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
         // sample_limit was caller-supplied with no upper bound, unlike every

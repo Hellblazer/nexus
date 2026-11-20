@@ -682,6 +682,7 @@ public final class ReembedHandler implements HttpHandler {
         }
         if (dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested) == null) {
             // The version of a new row is read off the target's minted name (D1), so a name to register must have one.
+            // This applies only when a NEW row would be registered: an existing live target is used as-is.
             throw new IllegalArgumentException("target_collection " + requested + " is not a conformant collection "
                 + "name: a re-embed target is registered under a conformant name (content type, owner, model and a "
                 + "v<n> version, joined by double underscores)");

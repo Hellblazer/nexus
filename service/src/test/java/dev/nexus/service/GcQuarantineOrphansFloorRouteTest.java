@@ -192,6 +192,21 @@ class GcQuarantineOrphansFloorRouteTest {
         return (Map<String, Object>) body.get("floor");
     }
 
+    // ── the mover registers a quarantine collection, so only a quarantine- name is accepted ──
+
+    @Test
+    void aQuarantineCollectionWithoutThePrefixIsRefusedAndNothingMoves() throws Exception {
+        Fixture f = seed(10, 6);
+        String plain = f.origin() + "-plainsibling";
+
+        HttpResponse<String> r = post(req(f, "quarantine_collection", plain));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(400);
+        assertThat(r.body()).contains("quarantine_collection").contains("quarantine-").contains(plain);
+        assertThat(count(f.origin())).as("nothing moved").isEqualTo(10);
+        assertThat(count(plain)).isZero();
+    }
+
     // ── the floor ────────────────────────────────────────────────────────────
 
     @Test

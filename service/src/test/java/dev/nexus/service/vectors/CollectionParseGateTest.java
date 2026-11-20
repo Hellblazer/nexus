@@ -374,13 +374,18 @@ class CollectionParseGateTest {
      * target named {@code quarantine-...}, so the prefix guard stays "a quarantine- name is an engine mint". It is a
      * name read for a name no row exists for yet, the same class as the client route's refusal in
      * CollectionRegistration.
+     *
+     * <p>Review round 3, 35 -> 36: QuarantineOrigin 4 -> 5, {@code requireMoverSibling}, the 400 for a
+     * {@code quarantine_collection} without the prefix on {@code POST /v1/vectors/gc/quarantine-orphans} (the SQL
+     * mover registers whatever it is given as a quarantine collection). The same registration-side name-guard class as
+     * the client route's refusal; nothing else was lowered to hide it.
      */
     private static final Map<String, Integer> QUARANTINE_READ_CENSUS = Map.ofEntries(
         Map.entry("dev/nexus/service/ChunkReaper.java", 3),
         Map.entry("dev/nexus/service/db/CatalogRepository.java", 5),
         Map.entry("dev/nexus/service/db/ChashRepository.java", 2),
         Map.entry("dev/nexus/service/db/CollectionRegistration.java", 4),
-        Map.entry("dev/nexus/service/db/QuarantineOrigin.java", 4),
+        Map.entry("dev/nexus/service/db/QuarantineOrigin.java", 5),
         Map.entry("dev/nexus/service/http/CatalogHandler.java", 4),
         Map.entry("dev/nexus/service/http/ReembedHandler.java", 1),
         Map.entry("dev/nexus/service/vectors/ChunkConstraintAdmin.java", 2),
@@ -389,7 +394,7 @@ class CollectionParseGateTest {
         Map.entry("dev/nexus/service/vectors/ChunkKeySweep.java", 1),
         Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 2));
 
-    private static final int QUARANTINE_READ_TOTAL_CEILING = 35;
+    private static final int QUARANTINE_READ_TOTAL_CEILING = 36;
 
     private static final Pattern QUARANTINE_READ = Pattern.compile(
         "(?<!String\\s{1,40})\\bQUARANTINE_PREFIX\\b"

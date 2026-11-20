@@ -133,6 +133,19 @@ public final class QuarantineOrigin {
         }
     }
 
+    /**
+     * The sibling a mover route names ({@code POST /v1/vectors/gc/quarantine-orphans}): the SQL mover registers whatever
+     * it is given as a {@code quarantine} collection, so a name without the prefix would mint a quarantine row
+     * with a plain name. Refused, a registration-side name guard like the client route's (RDR-229 P2.5).
+     */
+    public static void requireMoverSibling(String quarantineCollection) {
+        if (!isQuarantineName(quarantineCollection)) {
+            throw new IllegalArgumentException("quarantine_collection " + quarantineCollection + " must start with the "
+                + "prefix quarantine- : the move registers it as a quarantine collection, and only a quarantine- name "
+                + "may be one");
+        }
+    }
+
     private static IllegalArgumentException refused(String verb, String name) {
         return new IllegalArgumentException(
             verb + " is refused on the quarantine collection " + name + ": it would move or delete quarantined "

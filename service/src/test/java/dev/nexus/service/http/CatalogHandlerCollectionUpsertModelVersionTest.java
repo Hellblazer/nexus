@@ -147,21 +147,36 @@ class CatalogHandlerCollectionUpsertModelVersionTest extends AtomicWriteTestBase
     }
 
     @Test
-    void aBatchLargerThanOneBindChunkImportsAndSkipsItsExistingRows() {
-        // Review M2: the existing-names SELECT binds one parameter per name, so it is chunked like the INSERT
-        // (PostgreSQL allows 32767 binds); a batch over the budget must neither fail nor re-insert.
+    void aBatchLargerThanOneBindChunkIsImportedWhole_andAReImportSkipsEveryExistingRowIncludingTheLaterChunk()
+            throws Exception {
+        // The existing-names lookup binds one parameter per name and is chunked like the INSERT. The re-import sends
+        // every row with a blank version and a legacy name: a row the lookup missed (one in a later chunk) would be
+        // judged as new and refused 400, so this fails if the chunking drops a name. (jOOQ also splits a long IN
+        // list for PostgreSQL, so an unchunked lookup does not fail here; this pins the skip, not the splitting.)
         String t = newTenant();
         int n = 33_000;   // over PostgreSQL's 32767 bind limit
-        List<Map<String, Object>> rows = new java.util.ArrayList<>(n);
+        List<Map<String, Object>> first = new java.util.ArrayList<>(n);
+        List<Map<String, Object>> again = new java.util.ArrayList<>(n);
         for (int i = 0; i < n; i++) {
-            rows.add(row("knowledge__big" + i + "__minilm-l6-v2-384__v1", "v1"));
+            first.add(row("legacy_big_" + i, "v1"));
+            again.add(row("legacy_big_" + i, ""));
         }
 
-        assertThat(repo.importCollectionsBatch(t, rows)).isEqualTo(n);
-        assertThat(repo.importCollectionsBatch(t, rows)).as("a second pass skips every existing row").isEqualTo(n);
+        repo.importCollectionsBatch(t, first);
+        assertThat(rowCount(t)).as("every row of the first import landed").isEqualTo(n);
+        repo.importCollectionsBatch(t, again);
 
-        assertThat(version(t, "knowledge__big0__minilm-l6-v2-384__v1")).isEqualTo("v1");
-        assertThat(version(t, "knowledge__big" + (n - 1) + "__minilm-l6-v2-384__v1")).isEqualTo("v1");
+        assertThat(rowCount(t)).as("the re-import added nothing").isEqualTo(n);
+        assertThat(version(t, "legacy_big_0")).isEqualTo("v1");
+        assertThat(version(t, "legacy_big_" + (n - 1))).as("a row in the later chunk was skipped, not judged").isEqualTo("v1");
+    }
+
+    private int rowCount(String tenant) throws Exception {
+        try (var su = pg.createConnection("")) {
+            return org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .fetchCount(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS,
+                    dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant));
+        }
     }
 
     @Test

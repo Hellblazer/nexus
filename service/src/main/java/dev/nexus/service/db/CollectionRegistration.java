@@ -71,44 +71,51 @@ public final class CollectionRegistration {
         return quarantine ? "quarantine" : "live";
     }
 
-    /** True when {@code name} and {@code state} break "a quarantine- name is quarantine, and only one is". */
+    /**
+     * True for the two real contradictions only: a {@code quarantine-} name with state {@code live}, and a plain name
+     * with state {@code quarantine}. {@code dormant} and {@code disputed} are admin states orthogonal to the name
+     * (hygiene-002 marks rows {@code disputed}, and an export holding one must still import).
+     */
     private static boolean disagrees(String name, String state) {
-        return (name != null && name.startsWith(QuarantineOrigin.PREFIX)) != "quarantine".equals(state);
+        boolean prefixed = name != null && name.startsWith(QuarantineOrigin.PREFIX);
+        return prefixed ? "live".equals(state) : "quarantine".equals(state);
     }
 
     /**
-     * Refuses a NEW registration, in every form, whose name and effective {@code lifecycle_state} disagree (review
-     * N1): a {@code quarantine-} name takes only {@code quarantine}, and a plain name never does. The engine's own
+     * Refuses a NEW registration, in every form, whose name and effective {@code lifecycle_state} contradict (review
+     * N1): a {@code quarantine-} name is never {@code live}, and a plain name is never {@code quarantine}. The engine's own
      * mint passes {@code quarantine} for its prefixed sibling, so it is unaffected; the SQL movers write their rows
      * directly and do not pass through here.
      */
     static void requireNameAgreesWithState(String name, String effectiveState) {
         if (disagrees(name, effectiveState)) {
             throw new IllegalArgumentException("registering collection '" + name + "' with lifecycle_state '"
-                + effectiveState + "' is refused: a quarantine- name takes lifecycle_state 'quarantine' only, and "
-                + "any other name never does");
+                + effectiveState + "' is refused: a quarantine- name cannot be 'live', and any other name cannot "
+                + "be 'quarantine'");
         }
     }
 
     /**
-     * Refuses an import batch holding a NEW row whose explicit {@code lifecycle_state} and name disagree: a
-     * {@code quarantine-} name must say {@code quarantine}, and any other name must not (review, linda 2026-11-20).
+     * Refuses an import batch holding a NEW row whose EFFECTIVE {@code lifecycle_state} ({@link
+     * #lifecycleStateForImport}: the row's own, else the prefix fallback from its name or content_type) contradicts
+     * its name: a {@code quarantine-} name with {@code live}, or a plain name with {@code quarantine}, a plain name
+     * with a {@code quarantine-} content_type and no state included (review, linda 2026-11-20).
      * Loud and whole: the import's response is a bare count with no per-row report, so the batch is refused with one
      * {@link IllegalArgumentException} (a 400) that counts and names the rows, and nothing is stored, as the
-     * content_type guard already refuses a batch. A row with no state keeps the prefix fallback and cannot disagree.
+     * content_type guard already refuses a batch.
      */
     static void requireStatesAgreeWithNames(List<Map<String, Object>> newRows) {
         List<String> bad = new java.util.ArrayList<>();
         for (Map<String, Object> coll : newRows) {
-            String state = explicitLifecycleState(coll);
+            String state = lifecycleStateForImport(coll);
             String name = CatalogRepository.s(coll, "name");
-            if (state != null && disagrees(name, state)) {
+            if (disagrees(name, state)) {
                 bad.add("'" + name + "' (lifecycle_state=" + state + ")");
             }
         }
         if (!bad.isEmpty()) {
             throw new IllegalArgumentException("refusing the import: " + bad.size() + " row(s) whose lifecycle_state "
-                + "disagrees with the name (a quarantine- name must be 'quarantine', any other name must not be): "
+                + "contradicts the name (a quarantine- name cannot be 'live', any other name cannot be 'quarantine'): "
                 + String.join(", ", bad.size() > 10 ? bad.subList(0, 10) : bad) + (bad.size() > 10 ? ", ..." : ""));
         }
     }

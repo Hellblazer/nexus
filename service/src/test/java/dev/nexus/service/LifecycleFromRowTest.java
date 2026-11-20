@@ -161,15 +161,15 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
         String t = newTenant();
         String prefixedNoState = prefixed(col("a1a"));
         String prefixedLive = prefixed(col("a1b"));
-        String prefixedDormant = prefixed(col("a1c"));
         String plainQuarantine = col("a1d");
 
-        for (var c : List.of(reg(prefixedNoState, null), reg(prefixedLive, "live"), reg(prefixedDormant, "dormant"),
+        for (var c : List.of(reg(prefixedNoState, null), reg(prefixedLive, "live"),
                              reg(plainQuarantine, "quarantine"))) {
             String name = (String) c.get("name");
             assertThatThrownBy(() -> repo.upsertCollection(t, c))
                 .as("engine form " + name).isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(name).hasMessageContaining("lifecycle_state").hasMessageContaining("quarantine-");
+                .hasMessageContaining(name).hasMessageContaining("lifecycle_state").hasMessageContaining("quarantine-")
+                .hasMessageContaining("'" + (c.get("lifecycle_state") == null ? "live" : c.get("lifecycle_state")) + "'");
             assertThat(state(t, name)).as("nothing written for " + name).isNull();
         }
     }
@@ -311,6 +311,44 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
         assertThat(state(t, plainNoState)).isEqualTo("live");
         assertThat(state(t, batchQuarantine)).isEqualTo("quarantine");
         assertThat(state(t, batchNoState)).isEqualTo("quarantine");
+    }
+
+    @Test
+    void aNewImportedRowWhoseContentTypeSaysQuarantineButWhoseNameIsPlainAndStateAbsentIsRefused_namingTheRow()
+            throws Exception {
+        // Review (blocker): the EFFECTIVE state (the content_type prefix fallback included) is what is judged.
+        String t = newTenant();
+        String plain = col("a8c");
+        Map<String, Object> bad = reg(plain, null);
+        bad.put("content_type", "quarantine-knowledge");
+
+        assertThatThrownBy(() -> repo.importCollection(t, bad))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(plain)
+            .hasMessageContaining("lifecycle_state=quarantine");
+        assertThatThrownBy(() -> repo.importCollectionsBatch(t, List.of(bad)))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(plain).hasMessageContaining("1 row");
+        assertThat(state(t, plain)).isNull();
+    }
+
+    @Test
+    void dormantAndDisputedAreAdminStatesOrthogonalToTheName_importAndEngineRegistrationAcceptThem() throws Exception {
+        // Review: only 'quarantine-name with live' and 'plain name with quarantine' contradict. hygiene-002 marks rows
+        // 'disputed', and an export holding one must still import.
+        String t = newTenant();
+        String prefixedDisputed = prefixed(col("a8d"));
+        String plainDormant = col("a8e");
+        String prefixedDormant = prefixed(col("a8f"));
+        String plainDisputed = col("a8g2");
+
+        repo.importCollection(t, reg(prefixedDisputed, "disputed"));
+        repo.importCollectionsBatch(t, List.of(reg(plainDormant, "dormant")));
+        repo.upsertCollection(t, reg(prefixedDormant, "dormant"));
+        repo.upsertCollection(t, reg(plainDisputed, "disputed"));
+
+        assertThat(state(t, prefixedDisputed)).isEqualTo("disputed");
+        assertThat(state(t, plainDormant)).isEqualTo("dormant");
+        assertThat(state(t, prefixedDormant)).isEqualTo("dormant");
+        assertThat(state(t, plainDisputed)).isEqualTo("disputed");
     }
 
     @Test
