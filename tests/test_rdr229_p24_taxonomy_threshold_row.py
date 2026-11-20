@@ -50,7 +50,7 @@ def _rows(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return _ROWS.get(name)
 
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _get_collection_row)
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_names", lambda: sorted(_ROWS))
+    monkeypatch.setattr("nexus.mcp_infra.get_live_collection_names", lambda: sorted(_ROWS))
     return asked
 
 
