@@ -7,6 +7,7 @@ peer-recipient strip has a fixture that fails without it.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 
@@ -116,8 +117,15 @@ def test_a_peer_as_recipient_is_not_the_wake(text: str, blocks: bool) -> None:
     assert swg.evaluate_text(text).block is blocks, swg.evaluate_text(text)
 
 
+_HELD_BACK = ("Never start work the user held back or asked you to wait on, work that needs the user's approval, or "
+              "work another session owns.")
+
+
 def test_the_continuation_never_licenses_held_back_work() -> None:
-    """The sentence wren's post-compaction checkpoint directive uses too (compact_checkpoint.py, in flight for 8.5.2), so
-    the two read as one rule once both land."""
+    """The same sentence as the post-compaction checkpoint directive (wren, 1776ff7b7): one rule in both places."""
     for cls in (swg.CLASS_PROMISE, swg.CLASS_TIMED, swg.CLASS_CI_WAIT):
-        assert "Never start work the user held back or asked you to wait on." in swg.block_reason(cls, "I'm doing it.")
+        assert _HELD_BACK in " ".join(swg.block_reason(cls, "I'm doing it.").split())
+    tree = ast.parse(SCRIPT.with_name("compact_checkpoint.py").read_text(encoding="utf-8"))
+    directive = next(ast.literal_eval(node.value) for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                     and any(getattr(t, "id", "") == "_RESUME_DIRECTIVE" for t in node.targets))
+    assert _HELD_BACK in directive, "the checkpoint directive changed: keep the two sentences equal"

@@ -781,8 +781,9 @@ def block_reason(cls: str, clause: str) -> str:
            "until-loop for another run, " if cls == CLASS_CI_WAIT else
            "a Monitor or a background Bash until-loop for a run or CI, ")
         + "ScheduleWakeup or CronCreate for a timed step. "
-        f"{do_now}Never start work the user held back or asked you to wait on. If the wake is someone else (the "
-        "user, a peer, a notification), say plainly in one sentence who it is, then end the turn."
+        f"{do_now}Never start work the user held back or asked you to wait on, work that needs the user's approval, "
+        "or work another session owns. If the wake is someone else (the user, a peer, a notification), say plainly "
+        "in one sentence who it is, then end the turn."
     )
 
 
