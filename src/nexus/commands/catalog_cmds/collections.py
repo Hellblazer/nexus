@@ -49,7 +49,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
       nx catalog backfill-collections
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -553,7 +553,7 @@ def collection_gc_cmd(apply: bool) -> None:
     Filed under nexus-ks40 (catalog/T3 hygiene).
     """
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 

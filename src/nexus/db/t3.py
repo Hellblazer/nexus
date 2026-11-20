@@ -37,7 +37,7 @@ from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
 )
-from nexus.db.collection_lifecycle import (
+from nexus.db.rows.lifecycle import (
     QUARANTINE_NAME_PREFIX,
     TAXONOMY_BYPASS_PREFIXES,
     bypasses_canonical_schema,
@@ -87,7 +87,7 @@ _BYPASS_SCHEMA_PREFIXES: tuple[str, ...] = (
     # — the drift/doctor checks must treat them as expected state.
     # RDR-229 P2.5: only a name with no catalog row is judged by this prefix;
     # a row's lifecycle_state decides when there is one
-    # (:mod:`nexus.db.collection_lifecycle`).
+    # (:mod:`nexus.db.rows.lifecycle`).
     QUARANTINE_NAME_PREFIX,
 )
 

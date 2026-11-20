@@ -79,7 +79,7 @@ def classify_t3_orphan_collections(cat: "CatalogReader", t3_db: Any) -> list[dic
     an empty (falsely clean) orphan list, or to guess around by dropping a
     collection that might actually be tombstoned-only.
     """
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — command-local import (nexus.db.rows.lifecycle)
 
     # nexus-5z0us sibling: the listing carries each collection's physical
     # chunk count (stored_count; an older engine sends count only). Asking

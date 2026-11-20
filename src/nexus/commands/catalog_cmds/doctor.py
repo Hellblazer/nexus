@@ -453,7 +453,7 @@ def _run_collections_drift() -> dict:
     with-report, not all-or-nothing.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
     from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — command-local import (nexus.db.collection_state)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -668,7 +668,7 @@ def _run_chunk_size_distribution() -> dict:
     aren't meaningful.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
     from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
@@ -785,7 +785,7 @@ def _run_chunk_text_dedup() -> dict:
     ``{"pass": bool, "within": {coll: {...}}, "cross": [{...}]}``.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
     from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
@@ -926,7 +926,7 @@ def _run_t3_vs_catalog() -> dict:
     Bypass-schema collections (``taxonomy__*``) are skipped from all.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections  # noqa: PLC0415 — command-local import
@@ -1107,7 +1107,7 @@ def _run_name_vs_embed_dim() -> dict:
         is_conformant_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.collection_lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.collection_lifecycle)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
 
     mismatches: list[dict] = []
     empty: list[str] = []

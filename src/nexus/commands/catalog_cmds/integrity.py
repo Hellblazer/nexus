@@ -529,7 +529,7 @@ def _class_a_vanished_collections(
     without double-reporting them; Class B, formerly excluded the same way,
     is retired — RDR-191 Phase 6, nexus-o8dil.33).
     """
-    from nexus.db.collection_lifecycle import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.rows.lifecycle import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
         bypasses_canonical_schema,
         registry_rows_by_name,
     )

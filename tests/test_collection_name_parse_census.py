@@ -905,7 +905,7 @@ def test_the_routing_class_is_measured_not_listed() -> None:
     the routing census scans. 25 sites since P2.5 (nexus-p2m1x.10): the 23
     content-type tests, the shipped ``code__*`` default, and the taxonomy__
     half of the schema-bypass test, which was 12 sites (229-research-39) until
-    P2.5 gathered them into ``db/collection_lifecycle.py``."""
+    P2.5 gathered them into ``db/rows/lifecycle.py``."""
     routing = _by_class("routing")
     assert sum(s.n for s in routing) == CLASS_PIN["routing"] == 25
     assert {s.shape for s in routing} == {

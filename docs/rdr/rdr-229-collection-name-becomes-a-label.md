@@ -766,7 +766,7 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   name from the allow-list. A CHECK constraint cannot read
   `catalog_collections`, so reading the row here would mean a trigger.
   This is deferred to the RDR author's ruling (nexus-p2m1x.10's notes).
-- *The client's row-less fallback.* `nexus.db.collection_lifecycle`
+- *The client's row-less fallback.* `nexus.db.rows.lifecycle`
   judges a name with no row, or a row with no state, by its prefix, at
   each of the client's bypass checks (census note `QUAR_NOROW`, a
   migration source). `chunk_quarantine.is_quarantine_sibling_name` stays a
@@ -1512,7 +1512,7 @@ has. The routing class is 23 sites plus the `taxonomy__` half of the 12
   `db`'s own row resolver.
 - *The `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`.* P2.5 moves the
   `quarantine-` half to `lifecycle_state`, and in doing so routes all 12
-  sites through one helper, `collection_lifecycle.bypasses_canonical_schema`
+  sites through one helper, `nexus.db.rows.lifecycle.bypasses_canonical_schema`
   (P2.5's client commit). P2.9 therefore moves the `taxonomy__` half at that
   one site to the row. The client census's routing class went from 36 to
   25 in that commit (`tests/test_collection_name_parse_census.py`). No writer in `src/nexus` creates a
@@ -1924,7 +1924,7 @@ its acceptance is that test green plus the census pin it lowers.
 - P2.9 Routing by content type reads the row (item 12): the 24 routing
   sites (23 and `topic_route.is_prose`) and the `taxonomy__` half of the `_BYPASS_SCHEMA_PREFIXES` tests
   (T2 `229-research-39`, listed in item 12; since P2.5 the 12 tests are one
-  helper, `collection_lifecycle.bypasses_canonical_schema`, so this half is
+  helper, `nexus.db.rows.lifecycle.bypasses_canonical_schema`, so this half is
   one site), the shipped `"code__*"` exclude
   default, and the engine's `isFileRoutedCollection`, which tests a live
   collection. The URI-string classifiers (`NoteUri.isNote`, `canonical`,

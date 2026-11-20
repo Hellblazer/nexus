@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nexus.db.collection_lifecycle import (
+from nexus.db.rows.lifecycle import (
     QUARANTINE_NAME_PREFIX,
     TAXONOMY_BYPASS_PREFIXES,
     bypasses_canonical_schema,

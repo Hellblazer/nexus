@@ -31,7 +31,7 @@ MIG_SRC: str = (
     'Migration source: the name comes from another install or an older era.'
 )
 BYPASS: str = (
-    'The taxonomy__ half of the schema-bypass test, one site since P2.5 gathered the twelve into db/collection_lifecycle.py (P2.9 moves it to the row); the quarantine- half of the same test reads the row (P2.5).'
+    'The taxonomy__ half of the schema-bypass test, one site since P2.5 gathered the twelve into db/rows/lifecycle.py (P2.9 moves it to the row); the quarantine- half of the same test reads the row (P2.5).'
 )
 QUAR_NOROW: str = (
     "The quarantine- half of the schema-bypass test, for a name with no row or a row with no lifecycle_state only: a row's lifecycle_state decides when there is one (P2.5). Goes with the name parsers at P4."

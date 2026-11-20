@@ -67,7 +67,7 @@ from nexus.corpus import (
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
-from nexus.db.collection_lifecycle import bypasses_canonical_schema
+from nexus.db.rows.lifecycle import bypasses_canonical_schema
 from nexus.errors import (
     BatchWriteFailedError,
     EmbeddingDimensionMismatch,
