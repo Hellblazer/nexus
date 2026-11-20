@@ -337,6 +337,29 @@ def test_status_names_a_target_left_out_by_a_flag_apart_from_one_that_is_gone(en
     assert "in the round but left out of this read (--only, --skip or another tmux server): beta" in out
 
 
+def test_status_names_a_target_on_another_tmux_server_as_left_out_not_gone(env: Env, capsys) -> None:
+    for n in ("alpha", "beta"):
+        env.live(n)
+    assert env.run("--ask-ready") == 0
+    env.monkeypatch.setattr(env.crs, "check_server", lambda found, quiet=False: (
+        FAKE_SERVER, [s for s in found if s["name"] != "beta"], ""))
+    capsys.readouterr()
+    env.run("--status")
+    out = capsys.readouterr().out
+    assert "not live now" not in out
+    assert "in the round but left out of this read (--only, --skip or another tmux server): beta" in out
+
+
+def test_skip_by_a_session_id_prefix_names_the_flag(env: Env, capsys) -> None:
+    """--skip takes 8 or more leading characters of a session id; the full id alone would not tell startswith from ==."""
+    env.live("alpha")
+    env.live("betamax")
+    env.group("crew", ["alpha", "betamax"])
+    assert env.run("--ask-ready", "--group", "crew", "--skip", "sid-beta") == 0
+    assert env.mailed == ["alpha"]
+    assert _uncovered(capsys.readouterr().out) == {"betamax (live": "left out by --skip"}
+
+
 def test_a_group_whose_members_are_all_covered_prints_no_gaps(env: Env, capsys) -> None:
     env.live("alpha")
     env.live("beta")
