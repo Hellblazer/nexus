@@ -2938,6 +2938,18 @@ def _check_mandatory_pin_non_vacuity(session) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _cli_not_started_by_claude_code(monkeypatch):
+    """Clear the markers that say the CLI was started by Claude Code. The CLI withholds a flagged or
+    unverifiable hit's text under Claude Code (``sensitive_output.cli_output_posture``), so a test run from an
+    agent's shell got the stub where CI, which has no markers, got the text: the same test failed on the laptop and
+    passed in CI. A test of that posture sets a marker itself (``monkeypatch.setenv``)."""
+    from nexus.session import _CLAUDE_CODE_ENV_MARKERS  # noqa: PLC0415 — the markers the posture reads
+
+    for name in _CLAUDE_CODE_ENV_MARKERS:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _restore_cwd():
     """Put the working directory back after every test. Production code moves
     the process cwd (the aspect-worker daemon's prologue chdirs to its config
