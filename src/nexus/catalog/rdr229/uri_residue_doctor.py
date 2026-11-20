@@ -51,7 +51,7 @@ WARN = "warn"
 NOT_CHECKED_PREFIX = "not checked:"
 
 #: The engine release that carries ``GET /v1/catalog/uri_segment_census``.
-ROUTE_ENGINE = "0.1.199"
+ROUTE_ENGINE = "0.1.200"
 
 #: A collection is file-typed when its content type's name prefix (``<content_type>__``) is file-routed: the types
 #: of :data:`FILE_ROUTED_PREFIXES`, never a second list.

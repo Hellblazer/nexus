@@ -152,7 +152,7 @@ def test_an_engine_without_the_route_is_not_checked_and_names_the_engine() -> No
     exc = EngineRouteUnavailable("/uri_segment_census", ur.FLAG, EngineRouteUnavailable.UNSUPPORTED)
     report = ur.check_uri_residue(reader=_Reader(raises=exc))
     assert report["status"] == ur.NOT_APPLICABLE and ur.is_not_checked(report)
-    assert "0.1.199" in report["reason"], "the reason says which engine carries the route"
+    assert "0.1.200" in report["reason"], "the reason says which engine carries the route"
 
 
 @pytest.mark.parametrize("reason", [EngineRouteUnavailable.TIMEOUT, EngineRouteUnavailable.FAILED,
@@ -229,7 +229,7 @@ def test_the_other_bucket_is_keyed_by_the_engines_content_type_so_attribute_less
 def test_the_unsupported_text_names_the_edge_allowlist_for_a_cloud_client() -> None:
     exc = EngineRouteUnavailable("/uri_segment_census", ur.FLAG, EngineRouteUnavailable.UNSUPPORTED)
     reason = ur.check_uri_residue(reader=_Reader(raises=exc))["reason"]
-    assert "0.1.199" in reason and "conexus edge" in reason and ur.FLAG in reason
+    assert "0.1.200" in reason and "conexus edge" in reason and ur.FLAG in reason
 
 
 # ── rendering ───────────────────────────────────────────────────────────────────────────────────────────────────
