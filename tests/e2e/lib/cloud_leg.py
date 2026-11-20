@@ -278,6 +278,13 @@ from nexus.commands.catalog import _get_catalog
 print(_get_catalog().collection_for("knowledge", "cloud-leg-probe", "voyage-context-3"))
 """
 
+_URI_SEGMENTS = r"""
+import json
+from nexus.commands.catalog import _get_catalog
+# RDR-229 P1.2: the residue pre-flight's one engine read (counts only, never a walk).
+print(json.dumps(_get_catalog().uri_segment_census(limit=10), default=str)[:400])
+"""
+
 _LOCATORS = r"""
 import json
 from nexus.commands.catalog import _get_catalog
@@ -352,6 +359,8 @@ ROUTE_MAP: dict[str, Step] = {
                                 identity=True, needs=["identity"], expect_route="/v1/tuples/out"),
     "POST /v1/tuples/ack": Step("route-tuples-ack", "py", ["-c", _TUPLE_ACK], identity=True, needs=["identity"],
                                 expect_route="/v1/tuples/ack"),
+    "GET /v1/catalog/uri_segment_census": Step("route-uri-segment-census", "py", ["-c", _URI_SEGMENTS],
+                                               expect_route="/v1/catalog/uri_segment_census"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
