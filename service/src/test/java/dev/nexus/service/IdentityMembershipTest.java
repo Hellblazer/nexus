@@ -157,6 +157,23 @@ class IdentityMembershipTest {
     }
 
     @Test
+    void anAgentIsAKindOfWorkAndItsRowIsMarkedDoneInPlace() {
+        // RDR-253 Step 6 part 1 (nexus-hczdo): the SubagentStart hook registers kind=agent, SubagentStop marks it done.
+        // The CHECK constraint on identity_work.kind is widened by identity-005, so the DB accepts it as the service does.
+        String t = IdentityTestEnv.freshTenant();
+        env.clock.set(T0);
+        String id = env.createSeat(t, "dispatcher");
+        env.bind(t, id, "start", 0, ev("a1", 1, 10));
+        var started = env.post(t, "/" + id + "/work", Map.of("kind", "agent", "ref", "agent:a220cf773a02bf4d7", "state", "running"));
+        assertThat(started.status()).isEqualTo(200);
+        var stopped = env.post(t, "/" + id + "/work", Map.of("kind", "agent", "ref", "agent:a220cf773a02bf4d7", "state", "done"));
+        assertThat(stopped.str("state")).isEqualTo("done");
+        assertThat(env.get(t, "/" + id + "/work").list("work")).singleElement()
+            .satisfies(m -> assertThat(m).containsEntry("kind", "agent").containsEntry("state", "done"));
+        assertThat(env.get(t, "/work?kind=agent&ref=agent:a220cf773a02bf4d7").list("owners")).hasSize(1);
+    }
+
+    @Test
     void theReverseLookupFindsEveryIdentityThatOwnsAResource() {
         String t = IdentityTestEnv.freshTenant();
         String a = env.createSeat(t, "owner-a");

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-253 Step 6 part 1 (nexus-hczdo): a dispatched agent is background work its identity owns. The SubagentStart hook
+    registers kind=agent (ref agent:<agent id>) and SubagentStop marks it done. identity_work_kind_ck allowed only the five
+    kinds of identity-002, so it is widened to also admit 'agent'.
+
+    DDL only: the constraint is dropped and re-added with a wider predicate; no existing row is mutated (every stored kind
+    already satisfies the old, narrower predicate), so no DATA EFFECT line applies per scripts/data_effect_lint.py's own
+    scope. A separate file because identity-002 may already be applied, and a changeset's content is never edited after
+    that. An older engine (0.1.198) refuses the kind with 400 bad_kind: the client logs one line and carries on.
+
+    Rollback: re-adding the narrow CHECK fails once any row carries kind 'agent'; such rows must be removed first.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="identity-005-1" author="nexus-hczdo">
+        <comment>identity_work.kind also admits 'agent', the kind a dispatched agent registers under (RDR-253 Step 6 part 1).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.identity_work DROP CONSTRAINT identity_work_kind_ck;
+ALTER TABLE nexus.identity_work ADD CONSTRAINT identity_work_kind_ck
+    CHECK (kind IN ('watcher', 'wait', 'labrun', 'worktree', 'tmux', 'agent'));
+        </sql>
+        <rollback>
+ALTER TABLE nexus.identity_work DROP CONSTRAINT identity_work_kind_ck;
+ALTER TABLE nexus.identity_work ADD CONSTRAINT identity_work_kind_ck
+    CHECK (kind IN ('watcher', 'wait', 'labrun', 'worktree', 'tmux'));
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
