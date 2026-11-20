@@ -104,13 +104,15 @@ class NoteUriMoveTest {
         assertThat(docUri("rh-note")).isEqualTo("nx-note://" + dst + "/decision");
         assertThat(aspectUri("rh-note")).isEqualTo("nx-note://" + dst + "/notes/decision.md");
         assertThat(highlightUri("rh-note")).isEqualTo("nx-note://" + dst + "/decision");
-        assertThat(docUri("rh-legacy")).as("a legacy note keeps its spelling; the backfill owns the scheme")
-            .isEqualTo("chroma://" + dst + "/legacy-note");
+        assertThat(docUri("rh-legacy")).as("P2.10: no path moves a chroma:// value; it stays on its old segment")
+            .isEqualTo("chroma://" + src + "/legacy-note");
+        assertThat(physicalCollection("rh-legacy")).as("the document itself moved").isEqualTo(dst);
         assertThat(docUri("rh-gone")).as("a tombstone moves with its URI rewritten")
             .isEqualTo("nx-note://" + dst + "/gone");
         assertThat(docUri("rh-file")).isEqualTo("file:///papers/a.pdf");
         assertThat(columnsHolding("nx-note://" + src + "/")).isEmpty();
-        assertThat(columnsHolding("chroma://" + src + "/")).isEmpty();
+        assertThat(columnsHolding("chroma://" + src + "/")).as("the legacy value stays where it was")
+            .containsExactly("catalog_documents.source_uri");
 
         // The lookup a re-put under the target makes finds the moved note, in either spelling.
         for (String asked : List.of("nx-note://" + dst + "/decision", "chroma://" + dst + "/decision")) {
@@ -122,8 +124,8 @@ class NoteUriMoveTest {
 
     @Test
     void rehome_ontoATakenUri_refusesWholeNamingTheHolder() throws Exception {
-        for (String scheme : List.of("nx-note://", "chroma://")) {
-            String slug = scheme.startsWith("nx") ? "rht" : "rhl";
+        for (String scheme : List.of("nx-note://")) {
+            String slug = "rht";
             String src = coll(slug + "-src");
             String dst = coll(slug + "-dst");
             register(src, dst);
@@ -151,6 +153,22 @@ class NoteUriMoveTest {
         }
     }
 
+    /** P2.10: a chroma:// value is never rewritten, so the value a move would have made cannot collide. */
+    @Test
+    void rehome_aChromaValueTheMoveWouldHaveTakenIsNoCollision() throws Exception {
+        String src = coll("rhl-src");
+        String dst = coll("rhl-dst");
+        register(src, dst);
+        seedNote("rhl-mover", src, "chroma://" + src + "/t");
+        seedNote("rhl-holder", dst, "chroma://" + dst + "/t");
+
+        catalogRepo.rehomeCollection(TENANT, src, dst);
+
+        assertThat(physicalCollection("rhl-mover")).isEqualTo(dst);
+        assertThat(docUri("rhl-mover")).isEqualTo("chroma://" + src + "/t");
+        assertThat(docUri("rhl-holder")).isEqualTo("chroma://" + dst + "/t");
+    }
+
     @Test
     void rehome_aTombstonedHolderDoesNotBlock() throws Exception {
         String src = coll("rhd-src");
@@ -168,7 +186,7 @@ class NoteUriMoveTest {
     // ── rename (Test Plan row 550) ────────────────────────────────────────────
 
     @Test
-    void rename_rewritesBothSpellings_leavesResidueAndLookalikesAlone() throws Exception {
+    void rename_rewritesNoteSpelling_leavesLegacyResidueAndLookalikesAlone() throws Exception {
         String oldName = coll("rn_old");
         String newName = coll("rn-new");
         // '_' is a LIKE wildcard: this lookalike collection name differs from oldName at the '_'.
@@ -184,7 +202,8 @@ class NoteUriMoveTest {
         catalogRepo.renameCollection(TENANT, oldName, newName);
 
         assertThat(docUri("rn-note")).isEqualTo("nx-note://" + newName + "/n");
-        assertThat(docUri("rn-legacy")).isEqualTo("chroma://" + newName + "/l");
+        assertThat(docUri("rn-legacy")).as("P2.10: the chroma:// spelling is left on its old segment")
+            .isEqualTo("chroma://" + oldName + "/l");
         assertThat(docUri("rn-like")).isEqualTo("nx-note://" + lookalike + "/x");
         assertThat(docUri("rn-rdr")).isEqualTo("chroma://rdr__1-1__voyage-context-3__v1/docs/a.md");
         assertThat(aspectUri("rn-note")).isEqualTo("nx-note://" + newName + "/src/n.md");
@@ -222,7 +241,9 @@ class NoteUriMoveTest {
 
         assertThat(physicalCollection("up-note")).isEqualTo(b);
         assertThat(docUri("up-note")).isEqualTo("nx-note://" + b + "/x");
-        assertThat(docUri("up-legacy")).isEqualTo("chroma://" + b + "/l");
+        assertThat(physicalCollection("up-legacy")).isEqualTo(b);
+        assertThat(docUri("up-legacy")).as("P2.10: the chroma:// spelling is left on its old segment")
+            .isEqualTo("chroma://" + a + "/l");
 
         seedNote("up-blocked", a, "nx-note://" + a + "/x");
         assertThatThrownBy(() -> catalogRepo.updateDocument(TENANT, "up-blocked", Map.of("physical_collection", b)))

@@ -11584,8 +11584,9 @@ public final class CatalogRepository {
             // retired collection name (see TombstoneFilterGateTest.TOMBSTONE_EXEMPT). Scoped to rows the re-home loop
             // above just moved to Y (the target held nothing before, per the emptiness check),
             // so a foreign row carrying a stale X-named URI is left alone.
-            // RDR-231: NoteUri.moveTo rewrites both note spellings (nx-note://X/ and chroma://X/)
-            // and leaves residue and every other value unchanged.
+            // RDR-231, RDR-229 P2.10: NoteUri.moveTo rewrites only nx-note://X/ URIs that isNote classes as
+            // notes (X has no file-routed prefix); chroma:// values, nx-note:// values with a file-routed segment
+            // and every other value are unchanged, and namesCollection selects exactly the rewritten ones.
             counts.put("catalog_documents_source_uri", ctx.update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, NoteUri.moveTo(CATALOG_DOCUMENTS.SOURCE_URI, oldName, newName))
                 .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(newName))
