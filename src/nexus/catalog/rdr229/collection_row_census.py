@@ -68,8 +68,8 @@ def _version_num(r: dict) -> int:
 
 def _created_key(r: dict) -> tuple:
     """Sort key for ``created_at`` (the engine's text column, ``2026-11-20 09:56:57.054349+00`` in the registry). An empty
-    value sorts first, an unreadable one last; the readable ones sort by instant, so ``T`` and space spellings of one
-    instant tie rather than disagree."""
+    value sorts first, an unreadable one last; the readable ones sort by instant alone, so ``T`` and space spellings of
+    one instant tie (and fall to the name) rather than disagree."""
     v = _str(r, "created_at")
     if not v:
         return (0, 0.0, "")
@@ -79,7 +79,7 @@ def _created_key(r: dict) -> tuple:
         return (2, 0.0, v)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return (1, dt.timestamp(), v)
+    return (1, dt.timestamp(), "")
 
 
 def _parse(name: str) -> tuple[dict[str, str] | None, bool]:
@@ -259,7 +259,11 @@ def _tuples(live: list[dict]) -> dict[str, Any]:
             "switch_condition": ("P1.4's held commit switches the tie-break from NAME ASC to created_at ASC then NAME ASC "
                                  "only if created_at_winner_differs.count is 0 (Sam's ruling nexus/sam-ruling-rdr229-p14-"
                                  "tie-2026-11-20); a nonzero tied_candidates_without_created_at makes the comparison "
-                                 "unreliable, since an empty created_at sorts first")},
+                                 "unreliable, since an empty created_at sorts first. The NAME ASC winners here are "
+                                 "computed in Unicode codepoint order; the engine's ORDER BY name uses the tenant "
+                                 "database's collation, which is unverified for the cloud (the local bundle is C). "
+                                 "Before trusting a zero, check each tie listed under tied_at_top_version against the "
+                                 "engine's own order")},
         "rows_without_a_complete_tuple": incomplete,
     }
 
