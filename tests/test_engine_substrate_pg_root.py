@@ -127,7 +127,7 @@ class TestRootChoice:
         assert _choose(free_bytes=_boom) is None
 
     def test_macos_stays_on_the_old_root(self) -> None:
-        assert _choose(system="Darwin") is None
+        assert _choose(system="Darwin", tempdir=Path("/tmp")) is None
 
     def test_windows_stays_on_the_old_root(self) -> None:
         assert _choose(system="Windows") is None
@@ -244,7 +244,8 @@ class TestDiskDecisionStaysOffTheRunsTmpfs:
 
     def test_the_sweep_roots_include_the_original_tempdir(self, moved_tmpdir) -> None:
         orig, _run_t = moved_tmpdir
-        assert orig in sub.substrate_pg_roots(env={"NX_TEST_PG_ROOT": "default"}, system="Darwin")
+        env = {"NX_TEST_PG_ROOT": "default", "NX_TEST_PG_SHM_DIR": str(orig.parent / "no-such-dir")}
+        assert orig in sub.substrate_pg_roots(env=env, system="Darwin")
 
 
 class TestSweepRoots:
@@ -302,6 +303,7 @@ class TestSweepRoots:
         (shm / "nexus-test-pg-1000").mkdir(parents=True)
         assert sub.substrate_pg_roots(
             env={}, system="Darwin", uid=1000, tempdir=tmp_path, shm_dir=shm,
+            short_dir=tmp_path / "short",
         ) == [tmp_path]
 
     def test_override_and_tempdir_are_both_listed(self, tmp_path) -> None:
@@ -423,6 +425,7 @@ class TestSweepReapsAnOrphanInTheTmpfsRoot:
         orphan = _orphan(override, "nexus_t2_substrate_pg_orphan03")
         (tmp_path / "empty").mkdir()
         monkeypatch.setenv("NX_TEST_PG_ROOT", str(override))
+        monkeypatch.setenv("NX_TEST_PG_SHM_DIR", str(tmp_path / "no-such-dir"))  # a real /tmp or /dev/shm root stays out
         monkeypatch.setattr(sub.tempfile, "tempdir", str(tmp_path / "empty"))
 
         result = sub.sweep_stale_substrate_clusters()
@@ -625,7 +628,7 @@ class TestLinuxFallbackIsLoud:
         assert "socket" in self._warns()
 
     def test_macos_fallback_is_silent(self, recwarn) -> None:
-        assert _choose(system="Darwin") is None
+        assert _choose(system="Darwin", tempdir=Path("/tmp")) is None
         assert not [w for w in recwarn if "tmpfs" in str(w.message)]
 
     def test_default_override_is_silent(self, recwarn) -> None:
@@ -750,7 +753,7 @@ class TestRootIsDecidedOncePerRun:
         monkeypatch.setattr(sub, "_OWNED_LOGS", set())
         sub.begin_pg_root_session()
         try:
-            assert os.environ[sub._PG_ROOT_SESSION_ENV] == "tmpfs=/dev/shm/nexus-test-pg-9"
+            assert os.environ[sub._PG_ROOT_SESSION_ENV] == "root=/dev/shm/nexus-test-pg-9"
             assert Path(os.environ[sub._PG_ROOT_LOG_ENV]).is_file()
             sub.session_pg_root()  # a "worker" reading the same env
             assert calls == [1]
@@ -1156,7 +1159,7 @@ class TestControllerFailureDoesNotLeaveWorkersDecidingAlone:
 
         setattr_in(monkeypatch, sub, "tempfile.mkstemp", _nope)
         sub.begin_pg_root_session()
-        assert os.environ[sub._PG_ROOT_SESSION_ENV] == "tmpfs=/dev/shm/nexus-test-pg-9"
+        assert os.environ[sub._PG_ROOT_SESSION_ENV] == "root=/dev/shm/nexus-test-pg-9"
         assert not os.environ.get(sub._PG_ROOT_LOG_ENV)
 
     def test_conftest_persists_a_decision_when_the_controller_hook_fails(
