@@ -211,7 +211,7 @@ def collection_name_cmd(content_type: str, repo: Path | None) -> None:
             f"Run 'nx index repo {target_repo}' first; the indexer's "
             f"_catalog_hook registers the owner row that this command needs."
         ) from exc
-    click.echo(name.render())
+    click.echo(name.label)
 
 
 @click.command("rename-collection")

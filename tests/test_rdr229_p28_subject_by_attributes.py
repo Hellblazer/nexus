@@ -20,8 +20,13 @@ from pathlib import Path
 import httpx
 import pytest
 
+import nexus.catalog.factory as factory
+import nexus.corpus as corpus
+import nexus.repo_identity as repo_identity
 from nexus.catalog.collection_attributes import CollectionAttributes
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.corpus import _resolve_promoted_model_token, t3_collection_name
+from nexus.db.http_vector_client import HttpVectorClient
 
 _MODEL = "bge-base-en-v15-768"
 
@@ -89,12 +94,10 @@ def test_find_collection_refuses_a_row_for_another_tuple(monkeypatch) -> None:
 # -- collection_for_repo -----------------------------------------------------
 
 def _repo_client(monkeypatch, rows: dict) -> HttpCatalogClient:
-    import nexus.repo_identity as repo_identity
 
     cat = _client(monkeypatch, rows)
     monkeypatch.setattr(repo_identity, "_repo_identity", lambda repo: ("nexus", "abc123"))
     monkeypatch.setattr(cat, "owner_for_repo", lambda repo_hash: "1.7")
-    import nexus.corpus as corpus
 
     monkeypatch.setattr(
         corpus, "resolve_write_embedding_model", lambda ct, *, collection_exists: _MODEL,
@@ -131,26 +134,30 @@ def test_collection_for_repo_with_no_row_mints_v1(monkeypatch) -> None:
 # -- t3_collection_name: the knowledge subject --------------------------------
 
 class _T3:
-    """A vector store holding *names*; every other name is absent."""
+    """A vector store holding *names*, with a catalog answering *rows* keyed by
+    ``(content_type, owner_id)``; every other name and tuple is absent."""
+
+    def __init__(self, names: set[str], rows: dict | None = None) -> None:
+        self.names = names
+        self.rows = rows or {}
+        self.calls: list[tuple[str, str, str]] = []
+
+    def collection_exists(self, name: str) -> bool:
+        return name in self.names
+
+    def find_collection(self, content_type: str, owner_id: str, embedding_model: str):
+        self.calls.append((content_type, owner_id, embedding_model))
+        return self.rows.get((content_type, owner_id))
+
+
+class _T3NoCatalog:
+    """A store with no ``find_collection``: the name resolution alone."""
 
     def __init__(self, names: set[str]) -> None:
         self.names = names
 
     def collection_exists(self, name: str) -> bool:
         return name in self.names
-
-
-class _Reader:
-    def __init__(self, rows: dict) -> None:
-        self.rows = rows
-        self.calls: list[tuple[str, str, str]] = []
-
-    def find_collection(self, content_type: str, owner_id: str, embedding_model: str):
-        self.calls.append((content_type, owner_id, embedding_model))
-        return self.rows.get((content_type, owner_id))
-
-    def close(self) -> None:
-        pass
 
 
 def _attrs(label: str, owner_id: str) -> CollectionAttributes:
@@ -160,60 +167,81 @@ def _attrs(label: str, owner_id: str) -> CollectionAttributes:
     )
 
 
-@pytest.fixture
-def reader(monkeypatch):
-    import nexus.catalog.factory as factory
-
-    box: dict = {"reader": _Reader({})}
-    monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: box["reader"])
-    return box
+_ROWS = {("knowledge", "field-notes"): _attrs("notes-from-2024", "field-notes")}
 
 
 @pytest.mark.parametrize("for_write", [False, True])
-def test_a_non_conformant_knowledge_label_is_found_by_its_subject(reader, for_write) -> None:
-    from nexus.corpus import t3_collection_name
+def test_a_non_conformant_knowledge_label_is_found_by_its_subject(for_write) -> None:
 
-    reader["reader"] = _Reader({("knowledge", "field-notes"): _attrs("notes-from-2024", "field-notes")})
-    got = t3_collection_name("field-notes", t3=_T3({"notes-from-2024"}), for_write=for_write)
-    assert got == "notes-from-2024"
-    assert reader["reader"].calls and reader["reader"].calls[0][:2] == ("knowledge", "field-notes")
-
-
-def test_an_underscored_subject_is_looked_up_by_its_owner_segment(reader) -> None:
-    from nexus.corpus import t3_collection_name
-
-    reader["reader"] = _Reader({("knowledge", "field-notes"): _attrs("notes-from-2024", "field-notes")})
-    assert t3_collection_name("field_notes", t3=_T3(set())) == "notes-from-2024"
+    t3 = _T3({"notes-from-2024"}, _ROWS)
+    assert t3_collection_name("field-notes", t3=t3, for_write=for_write) == "notes-from-2024"
+    model = _resolve_promoted_model_token("knowledge", for_write=False)
+    assert t3.calls == [("knowledge", "field-notes", model)]
 
 
-def test_a_row_whose_label_is_the_rendered_name_keeps_the_existing_resolution(reader) -> None:
+def test_an_underscored_subject_is_looked_up_by_its_owner_segment() -> None:
+
+    assert t3_collection_name("field_notes", t3=_T3({"notes-from-2024"}, _ROWS)) == "notes-from-2024"
+
+
+def test_a_row_whose_label_is_the_rendered_name_keeps_the_existing_resolution() -> None:
     """The row overrides only when it names something other than the render;
     a conformant row with no chunks still yields to the legacy two-segment name
     that holds the data (nexus-6mr0), as before P2.8."""
-    from nexus.corpus import _resolve_promoted_model_token, t3_collection_name
 
     promoted = f"knowledge__field-notes__{_resolve_promoted_model_token('knowledge', for_write=False)}__v1"
-    reader["reader"] = _Reader({("knowledge", "field-notes"): _attrs(promoted, "field-notes")})
-    got = t3_collection_name("field-notes", t3=_T3({"knowledge__field-notes"}))
-    assert got == "knowledge__field-notes"
+    t3 = _T3({"knowledge__field-notes"}, {("knowledge", "field-notes"): _attrs(promoted, "field-notes")})
+    assert t3_collection_name("field-notes", t3=t3) == "knowledge__field-notes"
 
 
-def test_a_failed_row_read_falls_back_to_the_name_resolution(reader) -> None:
-    from nexus.corpus import t3_collection_name
+def test_a_row_label_this_store_does_not_hold_is_not_answered() -> None:
+    """The row comes from the process's catalog, which need not be this store's
+    tenant: a label the store does not hold leaves the name resolution."""
 
-    class _Broken(_Reader):
+    assert t3_collection_name("field-notes", t3=_T3({"knowledge__field-notes"}, _ROWS)) == "knowledge__field-notes"
+
+
+def test_a_failed_row_read_falls_back_to_the_name_resolution() -> None:
+
+    class _Broken(_T3):
         def find_collection(self, *a):  # type: ignore[override]
             raise httpx.ConnectError("down")
 
-    reader["reader"] = _Broken({})
-    assert t3_collection_name("field-notes", t3=_T3({"knowledge__field-notes"})) == "knowledge__field-notes"
+    assert t3_collection_name("field-notes", t3=_Broken({"knowledge__field-notes"})) == "knowledge__field-notes"
 
 
-def test_without_t3_the_resolver_stays_pure(reader) -> None:
-    """No t3 means no live lookup (the static contexts and the indexers)."""
-    from nexus.corpus import t3_collection_name
+def test_a_store_with_no_catalog_keeps_the_name_resolution() -> None:
 
-    reader["reader"] = _Reader({("knowledge", "field-notes"): _attrs("notes-from-2024", "field-notes")})
-    got = t3_collection_name("field-notes")
-    assert got.startswith("knowledge__field-notes__")
-    assert reader["reader"].calls == []
+    assert t3_collection_name("field-notes", t3=_T3NoCatalog({"knowledge__field-notes"})) == "knowledge__field-notes"
+
+
+def test_a_code_subject_is_not_looked_up() -> None:
+    """Only a knowledge subject resolves through the row in P2.8."""
+
+    t3 = _T3(set(), _ROWS)
+    t3_collection_name("code__field-notes", t3=t3)
+    assert t3.calls == []
+
+
+def test_without_t3_the_resolver_stays_pure() -> None:
+    """No t3 means no lookup (the static contexts and the indexers)."""
+
+    assert t3_collection_name("field-notes").startswith("knowledge__field-notes__")
+
+
+def test_the_vector_client_reads_the_row_through_the_catalog_reader(monkeypatch) -> None:
+
+    seen: list = []
+
+    class _Reader:
+        def find_collection(self, *a):
+            seen.append(a)
+            return _ROWS[("knowledge", "field-notes")]
+
+        def close(self) -> None:
+            seen.append("closed")
+
+    monkeypatch.setattr(factory, "make_catalog_reader", lambda **kw: _Reader())
+    got = HttpVectorClient.find_collection("knowledge", "field-notes", _MODEL)
+    assert got.label == "notes-from-2024"
+    assert seen == [("knowledge", "field-notes", _MODEL), "closed"]
