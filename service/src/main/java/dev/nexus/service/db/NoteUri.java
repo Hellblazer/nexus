@@ -170,19 +170,6 @@ public final class NoteUri {
         return uri;
     }
 
-    /** True when the collection name opens with a file-routed prefix ({@code rdr__}, {@code docs__}, {@code code__}). */
-    public static boolean isFileRoutedCollection(String collection) {
-        if (collection == null) {
-            return false;
-        }
-        for (String p : FILE_ROUTED_PREFIXES) {
-            if (collection.startsWith(p)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
     static Condition startsWith(Field<String> uri, Field<String> prefix) {
         return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, prefix));

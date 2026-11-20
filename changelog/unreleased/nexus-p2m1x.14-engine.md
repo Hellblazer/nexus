@@ -1,0 +1,3 @@
+### Changed
+
+- **The engine's stale-note repair tells file residue from notes by the collection's registry row, not by its name.** `repairStaleNoteUris` now reads `content_type` through the collection registry: a live collection of content type docs, rdr or code is refused as `file_routed_collection` whatever it is called, and one of content type knowledge is a rewrite candidate even when its name opens with `docs__`. A live row whose collection has no registry row is refused with the new reason `unregistered_collection` (counted in `refused`) and never rewritten. `NoteUri.isFileRoutedCollection` is removed; the URI-string classifiers and `note-uri-corpus.json` are unchanged (RDR-229 P2.9, nexus-p2m1x.14).
