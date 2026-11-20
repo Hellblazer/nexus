@@ -64,6 +64,7 @@ import java.util.function.Supplier;
  *  "tenant_export_format_version":1,
  *  "tenant_import_supported":true,
  *  "vector_topic_route_supported":true,
+ *  "taxonomy_prune_exact_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -1074,6 +1075,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection.
         appendVectorTopicRouteCapabilityField(body);
         appendIdentitySelfSeatCapabilityField(body);
+        // nexus-p2m1x.9 (RDR-229 P2.4): match=exact on POST /v1/taxonomy/assignments/prune_projection.
+        appendTaxonomyPruneExactCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

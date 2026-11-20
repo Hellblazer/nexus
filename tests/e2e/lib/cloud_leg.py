@@ -333,6 +333,8 @@ ROUTE_MAP: dict[str, Step] = {
                                 expect_route="/v1/tuples/ack"),
     "GET /v1/catalog/uri_segment_census": Step("route-uri-segment-census", "py", ["-c", _routes.URI_SEGMENTS],
                                                expect_route="/v1/catalog/uri_segment_census"),
+    "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
+                                                           expect_route="/v1/taxonomy/assignments/prune_projection"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")

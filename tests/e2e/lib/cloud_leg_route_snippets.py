@@ -40,3 +40,10 @@ import json
 from nexus.commands.catalog import _get_catalog
 print(json.dumps(_get_catalog().sensitive_locators(limit=10), default=str)[:400])
 """
+
+PRUNE_PROJECTION = r"""
+from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+# RDR-229 P2.4: a destructive route, probed so that it cannot delete: the name matches no collection and the floor
+# is 0.0 (no stored similarity is below it), so a healthy route answers {"removed": 0}.
+print(HttpTaxonomyStore().prune_projection_below("cloudleg-@label@", 0.0))
+"""
