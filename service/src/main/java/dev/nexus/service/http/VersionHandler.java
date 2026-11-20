@@ -648,7 +648,7 @@ public final class VersionHandler implements HttpHandler {
      * RDR-229 P1.2 (nexus-p2m1x.2) capability advertisement: does {@code GET /v1/catalog/uri_segment_census} group the
      * tenant's {@code chroma://} and {@code nx-note://} source-URI rows by table, scheme, segment and collection, so
      * {@code nx doctor} counts residue without walking the catalog? An engine before the change answers 404. Always
-     * present, always {@code true} on an engine carrying the change (engine-service 0.1.199). Cloud clients see it only
+     * present, always {@code true} on an engine carrying the change (engine-service 0.1.200). Cloud clients see it only
      * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff;
      * engine-release pre-tag check 3e).
      */

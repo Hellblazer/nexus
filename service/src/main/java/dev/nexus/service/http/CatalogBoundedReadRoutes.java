@@ -190,7 +190,7 @@ final class CatalogBoundedReadRoutes {
     }
 
     /**
-     * GET /v1/catalog/uri_segment_census?limit=N (RDR-229 P1.2, nexus-p2m1x.2, engine 0.1.199):
+     * GET /v1/catalog/uri_segment_census?limit=N (RDR-229 P1.2, nexus-p2m1x.2, engine 0.1.200):
      * {@code {count, limit, capped, groups:[{table, scheme, segment, collection, content_type, rows}]}}.
      *
      * <p>The tenant's {@code chroma://} and {@code nx-note://} source-URI rows grouped by table

@@ -66,36 +66,50 @@ public final class UriSegmentCensusReads {
     }
 
     private static Select<Record6<String, String, String, String, String, Integer>> perTable(
-            String tenant, String tableName, Table<?> table, Field<String> tenantId, Field<String> uri,
-            Field<String> collection) {
+            String tenant, Field<String> tableLabel, Field<String> schemeLabel, String prefix, Table<?> table,
+            Field<String> tenantId, Field<String> uri, Field<String> collection) {
         var c = CATALOG_COLLECTIONS;
-        // Literals in the template, no bind: the select list and the GROUP BY each render this expression, and two
-        // bind placeholders would be two different expressions to Postgres ("must appear in the GROUP BY clause").
-        Field<String> scheme = DSL.field(
-            "case when starts_with({0}, 'chroma://') then 'chroma' else 'nx-note' end", String.class, uri);
-        // The text after the first "://" up to the next "/": for "chroma://x/y" and "nx-note://x/y" alike, "x".
-        Field<String> segment = DSL.field("split_part(split_part({0}, '://', 2), '/', 1)", String.class, uri);
+        // The text after the first "://" up to the next "/": for "chroma://x/y" and "nx-note://x/y" alike, "x". Typed
+        // jOOQ with INLINE literal arguments, not binds: the select list and the GROUP BY each render this expression,
+        // and two bind placeholders would be two different expressions to Postgres ("must appear in the GROUP BY
+        // clause"; the INLINE-VS-BIND RULE, RawSqlGateTest).
+        Field<String> segment = DSL.function("split_part", String.class,
+            DSL.function("split_part", String.class, uri, DSL.inline("://"), DSL.inline(2)),
+            DSL.inline("/"), DSL.inline(1));
         Field<String> coll = DSL.coalesce(collection, DSL.inline(""));
         Field<String> ctype = DSL.coalesce(c.CONTENT_TYPE, DSL.inline(""));
-        return DSL.select(DSL.inline(tableName).as("tbl"), scheme.as("scheme"), segment.as("segment"),
+        return DSL.select(tableLabel.as("tbl"), schemeLabel.as("scheme"), segment.as("segment"),
                           coll.as("coll"), ctype.as("ctype"), DSL.count().as("n"))
             .from(table.leftJoin(c).on(c.TENANT_ID.eq(tenantId).and(c.NAME.eq(collection))))
-            .where(tenantId.eq(tenant).and(uri.startsWith(CHROMA).or(uri.startsWith(NOTE))))
-            .groupBy(scheme, segment, coll, ctype);
+            .where(tenantId.eq(tenant).and(uri.startsWith(prefix)))
+            .groupBy(segment, coll, ctype);
     }
 
     /**
      * The one statement: {@code fetchLimit} groups ordered by table, scheme, collection and segment, plus the total
-     * group count on every row. Public so a plan-shape test can explain the exact statement the route runs.
+     * group count on every row. One grouped select per table and scheme (the scheme is a literal of its select), under
+     * a UNION ALL. Public so a plan-shape test can explain the exact statement the route runs.
      */
     public static Select<?> listQuery(DSLContext ctx, String tenant, int fetchLimit) {
-        var u = perTable(tenant, "catalog_documents", CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
-                         CATALOG_DOCUMENTS.SOURCE_URI, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .unionAll(perTable(tenant, "document_aspects", DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID,
-                               DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION))
-            .unionAll(perTable(tenant, "document_highlights", DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID,
-                               DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.COLLECTION))
-            .asTable("u");
+        var docs = CATALOG_DOCUMENTS;
+        var asp = DOCUMENT_ASPECTS;
+        var hl = DOCUMENT_HIGHLIGHTS;
+        List<Select<Record6<String, String, String, String, String, Integer>>> parts = List.of(
+            perTable(tenant, DSL.inline("catalog_documents"), DSL.inline("chroma"), CHROMA, docs, docs.TENANT_ID,
+                     docs.SOURCE_URI, docs.PHYSICAL_COLLECTION),
+            perTable(tenant, DSL.inline("catalog_documents"), DSL.inline("nx-note"), NOTE, docs, docs.TENANT_ID,
+                     docs.SOURCE_URI, docs.PHYSICAL_COLLECTION),
+            perTable(tenant, DSL.inline("document_aspects"), DSL.inline("chroma"), CHROMA, asp, asp.TENANT_ID,
+                     asp.SOURCE_URI, asp.COLLECTION),
+            perTable(tenant, DSL.inline("document_aspects"), DSL.inline("nx-note"), NOTE, asp, asp.TENANT_ID,
+                     asp.SOURCE_URI, asp.COLLECTION),
+            perTable(tenant, DSL.inline("document_highlights"), DSL.inline("chroma"), CHROMA, hl, hl.TENANT_ID,
+                     hl.SOURCE_URI, hl.COLLECTION),
+            perTable(tenant, DSL.inline("document_highlights"), DSL.inline("nx-note"), NOTE, hl, hl.TENANT_ID,
+                     hl.SOURCE_URI, hl.COLLECTION));
+        Select<Record6<String, String, String, String, String, Integer>> union = parts.get(0);
+        for (int i = 1; i < parts.size(); i++) union = union.unionAll(parts.get(i));
+        var u = union.asTable("u");
         Field<String> tbl = u.field("tbl", String.class);
         Field<String> scheme = u.field("scheme", String.class);
         Field<String> segment = u.field("segment", String.class);
