@@ -99,7 +99,7 @@ doc:
       push: a push of develop, on --push
       owner: develop is red; the owner named, on --owner
       clear: develop is green again, on --owner
-      ack: the owner acknowledges, on --owner; from is stamped with the token's id
+      ack: the owner acknowledges, on --owner; from is set to the identity its session counts for
     sha: the 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent before the adapter's FOLD_RESULT_DIMS switch (so is outcome)
     outcome:
       success: kind sha; every run concluded success, neutral or skipped
