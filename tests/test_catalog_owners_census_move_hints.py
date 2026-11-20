@@ -168,3 +168,26 @@ def test_an_unreadable_page_leaves_the_flag_null_and_the_census_running(healthy_
     assert result.exit_code == 0, result.output
     (row,) = json.loads(result.stdout)["healthy"]
     assert row["docs_outside_root"] is None and "move_command" not in row
+
+
+def test_flagged_owner_whose_root_the_move_would_refuse_keeps_the_flag_and_gets_no_line(tmp_path):
+    """``--execute move --owner`` accepts a new root only inside a git work tree, so a flagged owner whose root is
+    not_a_repository or path_exists_empty is reported with the flag and no command the move would refuse."""
+    not_repo = tmp_path / "plain"
+    not_repo.mkdir()
+    (not_repo / "f.txt").write_text("x")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    engine = HintEngine()
+    engine.add_owner("1.2", str(not_repo), "h-1.2")
+    _outside(engine, "1.2", str(not_repo))
+    engine.add_owner("1.3", str(empty), "h-1.3")
+    _outside(engine, "1.3", str(empty))
+
+    data = _json(engine)
+    (plain,), (hollow,) = data["not_a_repository"], data["path_exists_empty"]
+    assert plain["docs_outside_root"] is True and hollow["docs_outside_root"] is True
+    assert "move_command" not in plain and "move_command" not in hollow
+    human = _census(engine)
+    assert "Documents outside their root (2):" in human.output
+    assert "--execute move" not in human.output

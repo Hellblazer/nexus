@@ -447,9 +447,11 @@ def annotate_census(reader: Any, classes: dict[str, list[dict]]) -> None:
     from the owner's first page of documents (one ``/list`` request each, never a second page), or ``None`` when the
     page could not be read. The flag is information beside the root class and never a class: it does not decide
     which owners the deactivate arm may act on. When the engine reports the move routes, a ``path_vanished`` row also
-    gains ``move_command`` (the owner move with the :data:`NEW_ROOT_PLACEHOLDER`, since its own root is gone) and
-    any other flagged row gains ``move_command`` with its own root. Fail-open per owner: a page that cannot be read
-    leaves that row with ``docs_outside_root = None`` and no line."""
+    gains ``move_command`` (the owner move with the :data:`NEW_ROOT_PLACEHOLDER`, since its own root is gone) and a
+    flagged ``healthy`` row gains ``move_command`` with its own root. A flagged row of any other class (a root that is
+    not a git work tree, empty, or unreadable) keeps the flag and gets no line: ``--execute move --owner`` refuses such
+    a root. Fail-open per owner: a page that cannot be read leaves that row with ``docs_outside_root = None`` and no
+    line."""
     supported = engine_supports_moves(reader)
     for cls, rows in classes.items():
         for row in rows:
@@ -460,5 +462,5 @@ def annotate_census(reader: Any, classes: dict[str, list[dict]]) -> None:
                 continue
             if cls == "path_vanished":
                 row["move_command"] = owner_move_line(prefix)
-            elif flag:
+            elif flag and cls == "healthy":
                 row["move_command"] = owner_move_line(prefix, root)
