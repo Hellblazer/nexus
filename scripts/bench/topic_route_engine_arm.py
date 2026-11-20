@@ -135,9 +135,9 @@ def summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     coverage = sorted({v for r in rows for v in r["ENG"]["route"]["coverage"].values()})
     return {"n": len(rows), "by_kind": by_kind, "bars": bars(rows), "short_rows": short,
             "coverage_values": coverage,
-            "scope_note": "Checks the engine route against the production-set result of 134-research-13; not a "
-                          "generalisation test (the 25 RDR questions are among leg 1's 26; only the 8 title "
-                          "questions are out of sample)."}
+            "scope_note": "Checks the engine route against the production-set result of 134-research-13; a "
+                          "reproduction test, not a generalisation test: the 25 RDR questions are among leg 1's 26, "
+                          "and the 8 title questions were measured before (134-research-13), so none is unseen."}
 
 
 def main(argv: list[str] | None = None) -> int:
