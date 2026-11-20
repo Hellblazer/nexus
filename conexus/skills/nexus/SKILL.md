@@ -18,12 +18,12 @@ effort: low
 
 | Put it in | When it is |
 |---|---|
-| T2 project `identity/<id>` | this seat's own standing context: its open questions, recurring commands, what it owns. Seats only (an ephemeral or delegated identity is refused). |
-| T2 project `{repo}` | a fact other sessions need |
+| T2 `identity/<id>` | this seat's own standing context (open questions, recurring commands, what it owns). Seats only |
+| T2 `{repo}` | a fact other sessions need |
 | memory files | Sam's rules |
-| the threads board | the public cross-session view of your work |
+| threads board | the public cross-session view |
 
-Write your own: `memory_put(project="identity/<id>", ...)`, with `<id>` from `nx identity show` (CLI: `nx memory put --mine`). SessionStart lists up to five titles as one line, `Your notes (identity/<id>): ...`.
+Write yours: `memory_put(project="identity/<id>", ...)`, `<id>` from `nx identity show`.
 
 ## Common Operations
 
