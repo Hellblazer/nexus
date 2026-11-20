@@ -862,6 +862,11 @@ restart script's promote.
   scope is bounded in the client, not the engine (the engine holds no cap): an
   entry over 2 KB is refused, and so is a put of a note once the scope holds 20
   notes; the resume pointer has a slot of its own, and nothing is evicted. The
+  client's identity-scope store sends no session token: the engine admits an
+  identity-scope call with none (reads open, writes fenced on the identity token
+  alone), so the scope can be read and written by a process whose session id has no
+  T1 lease, as at SessionStart after `/clear`, and by a plain `nx scratch --scope
+  identity`. The
   pointer is one entry tagged `resume-pointer` (the thread, worktree, `state:` and
   `waiting_on:` of the seat's board entry, at most 1 KB): the PreCompact checkpoint
   hook and a SessionEnd hook for reason `clear` write it, put before the earlier
@@ -1275,8 +1280,10 @@ None.
   (tests/hooks/test_resume_pointer.py); the reader prints one line of at most 400 bytes on `clear` only, drops a
   pointer over 48 hours old, and logs one `resume_line` event per `clear` start (hit, empty, error or timeout, with
   `age_s`; tests/hooks/test_resume_line.py); and a journey row writes through the real `nx scratch` commands, binds a
-  `clear`, and reads the line back through the reader's real opener when the new session id has a T1 session; without
-  one the reader prints nothing and creates no session (tests/identity/test_work_engine_rows.py).
+  `clear`, and reads the line back through the reader's real opener when the new session id has no T1 lease yet (the MCP
+  watcher publishes it 0-5 s after SessionStart, so at a `/clear` it never has one): the identity-scope store sends no
+  `X-Nexus-T1-Session`, the reader never calls `get_t1_database` and creates no session, and no lease file appears
+  (tests/identity/test_work_engine_rows.py).
 - Each restart mode (exit and relaunch, in-place `/restart`, `--revive` after a
   reboot) finds the old holder gone and binds the next generation, with no
   release step.
@@ -1461,3 +1468,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-20: wording matched to the reviewed token-file fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/review-token-file-restart-2026-11-20-r1` and `nexus/critique-token-file-restart-2026-11-20-r1`): the token file name comes from the registry's current `startedAt`, read on every call, so a process that outlives an in-place `/restart` follows it to the new file; a registry or token file that cannot be read is read once more after about 10 ms; the identity token goes only on identity-scope scratch writes, and a write's 401 re-reads the file once; Test Plan line for the long-lived process across an in-place `/restart`.
 - 2026-11-20: wording amended to match the reviewed Step 6 part 3 code (grant 3), bead nexus-hczdo (reviews T2 `nexus/review-47774ae08-nexus-hczdo-2026-11-20` and `nexus/critique-step6-part3-2026-11-20-r1`): per-identity T2 notes are guarded by the client, not fenced by the engine (seats only, own project only, the seven project-keyed store writes, the id-keyed paths not covered); a delegated identity keeps none and `--mine` writes from it are refused; retention does not prune `identity/<id>`; RDR-238 curate reads `identity/*`, the use measure is transcript reads; RDR-209 graduation excludes `identity/*`.
 - 2026-11-20: Step 6 part 2 recorded (the resume pointer; fix round 1, reviews T2 `nexus/review-step6-part2-2026-11-20-r1` and `nexus/critique-step6-part2-2026-11-20-r1`, decision T2 `nexus/decision-identity-scratch-caps-client-side-2026-11-20`): the identity scope's caps (2 KB an entry, 20 notes, a reserved slot for the resume pointer) are enforced in the client's identity-scope put, not by the engine, and the earlier text that implied an engine cap says so now; the pointer is one `resume-pointer` entry written at PreCompact and at SessionEnd with reason `clear`, printed once on `clear`, with no session-scope fallback.
+- 2026-11-20: wording matched to the reviewed resume-line fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/critique-resume-line-no-lease-2026-11-20-r1`): the identity-scope store sends no T1 session token, so the `/clear` resume line prints with no lease for the new session id; the Test Plan line that said it printed nothing without one is corrected.

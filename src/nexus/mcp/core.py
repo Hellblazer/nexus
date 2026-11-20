@@ -8456,18 +8456,21 @@ def scratch(
     """
     opened = None
     try:
-        t1, isolated = _get_t1()
-        prefix = "[T1 isolated] " if isolated else ""
         if scope == "identity":
             if persist:
                 return _fail("Error: persist flags an entry for the session-end flush, which never runs for identity "
                              "scratch; use scratch_manage(action=\"promote\", scope=\"identity\") to copy an entry to T2")
             from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
-            t1 = opened = identity_scratch(t1)
+            # No session store: the identity scope needs no T1 session, so this works when the session's lease does not
+            # resolve (nexus-hczdo).
+            t1 = opened = identity_scratch()
             prefix = "[identity] "
         elif scope != "session":
             return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
+        else:
+            t1, isolated = _get_t1()
+            prefix = "[T1 isolated] " if isolated else ""
 
         if action == "put":
             if not content:
@@ -8579,18 +8582,19 @@ def scratch_manage(
     """
     opened = None
     try:
-        t1, isolated = _get_t1()
-        prefix = "[T1 isolated] " if isolated else ""
         if scope == "identity":
             if action == "flag":
                 return _fail("Error: flag marks an entry for the session-end flush, which never runs for identity scratch; "
                              "use action=\"promote\" to copy it to T2")
             from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
-            t1 = opened = identity_scratch(t1)
+            t1 = opened = identity_scratch()                   # no session store: see scratch above (nexus-hczdo)
             prefix = "[identity] "
         elif scope != "session":
             return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
+        else:
+            t1, isolated = _get_t1()
+            prefix = "[T1 isolated] " if isolated else ""
 
         if action == "flag":
             # `scratch list` prints an 8-character prefix and the engine matches

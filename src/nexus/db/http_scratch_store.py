@@ -80,6 +80,11 @@ _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 #: the coupling end-to-end.
 SESSION_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized T1 session (HTTP 401)"
 
+#: The 401 text of a store that sends no session token (the identity scope). It deliberately does NOT contain
+#: :data:`SESSION_UNAUTHORIZED_MARKER`: the session-lease and MCP-reconnect advice keyed on that marker names a cause
+#: (a dead session token) this store cannot have (nexus-hczdo).
+IDENTITY_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized identity scratch (HTTP 401)"
+
 #: Appended to SESSION_UNAUTHORIZED_MARKER when the post-401 self-heal was
 #: attempted but found nothing fresher to adopt (no lease, expired, or
 #: unchanged) -- the ADOPTED/DECLINED distinction the owner-death guidance in
@@ -239,6 +244,12 @@ class HttpScratchStore:
             raise RuntimeError(
                 f"{_SESSION_ENV} (or {_SESSION_ID_ENV}) is required when "
                 "NX_STORAGE_BACKEND_T1=service. Set it to the session shared across siblings."
+            )
+        if not send_session_token and not self._session_id.startswith("identity:"):
+            # The engine admits a header-less call only for the identity scope (reads open, writes fenced on the identity
+            # token). For any other session id it would take the body's id unchecked, dropping the session gate.
+            raise ValueError(
+                f"send_session_token=False is for an identity scope (session_id 'identity:<id>'), not {self._session_id!r}"
             )
         # The minted session token (resolves to a live session_tokens row) is sent
         # as the X-Nexus-T1-Session header; the AuthFilter require-minted gate 401s a
@@ -1094,13 +1105,22 @@ class HttpScratchStore:
                     # nexus-k9sec: a recovered token that still 401s means the
                     # session token was not the cause; stop re-minting per call.
                     self._recovery_futile_at = time.monotonic()
-                raise RuntimeError(
-                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
-                )
+                raise self._unauthorized_error(path, heal_suffix, resp.text)
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )
         return resp.json()
+
+    def _unauthorized_error(self, path: str, heal_suffix: str, text: str) -> RuntimeError:
+        """The error for a 401 the whole ladder left standing. A store that sends a session token blames it
+        (:data:`SESSION_UNAUTHORIZED_MARKER`, which the CLI and the MCP key their lease and reconnect advice on); one that
+        sends none (the identity scope) names the bearer and the identity token instead."""
+        if not getattr(self, "_send_session_token", True):
+            return RuntimeError(
+                f"{IDENTITY_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: the bearer or the identity token was refused "
+                f"(an identity scope sends no session token): {text[:200]}"
+            )
+        return RuntimeError(f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {text[:200]}")
 
     @staticmethod
     def _edge_refusal(path: str, resp: httpx.Response) -> str | None:
@@ -1194,9 +1214,7 @@ class HttpScratchStore:
                     # nexus-k9sec: a recovered token that still 401s means the
                     # session token was not the cause; stop re-minting per call.
                     self._recovery_futile_at = time.monotonic()
-                raise RuntimeError(
-                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
-                )
+                raise self._unauthorized_error(path, heal_suffix, resp.text)
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )

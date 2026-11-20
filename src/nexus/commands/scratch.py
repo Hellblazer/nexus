@@ -67,7 +67,8 @@ def _clean_service_errors(fn):
 def _t1():
     """Return the active T1 scratch store for this process.
 
-    Routes through :func:`~nexus.db.t1.get_t1_database` so the correct
+    ``--scope identity`` returns the identity scope's store and never touches the session's T1 (it needs no session
+    lease: nexus-hczdo). Otherwise it routes through :func:`~nexus.db.t1.get_t1_database` so the correct
     backend is selected at runtime:
 
     * Default (hard default, RDR-152 -- see :mod:`nexus.db.storage_mode`) →

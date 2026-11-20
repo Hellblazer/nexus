@@ -63,7 +63,7 @@ def identity_scratch(base: Any = None, *, client: Any = None, identity: str | No
     """A T1-shaped store bound to the caller's identity scope.
 
     The store sends no session token, so it needs no session lease and never creates a session. *base* is accepted for
-    its callers and ignored: nothing is borrowed from it. *client* is the identity client that finds the delegated
+    old callers and ignored: nothing is borrowed from it (none passes one now). *client* is the identity client that finds the delegated
     parent (built from the config when None, and closed afterwards)."""
     from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred: http store must not load on every CLI start
     from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415

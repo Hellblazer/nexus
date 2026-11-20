@@ -309,6 +309,25 @@ def test_the_mcp_tool_refuses_persist_and_flag_for_identity_scratch_and_closes_t
     assert "unknown scope" in core.scratch_manage(action="promote", entry_id="e", scope="galaxy")
 
 
+def test_the_mcp_identity_scope_needs_no_session_store(monkeypatch, stores) -> None:
+    """nexus-hczdo: ``scratch``/``scratch_manage`` with ``scope="identity"`` never resolve the session's T1 store, so they work
+    when it cannot be resolved (no lease for the session id). The session scope still needs it."""
+    from nexus.mcp import core
+
+    def no_session_store() -> Any:
+        raise RuntimeError("no T1 session resolves for this process")
+
+    stores["identity"].resolve_prefix_candidates = lambda i: [i]                       # type: ignore[attr-defined]
+    stores["identity"].promote = lambda *a, **k: SimpleNamespace(action="new")         # type: ignore[attr-defined]
+    monkeypatch.setattr(core, "_get_t1", no_session_store)
+    monkeypatch.setattr(core, "_record_tier_write", lambda **k: None)
+    monkeypatch.setattr(core, "_t2_ctx", lambda: contextlib.nullcontext(None))
+    assert core.scratch(action="list", scope="identity").startswith("[identity]")
+    assert core.scratch(action="put", content="n", tags="x", scope="identity").startswith("[identity] Stored")
+    assert core.scratch_manage(action="promote", entry_id="e", project="p", title="t", scope="identity").startswith("[identity] Promoted")
+    assert "no T1 session resolves" in core.scratch(action="list"), "the session scope still resolves the session store"
+
+
 def test_mine_for_a_delegated_child_reads_its_parents_project_and_never_writes_it(monkeypatch, db) -> None:
     """Reads follow the child's identity scratch to the parent. Its WRITES are refused (RDR-253 Step 6 part 3,
     nexus-hczdo): a delegated identity keeps no identity notes, so none orphan when the child ends."""

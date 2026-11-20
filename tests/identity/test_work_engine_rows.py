@@ -355,8 +355,9 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
         config_dir = nexus_config_dir()
         leases_before = sorted(p.name for p in config_dir.glob("t1_session_lease.*"))
         assert not [n for n in leases_before if s2 in n], "no lease for the new session id exists before the read"
-        with pytest.raises(t1_mod.T1ServerNotFoundError):
-            t1_mod.get_t1_database()                                              # the pre-fix reader's path: an explicit id with no lease fails
+        with pytest.raises(t1_mod.T1ServerNotFoundError):                          # intended: get_t1_database stays strict about an explicit id with no lease
+            t1_mod.get_t1_database()                                              # (the pre-fix reader's path), so the row is not vacuous. If it is ever made
+                                                                                  # lenient this goes red for that reason, not because the reader regressed.
         minted: list[str] = []
         monkeypatch.setattr(t1_mod, "mint_t1_session_token", lambda sid, *, context: minted.append(sid) or {"session_token": "t"})
         line = resume_line.with_resume_line("GUIDANCE", {"session_id": s2, "source": "clear"})
