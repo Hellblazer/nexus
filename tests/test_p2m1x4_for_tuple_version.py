@@ -88,11 +88,20 @@ def test_an_empty_row_version_falls_back_to_the_conformant_name_loudly(monkeypat
     assert all(e["log_level"] == "warning" for e in warned)
 
 
-@pytest.mark.parametrize("name", ["a-legacy-slug", "code__1-1__bge-base-en-v15-768__v0"])
-def test_an_empty_row_version_with_no_usable_name_version_raises(monkeypatch, name) -> None:
-    cat = _client(monkeypatch, _row(name=name, model_version=""))
+def test_an_empty_row_version_with_a_v0_name_raises(monkeypatch) -> None:
+    cat = _client(monkeypatch, _row(name="code__1-1__bge-base-en-v15-768__v0", model_version=""))
     with pytest.raises(ValueError, match="empty model_version"):
         cat.collection_for("code", _OWNER, _MODEL)
+
+
+def test_an_empty_row_version_with_a_slug_name_is_answered_as_it_is(monkeypatch) -> None:
+    """Engine 0.1.200 (RDR-229 P2.8): a grandfathered slug row with a blank version can win its
+    tuple. It is returned unchanged; only a bump refuses (tests/test_rdr229_p28_subject_by_attributes.py)."""
+    cat = _client(monkeypatch, _row(name="a-legacy-slug", model_version=""))
+    got = cat.collection_for("code", _OWNER, _MODEL)
+    assert got.render() == "a-legacy-slug"
+    with pytest.raises(ValueError, match="model_version"):
+        cat.collection_for("code", _OWNER, _MODEL, bump=True)
 
 
 @pytest.mark.parametrize(

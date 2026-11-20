@@ -66,10 +66,19 @@ class TargetSelectionTest {
         assertThat(select(r)).isEqualTo(new Absent());
     }
 
+    /** RDR-229 P2.8 (engine 0.1.200): a grandfathered row is a candidate, as it is for collectionForTuple. */
     @Test
-    void aLegacyGrandfatheredRowIsNotACandidate() {
+    void aLegacyGrandfatheredRowIsACandidate() {
         var r = new CollectionRow("a", CT, OWNER, MODEL, "v1", true, "", "live");
-        assertThat(select(r)).isEqualTo(new Absent());
+        assertThat(select(r)).isEqualTo(new Live("a"));
+    }
+
+    @Test
+    void aGrandfatheredRowTiesByTheSameOrderAsAnyOther() {
+        var g = new CollectionRow("a-grand", CT, OWNER, MODEL, "v1", true, "", "live");
+        assertThat(select(row("b-conformant", "v1"), g)).as("equal version: the lexically lower name").isEqualTo(new Live("a-grand"));
+        var g2 = new CollectionRow("z-grand", CT, OWNER, MODEL, "v2", true, "", "live");
+        assertThat(select(row("a-conformant", "v1"), g2)).as("version dominates").isEqualTo(new Live("z-grand"));
     }
 
     @Test
@@ -78,10 +87,12 @@ class TargetSelectionTest {
     }
 
     @Test
-    void aSupersededRowThatIsNotLiveOrIsGrandfatheredStaysOut() {
+    void aSupersededRowThatIsNotLiveStaysOutAndAGrandfatheredOneDoesNot() {
         var q = new CollectionRow("q", CT, OWNER, MODEL, "v1", false, SOURCE, "quarantine");
         var g = new CollectionRow("g", CT, OWNER, MODEL, "v1", true, SOURCE, "live");
-        assertThat(select(q, g)).isEqualTo(new Absent());
+        assertThat(select(q)).as("a quarantine row stays out").isEqualTo(new Absent());
+        assertThat(select(q, g)).as("a superseded grandfathered row is the Superseded candidate (RDR-229 P2.8)")
+            .isEqualTo(new Superseded("g", SOURCE));
     }
 
     // ---- selection: which candidate wins ----

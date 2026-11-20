@@ -315,3 +315,47 @@ def test_the_no_row_repo_path_reads_for_tuple_once(monkeypatch) -> None:
     monkeypatch.setattr(cat, "_get", counting_get)
     cat.collection_for_repo(Path("/repo"), "code")
     assert calls.count("/collections/for_tuple") == 1
+
+
+# -- a row with no readable version (lead ruling 2026-11-20, engine 0.1.200) --
+# for_tuple now answers a grandfathered row, so a non-conformant label with a blank
+# model_version can win its tuple. It is answered as it is, with no version: nothing
+# is minted from it, and only a bump (which needs a version to add one to) refuses.
+
+_BLANK = _row("a-legacy-slug", "code", "1-7", version="")
+
+
+def test_find_collection_answers_a_blank_version_row_with_no_version(monkeypatch) -> None:
+    cat = _client(monkeypatch, {("code", "1-7", _MODEL): _BLANK})
+    got = cat.find_collection("code", "1-7", _MODEL)
+    assert got is not None
+    assert got.label == "a-legacy-slug"
+    assert got.model_version is None
+
+
+@pytest.mark.parametrize("bad", ["v0", "3", "vx"])
+def test_a_malformed_non_empty_version_still_raises(monkeypatch, bad) -> None:
+    cat = _client(monkeypatch, {("code", "1-7", _MODEL): _row("a-legacy-slug", "code", "1-7", version=bad)})
+    with pytest.raises(ValueError, match="model_version"):
+        cat.find_collection("code", "1-7", _MODEL)
+
+
+def test_collection_for_returns_a_blank_version_row_as_it_is(monkeypatch) -> None:
+    cat = _client(monkeypatch, {("code", "1-7", _MODEL): _BLANK})
+    got = cat.collection_for("code", "1.7", _MODEL)
+    assert got.render() == "a-legacy-slug"
+    assert got.model_version is None
+
+
+def test_collection_for_with_a_bump_refuses_a_blank_version_row(monkeypatch) -> None:
+    cat = _client(monkeypatch, {("code", "1-7", _MODEL): _BLANK})
+    with pytest.raises(ValueError, match="re-register the collection"):
+        cat.collection_for("code", "1.7", _MODEL, bump=True)
+
+
+def test_collection_for_repo_answers_a_blank_version_row_and_refuses_a_bump(monkeypatch) -> None:
+    cat = _repo_client(monkeypatch, {("code", "1-7", _MODEL): _BLANK})
+    got = cat.collection_for_repo(Path("/repo"), "code")
+    assert (got.label, got.model_version) == ("a-legacy-slug", None)
+    with pytest.raises(ValueError, match="set the row's model_version"):
+        cat.collection_for_repo(Path("/repo"), "code", bump=True)

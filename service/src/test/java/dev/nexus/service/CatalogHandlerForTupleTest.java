@@ -133,7 +133,7 @@ class CatalogHandlerForTupleTest {
                 + "\"embedding_model\":\"" + KNOWLEDGE_MODEL + "\",\"model_version\":\"v1\","
                 + "\"display_name\":\"\",\"legacy_grandfathered\":true}");
         var sup = post("/v1/catalog/collections/supersede",
-            "{\"old_name\":\"old-notes-p28\",\"new_name\":\"new-notes-p28\"}");
+            "{\"name\":\"old-notes-p28\",\"superseded_by\":\"new-notes-p28\"}");
         assertThat(sup.statusCode()).as("guard: the supersession applies").isEqualTo(200);
 
         var resp = get(forTuple("knowledge", "retired-notes", KNOWLEDGE_MODEL));
