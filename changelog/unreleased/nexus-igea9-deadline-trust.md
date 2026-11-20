@@ -7,4 +7,6 @@
   is handed on or escalated when nobody acknowledges it (nexus-igea9).
 - **A client can no longer forge the engine's owner or clear state.** The owner decision counted a prior owner or clear
   row when its `from` dim said `engine`, a value any data-scope writer can set. It now counts one only when the engine
-  wrote it, that is, when the row carries no sender session (nexus-igea9).
+  wrote it, that is, when the row carries no sender session, and the tuple routes (`out`, including `mode=replace`,
+  and an `ack` reply) refuse a client write to a `board/ci/<topic>` subspace whose `from` dim is `engine` with a 403
+  and the code `reserved_dim`. The stamper writes through the repository and is unaffected (nexus-igea9).

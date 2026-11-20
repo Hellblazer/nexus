@@ -22,6 +22,23 @@ final class BoardCiGuard {
     private BoardCiGuard() {
     }
 
+    /** The {@code from} value only the engine's own stamper writes (RDR-252): a client write that carries it is refused. */
+    static final String RESERVED_FROM = "engine";
+    /** The error code a refused write carries. */
+    static final String RESERVED_DIM = "reserved_dim";
+
+    /**
+     * Why a CLIENT write (any credential, through the HTTP route) to a {@code board/ci/<topic>} subspace is refused
+     * for its dims, or null when it passes. {@code from=engine} marks the owner and clear rows the stamper wrote; the
+     * stamper writes through the repository, never through the route, so no client write may carry it. A missing
+     * sender session cannot tell the engine's row from a raw-HTTP client's (RDR-252 S3), so the dim is made
+     * engine-only by construction.
+     */
+    static String reservedDimRefusal(Map<String, String> dims) {
+        return dims != null && RESERVED_FROM.equals(dims.get("from"))
+            ? RESERVED_DIM + ": the dim from=" + RESERVED_FROM + " on a board/ci topic is written by the engine alone" : null;
+    }
+
     /** Why a {@code board-ci} write to {@code subspace} with these keys is refused, or null when it passes. */
     static String refusal(String subspace, Map<String, String> keys) {
         String segment = subspace.startsWith(PREFIX) ? subspace.substring(PREFIX.length()) : subspace;
