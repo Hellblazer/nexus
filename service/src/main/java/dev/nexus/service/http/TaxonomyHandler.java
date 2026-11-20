@@ -777,7 +777,8 @@ public final class TaxonomyHandler implements HttpHandler {
      * Body: {@code source_collection_prefix} (a corpus prefix like {@code code__}
      * or a full collection name), {@code min_similarity} (0..1). Deletes
      * projection assignments under that prefix whose stored raw cosine is
-     * below the threshold; answers {@code {"removed": N}}.
+     * below the threshold; answers {@code {"removed": N, "match": "prefix"|"exact"}} ({@code match} names the
+     * mode applied, so an absent or null request field answers {@code "prefix"}).
      *
      * <p>nexus-p2m1x.9 (RDR-229 P2.4): optional {@code match}, {@code "prefix"} (the default when absent or null:
      * {@code startsWith}, as before) or {@code "exact"} ({@code source_collection} equals the name, so pruning
@@ -804,7 +805,9 @@ public final class TaxonomyHandler implements HttpHandler {
             return;
         }
         int removed = repo.pruneProjectionBelow(tenant, prefix, n.doubleValue(), exact);
-        HttpUtil.send(ex, 200, json(Map.of("removed", removed)));
+        // The mode applied is echoed: an older engine answers {"removed": N} alone, so a client that asked for
+        // exact reads "match" to confirm this engine honoured it, rather than trusting /version alone.
+        HttpUtil.send(ex, 200, json(Map.of("removed", removed, "match", exact ? "exact" : "prefix")));
     }
 
     // ── Collection ops ─────────────────────────────────────────────────────────
