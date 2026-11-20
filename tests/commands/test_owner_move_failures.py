@@ -3,7 +3,7 @@
 report prints, and the structural rule that no move route is reached before the capability check.
 
 The failures are driven through ``CliRunner`` with a fake catalog handle (no engine): the engine's own refusals are
-pinned Java-side and in tests/commands/test_catalog_owners_move.py against the substrate.
+pinned Java-side and in tests/integration/test_catalog_owners_move_journey.py against the substrate.
 """
 from __future__ import annotations
 

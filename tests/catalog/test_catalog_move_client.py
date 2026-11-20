@@ -3,7 +3,8 @@
 
 Wire-shape tests on an ``httpx.MockTransport`` (the engine side is pinned Java-side by CatalogDocumentMoveTest,
 CatalogOwnerMoveTest and CatalogMoveRoutesTest), a probe table, and the refusal every move command calls before any
-route call. The substrate leg of the same wire is in tests/commands/test_catalog_owners_move.py."""
+route call. The command over a mock engine is in tests/commands/test_catalog_owners_move.py, and the substrate leg of the
+same wire is in tests/integration/test_catalog_owners_move_journey.py."""
 from __future__ import annotations
 
 import json
