@@ -145,6 +145,62 @@ class OwnerTimerStartTest {
     }
 
     @Test
+    void aFailedFirstCensusIsRetriedUntilItSucceedsAndThenArmsTheDeadline() {
+        String[] f = redOnY();
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+        var scheduler = new RecordingScheduler();
+        AtomicInteger census = new AtomicInteger();
+
+        wiring.start(scheduler, () -> {
+            if (census.incrementAndGet() == 1) {
+                throw new IllegalStateException("the tenant census failed: the database is not up yet");
+            }
+            return List.of(f[0]);
+        });
+        scheduler.secondsCalls().getFirst().task().run();
+
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the first census failed: nothing armed").isNull();
+        assertThat(scheduler.secondsCalls()).as("the failed census scheduled another attempt").hasSize(2);
+        assertThat(scheduler.secondsCalls().get(1).delay()).as("with a longer delay").isGreaterThan(BoardOwnerWiring.REBUILD_DELAY_SECONDS);
+
+        scheduler.secondsCalls().get(1).task().run();
+
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the retry armed the open red's deadline")
+            .isEqualTo(episode.plus(DEADLINE));
+        assertThat(scheduler.secondsCalls()).as("a full census ends the retries").hasSize(2);
+    }
+
+    @Test
+    void aCensusThatFailsForOneTenantIsNotFullAndIsRetriedWhileTheRestIsArmed() {
+        String[] f = redOnY();
+        se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+
+        assertThat(wiring.rebuild(List.of(f[0]))).as("every tenant read: a full census").isTrue();
+        assertThat(wiring.rebuild(List.of(f[0], "not a tenant id\u0000"))).as("one tenant failed: not a full census").isFalse();
+    }
+
+    @Test
+    void theRetryDelayDoublesAndStopsGrowingAtTheCap() {
+        var wiring = new BoardOwnerWiring(se.env.ids.scope, se.tuples, se.env.ids.repo, se.env.ids.clock);
+        var scheduler = new RecordingScheduler();
+
+        wiring.start(scheduler, () -> {
+            throw new IllegalStateException("down");
+        });
+        for (int i = 0; i < 12; i++) {
+            scheduler.secondsCalls().get(i).task().run();
+        }
+
+        var delays = scheduler.secondsCalls().stream().map(RecordingScheduler.Scheduled::delay).toList();
+        assertThat(delays).as("5 s first, then double, then the cap").startsWith(5L, 10L, 20L, 40L, 80L, 160L, 300L, 300L);
+        assertThat(delays).as("never past the cap").allMatch(d -> d <= BoardOwnerWiring.REBUILD_MAX_DELAY_SECONDS);
+        assertThat(delays).as("one attempt is always waiting").hasSize(13);
+    }
+
+    @Test
     void aRedDoneWriteOnALiveEngineLeavesADeadlineArmed() throws Exception {
         se.env.ids.clock.set(Instant.now());   // the engine reads the system clock: the seats' leases must be fresh by it
         String[] f = redOnY();

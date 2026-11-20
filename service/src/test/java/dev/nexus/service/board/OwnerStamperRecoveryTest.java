@@ -93,6 +93,35 @@ class OwnerStamperRecoveryTest {
     }
 
     @Test
+    void aStamperErrorRowArmsTheDeadlineAndItHandsOnWhenNobodyAcknowledges() throws Exception {
+        String[] f = redOnY();
+        var faulty = new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            (in, trigger) -> { throw new IllegalStateException("boom"); });
+        var timer = new AckDeadlineTimer(new Recording(), se.env.ids.clock, faulty::onDeadline);
+        faulty.bind(timer);
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+
+        faulty.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error");
+        Instant episode = Instant.parse((String) rows.getFirst().get("episode_at"));
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("a stamper_error row runs the 20-minute deadline, as every owner row")
+            .isEqualTo(episode.plus(Duration.ofMinutes(20)));
+
+        // The deadline passes with no ack: the engine's own stamper (the fault was transient) hands the red on.
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        for (int i = 1; i < f.length; i++) {
+            se.env.renew(f[0], f[i]);
+        }
+        se.stamper.onDeadline(f[0], StamperEnv.BASE);
+
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason"))
+            .as("the stamper_error owner was handed on at its deadline").containsExactly("stamper_error", "handoff");
+    }
+
+    @Test
     void aRestartRearmsTheDeadlineOfAnOpenRedFromItsEpisode() {
         String[] f = redOnY();
         se.done(f[0], StamperEnv.BASE, "Y", "failure");

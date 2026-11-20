@@ -142,9 +142,11 @@ public final class OwnerDecision {
 
     /**
      * A stamper error posts the leader as owner with {@code reason=stamper_error}, for a red tip {@code sha} with no
-     * open owner row at that tip and a live serving group; otherwise nothing.
+     * open owner row at that tip and a live serving group; otherwise nothing. The row runs the acknowledgement deadline
+     * like every owner row (RDR-252): {@code episode_at} plus the topic's deadline, so a red whose evaluation failed is
+     * still handed on, or escalated, when nobody acknowledges it; the deadline's own evaluation re-reads the rows.
      */
-    public static Decision stamperError(GroupView group, String sha, List<BoardRow> owners, Instant now) {
+    public static Decision stamperError(GroupView group, String base, String sha, List<BoardRow> owners, Instant now) {
         if (group == null || sha == null) {
             return Decision.none();
         }
@@ -153,7 +155,8 @@ public final class OwnerDecision {
             return Decision.none();
         }
         return new Decision(new Post("owner", sha,
-            body(group.leader(), null, REASON_STAMPER_ERROR, List.of(), 0, now, false, 0)), null);
+            body(group.leader(), null, REASON_STAMPER_ERROR, List.of(), 0, now, false, 0)),
+            now.plus(Duration.ofMinutes(group.deadlineMinutes(base))));
     }
 
     // ── rows ─────────────────────────────────────────────────────────────────
@@ -272,15 +275,18 @@ public final class OwnerDecision {
     private static final Comparator<BoardRow> BY_TIME = Comparator.comparing(BoardRow::createdAt).thenComparing(BoardRow::id);
 
     /**
-     * The newest owner or clear row the engine posted; acks are not state, nor is a row another writer posted, nor an
-     * owner row whose body cannot be read as one (it is treated as absent, never thrown on).
+     * The newest owner or clear row the engine posted; acks are not state, nor is a row another writer posted (one that
+     * says {@code from=engine} but carries a sender session was written by a client), nor an owner row whose body
+     * cannot be read as one (it is treated as absent, never thrown on).
      */
     private static BoardRow currentRow(List<BoardRow> owners) {
         return owners.stream().filter(OwnerDecision::isState).max(BY_TIME).orElse(null);
     }
 
     private static boolean isState(BoardRow r) {
-        if (!"engine".equals(r.dim("from"))) {
+        // {@code from} is a dim any data-scope writer can set, so it proves nothing. The engine's own rows are written
+        // with no sender session; a row that carries a stamp was written through the tuple route by a client.
+        if (!"engine".equals(r.dim("from")) || (r.senderSession() != null && !r.senderSession().isBlank())) {
             return false;
         }
         if ("clear".equals(r.kind())) {

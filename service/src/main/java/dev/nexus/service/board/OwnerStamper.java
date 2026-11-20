@@ -155,10 +155,14 @@ public final class OwnerStamper implements OwnerOutHook {
             scope.withTenant(tenant, ctx -> {
                 BoardTopicLock.lock(ctx, tenant, base);
                 GroupView group = BoardReads.group(groups, identities, tenant, base);
-                OwnerDecision.Decision d = OwnerDecision.stamperError(group, sha,
+                OwnerDecision.Decision d = OwnerDecision.stamperError(group, base, sha,
                     BoardReads.rows(ctx, tenant, base, "owner"), clock.instant());
                 if (d.post() != null) {
                     post(ctx, tenant, base, d.post());
+                    // Armed under the lock, as in evaluate: the row is an owner row and runs the deadline like any other.
+                    if (timer != null) {
+                        timer.arm(tenant, base, d.deadline());
+                    }
                 }
                 return null;
             });

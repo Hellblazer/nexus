@@ -100,11 +100,27 @@ class OwnerDecisionLeaderCasesTest {
         OwnerFixture f = oneRed();
         OwnerDecision.Input in = f.input();
 
-        OwnerDecision.Decision d = OwnerDecision.stamperError(in.group(), "X", in.owners(), Instant.parse("2026-11-18T13:00:00Z"));
+        OwnerDecision.Decision d = OwnerDecision.stamperError(in.group(), OwnerFixture.BASE, "X", in.owners(),
+            Instant.parse("2026-11-18T13:00:00Z"));
 
         leaderOwns(d, "stamper_error");
         assertThat(d.post().kind()).isEqualTo("owner");
         assertThat(d.post().sha()).isEqualTo("X");
-        assertThat(OwnerDecision.stamperError(null, "X", List.of(), Instant.EPOCH).post()).as("no live group: no row").isNull();
+        assertThat(OwnerDecision.stamperError(null, OwnerFixture.BASE, "X", List.of(), Instant.EPOCH).post())
+            .as("no live group: no row").isNull();
+    }
+
+    @Test
+    void aStamperErrorRowRunsTheDeadlineFromItsEpisodeLikeAnyOwnerRow() {
+        OwnerFixture f = oneRed();
+        f.byTopic.put(OwnerFixture.BASE, 7);   // the topic's override wins over the group default, as for every owner row
+        OwnerDecision.Input in = f.input();
+        Instant now = Instant.parse("2026-11-18T13:00:00Z");
+
+        OwnerDecision.Decision d = OwnerDecision.stamperError(in.group(), OwnerFixture.BASE, "X", in.owners(), now);
+
+        assertThat(d.deadline()).as("counted from the row's episode_at, which is its post time")
+            .isEqualTo(now.plus(java.time.Duration.ofMinutes(7)));
+        assertThat(d.post().body()).containsEntry("episode_at", now.toString());
     }
 }
