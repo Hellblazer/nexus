@@ -207,6 +207,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PdfStubMetadataReads.CollectionStubs.examples", RESULT);   // nexus-f3yqd: one collection's example names in that answer
         notKeyed.put("ChashConformanceConstraints.Report.constraints", RESULT);   // nexus-f3yqd: one chash-conformance call's entries (no tenant data: pg_catalog)
         notKeyed.put("ManifestForeignCollectionReads.Page.documents", RESULT);   // GH #1611: one foreign-collection call's documents
+        notKeyed.put("UriSegmentCensusReads.Page.groups", RESULT);   // RDR-229 P1.2: one uri-segment-census call's groups
         notKeyed.put("ManifestForeignCollectionReads.Doc.collections", RESULT);   // GH #1611: one listed document's other collections
         // nexus-f3yqd: the census and drift answers' example lists, each built for one request and dropped with its response
         notKeyed.put("IndexRunCensusReads.Stale.examples", RESULT);
