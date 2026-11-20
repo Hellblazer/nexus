@@ -234,3 +234,41 @@ def test_record_without_an_open_scope_queries_nothing(new_pdf):
     reader = _Reader(here=_entry("1.1.9", str(new_pdf)))
     hints.record_curator_hint("1.1.9", "a" * 64, reader=reader)
     assert reader.calls == []
+
+
+# ── the curator hint's cost per run ─────────────────────────────────────────
+
+
+def _record_many(reader, n: int, scope_kwargs: dict | None = None) -> None:
+    with hints.run_scope(**(scope_kwargs or {})):
+        for i in range(n):
+            hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
+
+
+def test_curator_hint_stops_asking_after_the_first_failed_query(new_pdf):
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)), boom=httpx.ReadTimeout("read timed out"))
+    _record_many(reader, 5)
+    assert reader.calls.count("documents_by_meta") == 1, "one failed query ends the asking for the rest of the run"
+    calls_after_first = len(reader.calls)
+    reader.calls.clear()
+    _record_many(reader, 1)
+    assert calls_after_first >= 1 and reader.calls != [], "a new run asks again (the stop is per run, not per process)"
+
+
+def test_curator_hint_asks_about_a_capped_number_of_files_per_run(new_pdf, monkeypatch):
+    monkeypatch.setattr(hints, "CURATOR_HINT_MAX_FILES", 3)
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)))
+    _record_many(reader, 10)
+    assert reader.calls.count("documents_by_meta") == 3
+
+
+def test_curator_hint_spends_a_run_wide_time_budget(new_pdf):
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)))
+    _record_many(reader, 4, {"budget_s": 0.0})
+    assert reader.calls == [], "a spent budget asks nothing, not even the probe"
+
+
+def test_the_owner_kind_is_read_once_per_owner_per_run(new_pdf):
+    reader = _Reader(here=_entry("1.1.9", str(new_pdf)))
+    _record_many(reader, 4)
+    assert reader.calls.count("get_owner_by_prefix") == 1 and reader.calls.count("documents_by_meta") == 4

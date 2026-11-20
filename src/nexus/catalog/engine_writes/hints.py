@@ -9,8 +9,12 @@ tumblers before choosing to write (RDR-254 Technical Design, Move hints; Undo).
 Three rules hold for every hint:
 
 * FAIL OPEN. A hint is advisory. Every catalog query it makes runs inside :func:`fail_open`, which logs and drops an
-  exception (a refusal, a timeout, an engine without the route) and a spent time budget, and returns the caller's
-  default. A hint never changes an exit code and never stops an index run.
+  exception (a refusal, a timeout, an engine without the route) and returns the caller's default. A hint never
+  changes an exit code and never stops an index run.
+* BOUNDED. The renamed-repository hint stops asking when its time budget (:data:`HINT_BUDGET_S`) is spent. The curator
+  hint, which runs inside the write path once per newly written file, asks about at most
+  :data:`CURATOR_HINT_MAX_FILES` files per run, shares one :data:`HINT_BUDGET_S` budget across them, reads each owner's
+  kind once per run, and stops asking for the rest of the run after its first failed query.
 * PROBE FIRST. No query is made, and no line is printed, unless the engine reports the move routes
   (:func:`engine_supports_moves`): a client never prints a command its engine refuses.
 * NOT A SINGLETON. The curator hint is recorded from deep inside the single-file writers
@@ -47,8 +51,11 @@ OWNER_FIRST_PAGE: int = 200
 RENAME_SAMPLE: int = 20
 #: A vanished owner matches when at least this fraction of the sampled hashes also have a live row under it.
 RENAME_MATCH_FRACTION: float = 0.5
-#: One hint's whole query budget, in seconds. A hint that spends it stops asking and drops what it has not read.
+#: One hint's whole query budget, in seconds: the renamed-repository hint's, and for the curator hint the whole run's
+#: (every file of a ``--dir`` batch together). A hint that spends it stops asking and drops what it has not read.
 HINT_BUDGET_S: float = 30.0
+#: The most files one run's curator hint asks about (each costs up to three requests, the first of an owner four).
+CURATOR_HINT_MAX_FILES: int = 50
 #: The placeholder a census row prints where the new root is not known.
 NEW_ROOT_PLACEHOLDER: str = "<new root>"
 
@@ -75,13 +82,58 @@ def owner_move_line(owner: str, new_root: str | None = None) -> str:
 # ── the collector ───────────────────────────────────────────────────────────────────────────────────────────────
 
 
-class HintCollector:
-    """The hint lines of one run, in the order recorded, each once. Thread-safe: the uploader of a streaming PDF run
-    records from its own thread."""
+class Budget:
+    """A hint's query time. ``spent()`` turns true once :attr:`seconds` have passed; a loop of queries checks it
+    between queries and stops (the hint drops what it has not read)."""
 
-    def __init__(self) -> None:
+    def __init__(self, seconds: float = HINT_BUDGET_S, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self.seconds = seconds
+        self._clock = clock
+        self._deadline = clock() + seconds
+
+    def spent(self) -> bool:
+        return self._clock() >= self._deadline
+
+
+class HintCollector:
+    """The hint lines of one run, in the order recorded, each once, and the run's bound on what the curator hint may
+    ask: a run-wide time budget, a cap on the files it asks about, and a stop after the first failed query. Thread-safe:
+    the uploader of a streaming PDF run records from its own thread."""
+
+    def __init__(self, budget_s: float = HINT_BUDGET_S) -> None:
         self._lock = threading.Lock()
         self._lines: list[str] = []
+        self._budget = Budget(budget_s)
+        self._asked = 0
+        self._stopped = False
+        self._owner_is_curator: dict[str, bool] = {}
+
+    def admit(self) -> bool:
+        """May the curator hint ask about one more file? No once a query failed, the run's time is spent, or
+        :data:`CURATOR_HINT_MAX_FILES` files were asked about. Counts the file it admits."""
+        with self._lock:
+            if self._stopped or self._budget.spent() or self._asked >= CURATOR_HINT_MAX_FILES:
+                return False
+            self._asked += 1
+            return True
+
+    def stop(self) -> None:
+        """A query failed: the curator hint asks about no further file this run."""
+        with self._lock:
+            self._stopped = True
+
+    def budget_spent(self) -> bool:
+        return self._budget.spent()
+
+    def owner_is_curator(self, prefix: str, lookup: Callable[[str], bool]) -> bool:
+        """Whether owner *prefix* is a curator owner, read once per run (*lookup* is called on a first sight)."""
+        with self._lock:
+            known = self._owner_is_curator.get(prefix)
+        if known is None:
+            known = lookup(prefix)
+            with self._lock:
+                self._owner_is_curator[prefix] = known
+        return known
 
     def add(self, line: str) -> None:
         with self._lock:
@@ -106,12 +158,13 @@ def active_collector() -> HintCollector | None:
 
 
 @contextlib.contextmanager
-def run_scope() -> Iterator[HintCollector]:
-    """Open the collector for one command run. A nested scope reuses the outer one (the outer run prints)."""
+def run_scope(budget_s: float = HINT_BUDGET_S) -> Iterator[HintCollector]:
+    """Open the collector for one command run, with *budget_s* seconds for its curator queries. A nested scope reuses
+    the outer one (the outer run prints)."""
     global _open_collector
     with _scope_lock:
         outer = _open_collector
-        collector = outer if outer is not None else HintCollector()
+        collector = outer if outer is not None else HintCollector(budget_s)
         _open_collector = collector
     try:
         yield collector
@@ -161,19 +214,6 @@ def echo_hints(lines: Iterable[str]) -> None:
 # ── fail-open, budget, probe ────────────────────────────────────────────────────────────────────────────────────
 
 
-class Budget:
-    """A hint's query time. ``spent()`` turns true once :attr:`seconds` have passed; a loop of queries checks it
-    between queries and stops (the hint drops what it has not read)."""
-
-    def __init__(self, seconds: float = HINT_BUDGET_S, *, clock: Callable[[], float] = time.monotonic) -> None:
-        self.seconds = seconds
-        self._clock = clock
-        self._deadline = clock() + seconds
-
-    def spent(self) -> bool:
-        return self._clock() >= self._deadline
-
-
 def fail_open(label: str, fn: Callable[..., _T], *args: Any, default: _T, **kwargs: Any) -> _T:
     """Call ``fn(*args, **kwargs)`` and return its value; on ANY exception (a refused or failed query, a timeout, an
     engine without the route) log it under *label* and return *default*. The one wrapper every hint query sits in."""
@@ -211,22 +251,33 @@ def _reader(reader: Any) -> Any:
 # ── curator hint (Gap 1) ────────────────────────────────────────────────────────────────────────────────────────
 
 
-def curator_hint_lines(reader: Any, doc_id: str, content_hash: str) -> list[str]:
+def curator_hint_lines(reader: Any, doc_id: str, content_hash: str, collector: HintCollector | None = None) -> list[str]:
     """The move lines for document *doc_id*, a curator document the writer has just stamped with *content_hash*.
 
     Asks the metadata route for the live rows with that hash, keeps those under D's owner prefix other than D that
     are not aliases and name a file that is absent on this machine, and returns one document-move line per such row
     (D's path is the new path). A row whose file is present is a copy and gets no line (nexus-o19i0); a row with no
-    ``meta.content_hash`` is not in the answer at all. May raise: callers wrap it in :func:`fail_open`."""
+    ``meta.content_hash`` is not in the answer at all. "Absent on this machine" is read as "moved": a row of a
+    catalog shared with another machine, or on an unmounted volume, is named too (the line is a dry run).
+    Up to three requests (the document, its owner's kind, the metadata page); the owner's kind is read once per run
+    when *collector* is given, and the run's time budget is checked between requests. May raise: callers wrap it in
+    :func:`fail_open`."""
     if not engine_supports_moves(reader):
         return []
     here = reader.resolve(doc_id)
     if here is None or getattr(here, "alias_of", "") or not here.file_path or not Path(here.file_path).is_absolute():
         return []
     owner = _owner_prefix(here.tumbler)
-    row = reader.get_owner_by_prefix(owner)
-    if not row or row.get("owner_type") != "curator":
+
+    def _is_curator(prefix: str) -> bool:
+        row = reader.get_owner_by_prefix(prefix)
+        return bool(row) and row.get("owner_type") == "curator"
+
+    is_curator = collector.owner_is_curator(owner, _is_curator) if collector is not None else _is_curator(owner)
+    if not is_curator:
         return []  # an in-repo file: the repository hints cover it
+    if collector is not None and collector.budget_spent():
+        return []
     matches, _count = reader.documents_by_meta(meta=[("content_hash", content_hash)], limit=1000)
     lines: list[str] = []
     for old in matches:
@@ -240,15 +291,21 @@ def curator_hint_lines(reader: Any, doc_id: str, content_hash: str) -> list[str]
 
 def record_curator_hint(doc_id: str, content_hash: str, *, reader: Any = None) -> None:
     """Record the curator hints of a document the writer has just stamped, into the open run's collector. Does nothing
-    (and queries nothing) when no :func:`run_scope` is open. Fail-open."""
+    (and queries nothing) when no :func:`run_scope` is open. Fail-open, and bounded per run: it asks about at most
+    :data:`CURATOR_HINT_MAX_FILES` files, stops when the run's time budget (:data:`HINT_BUDGET_S`) is spent, and stops
+    for the rest of the run after the first query that fails."""
     collector = active_collector()
-    if collector is None or not doc_id or not content_hash:
+    if collector is None or not doc_id or not content_hash or not collector.admit():
         return
 
     def _lines() -> list[str]:
-        return curator_hint_lines(_reader(reader), doc_id, content_hash)
+        return curator_hint_lines(_reader(reader), doc_id, content_hash, collector)
 
-    for line in fail_open("curator", _lines, default=[]):
+    lines = fail_open("curator", _lines, default=None)
+    if lines is None:
+        collector.stop()
+        return
+    for line in lines:
         collector.add(line)
 
 
