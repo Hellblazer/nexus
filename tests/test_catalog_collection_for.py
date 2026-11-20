@@ -415,7 +415,8 @@ def test_canonical_embedding_model_unknown_raises() -> None:
 @pytest.mark.t2_tenant
 def test_collection_for_repo_uses_registered_owner(catalog, tmp_path) -> None:
     """Given a registered repo owner, ``collection_for_repo`` returns
-    the conformant ``CollectionName`` with the canonical model."""
+    the collection's attributes with the canonical model (RDR-229 P2.8:
+    a ``CollectionAttributes``, the registered row or a new mint)."""
     repo_root = tmp_path / "myrepo"
     repo_root.mkdir()
     # Stable identity: register an owner under a fixed repo_hash, then
