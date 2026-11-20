@@ -2991,6 +2991,24 @@ def _no_real_claude_version_probe(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_resume_pointer_store(request, monkeypatch):
+    """RDR-253 Step 6 part 2: a SessionStart with source clear reads the newest resume pointer from the
+    identity scratch (``nexus.hooks.resume_line._open_store``). A test that drives that path for anything else (the
+    source passthrough, the verb's field extraction) would reach real storage with no tenant, and on a developer box
+    the identity it resolves is the user's own. Make the opener raise for every test, so the reader prints nothing;
+    tests/hooks/test_resume_line.py injects its own store, and a module that needs the real opener sets
+    ``REAL_RESUME_POINTER_STORE = True``."""
+    if getattr(request.module, "REAL_RESUME_POINTER_STORE", False):
+        return
+    import nexus.hooks.resume_line as resume_line  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    def _refused() -> None:
+        raise RuntimeError("tests/conftest.py: the resume-pointer store is stubbed out")
+
+    monkeypatch.setattr(resume_line, "_open_store", _refused)
+
+
+@pytest.fixture(autouse=True)
 def _mcp_server_process_flag_does_not_leak(monkeypatch):
     """nexus-xs7fp: ``core.main()`` / ``catalog.main()`` call
     ``session.mark_mcp_server_process()``, and a couple of tests run a

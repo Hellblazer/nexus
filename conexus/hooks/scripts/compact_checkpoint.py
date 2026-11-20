@@ -4,11 +4,12 @@
 # /// script
 # requires-python = ">=3.12"
 # ///
-"""Auto-continuation across compaction (bead nexus-3lqxv): one script, three hooks.
+"""Auto-continuation across compaction (bead nexus-3lqxv): one script, four hooks.
 
 ``compact_checkpoint.py pre``     PreCompact (manual and auto compaction)
 ``compact_checkpoint.py post``    PostCompact
 ``compact_checkpoint.py inject``  SessionStart, matcher ``compact`` only
+``compact_checkpoint.py end``     SessionEnd, matcher ``clear`` only (the resume pointer, nothing else)
 
 Measured on session linda (e6613e51), 2026-10-31: two automatic compactions at about
 969,000 tokens each produced summaries of about 0.5 percent of the context. The state
@@ -31,6 +32,12 @@ payload ``cwd`` is the launch directory, usually the shared primary checkout), a
 the in-progress list keeps only the beads the board entry names, because every session
 claims beads under one assignee (both measured on halcyon's first live compaction,
 2026-11-01).
+
+After the checkpoint is on disk, PRE also leaves one ``resume-pointer`` entry in the session's identity scratch scope (RDR-253
+Step 6: thread, worktree, state, waiting_on; ``_resume_pointer.py`` holds the rules), which SessionStart prints once after
+``/clear``. ``compact_checkpoint.py end`` (SessionEnd, matcher ``clear``) writes the same pointer for a ``/clear`` in a session that
+never compacted. A failed write logs one line and writes nothing else; the pointer gets what is left of 38 s into the hook
+and is skipped past 36 s, and never changes the outcome of the checkpoint write.
 
 POST appends the ``compact_summary`` to the same file and logs one INFO line to
 ``<config>/logs/hook.log`` when the summary names none of the session's board title,
@@ -110,17 +117,20 @@ _cli_lookup = None
 _endpoint_resolve = None
 _session_facts = None
 _identity_lookup = None
+_resume_pointer = None
 
 
 def _load_siblings() -> None:
-    global _cli_lookup, _endpoint_resolve, _session_facts, _identity_lookup
+    global _cli_lookup, _endpoint_resolve, _session_facts, _identity_lookup, _resume_pointer
     import _cli_lookup as cli_lookup  # noqa: PLC0415 -- must follow the sys.path insert
     import _endpoint_resolve as endpoint_resolve  # noqa: PLC0415
     import _identity_lookup as identity_lookup  # noqa: PLC0415
+    import _resume_pointer as resume_pointer  # noqa: PLC0415
     import _session_facts as session_facts  # noqa: PLC0415
 
     _cli_lookup, _endpoint_resolve, _session_facts = cli_lookup, endpoint_resolve, session_facts
     _identity_lookup = identity_lookup
+    _resume_pointer = resume_pointer
 
 
 #: Wall clock for ``nx command-context continuation`` (measured 5.4 s); hooks.json gives
@@ -140,6 +150,10 @@ _SESSION_CANDIDATES = 4
 #: Bound on ``git worktree list``, run before the continuation call.
 _GIT_TIMEOUT_S = 3.0
 _TOTAL_BUDGET_S = 32.0
+#: The second of the hook the resume pointer must be done by (hooks.json gives pre 45 s), and the same for the SessionEnd
+#: run (15 s). The pointer is skipped when less than two seconds of that remain.
+_POINTER_DEADLINE_S = 38.0
+_END_DEADLINE_S = 13.0
 #: Clock skew tolerated for a ``written:`` stamp that lies in the future.
 _SKEW_S = 300.0
 #: Archives, used checkpoints, sidecars and temp files older than this (by mtime) are removed
@@ -1098,8 +1112,50 @@ def run_pre(payload: dict) -> str:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     _archive_and_prune(directory, session_id, time.time())
     _write_atomic(directory / f"{session_id}.md", "\n".join(parts) + "\n")
+    pointer = _write_resume_pointer(board, shaped, worktree, cwd, started, _POINTER_DEADLINE_S, "pre")
     board_note = f"board: {board_how}" if board_how and board.strip() else f"board: none ({_one_line(board_error or 'empty')})"
-    return f"wrote checkpoint ({board_note}{'; working state incomplete' if error else ''})"
+    return f"wrote checkpoint ({board_note}{'; working state incomplete' if error else ''}; resume pointer: {pointer})"
+
+
+def _write_resume_pointer(board: str, shaped: str, worktree: str | None, cwd: str | None, started: float,
+                          deadline_s: float, where: str) -> str:
+    """RDR-253 Step 6: the one ``resume-pointer`` entry in identity scratch (see ``_resume_pointer``), written after the
+    checkpoint is on disk so nothing it does can cost the checkpoint. *started* is the hook's own start (monotonic) and
+    *deadline_s* the second the pointer must be done by: it gets what is left of that, never more than its own budget,
+    and is skipped when under two seconds remain. Returns what happened, for the probe line."""
+    try:
+        elapsed = time.monotonic() - started
+        if elapsed > deadline_s - 2.0:
+            _log("INFO", f"{where}: resume pointer outcome=skipped: {elapsed:.0f} s into the hook")
+            return f"skipped ({elapsed:.0f} s into the hook)"
+        rows = [ln.strip() for ln in _in_progress_section(shaped).splitlines() if _BD_ROW_RE.match(ln)]
+        line = _resume_pointer.compose(board, rows, worktree)
+        if line is None:
+            return "none (nothing to point at)"
+        budget = min(_resume_pointer.BUDGET_S, deadline_s - elapsed)
+        return _resume_pointer.write(line, _run_nx, cwd, _log, budget, where)
+    except Exception as exc:  # noqa: BLE001 -- never veto a compaction over the pointer
+        _log("WARNING", f"{where}: resume pointer: {type(exc).__name__}: {exc}")
+        return "failed"
+
+
+def run_end(payload: dict) -> str:
+    """SessionEnd (reason ``clear``): leave the resume pointer for a ``/clear`` in a session that never compacted.
+    No checkpoint file and no continuation call: SessionEnd has seconds, so this reads the board and writes the line."""
+    session_id = _session_id(payload)
+    if session_id is None:
+        _log("WARNING", "end: the payload carried no usable session id; nothing written")
+        return "skipped: no usable session id"
+    reason = payload.get("reason")
+    if reason != "clear":
+        return f"skipped: reason {_token(reason)}"
+    started = time.monotonic()
+    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
+    name = _session_name(session_id)
+    identity = _identity_lookup.lookup(session_id, _config_dir())[0] if _identity_lookup is not None else ""
+    _title, board, _how, _error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S, identity)
+    worktree, _others = _session_worktrees(name, cwd, board)
+    return f"resume pointer: {_write_resume_pointer(board, '', worktree, cwd or worktree, started, _END_DEADLINE_S, 'end')}"
 
 
 def run_post(payload: dict) -> str:
@@ -1332,7 +1388,7 @@ def run_inject(payload: dict) -> str:
     return "emitted"
 
 
-_MODES = {"pre": run_pre, "post": run_post, "inject": run_inject}
+_MODES = {"pre": run_pre, "post": run_post, "inject": run_inject, "end": run_end}
 
 
 def _one_line(value: object, limit: int = 120) -> str:
@@ -1375,7 +1431,7 @@ def main(argv: list[str] | None = None) -> int:
         _load_siblings()
         handler = _MODES.get(mode)
         if handler is None:
-            _log("WARNING", f"unknown mode {mode!r}; expected pre, post or inject")
+            _log("WARNING", f"unknown mode {mode!r}; expected pre, post, inject or end")
             return 0
         payload = _read_payload()
         if _from_subagent(payload):
@@ -1385,7 +1441,9 @@ def main(argv: list[str] | None = None) -> int:
         outcome = handler(payload) or "done"
         # inject runs on every SessionStart and is a no-op unless the source is compact; a no-op leaves
         # no probe line, so a plain start writes nothing (tests/hooks/test_nx_launch.py, no-CLI pin).
-        if mode != "inject" or payload.get("source") == "compact":
+        # end runs on a SessionEnd whose matcher is clear: any other reason is a no-op and leaves no probe line either.
+        quiet = (mode == "inject" and payload.get("source") != "compact") or (mode == "end" and payload.get("reason") != "clear")
+        if not quiet:
             _probe(mode, payload, outcome)
     except BaseException as exc:  # noqa: BLE001 -- the no-veto contract is the reason
         _log("ERROR", f"{mode}: unexpected {type(exc).__name__}: {exc}")

@@ -38,6 +38,7 @@ and returns a :class:`~nexus.types.PromotionReport`.
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
@@ -129,6 +130,31 @@ from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
 from nexus.correlation import stamp_request
+
+
+# ── Identity scope caps (RDR-253 Step 6) ───────────────────────────────────────
+
+#: The identity scratch scope (``session_id`` of ``identity:<id>``) outlives a session, so its size is bounded here, in
+#: the client: the engine holds no cap (an engine-side one can follow in a later engine release). A put over
+#: :data:`IDENTITY_ENTRY_MAX_BYTES` is refused; a NON-pointer put is refused once the scope holds
+#: :data:`IDENTITY_SCOPE_MAX_ENTRIES` non-pointer entries. The resume pointer (tag :data:`IDENTITY_RESUME_TAG`, content
+#: head ``resume <stamp> | ``) has its own slot and is never refused for the count of the others; its own count is
+#: bounded by the same number so a flood of pointers cannot stand in for the cap. Nothing is ever evicted: a refusal
+#: leaves the scope as it was, and the caller deletes an entry to make room. The check reads the scope first, so two
+#: writers racing can overshoot by a few entries; the bound is a guard against accumulation, not a transaction.
+IDENTITY_ENTRY_MAX_BYTES: int = 2048
+IDENTITY_SCOPE_MAX_ENTRIES: int = 20
+IDENTITY_RESUME_TAG: str = "resume-pointer"
+_IDENTITY_RESUME_HEAD = re.compile(r"^resume [0-9T:Z-]+ \| ")
+
+
+class IdentityScratchCapError(RuntimeError):
+    """An identity-scope put refused by a client-side cap (size or count); nothing was written or evicted."""
+
+
+def is_resume_pointer(tags: str, content: str) -> bool:
+    """True for the one entry shape that has the reserved slot: the tag AND the ``resume <stamp> | `` head."""
+    return IDENTITY_RESUME_TAG in {t.strip() for t in (tags or "").split(",")} and bool(_IDENTITY_RESUME_HEAD.match(content or ""))
 
 
 # ── HttpScratchStore ───────────────────────────────────────────────────────────
@@ -698,6 +724,8 @@ class HttpScratchStore:
         ``scratch_sessions`` / ``{session_id}_{id}``.
         """
         import uuid as _uuid_mod  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
+        if self._session_id.startswith("identity:"):
+            self._check_identity_caps(content, tags)
         doc_id = str(_uuid_mod.uuid4())
         if persist:
             flush_project = flush_project or "scratch_sessions"
@@ -717,6 +745,21 @@ class HttpScratchStore:
         }
         resp = self._post("/v1/t1/put", payload)
         return str(resp["id"])
+
+    def _check_identity_caps(self, content: str, tags: str) -> None:
+        """Refuse an identity-scope put the client-side caps forbid (see :data:`IDENTITY_ENTRY_MAX_BYTES`)."""
+        size = len(content.encode("utf-8"))
+        if size > IDENTITY_ENTRY_MAX_BYTES:
+            raise IdentityScratchCapError(
+                f"identity scratch entries are capped at {IDENTITY_ENTRY_MAX_BYTES} bytes; this one is {size}")
+        pointer = is_resume_pointer(tags, content)
+        held = [e for e in self.list_entries()
+                if is_resume_pointer(str(e.get("tags") or ""), str(e.get("content") or "")) == pointer]
+        if len(held) >= IDENTITY_SCOPE_MAX_ENTRIES:
+            kind = "resume pointers" if pointer else "entries"
+            raise IdentityScratchCapError(
+                f"the identity scratch scope holds {len(held)} {kind}, the cap is {IDENTITY_SCOPE_MAX_ENTRIES}; "
+                "delete one first (nothing is evicted for you)")
 
     # ── Read ───────────────────────────────────────────────────────────────────
 

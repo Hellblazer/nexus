@@ -91,9 +91,9 @@ def session_start_cmd() -> None:
         source = src if isinstance(src, str) and src else None
     output = hooks.session_start(claude_session_id=claude_session_id, source=source)
     # The same call as nexus.hooks.session_start_verb, so the two entries stay identical (nexus-qo7ie.16).
-    from nexus.hooks.session_start_verb import with_curation  # noqa: PLC0415 -- only this command needs it
+    from nexus.hooks.session_start_verb import with_curation, with_resume  # noqa: PLC0415 -- only this command needs it
 
-    click.echo(with_curation(output, payload))
+    click.echo(with_resume(with_curation(output, payload), payload))
 
 
 @hook_group.command("mailbox-arm")

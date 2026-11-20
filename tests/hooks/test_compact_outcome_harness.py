@@ -265,7 +265,7 @@ def nx_scan(source: str) -> tuple[set[tuple[str, ...]], list[str]]:
     the scan cannot read, as violations.
 
     Two spellings reach nx in compact_checkpoint.py and the scan reads both: ``_run_nx([...], ...)`` (the first argument a LIST
-    LITERAL) and ``subprocess.run([*base, ...])`` (a list literal whose first element is ``*base``). Anything else is a violation:
+    LITERAL; ``run_nx`` is the same call as ``_resume_pointer.py`` spells it through the runner it is handed) and ``subprocess.run([*base, ...])`` (a list literal whose first element is ``*base``). Anything else is a violation:
     a ``_run_nx`` whose first argument is a variable, a keyword or a built list; a subprocess call that is not a list literal
     headed ``*base`` or ``git``; ``os.system``, ``os.popen`` or an ``os.exec*``/``os.spawn*``. A violation fails the test, so a
     spelling the scan cannot see is never silently outside the stub's coverage."""
@@ -286,7 +286,7 @@ def nx_scan(source: str) -> tuple[set[tuple[str, ...]], list[str]]:
         func = node.func
         first = node.args[0] if node.args else None
         where = f"line {node.lineno}"
-        if isinstance(func, ast.Name) and func.id == "_run_nx":
+        if isinstance(func, ast.Name) and func.id in ("_run_nx", "run_nx"):
             if isinstance(first, ast.List):
                 prefixes.add(words(first.elts))
             else:
@@ -341,6 +341,16 @@ class TestStubAnswersEveryHookCall:
         # a non-vacuity pin for the scan itself: if it finds nothing, "the stub answers all of it" proves nothing
         prefixes, violations = nx_scan(CHECKPOINT.read_text(encoding="utf-8"))
         assert prefixes >= self.KNOWN and violations == []
+
+    def test_the_resume_pointers_calls_are_read_and_answered_too(self, tmp_path: Path) -> None:
+        """``_resume_pointer.py`` runs nx through the runner it is handed (``run_nx``): a call spelling the scan reads, so a
+        new verb added there cannot sit outside the stub's coverage (RDR-253 Step 6 part 2)."""
+        source = (HOOK_DIR / "_resume_pointer.py").read_text(encoding="utf-8")
+        prefixes, violations = nx_scan(source)
+        assert violations == [] and prefixes == {("scratch",)}, (prefixes, violations)
+        assert unanswered(prefixes, tmp_path) == []
+        _p, bad = nx_scan(source + "\n\ndef _new(run_nx, line):\n    return run_nx(line, None, 1.0)\n")
+        assert bad, "a run_nx call whose first argument is not a list literal is a violation, not a silent gap"
 
     @pytest.mark.parametrize("spelling", [
         "a = ['memory', 'get']\n_run_nx(a, None, 1.0)",                                  # a list built elsewhere

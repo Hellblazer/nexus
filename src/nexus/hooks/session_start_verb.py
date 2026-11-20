@@ -68,7 +68,7 @@ def run(payload: dict | None) -> HookResult:
         src = payload.get("source")
         source = src if isinstance(src, str) and src else None
     output = hooks.session_start(claude_session_id=session_id, source=source)
-    return HookResult(stdout=with_curation(output, payload))
+    return HookResult(stdout=with_resume(with_curation(output, payload), payload))
 
 
 def with_curation(output: str | None, payload: dict | None) -> str | None:
@@ -79,5 +79,16 @@ def with_curation(output: str | None, payload: dict | None) -> str | None:
         from nexus.hooks.memory_curation_check import with_curation_line  # noqa: PLC0415 -- guarded so a broken check never costs the guidance
 
         return with_curation_line(output, payload)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        return output
+
+
+def with_resume(output: str | None, payload: dict | None) -> str | None:
+    """RDR-253 Step 6 part 2: the one resume-pointer line, for a ``clear`` or ``resume`` start only. Rides this verb like
+    the curation line, so it adds no hooks.json entry and no process; nothing it does can cost the guidance above it."""
+    try:
+        from nexus.hooks.resume_line import with_resume_line  # noqa: PLC0415 -- guarded so a broken read never costs the guidance
+
+        return with_resume_line(output, payload)
     except Exception:  # noqa: BLE001 -- see the docstring
         return output

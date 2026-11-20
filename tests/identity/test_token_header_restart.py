@@ -214,5 +214,6 @@ def test_an_identity_scope_write_refused_with_401_re_reads_the_token_file_and_re
     monkeypatch.setattr(store, "_refresh_session_token_from_lease", lambda sent: healed.append("lease") or False)
     monkeypatch.setattr(store, "_remint_data_token_and_rebuild", lambda sent="": healed.append("remint") or False)
     assert store.put(content="x", tags="") == "entry-1"
-    assert engine.seen == [("/v1/t1/put", "tok-old"), ("/v1/t1/put", "tok-new")]
+    # an identity-scope put reads the scope first (the client-side caps, RDR-253 Step 6): the read carries no token
+    assert engine.seen == [("/v1/t1/list", None), ("/v1/t1/put", "tok-old"), ("/v1/t1/put", "tok-new")]
     assert healed == [], "the session-token and bearer heals never ran"

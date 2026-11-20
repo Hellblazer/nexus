@@ -281,3 +281,37 @@ def test_the_identity_notes_line_is_one_line_inside_its_cap_and_counted_in_the_h
     worst = _identity_notes_worst_case()
     assert len(worst) == 1 and len(worst[0].encode("utf-8")) <= identity_notes.MAX_LINE
     assert worst[0] in _fixture_session_start_hook_output()
+
+
+def test_the_resume_line_on_clear_is_counted_and_composes_with_the_other_new_lines(monkeypatch) -> None:
+    """RDR-253 Step 6 part 2: a ``/clear`` start also prints one resume line, at most 400 bytes plus the blank line before
+    it. The proposal allows three new SessionStart lines across its parts: this is one (clear starts only), part 3's
+    identity-notes line is another (every start; it sits in ``_fixture_session_start_hook_output`` once part 3 is
+    present), part 1 adds none. The resume line has its own allowance on top of the bounded ceiling, so it neither eats the
+    headroom part 3's line was measured against nor can be hidden by it: the components as the fixture holds them stay under
+    the ceiling, and with the worst resume line added they stay under the ceiling plus that allowance."""
+    from datetime import datetime, timedelta, timezone
+
+    from nexus.hooks import resume_line
+
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    written = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    worst = {"id": "1", "tags": "resume-pointer",
+             "content": f"resume {written} | thread: " + "\U0001f600" * 300 + " | worktree: /w/" + "x" * 900 + " | state: " + "y " * 600}
+
+    class Store:
+        def list_entries(self):
+            return [worst]
+
+    line = resume_line.with_resume_line("", {"source": "clear"}, open_store=lambda: Store())
+    assert line and "\n" not in line, "exactly one line"
+    added = len(line.encode("utf-8")) + 2
+    allowance = resume_line.MAX_BYTES + 2
+    assert added <= allowance == 402, f"the resume line is {added} bytes with its blank line; the design says about 400"
+    guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
+    hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
+    base = guidance_bytes + hook_bytes + len(_SN_SESSION_START_SECTION.read_bytes()) + len(_BD_PRIME_REPO_FILE.read_bytes())
+    assert base < _BOUNDED_SESSIONSTART_BUDGET_BYTES, f"{base}B without the resume line >= {_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
+    assert base + added < _BOUNDED_SESSIONSTART_BUDGET_BYTES + allowance
+    for source in ("startup", "resume", "compact", "fork"):
+        assert resume_line.with_resume_line("", {"source": source}, open_store=lambda: Store()) == "", f"no line on {source}"

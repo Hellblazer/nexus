@@ -198,9 +198,10 @@ def restamp(path: Path, seconds_ago: float) -> None:
 
 def nx_calls(env, *, work: bool = False) -> list[str]:
     """What the checkpoint asked of nx. The running-work read (RDR-253 Step 6) is its own addition, so the board and
-    continuation assertions leave it out; ``work=True`` keeps it."""
+    continuation assertions leave it out; ``work=True`` keeps it. The resume pointer (RDR-253 Step 6 part 2, its own file
+    tests/hooks/test_resume_pointer.py) is left out the same way."""
     lines = env.nx_log.read_text(encoding="utf-8").splitlines() if env.nx_log.exists() else []
-    return lines if work else [c for c in lines if not c.startswith("identity work list")]
+    return lines if work else [c for c in lines if not c.startswith(("identity work list", "scratch "))]
 
 
 class TestPre:
@@ -1438,7 +1439,7 @@ class TestScript:
         assert roots, "the walk found no imports; it went blind"
         outside = {r for r in roots if r not in sys.stdlib_module_names and not r.startswith("_")}
         assert not outside, outside
-        own = {"_cli_lookup", "_endpoint_resolve", "_identity_lookup", "_session_facts"}
+        own = {"_cli_lookup", "_endpoint_resolve", "_identity_lookup", "_resume_pointer", "_session_facts"}
         assert {r for r in roots if r.startswith("_")} <= {"__future__", *own}
         assert all((SCRIPT.parent / f"{m}.py").is_file() for m in own)
         # The sibling the checkpoint shares with the restart script holds to the same rule.

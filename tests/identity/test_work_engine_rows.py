@@ -12,16 +12,23 @@ and only ``NX_IDENTITY_REQUIRE_STEP2=0`` lets it skip (the nexus-moht0 doctrine)
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click.testing import CliRunner
 
+from nexus.commands import scratch as scratch_cmd
+from nexus.db import t1 as t1_mod
+from nexus.db.http_scratch_store import IDENTITY_SCOPE_MAX_ENTRIES, IdentityScratchCapError
 from nexus.db.t1 import mint_t1_session_token
 from nexus.db.t2.http_memory_store import HttpMemoryStore, identity_project
+from nexus.hooks import resume_line
 from nexus.identity import membership, token_header, work
-from nexus.identity.bind_client import IdentityApiError
+from nexus.identity.bind_client import IdentityApiError, IdentityClient
 from nexus.identity.ops import CallerFacts, IdentityEnv, is_alive
 from nexus.identity.scratch_scope import identity_scratch, scope_owner
 from nexus.identity.token_file import read_token_file, token_path
@@ -299,11 +306,77 @@ def row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_toke
         assert token_header.token_file_path() == second, "the server follows its registry file to the new token file"
 
 
+def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_before(world: World) -> None:
+    """RDR-253 Step 6 part 2: the writer (the real ``nx scratch --scope identity`` commands, driven through
+    ``_resume_pointer.write``) and the reader (``nexus.hooks.resume_line``, its default opener) meet in the engine. The writer
+    leaves one ``resume-pointer`` entry, the next write puts first and prunes the old one, a ``/clear`` binds a new session id,
+    and SessionStart's reader prints exactly that line: with a T1 session available, and with none (the new session id's lease
+    is not published yet), which is the case the lease-less fallback exists for. Other sources print nothing. The 2 KB and
+    20-entry caps are held against the real store."""
+    script = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "_resume_pointer.py"
+    spec = importlib.util.spec_from_file_location("resume_pointer_journey", script)
+    assert spec and spec.loader
+    rp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rp)
+
+    world.now = time.time()
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    world.hook(100, "startup", "s1")
+    session = _session(world)
+    log: list[tuple[str, str]] = []
+
+    def nx(args, cwd, timeout):
+        """What ``nx`` does for the hook: the real click command, on this world's engine and identity."""
+        result = CliRunner().invoke(scratch_cmd.scratch, args[1:])
+        return result.output, (None if result.exit_code == 0 else f"`nx {' '.join(args[:4])}` exited {result.exit_code}: {result.output.strip()[-160:]}")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _as(monkeypatch, world, 100)
+        monkeypatch.setattr(IdentityClient, "from_config", classmethod(lambda cls: IdentityClient(world.base_url, world._tenant_token)))
+        monkeypatch.setattr(t1_mod, "get_t1_database", lambda *a, **k: session)
+
+        board = "## The thread the seat was on\nref: nexus-row01\nstate: halfway\nworktree: /w/row\nwaiting_on: review\n"
+        first = rp.compose(board, [], "/w/row")
+        assert first and rp.write(first, nx, None, lambda lvl, msg: log.append((lvl, msg))) == "identity", log
+        second = rp.compose(board.replace("halfway", "nearly done"), [], "/w/row")
+        assert rp.write(second, nx, None, lambda lvl, msg: log.append((lvl, msg))) == "identity", log
+        mine = identity_scratch(session, client=world.client)
+        pointers = [e for e in mine.list_entries() if e["tags"] == "resume-pointer"]
+        assert [e["content"] for e in pointers] == [second], "put first, then the earlier pointer is deleted: one remains"
+
+        world.hook(100, "clear", "s2")                                            # /clear: a new session id, the same identity
+        line = resume_line.with_resume_line("GUIDANCE", {"session_id": world.q("s2"), "source": "clear"})
+        assert line and line.startswith("GUIDANCE\n\nResume pointer (identity scratch, written just now): thread: The thread the seat was on")
+        assert "worktree: /w/row" in line and "state: nearly done" in line and "waiting_on: review" in line and line.count("\n") == 2
+        for source in ("resume", "startup", "compact", "fork"):
+            assert resume_line.with_resume_line("GUIDANCE", {"source": source}) == "GUIDANCE", source
+
+        def no_lease(*_a, **_k):
+            raise t1_mod.T1ServerNotFoundError("no T1 session lease resolves for the new session id")
+
+        monkeypatch.setattr(t1_mod, "get_t1_database", no_lease)                   # the new session's lease is not published yet
+        assert resume_line.with_resume_line("GUIDANCE", {"source": "clear"}) == line, "the opener mints its own token"
+
+        # the caps, against the real store: 2 KB an entry; 20 non-pointer entries; the pointer's slot is its own
+        with pytest.raises(IdentityScratchCapError, match="2048"):
+            mine.put(content="x" * 2049, tags="working")
+        for n in range(IDENTITY_SCOPE_MAX_ENTRIES):
+            mine.put(content=f"note {n}", tags="working")
+        with pytest.raises(IdentityScratchCapError, match="20"):
+            mine.put(content="the 21st", tags="working")
+        assert rp.write(rp.compose(board, [], "/w/row"), nx, None, lambda lvl, msg: log.append((lvl, msg))) == "identity", log
+        assert len([e for e in mine.list_entries() if e["tags"] == "resume-pointer"]) == 1
+        assert len(mine.list_entries()) == IDENTITY_SCOPE_MAX_ENTRIES + 1
+        assert scope_owner(world.client) == alpha
+
+
 ROWS = (
     row_a_membership_write_by_a_non_owner_is_refused_and_the_owners_stays,
     row_identity_scratch_survives_a_clear_and_a_session_close_and_is_refused_to_a_non_owner,
     row_a_delegated_child_reads_its_parents_identity_scratch_and_cannot_write_it,
     row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_token_file,
+    row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_before,
     row_a_process_with_no_identity_has_no_identity_scratch,
     row_a_note_in_the_identity_project_is_still_found_after_a_rename,
     row_work_rows_follow_the_identity_and_a_crashed_owners_running_row_is_stale,

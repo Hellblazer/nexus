@@ -724,7 +724,7 @@ already gone.
 | Mailbox `mailbox/<id>` | tuple space, `TupleHandler` | any identity may send (`out`) | the owner's `in`, `inp`, `ack`, `nack`, `renew`, `release` | ownership and generation; a send is a label, as today; a parked `in` is fenced again when it wakes and releases a claim it no longer owns |
 | Membership `identity_memberships` | table, `IdentityHandler`, the `/v1/identity/<id>/memberships` routes | the owner only | join, leave and role change | ownership and generation |
 | Threads entry | T2 memory, project `threads`, `MemoryHandler` | the owner only | `put` (including `replaces`), `put_or_merge`, `merge`, `import`, `import_batch`, `delete`, `restore`, `summaries` on an entry carrying an `identity: <id>` line | ownership and generation, read against the stored entry whether it is quarantined or not; a new entry may name only the writer's own identity, and a write that removes or changes the line is refused (the identity line is immutable); a rollup `summaries` counts as the fenced operation on each of its sources; `put_or_merge` never merges into a fenced entry (a legacy entry with no `identity:` line still merges); `replaces` checks the entry it replaces; the tenant-wide sweeps `expire` and `reap` skip such entries |
-| Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`, on the scope with `session_id` `identity:<id>`; `session/close` never closes the scope (it answers `deleted` 0) and `sweep` excludes it | ownership and generation |
+| Identity scratch | T1, the identity scope, `ScratchHandler` | the owner only; a delegated child reads | `put`, `flag`, `unflag`, `delete`, on the scope with `session_id` `identity:<id>`; `session/close` never closes the scope (it answers `deleted` 0) and `sweep` excludes it; the client refuses an entry over 2 KB and a note once 20 are held (the resume pointer has its own slot; no engine cap) | ownership and generation |
 | Per-identity notes | T2 memory, project `identity/<id>` | the seat itself, and only its own project (client check) | not engine-fenced: the engine takes a write to this project from any caller. The client refuses `put`, `put_or_merge`, `put_replacing`, `import_entry`, `import_entries_batch`, `delete` by project and title and `insert_summary` unless the caller's token file names the seat that owns the project | the caller's kind (seat only) and the project's owner; the id-keyed paths (`delete` by id, `merge_memories`, `restore`), raw HTTP and a process with no Claude ancestor are not covered |
 
 Reads are not checked, a delegated child's included. Every other subspace, project and scope keeps its
@@ -857,7 +857,17 @@ restart script's promote.
 - **Identity scratch and per-identity T2.** The identity scope holds working
   state that must cross `/clear` and restart but is not worth a permanent
   record; it lives as long as the identity, and is the T1 scope whose
-  `session_id` is `identity:<id>`, which needs no new table or changeset. T2
+  `session_id` is `identity:<id>`, which needs no new table or changeset. The
+  scope is bounded in the client, not the engine (the engine holds no cap): an
+  entry over 2 KB is refused, and so is a put of a note once the scope holds 20
+  notes; the resume pointer has a slot of its own, and nothing is evicted. The
+  pointer is one entry tagged `resume-pointer` (the thread, worktree, `state:` and
+  `waiting_on:` of the seat's board entry, at most 1 KB): the PreCompact checkpoint
+  hook and a SessionEnd hook for reason `clear` write it, put before the earlier
+  pointer is deleted, and SessionStart prints it as one line (at most 400 bytes,
+  with its age; nothing past 48 hours) for source `clear` only. A failed write logs
+  one line and writes nothing else. The board stays authoritative: threads, asks and
+  decisions never go in the scope. T2
   holds what is permanent:
   records a seat writes carry its identity, and a seat's own notes live in
   project `identity/<id>`, keyed by id so a rename moves nothing. Only a seat
@@ -1165,7 +1175,10 @@ send going to the single live directory holder's session mailbox
 The identity T1 scope in the client; project `identity/<id>`; memberships through
 the membership routes; work registration through the work routes; the three liveness consumers (worktree
 removal, sandbox and tmux cleanup, the restart readiness check) moved onto
-`nx identity alive`.
+`nx identity alive`. The identity scope's caps (2 KB an entry, 20 notes, a reserved slot for the resume pointer) are
+held by the client's identity-scope put; an engine-side cap can follow in a later engine release. The resume
+pointer (above, Identity scratch and per-identity T2) is written by the checkpoint hook at PreCompact and at
+SessionEnd with reason `clear`, and printed by SessionStart on `clear`.
 
 Part 3, per-identity T2 notes (bead nexus-hczdo, 8.5.3): the client guard on `identity/<id>`
 (seats only, own project only; `put`, `put_or_merge`, `put_replacing`, `import_entry`,
@@ -1209,6 +1222,9 @@ Open items carried into Phase 2 (accepted gaps, Sam 2026-11-19: "yes, accept bot
   last 180 days.
 - After each Claude Code upgrade, check the MCP log's `_meta` keys for
   `claudecode/agentId` (subagent delegation becomes possible).
+- The resume pointer's hit rate after `/clear`: the `resume_line` events with `outcome` hit against all
+  `clear` starts, and `age_s` of the hits; the checkpoint hook's `resume pointer outcome=` lines (identity or none, with
+  `ms=`) say how often the write fails and what it costs a compaction.
 
 ### New Dependencies
 
@@ -1228,6 +1244,14 @@ None.
   tests/identity/test_token_header_restart.py; nexus-hczdo).
 - First write after `/clear` succeeds; a Bash child from before the `/clear`
   still writes; a freshly started MCP server reads its token file.
+- The identity scope's caps are held in the client (tests/db/test_http_scratch_store_identity_caps.py): an
+  entry over 2 KB, and the 21st note, are refused with nothing evicted; the resume pointer's slot is its own.
+- The resume pointer: the writer puts before it prunes and never deletes an entry that lacks the exact tag and head
+  (tests/hooks/test_resume_pointer.py); the reader prints one line of at most 400 bytes on `clear` only, drops a
+  pointer over 48 hours old, and logs one `resume_line` event per `clear` start (hit, empty, error or timeout, with
+  `age_s`; tests/hooks/test_resume_line.py); and a journey row writes through the real `nx scratch` commands, binds a
+  `clear`, and reads the line back through the reader's real opener, with and without a T1 session for the new session id
+  (tests/identity/test_work_engine_rows.py).
 - Each restart mode (exit and relaunch, in-place `/restart`, `--revive` after a
   reboot) finds the old holder gone and binds the next generation, with no
   release step.
@@ -1411,3 +1435,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: wording matched to the reviewed lease fork-race fix (grant 3; bead nexus-hczdo, develop run 44659989781; reviews T2 `nexus/review-0feb06c39-nexus-hczdo-2026-11-20-r1` and `nexus/critique-forkrace-2026-11-19-r1`): an unknown registry session id gets one renewal of grace before its `fork` row, so a `/clear` whose hook binds within it leaves no `fork` row.
 - 2026-11-20: wording matched to the reviewed token-file fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/review-token-file-restart-2026-11-20-r1` and `nexus/critique-token-file-restart-2026-11-20-r1`): the token file name comes from the registry's current `startedAt`, read on every call, so a process that outlives an in-place `/restart` follows it to the new file; a registry or token file that cannot be read is read once more after about 10 ms; the identity token goes only on identity-scope scratch writes, and a write's 401 re-reads the file once; Test Plan line for the long-lived process across an in-place `/restart`.
 - 2026-11-20: wording amended to match the reviewed Step 6 part 3 code (grant 3), bead nexus-hczdo (reviews T2 `nexus/review-47774ae08-nexus-hczdo-2026-11-20` and `nexus/critique-step6-part3-2026-11-20-r1`): per-identity T2 notes are guarded by the client, not fenced by the engine (seats only, own project only, the seven project-keyed store writes, the id-keyed paths not covered); a delegated identity keeps none and `--mine` writes from it are refused; retention does not prune `identity/<id>`; RDR-238 curate reads `identity/*`, the use measure is transcript reads; RDR-209 graduation excludes `identity/*`.
+- 2026-11-20: Step 6 part 2 recorded (the resume pointer; fix round 1, reviews T2 `nexus/review-step6-part2-2026-11-20-r1` and `nexus/critique-step6-part2-2026-11-20-r1`, decision T2 `nexus/decision-identity-scratch-caps-client-side-2026-11-20`): the identity scope's caps (2 KB an entry, 20 notes, a reserved slot for the resume pointer) are enforced in the client's identity-scope put, not by the engine, and the earlier text that implied an engine cap says so now; the pointer is one `resume-pointer` entry written at PreCompact and at SessionEnd with reason `clear`, printed once on `clear`, with no session-scope fallback.
