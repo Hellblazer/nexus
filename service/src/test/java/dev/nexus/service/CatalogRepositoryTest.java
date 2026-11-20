@@ -2198,11 +2198,15 @@ class CatalogRepositoryTest {
      * nexus-6pbwx: a repaired legacy slug collection and the conformant collection of the
      * same owner now share a (content_type, owner_id, embedding_model) tuple. At equal version
      * the collection registered first wins (nexus-p2m1x.4; it was the lexically lower name, and
-     * before that the higher), which here is the conformant one, and a higher version still wins
-     * whatever the name or the age.
+     * before that the higher). Here the conformant collection is registered first, so it wins,
+     * and a slug registered AFTER it does not; a higher version still wins whatever the name or
+     * the age. The opposite case, a slug registered first, is
+     * {@code collectionForTuple_aLegacySlugOlderThanItsConformantSiblingNowWinsTheTie}. (Named
+     * {@code conformantNameBeatsARepairedSlugAtEqualVersion} while the lower name decided; it
+     * passed under either order, which is why it carries the registration order now.)
      */
     @Test @Order(60)
-    void collectionForTuple_conformantNameBeatsARepairedSlugAtEqualVersion() {
+    void collectionForTuple_aSlugRegisteredAfterTheConformantCollectionDoesNotWinAtEqualVersion() {
         String tenant = "own6pbwx-tuple-tenant";
         String conformant = "code__1-27__voyage-code-3__v1";
         String slug = "code__zslug-6pbwx__voyage-code-3__v1";
@@ -2303,8 +2307,9 @@ class CatalogRepositoryTest {
 
     /**
      * nexus-p2m1x.4: the order is TOTAL and independent of row order. Two rows with the same created_at
-     * fall to the primary key whichever was inserted first, and a version above both still wins whatever
-     * the age. (The name is the last key only because it is the one unique column until P3.1.)
+     * fall to the name whichever was inserted first, and a version above both still wins whatever
+     * the age. (The name is the last key only because it is the one column unique within a tenant until
+     * P3.1.)
      */
     @Test @Order(60)
     void collectionForTuple_equalRegistrationTimeFallsToTheNameInEitherInsertOrder() {
