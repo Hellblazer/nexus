@@ -37,7 +37,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * develop and after the item 2 change alike; a row whose explicit state disagrees with its name is P2.5's own
  * test, not pinned here.
  *
- * <p>RDR-229 item 9 non-stranding guard: keep until P4.4 retires the fallback.
+ * <p>Each test is a non-stranding guard (RDR-229 item 9; keep until P4.4). Their names are listed in
+ * {@code tests/test_rdr229_non_stranding_inventory.py}, which fails if one goes missing.
  *
  * <p>Hermetic embedded Postgres (zonky), the whole Liquibase changelog, the service role under RLS: the setup of
  * {@code CatalogRepositoryTest}.
@@ -49,7 +50,7 @@ class CatalogEtlImportNonStrandingTest {
     private static final String SVC_ROLE = "svc_etl_nonstrand";
     private static final String SVC_PASS = "svc_etl_nonstrand_pass";
 
-    /** A row as another install exported it: no lifecycle_state, no model_version of the era. */
+    /** A row as another install exported it: no lifecycle_state (the column did not exist then); model_version v1. */
     private static Map<String, Object> legacyRow(String name, String contentType, String owner, String model) {
         return Map.of("name", name, "content_type", contentType, "owner_id", owner,
                       "embedding_model", model, "model_version", "v1");
@@ -109,6 +110,7 @@ class CatalogEtlImportNonStrandingTest {
         assertThat(lifecycleState(name)).as(name + " lifecycle_state").isEqualTo(lifecycle);
     }
 
+    /** Non-stranding guard (RDR-229 item 9; keep until P4.4): the route's own path, batch import. */
     @Test
     void batchImport_rowlessLegacyNames_deriveLifecycleFromTheNameWhenTheRowCarriesNone() {
         // The route's own path (handleImportCollection -> importCollectionsBatch).
@@ -129,6 +131,7 @@ class CatalogEtlImportNonStrandingTest {
         assertLanded(plainFour, "docs", "nsg-etl-b4", "voyage-context-3", "live");
     }
 
+    /** Non-stranding guard (RDR-229 item 9; keep until P4.4): the single-row import. */
     @Test
     void singleImport_rowlessLegacyNames_deriveLifecycleFromTheNameWhenTheRowCarriesNone() {
         // The single-row delegate (doImportCollection) shares the rule; a quarantine- prefix on the
@@ -145,10 +148,15 @@ class CatalogEtlImportNonStrandingTest {
         assertLanded(plain, "knowledge", "nsg-etl-s3", "voyage-context-3", "live");
     }
 
+    /**
+     * Non-stranding guard (RDR-229 item 9; keep until P4.4): a row that carries a {@code lifecycle_state} agreeing
+     * with its name lands in that state. This does NOT pin that the import READS the field: today it ignores it
+     * and the prefix answers, so the test passes either way. That the field is read, and what happens to a row
+     * whose state disagrees with its name, are P2.5's own tests.
+     */
     @Test
-    void batchImport_aRowCarryingAnAgreeingLifecycleState_landsWithThatState() {
-        // The explicit arm of item 2, on the value that agrees with the name: today the import ignores the
-        // field and the prefix answers; after item 2 the field answers; both read the same here.
+    void batchImport_aRowCarryingALifecycleStateThatAgreesWithItsName_landsInThatState() {
+        // Both the prefix and the field say the same here; after item 2 the field answers, today the prefix does.
         String quarantine = "quarantine-code__nsg-etl-e1__voyage-code-3__v1";
         String live = "code__nsg-etl-e2__voyage-code-3__v1";
         var explicitQuarantine = new java.util.HashMap<>(
