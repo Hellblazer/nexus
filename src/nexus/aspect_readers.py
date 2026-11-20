@@ -73,6 +73,7 @@ __all__ = [
     "StatOk",
     "StatResult",
     "canonical_note_uri",
+    "file_routed_uri",
     "capture_https_etag",
     "is_note_uri",
     "note_uri",
@@ -218,6 +219,51 @@ def _warn_unanchored_relative_once(collection: str, source_path: str) -> None:
     )
 
 
+def file_routed_uri(
+    collection: str, source_path: str, *, repo_root: str | None = None,
+) -> str | None:
+    """The ``file://`` identity of ``source_path`` for a collection that routes to ``file://`` (the branch of
+    :func:`uri_for` that a ``rdr__``/``docs__``/``code__`` collection takes). The result never depends on
+    ``collection``, which only names the collection in the one-time warning for an unanchored relative path, so a
+    caller that already knows the collection is file-routed by another test than its name (RDR-229 P2.10:
+    ``nx catalog backfill-source-uri`` on residue under a prefix-free label whose registry row has content type
+    code, docs or rdr) can ask for it directly. Same rule as :func:`uri_for`; see its docstring for the contract.
+    """
+    import os.path  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+
+    if not source_path:
+        return None
+    # nexus-yg70j defect B / nexus-3e4s: NEVER anchor on the process CWD.
+    #
+    # `os.path.abspath` on a RELATIVE path calls getcwd(), which makes this
+    # identity field a function of where the process happens to be standing.
+    # Two failure modes, both observed:
+    #   * cwd DELETED -> getcwd() raises, and before 7.16.2 that killed the
+    #     aspect-worker permanently and silently (16 batches, ~40 min).
+    #   * cwd VALID BUT UNRELATED -> a plausible file:// URI for a path that
+    #     does not exist. After the 7.16.2 chdir fix the worker stands in
+    #     the config dir, so "docs/rdr/x.md" minted
+    #     file:///Users/<u>/.config/nexus/docs/rdr/x.md. Loud failure became
+    #     quiet wrong answer.
+    #
+    # The catalog stores file_path RELATIVE and the anchor is the OWNER's
+    # repo_root -- exactly what HttpCatalogClient.resolve_path (nexus-5i864)
+    # already does for the link generator, and what the engine's
+    # deriveSourceUri does server-side (returns "" for a relative path with
+    # an empty repoRoot rather than guessing).
+    #
+    # So: absolute is returned as-is; relative is anchored ONLY on an
+    # explicitly supplied repo_root; relative with no root returns None.
+    # None is a missing identity, which is detectable and recoverable. A
+    # cwd-anchored URI is a WRONG identity, which is neither.
+    if os.path.isabs(source_path):
+        return "file://" + os.path.normpath(source_path)
+    if repo_root:
+        return "file://" + os.path.normpath(os.path.join(str(repo_root), source_path))
+    _warn_unanchored_relative_once(collection, source_path)
+    return None
+
+
 def uri_for(
     collection: str, source_path: str, *, repo_root: str | None = None, db: object = None,
 ) -> str | None:
@@ -281,40 +327,10 @@ def uri_for(
     ``CatalogRepository.deriveSourceUri`` — three implementations, one
     contract.
     """
-    import os.path  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-
     if not source_path:
         return None
     if is_file_routed_collection(collection, db=db):
-        # nexus-yg70j defect B / nexus-3e4s: NEVER anchor on the process CWD.
-        #
-        # `os.path.abspath` on a RELATIVE path calls getcwd(), which makes this
-        # identity field a function of where the process happens to be standing.
-        # Two failure modes, both observed:
-        #   * cwd DELETED -> getcwd() raises, and before 7.16.2 that killed the
-        #     aspect-worker permanently and silently (16 batches, ~40 min).
-        #   * cwd VALID BUT UNRELATED -> a plausible file:// URI for a path that
-        #     does not exist. After the 7.16.2 chdir fix the worker stands in
-        #     the config dir, so "docs/rdr/x.md" minted
-        #     file:///Users/<u>/.config/nexus/docs/rdr/x.md. Loud failure became
-        #     quiet wrong answer.
-        #
-        # The catalog stores file_path RELATIVE and the anchor is the OWNER's
-        # repo_root -- exactly what HttpCatalogClient.resolve_path (nexus-5i864)
-        # already does for the link generator, and what the engine's
-        # deriveSourceUri does server-side (returns "" for a relative path with
-        # an empty repoRoot rather than guessing).
-        #
-        # So: absolute is returned as-is; relative is anchored ONLY on an
-        # explicitly supplied repo_root; relative with no root returns None.
-        # None is a missing identity, which is detectable and recoverable. A
-        # cwd-anchored URI is a WRONG identity, which is neither.
-        if os.path.isabs(source_path):
-            return "file://" + os.path.normpath(source_path)
-        if repo_root:
-            return "file://" + os.path.normpath(os.path.join(str(repo_root), source_path))
-        _warn_unanchored_relative_once(collection, source_path)
-        return None
+        return file_routed_uri(collection, source_path, repo_root=repo_root)
     return note_uri(collection, source_path)
 
 

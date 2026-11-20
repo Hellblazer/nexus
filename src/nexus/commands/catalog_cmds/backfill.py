@@ -36,8 +36,21 @@ them. The rules live in :mod:`nexus.catalog.meta_backfill`.
 from __future__ import annotations
 
 import json
+from collections import Counter
 
 import click
+
+
+def _after_scheme(uri: str) -> str:
+    """The text after the ``chroma://`` scheme: ``<segment>/<path>``."""
+    return uri[len("chroma://"):]
+
+
+def _own_segment(uri: str) -> str:
+    """The collection segment a ``chroma://<segment>/<path>`` value was written with: the text between the scheme and
+    the first ``/`` (all of it when there is none). The residue keeps this segment whichever collection its row is
+    filed under now (RDR-229 P2.10)."""
+    return _after_scheme(uri).split("/", 1)[0]
 
 
 @click.command(name="backfill-source-uri")
@@ -56,29 +69,40 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     ``knowledge__`` documents minted via ``nx store put`` / MCP ``store_put``
     (now ``nx-note://``, RDR-231). Those rows are legacy NOTES: the engine's
     backfill rewrites them to ``nx-note://``, so this verb leaves them alone.
-    This verb ONLY rewrites
-    rows whose PHYSICAL COLLECTION routes to ``file://`` in
-    ``nexus.aspect_readers.uri_for`` (a collection whose catalog row says
-    ``rdr``, ``docs`` or ``code``, ``is_file_routed_collection``): those rows carry a ``chroma://``
-    identity ONLY because they were minted by an older ``uri_for`` build
-    that predated those prefixes routing to ``file://`` — migration
-    residue, not a legitimate origin marker.
+    This verb ONLY rewrites ``chroma://`` residue of file-routed
+    collections: rows that carry a ``chroma://`` identity ONLY because they
+    were minted by an older ``uri_for`` build that predated file-typed
+    collections (a catalog row saying ``rdr``, ``docs`` or ``code``) routing
+    to ``file://`` -- migration residue, not a legitimate origin marker.
 
-    For each candidate row, parses the path component out of the stored
-    ``chroma://<collection>/<path>`` URI and re-derives through the
-    CURRENT ``uri_for(collection, path)``. Refuses (reports, never
-    writes) a row whose parsed path is not absolute — there is no
-    ``repo_root`` to anchor a relative one at backfill time, and this
-    verb never guesses at one.
+    A row is a candidate by the residue's OWN segment (RDR-229 P2.10, T2
+    ``229-research-65``): the segment of ``chroma://<segment>/<path>`` has a
+    ``rdr__``, ``docs__`` or ``code__`` prefix (``FILE_ROUTED_PREFIXES``), or
+    the row's collection has content type ``code``, ``docs`` or ``rdr`` in
+    the catalog (``mcp_infra.get_collection_row``). The row's collection
+    name is not the test: no path moves residue any more, so it keeps the
+    segment it was written with while its row is filed under another
+    collection, and the P2.10 repair move gives residue on a prefix-free
+    label a ``<content_type>__`` segment.
+
+    For each candidate row, takes the path component out of the stored URI
+    (the text after ``chroma://<segment>/``) and re-derives its ``file://``
+    identity with ``file_routed_uri``, which does not depend on the
+    collection's name. Refuses (reports, never writes) a row whose parsed
+    path is not absolute -- there is no ``repo_root`` to anchor a relative
+    one at backfill time, and this verb never guesses at one.
 
     Always prints a per-collection census of EVERY ``chroma://`` row
-    first — candidates (file-routed, rewritten under ``--apply``) vs.
-    legacy notes (left for the engine backfill) — regardless of ``--apply``,
-    so the number is explained rather than eyeballed.
+    first -- candidates (rewritten under ``--apply``) vs. legacy notes (left
+    for the engine backfill) -- regardless of ``--apply``, so the number is
+    explained rather than eyeballed.
     """
-    from collections import Counter  # noqa: PLC0415 — command-local
-
-    from nexus.aspect_readers import is_file_routed_collection, uri_for  # noqa: PLC0415 — command-local
+    from nexus import mcp_infra  # noqa: PLC0415 — command-local: the client row cache (RDR-229 item 12)
+    from nexus.aspect_readers import (  # noqa: PLC0415 — command-local
+        FILE_ROUTED_PREFIXES,
+        _collection_is_file_routed,
+        file_routed_uri,
+    )
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
@@ -91,30 +115,46 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
         if (d.source_uri or "").startswith("chroma://")
     ]
 
+    # A content type's name prefix is ``<content_type>__``, so the file-typed content types are the frozen prefix
+    # list's, never a second list (the same derivation as nexus.catalog.rdr229.uri_residue_doctor).
+    file_typed = frozenset(p.removesuffix("__") for p in FILE_ROUTED_PREFIXES)
+    typed: dict[str, bool] = {}
+
+    def _collection_is_file_typed(collection: str) -> bool:
+        if collection not in typed:
+            row = mcp_infra.get_collection_row(collection) or {}
+            typed[collection] = row.get("content_type") in file_typed
+        return typed[collection]
+
+    def _is_candidate(d: object) -> bool:
+        # the URI-string classifier over the frozen list (it reads only the residue's own segment), or the row's type
+        return _collection_is_file_routed(_after_scheme(d.source_uri or "")) or _collection_is_file_typed(
+            d.physical_collection
+        )
+
+    candidates = [d for d in chroma_rows if _is_candidate(d)]
+
     by_collection = Counter(d.physical_collection for d in chroma_rows)
+    candidate_collections = {d.physical_collection for d in candidates}
     census = {
-        coll: {
-            "count": n,
-            "candidate": is_file_routed_collection(coll),
-        }
+        coll: {"count": n, "candidate": coll in candidate_collections}
         for coll, n in sorted(by_collection.items())
     }
-
-    candidates = [d for d in chroma_rows if is_file_routed_collection(d.physical_collection)]
 
     updates: list[tuple[object, str]] = []
     refused: list[tuple[object, str]] = []
     for d in candidates:
         uri = d.source_uri or ""
-        prefix = f"chroma://{d.physical_collection}/"
+        segment = _own_segment(uri)
+        prefix = f"chroma://{segment}/"
         if not uri.startswith(prefix):
-            refused.append((d, f"malformed chroma:// URI: does not start with {prefix!r}"))
+            refused.append((d, f"malformed chroma:// URI: no path after the segment {segment!r}"))
             continue
         path = uri[len(prefix):]
         if not path.startswith("/"):
             refused.append((d, f"parsed path is not absolute: {path!r}"))
             continue
-        new_uri = uri_for(d.physical_collection, path)
+        new_uri = file_routed_uri(d.physical_collection, path)
         if not new_uri:
             refused.append((d, f"uri_for did not re-derive a file:// URI (got {new_uri!r})"))
             continue
