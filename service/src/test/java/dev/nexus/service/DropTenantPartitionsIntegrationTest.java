@@ -397,8 +397,18 @@ class DropTenantPartitionsIntegrationTest {
     private static final int ATTEMPTS = 5;
     private static final long ATTEMPT_TIMEOUT_MS = 500;
     private static final long BACKOFF_STEP_MS = 200;
-    /** Five full waits plus the four sleeps between them: 5 x 500 + 200 x (1 + 2 + 3 + 4). */
-    private static final long MIN_GIVE_UP_MS = ATTEMPTS * ATTEMPT_TIMEOUT_MS + BACKOFF_STEP_MS * (ATTEMPTS - 1) * ATTEMPTS / 2;
+    /**
+     * Five full budgets plus the four sleeps between them: 5 x budget + 200 x (1 + 2 + 3 + 4). A lock that waited its
+     * own 10 s lock_timeout, or a budget that is not one deadline per attempt, shows as a give-up far above this.
+     */
+    private static long minGiveUpMs(long budgetMs) {
+        return ATTEMPTS * budgetMs + BACKOFF_STEP_MS * (ATTEMPTS - 1) * ATTEMPTS / 2;
+    }
+
+    private static final long MIN_GIVE_UP_MS = minGiveUpMs(ATTEMPT_TIMEOUT_MS);
+
+    /** Slack over the minimum: statement and scheduling overhead on a loaded test host (the real overhead is tens of ms). */
+    private static final long GIVE_UP_SLACK_MS = 3000;
 
     private static final Condition IS_RELATION_LOCK = DSL.field(DSL.name("locktype"), String.class).eq("relation");
 
@@ -455,6 +465,23 @@ class DropTenantPartitionsIntegrationTest {
     private static List<RelLock> locksBelowTheRoots(Connection obs, int pid, java.util.Set<String> below, String mode) {
         return relationLocks(obs, pid).stream()
             .filter(l -> l.granted() && l.mode().equals(mode) && below.contains(l.relation())).toList();
+    }
+
+    /** Schema-qualified names of the tables (relkind r or p) on which backend {@code pid} holds ACCESS EXCLUSIVE. */
+    private static java.util.Set<String> accessExclusiveTables(Connection obs, int pid) {
+        var l = DSL.table(DSL.name("pg_catalog", "pg_locks")).as("l");
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return dsl(obs).select(DSL.field(DSL.name("n", "nspname"), String.class), DSL.field(DSL.name("c", "relname"), String.class))
+            .from(l)
+            .join(c).on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("l", "relation"))))
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("l", "pid"), Integer.class).eq(pid))
+            .and(DSL.field(DSL.name("l", "locktype"), String.class).eq("relation"))
+            .and(DSL.field(DSL.name("l", "mode"), String.class).eq("AccessExclusiveLock"))
+            .and(DSL.field(DSL.name("l", "granted"), Boolean.class).isTrue())
+            .and(DSL.field(DSL.name("c", "relkind")).cast(SQLDataType.VARCHAR).in("r", "p"))
+            .fetchSet(r -> r.value1() + "." + r.value2());
     }
 
     /** Polls (bounded) until {@code cond} holds; fails at once if the drop already finished, which is the case it excludes. */
@@ -552,8 +579,8 @@ class DropTenantPartitionsIntegrationTest {
                 .hasMessageContaining("held a lock it needs; rerun, after index builds finish if one is running")
                 .hasMessageContaining(TA);
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
-            assertThat(elapsedMs).as("every attempt waits its full lock_timeout and sleeps its backoff before the next")
-                .isGreaterThanOrEqualTo(MIN_GIVE_UP_MS);
+            assertThat(elapsedMs).as("every attempt waits its full budget and sleeps its backoff before the next")
+                .isBetween(MIN_GIVE_UP_MS, MIN_GIVE_UP_MS + GIVE_UP_SLACK_MS);
             s.rollback();
         }
         try (Connection obs = pg.createConnection("")) {
@@ -650,6 +677,160 @@ class DropTenantPartitionsIntegrationTest {
             assertThat(relationLocks(obs, backendPid(a)).stream().filter(l -> roots.contains(l.relation())).toList())
                 .as("no lock of any mode on either root or anything below it").isEmpty();
             a.rollback();
+        }
+    }
+
+    /**
+     * Two drops of different tenants hold RowExclusive on the manifest tables from their deletes and would each want
+     * ACCESS EXCLUSIVE on them, waiting for the other's: the drops serialize, so both succeed.
+     */
+    @Test
+    void twoConcurrentDropsOfDifferentTenants_bothSucceed() throws Exception {
+        final String T1 = "p225-drop-conc1";
+        final String T2 = "p225-drop-conc2";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), T1, 14000L);
+            seed(dsl(su), T2, 15000L);
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        try (Connection d1 = admin(); Connection d2 = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            Future<Integer> f1 = pool.submit(() -> {
+                go.await();
+                return PartitionScratch.dropTenantPartitions(dsl(d1), T1);
+            });
+            Future<Integer> f2 = pool.submit(() -> {
+                go.await();
+                return PartitionScratch.dropTenantPartitions(dsl(d2), T2);
+            });
+            go.countDown();
+            assertThat(f1.get(60, TimeUnit.SECONDS)).isEqualTo(expectedLeaves);
+            assertThat(f2.get(60, TimeUnit.SECONDS)).isEqualTo(expectedLeaves);
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), T1)).isEmpty();
+            assertThat(leaves(dsl(a), T2)).isEmpty();
+        }
+    }
+
+    /**
+     * Inside the open transaction after the call, the drop holds no lock on another tenant's leaf beyond RowShare.
+     * RowShare is the one the manifest delete's statement triggers take on every chunks leaf (their locking read of
+     * nexus.chunks cannot be pruned at plan time) and it conflicts with nothing but ACCESS EXCLUSIVE; what must be
+     * absent is the AccessShare a catalog walk over the partition tree (pg_partition_tree) took on every leaf and held to
+     * commit, and any lock that conflicts with another tenant's index build, vacuum or drop.
+     */
+    @Test
+    void theDropHoldsNoLockOnAnotherTenantsLeafBeyondTheDeleteTriggersRowShare() throws Exception {
+        final String TA = "p225-drop-nolock";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 16000L);
+        }
+        try (Connection a = admin(); Connection obs = pg.createConnection("")) {
+            java.util.Set<String> bystander = new java.util.HashSet<>();
+            for (String leaf : leaves(dsl(obs), TB)) bystander.add("nexus." + leaf);
+            assertThat(bystander).isNotEmpty();
+            a.setAutoCommit(false);
+            PartitionScratch.dropTenantPartitions(dsl(a), TA);
+            assertThat(relationLocks(obs, backendPid(a)).stream()
+                .filter(l -> bystander.contains(l.relation()) && !l.mode().equals("RowShareLock")).toList())
+                .as("locks other than RowShare held by the drop on the bystander tenant's leaves").isEmpty();
+            a.rollback();
+        }
+    }
+
+    /**
+     * The up-front lock set is complete and not larger than needed: after the call, in the same transaction, the
+     * tables the drop holds ACCESS EXCLUSIVE on are exactly the four tables around the leaves, the two roots, and this
+     * tenant's own model partitions and leaves. A lock DETACH or DROP takes that the lock step did not (it would then
+     * surface only under contention) shows up here as an extra table; one the step takes needlessly, as a missing one.
+     */
+    @Test
+    void theAccessExclusiveLocksTheDropHolds_areExactlyTheUpFrontSet() throws Exception {
+        final String TA = "p225-drop-lockset";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 17000L);
+        }
+        try (Connection a = admin(); Connection obs = pg.createConnection("")) {
+            java.util.Set<String> expected = new java.util.TreeSet<>(List.of(
+                "nexus.catalog_document_chunks", "nexus.topic_assignments", "nexus.chunk_orphaned_at",
+                "nexus.catalog_collections", "nexus.chunks", "nexus.taxonomy_centroids"));
+            for (String parent : List.of("chunks", "taxonomy_centroids")) {
+                for (var mp : PartitionScratch.children(dsl(obs), parent)) expected.add("nexus." + mp.name());
+            }
+            for (String leaf : leaves(dsl(obs), TA)) expected.add("nexus." + leaf);
+            a.setAutoCommit(false);
+            PartitionScratch.dropTenantPartitions(dsl(a), TA);
+            assertThat(accessExclusiveTables(obs, backendPid(a))).containsExactlyInAnyOrderElementsOf(expected);
+            a.rollback();
+        }
+    }
+
+    /**
+     * A manifest table held past one attempt's budget makes the drop give up: inside the time bound (not the
+     * function's 10 s), naming the tenant, changing nothing; a rerun after the holder is gone drops everything.
+     */
+    @Test
+    void aReferencingTableHeldPastTheBudget_makesTheDropGiveUpInsideTheBound() throws Exception {
+        final String TA = "p225-drop-refheld";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 18000L);
+        }
+        Map<String, Integer> before = rowCounts(TA);
+        List<String> leavesBefore;
+        int expectedLeaves;
+        try (Connection obs = pg.createConnection("")) {
+            leavesBefore = leaves(dsl(obs), TA);
+            expectedLeaves = modelPartitions(dsl(obs));
+        }
+        try (Connection w = admin(); Connection d = admin()) {
+            w.setAutoCommit(false);
+            PgContainerHelper.lockTable(w, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> PartitionScratch.dropTenantPartitions(dsl(d), TA))
+                .satisfies(t -> assertThat(sqlState(t)).as("lock_not_available").isEqualTo("55P03"))
+                .hasMessageContaining("held a lock it needs; rerun, after index builds finish if one is running")
+                .hasMessageContaining(TA);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            assertThat(elapsedMs).as("give-up time with the manifest table held")
+                .isBetween(MIN_GIVE_UP_MS, MIN_GIVE_UP_MS + GIVE_UP_SLACK_MS);
+            w.rollback();
+        }
+        try (Connection obs = pg.createConnection("")) {
+            assertThat(leaves(dsl(obs), TA)).containsExactlyInAnyOrderElementsOf(leavesBefore);
+        }
+        assertThat(rowCounts(TA)).isEqualTo(before);
+        try (Connection a = admin()) {
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(a), TA)).isEqualTo(expectedLeaves);
+        }
+    }
+
+    /**
+     * The budget is half of deadlock_timeout when that is below 1 s: at deadlock_timeout = 100 ms the budget is 50 ms,
+     * so the give-up (root held by a reader) takes 5 x 50 ms + the sleeps, well under the 4.5 s of the default budget.
+     */
+    @Test
+    void theBudgetFollowsDeadlockTimeout() throws Exception {
+        final String TA = "p225-drop-budget";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 19000L);
+        }
+        final long budgetMs = 50;
+        try (Connection s = admin(); Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            dsl(su).select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("deadlock_timeout"), DSL.val("100ms"), DSL.val(false))).fetch();
+            holdOnlyTheRoot(s);
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> PartitionScratch.dropTenantPartitions(dsl(su), TA))
+                .satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            assertThat(elapsedMs).as("give-up time at deadlock_timeout = 100 ms (budget 50 ms)")
+                .isBetween(minGiveUpMs(budgetMs), minGiveUpMs(budgetMs) + 1500);
+            s.rollback();
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(su), TA)).isPositive();
         }
     }
 }
