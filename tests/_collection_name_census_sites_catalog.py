@@ -13,6 +13,7 @@ from __future__ import annotations
 from tests._collection_name_census_notes import (
     BYPASS,
     DIAG_D,
+    DIAG_P12,
     FILEPATH,
     MIG_SRC,
     MINT_A,
@@ -73,6 +74,9 @@ SITES: tuple[S, ...] = (
     S('src/nexus/catalog/recovery_bundle.py',
       ('return None  # file-backed always wins', 'if entry.physical_collection.startswith(FILE_ROUTED_PREFIXES):'),
       'const_prefix', 'migration-source', MIG_SRC),
+    S('src/nexus/catalog/rdr229/collection_row_census.py',
+      ('try:', 'return parse_conformant_collection_name(origin), m is not None'),
+      'primitive_call', 'diagnostic', DIAG_P12),
     S('src/nexus/catalog/recovery_bundle.py',
       ('return entry.source_uri', 'if entry.title and not entry.physical_collection.startswith(FILE_ROUTED_PREFIXES):'),
       'const_prefix', 'migration-source', MIG_SRC),
