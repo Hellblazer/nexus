@@ -2853,8 +2853,8 @@ def _run_check_uri_residue() -> None:
     """RDR-229 P1.2 (nexus-p2m1x.2): the ``chroma://`` residue pre-flight. WARN when a code/docs/rdr collection holds
     ``chroma://`` rows with a prefix-free segment or ``nx-note://`` rows with one. One engine read, no catalog walk
     (RDR-241). Does NOT gate: P2.10's repair move clears it, and until it ships nothing can. The verdicts and wording
-    are :mod:`nexus.catalog.uri_residue_doctor`'s, shared with ``nx catalog doctor --uri-residue``."""
-    from nexus.catalog import uri_residue_doctor as ur  # noqa: PLC0415 — deferred, keeps CLI startup fast
+    are :mod:`nexus.catalog.rdr229.uri_residue_doctor`'s, shared with ``nx catalog doctor --uri-residue``."""
+    from nexus.catalog.rdr229 import uri_residue_doctor as ur  # noqa: PLC0415 — deferred, keeps CLI startup fast
 
     for line in ur.render_text(ur.check_uri_residue()):
         click.echo(line)

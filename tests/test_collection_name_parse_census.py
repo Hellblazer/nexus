@@ -331,16 +331,17 @@ for _site in LEDGER:
     )
 
 #: THE PIN (RDR-229 P1.1, 2026-11-20, measured on develop 970f73223):
-#: 243 sites, by class and by shape. Phase 2 lowers these by deleting ledger
+#: 244 sites, by class and by shape (243 at P1.1, plus the one-off P1.2 collections-census parse, a diagnostic
+#: ledger entry that is deleted before Phase 4). Phase 2 lowers these by deleting ledger
 #: entries; nothing here may rise without a ledger entry and a reason.
-PARSE_SITE_PIN: int = 243
+PARSE_SITE_PIN: int = 244
 CLASS_PIN: dict[str, int] = {
-    "mint": 107, "holdover": 40, "routing": 36, "diagnostic": 30,
+    "mint": 107, "holdover": 40, "routing": 36, "diagnostic": 31,
     "migration-source": 14, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 171, "const_prefix": 31, "fnmatch": 14,
+    "primitive_call": 172, "const_prefix": 31, "fnmatch": 14,
     "loop_prefix": 7, "strip_prefix": 4, "startswith": 4, "split": 2,
     "fstring_prefix": 2, "hash_suffix": 2, "in": 1, "glob_default": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1, "substring": 1,
@@ -757,7 +758,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 243
+    assert PARSE_SITE_PIN == 244
 
 
 # ---------------------------------------------------------------------------

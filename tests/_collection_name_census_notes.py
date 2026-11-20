@@ -24,6 +24,9 @@ MINT_NOROW: str = (
 DIAG_D: str = (
     'RDR-204 (d): its purpose is to report or discover a name the catalog row does not back, so a row read would make it vacuous.'
 )
+DIAG_P12: str = (
+    'RDR-229 P1.2 (nexus-p2m1x.2): the one-off collections-census measures how many rows disagree with their names, so it must parse the name to compare; a row read would make the measurement vacuous. A measurement tool, deleted before Phase 4 removes the parser (P1.R / Phase 4).'
+)
 MIG_SRC: str = (
     'Migration source: the name comes from another install or an older era.'
 )
