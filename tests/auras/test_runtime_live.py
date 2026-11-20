@@ -617,7 +617,7 @@ def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(rep
             consumed_by=None, expires_at=None, created_at=None, sender_session=None, sender_session_known=True,
         )
 
-    ack =f" Ack: post kind=ack sha={sha} to {owner_subspace}."
+    ack = f" Ack: post kind=ack sha={sha} to {owner_subspace}."
     before = len(_REAL_RUNS)
     rt.offer(owner_subspace, [owner_row("t1", "i7", None, "earliest_suspect", False)])
     _settle(rt)

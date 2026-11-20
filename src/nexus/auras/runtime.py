@@ -79,13 +79,15 @@ class _Failure(Exception):
 #: The ``from`` value that names the engine. ``from`` is a dimension the writer typed, so any writer can post it;
 #: a row counts as the engine's only when it also carries no ``sender_session`` (RDR-252 critique S3).
 ENGINE_WRITER = "engine"
+#: Refusal keys kept for the once-per-row log line; past this the set restarts, so a long session holds a bounded few.
+MAX_REFUSED_KEYS = 1024
 
 
 def _engine_wrote(row: Any) -> bool:
     """True when *row* is one the engine wrote itself: the engine stamps ``sender_session`` on a client's write and
     writes its own rows with none, so the stamp must be rendered (``sender_session_known``) and empty. An engine that
-    renders no stamp cannot say, which reads as not the engine's."""
-    return bool(getattr(row, "sender_session_known", False)) and not getattr(row, "sender_session", None)
+    renders no stamp cannot say, which reads as not the engine's. A blank stamp is a stamp: only a null one counts."""
+    return bool(getattr(row, "sender_session_known", False)) and getattr(row, "sender_session", None) is None
 
 
 def _matches(pairs: Sequence[tuple[str, str]] | None, row: Any) -> bool:
@@ -100,6 +102,15 @@ def _matches(pairs: Sequence[tuple[str, str]] | None, row: Any) -> bool:
         if k == "from" and v == ENGINE_WRITER and not _engine_wrote(row):
             return False
     return True
+
+
+def _refused_for_stamp(pairs: Sequence[tuple[str, str]] | None, row: Any) -> bool:
+    """True when *row* meets every pair of *pairs* except that its ``from = "engine"`` claim fails :func:`_engine_wrote`."""
+    if pairs is None or _matches(pairs, row):
+        return False
+    dims = row.dims or {}
+    return (any(k == "from" and v == ENGINE_WRITER for k, v in pairs) and all(dims.get(k) == v for k, v in pairs)
+            and not _engine_wrote(row))
 
 
 _ABSENT = object()
@@ -186,6 +197,7 @@ class AuraRuntime:
         self._identity = identity
         self._lanes = {a.name: _Lane(a) for a in auras}
         self._cond = threading.Condition()
+        self._refused: set[tuple[str, str]] = set()  # (aura, row id) already logged for its stamp refusal
 
     def extend(self, auras: Sequence[Aura], identity: str | None) -> None:
         """Take more auras after the first load, and the identity a ``self.identity`` argument now fills: a server that
@@ -211,6 +223,22 @@ class AuraRuntime:
                     self._enqueue(lane, _Item("fire", row))
                 elif _matches(lane.aura.clear_match, row):
                     self._enqueue(lane, _Item("clear", row))
+                elif _refused_for_stamp(lane.aura.match, row) or _refused_for_stamp(lane.aura.clear_match, row):
+                    self._note_stamp_refusal(lane, row)
+
+    def _note_stamp_refusal(self, lane: _Lane, row: Any) -> None:
+        """One debug line per (aura, row): a row claiming ``from = "engine"`` that the stamp rules out. Without it an
+        engine whose own rows began to carry a stamp would silence the aura with no trace (RDR-252 critique S3b).
+        The line says the row was stamped, never which session stamped it."""
+        key = (lane.aura.name, str(row.id))
+        with self._cond:
+            if key in self._refused:
+                return
+            if len(self._refused) >= MAX_REFUSED_KEYS:
+                self._refused.clear()
+            self._refused.add(key)
+        _log.debug("aura_from_engine_ignored", aura=lane.aura.name, tuple_id=row.id,
+                   stamp="unrendered" if not getattr(row, "sender_session_known", False) else "present")
 
     def _enqueue(self, lane: _Lane, item: _Item) -> None:
         with self._cond:
