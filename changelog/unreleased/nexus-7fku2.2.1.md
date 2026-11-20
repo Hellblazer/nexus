@@ -1,3 +1,0 @@
-### Changed
-
-- **`search.topic_route_nx_answer` routes any `search` or `query` step, not only steps in a prose-scoped plan (RDR-134 option (b)).** In 8.5.1 a step routed only when its plan declared `taxonomy_domain: prose`, which only the analyze, document and research plans do, so the setting almost never engaged. Now every `search` and `query` step of an nx_answer plan is routed when the setting is not `off`, unless its scope names a `taxonomy_domain` other than `prose` or a `topic`; the search layer still routes only prose collections (knowledge, docs, rdr, paper), never code, and the catalog-route, topic and combined-query exclusions are unchanged. The default stays `off`.

@@ -1,5 +1,13 @@
 # Changelog
 
+## [8.5.2] - 2026-11-19
+
+Plugin version aligned with conexus 8.5.2. These plugin changes become live at this pin.
+
+- `conexus/hooks/scripts/stop_wake_guard.py` -- the Stop wake guard blocks a turn that ends on the session's own next step in the present tense at a clause start ("I'm doing X", "Next I'm starting X"), excluding a stated no-action, and a peer named only as recipient no longer counts as the wake (turn-end census, T2 nexus/turn-end-owned-idle-census-2026-11-19).
+- `conexus/hooks/scripts/compact_checkpoint.py` -- after a compaction, once the user's last ask is done, the checkpoint tells the session to act on any open item with nothing to wait on and to say what it waits on; it never starts work the user held back, work needing the user's approval, or work another session owns.
+- `conexus/hooks/scripts/_session_facts.py` -- the checkpoint's running-task row names the command when zsh wraps it as an unquoted `eval` word.
+
 ## [8.5.1] - 2026-11-19
 
 Plugin version aligned with conexus 8.5.1. These plugin changes become live at this pin.
