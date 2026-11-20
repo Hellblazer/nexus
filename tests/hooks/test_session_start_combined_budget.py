@@ -140,6 +140,12 @@ _SN_SESSION_START_SECTION = (
 _BD_PRIME_REPO_FILE = Path(__file__).resolve().parents[2] / ".beads" / "PRIME.md"
 
 
+def _identity_notes_worst_case() -> list[str]:
+    from nexus.hooks import identity_notes
+
+    return identity_notes._render("i123", ["x" * 100 + str(i) for i in range(60)], capped=True)
+
+
 def _fixture_session_start_hook_output() -> str:
     """Assemble session_start_hook.py's REPRESENTATIVE combined output:
     fixture T2-memory block + REAL ``_render_ready_beads`` render of a
@@ -148,6 +154,9 @@ def _fixture_session_start_hook_output() -> str:
     # nexus-mtheb: the T1 contract is the first thing main() emits, so the sum
     # carries it (the real constant, not a fixture).
     lines: list[str] = [*_T1_TOP_LINES, _FIXTURE_T2_MEMORY_BLOCK, ""]
+    # RDR-253 Step 6 part 3 (nexus-hczdo): the one identity-notes line, at its worst case (six titles at the 60-character
+    # cut and the capped overflow note), through the real render.
+    lines.extend(_identity_notes_worst_case())
     lines.extend(_render_ready_beads(_FIXTURE_READY_RAW))
     lines.extend(_build_capabilities_block())
     lines.append(_FIXTURE_KNOWLEDGE_MAP)
@@ -262,3 +271,13 @@ def test_sessionstart_bounded_components_under_budget(monkeypatch) -> None:
         f"{sn_bytes}B + bd-prime {bd_prime_bytes}B) >= budget "
         f"{_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     )
+
+
+def test_the_identity_notes_line_is_one_line_inside_its_cap_and_counted_in_the_hook_fixture() -> None:
+    """RDR-253 Step 6 part 3 adds exactly one SessionStart line, at most ``identity_notes.MAX_LINE`` bytes, and the combined
+    budget above is measured with it present (a fixture that left it out would measure a hook that no longer exists)."""
+    from nexus.hooks import identity_notes
+
+    worst = _identity_notes_worst_case()
+    assert len(worst) == 1 and len(worst[0].encode("utf-8")) <= identity_notes.MAX_LINE
+    assert worst[0] in _fixture_session_start_hook_output()
