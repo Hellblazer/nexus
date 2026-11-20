@@ -130,7 +130,7 @@ class _Taxonomy:
         self.projected.append((source, round(threshold, 2)))
         return {"matched_topics": [], "novel_chunks": [], "total_chunks": 0, "chunk_assignments": []}
 
-    def prune_projection_below(self, prefix: str, thr: float) -> int:
+    def prune_projection_below(self, prefix: str, thr: float, *, exact: bool = False) -> int:
         self.pruned.append((prefix, round(thr, 2)))
         return 1
 
