@@ -778,6 +778,11 @@ public final class TaxonomyHandler implements HttpHandler {
      * or a full collection name), {@code min_similarity} (0..1). Deletes
      * projection assignments under that prefix whose stored raw cosine is
      * below the threshold; answers {@code {"removed": N}}.
+     *
+     * <p>nexus-p2m1x.9 (RDR-229 P2.4): optional {@code match}, {@code "prefix"} (the default when absent or null:
+     * {@code startsWith}, as before) or {@code "exact"} ({@code source_collection} equals the name, so pruning
+     * {@code ..__v1} leaves {@code ..__v10} alone). Any other value is a 400. {@code /version}'s
+     * {@code taxonomy_prune_exact_supported} tells a client whether an engine honours the field.
      */
     private void handlePruneProjection(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -788,7 +793,17 @@ public final class TaxonomyHandler implements HttpHandler {
             HttpUtil.send(ex, 400, json(Map.of("error", "min_similarity must be a number in [0, 1]")));
             return;
         }
-        int removed = repo.pruneProjectionBelow(tenant, prefix, n.doubleValue());
+        boolean exact;
+        Object match = body.get("match");
+        if (match == null || "prefix".equals(match)) {
+            exact = false;
+        } else if ("exact".equals(match)) {
+            exact = true;
+        } else {
+            HttpUtil.send(ex, 400, json(Map.of("error", "match must be \"prefix\" or \"exact\"")));
+            return;
+        }
+        int removed = repo.pruneProjectionBelow(tenant, prefix, n.doubleValue(), exact);
         HttpUtil.send(ex, 200, json(Map.of("removed", removed)));
     }
 
