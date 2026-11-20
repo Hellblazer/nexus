@@ -198,7 +198,7 @@ EXIT_COULD_NOT_CHECK = 3
         "RDR-229 P1.2 (nexus-p2m1x.2): count the chroma:// source-URI rows whose segment has no "
         "rdr__/docs__/code__ prefix, split by whether their collection is code/docs/rdr, and the nx-note:// "
         "rows of such a collection with a prefix-free segment, across catalog_documents, document_aspects and "
-        "document_highlights. One engine read (engine-service 0.1.199), no catalog walk. WARN on any; never "
+        "document_highlights. One engine read (engine-service 0.1.200), no catalog walk. WARN on any; never "
         "changes the exit status. Not checked, never a pass, on an engine without the route."
     ),
 )

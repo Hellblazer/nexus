@@ -15,7 +15,7 @@ from typing import Any
 from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable, get_route, require_flag
 
 ROUTE: str = "/uri_segment_census"
-#: The ``GET /version`` flag that says the engine answers the route (engine-service 0.1.199).
+#: The ``GET /version`` flag that says the engine answers the route (engine-service 0.1.200).
 FLAG: str = "catalog_uri_segment_census_supported"
 #: The route's bound on ``limit`` (``UriSegmentCensusReads.MAX_LIMIT``).
 CENSUS_MAX: int = 10_000
