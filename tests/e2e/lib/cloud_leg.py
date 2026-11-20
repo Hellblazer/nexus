@@ -259,6 +259,13 @@ from nexus.mcp.catalog import catalog_search
 print(catalog_search(author="@label@"))
 """
 
+_FOR_TUPLE = r"""
+from nexus.commands.catalog import _get_catalog
+# RDR-229 P1.4: collection_for reads the next version from the for_tuple row (the probe subject's tuple; a
+# missing row answers 404 and the client falls back to v1, so the route is exercised either way).
+print(_get_catalog().collection_for("knowledge", "cloud-leg-probe", "voyage-context-3"))
+"""
+
 _LOCATORS = r"""
 import json
 from nexus.commands.catalog import _get_catalog
@@ -323,6 +330,8 @@ ROUTE_MAP: dict[str, Step] = {
                                            expect_route="/v1/catalog/docs/by-author"),
     "GET /v1/catalog/sensitive/locators": Step("route-sensitive-locators", "py", ["-c", _LOCATORS],
                                                expect_route="/v1/catalog/sensitive/locators"),
+    "GET /v1/catalog/collections/for_tuple": Step("route-collections-for-tuple", "py", ["-c", _FOR_TUPLE],
+                                                  expect_route="/v1/catalog/collections/for_tuple"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
