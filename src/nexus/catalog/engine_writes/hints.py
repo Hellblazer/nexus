@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import re
 import shlex
 import threading
 import time
@@ -254,22 +255,36 @@ def record_curator_hint(doc_id: str, content_hash: str, *, reader: Any = None) -
 # ── repository hints (Gaps 2 and 3) and the census flag ─────────────────────────────────────────────────────────
 
 
-def is_root_derived(source_uri: str, file_path: str) -> bool:
-    """A repo file's row: a ``file://`` URI that ends in ``/<file_path>`` with a relative ``file_path`` (the rule the
-    engine's owner move uses to decide which rows it rewrites)."""
-    if not file_path or not source_uri.startswith("file://") or isabs(file_path):
-        return False
+def derived_root_uri(file_path: str, source_uri: str, repo_root: str) -> str | None:
+    """The URI a fresh registration at *repo_root* gives a row, or ``None`` when the engine's owner move would skip it.
+
+    This is ``CatalogMoves.rootDerivedUri`` with ``CatalogRepository.deriveSourceUri``, on the engine's POSIX host (the
+    table in ``tests/catalog/test_move_hints_root_parity.py`` evaluates the Java by hand, and a tripwire test fails when
+    a clause of it changes). A row is root-derived when its ``source_uri`` is ``file://`` and ends in ``/<norm>``, where
+    *norm* is the normalized, relative, non-blank ``file_path`` that does not start with ``..``. The derived URI is
+    ``file://`` plus the root joined with *norm* and normalized. A root that is not a POSIX absolute path (a Windows
+    ``C:\\repo``, a relative path, an empty one) derives nothing, as on the engine, whose move skips every row then."""
+    if not file_path.strip() or not source_uri.startswith("file://") or "\x00" in file_path or isabs(file_path):
+        return None
     norm = normpath(file_path)
-    return norm != "." and not norm.startswith("..") and source_uri.endswith("/" + norm)
+    if norm == "." or norm.startswith("..") or not source_uri.endswith("/" + norm):
+        return None
+    if not isabs(repo_root) or "\x00" in repo_root:
+        return None
+    joined = re.sub(r"^/+", "/", normpath(f"{repo_root}/{norm}"))
+    return "file://" + joined
 
 
 def count_docs_outside_root(docs: Iterable[Any], repo_root: str) -> int:
-    """How many of *docs* are root-derived and do not start with ``file://<repo_root>/``."""
-    prefix = f"file://{repo_root.rstrip('/')}/"
-    return sum(
-        1 for d in docs
-        if is_root_derived(d.source_uri or "", d.file_path or "") and not (d.source_uri or "").startswith(prefix)
-    )
+    """How many of *docs* the engine's owner move would REWRITE at *repo_root*: root-derived rows whose current
+    ``source_uri`` differs from :func:`derived_root_uri`."""
+    n = 0
+    for d in docs:
+        uri = d.source_uri or ""
+        derived = derived_root_uri(d.file_path or "", uri, repo_root)
+        if derived is not None and derived != uri:
+            n += 1
+    return n
 
 
 def first_page(reader: Any, owner_prefix: str) -> list[Any]:
