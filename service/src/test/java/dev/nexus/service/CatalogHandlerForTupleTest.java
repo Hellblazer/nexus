@@ -10,7 +10,6 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -67,13 +66,12 @@ class CatalogHandlerForTupleTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
 
         // AuthFilter runs the per-tenant, once-per-process ghost sweep on the tenant's first
         // request and deletes any collection registered but chunkless at that moment
         // (CatalogHandlerRenameTest, nexus-ft04v Phase 1). Burn it before registering.
-        var warmup = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        var warmup = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build();
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
@@ -149,8 +147,7 @@ class CatalogHandlerForTupleTest {
     }
 
     private HttpResponse<String> get(String path) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", TENANT)
             .GET().build();
@@ -158,8 +155,7 @@ class CatalogHandlerForTupleTest {
     }
 
     private HttpResponse<String> post(String path, String body) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", TENANT)
             .header("Content-Type", "application/json")
