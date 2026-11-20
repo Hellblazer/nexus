@@ -129,7 +129,7 @@ class TestPlugin:
     def test_scratch_plugin_wires_only_the_compaction_hooks(self, tmp_path: Path) -> None:
         wired = co.build_plugin(str(tmp_path / "p"))
         assert wired == ["PostCompact:manual|auto", "PreCompact:manual|auto", "SessionStart:compact"]
-        text = (tmp_path / "p" / "hooks" / "hooks.json").read_text()
+        text = (tmp_path / "p" / "hooks" / "hooks.json").read_text(encoding="utf-8")
         for stray in ("nx_launch", "upgrade-auto", "self-gc", "version_lockstep", "mailbox_drain", "auto-approve",
                       "stop_wake_guard", "identity_bind", "nx-hook"):
             assert stray not in text
@@ -154,7 +154,7 @@ class TestPlugin:
         """What could bind an identity or reach an engine: a SessionStart bind hook, an MCP server's lease, a stray hook."""
         co.build_plugin(str(tmp_path / "p"), overlay=True)
         plugin = tmp_path / "p"
-        hooks = json.loads((plugin / "hooks" / "hooks.json").read_text())["hooks"]
+        hooks = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
         assert sorted(hooks) == ["PostCompact", "PreCompact", "SessionStart"]
         for groups in hooks.values():
             for group in groups:
@@ -162,7 +162,7 @@ class TestPlugin:
                     scripts = {Path(a).name for a in [hook["command"], *hook.get("args", [])] if a.endswith(".py")}
                     assert scripts and scripts <= {"compact_checkpoint.py", co.OVERLAY_SCRIPT}, hook
         assert not any(p.name in (".mcp.json", "mcp.json") for p in plugin.rglob("*"))
-        assert "mcpServers" not in (plugin / ".claude-plugin" / "plugin.json").read_text()
+        assert "mcpServers" not in (plugin / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
         argv = co.claude_argv("claude", str(plugin), "haiku", 1.0, "sid")
         assert "--strict-mcp-config" in argv and argv[argv.index("--setting-sources") + 1] == ""
 
@@ -207,7 +207,7 @@ def unanswered(prefixes: set[tuple[str, ...]], tmp_path: Path, mode: str = "full
     ordered = sorted(prefixes)
     bad: list[tuple[str, ...]] = []
     for prefix in ordered:
-        done = subprocess.run([sys.executable, str(stub), *prefix, "x"], env=env, capture_output=True, text=True,
+        done = subprocess.run([sys.executable, str(stub), *prefix, "x"], env=env, capture_output=True, text=True, encoding="utf-8",
                               timeout=30, cwd=str(tmp_path))
         if done.returncode != 0:
             bad.append(prefix)
@@ -258,7 +258,7 @@ def _provisioned(tmp_path: Path, arm: str = "real") -> tuple[dict, Path, Path]:
     co.provision_iso(str(iso), SID)
     claude = tmp_path / "claude"
     (claude / "sessions").mkdir(parents=True)
-    (claude / "sessions" / "4242.json").write_text(json.dumps({"pid": 4242, "sessionId": SID, "name": "demo_session"}))
+    (claude / "sessions" / "4242.json").write_text(json.dumps({"pid": 4242, "sessionId": SID, "name": "demo_session"}), encoding="utf-8")
     env = co.child_env(str(iso), arm, dict(os.environ))
     env["CLAUDE_CONFIG_DIR"] = str(claude)
     return env, iso, repo
@@ -267,11 +267,11 @@ def _provisioned(tmp_path: Path, arm: str = "real") -> tuple[dict, Path, Path]:
 def _run_hook(mode: str, env: dict, repo: Path, extra: dict | None = None) -> subprocess.CompletedProcess:
     payload = {"session_id": SID, "cwd": str(repo), "trigger": "auto", "hook_event_name": "PreCompact", **(extra or {})}
     return subprocess.run([sys.executable, str(CHECKPOINT), mode], input=json.dumps(payload), env=env,
-                          capture_output=True, text=True, timeout=90)
+                          capture_output=True, text=True, encoding="utf-8", timeout=90)
 
 
 def _stub_calls(iso: Path) -> list[dict]:
-    return [json.loads(line) for line in (iso / "stub" / "calls.jsonl").read_text().splitlines()]
+    return [json.loads(line) for line in (iso / "stub" / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
 
 
 @posix_only
@@ -279,7 +279,7 @@ class TestStubDrivesTheRealHook:
     def test_full_stub_puts_the_board_the_checks_and_the_running_work_in_the_checkpoint(self, tmp_path: Path) -> None:
         env, iso, repo = _provisioned(tmp_path)
         assert _run_hook("pre", env, repo).returncode == 0
-        ck = (iso / "nexus-config" / "compact-checkpoints" / f"{SID}.md").read_text()
+        ck = (iso / "nexus-config" / "compact-checkpoints" / f"{SID}.md").read_text(encoding="utf-8")
         assert "Close out the demo repo" in ck and "branch: main" in ck
         assert "## Board checked against the facts" in ck and "## Running for this session" in ck
         assert "## Background work this identity still has running" in ck and "watcher.sh" in ck
@@ -299,7 +299,7 @@ class TestStubDrivesTheRealHook:
     def test_empty_stub_is_the_planted_bad_checkpoint(self, tmp_path: Path) -> None:
         env, iso, repo = _provisioned(tmp_path, "bad")
         assert _run_hook("pre", env, repo).returncode == 0
-        ck = (iso / "nexus-config" / "compact-checkpoints" / f"{SID}.md").read_text()
+        ck = (iso / "nexus-config" / "compact-checkpoints" / f"{SID}.md").read_text(encoding="utf-8")
         assert "Close out the demo repo" not in ck and "alpha" not in ck and "Background work" not in ck
         assert all(c["known"] for c in _stub_calls(iso))
 
@@ -310,13 +310,13 @@ class TestStubDrivesTheRealHook:
         env, _iso, repo = _provisioned(tmp_path)
         plugin = tmp_path / "plugin"
         co.build_plugin(str(plugin))
-        hooks = json.loads((plugin / "hooks" / "hooks.json").read_text())["hooks"]
+        hooks = json.loads((plugin / "hooks" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
 
         def run(event: str, extra: dict) -> str:
             hook = hooks[event][0]["hooks"][0]
             argv = [hook["command"], *(a.replace("${CLAUDE_PLUGIN_ROOT}", str(plugin)) for a in hook["args"])]
             payload = {"session_id": SID, "cwd": str(repo), "trigger": "auto", "hook_event_name": event, **extra}
-            done = subprocess.run(argv, input=json.dumps(payload), env=env, capture_output=True, text=True, timeout=120)
+            done = subprocess.run(argv, input=json.dumps(payload), env=env, capture_output=True, text=True, encoding="utf-8", timeout=120)
             assert done.returncode == 0, done.stderr
             return done.stdout
 
@@ -352,10 +352,10 @@ class TestIsolation:
         config = iso / "nexus-config"
         files = sorted(p.relative_to(config).as_posix() for p in config.rglob("*") if p.is_file())
         assert len(files) == 1 and files[0].startswith("identity/") and files[0].endswith(".token"), files
-        record = json.loads((config / files[0]).read_text())
+        record = json.loads((config / files[0]).read_text(encoding="utf-8"))
         assert record["identity"] == co.IDENTITY and record["token"] == "" and record["expires_at"] is None
         # an identity call the stub does not answer: nothing can bind
-        done = subprocess.run(["nx", "identity", "bind"], env=env, capture_output=True, text=True, timeout=30)
+        done = subprocess.run(["nx", "identity", "bind"], env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
         assert done.returncode != 0 and [c["known"] for c in _stub_calls(iso)] == [False]
 
 
@@ -461,7 +461,7 @@ class TestOverlay:
         repo = self._repo(tmp_path)
         tr = tmp_path / "t.jsonl"
         tr.write_text(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content":
-                       "Command running in background with ID: bx1. Output is being written to: /tmp/x/bx1.output."}]}}) + "\n")
+                       "Command running in background with ID: bx1. Output is being written to: /tmp/x/bx1.output."}]}}) + "\n", encoding="utf-8")
         work = overlay.capture({"cwd": str(repo), "transcript_path": str(tr)})
         assert work["branches"] == ["alpha", "beta"] and len(work["todo"]) == 3
         assert work["tasks"] == [{"id": "bx1", "output": "/tmp/x/bx1.output"}]
@@ -472,7 +472,7 @@ class TestOverlay:
         tr = tmp_path / "t.jsonl"
         tr.write_text(
             json.dumps({"type": "user", "message": {"content": "Command running in background with ID: b2. Output is being written to: /tmp/b2.output."}}) + "\n"
-            + json.dumps({"type": "user", "message": {"content": "<task-notification>b2 completed</task-notification>"}}) + "\n")
+            + json.dumps({"type": "user", "message": {"content": "<task-notification>b2 completed</task-notification>"}}) + "\n", encoding="utf-8")
         assert overlay.background_tasks(str(tr)) == []
         assert overlay.render({"tasks": [], "branches": [], "todo": [], "head_branch": "main"}) == ""
 
@@ -486,7 +486,7 @@ class TestOverlay:
         payload = json.dumps({"session_id": SID, "cwd": str(repo), "transcript_path": ""})
 
         def overlay_run(verb: str) -> subprocess.CompletedProcess:
-            return subprocess.run([sys.executable, str(script), verb], input=payload, env=env, capture_output=True, text=True, timeout=30)
+            return subprocess.run([sys.executable, str(script), verb], input=payload, env=env, capture_output=True, text=True, encoding="utf-8", timeout=30)
 
         overlay_run("pre")
         assert (directory / f"{SID}.openwork.json").is_file()
