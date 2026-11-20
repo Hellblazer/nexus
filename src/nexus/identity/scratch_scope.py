@@ -35,6 +35,10 @@ def scope_owner(client: Any, *, identity: str | None = None) -> str:
         from nexus.identity import token_header  # noqa: PLC0415 — deferred: leaf import cost
 
         record = token_header.current()
+        if record is None and token_header.has_claude_ancestor():
+            raise IdentityScopeError(
+                "this process's identity token file not readable yet (its Claude process has no token file, or it is being "
+                "rewritten, as it is while Claude restarts): try again in a moment; if it stays so, the session holds no identity")
         if record is None:
             raise IdentityScopeError(
                 "no identity is bound to this process, so it has no identity scratch (it needs a Claude session "
