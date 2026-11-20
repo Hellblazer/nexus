@@ -242,7 +242,9 @@ migration_wal_bytes_per_worker = 12143000
 # 2663 -> 2664 (2026-11-20, drop_tenant_partitions lock order): vectors-066-1 redefines nexus.drop_tenant_partitions (1 CREATE OR REPLACE FUNCTION, ACL kept, no table, no REVOKE or GRANT). Numbered 066 because RDR-229 D2 relands as vectors-064 and vectors-065.
 # Counted from the changeset's statements (1) and measured: qwent lab-m via lab-run, 2026-11-21, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on 1cef78e7c (base origin/develop d1e38326a; gate jar rebuilt), ddl: migration=2664 (wal migration 12.3MB, inside the band). Commit: the drop_tenant_partitions lock-order commits.
 # 2664 -> 2666 (2026-11-21, nexus-f3yqd.2.23, RDR-246 Activation Step 2, D2 relanded after vectors-066): vectors-065 adds the owner-read policy catalog_collections_owner_read for the first registered data move (one DROP POLICY IF EXISTS and one CREATE POLICY); vectors-064 only INSERTs one row into nexus.data_moves, so it adds none. Earlier measurement before vectors-066: migration=2665 on f47263157 (lab-m, auto host, 2026-11-20).
-migration_ddl_per_worker = 2666
+# 2666 -> 2674 (2026-11-21, nexus-p2m1x.15, RDR-229 P2.10): catalog-049-1 is a CREATE OR REPLACE of nexus.catalog_reconcile_commit (1 CREATE FUNCTION) and re-issues its GRANT EXECUTE to nexus_svc (1 GRANT); catalog-050-1 to -3 each DROP POLICY IF EXISTS and CREATE POLICY the owner-read policy of one move driving table (catalog_documents, document_aspects, document_highlights: 6). catalog-049-2 is one INSERT into nexus.data_moves, no DDL; the policy DO blocks run no DDL. The catalog_collections policy the moves' verification joins is vectors-065's, counted above.
+# Counted from the changesets' statements (8); measured on the stacked integration tree (linda re-derives the shared ceiling once there).
+migration_ddl_per_worker = 2674
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
