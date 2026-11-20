@@ -3,7 +3,8 @@
 """The quarantine sibling's name, as the engine reaper mints it and as the client builds it.
 
 RDR-192 Step 9 (nexus-2x9xa, critique S6). The Java reaper moves a chunk into
-``quarantine-<origin name>`` (``ChunkReaper.QUARANTINE_PREFIX + name``); the client's
+``quarantine-<origin name>`` (``QuarantineOrigin.PREFIX + name``, which ``ChunkReaper.QUARANTINE_PREFIX``
+aliases since RDR-229 P2.5); the client's
 ``quarantine_collection_name`` builds ``quarantine-<content_type>__<owner>__<model>__<version>``
 from the origin's catalog row. The two agree only for a conformant name whose row agrees with
 it, and the runbook's "the same quarantine- collection" and "index repo moves it back" rest on
@@ -24,7 +25,9 @@ import pytest
 from nexus.catalog import chunk_quarantine as cq
 
 _REPO = Path(__file__).resolve().parent.parent
-_REAPER = _REPO / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service" / "ChunkReaper.java"
+_JAVA = _REPO / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service"
+_REAPER = _JAVA / "ChunkReaper.java"
+_ORIGIN = _JAVA / "db" / "QuarantineOrigin.java"
 
 CONFORMANT_ORIGINS = [
     "knowledge__distributed-systems__bge-base-en-v15-768__v1",
@@ -39,9 +42,15 @@ CONFORMANT_ORIGINS = [
 
 
 def _java_prefix() -> str:
-    text = _REAPER.read_text(encoding="utf-8")
-    match = re.search(r'QUARANTINE_PREFIX\s*=\s*"([^"]+)"', text)
-    assert match, "ChunkReaper.QUARANTINE_PREFIX was not found: the constant moved or was renamed"
+    """The engine's one quarantine prefix, ``QuarantineOrigin.PREFIX`` (RDR-229 P2.5), after checking
+    that the reaper's mint constant still aliases it rather than carrying a literal of its own."""
+    reaper = _REAPER.read_text(encoding="utf-8")
+    assert re.search(r"QUARANTINE_PREFIX\s*=\s*(?:dev\.nexus\.service\.db\.)?QuarantineOrigin\.PREFIX\s*;", reaper), (
+        "ChunkReaper.QUARANTINE_PREFIX no longer aliases QuarantineOrigin.PREFIX: the reaper's mint and the "
+        "engine's prefix could drift apart"
+    )
+    match = re.search(r'\bString\s+PREFIX\s*=\s*"([^"]+)"', _ORIGIN.read_text(encoding="utf-8"))
+    assert match, "QuarantineOrigin.PREFIX was not found: the constant moved or was renamed"
     return match.group(1)
 
 
