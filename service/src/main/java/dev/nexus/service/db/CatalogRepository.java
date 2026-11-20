@@ -4147,9 +4147,12 @@ public final class CatalogRepository {
      *       nothing here merges. Each sampled entry carries what a choosing rule reads of the row and of its twin:
      *       {@code chunk_count}, {@code indexed_at}, {@code has_aspects}, {@code has_highlights} (the twin's under a
      *       {@code twin_} prefix).</li>
-     *   <li><b>refused</b> ({@code refused}): the row's physical collection is blank or file-routed ({@code docs__},
-     *       {@code code__}, {@code rdr__}), where a note URI would read as residue, or the URI has no title part. Reported,
-     *       never rewritten.</li>
+     *   <li><b>refused</b> ({@code refused}): a row not proven to be a note in a note collection, reported and never
+     *       rewritten. The proof is the collection's {@code catalog_collections.content_type}, read from the table and never
+     *       from the name: only {@code knowledge} qualifies. The reasons are {@code malformed} (a blank physical collection,
+     *       or a URI with no title part), {@code unregistered_collection} (no row for the collection),
+     *       {@code file_routed_collection} (content type docs, rdr or code, where a note URI would read as residue) and
+     *       {@code unproven_content_type} (any other type, such as {@code unknown} or a quarantine type).</li>
      *   <li><b>tombstoned</b> ({@code tombstoned}): stale rows with {@code deleted_at} set. Counted, never rewritten:
      *       catalog-016 constrains only live rows, so a tombstone cannot cause a duplicate. A restore makes the row live
      *       again, so a restored stale tombstone appears in the next census as a rewrite or merge candidate.</li>
@@ -4233,6 +4236,10 @@ public final class CatalogRepository {
             out.put("refused_file_routed_collection",
                 (int) refused.stream().filter(m -> "file_routed_collection".equals(m.reason())).count());
             out.put("refused_malformed", (int) refused.stream().filter(m -> "malformed".equals(m.reason())).count());
+            out.put("refused_unregistered_collection",
+                (int) refused.stream().filter(m -> "unregistered_collection".equals(m.reason())).count());
+            out.put("refused_unproven_content_type",
+                (int) refused.stream().filter(m -> "unproven_content_type".equals(m.reason())).count());
             out.put("tombstoned", tombstoned.size());
             out.put("export_copies", exportCopies);
             out.put("export_copies_target_moved", exportMoved.size());
@@ -4386,29 +4393,35 @@ public final class CatalogRepository {
     private static final java.util.Set<String> FILE_ROUTED_CONTENT_TYPES = java.util.Set.of("docs", "rdr", "code");
 
     /**
-     * True when the live collection {@code coll} holds file-routed content, read from its registry row's
-     * {@code content_type}, never from its name (RDR-229 item 12: a minted label carries no prefix). A collection with no
-     * registry row has no readable content type: {@code memo} records it as {@code null} so the caller can refuse the
-     * row, and this returns false. {@code memo} holds one answer per collection per census.
+     * {@code content_type} of each named collection of {@code tenant}, read straight from {@code catalog_collections} in
+     * the caller's transaction, one query per 500 names. A name with no row is absent from the result. Deliberately not
+     * {@link CollectionRegistry#require}: its process-wide cache is not evicted when {@code upsertCollection} changes a
+     * row's content type, so a hit can name the type the row had before, and this answer decides what {@code apply} rewrites.
      */
-    private static boolean fileRoutedByRow(DSLContext ctx, String tenant, String coll, Map<String, Boolean> memo) {
-        if (!memo.containsKey(coll)) {
-            Boolean answer;
-            try {
-                answer = FILE_ROUTED_CONTENT_TYPES.contains(CollectionRegistry.require(ctx, tenant, coll).contentType());
-            } catch (UnregisteredCollectionException e) {
-                answer = null;
+    private static Map<String, String> contentTypesOf(DSLContext ctx, String tenant, java.util.Collection<String> names) {
+        Map<String, String> out = new HashMap<>();
+        List<String> all = new ArrayList<>(names);
+        for (int i = 0; i < all.size(); i += 500) {
+            for (var r : ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE)
+                    .from(CATALOG_COLLECTIONS)
+                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                           .and(CATALOG_COLLECTIONS.NAME.in(all.subList(i, Math.min(i + 500, all.size())))))
+                    .fetch()) {
+                out.put(r.value1(), r.value2());
             }
-            memo.put(coll, answer);
         }
-        return Boolean.TRUE.equals(memo.get(coll));
+        return out;
     }
 
     /** Splits the live pre-filter rows into the rewrite, merge and refused classes (each sorted by tumbler). */
     private static void classifyStaleNotes(DSLContext ctx, String tenant, List<org.jooq.Record3<String, String, String>> rows,
                                            List<StaleNote> rewrite, List<StaleNote> merge, List<StaleNote> refused) {
         List<StaleNote> candidates = new ArrayList<>();
-        Map<String, Boolean> fileRoutedByCollection = new HashMap<>();   // coll -> file-routed; null = no registry row
+        java.util.Set<String> collections = new java.util.TreeSet<>();
+        for (var r : rows) {
+            if (NoteUri.isNote(r.value2()) && !r.value3().isBlank()) collections.add(r.value3());
+        }
+        Map<String, String> contentTypes = contentTypesOf(ctx, tenant, collections);
         for (var r : rows) {
             String tumbler = r.value1();
             String uri = r.value2();
@@ -4419,11 +4432,14 @@ public final class CatalogRepository {
             boolean hasTitleSlash = uri.indexOf('/', scheme.length()) >= 0;
             if (x == null || x.isEmpty() || coll.isBlank() || !hasTitleSlash) {
                 refused.add(new StaleNote(tumbler, uri, coll, null, "malformed", null));
-            } else if (fileRoutedByRow(ctx, tenant, coll, fileRoutedByCollection)) {
-                refused.add(new StaleNote(tumbler, uri, coll, null, "file_routed_collection", null));
-            } else if (fileRoutedByCollection.get(coll) == null) {
-                // No registry row: the content type cannot be read, so the row is never proven a note. Refused, not guessed.
+            } else if (!contentTypes.containsKey(coll)) {
+                // No registry row: the content type cannot be read, so the row is never proven a note.
                 refused.add(new StaleNote(tumbler, uri, coll, null, "unregistered_collection", null));
+            } else if (FILE_ROUTED_CONTENT_TYPES.contains(contentTypes.get(coll))) {
+                refused.add(new StaleNote(tumbler, uri, coll, null, "file_routed_collection", null));
+            } else if (!"knowledge".equals(contentTypes.get(coll))) {
+                // unknown (the hygiene walks' untyped rows), quarantine-* and any other type: not proven a note.
+                refused.add(new StaleNote(tumbler, uri, coll, null, "unproven_content_type", null));
             } else {
                 candidates.add(new StaleNote(tumbler, uri, coll,
                     NoteUri.NOTE + coll + uri.substring(scheme.length() + x.length()), null, null));
@@ -4478,7 +4494,12 @@ public final class CatalogRepository {
                 .from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                        .and(CATALOG_DOCUMENTS.TUMBLER.in(chosen.stream().map(StaleNote::tumbler).toList()))
-                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                       // RDR-229: a collection retyped since the census is no longer proven a note collection.
+                       .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
+                           .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                                  .and(CATALOG_COLLECTIONS.NAME.eq(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
+                                  .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("knowledge"))))))
                 .fetch()) {
             fresh.put(r.value1(), new Fresh(r.value2(), r.value3()));
         }
