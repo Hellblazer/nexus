@@ -144,57 +144,57 @@ class CatalogRenameIdentityCascadeTest {
         assertThat(collectionRow("hren__blank-src").get("superseded_by")).isEqualTo("");
     }
 
-    // ── chroma:// source_uri rewrite ───────────────────────────────────────────
+    // ── nx-note:// source_uri rewrite (RDR-229 P2.10: the rename moves only a note's URI) ─────
 
     @Test
-    void everyStoredChromaUriFollowsTheRename() throws Exception {
+    void everyStoredNoteUriFollowsTheRename() throws Exception {
         String a = "knowledge__uri-src__voyage-context-3__v1";
         String b = "knowledge__uri-tgt__voyage-context-3__v1";
         seedCollection(a, "knowledge", "uri-src");
         seedDocument(a, "uri-doc", "Note One");
-        setSourceUri("uri-doc", "chroma://" + a + "/Note%20One");
+        setSourceUri("uri-doc", "nx-note://" + a + "/Note%20One");
         withDsl(dsl -> dsl.insertInto(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
                 DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
                 DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID)
             .values(DSL.val(TENANT), DSL.val(a), DSL.val("Note One"), DSL.currentOffsetDateTime(),
-                DSL.val("m"), DSL.val("e"), DSL.val("chroma://" + a + "/Note%20One"), DSL.val("uri-doc"))
+                DSL.val("m"), DSL.val("e"), DSL.val("nx-note://" + a + "/Note%20One"), DSL.val("uri-doc"))
             .execute());
         withDsl(dsl -> dsl.insertInto(DOCUMENT_HIGHLIGHTS,
                 DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
                 DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-            .values(DSL.val(TENANT), DSL.val("uri-doc"), DSL.val("chroma://" + a + "/Note%20One"),
+            .values(DSL.val(TENANT), DSL.val("uri-doc"), DSL.val("nx-note://" + a + "/Note%20One"),
                 DSL.val(a), DSL.currentOffsetDateTime())
             .execute());
 
         assertThat(rename(a, b, Map.of()).statusCode()).isEqualTo(200);
 
-        assertThat(docSourceUri("uri-doc")).isEqualTo("chroma://" + b + "/Note%20One");
+        assertThat(docSourceUri("uri-doc")).isEqualTo("nx-note://" + b + "/Note%20One");
         assertThat(queryString(dsl -> dsl.select(DOCUMENT_ASPECTS.SOURCE_URI).from(DOCUMENT_ASPECTS)
             .where(DOCUMENT_ASPECTS.DOC_ID.eq("uri-doc")).fetchOne(DOCUMENT_ASPECTS.SOURCE_URI)))
-            .isEqualTo("chroma://" + b + "/Note%20One");
+            .isEqualTo("nx-note://" + b + "/Note%20One");
         assertThat(queryString(dsl -> dsl.select(DOCUMENT_HIGHLIGHTS.SOURCE_URI).from(DOCUMENT_HIGHLIGHTS)
             .where(DOCUMENT_HIGHLIGHTS.DOC_ID.eq("uri-doc")).fetchOne(DOCUMENT_HIGHLIGHTS.SOURCE_URI)))
-            .isEqualTo("chroma://" + b + "/Note%20One");
+            .isEqualTo("nx-note://" + b + "/Note%20One");
         // Enumeration by the schema, not by a list someone keeps: no text or json column
         // anywhere in nexus still names the old collection's URI prefix.
-        assertThat(columnsHolding("chroma://" + a + "/")).isEmpty();
+        assertThat(columnsHolding("nx-note://" + a + "/")).isEmpty();
     }
 
     @Test
     void theRewriteIsAPrefixMatchNotALikePattern() throws Exception {
-        // '_' is a LIKE wildcard: chroma://knowledge__u_x/% would also match knowledge__uax.
+        // '_' is a LIKE wildcard: nx-note://knowledge__u_x/% would also match knowledge__uax.
         seedCollection("knowledge__u_x", "knowledge", "u_x");
         seedCollection("knowledge__uax", "knowledge", "uax");
         seedDocument("knowledge__u_x", "us-doc", "T");
-        setSourceUri("us-doc", "chroma://knowledge__u_x/T");
+        setSourceUri("us-doc", "nx-note://knowledge__u_x/T");
         seedDocument("knowledge__uax", "ua-doc", "T");
-        setSourceUri("ua-doc", "chroma://knowledge__uax/T");
+        setSourceUri("ua-doc", "nx-note://knowledge__uax/T");
 
         assertThat(rename("knowledge__u_x", "knowledge__u_y", Map.of()).statusCode()).isEqualTo(200);
 
-        assertThat(docSourceUri("ua-doc")).isEqualTo("chroma://knowledge__uax/T");
-        assertThat(docSourceUri("us-doc")).isEqualTo("chroma://knowledge__u_y/T");
+        assertThat(docSourceUri("ua-doc")).isEqualTo("nx-note://knowledge__uax/T");
+        assertThat(docSourceUri("us-doc")).isEqualTo("nx-note://knowledge__u_y/T");
     }
 
     @Test
@@ -204,16 +204,16 @@ class CatalogRenameIdentityCascadeTest {
         seedCollection(a, "knowledge", "col-src");
         seedCollection("knowledge__col-other", "knowledge", "col-other");
         seedDocument(a, "col-doc", "Dup");
-        setSourceUri("col-doc", "chroma://" + a + "/Dup");
+        setSourceUri("col-doc", "nx-note://" + a + "/Dup");
         // A live document elsewhere already carries the URI the rewrite would produce.
         seedDocument("knowledge__col-other", "col-squat", "Dup");
-        setSourceUri("col-squat", "chroma://" + b + "/Dup");
+        setSourceUri("col-squat", "nx-note://" + b + "/Dup");
 
         var resp = rename(a, b, Map.of());
         assertThat(resp.statusCode()).isEqualTo(409);
-        assertThat(resp.body()).contains("chroma://" + b + "/Dup").contains("col-squat");
+        assertThat(resp.body()).contains("nx-note://" + b + "/Dup").contains("col-squat");
 
-        assertThat(docSourceUri("col-doc")).isEqualTo("chroma://" + a + "/Dup");
+        assertThat(docSourceUri("col-doc")).isEqualTo("nx-note://" + a + "/Dup");
         assertThat(queryString(dsl -> dsl.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
             .where(CATALOG_DOCUMENTS.TUMBLER.eq("col-doc")).fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)))
             .isEqualTo(a);
@@ -221,25 +221,49 @@ class CatalogRenameIdentityCascadeTest {
         assertThat(collectionRow(b)).isNull();
     }
 
+    /**
+     * RDR-229 P2.10: the legacy spelling is not a note the rename moves, and a would-be target held by another live
+     * document is no collision: the {@code chroma://} value keeps the segment it was written with.
+     */
+    @Test
+    void aLegacyChromaUriIsLeftOnItsOldSegmentAndCollidesWithNothing() throws Exception {
+        String a = "knowledge__lg-src";
+        String b = "knowledge__lg-tgt";
+        seedCollection(a, "knowledge", "lg-src");
+        seedCollection("knowledge__lg-other", "knowledge", "lg-other");
+        seedDocument(a, "lg-doc", "Legacy");
+        setSourceUri("lg-doc", "chroma://" + a + "/Legacy");
+        seedDocument("knowledge__lg-other", "lg-squat", "Legacy");
+        setSourceUri("lg-squat", "chroma://" + b + "/Legacy");
+
+        assertThat(rename(a, b, Map.of()).statusCode()).isEqualTo(200);
+
+        assertThat(docSourceUri("lg-doc")).isEqualTo("chroma://" + a + "/Legacy");
+        assertThat(docSourceUri("lg-squat")).isEqualTo("chroma://" + b + "/Legacy");
+        assertThat(queryString(dsl -> dsl.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TUMBLER.eq("lg-doc")).fetchOne(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)))
+            .as("the document itself moved").isEqualTo(b);
+    }
+
     @Test
     void aStaleUriOnAForeignDocumentIsNotThisRenamesToTouch() throws Exception {
         // Critique of a11876053: a document in a THIRD collection still carrying a stale
-        // chroma://<name>/ URI (a pre-fix rename, then the name reused) must be neither
+        // nx-note://<name>/ URI (a pre-fix rename, then the name reused) must be neither
         // rewritten nor reported as a collision by a rename of the new <name>.
         String reused = "knowledge__reuse-x";
         seedCollection(reused, "knowledge", "reuse-x");
         seedCollection("knowledge__third", "knowledge", "third");
         seedDocument(reused, "member-doc", "Member");
-        setSourceUri("member-doc", "chroma://" + reused + "/Member");
+        setSourceUri("member-doc", "nx-note://" + reused + "/Member");
         seedDocument("knowledge__third", "orphan-doc", "Orphan");
-        setSourceUri("orphan-doc", "chroma://" + reused + "/Orphan");
+        setSourceUri("orphan-doc", "nx-note://" + reused + "/Orphan");
         // Its rewritten form collides with a live document; a text-only check would 409.
         seedDocument("knowledge__third", "squat-doc", "Squat");
-        setSourceUri("squat-doc", "chroma://knowledge__reuse-y/Orphan");
+        setSourceUri("squat-doc", "nx-note://knowledge__reuse-y/Orphan");
 
         assertThat(rename(reused, "knowledge__reuse-y", Map.of()).statusCode()).isEqualTo(200);
-        assertThat(docSourceUri("member-doc")).isEqualTo("chroma://knowledge__reuse-y/Member");
-        assertThat(docSourceUri("orphan-doc")).isEqualTo("chroma://" + reused + "/Orphan");
+        assertThat(docSourceUri("member-doc")).isEqualTo("nx-note://knowledge__reuse-y/Member");
+        assertThat(docSourceUri("orphan-doc")).isEqualTo("nx-note://" + reused + "/Orphan");
     }
 
     @Test
@@ -248,11 +272,11 @@ class CatalogRenameIdentityCascadeTest {
         String b = "knowledge__rt-tgt";
         seedCollection(a, "knowledge", "rt-src");
         seedDocument(a, "rt-doc", "Round");
-        setSourceUri("rt-doc", "chroma://" + a + "/Round");
+        setSourceUri("rt-doc", "nx-note://" + a + "/Round");
         assertThat(rename(a, b, Map.of()).statusCode()).isEqualTo(200);
-        assertThat(docSourceUri("rt-doc")).isEqualTo("chroma://" + b + "/Round");
+        assertThat(docSourceUri("rt-doc")).isEqualTo("nx-note://" + b + "/Round");
         assertThat(rename(b, a, Map.of()).statusCode()).isEqualTo(200);
-        assertThat(docSourceUri("rt-doc")).isEqualTo("chroma://" + a + "/Round");
+        assertThat(docSourceUri("rt-doc")).isEqualTo("nx-note://" + a + "/Round");
     }
 
     // ── owner-root: hyphenated owner_id against a dotted owner tumbler ─────────
