@@ -260,29 +260,43 @@ start` to bring the stack up and `nx daemon service status` to verify health
 
 ### Collections
 
-Collections are namespaced by corpus type using `__` (double underscore) as separator. Each collection's embedding model is fixed; the service routes by collection name:
+A collection is a row in the catalog's registry (`catalog_collections`). The
+row holds the collection's `collection_id`, a number the engine assigns and
+never reuses, and its attributes: content type (`code`, `docs`, `rdr`,
+`knowledge`), owner, embedding model, model version, dimension and
+lifecycle state. Chunks, catalog documents and every other per-collection
+table reference the `collection_id`. The service routes by the row: which
+model embeds a collection, and whether it is live or quarantined, is read
+from its attributes (RDR-229).
 
-Conformant collection names (RDR-103) follow a 4-segment shape:
-`<content_type>__<owner_id>__<embedding_model>__v<n>`.
+The collection's name is a label, unique among a tenant's live collections.
+A new collection gets a minted label, `c` followed by its id (`c4812`), and
+can be renamed to anything readable. Collections created earlier keep their
+names as labels, in one of two older shapes, neither of which is parsed for
+meaning:
 
-| Pattern | Contents | Managed-cloud model | Local model, default | Local model, keyed |
+- the four-segment RDR-103 shape, `<content_type>__<owner_id>__<embedding_model>__v<n>`, for example `knowledge__nexus-1-1__voyage-context-3__v1`;
+- the pre-RDR-103 two-segment shape, `<content_type>__<repo>-<hash>`, for example `code__myrepo-a1b2c3`.
+
+| Content type | Contents | Managed-cloud model | Local model, default | Local model, keyed |
 |---------|----------|---------------------|-----------------------|---------------------|
-| `code__<owner_id>__voyage-code-3__v1` | Indexed source code | voyage-code-3 | bge-768 | voyage-code-3 |
-| `docs__<owner_id>__voyage-context-3__v1` | Indexed prose files | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
-| `rdr__<owner_id>__voyage-context-3__v1` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
-| `knowledge__<owner_id>__voyage-context-3__v1` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `code` | Indexed source code | voyage-code-3 | bge-768 | voyage-code-3 |
+| `docs` | Indexed prose files | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `rdr` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
+| `knowledge` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 
-(`<owner_id>` is a stable slug like `nexus-1-1`. See [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md).)
-
-**Legacy shape (fallback, pre-RDR-103)**: 2-segment `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. Still present on collections created before the conformance migration; new collections use the 4-segment shape above.
+A collection is found by its attributes, never by building its name: `nx
+index repo` asks for the collection with the repo's content type, owner and
+model, and a `knowledge` subject is found the same way, with the subject as
+its owner.
 
 A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
-**TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
+**TTL and expiry**: `nx store expire` removes expired entries from `knowledge` collections only (content type `knowledge` on the row). Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
-**Choosing a collection** (which content type, how to name a `knowledge` subject, when to reuse instead of create, what goes where): [Choosing and Naming Collections](collections.md). The short version: `code`/`docs`/`rdr` come from `nx index repo` only; `knowledge` collections are named after a durable subject area, never a document, session, source app, or placeholder; type the bare subject and let the catalog render the model and version.
+**Choosing a collection** (which content type, how to name a `knowledge` subject, when to reuse instead of create, what goes where): [Choosing and Naming Collections](collections.md). The short version: `code`/`docs`/`rdr` come from `nx index repo` only; `knowledge` collections are named after a durable subject area, never a document, session, source app, or placeholder; type the bare subject and let the catalog find or create the collection by its attributes.
 
 ## T3 Backup and Migration (Export/Import)
 
