@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.board;
 
+import dev.nexus.service.db.IdentityRepository;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -145,9 +146,14 @@ class OwnerStamperRecoveryTest {
             Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
         assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason")).containsExactly("stamper_error");
 
-        faulty.onDeadline(f[0], StamperEnv.BASE);   // the timer fires early: nothing is posted, the deadline stays armed
+        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
+        timer.arm(f[0], StamperEnv.BASE, null);   // cancelled first: postStamperError armed it, so only the fail-safe can arm it again
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).isNull();
+
+        faulty.onDeadline(f[0], StamperEnv.BASE);   // the timer fires early: nothing is posted, the deadline is armed again
         assertThat(se.ownerRows(f[0], StamperEnv.BASE)).hasSize(1);
-        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("an early firing re-arms at the row's deadline").isNotNull();
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("an early firing re-arms at the row's deadline")
+            .isEqualTo(episode.plus(Duration.ofMinutes(20)));
 
         se.env.ids.clock.advance(Duration.ofMinutes(21));
         renewSeats(f);
@@ -159,6 +165,93 @@ class OwnerStamperRecoveryTest {
         assertThat(timer.armedAt(f[0], StamperEnv.BASE)).as("an escalated row runs no deadline").isNull();
         faulty.onDeadline(f[0], StamperEnv.BASE);
         assertThat(se.ownerRows(f[0], StamperEnv.BASE)).as("no second escalated row").hasSize(2);
+    }
+
+    /** A stamper whose decision throws and whose fail-safe liveness read fails while {@code livenessDown} is set. */
+    private OwnerStamper faultyWithLiveness(java.util.concurrent.atomic.AtomicBoolean livenessDown) {
+        return new OwnerStamper(se.env.ids.scope, se.tuples, se.env.groups, se.env.ids.repo, se.env.ids.clock,
+            (in, trigger) -> { throw new IllegalStateException("deterministic boom on " + trigger); },
+            IdentityRepository::liveAliases,
+            (repo, tenant, pushes, owners, group) -> {
+                if (livenessDown.get()) {
+                    throw new IllegalStateException("liveness read down");
+                }
+                return BoardReads.identities(repo, tenant, pushes, owners, group);
+            });
+    }
+
+    private void stamperErrorRowOnY(OwnerStamper stamper, String[] f) {
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+        stamper.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason")).containsExactly("stamper_error");
+    }
+
+    @Test
+    void aLivenessReadFailureNeverLetsTheFailSafeEscalateAnAcknowledgedRed() {
+        String[] f = redOnY();
+        var down = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var faulty = faultyWithLiveness(down);
+        faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
+        stamperErrorRowOnY(faulty, f);
+        se.ack(f[0], StamperEnv.BASE, "Y", "sess-lead");   // the row's owner, the leader, acknowledges the row's own tip
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        renewSeats(f);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> faulty.onDeadline(f[0], StamperEnv.BASE))
+            .as("nobody can be shown live, so the ack cannot be matched: the timer retries rather than escalate")
+            .hasMessageContaining("liveness read down");
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason"))
+            .as("no escalated row with owner null woke every member").containsExactly("stamper_error");
+
+        down.set(false);   // the read recovers; the retry sees the ack and the red stays acknowledged
+        faulty.onDeadline(f[0], StamperEnv.BASE);
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason")).containsExactly("stamper_error");
+    }
+
+    @Test
+    void aFailSafeThatItselfThrowsIsRetriedByTheTimerAfterItsDelayAndEscalatesOnceItCanRun() {
+        String[] f = redOnY();
+        var down = new java.util.concurrent.atomic.AtomicBoolean(true);
+        var faulty = faultyWithLiveness(down);
+        var sched = new RecordingScheduler();
+        var timer = new AckDeadlineTimer(sched, se.env.ids.clock, faulty::onDeadline);
+        faulty.bind(timer);
+        stamperErrorRowOnY(faulty, f);
+        Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        renewSeats(f);
+
+        sched.deadlines().getLast().task().run();   // the timer fires; the evaluation and the fail-safe both throw
+
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).hasSize(1);
+        assertThat(sched.deadlines().getLast().millis()).as("a retry is scheduled after the timer's delay")
+            .isEqualTo(AckDeadlineTimer.RETRY.toMillis());
+        assertThat(timer.armedAt(f[0], StamperEnv.BASE)).isEqualTo(se.env.ids.clock.instant().plus(AckDeadlineTimer.RETRY));
+
+        down.set(false);
+        renewSeats(f);
+        sched.deadlines().getLast().task().run();   // the retry: the fail-safe runs and escalates to the live leader
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
+        assertThat(rows.getLast().body()).containsEntry("owner", f[1]);
+    }
+
+    @Test
+    void aGroupWithNoLiveMemberStillEscalatesWithOwnerNullWhenTheLivenessReadWorks() {
+        String[] f = redOnY();
+        var faulty = faultyWithLiveness(new java.util.concurrent.atomic.AtomicBoolean(false));
+        faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
+        stamperErrorRowOnY(faulty, f);
+        se.env.ids.clock.advance(Duration.ofHours(2));   // every seat's lease has lapsed
+
+        faulty.onDeadline(f[0], StamperEnv.BASE);
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
+        assertThat(rows.getLast().get("owner")).as("the RDR's no-one-live case still names no one").isNull();
     }
 
     @Test

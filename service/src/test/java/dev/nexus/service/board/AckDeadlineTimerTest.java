@@ -226,6 +226,46 @@ class AckDeadlineTimerTest {
     }
 
     @Test
+    void aHandoffThatKeepsFailingRaisesAnErrorEventEveryTwelfthAttemptAndKeepsRetryingAndASuccessResetsTheCount() {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AckDeadlineTimer.class);
+        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        logs.start();
+        logger.addAppender(logs);
+        try {
+            ManualScheduler sched = new ManualScheduler();
+            boolean[] failing = {true};
+            AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> {
+                if (failing[0]) {
+                    throw new IllegalStateException("boom");
+                }
+            });
+            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
+
+            for (int i = 0; i < 24; i++) {
+                sched.tasks.getLast().task().run();
+            }
+
+            var errors = logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR).toList();
+            assertThat(errors).as("attempts 12 and 24").hasSize(2);
+            assertThat(errors.getFirst().getFormattedMessage()).contains("board_ack_deadline_stuck", "attempt=12");
+            assertThat(errors.getLast().getFormattedMessage()).contains("attempt=24");
+            assertThat(timer.armedAt("t1", "b")).as("the retry is never abandoned: a lost deadline is the worse failure").isNotNull();
+
+            failing[0] = false;
+            sched.tasks.getLast().task().run();
+            failing[0] = true;
+            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
+            for (int i = 0; i < 11; i++) {
+                sched.tasks.getLast().task().run();
+            }
+            assertThat(logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR).count())
+                .as("a success reset the count: 11 fresh failures raise nothing").isEqualTo(2);
+        } finally {
+            logger.detachAppender(logs);
+        }
+    }
+
+    @Test
     void evictingATenantCancelsItsDeadlinesAndLeavesOthers() {
         ManualScheduler sched = new ManualScheduler();
         List<String> fired = new ArrayList<>();
