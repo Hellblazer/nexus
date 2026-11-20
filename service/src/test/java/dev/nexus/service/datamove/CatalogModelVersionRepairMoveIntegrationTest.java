@@ -46,10 +46,11 @@ import java.util.stream.Collectors;
  * census found them. The move is registered by the walk itself; the base empties the registry before each scenario, so
  * {@link #captureRegistration} reads the row the walk wrote and {@link #registerTheMove} puts it back unchanged.
  *
- * <p>Falsifiers, by hand: drop {@code t.model_version = ''} from the template and the "already set" row is rewritten (its
- * xmin moves); loosen the name pattern to {@code ~ '__v[0-9]+$'} and {@code gate-probe-124}-shaped names with a suffix are
- * rewritten; stop filtering by tenant in the verification and a tenant's check reads another's rows; put the INSERT into a
- * changeset that also UPDATEs {@code catalog_collections} and the walk test sees every row's xmin move.
+ * <p>The red run is the registration: before vectors-064 existed every scenario failed at "the walk registers the move".
+ * What each assertion is meant to catch, not run by hand: drop {@code t.model_version = ''} from the template and the
+ * "already set" row is rewritten (its xmin moves); loosen the name pattern to {@code ~ '__v[0-9]+$'} and the {@code __v1x},
+ * legacy and quarantine names are rewritten; put the INSERT into a changeset that also UPDATEs {@code catalog_collections}
+ * and the walk test sees every row's xmin move.
  */
 class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBase {
 
