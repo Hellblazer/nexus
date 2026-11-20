@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""nexus-dg7i6.4: SessionStart re-hosts ``bd prime`` when the beads plugin is off.
+"""nexus-dg7i6.4: ``bd prime`` is re-hosted when the beads plugin is off.
 
 The beads Claude Code plugin's one load-bearing contribution to a beads repo
 is its SessionStart/PreCompact ``bd prime`` hook (repo ``.beads/PRIME.md``
 plus beads' own memories). nexus disables the plugin per project to take its
 28 skill-listing entries out of the model's view (T3 1.11.758), so
-``session_context`` prints ``bd prime`` itself, but only when the plugin is
+``session_context`` renders ``bd prime`` itself, but only when the plugin is
 effectively disabled: a user who keeps the plugin must not get PRIME twice.
+
+Since the SessionStart progressive-disclosure change the primer is no longer printed at session start: it is the second
+half of the ``beads`` topic of ``nx brief`` (:func:`nexus.hooks.session_context._render_beads`), under the same conditions.
 
 Effective enablement follows Claude Code's settings precedence for
 ``enabledPlugins``: project ``.claude/settings.local.json`` over project
@@ -97,7 +100,6 @@ class TestSessionContextPrime:
         config = tmp_path / "config"
         _settings(config / "settings.json", {KEY: plugin_on})
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
         calls: list = []
@@ -107,7 +109,7 @@ class TestSessionContextPrime:
             return prime if args == ["bd", "prime"] else ready
 
         monkeypatch.setattr(session_context, "run_command", _fake)
-        return session_context.run(None).stdout or "", calls
+        return "\n".join(session_context._render_beads(proj)), calls
 
     def test_prints_prime_when_plugin_is_off(self, monkeypatch, tmp_path: Path) -> None:
         out, calls = self._run(monkeypatch, tmp_path, beads_dir=True, plugin_on=False)
@@ -124,12 +126,22 @@ class TestSessionContextPrime:
         assert ["bd", "prime"] not in calls
         assert self.PRIME not in out
 
-    def test_failed_prime_is_silent_and_keeps_other_sections(self, monkeypatch, tmp_path: Path) -> None:
-        out, calls = self._run(monkeypatch, tmp_path, beads_dir=True, plugin_on=False, prime=None)
+    def test_failed_prime_is_silent_and_keeps_the_ready_beads(self, monkeypatch, tmp_path: Path) -> None:
+        out, calls = self._run(monkeypatch, tmp_path, beads_dir=True, plugin_on=False, prime=None,
+                               ready="○ nexus-abc123 ● P1 [bug] a ready bead")
         assert ["bd", "prime"] in calls
-        assert "## nx Capabilities" in out
+        assert "## Ready Beads" in out and "a ready bead" in out
 
     def test_prime_skipped_when_bd_ready_failed(self, monkeypatch, tmp_path: Path) -> None:
         out, calls = self._run(monkeypatch, tmp_path, beads_dir=True, plugin_on=False, ready=None)
         assert ["bd", "prime"] not in calls
         assert self.PRIME not in out
+
+    def test_session_start_no_longer_prints_the_primer(self, monkeypatch, tmp_path: Path) -> None:
+        proj = tmp_path / "project"
+        (proj / ".beads").mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(proj))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.chdir(proj)
+        monkeypatch.setattr(session_context, "run_command", lambda *a, **k: pytest.fail(f"spawned {a!r}"))
+        assert "# beads usage" not in (session_context.run(None).stdout or "")

@@ -93,7 +93,15 @@ def _parse_decision(output: str) -> str | None:
 # purpose: the record pins both, and answers the cost of the prompts by telling the
 # model, in the answer and the description, how long to wait before asking again.
 # Auto-approving it is a change to the record, and Sam's.
+#
+# SessionStart progressive disclosure: ``brief`` is read-only and is held out of the
+# allowlist for now, as an OPEN GATE QUESTION for Sam, not a finding that it is unsafe.
+# It returns what the SessionStart hook used to inject on his behalf without a prompt (T2
+# titles, ready beads, the capabilities and map text, the RDR count, the seat's own
+# startup note); a prompt per first call is the cost of leaving it out. Moving it into
+# ``_ALLOWED_TOOLS`` is one line there and one line here.
 _MANUAL_APPROVAL_REQUIRED = {
+    "mcp__plugin_conexus_nexus__brief",
     "mcp__plugin_conexus_nexus__daemon_uninstall",
     "mcp__plugin_conexus_nexus__setup",
     "mcp__plugin_conexus_nexus__setup_status",

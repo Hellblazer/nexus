@@ -55,3 +55,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/_resume_pointer.py`: new. One line tagged `resume-pointer` (thread, worktree, state, waiting_on; at most 1 KB), put before the earlier pointers are deleted; any failure logs one line and writes nothing else.
 - `conexus/hooks/hooks.json`: a SessionEnd group with matcher `clear` running `compact_checkpoint.py end` (15 s).
 - `conexus/README.md`: the hook table's new SessionEnd row and the PreCompact note.
+- `conexus/README.md`: the SessionStart progressive-disclosure change: the `session-context` hook row now says what it prints, and the `brief` MCP tool joins the tool catalog (46 core tools, 56 for agents), held out of auto-approval.

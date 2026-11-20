@@ -1,167 +1,52 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""nexus-h33x8.5 fix-pass — VERIFICATION 1, the COMBINED SessionStart byte
-budget, exactly the way the bead's own 12,817-byte baseline was measured:
-piping the SessionStart payload through each unconditional hook AND
-SUMMING (bead's MEASURED table: SKILL.md/imperative 7,507 +
-session_start_hook.py 5,278 + nx-hook-session-start 32 = 12,817; the three
-conditional emitters — preflight.py, rdr_hook.py, version_lockstep_hook.py
-— stay at their carved-out 0 bytes and are not part of this sum).
+"""The SessionStart byte budget: what nexus injects on every start, summed from the REAL renders.
 
-The critic's Critical (T2 nexus/substantive-critique-h33x8.3-.5-2026-08-20,
-[22935]) found that the first .5 pass only budgeted the emitter it directly
-edited (``nx hook session-start`` — see ``TestGuidanceByteBudgetIntegration``
-in tests/test_hooks.py) and left ``session_start_hook.py`` — the bead's own
-second-largest baseline contributor, explicitly counted in 12,817 and NOT
-among the three carved-out conditional emitters — untouched and unbudgeted.
-This file closes that gap: it asserts the SUM of the two unconditional,
-always-firing emitters this bead's scope now covers.
+History. nexus-h33x8.5 first held this sum under 6,000 bytes against a 12,817-byte baseline. By 2026-11 it had crept back to
+7-9 KB on resume, clear and fork (the reference blocks: the T2 memory scan, ready beads, the bd primer, the capabilities
+block, the Knowledge Map and the RDR count were half of it). SessionStart progressive disclosure (T2
+nexus/design-sessionstart-progressive-disclosure-2026-11-20, approved by Sam) moved those blocks behind ``nx brief <topic>``
+and lowered the ceilings here to the measured values, so the total cannot creep back unnoticed.
 
-DETERMINISM: session_start_hook.py's real output depends on live, daily-
-varying T2/bead state (T2 listing + bead prime) — hard-coding a live-state
-assertion would be a flaky CI gate keyed on unrelated project activity
-(dev notes T2 nexus/h33x8.5-dev-notes-2026-08-20 already flagged this
-exact tension). So this test builds a REPRESENTATIVE FIXTURE: a realistic
-T2-memory block and a realistic ready-beads raw payload, sized at or above
-what a live run actually measured on 2026-08-20 (Ready Beads block 855B
-post-trim; the T2 Memory sub-fixture is 626B, slightly UNDER the 847B live
-figure — acceptable while the combined margin stays ~2,000B; see the
-fix-pass section of the dev notes), run through the REAL render functions
-(``_render_ready_beads``, ``_build_capabilities_block``) wherever those
-exist as pure/testable seams, and a literal Knowledge Map fixture sized to
-match a typical ``nx context refresh`` cache file. The guidance emitter
-half is the REAL ``nexus.hooks.session_start()`` output (stale-process
-probe mocked for determinism, mirroring
-``TestGuidanceByteBudgetIntegration`` in tests/test_hooks.py) — not a
-fixture, since that side is fully deterministic already.
+What is counted, per start (the always-on set):
+
+* guidance: the REAL ``nx hook session-start`` render, with the REAL mailbox-arm instruction (a budget that measured it with its
+  largest conditional block absent would not be a budget), the stale-process probe mocked for determinism.
+* the context hook: the REAL ``session_context.run`` output, with the one identity-notes line at its worst case (six titles at
+  the 60-character cut and the capped overflow note, through the real render) and no threads due. That is the T1 contract,
+  the notes line, the one static ``nx brief`` index line, and nothing else; the hygiene block fires only on a stale cache.
+* sn's static ``session-start-section.md``: a plain file read, and not ours, so it is counted separately in the bounded sum.
+* a ``/clear`` start also prints the RDR-253 Step 6 resume line, at its 400-byte cap plus the blank line before it.
+
+Not counted, and why: the beads plugin's own ``bd prime`` (the repo ``.beads/PRIME.md``, 992 bytes) when the plugin is on is the
+plugin's output, not nexus's, and when it is off the primer is the ``beads`` topic of ``nx brief``, no longer printed at start;
+the fire-only notices (setup, preflight failure, mcp-connect timeout, version lockstep, RDR remedy and unchecked-fix lines,
+hygiene), which are zero on a healthy start; and the compaction checkpoint, a state snapshot that fires on ``compact`` only and
+is capped at 8,192 bytes by its own test. Per-event measurements are in the build record.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import patch
 
-# The emitter the bead measured as ``session_start_hook.py`` now runs as
-# ``nexus.hooks.session_context`` (RDR-215 bead nexus-q02nx.21); the plugin
-# copy was deleted at nexus-z9cz2, so the real renders come from the port.
-from nexus.hooks.session_context import _T1_TOP_LINES, _build_capabilities_block, _render_ready_beads
+import pytest
 
+from nexus import brief
+from nexus.hooks import identity_notes, session_context
 
-#: Representative T2-memory block, sized to match (slightly above) a live
-#: 2026-08-20 measurement AFTER the fix-pass render-cap trim (_HARD_CAP
-#: 15->8, _SNIPPET_LIMIT 5->3, _TITLE_LIMIT 8->5, snippet max_chars
-#: 120->70 in conexus/hooks/scripts/t2_prefix_scan.py). Not re-deriving
-#: t2_prefix_scan.py's internal rendering here — that module has its own
-#: dedicated suite (tests/hooks/test_t2_prefix_scan.py); this is a
-#: representative SIZE fixture for the combined-budget sum only.
-_FIXTURE_T2_MEMORY_BLOCK = (
-    "## T2 Memory (Active Project)\n"
-    "### T2 Memory\n"
-    "  fixture-entry-one-2026-08-20 — a representative T2 entry snippet, "
-    "about seventy characters long to mat…\n"
-    "  fixture-entry-two-2026-08-20 — another representative snippet of "
-    "similar length to a real one, trunca…\n"
-    "  fixture-entry-three-2026-08-20\n"
-    "  fixture-entry-four-2026-08-20\n"
-    "  … (1200 more)\n"
-    "\n"
-    "### T2 Memory (active)\n"
-    "  fixture-active-one-2026-08-20 — representative active-project "
-    "snippet text, about seventy chars…\n"
-    "  fixture-active-two-2026-08-20 — representative active-project "
-    "snippet text, about seventy chars…\n"
-    "  fixture-active-three-2026-08-20\n"
-    "  … (20 more)\n"
-)
+#: Measured on the progressive-disclosure build: guidance 1,900 B + hook 1,241 B = 3,141 B. Rounded up by about 2%.
+_COMBINED_BUDGET_BYTES = 3200
 
-#: Representative raw ``bd ready`` stdout: 15 lines, each padded to a
-#: realistic bead-title length (~150-190 chars, matching real titles
-#: measured live on 2026-08-20) so ``_render_ready_beads`` exercises its
-#: real 5-line/160-char cap and overflow-count line against fixture input
-#: at least as large as live traffic.
-_FIXTURE_READY_RAW = "\n".join(
-    f"○ nexus-fx{i:03d} ● P1 [bug] Representative ready-bead title padded to "
-    f"resemble real bead-title length for the combined-budget fixture, "
-    f"item number {i} of the fixture set so each line differs"
-    for i in range(15)
-)
+#: guidance 1,900 B + hook 1,241 B + sn static 1,143 B = 4,284 B. Rounded up by about 0.4%.
+_BOUNDED_SESSIONSTART_BUDGET_BYTES = 4300
 
-#: Representative Knowledge Map fixture — session_start_hook.py inlines
-#: the ``nx context refresh``-produced L1 cache file verbatim (no pure
-#: render function to call; it is a plain file read). Sized to match the
-#: 657 bytes measured live on 2026-08-20 for this repo's cache file.
-_FIXTURE_KNOWLEDGE_MAP = (
-    "## Knowledge Map\n\n"
-    "code: representative topic label one (12345), representative topic "
-    "label two (6789), representative topic label three (2345), a fourth "
-    "representative label (901), a fifth representative label to pad this "
-    "fixture out toward the real measured 657-byte size (42)\n"
-    "docs: representative doc-corpus topic label (1500), another doc "
-    "corpus label for padding (700)\n"
-)
-
-#: The combined budget (bead VERIFICATION 1: SessionStart total < 6,000
-#: bytes). 6,000 exactly, per the bead's own target — this test is the
-#: mechanical, non-negotiable check the bead calls for.
-_COMBINED_BUDGET_BYTES = 6000
-
-#: nexus-cnzei.6 fix round (critic Critical 2 / CRE 3): this is NOT a full
-#: SessionStart census and must never be called one — the real total is
-#: ~13.1-13.6KB (T2 nexus/llm-guidance-audit-injection-2026-09-13), and this
-#: constant bounds a specific set of BOUNDED components, some real and some
-#: fixture-sized. See test_sessionstart_bounded_components_under_budget's
-#: own docstring for exactly which is which, with each excluded or
-#: fixture-sized component's approximate real size. Measured 2026-09-13:
-#: guidance 1969B + hook fixture 2778B + sn static 748B + bd-prime 992B =
-#: 6487B, stable (bd-prime and sn are static files; guidance and hook's two
-#: real sub-renders do not touch live-varying state; hook's two fixtures are
-#: fixed strings). ~8% headroom: 6487 * 1.08 ~= 7006, rounded.
-#:
-#: nexus-mtheb (2026-11-01): re-derived. The hook fixture now carries the real
-#: ``_T1_TOP_LINES`` (the contract leads every SessionStart context), which the
-#: fixture had omitted, and the sn static section had grown 748B -> 1098B since
-#: the figure above (the sum was already 6913B against 7000 before the T1 lines
-#: went in). Measured now: guidance 1993B + hook fixture 3430B + sn static 1098B
-#: + bd-prime 992B = 7513B. 7513 * 1.08 ~= 8114, rounded.
-_BOUNDED_SESSIONSTART_BUDGET_BYTES = 8150
+#: The hook's own always-on output with the notes line at its worst case: 1,241 B (T1 contract 603 B, the notes line at its
+#: 300 B cap, the 189 B index line, joins). The figure that says the reference blocks stayed out.
+_HOOK_ALWAYS_ON_BUDGET_BYTES = 1300
 
 _SN_SESSION_START_SECTION = (
     Path(__file__).resolve().parents[2] / "sn" / "hooks" / "scripts" / "session-start-section.md"
 )
-
-#: bd prime's REPO-LEVEL PRIME.md — the file bd actually prints byte-for-
-#: byte in THIS repo, per src/nexus/beads_prime.py's own docstring ("A
-#: repo-level .beads/PRIME.md always wins over this [machine-wide] file --
-#: bd reads repo-level first"). A plain, deterministic file read: this repo
-#: commits this file, so there is nothing live to render and nothing to
-#: mock. This is NOT nexus.beads_prime.load_template() (the generic
-#: machine-wide template nexus-cnzei.8 installs elsewhere) — that function
-#: is real and callable too, but its output is not what a session in THIS
-#: checkout actually sees, since the repo-level file overrides it.
-_BD_PRIME_REPO_FILE = Path(__file__).resolve().parents[2] / ".beads" / "PRIME.md"
-
-
-def _identity_notes_worst_case() -> list[str]:
-    from nexus.hooks import identity_notes
-
-    return identity_notes._render("i123", ["x" * 100 + str(i) for i in range(60)], capped=True)
-
-
-def _fixture_session_start_hook_output() -> str:
-    """Assemble session_start_hook.py's REPRESENTATIVE combined output:
-    fixture T2-memory block + REAL ``_render_ready_beads`` render of a
-    fixture raw payload + REAL ``_build_capabilities_block`` + fixture
-    Knowledge Map. Mirrors ``main()``'s own line assembly order."""
-    # nexus-mtheb: the T1 contract is the first thing main() emits, so the sum
-    # carries it (the real constant, not a fixture).
-    lines: list[str] = [*_T1_TOP_LINES, _FIXTURE_T2_MEMORY_BLOCK, ""]
-    # RDR-253 Step 6 part 3 (nexus-hczdo): the one identity-notes line, at its worst case (six titles at the 60-character
-    # cut and the capped overflow note), through the real render.
-    lines.extend(_identity_notes_worst_case())
-    lines.extend(_render_ready_beads(_FIXTURE_READY_RAW))
-    lines.extend(_build_capabilities_block())
-    lines.append(_FIXTURE_KNOWLEDGE_MAP)
-    return "\n".join(lines)
-
 
 #: nexus-6konb.12 (MM-3.4 fix 2): a uuid4()-shaped, 36-char session id -- the
 #: real ``CLAUDE_CODE_SESSION_ID`` / ``generate_session_id()`` shape -- not
@@ -170,6 +55,22 @@ def _fixture_session_start_hook_output() -> str:
 #: tests/test_hooks.py for the sibling pin and the measured-vs-fictional
 #: history this matches.
 _REAL_SESSION_ID = "8154ea0d-6649-4a18-9ef7-ea42818188b0"
+
+
+def _identity_notes_worst_case() -> list[str]:
+    return identity_notes._render("i123", ["x" * 100 + str(i) for i in range(60)], capped=True)
+
+
+def _real_hook_output(monkeypatch, tmp_path: Path, notes: list[str] | None = None) -> str:
+    """The real ``session_context.run`` output for a session id, in an empty config dir, with no threads due and the notes
+    line *notes* (default: the worst case)."""
+    notes = _identity_notes_worst_case() if notes is None else notes
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("nexus.hooks.board_due.due_lines", lambda sid, **k: [])
+    monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: list(notes))
+    return session_context.run({"session_id": _REAL_SESSION_ID}).stdout or ""
 
 
 def _real_guidance_emitter_output() -> str:
@@ -201,95 +102,76 @@ def _real_guidance_emitter_output() -> str:
         )
 
 
-def test_combined_sessionstart_total_under_6000_bytes(monkeypatch) -> None:
-    """VERIFICATION 1, the bead's own summing method: nx-hook-session-start
-    emitter + session_start_hook.py emitter (fixture-representative T2/
-    ready-beads state) must sum under 6,000 bytes. This is the fix-pass
-    counterpart to ``TestGuidanceByteBudgetIntegration`` (tests/test_hooks.py),
-    which pins only the first emitter's own share."""
+def _bytes(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def test_combined_sessionstart_total_stays_under_its_ceiling(monkeypatch, tmp_path: Path) -> None:
+    """The two emitters nexus controls, summed: the guidance and the context hook. The ceiling is the measured value rounded up
+    a little (progressive disclosure target: about 3 KB on resume, clear and fork, from 7-9 KB)."""
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-    guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
-    hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
+    guidance_bytes = _bytes(_real_guidance_emitter_output())
+    hook_bytes = _bytes(_real_hook_output(monkeypatch, tmp_path))
     combined = guidance_bytes + hook_bytes
     assert combined < _COMBINED_BUDGET_BYTES, (
-        f"combined SessionStart total {combined}B "
-        f"(guidance {guidance_bytes}B + session_start_hook.py fixture "
-        f"{hook_bytes}B) >= budget {_COMBINED_BUDGET_BYTES}B"
+        f"combined SessionStart total {combined}B (guidance {guidance_bytes}B + context hook {hook_bytes}B) "
+        f">= budget {_COMBINED_BUDGET_BYTES}B: move reference context behind `nx brief` instead of raising the ceiling"
+    )
+    assert combined > _COMBINED_BUDGET_BYTES * 0.9, (
+        f"{combined}B is far under {_COMBINED_BUDGET_BYTES}B: the ceiling is no longer the measured value, so it no longer "
+        "catches creep; re-measure and lower it"
     )
 
 
-def test_sessionstart_bounded_components_under_budget(monkeypatch) -> None:
-    """nexus-cnzei.6 fix round (critic Critical 2 / CRE 3): this bounds
-    FOUR components of a real SessionStart, not the whole ~13.1-13.6KB
-    payload (T2 nexus/llm-guidance-audit-injection-2026-09-13). Renamed
-    from ``test_full_sessionstart_census_under_budget`` — that name
-    claimed more than the test measures, which is exactly the defect this
-    fix round exists to close. Per component:
+def test_the_context_hook_prints_only_the_always_on_set(monkeypatch, tmp_path: Path) -> None:
+    """The hook's own output: the T1 contract, the notes line, the index line. Nothing that moved behind ``nx brief`` is in it,
+    and its size is held where the reference blocks cannot return."""
+    out = _real_hook_output(monkeypatch, tmp_path)
+    assert _bytes(out) < _HOOK_ALWAYS_ON_BUDGET_BYTES, f"{_bytes(out)}B >= {_HOOK_ALWAYS_ON_BUDGET_BYTES}B"
+    assert _bytes(out) > _HOOK_ALWAYS_ON_BUDGET_BYTES * 0.9, f"{_bytes(out)}B: re-measure and lower the ceiling"
+    lines = [ln for ln in out.split("\n") if ln]
+    assert lines[0].startswith("## T1:") and lines[-1] == session_context.BRIEF_INDEX_LINE
+    for moved in ("## T2 Memory", "## Ready Beads", "## nx Capabilities", "## Knowledge Map"):
+        assert moved not in out
 
-    - guidance (``nx hook session-start``, via the side-effect-free
-      ``render_session_start()``): REAL, ~1969B.
-    - sn's static ``session-start-section.md``: REAL (plain file read),
-      ~748B.
-    - bd prime's repo-level ``.beads/PRIME.md``: REAL (plain file read;
-      this repo commits it, and it wins over the generic machine-wide
-      template bd would otherwise print — see ``_BD_PRIME_REPO_FILE``
-      above), ~992B.
-    - ``session_start_hook.py``'s combined output: PARTIALLY FIXTURE.
-      ``_render_ready_beads``/``_build_capabilities_block`` are real
-      renders of fixture input; the T2-memory block and Knowledge Map are
-      hardcoded fixture STRINGS, not live renders, because both depend on
-      this box's live T2/bead state (see ``_FIXTURE_T2_MEMORY_BLOCK`` and
-      ``_FIXTURE_KNOWLEDGE_MAP`` above for why hardcoding was chosen over
-      flakiness). Approximate real sizes as separately measured 2026-08-20:
-      T2-memory block ~847B (fixture here is ~626B, slightly under);
-      Knowledge Map ~657B (fixture here is sized to match).
 
-    EXCLUDED entirely, not measured here at all: bd prime's own
-    post-PRIME-text ``bd remember`` memory dump (beads 1.2.x appends this
-    unless ``--no-memories`` is passed; not suppressed by this repo's
-    hook), and the three conditional emitters (preflight.py, rdr_hook.py,
-    version_lockstep_hook.py) that carve out to 0B in the common case per
-    the bead's own measured baseline (module docstring above)."""
+def test_sessionstart_bounded_components_under_budget(monkeypatch, tmp_path: Path) -> None:
+    """The guidance, the context hook and sn's static section, summed: what a healthy start shows the model (the plugin's own
+    ``bd prime`` and the fire-only notices are not counted; see the module docstring)."""
     assert _SN_SESSION_START_SECTION.exists(), (
-        f"{_SN_SESSION_START_SECTION} missing — sn plugin layout changed; "
-        "update this census's file list"
-    )
-    assert _BD_PRIME_REPO_FILE.exists(), (
-        f"{_BD_PRIME_REPO_FILE} missing — this repo's repo-level PRIME.md "
-        "was removed; update this test's file list (bd prime would then "
-        "fall through to the generic machine-wide template instead)"
+        f"{_SN_SESSION_START_SECTION} missing — sn plugin layout changed; update this census's file list"
     )
     monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-    guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
-    hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
+    guidance_bytes = _bytes(_real_guidance_emitter_output())
+    hook_bytes = _bytes(_real_hook_output(monkeypatch, tmp_path))
     sn_bytes = len(_SN_SESSION_START_SECTION.read_bytes())
-    bd_prime_bytes = len(_BD_PRIME_REPO_FILE.read_bytes())
-    total = guidance_bytes + hook_bytes + sn_bytes + bd_prime_bytes
+    total = guidance_bytes + hook_bytes + sn_bytes
     assert total < _BOUNDED_SESSIONSTART_BUDGET_BYTES, (
-        f"bounded SessionStart components {total}B (guidance {guidance_bytes}B + "
-        f"session_start_hook.py fixture {hook_bytes}B + sn static "
-        f"{sn_bytes}B + bd-prime {bd_prime_bytes}B) >= budget "
-        f"{_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
+        f"bounded SessionStart components {total}B (guidance {guidance_bytes}B + context hook {hook_bytes}B + sn static "
+        f"{sn_bytes}B) >= budget {_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     )
 
 
-def test_the_identity_notes_line_is_one_line_inside_its_cap_and_counted_in_the_hook_fixture() -> None:
-    """RDR-253 Step 6 part 3 adds exactly one SessionStart line, at most ``identity_notes.MAX_LINE`` bytes, and the combined
-    budget above is measured with it present (a fixture that left it out would measure a hook that no longer exists)."""
-    from nexus.hooks import identity_notes
-
+def test_the_identity_notes_line_is_one_line_inside_its_cap_and_counted_in_the_hook_output(monkeypatch, tmp_path: Path) -> None:
+    """RDR-253 Step 6 part 3 adds exactly one SessionStart line, at most ``identity_notes.MAX_LINE`` bytes, and the budget above
+    is measured with it present at its worst case (a measurement that left it out would measure a hook that no longer exists)."""
     worst = _identity_notes_worst_case()
-    assert len(worst) == 1 and len(worst[0].encode("utf-8")) <= identity_notes.MAX_LINE
-    assert worst[0] in _fixture_session_start_hook_output()
+    assert len(worst) == 1 and _bytes(worst[0]) <= identity_notes.MAX_LINE
+    assert worst[0] in _real_hook_output(monkeypatch, tmp_path).split("\n")
 
 
-def test_the_resume_line_on_clear_is_counted_and_composes_with_the_other_new_lines(monkeypatch) -> None:
+def test_a_typical_notes_line_leaves_room_under_the_ceiling(monkeypatch, tmp_path: Path) -> None:
+    """The ceiling is for the worst case; a typical seat (five short titles) is well under it, so the worst case is not what
+    every session pays."""
+    typical = identity_notes._render("i5", ["design-of-record", "open-questions", "startup", "recurring-commands", "owns"], capped=False)
+    assert _bytes(_real_hook_output(monkeypatch, tmp_path, typical)) < _bytes(_real_hook_output(monkeypatch, tmp_path)) - 100
+
+
+def test_the_resume_line_on_clear_is_counted_and_composes_with_the_other_new_lines(monkeypatch, tmp_path: Path) -> None:
     """RDR-253 Step 6 part 2: a ``/clear`` start also prints one resume line, at most 400 bytes plus the blank line before
-    it. The proposal allows three new SessionStart lines across its parts: this is one (clear starts only), part 3's
-    identity-notes line is another (every start; it sits in ``_fixture_session_start_hook_output`` once part 3 is
-    present), part 1 adds none. The resume line has its own allowance on top of the bounded ceiling, so it neither eats the
-    headroom part 3's line was measured against nor can be hidden by it: the components as the fixture holds them stay under
-    the ceiling, and with the worst resume line added they stay under the ceiling plus that allowance."""
+    it. The resume line has its own allowance on top of the bounded ceiling, so it neither eats the headroom the notes line was
+    measured against nor can be hidden by it: the components stay under the ceiling, and with the worst resume line added they
+    stay under the ceiling plus that allowance. A ``clear`` start is the largest of the five by exactly this line."""
     from datetime import datetime, timedelta, timezone
 
     from nexus.hooks import resume_line
@@ -305,13 +187,20 @@ def test_the_resume_line_on_clear_is_counted_and_composes_with_the_other_new_lin
 
     line = resume_line.with_resume_line("", {"source": "clear"}, open_store=lambda: Store())
     assert line and "\n" not in line, "exactly one line"
-    added = len(line.encode("utf-8")) + 2
+    added = _bytes(line) + 2
     allowance = resume_line.MAX_BYTES + 2
     assert added <= allowance == 402, f"the resume line is {added} bytes with its blank line; the design says about 400"
-    guidance_bytes = len(_real_guidance_emitter_output().encode("utf-8"))
-    hook_bytes = len(_fixture_session_start_hook_output().encode("utf-8"))
-    base = guidance_bytes + hook_bytes + len(_SN_SESSION_START_SECTION.read_bytes()) + len(_BD_PRIME_REPO_FILE.read_bytes())
+    base = (_bytes(_real_guidance_emitter_output()) + _bytes(_real_hook_output(monkeypatch, tmp_path))
+            + len(_SN_SESSION_START_SECTION.read_bytes()))
     assert base < _BOUNDED_SESSIONSTART_BUDGET_BYTES, f"{base}B without the resume line >= {_BOUNDED_SESSIONSTART_BUDGET_BYTES}B"
     assert base + added < _BOUNDED_SESSIONSTART_BUDGET_BYTES + allowance
     for source in ("startup", "resume", "compact", "fork"):
         assert resume_line.with_resume_line("", {"source": source}, open_store=lambda: Store()) == "", f"no line on {source}"
+
+
+@pytest.mark.parametrize("topic", session_context.BRIEF_TOPICS)
+def test_every_moved_block_is_reachable_through_a_brief_topic_the_index_names(topic: str) -> None:
+    """The index line is the only pointer SessionStart leaves; each topic it names must exist in ``nexus.brief`` and each
+    ``nexus.brief`` topic must be named by it (a block that moved and is not named is unreachable)."""
+    assert topic in brief.TOPICS and f"{topic} (" in session_context.BRIEF_INDEX_LINE
+    assert set(brief.TOPICS) == set(session_context.BRIEF_TOPICS)

@@ -1,31 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""Tests for ``nexus.hooks.session_context`` -- the SessionStart
-T2-memory/beads/capabilities/knowledge-map hook ported onto the
-command-tier dispatch mechanism (RDR-215 bead nexus-q02nx.21).
+"""Tests for ``nexus.hooks.session_context`` -- the SessionStart context hook (RDR-215 bead nexus-q02nx.21).
 
-Carries the script-level hygiene and ready-beads/capabilities assertions
-across by re-driving them against the NEW module (the plugin script and
-its differential tests were deleted at nexus-z9cz2), and adds:
+Since the SessionStart progressive-disclosure change (T2 nexus/design-sessionstart-progressive-disclosure-2026-11-20)
+the hook prints only what is a rule or about this session now: the T1 contract, the threads due, the one identity-notes
+line, one static index line naming ``nx brief <topic>``, and the hygiene block. The T2 memory scan, ready beads, the bd
+primer, the capabilities block and the Knowledge Map moved behind ``nx brief`` (:mod:`nexus.brief`), rendered by the
+same functions in this module; the topic tests live in ``tests/test_brief.py``.
 
-* **``run()`` composition tests** -- the T2/beads/capabilities/knowledge-map
-  assembly order, the ``HookResult`` contract (``stdout=None`` vs a joined
-  string), and that ``payload`` is accepted and ignored (the script never
-  reads stdin).
-* **In-process T2 section tests** -- the T2 Memory section comes from
-  ``nexus.hooks.t2_prefix_scan.scan()`` in-process (bead nexus-b5ugt), so
-  no plugin path is resolved at all.
+Carries the script-level hygiene and ready-beads/capabilities assertions across by re-driving them against the module
+(the plugin script and its differential tests were deleted at nexus-z9cz2), and adds the ``run()`` composition tests: the
+``HookResult`` contract (``stdout=None`` vs a joined string), what the hook prints, and that it prints none of what moved.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
-import sys
 import time as _time
 from pathlib import Path
 
+import pytest
+
 from nexus._hook_runtime._io import HookResult
-from nexus.hooks import session_context, t2_prefix_scan
+from nexus.hooks import board_due, identity_notes, session_context, t2_prefix_scan
 
 # -- Carried: the plugin script's hygiene tests, retargeted ------------------
 
@@ -160,33 +158,33 @@ class TestReadyBeadsAndCapabilitiesCarried:
 
 class TestRunHookResultContract:
     def _isolate(self, monkeypatch, tmp_path: Path) -> None:
-        """No live L1 cache, no CLAUDE_PLUGIN_ROOT, both nx/bd unavailable."""
-        monkeypatch.setattr(session_context, "which", lambda cmd: False)
+        """No live L1 cache, no CLAUDE_PLUGIN_ROOT, a project dir of our own."""
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
         (tmp_path / "project").mkdir()
+        monkeypatch.chdir(tmp_path / "project")
 
-    def test_minimal_output_is_the_t1_contract_then_the_capabilities_block(self, monkeypatch, tmp_path: Path) -> None:
-        """nexus-mtheb: the top-level T1 contract leads, then the capabilities block."""
+    def test_minimal_output_is_the_t1_contract_then_the_index_line(self, monkeypatch, tmp_path: Path) -> None:
+        """nexus-mtheb: the top-level T1 contract leads. Then, with nothing due and no identity, the one index line."""
         self._isolate(monkeypatch, tmp_path)
         result = session_context.run(None)
         assert result.stdout is not None
         assert result.stdout.startswith("## T1: the working layer this session shares with its subagents")
         t1_block = "\n".join(session_context._T1_TOP_LINES)
-        assert result.stdout[len(t1_block) + 1:].startswith("## nx Capabilities")
-        assert "## T2 Memory" not in result.stdout
-        assert "## Ready Beads" not in result.stdout
-        assert "## Hygiene" not in result.stdout
+        assert result.stdout[len(t1_block) + 1:] == session_context.BRIEF_INDEX_LINE
+        for gone in ("## T2 Memory", "## Ready Beads", "## nx Capabilities", "## Knowledge Map", "## Hygiene"):
+            assert gone not in result.stdout
 
     def test_the_payload_feeds_only_the_board_due_lookup(self, monkeypatch, tmp_path: Path) -> None:
         """run() reads one payload field, ``session_id``, and only to look up the session's due board threads
-        (nexus-ct74m, nexus.hooks.board_due): with that lookup finding nothing due, a payload and None give the
-        same output. The lookup is stubbed, so this test reaches no storage (it has no tenant)."""
-        from nexus.hooks import board_due
-
+        (nexus-ct74m, nexus.hooks.board_due) and its identity's notes line: with those finding nothing, a payload and
+        None give the same output. Both lookups are stubbed, so this test reaches no storage (it has no tenant)."""
         seen: list[str] = []
         monkeypatch.setattr(board_due, "due_lines", lambda sid: seen.append(sid) or [])
+        monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: [])
         self._isolate(monkeypatch, tmp_path)
         result_none = session_context.run(None)
         result_payload = session_context.run({"session_id": "irrelevant", "source": "startup"})
@@ -200,145 +198,103 @@ class TestRunHookResultContract:
         assert result.crashed is False
 
 
-class TestRunComposition:
-    """T2 memory / ready beads sections, when present, in the script's own
-    assembly order: T2 memory, then ready beads, then capabilities."""
+class TestRunPrintsNothingThatMoved:
+    """The moved blocks are not rendered, and not even computed, at session start: no nx or bd is spawned, no T2 call
+    is made, no Knowledge Map is read (the hygiene check stats the cache's mtime and reads nothing)."""
 
-    def test_t2_memory_and_ready_beads_sections_appear_in_order(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
+    def test_no_moved_block_is_rendered_or_computed(self, monkeypatch, tmp_path: Path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
         (tmp_path / "project").mkdir()
+        monkeypatch.chdir(tmp_path / "project")
+        monkeypatch.setattr(session_context, "which", lambda cmd: pytest.fail(f"which({cmd!r}) at session start"))
+        monkeypatch.setattr(session_context, "run_command", lambda *a, **k: pytest.fail(f"spawned {a!r}"))
+        monkeypatch.setattr(t2_prefix_scan, "scan", lambda project: pytest.fail("the T2 scan ran at session start"))
+        out = session_context.run(None).stdout or ""
+        assert "T2 Memory" not in out and "Ready Beads" not in out and "Capabilities" not in out
 
-        monkeypatch.setattr(session_context, "which", lambda cmd: cmd in ("nx", "bd"))
-
-        calls: list[list[str]] = []
-
-        def _fake_run_command(args, timeout, cwd=None):
-            calls.append(args)
-            if args[:2] == ["git", "rev-parse"]:
-                return "/repo/myproject"
-            if args[0] == "bd":
-                return "○ nexus-abc123 ● P1 [bug] a ready bead"
-            return ""
-
-        monkeypatch.setattr(session_context, "run_command", _fake_run_command)
-        # The T2 body arrives in-process now (bead nexus-b5ugt), not from
-        # a subprocess, so it is stubbed where it is actually called.
-        scanned: list[str] = []
-
-        def _fake_scan(project: str) -> str:
-            scanned.append(project)
-            return "  fixture-t2-entry — a snippet"
-
-        monkeypatch.setattr(t2_prefix_scan, "scan", _fake_scan)
-
-        result = session_context.run(None)
-        assert result.stdout is not None
-        t2_idx = result.stdout.index("## T2 Memory (Active Project)")
-        beads_idx = result.stdout.index("## Ready Beads")
-        caps_idx = result.stdout.index("## nx Capabilities")
-        assert t2_idx < beads_idx < caps_idx
-        assert "fixture-t2-entry" in result.stdout
-        assert "a ready bead" in result.stdout
-
-        # The T2 body came from scan(), called with the project name the
-        # hook derived from git. This replaces an assertion on the old
-        # subprocess argv (sys.executable + the resolved sibling script);
-        # bead nexus-b5ugt removed the subprocess, and the claim worth
-        # keeping was always which project got scanned, not how.
-        assert scanned == ["myproject"]
-        assert not [c for c in calls if c and c[0] == sys.executable], (
-            "session_context spawned a python subprocess for T2 again"
-        )
-
-    def test_nx_not_found_skips_t2_memory_but_not_capabilities(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "project"))
-        (tmp_path / "project").mkdir()
-        monkeypatch.setattr(session_context, "which", lambda cmd: False)
-
-        result = session_context.run(None)
-        assert result.stdout is not None
-        assert "## T2 Memory" not in result.stdout
-        assert "## nx Capabilities" in result.stdout
+    def test_the_hygiene_block_still_fires_on_a_stale_cache_without_reading_it(self, monkeypatch, tmp_path: Path) -> None:
+        repo = tmp_path / "fakerepo"
+        repo.mkdir()
+        config = tmp_path / "config"
+        (config / "context").mkdir(parents=True)
+        digest = hashlib.sha1(os.path.realpath(repo).encode()).hexdigest()[:8]
+        cache = config / "context" / f"fakerepo-{digest}.txt"
+        cache.write_text("## Knowledge Map\nMAP-BODY-MARKER\n", encoding="utf-8")
+        ten_days_ago = _time.time() - 10 * 86400
+        os.utime(cache, (ten_days_ago, ten_days_ago))
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        monkeypatch.chdir(repo)
+        out = session_context.run(None).stdout or ""
+        assert "## Hygiene" in out and "10d old" in out and "nx context refresh" in out
+        assert "MAP-BODY-MARKER" not in out, "the map itself is not printed"
 
 
-# -- _plugin_root(): the one unavoidable deviation from a literal carry -----
+class TestTheIndexLine:
+    def test_it_is_one_static_line_naming_every_topic_with_a_gloss(self) -> None:
+        line = session_context.BRIEF_INDEX_LINE
+        assert "\n" not in line and len(line.encode("utf-8")) <= 260, len(line.encode("utf-8"))
+        assert "nx brief" in line and "`brief`" in line
+        assert session_context.BRIEF_TOPICS == ("memory", "beads", "caps", "map", "rdr", "me")
+        for topic in session_context.BRIEF_TOPICS:
+            assert f"{topic} (" in line, f"{topic} has no gloss in the index line"
+
+    def test_it_is_printed_after_the_identity_notes_line_and_before_hygiene(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(identity_notes, "notes_lines", lambda sid, **k: ["Your notes (identity/i5): a, b"])
+        monkeypatch.setattr("nexus.hooks.board_due.due_lines", lambda sid: ["## Due on your threads board (x)", "- X: due 2026-11-14", ""])
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        out = session_context.run({"session_id": "s1"}).stdout or ""
+        assert out.index("## Due on your") < out.index("Your notes (identity/i5)") < out.index(session_context.BRIEF_INDEX_LINE)
 
 
-class TestTheT2SectionIsProducedInProcess:
-    """The T2 Memory section reaches run()'s output, without a subprocess.
+# -- the extracted renders: the same text the hook used to print --------------
 
-    This replaces TestPluginRootResolution, which pinned three facts
-    about LOCATING conexus/hooks/scripts/t2_prefix_scan.py: that the env
-    var won, that the dev-checkout fallback found the real sibling, and
-    that the plumbing reached a real subprocess. Bead nexus-b5ugt
-    removed the thing all three described -- session_context calls
-    nexus.hooks.t2_prefix_scan.scan() in-process and resolves no plugin
-    path at all, so _plugin_root has no callers and is gone.
 
-    Deleting them outright would have dropped the one claim worth
-    keeping: that the section actually arrives, carrying the project
-    name. run_command swallows a failure into None, so a broken T2 path
-    produces no error and no section, forever -- which is exactly how
-    the defect this bead fixes stayed invisible. That claim is kept
-    here, against the seam that exists now.
-    """
-
-    def test_the_section_arrives_carrying_the_project_name(
-        self, monkeypatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-
-        # A repo this test OWNS, rather than whatever checkout pytest
-        # happens to run from. The first draft took the project name from
-        # `git rev-parse --show-toplevel` in the ambient cwd, which made
-        # the test silently dependent on being run from inside a git
-        # repository -- it failed the moment the suite was run from a
-        # scratch directory to reproduce CI's environment. The hook's job
-        # is to derive the name from the repo it is pointed at; the test
-        # should point it at one.
+class TestExtractedRenders:
+    def test_t2_memory_arrives_carrying_the_project_name_without_a_plugin_path(self, monkeypatch, tmp_path: Path) -> None:
         repo = tmp_path / "myproject"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", "."], cwd=repo, check=True)
-        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
-        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "nx")
-        project_name = "myproject"
-
         seen: list[str] = []
 
-        def _fake_scan(project: str) -> str:
+        def _fake_scan(project: str, **_kw) -> str:
             seen.append(project)
-            return f"## T2 Memory (Active Project) FAKE for {project}"
+            return f"  entry for {project}"
 
         monkeypatch.setattr(t2_prefix_scan, "scan", _fake_scan)
+        lines = session_context._render_t2_memory(str(repo))
+        assert lines == ["## T2 Memory (Active Project)", "  entry for myproject", ""]
+        assert seen == ["myproject"]
+        assert not hasattr(session_context, "_plugin_root"), "the hook resolves no plugin path (nexus-b5ugt)"
 
-        result = session_context.run(None)
-        assert result.stdout is not None
-        assert f"FAKE for {project_name}" in result.stdout
-        assert seen == [project_name], (
-            f"scan() was called with {seen}, not the repo name the hook "
-            f"derived from git"
-        )
+    def test_t2_memory_is_empty_when_there_is_no_repo_or_nothing_scanned(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(t2_prefix_scan, "scan", lambda project, **kw: "")
+        monkeypatch.setattr(session_context, "run_command", lambda *a, **k: None)
+        assert session_context._render_t2_memory(str(tmp_path)) == []
+        monkeypatch.setattr(session_context, "run_command", lambda *a, **k: "/repo/p")
+        assert session_context._render_t2_memory(str(tmp_path)) == []
 
-    def test_the_hook_resolves_no_plugin_path_at_all(self) -> None:
-        """The property that made the three old tests unnecessary.
+    def test_beads_is_ready_then_prime_and_empty_without_bd(self, monkeypatch, tmp_path: Path) -> None:
+        monkeypatch.setattr(session_context, "which", lambda cmd: False)
+        assert session_context._render_beads(tmp_path) == []
+        monkeypatch.setattr(session_context, "which", lambda cmd: cmd == "bd")
+        monkeypatch.setattr(session_context, "run_command", lambda args, timeout, cwd=None: "○ nexus-abc123 ● P1 [bug] a ready bead")
+        text = "\n".join(session_context._render_beads(tmp_path))
+        assert text.startswith("## Ready Beads") and "a ready bead" in text
 
-        Asserted on the module attribute, not on its source text: the
-        first draft of this grepped for "_plugin_root" and matched a
-        stale docstring reference, which is the same grep-cannot-tell-an
-        -identifier-from-a-sentence error this bead had just fixed in
-        test_plugin_sibling_resolution's own scan.
-        """
-        assert not hasattr(session_context, "_plugin_root"), (
-            "session_context resolves a plugin path again; if that is "
-            "deliberate, put it back in test_plugin_sibling_resolution's "
-            "RESOLVERS so the env-var contract is pinned for it"
-        )
-
+    def test_knowledge_map_reads_the_cache_and_names_its_path(self, monkeypatch, tmp_path: Path) -> None:
+        repo = tmp_path / "fakerepo"
+        repo.mkdir()
+        config = tmp_path / "config"
+        (config / "context").mkdir(parents=True)
+        digest = hashlib.sha1(os.path.realpath(repo).encode()).hexdigest()[:8]
+        cache = config / "context" / f"fakerepo-{digest}.txt"
+        cache.write_text("## Knowledge Map\n\ncode: Topic (7)\n", encoding="utf-8")
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+        assert session_context._knowledge_map_path(str(repo)) == str(cache)
+        assert session_context._render_knowledge_map(str(repo)) == ["## Knowledge Map\n\ncode: Topic (7)", ""]
+        assert session_context._render_knowledge_map(str(tmp_path)) == []

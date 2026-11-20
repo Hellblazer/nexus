@@ -53,8 +53,8 @@ story.
 - **40 skills** — infrastructure standalone, RDR-078 verb skills, MCP-tool pointer skills (RDR-080), agent-dispatcher skills, and RDR workflow skills
 - **5 standard pipelines** — feature, bug, research, onboarding, architecture (`plan-auditor` / `plan-enricher` / `knowledge-tidier` steps now direct MCP tool invocations per RDR-080)
 - **Session hooks** — surface T2 memory context, prime beads, health-check dependencies
-- **Permission auto-approval** — safe commands and the nexus MCP tools skip the confirmation prompt, except `daemon_uninstall`, `setup` and `setup_status`
-- **Two bundled MCP servers** — `nexus` (45 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
+- **Permission auto-approval** — safe commands and the nexus MCP tools skip the confirmation prompt, except `daemon_uninstall`, `setup`, `setup_status` and `brief`
+- **Two bundled MCP servers** — `nexus` (46 tools: search, query, store, memory, scratch, plans, traverse, scoped/graph-hop search, and orchestration tools including `nx_answer` for plan-centric retrieval, whose plans run the 10 LLM-backed operators) and `nexus-catalog` (10 catalog tools) — plus `sequential-thinking`, a standard-library Python server started through uv
 
 ### Pick your entry point
 
@@ -327,7 +327,7 @@ names each handler by its program and verb.
 | `SessionStart` | `nx-hook self-gc` | Reap superseded install generations no live process is holding. Spawns `nx self gc`; the shell form's `>/dev/null 2>&1 \|\| true` is the verb's own silence (`nexus.hooks.self_gc`) |
 | `SessionStart` | `nx-hook preflight` | Silent health check of skill-routed tool reachability; emits a `## nx Preflight: FAILED` marker on gaps (nexus-hwbj) |
 | `SessionStart` | `nx-hook session-start` | Resolve/propagate session id; emit the routing guidance imperative (nexus-h33x8.4 — moved here from a pinned `cat` of a skill file so guidance edits ship at PyPI-release/reinstall cadence instead of plugin-release cadence; see `nexus.session_start_guidance`) |
-| `SessionStart` | `nx-hook session-context` | Surface T2 memory, ready beads, and scratch context at session start |
+| `SessionStart` | `nx-hook session-context` | Print the T1 contract, the threads due, the identity-notes line and one index line naming `nx brief <topic>` (the T2 memory scan, ready beads, the capabilities block and the Knowledge Map moved behind `nx brief` and the `brief` MCP tool) |
 | `SessionStart` | `nx-hook rdr` | Reconcile RDR file frontmatter ↔ T2 metadata (self-healing on divergence) |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/version_lockstep_hook.py` | Detect plugin↔CLI version skew (RDR-143); nudge and dispatch a detached, extras-preserving upgrade that takes effect next session |
 | `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s, inside a 50 s timeout that also covers uv's cold start) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
@@ -412,11 +412,11 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 
 | Server | Purpose | Tools |
 |--------|---------|-------|
-| `nexus` | Retrieval + storage (core) | 45 tools — see below |
+| `nexus` | Retrieval + storage (core) | 46 tools — see below |
 | `nexus-catalog` | Catalog access (RDR-062) | `search`, `show`, `list`, `register`, `update`, `link`, `links`, `link_query`, `resolve`, `stats` |
 | `sequential-thinking` | Compaction-resilient reasoning chains | `sequentialthinking` |
 
-### `nexus` MCP tool catalog (45 tools)
+### `nexus` MCP tool catalog (46 tools)
 
 | Category | Tools |
 |----------|-------|
@@ -432,6 +432,7 @@ The plugin ships `.mcp.json` which Claude Code picks up automatically on install
 | Orchestration (RDR-080) | `nx_answer`, `nx_answer_report`, `nx_tidy`, `nx_enrich_beads`, `nx_plan_audit` |
 | Admin | `daemon_uninstall` |
 | Setup (RDR-228) | `setup`, `setup_status` |
+| Session context | `brief` (the reference context SessionStart no longer injects, one topic at a time; the same text as `nx brief <topic>`) |
 
 **`nx_answer`** is the retrieval entry point for multi-step questions.
 It runs `plan_match` against the library, executes the best-matching plan
@@ -440,7 +441,7 @@ via `plan_run`, and falls through to an inline planner on miss.  See
 
 ### Nexus MCP Servers (`nx-mcp`, `nx-mcp-catalog`)
 
-The nexus core server exposes 45 MCP tools and the nexus-catalog server exposes 10 catalog tools, 55 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
+The nexus core server exposes 46 MCP tools and the nexus-catalog server exposes 10 catalog tools, 56 tools an agent calls. Some functions are Python-only, not tools, including the 10 operators that `nx_answer` plans run. The core server also registers 2 internal `hook_*` tools that the plugin's own hooks call; they are not for agents. These give agents direct access to all three storage tiers and the catalog without requiring Bash. This eliminates failures in background agents and restricted permission contexts where Bash is unavailable.
 
 **Pagination**: `search`, `store_list`, and `memory_search` return paged results. Pass `offset=N` for subsequent pages. Response footer: `--- showing X-Y of Z. next: offset=N` or `(end)`.
 

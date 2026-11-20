@@ -78,7 +78,11 @@ def test_session_context_spawns_git_and_bd_off_the_cwd(windows_box, spawned, mon
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     monkeypatch.setattr(session_context, "which", lambda cmd: cmd in {"nx", "bd"})
+    # SessionStart no longer spawns anything (progressive disclosure); the two spawning blocks are the brief's.
     session_context.run(None)
+    assert spawned == []
+    session_context._render_t2_memory(str(tmp_path))
+    session_context._render_beads(tmp_path)
     assert _heads(spawned) == [GIT, BD], spawned
 
 
@@ -92,6 +96,8 @@ def test_session_context_with_only_a_planted_git_and_bd_spawns_nothing(
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
     monkeypatch.setattr(session_context, "which", lambda cmd: cmd in {"nx", "bd"})
     session_context.run(None)  # never raises into the hook
+    session_context._render_t2_memory(str(tmp_path))
+    session_context._render_beads(tmp_path)  # nor into the brief
     assert spawned == []
     assert session_context.run_command(["git", "status"], 5) is None
 

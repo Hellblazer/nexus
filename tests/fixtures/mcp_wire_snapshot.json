@@ -1,5 +1,19 @@
 {
   "nexus": {
+    "brief": {
+      "is_async": false,
+      "module": "nexus.mcp.core",
+      "parameters": {
+        "properties": {
+          "topic": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "qualname": "brief"
+    },
     "collection_list": {
       "is_async": false,
       "module": "nexus.mcp.core",

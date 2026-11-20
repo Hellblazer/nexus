@@ -403,7 +403,7 @@ def _check_freshness(last_updated: str, stale_days: int) -> str | None:
     return None
 
 
-def scan(project: str) -> str:
+def scan(project: str, *, configure_logging: bool = True) -> str:
     """Return the T2 prefix-scan body for *project* — the same content
     the plugin's ``t2_prefix_scan.py`` printed to stdout, produced
     in-process against the real T2 HTTP client instead of shelling out.
@@ -411,7 +411,8 @@ def scan(project: str) -> str:
     Returns ``""`` when *project* is empty, the engine is reachable but
     has zero matching namespaces (a genuinely empty T2 — fresh install,
     or no entries under this prefix yet; empty is not stale), or nothing
-    ends up rendered. A source-unreachable failure (construction, or the
+    ends up rendered. *configure_logging* is the hook's: pass False from a
+    process that already has its own logging (``nx brief``). A source-unreachable failure (construction, or the
     first ``get_projects_with_prefix`` call) is ALWAYS a visible
     ``WARNING: ...`` line — never a silent no-op, matching the plugin
     mirror's nexus-8fvp2 contract that a reachability failure must never
@@ -446,7 +447,10 @@ def scan(project: str) -> str:
     # were already covered. What this fixes is the bare-subprocess case
     # -- which is what the tests run, and a test harness that silently
     # eats a corrupted envelope is how the defect stays invisible.
-    configure_hook_logging()
+    if configure_logging:
+        # ``nx brief`` and the ``brief`` MCP tool pass False: their process already has its own sink, and
+        # ``configure_hook_logging`` would replace it (the MCP server's, on every call).
+        configure_hook_logging()
 
     timeout = float(
         os.environ.get("NX_T2_SCAN_TIMEOUT_S", str(_DEFAULT_HTTP_TIMEOUT_S))

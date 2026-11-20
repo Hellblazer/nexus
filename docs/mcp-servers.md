@@ -8,16 +8,16 @@ For **when to use which retrieval interface**, see [Querying Guide](querying-gui
 
 | Server | Entry point | Tools | Purpose |
 |---|---|---|---|
-| `nexus` | `nx-mcp` | 47 | Storage tiers, retrieval, orchestration, diagnostics |
+| `nexus` | `nx-mcp` | 48 | Storage tiers, retrieval, orchestration, diagnostics |
 | `nexus-catalog` | `nx-mcp-catalog` | 10 | Document catalog, link graph, tumbler resolution |
 
 The `nexus` and `nexus-catalog` servers register automatically when you install the plugin (`/plugin install conexus@nexus-plugins`). No separate install. The `.mcpb` extension registers only `nexus` — catalog tools (`search`, `link`, etc. on the `nexus-catalog` server) are unavailable in Claude Desktop until the plugin also ships a second `.mcpb` entry.
 
 **Substrate dependency**: since RDR-155, every persistent tier (T2 + T3 storage/retrieval tools) routes through the native nexus-service (`nx daemon service`, Postgres 17 + pgvector), not a ChromaDB daemon. A single `nx init` provisions and starts it and offers to register the OS autostart unit so it survives reboots (RDR-174 collapsed flow). See [Getting Started § Install](getting-started.md#install) for the install walkthrough and [Container Integration](container-integration.md) for the multi-process / multi-host model.
 
-## `nexus` — retrieval + storage (47 tools)
+## `nexus` — retrieval + storage (48 tools)
 
-Of the 47 registered tools, 45 are for agents; 2 are internal `hook_*` tools the plugin's own hooks call.
+Of the 48 registered tools, 46 are for agents; 2 are internal `hook_*` tools the plugin's own hooks call.
 
 Full tool names follow `mcp__plugin_conexus_nexus__<tool>`.
 
@@ -158,9 +158,18 @@ to the user; `not-now` does not silence that note on this server, and a finished
 that, and `setup` with mode `local` starts it without a download. Neither tool is
 auto-approved (see Permission auto-approval below).
 
+### Session brief
+
+One tool, registered in every session. SessionStart injects only the rules and the state of this session, plus one index line; the
+reference context it used to print is loaded on demand, one topic at a time.
+
+| Tool | Purpose |
+|---|---|
+| `brief` | Reference context SessionStart no longer injects. `topic` is `memory` (T2 notes of this project), `beads` (ready beads and the bd usage primer), `caps` (nx tool notes), `map` (Knowledge Map topic labels), `rdr` (RDR counts and index state) or `me` (this seat's own startup note, `identity/<id>` titled `startup`, printed as data for the session to read: nothing executes a note). No `topic` returns the index. The same text as the `nx brief` CLI verb ([CLI reference](cli-reference.md#nx-brief)), rendered by the same functions the hook used. A topic that fails returns an error line and costs only that context. Read-only |
+
 ### Hook-tier tools (internal plumbing, RDR-215)
 
-The remaining 2 of the 47 registered tools are `hook_*` entries
+The remaining 2 of the 48 registered tools are `hook_*` entries
 (`src/nexus/mcp/hooks.py`, `nexus.mcp.hooks.HOOK_TOOLS`). Each ports a
 conexus plugin `hooks.json` entry to a `hook_*` MCP tool.
 `hook_subagent_start` is what `hooks.json` WIRES for `SubagentStart` (an
@@ -176,8 +185,8 @@ and divergence-language hook tools (`hook_pre_close_verification`,
 `hook_divergence_language_guard`) at cleanup steps A2 and A3; the wire
 snapshot moved with them. There is no reason to call either remaining tool by
 hand, and their own tool descriptions say so ("not meant to be invoked
-directly"). Listed here only so the 47-tool count reconciles with the tables
-above, which cover the 45 tools an agent calls directly:
+directly"). Listed here only so the 48-tool count reconciles with the tables
+above, which cover the 46 tools an agent calls directly:
 
 | Tool | Fires on |
 |---|---|
@@ -291,7 +300,7 @@ Pass `offset=N` back to the same tool to fetch the next page. Default page size 
 
 ## Permission auto-approval
 
-The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory; `mcp__plugin_conexus_nexus__setup` and `mcp__plugin_conexus_nexus__setup_status` are excluded too, because `setup` installs software and the application's own prompt before it runs is a second check on the user's consent. `mcp__plugin_conexus_nexus__procedure_run` is auto-approved: it runs reviewed procedures in a sandbox with read-only verbs. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
+The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory; `mcp__plugin_conexus_nexus__setup` and `mcp__plugin_conexus_nexus__setup_status` are excluded too, because `setup` installs software and the application's own prompt before it runs is a second check on the user's consent. `mcp__plugin_conexus_nexus__brief` is read-only and is held out for now, as a gate question: it returns what the SessionStart hook used to inject on the user's behalf without a prompt. `mcp__plugin_conexus_nexus__procedure_run` is auto-approved: it runs reviewed procedures in a sandbox with read-only verbs. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
 
 The separate `sn` plugin auto-approves Serena's read and navigation tools and both Context7 tools. Serena's file and memory writers, `jet_brains_debug` (arbitrary Groovy/Java in the IDE's JVM), `query_project`, `onboarding` and `restart_language_server` get no decision and reach Claude Code's own prompt or auto-mode classifier, as Edit and Write do (nexus-2lf1v; before that every Serena tool was auto-approved). To stop being asked for the writers you use, add them by name to `permissions.allow`.
 

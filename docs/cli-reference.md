@@ -5589,6 +5589,29 @@ A `#`, `##` or `###` heading starts a thread; fields before any heading belong t
 
 ---
 
+## nx brief
+
+Reference context that SessionStart no longer injects, on demand (progressive disclosure: SessionStart prints the T1 contract, the threads due, one identity-notes line and one index line; the rest is a topic here). Each topic prints what the hook used to inject, rendered by the same code, for the repo in the working directory. The `brief` MCP tool returns the same text.
+
+```
+nx brief [TOPIC]
+```
+
+With no `TOPIC`, prints the topics and what each holds.
+
+| Topic | Prints |
+|-------|--------|
+| `memory` | T2 notes of this project: titles, newest first, with snippets |
+| `beads` | Ready beads (`bd ready`), and the `bd prime` usage primer when the beads plugin is off for this project |
+| `caps` | nx tool notes: search filters, the MCP tool prefix, pagination, enrich commands |
+| `map` | The Knowledge Map for this repo (the cache `nx context refresh` writes) |
+| `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
+| `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |
+
+A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `topic`, `ok`, `bytes`, `source`) to `<config>/logs/brief.log`, the count a topic's keep-or-drop review reads.
+
+---
+
 ## nx context
 
 Project context cache for agent cold-start acceleration. Generates a compact topic map (~200 tokens) from taxonomy data and caches it for injection at session start.
@@ -5609,7 +5632,7 @@ nx context show
 |------|-------------|
 | `--global` | Generate a single global cache (all collections) instead of per-repo |
 
-The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. `nx context show` and the SessionStart hook resolve the per-repo path first, falling back to the global file; the SubagentStart hook no longer falls back to it (`nexus.hooks.subagent_start`) and reads only the per-repo cache. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
+The per-repo cache is stored at `~/.config/nexus/context/<repo>-<hash>.txt`. The global cache (via `--global`) is at `~/.config/nexus/context_l1.txt`. `nx context show`, `nx brief map` and the SessionStart hygiene check resolve the per-repo path first, falling back to the global file; the SubagentStart hook no longer falls back to it (`nexus.hooks.subagent_start`) and reads only the per-repo cache. The cache is automatically regenerated after `nx taxonomy discover` and `nx index repo`.
 
 ---
 
