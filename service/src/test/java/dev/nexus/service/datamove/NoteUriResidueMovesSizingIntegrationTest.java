@@ -24,9 +24,9 @@ import java.util.List;
  * the three shipped moves over a seeded store of {@code <rows>} catalog documents (one tenth carrying residue on a
  * prefix-free docs label, an aspect row for every second document and a highlight row for every fourth), with
  * {@code sleep_ms} 0 so the figure is the chunk's own cost: dml_utils walks every row of the driving table whatever the
- * template matches, so the cost follows the table's size and not the residue count (T2 229-research-66). The cloud
- * {@code sleep_ms} and the production tenant's timing are the PITR-fork step, which is cloud spend and waits for Sam's go;
- * nothing here is that measurement.
+ * template matches, so the cost follows the table's size and not the residue count (T2 229-research-66). The shipped sizing
+ * was measured on a production PITR fork (scripts/spikes/rdr229-p210-fork-timing/run.sh, 2026-11-20); this is the
+ * local-store companion, which also times the rewrites.
  */
 @EnabledIfSystemProperty(named = "nexus.p210.sizing", matches = "\\d+")
 class NoteUriResidueMovesSizingIntegrationTest extends DataMoveIntegrationBase {
