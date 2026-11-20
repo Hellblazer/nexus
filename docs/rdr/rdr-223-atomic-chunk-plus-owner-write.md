@@ -2,7 +2,8 @@
 title: "Atomic Chunk-Plus-Owner Write on Every Client Path"
 id: RDR-223
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-20
 accepted_date: 2026-09-28
 priority: medium
 author: Sam
@@ -194,7 +195,7 @@ nexus-76's store-path and import review.
   order — **Status**: Verified — **Method**: Source Search (F-2, F-3)
 - [x] The note paths need no engine change to use the combined write —
   **Status**: Verified — **Method**: Source Search (F-5)
-- [ ] Identity-less files in `nx index repo` are rare and point at an upstream
+- [waived: Sam 2026-11-19, the "find why" half of Decision 3 cut, T2 `nexus/sam-ruling-rdr223-decision3-cut-2026-11-19`] Identity-less files in `nx index repo` are rare and point at an upstream
   registration gap (A-1, `nexus_rdr/223-research-9`) — **Status**:
   Unverified (stays assumed); **Method**: Docs Only. Phase 2 Step 3 recorded
   the count as a deferral (`nexus_rdr/223-research-16`, 2026-09-30). No
@@ -809,7 +810,7 @@ the reaper's queue and grows until the 30-day grace ages its first candidates
 (about 2026-12-02). The 2026-11-16 census read CLEAN (0 unlisted orphans,
 other-collection-only flat at 10, no-manifest 1078, all within reaper grace).
 Sam ruled the same day, "Wait for the drain": after 2026-12-02 bob reads the
-reaper (bead nexus-z0o2p.29, deferred to 2026-12-09). If raw no-manifest levels
+reaper, on 2026-12-03 (bead nexus-z0o2p.29, deferred to 2026-12-09 as the backstop). If raw no-manifest levels
 off or falls and `reaper_quarantine` rows appear, the exit is met; if it keeps
 climbing past the grace, it is a leak to chase. RDR-223 closes before that read
 under Sam's 2026-11-19 ruling (T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`),
@@ -935,7 +936,10 @@ per-path beads.
 2. **Note paths need no engine change** (settled by checking, F-5). The
    client-side `store_put` machinery is reconciled in Technical Design 3.
 3. **Gap 4: stop writing identity-less chunks and find why they lack
-   identity.** No ghost documents.
+   identity.** No ghost documents. Amended 2026-11-19: the second half was cut
+   (Sam, "Accept the cut", T2 `nexus/sam-ruling-rdr223-decision3-cut-2026-11-19`).
+   The refusal (`9163f348e`) is the fix; no identity-less file was ever
+   observed, so there was no registration cause to find.
 4. **Own RDR**, separate from RDR-222.
 5. **Keep nexus-wbfpw.28's registration rollback.** No register-if-absent on
    `write_many`.
@@ -986,7 +990,9 @@ unless stated.
   `301b9451b`; engine-service-v0.1.194, deployed 2026-11-16) and Sam's
   2026-11-15 and 2026-11-16 rulings. Technical Design 6 no longer cites a
   throughput measurement that does not exist. Technical Design 4's plan
-  sentence is marked as planned, against its As-built block.
+  sentence is marked as planned, against its As-built block. Decision 3's
+  "find why" half is recorded as cut and Critical Assumption 3 as waived (Sam,
+  2026-11-19, finding 2). Closed as Implemented the same day.
 
 - 2026-10-31: Closure-critique amendment (T2 `nexus_rdr/223-closure-critique-2026-10-31`,
   findings S1 to S3). The `store-put` retirement (nexus-nt76j, `38f4167be`,
