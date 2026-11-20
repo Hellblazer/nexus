@@ -288,6 +288,48 @@ def test_a_successful_read_rearms_the_unreadable_log(monkeypatch: pytest.MonkeyP
     assert events == ["projection_threshold_row_unreadable"] * 2
 
 
+def _catalog_client(handler):
+    import httpx
+
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    cat = HttpCatalogClient(base_url="http://mock.test", _token="t")
+    cat._client = httpx.Client(base_url="http://mock.test", transport=httpx.MockTransport(handler))
+    return cat
+
+
+def test_supports_taxonomy_prune_exact_counts_only_json_true_from_one_cached_version_read() -> None:
+    import httpx
+
+    asked: list[str] = []
+
+    def make(body):
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(request.url.path)
+            return httpx.Response(200, json=body)
+
+        return _catalog_client(handler)
+
+    assert make({"taxonomy_prune_exact_supported": True}).supports_taxonomy_prune_exact() is True
+    for not_true in ("true", 1, None, [True], {}):
+        assert make({"taxonomy_prune_exact_supported": not_true}).supports_taxonomy_prune_exact() is False, repr(not_true)
+    assert make({}).supports_taxonomy_prune_exact() is False, "an engine without the key"
+    assert make({"catalog_move_supported": True}).supports_taxonomy_prune_exact() is False, "its own flag"
+    asked.clear()
+    cat = make({"taxonomy_prune_exact_supported": True})
+    assert [cat.supports_taxonomy_prune_exact() for _ in range(5)] == [True] * 5
+    assert asked == ["/version"], "cached: one /version read however many times it is asked"
+
+
+def test_supports_taxonomy_prune_exact_is_false_when_version_cannot_be_read() -> None:
+    import httpx
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("down")
+
+    assert _catalog_client(boom).supports_taxonomy_prune_exact() is False
+
+
 def test_prune_projection_below_posts_match_exact_only_when_asked() -> None:
     from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
 
