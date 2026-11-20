@@ -51,6 +51,8 @@ OWNER_FIRST_PAGE: int = 200
 RENAME_SAMPLE: int = 20
 #: A vanished owner matches when at least this fraction of the sampled hashes also have a live row under it.
 RENAME_MATCH_FRACTION: float = 0.5
+#: ... and for at least this many of them: one hashed document that also sits under a vanished owner is not a rename.
+RENAME_MIN_MATCHES: int = 2
 #: One hint's whole query budget, in seconds: the renamed-repository hint's, and for the curator hint the whole run's
 #: (every file of a ``--dir`` batch together). A hint that spends it stops asking and drops what it has not read.
 HINT_BUDGET_S: float = 30.0
@@ -364,9 +366,11 @@ def rename_hint_lines(reader: Any, new_owner: str, new_root: str, page: list[Any
 
     Takes the first :data:`RENAME_SAMPLE` documents of *page* that carry ``meta.content_hash``, asks the metadata route
     once per hash, and groups the hits by owner prefix. A vanished owner that has a live row for at least
-    :data:`RENAME_MATCH_FRACTION` of the sampled hashes gets a line, highest match count first (ties in prefix order).
-    Rows without a hash are not counted; no sampled hash means no line. May raise: callers wrap it in
-    :func:`fail_open`."""
+    :data:`RENAME_MATCH_FRACTION` of the hashes asked, and for at least :data:`RENAME_MIN_MATCHES` of them (one hashed
+    document and one match is a coincidence, not a rename), gets a line, highest match count first; ties are broken in
+    tumbler order (``1.9`` before ``1.10``). When the budget runs out the hashes not yet asked are dropped and the
+    owners are judged on the ones asked, so the matches already found are kept. Rows without a hash are not counted;
+    no sampled hash means no line. May raise: callers wrap it in :func:`fail_open`."""
     hashes: list[str] = []
     for d in page:
         h = (getattr(d, "meta", None) or {}).get("content_hash")
@@ -378,17 +382,26 @@ def rename_hint_lines(reader: Any, new_owner: str, new_root: str, page: list[Any
         return []
     wanted = set(vanished)
     hits: dict[str, int] = {}
+    asked = 0
     for h in hashes:
         if budget.spent():
-            _log.warning("move_hints.budget_spent", hint="rename", asked=len(hashes))
-            return []
+            _log.warning("move_hints.budget_spent", hint="rename", asked=asked, sampled=len(hashes))
+            break
         rows, _count = reader.documents_by_meta(meta=[("content_hash", h)], limit=1000)
+        asked += 1
         owners = {_owner_prefix(r.tumbler) for r in rows if not r.alias_of}
         for prefix in owners & wanted:
             hits[prefix] = hits.get(prefix, 0) + 1
-    need = len(hashes) * RENAME_MATCH_FRACTION
-    ranked = sorted(((n, p) for p, n in hits.items() if n >= need), key=lambda t: (-t[0], t[1]))
+    need = max(RENAME_MIN_MATCHES, asked * RENAME_MATCH_FRACTION)
+    ranked = sorted(((n, p) for p, n in hits.items() if n >= need), key=lambda t: (-t[0], _tumbler_key(t[1])))
     return [owner_move_line(p, new_root) for _n, p in ranked]
+
+
+def _tumbler_key(prefix: str) -> tuple[int, ...]:
+    """Sort key of an owner prefix in tumbler order: ``1.9`` before ``1.10``."""
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred: a leaf import kept out of the load path
+
+    return Tumbler.parse(prefix).segments
 
 
 def vanished_owner_prefixes(reader: Any, *, exclude: str = "") -> list[str]:

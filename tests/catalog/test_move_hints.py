@@ -124,19 +124,52 @@ def test_query_timeout_is_logged_and_dropped(new_pdf):
     assert budget.spent() is False and budget.spent() is True
 
 
-def test_rename_loop_stops_asking_once_the_budget_is_spent():
-    page = [_entry("1.2.1", meta={"content_hash": "h1"}), _entry("1.2.2", meta={"content_hash": "h2"})]
-    asked: list[str] = []
+class _ByHash(_Reader):
+    """A reader whose metadata route answers, per hash, the tumblers given in ``owners_by_hash``."""
 
-    class _OneHit(_Reader):
-        def documents_by_meta(self, **kwargs):
-            asked.append(kwargs["meta"][0][1])
-            return [_entry("1.7.1", "/gone")], 1
+    def __init__(self, owners_by_hash: dict[str, list[str]]) -> None:
+        super().__init__()
+        self.owners_by_hash = owners_by_hash
+        self.asked: list[str] = []
 
-    spent_after_one = iter([False, True, True])
-    stop = SimpleNamespace(spent=lambda: next(spent_after_one))
-    assert hints.rename_hint_lines(_OneHit(), "1.2", "/new", page, ["1.7"], stop) == []
-    assert asked == ["h1"], "the second hash was never asked, and the hint dropped what it had not finished"
+    def documents_by_meta(self, **kwargs):
+        h = kwargs["meta"][0][1]
+        self.asked.append(h)
+        rows = [_entry(t, "/gone") for t in self.owners_by_hash.get(h, [])]
+        return rows, len(rows)
+
+
+def _hashed_page(*hashes: str) -> list:
+    return [_entry(f"1.2.{i + 1}", meta={"content_hash": h}) for i, h in enumerate(hashes)]
+
+
+def test_rename_loop_stops_asking_once_the_budget_is_spent_and_returns_the_matches_found():
+    """The budget runs out after two of four hashes: the owner that matched both of the two asked is still named
+    (two matches, all of what was asked), and the last two hashes are never asked."""
+    reader = _ByHash({h: ["1.7.1"] for h in ("h1", "h2", "h3", "h4")})
+    spent = iter([False, False, True, True])
+    stop = SimpleNamespace(spent=lambda: next(spent))
+    lines = hints.rename_hint_lines(reader, "1.2", "/new", _hashed_page("h1", "h2", "h3", "h4"), ["1.7"], stop)
+    assert reader.asked == ["h1", "h2"]
+    assert lines == [hints.owner_move_line("1.7", "/new")]
+
+
+def test_rename_needs_at_least_two_matching_hashes():
+    one_doc = _hashed_page("h1")
+    assert hints.rename_hint_lines(_ByHash({"h1": ["1.7.1"]}), "1.2", "/new", one_doc, ["1.7"], hints.Budget()) == [], \
+        "one hashed document and one match is not evidence of a rename"
+    two_docs = _hashed_page("h1", "h2")
+    assert hints.rename_hint_lines(_ByHash({"h1": ["1.7.1"]}), "1.2", "/new", two_docs, ["1.7"], hints.Budget()) == [], \
+        "half of two is one match, still below the floor of two"
+    both = _ByHash({"h1": ["1.7.1"], "h2": ["1.7.2"]})
+    assert hints.rename_hint_lines(both, "1.2", "/new", two_docs, ["1.7"], hints.Budget()) == [hints.owner_move_line("1.7", "/new")]
+
+
+def test_rename_ties_break_by_tumbler_order_not_lexical_order():
+    reader = _ByHash({"h1": ["1.10.1", "1.9.1", "1.3.8"], "h2": ["1.10.2", "1.9.2"]})
+    lines = hints.rename_hint_lines(reader, "1.2", "/new", _hashed_page("h1", "h2"), ["1.10", "1.9", "1.3"], hints.Budget())
+    assert lines == [hints.owner_move_line("1.9", "/new"), hints.owner_move_line("1.10", "/new")], \
+        "1.9 sorts before 1.10 as tumblers do (lexically 1.10 would come first), and 1.3, with one match, is out"
 
 
 def test_probe_that_raises_reads_as_no_support():
