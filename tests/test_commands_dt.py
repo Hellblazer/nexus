@@ -40,6 +40,13 @@ from tests._module_seam import setattr_in
 pytestmark = pytest.mark.usefixtures("cloud_mode")
 
 
+@pytest.fixture(autouse=True)
+def _no_subject_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-229 P2.8: ``--collection`` reads the subject's catalog row; these tests assert the
+    rendered name, so the registry answers "no row" and the real catalog reader is never built."""
+    monkeypatch.setattr("nexus.corpus.catalog_subject_finder", lambda: (lambda *_a: None))
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
