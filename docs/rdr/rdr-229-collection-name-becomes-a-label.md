@@ -758,7 +758,8 @@ by `created_at` ascending, then name, until `collection_id` replaces it. As
 shipped by P1.4: `.orderBy(COL_VERSION_NUM.desc(), F_COL_CRTAT.asc(),
 CATALOG_COLLECTIONS.NAME.asc())` (`CatalogRepository.java:10560`), whose
 comment at `:10548` says "P3.1's collection_id (identity) replaces created_at
-here with the same meaning". No P3 bead text carries that switch yet. The
+here with the same meaning". P3.5c owns that switch (Java readers and the
+two upserts read the id). The
 name-rendering branch of
 `t3_collection_name` stays only as a migration source for a legacy
 two-segment knowledge name that has no row.
