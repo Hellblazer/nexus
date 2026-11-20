@@ -2879,12 +2879,26 @@ def project_cmd(
                 exact=exact,
             )
             total_removed = 0
+            unapplied: str | None = None
             for name, thr in plan.targets:
-                removed = db.taxonomy.prune_projection_below(name, thr, exact=exact)
+                removed, applied = db.taxonomy.prune_projection_below(name, thr, exact=exact)
                 total_removed += removed
-                if removed or len(plan.targets) == 1:
+                if removed or len(plan.targets) == 1 or (exact and applied != "exact"):
                     click.echo(f"  {name}: removed {removed} projection assignment(s) below {thr:.2f}")
+                if exact and applied != "exact":
+                    # The /version flag and the prune can reach different engines (a rollback inside the
+                    # flag's cache window, two instances): an exact-planned prune whose reply does not echo
+                    # exact ran in the engine's own mode, so the guard the plan dropped was needed. Stop.
+                    unapplied = name
+                    break
             click.echo(f"Pruned {total_removed} projection assignment(s).")
+            if unapplied is not None:
+                click.echo(
+                    "the engine did not apply exact matching; no further collections pruned; rerun without "
+                    "exact or after the engine is current. "
+                    f"{unapplied} ran in the engine's own matching mode, which may have reached longer names it prefixes."
+                )
+                raise click.ClickException("the prune was stopped after the first collection: exact matching was not applied")
             if plan.skipped:
                 click.echo(
                     f"{len(plan.skipped)} skipped: pruned only down to the lowest threshold of a "

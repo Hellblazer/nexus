@@ -747,11 +747,13 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
 
     def prune_projection_below(
         self, source_collection_prefix: str, min_similarity: float, *, exact: bool = False,
-    ) -> int:
+    ) -> tuple[int, str | None]:
         """POST /v1/taxonomy/assignments/prune_projection (GH #1528, nexus-4tfxp):
         delete projection assignments under *source_collection_prefix* (a corpus
         prefix like ``code__`` or one full collection name) whose stored raw
-        cosine is below *min_similarity*. Returns the removed count. The
+        cosine is below *min_similarity*. Returns ``(removed, match)``: the removed
+        count and the matching mode the engine says it applied (``"exact"`` or
+        ``"prefix"``), ``None`` from an engine that does not echo it. The
         recovery path for a pass that admitted weak matches: persist is a
         prefer-higher upsert, so nothing else lowers or removes a row.
 
@@ -759,7 +761,9 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         longer name it prefixes. ``exact=True`` sends ``match: "exact"``, the
         engine's exact-name mode (RDR-229 P2.4 follow-up, engine 0.1.200); send
         it only to an engine that advertises it (``prune_supports_exact``), as
-        an older engine ignores the field and prunes by prefix."""
+        an older engine ignores the field and prunes by prefix; a caller that sent
+        it checks the echoed mode, because the flag and the prune can reach
+        different engines."""
         # idempotent=False (nexus-ll31n sibling): a threshold-predicate
         # sweep ("everything below min_similarity") over a discovered
         # population. A retry after a lost response re-evaluates the SAME
@@ -773,7 +777,10 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if exact:
             body["match"] = "exact"
         r = self._post("/assignments/prune_projection", body, idempotent=False)
-        return int(r.get("removed", 0)) if isinstance(r, dict) else 0
+        if not isinstance(r, dict):
+            return 0, None
+        mode = r.get("match")
+        return int(r.get("removed", 0)), mode if isinstance(mode, str) else None
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove assignments for a deleted doc."""
