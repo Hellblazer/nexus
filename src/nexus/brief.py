@@ -56,7 +56,7 @@ _LOG_TOPIC_CHARS = 40
 
 STARTUP_TITLE = "startup"
 
-#: The usage file stops growing here (about 12,000 calls); a full file loses new lines, never a brief.
+#: Past this size the usage file rotates to ``brief.log.1`` (about 12,000 calls a file), so it keeps recording and stays bounded.
 _USAGE_LOG_MAX_BYTES = 1_000_000
 
 
@@ -168,7 +168,7 @@ def _record(topic: str, result: BriefResult, source: str) -> None:
         _log.info("brief_load", **fields)
         path = _usage_log_path()
         if path.exists() and path.stat().st_size > _USAGE_LOG_MAX_BYTES:
-            return
+            path.replace(path.with_name(path.name + ".1"))  # one generation kept: the two files stay near twice the cap
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), **fields})
         with path.open("a", encoding="utf-8") as fh:

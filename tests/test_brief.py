@@ -278,14 +278,32 @@ def test_a_usage_file_that_cannot_be_written_costs_the_brief_nothing(tmp_path: P
     assert brief.render("caps").ok
 
 
-def test_the_usage_file_stops_growing_at_its_cap(tmp_path: Path, monkeypatch) -> None:
+def test_a_full_usage_file_rotates_and_the_new_call_is_still_recorded(tmp_path: Path, monkeypatch) -> None:
+    """Past its cap the file moves to brief.log.1 (replacing an older one) and a fresh file takes the line, so the
+    usage count keeps recording and the two files together never pass twice the cap plus one line."""
     config = tmp_path / "config"
     (config / "logs").mkdir(parents=True)
     path = config / "logs" / "brief.log"
-    path.write_text("x" * (brief._USAGE_LOG_MAX_BYTES + 1), encoding="utf-8")
+    older = path.with_name("brief.log.1")
+    older.write_text("old\n", encoding="utf-8")
+    full = "x" * (brief._USAGE_LOG_MAX_BYTES + 1)
+    path.write_text(full, encoding="utf-8")
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
     brief.render("caps")
-    assert path.stat().st_size == brief._USAGE_LOG_MAX_BYTES + 1
+    assert older.read_text(encoding="utf-8") == full, "the full file became brief.log.1, replacing the older one"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and json.loads(lines[0])["topic"] == "caps"
+
+
+def test_a_usage_file_under_its_cap_is_appended_not_rotated(tmp_path: Path, monkeypatch) -> None:
+    config = tmp_path / "config"
+    (config / "logs").mkdir(parents=True)
+    path = config / "logs" / "brief.log"
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config))
+    path.write_text("x" * (brief._USAGE_LOG_MAX_BYTES - 1) + "\n", encoding="utf-8")  # exactly at the cap
+    brief.render("caps")
+    assert not path.with_name("brief.log.1").exists()
+    assert path.read_text(encoding="utf-8").splitlines()[-1].startswith("{")
 
 
 def test_the_project_dir_is_claude_project_dir_like_the_hook(tmp_path: Path, monkeypatch) -> None:

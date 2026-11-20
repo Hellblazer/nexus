@@ -5608,7 +5608,7 @@ With no `TOPIC`, prints the topics and what each holds.
 | `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
 | `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |
 
-A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `topic`, `ok`, `bytes`, `source`) to `<config>/logs/brief.log`, the count a topic's keep-or-drop review reads.
+A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `topic`, `ok`, `bytes`, `source`) to `<config>/logs/brief.log`, the count a topic's keep-or-drop review reads. Past 1 MB the file moves to `brief.log.1` (replacing an older one) and a new file starts.
 
 ---
 

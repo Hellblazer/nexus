@@ -64,8 +64,6 @@ from nexus._hook_runtime._io import HookResult, permission_decision, permission_
 #: are ABSENT on purpose too: ``setup`` installs software, and the application's
 #: prompt before it runs is the second check on consent after the model has asked
 #: the user (CA-8). The record holds ``setup_status`` to the same prompt.
-#: ``mcp__plugin_conexus_nexus__brief`` (the on-demand SessionStart context) is read-only
-#: and ABSENT for now: whether a call on demand needs no prompt is Sam's gate question.
 _ALLOWED_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__plugin_conexus_nexus__search",
@@ -90,6 +88,7 @@ _ALLOWED_TOOLS: frozenset[str] = frozenset(
         "mcp__plugin_conexus_nexus__plan_search",
         "mcp__plugin_conexus_nexus__plan_delete",
         "mcp__plugin_conexus_nexus__procedure_run",  # Sam 2026-11-08, nexus-qo7ie.31
+        "mcp__plugin_conexus_nexus__brief",  # read-only on-demand SessionStart context (gate ruling)
         "mcp__plugin_conexus_nexus__traverse",
         "mcp__plugin_conexus_nexus__nx_answer",
         "mcp__plugin_conexus_nexus__nx_answer_report",
