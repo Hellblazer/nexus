@@ -195,7 +195,7 @@ def default_owner_dir() -> Path:
 
 
 def _owner_path(directory: Path, identity: str, kind: str, ref: str) -> Path:
-    return Path(directory) / OWNER_DIR_NAME / (hashlib.sha256(f"{identity}\0{kind}\0{ref}".encode()).hexdigest()[:32] + ".json")
+    return Path(directory) / OWNER_DIR_NAME / (hashlib.sha256(f"{identity}\0{kind}\0{ref}".encode()).hexdigest() + ".json")
 
 
 def record_owner(directory: Path, identity: str, kind: str, ref: str, *, pid: int, start: str | None, host: str) -> None:

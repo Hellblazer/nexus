@@ -94,7 +94,7 @@ def test_the_stop_verb_marks_done_even_when_the_transcript_is_unreadable(labels:
 
 def test_a_nudged_agent_runs_one_more_turn_so_its_row_ends_at_the_stop_after_the_nudge(labels: list, tmp_path) -> None:
     transcript = tmp_path / "t.jsonl"
-    transcript.write_text('{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}\n')
+    transcript.write_text('{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}\n', encoding="utf-8")
     out = nudge.run({**START, "agent_transcript_path": str(transcript)})
     assert out.stdout and "You wrote nothing to T1" in out.stdout
     assert labels == [], "the nudge keeps the agent running: not done yet"
