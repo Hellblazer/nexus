@@ -122,7 +122,7 @@ def expire_db(mock_chromadb, monkeypatch):
     mock_client.get_collection.return_value = mock_col
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {"content_type": "knowledge"} if name == "knowledge__sec" else None,
+        lambda name, **_kw: {"content_type": "knowledge"} if name == "knowledge__sec" else None,
     )
     db = T3Database(tenant="t", database="d", api_key="k", _client=mock_client)
     return db, mock_col
@@ -342,7 +342,7 @@ def test_expire_skips_non_knowledge_collections(mock_chromadb, monkeypatch):
         "docs__papers": {"content_type": "docs"},
         "knowledge__sec": {"content_type": "knowledge"},
     }
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, **_kw: rows.get(name))
 
     _, mock_client = mock_chromadb
     mock_col = MagicMock()
@@ -884,7 +884,7 @@ def test_upsert_chunks_calls_col_upsert(mock_db, monkeypatch):
     import nexus.mcp_infra as mi
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+        lambda name, **_kw: {"content_type": "code"} if name == "code__myrepo" else None,
     )
     db, mock_col, _ = mock_db
     db.upsert_chunks(
@@ -906,7 +906,7 @@ def test_upsert_chunks_force_re_embed_is_local_noop(mock_db, monkeypatch):
     import nexus.mcp_infra as mi
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+        lambda name, **_kw: {"content_type": "code"} if name == "code__myrepo" else None,
     )
     db, mock_col, _ = mock_db
     db.upsert_chunks(
@@ -1293,7 +1293,7 @@ def test_update_chunks_calls_col_update_without_documents(mock_db, monkeypatch):
     import nexus.mcp_infra as mi
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {"content_type": "code"} if name == "code__myrepo" else None,
+        lambda name, **_kw: {"content_type": "code"} if name == "code__myrepo" else None,
     )
     db, mock_col, _ = mock_db
     # RDR-102 Phase B: source_path is dropped by normalize. frecency_score

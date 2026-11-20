@@ -61,7 +61,9 @@ def _seed(tenant: str) -> None:
         cat.register_collection(TIE_LEGACY, content_type="docs", owner_id="99-6", embedding_model=model,
                                 legacy_grandfathered=False)
         cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model)
-        cat.register_collection(NOVER, content_type="docs", owner_id="99-7", embedding_model=model, model_version="",
+        # RDR-229 P2.5 (D1): the route refuses a NEW row with a blank model_version, so NOVER registers at v1
+        # and the SQL below blanks it, the shape a legacy row still has on an install until D2 repairs it.
+        cat.register_collection(NOVER, content_type="docs", owner_id="99-7", embedding_model=model, model_version="v1",
                                 legacy_grandfathered=True)
         cat.register_collection(OLD, content_type="docs", owner_id="99-4", embedding_model=model)
         cat.register_collection(NEW, content_type="docs", owner_id="99-4", embedding_model=model, model_version="v2")
@@ -101,6 +103,8 @@ def _seed(tenant: str) -> None:
     sql.append(
         "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) VALUES "
         f"({_sql_str(tenant)}, {_sql_str(asp_hl_tumbler)}, {_sql_str(f'chroma://{LABEL}/hl')}, {_sql_str(LABEL)}, now());")
+    sql.append(f"UPDATE nexus.catalog_collections SET model_version = '' "
+               f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(NOVER)};")
     # the dangling tombstone: OLD is superseded by NEW, and NEW's row goes away
     sql.append(f"DELETE FROM nexus.catalog_collections WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(NEW)};")
     _run_psql("\n".join(sql))

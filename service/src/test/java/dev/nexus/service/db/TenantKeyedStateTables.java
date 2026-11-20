@@ -271,6 +271,9 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
             + "the ledger of the rows that call changed, built for that request and returned in its response "
             + "(nexus-bivz3.24); nothing keeps it between requests");
+        notKeyed.put("CatalogRepository.ImportCollectionsResult.stateCorrected", "a component of one ETL collection "
+            + "import's result, the names of the new rows that call imported as quarantine although they carried live "
+            + "(RDR-229 P2.5), built for that request and returned in its response; nothing keeps it between requests");
         notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
             + "tenant name beside its counts), built for that request and dropped with its response");
         for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
