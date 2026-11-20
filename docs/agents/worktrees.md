@@ -170,10 +170,14 @@ things to avoid carefully; they are impossible.
    clear needs every workflow's latest result green; `outcome` stays this
    sha's own, and a per-sha failure is never overridden. A row with no
    `branch_outcome` whose body carries a null `carried` (the carry read
-   failed), a `carried` list holding a non-passing entry, or a `carried_n`
-   above the list's length has no verdict when its per-sha result is success
-   (no clear, and the stamper logs `board_done_no_verdict`); a per-sha failure
-   still counts. For a truncated
+   failed), a `carried` list holding an entry that is not `success` (a
+   carried skipped or neutral does not pass), or a `carried_n` above the
+   list's length (an absent list counts as empty) has no verdict when its
+   per-sha result is success. No clear, and the stamper logs
+   `board_done_no_verdict` with `reason=carry_failed` (null, unreadable or
+   trimmed carry data), `carried_not_green` (a carried entry is present and
+   not success, so develop holds a red), `cancelled` or `unknown`; a per-sha
+   failure still counts. For a truncated
    list, or a missing conclusion, read the `kind=run` rows or the check runs,
    and a cancelled run per the rule below. The
    wake is best-effort: the adapter drops it without retry on a GitHub or

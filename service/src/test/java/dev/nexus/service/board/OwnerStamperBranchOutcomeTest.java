@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -79,6 +80,39 @@ class OwnerStamperBranchOutcomeTest {
         se.doneBody(t, StamperEnv.BASE, "Y", "success",
             "{\"state\":\"concluded\",\"sha\":\"Y\",\"carried\":[[\"Service CI\",7,\"success\",\"X\"]],\"carried_n\":1}");
         assertThat(kinds(t)).endsWith("clear");
+    }
+
+    /** The hook says why a sha row left no verdict: one info line per such row, the reason an operator greps for. */
+    @Test
+    void aShaRowWithNoCountingVerdictLogsOneLineNamingTheReason() {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(OwnerStamper.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            String t = se.tenant();
+            String sub = "board/ci/" + StamperEnv.BASE + "--done";
+            String runs = "\"runs\":[[100,1,\"CI\",\"success\"]]";
+            java.util.function.BiConsumer<String, String> hook = (outcome, carried) -> se.stamper.afterOut(t, sub,
+                new java.util.LinkedHashMap<>(Map.of("from", "github", "kind", "sha", "sha", "Y", "outcome", outcome)),
+                "{\"sha\":\"Y\",\"n\":1," + carried + runs + "}");
+            hook.accept("success", "\"carried\":null,");
+            hook.accept("success", "\"carried\":[[\"Service CI\",7,\"failure\",\"X\"]],");
+            hook.accept("cancelled", "");
+            se.stamper.afterOut(t, sub, new java.util.LinkedHashMap<>(Map.of("from", "github", "kind", "sha", "sha", "Y")), "{}");
+            se.stamper.afterOut(t, sub, new java.util.LinkedHashMap<>(Map.of("from", "github", "kind", "run", "sha", "Y")), "{}");
+            hook.accept("success", "\"carried\":[[\"Service CI\",7,\"success\",\"X\"]],");   // a verdict: no line
+
+            List<String> lines = appender.list.stream().map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.contains("event=board_done_no_verdict")).toList();
+            assertThat(lines).hasSize(4);
+            assertThat(lines.get(0)).contains("tenant=" + t, "base=" + StamperEnv.BASE, "sha=Y", "reason=carry_failed");
+            assertThat(lines.get(1)).contains("reason=carried_not_green");
+            assertThat(lines.get(2)).contains("reason=cancelled");
+            assertThat(lines.get(3)).contains("reason=unknown");
+        } finally {
+            logger.detachAppender(appender);
+        }
     }
 
     private List<String> kinds(String tenant) {

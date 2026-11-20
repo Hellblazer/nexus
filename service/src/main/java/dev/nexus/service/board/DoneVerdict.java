@@ -24,10 +24,12 @@ import java.util.Set;
  * failure whatever it says (a red is red; a branch_outcome can only be as bad as the per-sha result, so a
  * contradiction is a writer bug and fails toward red). A value other than success, failure or cancelled is no verdict.
  *
- * <p>Without branch_outcome, a per-sha success is judged by the body's {@code carried}, when the body carries the key:
- * null (the carry read failed), a list holding an entry whose conclusion is not success, neutral or skipped (or is
- * missing), or a {@code carried_n} above the list's length (entries were trimmed, the hidden ones cannot be checked)
- * leaves no verdict. The engine fails toward not clearing. A body without the key reads as before.
+ * <p>Without branch_outcome, a per-sha success is judged by the body's {@code carried} and {@code carried_n}: a null
+ * {@code carried} (the carry read failed), a list holding an entry whose conclusion is not {@code success} (a carried
+ * skipped or neutral does not pass, so a skipped latest run of a workflow cannot clear an earlier red; the sha's own
+ * runs keep success, neutral and skipped) or is missing, or a {@code carried_n} above the list's length (entries were
+ * trimmed, the hidden ones cannot be checked; an absent list counts as empty) leaves no verdict. The engine fails
+ * toward not clearing. A body with neither {@code carried} nor {@code carried_n} reads as before.
  */
 public final class DoneVerdict {
 
@@ -50,13 +52,15 @@ public final class DoneVerdict {
     }
 
     public static final String REASON_CARRY_FAILED = "carry_failed";
+    public static final String REASON_CARRIED_NOT_GREEN = "carried_not_green";
     public static final String REASON_CANCELLED = "cancelled";
     public static final String REASON_UNKNOWN = "unknown";
 
     /**
      * A row's verdict, or its absence with the reason: {@code reason} is null when the verdict counts, else
-     * {@code carry_failed} (the carry-forward was null, unverifiable or held a non-passing result), {@code cancelled}
-     * or {@code unknown} (not a sha row, no sha, an outcome that cannot be told or is not recognised).
+     * {@code carry_failed} (the carry data is null, unreadable or trimmed), {@code carried_not_green} (a carried entry
+     * is present and not success: develop holds a red or an unfinished result), {@code cancelled} or {@code unknown}
+     * (not a sha row, no sha, an outcome that cannot be told or is not recognised).
      */
     public record Resolution(Optional<Verdict> verdict, String reason) {
     }
@@ -94,8 +98,11 @@ public final class DoneVerdict {
             }
         } else {
             outcome = perSha;
-            if (OK.equals(outcome) && !carryVerified(body)) {
-                return none(REASON_CARRY_FAILED);
+            if (OK.equals(outcome)) {
+                String problem = carryProblem(body);
+                if (problem != null) {
+                    return none(problem);
+                }
             }
         }
         if (outcome == null) {
@@ -111,24 +118,36 @@ public final class DoneVerdict {
     }
 
     /**
-     * True when the body carries no {@code carried} key, or a list the engine can check itself: every entry a
-     * {@code [workflow, run, conclusion, sha]} whose conclusion passes, and no more entries counted in
-     * {@code carried_n} than listed. A null list, a missing or non-passing conclusion, or trimmed entries is false.
+     * Why the body's carry-forward cannot back a per-sha success, or null when it can: a body with neither
+     * {@code carried} nor {@code carried_n}, or a list whose every entry is a {@code [workflow, run, conclusion, sha]}
+     * with conclusion {@code success} (a carried skipped or neutral does not pass: a skipped latest run of a
+     * workflow must not clear an earlier red) and no more entries counted in {@code carried_n} than listed. An absent
+     * list counts as empty. {@link #REASON_CARRIED_NOT_GREEN} when an entry holds a conclusion other than success (a
+     * visible red outranks an unreadable entry); {@link #REASON_CARRY_FAILED} for a null or non-list {@code carried},
+     * an entry that cannot be read, or trimmed entries.
      */
-    private static boolean carryVerified(JsonNode body) {
-        if (body == null || !body.has("carried")) {
-            return !(body != null && body.path("carried_n").isNumber() && body.get("carried_n").asLong() > 0);
+    private static String carryProblem(JsonNode body) {
+        if (body == null) {
+            return null;
+        }
+        long counted = body.path("carried_n").isNumber() ? body.get("carried_n").asLong() : 0;
+        if (!body.has("carried")) {
+            return counted > 0 ? REASON_CARRY_FAILED : null;
         }
         JsonNode carried = body.get("carried");
         if (!carried.isArray()) {
-            return false;   // null, or a shape nobody writes
+            return REASON_CARRY_FAILED;   // null, or a shape nobody writes
         }
+        boolean unreadable = false;
         for (JsonNode entry : carried) {
-            if (!entry.isArray() || entry.size() < 3 || !entry.get(2).isTextual() || !SUCCESS.contains(entry.get(2).asText())) {
-                return false;
+            JsonNode conclusion = entry.isArray() && entry.size() >= 3 ? entry.get(2) : null;
+            if (conclusion == null || !conclusion.isTextual()) {
+                unreadable = true;
+            } else if (!OK.equals(conclusion.asText())) {
+                return REASON_CARRIED_NOT_GREEN;
             }
         }
-        return !(body.path("carried_n").isNumber() && body.get("carried_n").asLong() > carried.size());
+        return unreadable || counted > carried.size() ? REASON_CARRY_FAILED : null;
     }
 
     /** The outcome from the body's {@code runs}, or null when none can be told. */

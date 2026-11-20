@@ -134,22 +134,43 @@ class DoneVerdictBranchOutcomeTest {
         return "{\"sha\":\"Y\",\"n\":1,\"carried\":" + list + extra + ",\"runs\":[[100,1,\"CI\",\"success\"]]}";
     }
 
-    @Test
-    void aCarriedListWithAnyNonPassingEntryLeavesAPerShaSuccessNoVerdict() {
-        for (String conclusion : new String[] {"\"failure\"", "\"cancelled\"", "\"timed_out\"", "\"stale\"", "null", "\"bogus\""}) {
-            String body = carried("[[\"Service CI\",7," + conclusion + ",\"X\"]]", "");
-            assertThat(verdictOf(body, "outcome", "success")).as(conclusion).isEmpty();
-            assertThat(DoneVerdict.resolve(row(body, "outcome", "success")).reason()).as(conclusion)
-                .isEqualTo(DoneVerdict.REASON_CARRY_FAILED);
-        }
-        assertThat(verdictOf(carried("[[\"Service CI\",7]]", ""), "outcome", "success")).as("a short entry").isEmpty();
-        assertThat(verdictOf(carried("[[\"A\",1,\"success\",\"X\"],[\"B\",2,\"failure\",\"X\"]]", ""), "outcome", "success"))
-            .as("one bad entry among good ones").isEmpty();
+    private static void assertNoVerdict(String body, String reason, String why) {
+        assertThat(verdictOf(body, "outcome", "success")).as(why).isEmpty();
+        assertThat(DoneVerdict.resolve(row(body, "outcome", "success")).reason()).as(why + " (reason)").isEqualTo(reason);
     }
 
     @Test
-    void aCarriedListOfPassingEntriesLeavesAPerShaSuccess() {
-        String body = carried("[[\"A\",1,\"success\",\"X\"],[\"B\",2,\"neutral\",\"X\"],[\"C\",3,\"skipped\",\"X\"]]", ",\"carried_n\":3");
+    void aCarriedEntryThatIsPresentButNotPassingLeavesAPerShaSuccessNoVerdictForCarriedNotGreen() {
+        for (String conclusion : new String[] {"\"failure\"", "\"cancelled\"", "\"timed_out\"", "\"stale\"", "\"bogus\""}) {
+            assertNoVerdict(carried("[[\"Service CI\",7," + conclusion + ",\"X\"]]", ""),
+                DoneVerdict.REASON_CARRIED_NOT_GREEN, conclusion);
+        }
+        assertNoVerdict(carried("[[\"A\",1,\"success\",\"X\"],[\"B\",2,\"failure\",\"X\"]]", ""),
+            DoneVerdict.REASON_CARRIED_NOT_GREEN, "one bad entry among good ones");
+    }
+
+    @Test
+    void aCarriedSkippedOrNeutralEntryIsNotPassingButThePerShaRunsKeepTheirSet() {
+        // a skipped latest Service CI run must not clear an earlier red: a carried entry passes only on success
+        assertNoVerdict(carried("[[\"Service CI\",7,\"skipped\",\"X\"]]", ""), DoneVerdict.REASON_CARRIED_NOT_GREEN, "carried skipped");
+        assertNoVerdict(carried("[[\"Service CI\",7,\"neutral\",\"X\"]]", ""), DoneVerdict.REASON_CARRIED_NOT_GREEN, "carried neutral");
+        String ownRuns = "{\"sha\":\"Y\",\"n\":2,\"runs\":[[100,1,\"CI\",\"skipped\"],[101,1,\"CI\",\"neutral\"]]}";
+        assertThat(outcomeOf(ownRuns)).as("the sha's own skipped and neutral runs still read success").isEqualTo("success");
+        assertThat(outcomeOf(ownRuns, "outcome", "success")).isEqualTo("success");
+    }
+
+    @Test
+    void anUnreadableCarriedEntryLeavesAPerShaSuccessNoVerdictForCarryFailed() {
+        assertNoVerdict(carried("[[\"Service CI\",7,null,\"X\"]]", ""), DoneVerdict.REASON_CARRY_FAILED, "null conclusion");
+        assertNoVerdict(carried("[[\"Service CI\",7]]", ""), DoneVerdict.REASON_CARRY_FAILED, "a short entry");
+        assertNoVerdict(carried("\"x\"", ""), DoneVerdict.REASON_CARRY_FAILED, "a carried that is not a list");
+        assertNoVerdict(carried("[[\"Service CI\",7,null,\"X\"],[\"B\",2,\"failure\",\"X\"]]", ""),
+            DoneVerdict.REASON_CARRIED_NOT_GREEN, "a visible red outranks an unreadable entry");
+    }
+
+    @Test
+    void aCarriedListOfSuccessEntriesLeavesAPerShaSuccess() {
+        String body = carried("[[\"A\",1,\"success\",\"X\"],[\"B\",2,\"success\",\"X\"],[\"C\",3,\"success\",\"X\"]]", ",\"carried_n\":3");
         assertThat(outcomeOf(body, "outcome", "success")).isEqualTo("success");
     }
 
@@ -159,6 +180,17 @@ class DoneVerdictBranchOutcomeTest {
         assertThat(verdictOf(carried(one, ",\"carried_n\":2"), "outcome", "success")).as("n 2, one listed").isEmpty();
         assertThat(outcomeOf(carried(one, ",\"carried_n\":1"), "outcome", "success")).as("n equals the list").isEqualTo("success");
         assertThat(verdictOf(carried("[]", ",\"carried_n\":1"), "outcome", "success")).as("everything trimmed").isEmpty();
+        assertNoVerdict(carried(one, ",\"carried_n\":2"), DoneVerdict.REASON_CARRY_FAILED, "trimmed");
+    }
+
+    @Test
+    void aCarriedNWithNoCarriedKeyCountsAnAbsentListAsEmpty() {
+        String runs = "\"runs\":[[100,1,\"CI\",\"success\"]]";
+        assertNoVerdict("{\"sha\":\"Y\",\"n\":1," + runs + ",\"carried_n\":1}", DoneVerdict.REASON_CARRY_FAILED, "carried_n 1, no list");
+        assertThat(outcomeOf("{\"sha\":\"Y\",\"n\":1," + runs + ",\"carried_n\":0}", "outcome", "success"))
+            .as("carried_n 0 and no list: nothing to carry").isEqualTo("success");
+        assertThat(outcomeOf("{\"sha\":\"Y\",\"n\":1," + runs + "}", "outcome", "success"))
+            .as("neither key: as before").isEqualTo("success");
     }
 
     @Test
@@ -199,6 +231,10 @@ class DoneVerdictBranchOutcomeTest {
         assertThat(DoneVerdict.resolve(row("{\"sha\":\"Y\"}")).reason()).isEqualTo(DoneVerdict.REASON_UNKNOWN);
         assertThat(DoneVerdict.resolve(row(ONE_GREEN_RUN, "outcome", "success")).reason()).as("a verdict has none").isNull();
         assertThat(DoneVerdict.resolve(row(ONE_GREEN_RUN, "outcome", "failure")).reason()).isNull();
+        // the strings an operator greps for
+        assertThat(java.util.List.of(DoneVerdict.REASON_CARRY_FAILED, DoneVerdict.REASON_CARRIED_NOT_GREEN,
+            DoneVerdict.REASON_CANCELLED, DoneVerdict.REASON_UNKNOWN))
+            .containsExactly("carry_failed", "carried_not_green", "cancelled", "unknown");
     }
 
     // ── what the stamper's decision does with it ─────────────────────────────
