@@ -2203,7 +2203,8 @@ class CatalogRepositoryTest {
      * the age. The opposite case, a slug registered first, is
      * {@code collectionForTuple_aLegacySlugOlderThanItsConformantSiblingNowWinsTheTie}. (Named
      * {@code conformantNameBeatsARepairedSlugAtEqualVersion} while the lower name decided; it
-     * passed under either order, which is why it carries the registration order now.)
+     * passes under either order, since the conformant row is both older and lower-named; the
+     * flip, tie and parity tests are what catch a revert to name order.)
      */
     @Test @Order(60)
     void collectionForTuple_aSlugRegisteredAfterTheConformantCollectionDoesNotWinAtEqualVersion() {
