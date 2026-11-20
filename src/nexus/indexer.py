@@ -533,7 +533,7 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     if cat is None:
         return _conformant_name_for_repo(repo, content_type)
     try:
-        return cat.collection_for_repo(repo, content_type).render()
+        return cat.collection_for_repo(repo, content_type).label
     except LookupError:
         # Owner not yet registered; fall through to the path-derived
         # synthesis below. This happens for callers that bypass the

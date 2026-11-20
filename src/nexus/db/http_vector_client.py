@@ -6942,6 +6942,28 @@ class HttpVectorClient:
             if close is not None:
                 close()
 
+    @staticmethod
+    def find_collection(content_type: str, owner_id: str, embedding_model: str) -> Any:
+        """The catalog row registered for ``(content_type, owner_id, embedding_model)``,
+        as :class:`~nexus.catalog.collection_attributes.CollectionAttributes`, or
+        ``None`` when no row backs the tuple (RDR-229 P2.8).
+
+        Read through the catalog reader, as :meth:`_catalog_chashes_for_title` is.
+        That reader is the process default, not one bound to this client's tenant,
+        so a caller that needs this store's collection checks the label against
+        this store before using it (:func:`nexus.corpus.t3_collection_name` does).
+        A failed read raises.
+        """
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+        reader = make_catalog_reader()
+        try:
+            return reader.find_collection(content_type, owner_id, embedding_model)  # type: ignore[union-attr]
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+
     def batch_delete(self, collection: str, ids: list[str]) -> int:
         """Delete *ids* from *collection* in service-quota-bounded batches.
 

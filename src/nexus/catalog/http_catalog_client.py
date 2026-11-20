@@ -97,6 +97,7 @@ from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler, version_from_for_tuple_row
+from nexus.catalog.collection_attributes import CollectionAttributes
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
@@ -3964,7 +3965,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         content_type: str,
         *,
         bump: bool = False,
-    ) -> CollectionName:
+    ) -> "CollectionAttributes":
+        """The collection *repo*'s *content_type* chunks go to, as its catalog row.
+
+        RDR-229 P2.8 (item 5): a registered tuple answers its row, so a repo
+        whose collection is registered under a legacy slug gets that label back
+        instead of the conformant name a render would produce. A new tuple, or
+        ``bump``, has no row for the name it needs, so it renders one (the mint
+        class; the engine mints labels from P3.8).
+        """
         # Mirrors canonical _DocumentOps.collection_for_repo:
         # look up the owner by repo_hash, then resolve the embedding model.
         from nexus.repo_identity import _repo_identity  # noqa: PLC0415 — circular-dep avoidance
@@ -3989,7 +3998,45 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 content_type, owner, token,
             ),
         )
-        return self.collection_for(content_type, owner, embedding_model, bump=bump)
+        if not bump:
+            row = self.find_collection(
+                content_type, owner_segment_for_tumbler(owner), embedding_model,
+            )
+            if row is not None:
+                return row
+        minted = self.collection_for(content_type, owner, embedding_model, bump=bump)
+        return CollectionAttributes.minted(
+            label=minted.render(), content_type=content_type, owner_id=minted.owner_id,
+            embedding_model=embedding_model, model_version=minted.model_version,
+        )
+
+    def find_collection(
+        self, content_type: str, owner_id: str, embedding_model: str,
+    ) -> "CollectionAttributes | None":
+        """The registered collection for ``(content_type, owner_id, embedding_model)``.
+
+        RDR-229 item 1, through ``GET /collections/for_tuple``. *owner_id* is the
+        row's owner segment (a knowledge collection's subject). ``None`` on a 404:
+        no row backs the tuple. Any other failure raises, so a caller never takes
+        an unreadable registry for an empty one and mints over it. A row for a
+        different tuple, or with a malformed version, raises ``ValueError``.
+        """
+        try:
+            row = self._get(
+                "/collections/for_tuple",
+                content_type=content_type,
+                owner_id=owner_id,
+                embedding_model=embedding_model,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        if not row:
+            return None
+        return CollectionAttributes.from_for_tuple(
+            row, content_type=content_type, owner_id=owner_id, embedding_model=embedding_model,
+        )
 
     def supersede_collection(
         self,
