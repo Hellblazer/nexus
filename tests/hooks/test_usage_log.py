@@ -45,7 +45,7 @@ def test_a_full_file_rotates_to_dot_one_and_the_new_line_is_recorded(tmp_path: P
 def test_a_file_at_its_cap_is_appended_not_rotated(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "logs").mkdir()
     path = tmp_path / "logs" / "brief.log"
-    path.write_text("x" * (usage_log.MAX_BYTES - 1) + "\n", encoding="utf-8")
+    path.write_bytes(b"x" * (usage_log.MAX_BYTES - 1) + b"\n")  # bytes: text mode on Windows would write \r\n, one byte over
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
     usage_log.append("brief_load", topic="caps")
     assert not path.with_name("brief.log.1").exists()
