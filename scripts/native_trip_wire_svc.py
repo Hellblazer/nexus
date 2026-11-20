@@ -15,8 +15,9 @@ the ``changes`` job, and the trip-wire's job-level ``if:`` skips the whole job o
    CI runs at a time and a newer push REPLACES a pending one, so the replaced run's commits sit in no later
    ``before..HEAD`` range; its trip-wire shows as cancelled or absent, the base reads uncovered, and this run builds.
    A ``skipped`` base is covered because its own decision required the same two proofs, back to a built commit:
-   the job's ``if:`` builds whenever the ``changes`` job did not succeed, so ``skipped`` comes only from this script
-   answering ``false``, never from a failed ``needs``. A base that also carries a failed run is uncovered.
+   the job's ``if:`` builds whenever the ``changes`` job did not succeed, so ``skipped`` comes from this script
+   answering ``false``, never from a failed ``needs`` (a run cancelled by hand can also leave it unbuilt; that run
+   shows cancelled, and it is the one accepted gap besides the residual below). A base that also carries a failed run is uncovered.
 
 An unusable base (all zeros, empty, not in the checkout), a failed check-run read, or a base whose run failed,
 timed out or was cancelled answers ``true``. One residual is accepted: a base whose run is still queued or running

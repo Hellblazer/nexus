@@ -41,7 +41,7 @@ TAG_TREE=$(cd ../nexus-wt/engine-cut-"$TAG_SHA" && pwd)
 
 The version is **tag-stamped** — there is NO manifest to bump (`release.properties` `release_version` is blank in source, stamped at native-build time from the tag; the Maven pom stays `1.0-SNAPSHOT`).
 
-Confirm the full Java suite (main and integration group) and the native build passed on the frozen `service/` tree. Service CI's `Java tests + jOOQ codegen drift guard` job runs both suites; when it concluded success on a commit whose `service/` tree equals `TAG_SHA`'s, that run is the gate and no chas suite runs (a second run of the same tree finds nothing the first did not). The job must have RUN: Service CI skips it when it decides `service/` did not change, and a skipped, cancelled or timed-out job covers nothing. The native build is CI's `engine-service native build (PR trip-wire)` check concluded `success` (not `skipped`: since suite audit item 8 the trip-wire skips a push that changes none of its inputs, and a skipped check builds nothing) on a commit whose `service/` tree, `.github/workflows/ci.yml` and `.github/actions/maven-cache/` equal `TAG_SHA`'s, or the Step 3f dispatch run, which builds every native platform.
+Confirm the full Java suite (main and integration group) and the native build passed on the frozen `service/` tree. Service CI's `Java tests + jOOQ codegen drift guard` job runs both suites; when it concluded success on a commit whose `service/` tree equals `TAG_SHA`'s, that run is the gate and no chas suite runs (a second run of the same tree finds nothing the first did not). The job must have RUN: Service CI skips it when it decides `service/` did not change, and a skipped, cancelled or timed-out job covers nothing. The native build is CI's `engine-service native build (PR trip-wire)` check concluded `success` (not `skipped`: since suite audit item 8 the trip-wire skips a push that changes none of its inputs, and a skipped check builds nothing) on a commit whose `service/` tree, `.github/workflows/ci.yml`, `.github/actions/maven-cache/` and `scripts/check_native_embedded_resources.py` equal `TAG_SHA`'s (the trip-wire's inputs, `scripts/native_trip_wire_svc.py`), or the Step 3f dispatch run, which builds every native platform.
 
 ```bash
 # the run that covers the frozen tree: Java tests job concluded success, not skipped
@@ -49,7 +49,7 @@ git diff --stat <service-ci-sha> "$TAG_SHA" -- service/    # empty = same engine
 gh api "repos/Hellblazer/nexus/commits/<service-ci-sha>/check-runs" \
   -q '.check_runs[] | select(.name=="Java tests + jOOQ codegen drift guard") | .conclusion'   # success
 # the native build of that tree: the trip-wire concluded success, not skipped (find the commit that built it)
-git diff --stat <trip-wire-sha> "$TAG_SHA" -- service/ .github/workflows/ci.yml .github/actions/maven-cache/   # empty
+git diff --stat <trip-wire-sha> "$TAG_SHA" -- service/ .github/workflows/ci.yml .github/actions/maven-cache/ scripts/check_native_embedded_resources.py   # empty
 gh api "repos/Hellblazer/nexus/commits/<trip-wire-sha>/check-runs" \
   -q '.check_runs[] | select(.name=="engine-service native build (PR trip-wire)") | .conclusion'   # success
 # only when no such run exists: one chas run of both suites on TAG_TREE (needs Docker for Testcontainers)
