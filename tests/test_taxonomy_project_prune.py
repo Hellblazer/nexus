@@ -17,13 +17,15 @@ def _wire(
     *, rows: dict[str, str] | None = None, distinct: list[str] | None = None,
     unreadable: bool = False, exact: bool = False, exact_log: list[bool] | None = None,
     unreadable_names: tuple[str, ...] = (), projection_counts: dict[str, int] | None = None,
-    probe: bool = True,
+    probe: bool = True, echo: str | None = "auto",
 ) -> None:
     """*rows* maps collection name -> catalog content_type (the live listing).
     *unreadable* makes the listing and every row read raise, as an outage does;
     *unreadable_names* makes the row read raise for those names only.
     *projection_counts* is what the store answers for the distinct ``source_collection``
-    values of the projection rows.
+    values of the projection rows. *echo* is the ``match`` the engine's reply carries:
+    ``"auto"`` echoes the mode asked for (a current engine), ``None`` is a reply with no
+    ``match`` key (an engine without the echo), any other string is sent as is.
     *exact* is what the engine's exact-name prune capability probe answers; *exact_log*
     collects the ``exact`` flag of each prune call."""
     rows = rows or {}
@@ -41,7 +43,8 @@ def _wire(
             pruned.append((prefix, round(thr, 2)))
             if exact_log is not None:
                 exact_log.append(exact)
-            return removed
+            mode = ("exact" if exact else "prefix") if echo == "auto" else echo
+            return removed, mode
 
     class _Db:
         taxonomy = _Taxonomy()
@@ -333,6 +336,46 @@ def test_prune_sends_exact_and_drops_the_collision_guard_when_the_engine_support
     assert pruned == [("code__1-1__m__v1", 0.7), ("code__1-1__m__v10", 0.5)], "each at its OWN threshold"
     assert exact_log == [True, True]
     assert "skipped" not in result.output
+
+
+@pytest.mark.parametrize("echo", [None, "prefix"], ids=["no-echo", "echoed-prefix"])
+def test_prune_stops_at_once_when_the_engine_did_not_apply_exact_matching(monkeypatch, echo) -> None:
+    """The /version flag and the prune can disagree (a rollback inside the flag cache, two instances): a
+    reply whose ``match`` is not ``exact`` ends the sweep after the FIRST prune, exits non-zero, and says so."""
+    pruned: list[tuple[str, float]] = []
+    exact_log: list[bool] = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact=True, exact_log=exact_log, echo=echo,
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "docs__z": "docs"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert len(pruned) == 1, "never continue exact-planned prunes on an engine that did not echo exact"
+    assert exact_log == [True]
+    assert "the engine did not apply exact matching; no further collections pruned" in result.output
+    assert "rerun without exact or after the engine is current" in result.output
+    assert pruned[0][0] in result.output, "names the collection that already ran in the engine's own mode"
+    assert result.exit_code != 0
+
+
+def test_prune_continues_when_the_engine_echoes_exact(monkeypatch) -> None:
+    pruned: list[tuple[str, float]] = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact=True, echo="exact",
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "docs__z": "docs"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert len(pruned) == 3
+    assert "did not apply" not in result.output
+
+
+def test_prune_without_exact_does_not_read_the_echo(monkeypatch) -> None:
+    """In the prefix mode an engine that predates the echo returns no ``match``: that is the normal case."""
+    pruned: list[tuple[str, float]] = []
+    _wire(monkeypatch, pruned, removed=1, exact=False, echo=None, rows={"code__a": "code", "docs__z": "docs"})
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert len(pruned) == 2
 
 
 def test_prune_single_collection_sends_exact_when_the_engine_supports_it(monkeypatch) -> None:
