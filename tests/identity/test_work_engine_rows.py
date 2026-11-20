@@ -264,8 +264,9 @@ def row_identity_scratch_follows_an_in_place_restart_to_the_new_generations_toke
     """nexus-hczdo: an MCP server outlives an in-place ``/restart``. The restart keeps the Claude pid and gives the
     registry file a new ``startedAt``, so the generation-2 token lives in ``<pid>.<new startedAt>.token`` while the
     server's earlier calls had named ``<pid>.<old startedAt>.token``. The server's identity-scope put and list must
-    send generation 2's token, not the still-unexpired generation-1 file's (a 401 on ``/v1/t1/*``, scope=session
-    working all the while). Discovery is the real one (the registry names the file), not the ``_discover`` seam."""
+    send generation 2's token, not the still-unexpired generation-1 file's: the engine answers the old token's write
+    ``409 generation_superseded`` (a read passes, a token that resolves is never a 401). Discovery is the real one (the
+    registry names the file), not the ``_discover`` seam."""
     from nexus.identity import holder
 
     world.now = time.time()

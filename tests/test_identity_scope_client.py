@@ -40,6 +40,7 @@ def holds(monkeypatch: pytest.MonkeyPatch, identity: str | None) -> None:
     from nexus.identity import token_header
 
     monkeypatch.setattr(token_header, "current", lambda **k: None if identity is None else SimpleNamespace(identity=identity))
+    monkeypatch.setattr(token_header, "has_claude_ancestor", lambda: False)    # no ancestor: the message names no identity, wherever this runs
 
 
 # ── whose scope ─────────────────────────────────────────────────────────────
