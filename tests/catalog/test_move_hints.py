@@ -124,6 +124,21 @@ def test_query_timeout_is_logged_and_dropped(new_pdf):
     assert budget.spent() is False and budget.spent() is True
 
 
+def test_rename_loop_stops_asking_once_the_budget_is_spent():
+    page = [_entry("1.2.1", meta={"content_hash": "h1"}), _entry("1.2.2", meta={"content_hash": "h2"})]
+    asked: list[str] = []
+
+    class _OneHit(_Reader):
+        def documents_by_meta(self, **kwargs):
+            asked.append(kwargs["meta"][0][1])
+            return [_entry("1.7.1", "/gone")], 1
+
+    spent_after_one = iter([False, True, True])
+    stop = SimpleNamespace(spent=lambda: next(spent_after_one))
+    assert hints.rename_hint_lines(_OneHit(), "1.2", "/new", page, ["1.7"], stop) == []
+    assert asked == ["h1"], "the second hash was never asked, and the hint dropped what it had not finished"
+
+
 def test_probe_that_raises_reads_as_no_support():
     class _Bad:
         def supports_catalog_move(self):

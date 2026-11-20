@@ -2696,6 +2696,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", owner=str(_nonblank("by_owner", "owner", owner))))
 
+    def owner_documents_page(self, owner: Tumbler | str, limit: int) -> list[CatalogEntry]:
+        """The first *limit* live documents of *owner* in tumbler order: ONE ``/list`` page (RDR-254 move hints)."""
+        return self._docs_from(self._get("/list", owner=str(_nonblank("owner_documents_page", "owner", owner)), limit=limit))
+
     def by_content_type(self, content_type: str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", content_type=_nonblank("by_content_type", "content_type", content_type)))
 

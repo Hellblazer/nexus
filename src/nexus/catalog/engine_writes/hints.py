@@ -29,6 +29,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
+from posixpath import isabs, normpath
 from typing import Any, TypeVar
 
 import structlog
@@ -37,6 +38,14 @@ _log = structlog.get_logger(__name__)
 
 _T = TypeVar("_T")
 
+#: The documents of an owner a hint reads: the engine's own default page of ``GET /list``. The census flag and the
+#: renamed-repository sample both come from this one page and never read a second one.
+OWNER_FIRST_PAGE: int = 200
+#: How many of the new owner's documents (in tumbler order, those that carry ``meta.content_hash``) the
+#: renamed-repository hint asks the metadata route about. A starting value to tune on a real renamed repository.
+RENAME_SAMPLE: int = 20
+#: A vanished owner matches when at least this fraction of the sampled hashes also have a live row under it.
+RENAME_MATCH_FRACTION: float = 0.5
 #: One hint's whole query budget, in seconds. A hint that spends it stops asking and drops what it has not read.
 HINT_BUDGET_S: float = 30.0
 #: The placeholder a census row prints where the new root is not known.
@@ -229,3 +238,120 @@ def record_curator_hint(doc_id: str, content_hash: str, *, reader: Any = None) -
 
     for line in fail_open("curator", _lines, default=[]):
         collector.add(line)
+
+
+# ── repository hints (Gaps 2 and 3) and the census flag ─────────────────────────────────────────────────────────
+
+
+def is_root_derived(source_uri: str, file_path: str) -> bool:
+    """A repo file's row: a ``file://`` URI that ends in ``/<file_path>`` with a relative ``file_path`` (the rule the
+    engine's owner move uses to decide which rows it rewrites)."""
+    if not file_path or not source_uri.startswith("file://") or isabs(file_path):
+        return False
+    norm = normpath(file_path)
+    return norm != "." and not norm.startswith("..") and source_uri.endswith("/" + norm)
+
+
+def count_docs_outside_root(docs: Iterable[Any], repo_root: str) -> int:
+    """How many of *docs* are root-derived and do not start with ``file://<repo_root>/``."""
+    prefix = f"file://{repo_root.rstrip('/')}/"
+    return sum(
+        1 for d in docs
+        if is_root_derived(d.source_uri or "", d.file_path or "") and not (d.source_uri or "").startswith(prefix)
+    )
+
+
+def first_page(reader: Any, owner_prefix: str) -> list[Any]:
+    """The first :data:`OWNER_FIRST_PAGE` live documents of an owner, in tumbler order. One request; never a second."""
+    return list(reader.owner_documents_page(owner_prefix, OWNER_FIRST_PAGE))
+
+
+def docs_outside_root_flag(reader: Any, owner_prefix: str, repo_root: str) -> bool | None:
+    """The census flag of one owner: ``True`` when its first page holds a root-derived row outside ``repo_root``,
+    ``False`` when not, ``None`` when the page could not be read (fail-open: no flag, no line)."""
+    page = fail_open("outside-root", first_page, reader, owner_prefix, default=None)
+    if page is None or not repo_root:
+        return None
+    return count_docs_outside_root(page, repo_root) > 0
+
+
+def rename_hint_lines(reader: Any, new_owner: str, new_root: str, page: list[Any],
+                      vanished: list[str], budget: Budget) -> list[str]:
+    """Owner-move lines for the vanished owners (prefixes in *vanished*) whose documents match those of *new_owner*.
+
+    Takes the first :data:`RENAME_SAMPLE` documents of *page* that carry ``meta.content_hash``, asks the metadata route
+    once per hash, and groups the hits by owner prefix. A vanished owner that has a live row for at least
+    :data:`RENAME_MATCH_FRACTION` of the sampled hashes gets a line, highest match count first (ties in prefix order).
+    Rows without a hash are not counted; no sampled hash means no line. May raise: callers wrap it in
+    :func:`fail_open`."""
+    hashes: list[str] = []
+    for d in page:
+        h = (getattr(d, "meta", None) or {}).get("content_hash")
+        if isinstance(h, str) and h and h not in hashes:
+            hashes.append(h)
+        if len(hashes) >= RENAME_SAMPLE:
+            break
+    if not hashes or not vanished:
+        return []
+    wanted = set(vanished)
+    hits: dict[str, int] = {}
+    for h in hashes:
+        if budget.spent():
+            _log.warning("move_hints.budget_spent", hint="rename", asked=len(hashes))
+            return []
+        rows, _count = reader.documents_by_meta(meta=[("content_hash", h)], limit=1000)
+        owners = {_owner_prefix(r.tumbler) for r in rows if not r.alias_of}
+        for prefix in owners & wanted:
+            hits[prefix] = hits.get(prefix, 0) + 1
+    need = len(hashes) * RENAME_MATCH_FRACTION
+    ranked = sorted(((n, p) for p, n in hits.items() if n >= need), key=lambda t: (-t[0], t[1]))
+    return [owner_move_line(p, new_root) for _n, p in ranked]
+
+
+def vanished_owner_prefixes(reader: Any, *, exclude: str = "") -> list[str]:
+    """Prefixes of the active repo owners whose recorded root is gone on this machine (``path_vanished``)."""
+    from nexus.commands.catalog_cmds.owners import _classify_owner_root  # noqa: PLC0415 — deferred: the command module is heavy
+
+    out: list[str] = []
+    for o in reader.list_owners_by_type("repo"):
+        prefix, root = str(o.get("tumbler_prefix") or ""), o.get("repo_root") or ""
+        if prefix and prefix != exclude and root and not o.get("deactivated_at") and _classify_owner_root(root) == "path_vanished":
+            out.append(prefix)
+    return out
+
+
+def repo_hints(repo: Path, *, reader: Any = None) -> list[str]:
+    """The hint lines for the end of ``nx index repo`` of *repo*: the documents-outside-root line for the repository's
+    owner, then a renamed-repository line for each vanished owner whose documents match. Reads durable catalog state, so
+    it repeats on every run until the move is made. Each hint sits in its own :func:`fail_open`, so one that cannot be
+    read drops alone; the function returns ``[]`` when the owner itself cannot be found."""
+
+    def _owner() -> tuple[Any, str, str, list[Any]] | None:
+        r = _reader(reader)
+        if not engine_supports_moves(r):
+            return None
+        from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — deferred: the identity helpers run a subprocess
+
+        _name, repo_hash, _main = _repo_identity_with_main(repo)
+        owner = r.owner_for_repo(repo_hash)
+        if owner is None:
+            return None
+        prefix = str(owner)
+        root = (r.get_owner_by_prefix(prefix) or {}).get("repo_root") or ""
+        if not root:
+            return None
+        return r, prefix, root, first_page(r, prefix)
+
+    found = fail_open("repo-owner", _owner, default=None)
+    if found is None:
+        return []
+    r, prefix, root, page = found
+    lines: list[str] = []
+    if count_docs_outside_root(page, root) > 0:
+        lines.append(owner_move_line(prefix, root))
+
+    def _renamed() -> list[str]:
+        vanished = vanished_owner_prefixes(r, exclude=prefix)
+        return rename_hint_lines(r, prefix, root, page, vanished, Budget()) if vanished else []
+
+    return lines + fail_open("rename", _renamed, default=[])

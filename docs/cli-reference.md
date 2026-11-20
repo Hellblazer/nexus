@@ -1719,6 +1719,13 @@ Index runs print one line naming the move command when the catalog shows the sig
 
 A document indexed by a client older than v7.95.0 (before 2026-11-03) and not indexed since carries no `meta.content_hash`, so the hint cannot see it. Before a planned move of such a file, run `nx index pdf --force` (or `md`) on it once; the hint then works. For a file that already moved, the old row can no longer be stamped: find its tumbler with `nx catalog search '<file name>'` (`nx search` prints paths, not tumblers) and run the document move by hand. Every single-file writer stamps the hash, including a document large enough for the batched writer; only the repository indexers' oversize writer does not, and it never writes a curator document.
 
+**A moved repository (`nx index repo`).** Two hints read the catalog's durable state at the end of every `nx index repo`, just before `Done.`, so each repeats on every run until the move is made or the old owner is deactivated, and neither depends on catching the moment of registration.
+
+- *Documents outside their root.* The run reads the first page (200) of the repository owner's documents and counts the ones whose `source_uri` is root-derived (a `file://` URI that ends in its relative `file_path`) and does not start with `file://<repo root>/`. When any do, it prints `nx catalog owners --execute move --owner <prefix> --new-root <repo root>`. This is the same-name move after registration re-rooted the owner row and left its documents naming the old root.
+- *Renamed repository.* When another repo owner's recorded root is gone on this machine (`path_vanished`, active owners only), the run takes the repository's first 20 documents (in tumbler order, from that same first page) that carry `meta.content_hash`, asks the metadata route once per hash, and counts, per vanished owner, the hashes that also sit on a live row under it. An owner that matches at least half prints `nx catalog owners --execute move --owner <old prefix> --new-root <repo root>`; when several qualify each prints, the highest match count first. A document with no `meta.content_hash` is not counted, and a repository with none prints nothing. The 20 and the half are starting values, tuned on a real renamed repository.
+
+Each repository hint is read independently: one that cannot be read is dropped alone.
+
 ### nx catalog backfill-owner-id (removed)
 
 Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote

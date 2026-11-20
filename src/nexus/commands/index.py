@@ -13,7 +13,11 @@ import click
 import structlog
 from tqdm import tqdm
 
-from nexus.catalog.engine_writes.hints import prints_hints as _prints_hints  # RDR-254: move hints printed after the run
+from nexus.catalog.engine_writes.hints import (  # RDR-254: move hints, printed after the run's own output
+    echo_hints as _echo_hints,
+    prints_hints as _prints_hints,
+    repo_hints as _repo_hints,
+)
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
@@ -1877,6 +1881,8 @@ def index_repo_cmd(
         # Retry summary now emitted from the `finally` block around
         # index_repository (see `emit_retry_summary`) so it fires on both
         # success and exception paths — Reviewer A/I-2.
+        if not frecency_only:
+            _echo_hints(_repo_hints(path))  # RDR-254 Gaps 2 and 3: read-only, fail-open, repeats until the move is made
         click.echo("Done.")
 
         # nexus-tp8yk D2b: a manifest write failure / identity drop /
