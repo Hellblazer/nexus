@@ -2241,8 +2241,11 @@ class CatalogRepositoryTest {
     /**
      * nexus-p2m1x.4, the RDR's third assertion: a tuple holding a conformant collection, a repaired
      * legacy slug and a {@code legacy_grandfathered} row resolves to the same collection before P1.4,
-     * after it, and after D5 drops the {@code legacy_grandfathered = false} filter (P3.8 re-runs this
-     * test with that predicate gone; keep it in the suite). The conformant row is the lexically lowest
+     * after it, and after D5 drops the {@code legacy_grandfathered = false} filter. The filter drop
+     * moved into engine 0.1.200 (RDR-229 P2.8, nexus-p2m1x.13; lead ruling 2026-11-20), so this test
+     * runs with that predicate gone, and
+     * {@link #collectionForTuple_aGrandfatheredRowIsACandidateOfItsTuple} proves the grandfathered
+     * row is now a candidate rather than still filtered out. The conformant row is the lexically lowest
      * name AND the first registered, and the grandfathered row sorts above it and was registered last,
      * so the winner does not move whether the tie runs by name (today) or by registration time (the
      * census-gated switch, Sam 2026-11-20): the one the filter drop must not change.
@@ -2262,6 +2265,42 @@ class CatalogRepositoryTest {
 
         assertThat(repo.collectionForTuple(tenant, "code", "1-42", OWN_MODEL).get("name"))
             .as("the conformant collection wins with both siblings present").isEqualTo(conformant);
+    }
+
+    /**
+     * nexus-p2m1x.13 (engine 0.1.200): the {@code legacy_grandfathered = false} predicate is gone from
+     * {@code collectionForTuple}, so a flagged row is a candidate like any other. Ordering is unchanged
+     * (highest {@code model_version}, then the first registered, P1.4): a grandfathered row alone on its
+     * tuple wins it, one at a higher version beats a conformant row at a lower one, and at equal
+     * version the conformant row, registered first here, still wins. Before the drop the first two cases answered null and
+     * the conformant row respectively.
+     */
+    @Test @Order(59)
+    void collectionForTuple_aGrandfatheredRowIsACandidateOfItsTuple() {
+        String tenant = "p2m1x13-gf-tenant";
+        String alone = "notes-from-2024";
+        registerCollAt(tenant, alone, "field-notes-gf", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", true);
+        assertThat(repo.getCollection(tenant, alone).get("legacy_grandfathered"))
+            .as("guard: the row is flagged").isEqualTo(true);
+        assertThat(repo.collectionForTuple(tenant, "code", "field-notes-gf", OWN_MODEL))
+            .as("a grandfathered row alone on its tuple answers it").isNotNull();
+        assertThat(repo.collectionForTuple(tenant, "code", "field-notes-gf", OWN_MODEL).get("name"))
+            .isEqualTo(alone);
+
+        String conformant = "code__1-43__voyage-code-3__v1";
+        registerCollAt(tenant, conformant, "1-43", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, "code__zgrand-p2m1x13__voyage-code-3__v2", "1-43", OWN_MODEL, "v2",
+            "2026-02-01T00:00:00Z", true);
+        assertThat(repo.collectionForTuple(tenant, "code", "1-43", OWN_MODEL).get("name"))
+            .as("version dominates: a grandfathered v2 beats a conformant v1")
+            .isEqualTo("code__zgrand-p2m1x13__voyage-code-3__v2");
+
+        String conformantTie = "code__1-44__voyage-code-3__v1";
+        registerCollAt(tenant, conformantTie, "1-44", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, "code__zgrand-p2m1x13b__voyage-code-3__v1", "1-44", OWN_MODEL, "v1",
+            "2026-02-01T00:00:00Z", true);
+        assertThat(repo.collectionForTuple(tenant, "code", "1-44", OWN_MODEL).get("name"))
+            .as("equal version: the conformant name still wins the tie").isEqualTo(conformantTie);
     }
 
     /**
