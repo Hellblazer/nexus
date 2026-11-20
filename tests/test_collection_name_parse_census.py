@@ -185,10 +185,10 @@ TWO already-live callers in ``catalog/chunk_quarantine.py`` (one
 pre-existing, in ``quarantine_collection_name``; one new, in this same
 bead's C1 fix, ``quarantine_registration_kwargs``) that the old
 two-name hardcoded set could never have seen. ``is_conformant_
-collection_name``/``parse_conformant_collection_name`` were considered
-and deliberately excluded -- see ``_CANDIDATE_STRING_PRIMITIVES``'s own
-docstring in corpus.py for why they are the sanctioned public API, not
-a drift risk the way the three primitives are. Attribute-form calls
+collection_name``/``parse_conformant_collection_name`` were left out of
+that tuple then; since RDR-229 P1.1 they are counted, as parser roots of the
+derived helper set (see the P1.1 paragraph below), and the three primitives
+are the non-vacuity floor of that set. Attribute-form calls
 (``corpus.split_candidate_collection_name(x)``) are now ALSO matched,
 not just bare-name imports -- the boundary
 ``test_scanner_is_not_vacuous`` used to pin as "must NOT match" is now
@@ -251,7 +251,7 @@ than dropped" discipline of the private-handle census this gate is modelled
 on (``tests/test_private_handle_access_census.py``).
 
 RDR-229 P1.1 (2026-11-20, nexus-p2m1x.1) WIDENED THE CENSUS and re-pinned it
-at the measured count: 46 -> 235. The five classes above kept their names;
+at the measured count: 46 -> 243. The five classes above kept their names;
 the scanner (now ``tests/_collection_name_census_scan.py``) gained seven shapes
 (``fstring_prefix``, ``const_prefix``, ``loop_prefix``, ``substring``,
 ``glob_default``, ``sql_prefix``, ``fnmatch``) and its fifth class now covers
@@ -265,11 +265,20 @@ classifier) or one of the two non-parse fnmatch labels (label pattern, file
 path) or an explicit holdover with a note naming the step that moves it, and
 a live site with no entry is refused, naming file, line and shape. The pin is
 the measured total, per class and per shape; the per-file table below is
-derived from the ledger. 189 sites are new: 130 more calls to derived
-helpers, and 59 of the raw and routing shapes (the routing census scans 60 on
+derived from the ledger. 197 sites are new: 130 more calls to derived
+helpers, and 67 of the raw and routing shapes (the routing census scans 60 on
 this tree, 59 when T2 ``229-research-39`` measured it, less the two it shares
-with the 46, plus ``repo_identity``'s ``__owner__`` substring test). The 46
-are all still there. ``scripts/`` (10 raw sites, T2 ``229-research-21``) stays outside
+with the 46, plus the sites its method does not look for). The 46 are all
+still there. Review round 1 (2026-11-20) added the shapes the first pass
+left out: concatenated and formatted prefixes, locals bound by AnnAssign,
+walrus, tuple-unpack and prefix literals, computed prefix constants,
+``removeprefix``/``removesuffix``/``replace``, ``find``/``index``/``count``,
+``sep="__"`` and a named ``"__"``, ``endswith("__")`` and the hash-suffix leg,
+and it made exclusions shape-specific. The 22 holdovers that first said
+"needs an owner" are RDR-204 class (b) model reads, owned by P2.2 (baton's
+ruling, nexus-p2m1x.7); three that only print a model beside the row's own
+value are diagnostic, and two that already read the row first are mint (the
+NoRow outcome). ``scripts/`` (10 raw sites, T2 ``229-research-21``) stays outside
 ``SRC`` and so outside this gate. Phase 2 lowers the pins by deleting ledger
 entries.
 
@@ -317,44 +326,33 @@ for _site in LEDGER:
     )
 
 #: THE PIN (RDR-229 P1.1, 2026-11-20, measured on develop 970f73223):
-#: 235 sites, by class and by shape. Phase 2 lowers these by deleting ledger
+#: 243 sites, by class and by shape. Phase 2 lowers these by deleting ledger
 #: entries; nothing here may rise without a ledger entry and a reason.
-PARSE_SITE_PIN: int = 235
+PARSE_SITE_PIN: int = 243
 CLASS_PIN: dict[str, int] = {
-    "mint": 101, "holdover": 42, "routing": 36, "diagnostic": 26,
+    "mint": 107, "holdover": 39, "routing": 36, "diagnostic": 31,
     "migration-source": 14, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
     "primitive_call": 171, "const_prefix": 31, "fnmatch": 14,
-    "loop_prefix": 7, "startswith": 4, "split": 2, "fstring_prefix": 2,
-    "in": 1, "glob_default": 1, "sql_prefix": 1, "substring": 1,
+    "loop_prefix": 7, "strip_prefix": 4, "startswith": 4, "split": 2,
+    "fstring_prefix": 2, "hash_suffix": 2, "in": 1, "glob_default": 1,
+    "sql_prefix": 1, "concat_prefix": 1, "endswith": 1, "substring": 1,
 }
 
-#: The candidate-string PRIMITIVES the funnel helpers themselves are
-#: allowed to use (RDR-204 Phase 3 repoint, nexus-ft04v.26 THE REPOINT --
-#: coordinator ruling 2026-09-09). A caller reaching for one of these
-#: OUTSIDE corpus.py's own helper bodies is doing the same name-derives-
-#: a-fact parsing the original four classes exist to catch, just
-#: relocated behind a function call instead of a raw split/partition --
-#: "parsing that moves into one helper with N callers while the gate
-#: reads zero" is the exact failure this fifth class exists to close.
-#: corpus.py's OWN internal use (each primitive's own definition, and
-#: the other funnel helpers' calls into them) is excluded -- see
-#: ``_raw_collection_name_parse_sites``.
-#:
-#: SINGLE-SOURCED in ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES``
-#: (RDR-204 Phase 3 fix round, nexus-ft04v.28 item 6) rather than
-#: hand-duplicated as a literal here: a hardcoded copy in THIS file,
-#: ~400 lines from any of the three definitions, is exactly "a renamed
-#: parsing primitive evades it" -- nothing forces this list to track a
-#: rename. Importing the source-of-truth tuple means a rename that
-#: forgets to update it is caught by
-#: ``test_candidate_string_primitives_all_resolve_to_real_functions``
-#: below, loud, rather than silently under-counting forever. See that
-#: constant's own docstring in corpus.py for why
-#: ``is_conformant_collection_name``/``parse_conformant_collection_name``
-#: are deliberately NOT primitives here despite also being regex-based.
+#: The three candidate-string PRIMITIVES (RDR-204 Phase 3 repoint,
+#: nexus-ft04v.26; single-sourced in ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES``
+#: by nexus-ft04v.28 item 6). Since RDR-229 P1.1 they are the NON-VACUITY FLOOR
+#: of the census's derived helper set, not its definition: the counted helpers
+#: are derived from corpus.py's call graph (``_scan.derive_parser_helpers``),
+#: and ``test_derived_helper_set_is_non_empty_and_holds_the_current_primitives``
+#: asserts the derived set contains these three, so a rename that drops one
+#: from the derivation fails loud. A call to any derived helper outside
+#: corpus.py is a ``primitive_call`` site; corpus.py's own helper-to-helper
+#: calls are not counted (coordinator ruling 2026-09-09). The tuple is
+#: imported, not retyped, so a rename that forgets it is caught by
+#: ``test_candidate_string_primitives_all_resolve_to_real_functions`` below.
 from nexus.corpus import _CANDIDATE_STRING_PRIMITIVES  # noqa: E402 — import after the module docstring/constants above it, matching this file's existing style
 
 def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
@@ -391,20 +389,37 @@ def _raw_collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
     return _scan.raw_sites()
 
 
-def _resolve_excluded_sites() -> tuple[dict[str, dict[int, tuple[str, ...]]], list[str]]:
+def _resolve_excluded_sites() -> tuple[dict[str, dict[tuple[int, str], tuple[str, ...]]], list[str]]:
     """Resolve every ``_EXCLUDED_SITES`` content anchor to its CURRENT
     live line number (nexus-vkpr3). Returns ``(by_file, problems)``:
-    ``by_file`` maps path -> {resolved lineno: content anchor}; a
+    ``by_file`` maps path -> {(resolved lineno, shape): content anchor}; an
+    exclusion removes only the shape it names (RDR-229 P1.1 review), so a
+    different shape on the same line stays a hit. A
     ``problems`` entry (STALE or AMBIGUOUS) means the anchor did not
     resolve at all -- callers must not silently treat that as "nothing
     to exclude here", `test_excluded_sites_are_real_matches_not_omissions`
     fails loud on any non-empty `problems`."""
-    items = [(rel, content, content) for (rel, content) in _EXCLUDED_SITES]
+    items = [
+        (rel, content, (content, shape))
+        for (rel, content, shape) in _EXCLUDED_SITES
+    ]
     resolved, problems = resolve_ledger(REPO_ROOT, items)
-    by_file: dict[str, dict[int, tuple[str, ...]]] = {}
-    for rel, lineno, content in resolved:
-        by_file.setdefault(rel, {})[lineno] = content
+    by_file: dict[str, dict[tuple[int, str], tuple[str, ...]]] = {}
+    for rel, lineno, (content, shape) in resolved:
+        by_file.setdefault(rel, {})[(lineno, shape)] = content
     return by_file, problems
+
+
+def _without_excluded(
+    raw: dict[str, list[tuple[int, str]]],
+    excluded: dict[str, dict[tuple[int, str], tuple[str, ...]]],
+) -> dict[str, list[tuple[int, str]]]:
+    result: dict[str, list[tuple[int, str]]] = {}
+    for rel, hits in raw.items():
+        kept = [(ln, sh) for ln, sh in hits if (ln, sh) not in excluded.get(rel, {})]
+        if kept:
+            result[rel] = kept
+    return result
 
 
 def _collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
@@ -414,13 +429,7 @@ def _collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
     `test_excluded_sites_are_real_matches_not_omissions` is what makes a
     resolution failure loud in its own right."""
     excluded_by_file, _problems = _resolve_excluded_sites()
-    result: dict[str, list[tuple[int, str]]] = {}
-    for rel, hits in _raw_collection_name_parse_sites().items():
-        excluded_linenos = set(excluded_by_file.get(rel, {}))
-        kept = [(lineno, cls) for lineno, cls in hits if lineno not in excluded_linenos]
-        if kept:
-            result[rel] = kept
-    return result
+    return _without_excluded(_raw_collection_name_parse_sites(), excluded_by_file)
 
 
 def _grown(live: dict[str, int], census: dict[str, int]) -> list[str]:
@@ -508,10 +517,10 @@ def test_excluded_sites_are_real_matches_not_omissions() -> None:
     )
     raw = _raw_collection_name_parse_sites()
     missing = [
-        f"{rel}:{lineno} (anchor {content!r})"
-        for rel, linenos in by_file.items()
-        for lineno, content in linenos.items()
-        if lineno not in {ln for ln, _cls in raw.get(rel, [])}
+        f"{rel}:{lineno} shape={shape} (anchor {content!r})"
+        for rel, keyed in by_file.items()
+        for (lineno, shape), content in keyed.items()
+        if (lineno, shape) not in set(raw.get(rel, []))
     ]
     assert not missing, (
         f"declared exclusion(s) resolve to a live line the raw scan no "
@@ -526,10 +535,10 @@ def test_excluded_sites_do_not_reach_the_pin() -> None:
     live = _collection_name_parse_sites()
     by_file, _problems = _resolve_excluded_sites()
     leaked = [
-        f"{rel}:{lineno}"
-        for rel, linenos in by_file.items()
-        for lineno in linenos
-        if lineno in {ln for ln, _cls in live.get(rel, [])}
+        f"{rel}:{lineno} shape={shape}"
+        for rel, keyed in by_file.items()
+        for (lineno, shape) in keyed
+        if (lineno, shape) in set(live.get(rel, []))
     ]
     assert not leaked, f"excluded site(s) still counted toward the pin: {leaked}"
 
@@ -641,10 +650,7 @@ def _live_and_ledger() -> tuple[
     """The live widened scan (exclusions applied) and the ledger resolved to
     current lines. An unresolved anchor fails ``test_ledger_anchors_resolve``."""
     excluded, _problems = _resolve_excluded_sites()
-    raw = {
-        rel: [(ln, sh) for ln, sh in hits if ln not in excluded.get(rel, {})]
-        for rel, hits in _raw_collection_name_parse_sites().items()
-    }
+    raw = _without_excluded(_raw_collection_name_parse_sites(), excluded)
     resolved, _problems = _scan.resolve_sites(REPO_ROOT, list(LEDGER))
     return _scan.live_counter(raw), resolved
 
@@ -740,13 +746,13 @@ def test_pin_matches_documented_total() -> None:
     two parse helpers were deleted as dead code, nexus-z0o2p.25; then 46 -- 45
     on 2026-10-21 when HttpVectorClient.put was retired, nexus-nt76j; then 45 -- 46
     on 2026-11-03 for the rename's class-(a) target-model token in
-    HttpCatalogClient.rename_collection_cascade, nexus-ucagi; then 46 -- 235
+    HttpCatalogClient.rename_collection_cascade, nexus-ucagi; then 46 -- 243
     on 2026-11-20 when RDR-229 P1.1 (nexus-p2m1x.1) widened the scanner and
     made the census a per-site ledger, see the module docstring) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 235
+    assert PARSE_SITE_PIN == 243
 
 
 # ---------------------------------------------------------------------------
@@ -807,11 +813,36 @@ def test_the_census_refuses_a_bad_class_a_bare_holdover_and_a_mislabelled_fnmatc
         site("b", "startswith", "holdover"),
         site("c", "startswith", "holdover", "P2.9"),
         site("d", "fnmatch", "mint"),
+        site("e", "startswith", "label-pattern"),
+        site("f", "const_prefix", "file-path"),
+        site("g", "startswith", "holdover", "needs an owner"),
+        site("h", "fnmatch", "label-pattern"),
+        site("i", "fnmatch", "file-path"),
     ])
-    assert len(problems) == 3, problems
+    assert len(problems) == 6, problems
     assert "class 'parse'" in problems[0]
-    assert "a holdover must carry a note" in problems[1]
+    assert "Phase 2 step (P2.n)" in problems[1]
     assert "an fnmatch is a label-pattern" in problems[2]
+    assert "'label-pattern' is for an fnmatch" in problems[3]
+    assert "'file-path' is for an fnmatch" in problems[4]
+    assert "Phase 2 step (P2.n)" in problems[5]
+
+
+def test_an_exclusion_removes_only_the_shape_it_names(tmp_path: pathlib.Path) -> None:
+    """Review round 1, item 5: a line holding two shapes, one excluded, keeps
+    the other as a hit (the old line-keyed filter dropped both)."""
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        'def f(raw):\n    return raw.rsplit("__", 1)[-1] if "__" in raw else raw\n',
+        encoding="utf-8",
+    )
+    raw = {"src/nexus/sample.py": _scan.scan_file(sample)}
+    assert raw == {"src/nexus/sample.py": [(2, "in"), (2, "rsplit")]}
+    kept = _without_excluded(raw, {"src/nexus/sample.py": {(2, "rsplit"): ("x",)}})
+    assert kept == {"src/nexus/sample.py": [(2, "in")]}
+    assert _without_excluded(raw, {"src/nexus/sample.py": {(2, "in"): ("x",)}}) == {
+        "src/nexus/sample.py": [(2, "rsplit")]
+    }
 
 
 def _by_class(cls: str) -> list[_scan.Site]:
@@ -853,16 +884,15 @@ def test_the_routing_class_is_measured_not_listed() -> None:
 
 def test_only_the_five_rdr_classes_and_the_two_fnmatch_labels_are_final() -> None:
     """``holdover`` is the one provisional label, and it never stands bare:
-    each carries a note that names the Phase 2 step that moves it (P2.3
-    write-model, P2.4 taxonomy threshold, P2.7 retire the name matcher) or
-    says it needs an owner, because no step in the RDR names it yet."""
+    each carries a note that names the Phase 2 step (P2.n) that moves it
+    (P2.2 read-path model reads, P2.3 write model, P2.4 taxonomy threshold,
+    P2.7 retire the name matcher). No holdover is left without an owner."""
     assert set(_scan.CLASSES) == {
         "mint", "migration-source", "diagnostic", "routing", "uri-classifier",
         "label-pattern", "file-path", "holdover",
     }
     holdovers = _by_class("holdover")
     assert sum(s.n for s in holdovers) == CLASS_PIN["holdover"]
-    assert all(
-        re.search(r"\bP2\.[0-9]+\b", s.note) or "needs an owner" in s.note
-        for s in holdovers
-    ), "a holdover note must name its Phase 2 step or say it needs an owner"
+    assert all(re.search(r"\bP2\.[0-9]+\b", s.note) for s in holdovers), (
+        "a holdover note must name the Phase 2 step (P2.n) that moves it"
+    )

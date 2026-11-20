@@ -39,8 +39,8 @@ WM_P23: str = (
 WM_P24: str = (
     "Taxonomy threshold keyed by the name's prefix; becomes a row read at P2.4."
 )
-WM_NONE: str = (
-    'Name-only model read on a read or display path; no Phase 2 step names it, so it needs an owner.'
+WM_P22: str = (
+    'RDR-204 (b) read-path model read from the name; becomes a resolve_collection Row read at P2.2.'
 )
 MINT_QUAR: str = (
     "Mints the quarantine sibling's name from the origin's; the row is preferred and the name read only when the origin has none (RDR-204 coordinator ruling 2026-09-08)."

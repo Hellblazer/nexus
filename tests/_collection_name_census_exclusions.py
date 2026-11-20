@@ -16,9 +16,12 @@ upper case only. Re-checked on develop 970f73223: neither line is a hit.
 """
 from __future__ import annotations
 
-#: (relative-path, content-anchor) -> one-line reason, for sites the raw
+#: (relative-path, content-anchor, shape) -> one-line reason, for sites the raw
 #: AST scan WOULD flag but which the RDR-204 Phase 3 item 1 exclusion rule
 #: (``mcp__`` tool names, ``rdr-`` document ids) removes from the pin.
+#:
+#: SHAPE-SPECIFIC (RDR-229 P1.1 review): an entry removes the one shape
+#: it names on that line. A different shape on the same line stays a hit.
 #:
 #: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the
 #: exempted line's own stripped source text PLUS its nearest preceding
@@ -37,7 +40,7 @@ from __future__ import annotations
 #: ``test_excluded_sites_are_real_matches_not_omissions`` — an anchor
 #: that no longer resolves (STALE) or resolves ambiguously is a stale
 #: judgement call, not a quieter gate.
-EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
+EXCLUDED_SITES: dict[tuple[str, tuple[str, ...], str], str] = {
     (
         "src/nexus/mcp/core.py",
         (
@@ -45,6 +48,7 @@ EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
             'bare = raw_tool.rsplit("__", 1)[-1] if '
             'raw_tool.startswith("mcp__") else raw_tool',
         ),
+        "rsplit",
     ): (
         "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
         'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
@@ -53,6 +57,7 @@ EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/plans/answer_kind.py",
         ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
+        "rsplit",
     ): (
         "mcp__ tool name: `terminal_is_retrieval_only` strips the mcp__...__ "
         "prefix from a plan's last step the way the runner does (nexus-0vh80)."
@@ -60,6 +65,7 @@ EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/plans/bundle.py",
         ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
+        "rsplit",
     ): (
         "mcp__ tool name: `_extract_tool_name`'s own docstring says it "
         '"strips any mcp__...__ prefix" from a plan step\'s tool identifier.'
@@ -67,6 +73,7 @@ EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/plans/cost_estimate.py",
         ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
+        "rsplit",
     ): (
         "mcp__ tool name: `_extract_tool`, the documented local copy of "
         "bundle._extract_tool_name, strips the same mcp__...__ prefix."
@@ -74,6 +81,7 @@ EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/plans/runner.py",
         ('if t.startswith("mcp__"):', 't = t.rsplit("__", 1)[-1]'),
+        "rsplit",
     ): (
         "mcp__ tool name: strips an mcp__...__ prefix from a resolved plan "
         "step's tool identifier before dispatch, guarded by the same "
@@ -82,6 +90,7 @@ EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/mcp/hooks.py",
         ('*parents, leaf = flat_name.split("__")',),
+        "split",
     ): (
         "not a collection name at all: RDR-215's tool-tier hook_<name> "
         'registration flattens a dotted payload field path (e.g. '

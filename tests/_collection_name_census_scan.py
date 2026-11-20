@@ -7,26 +7,44 @@ Split out of ``tests/test_collection_name_parse_census.py`` so that file stays
 under its size ceiling. Nothing here is a test; the test files import it.
 
 WHAT IT MATCHES. One AST walk of a Python file yields ``(lineno, shape)``
-hits. The nine shapes RDR-204 Phase 3 built keep their names, so every older
+hits. The shapes RDR-204 Phase 3 built keep their names, so every older
 assertion reads unchanged: ``split`` / ``rsplit`` / ``partition`` /
-``rpartition`` (``"__"`` argument), ``startswith`` / ``endswith`` (a literal
+``rpartition`` (a ``"__"`` argument), ``startswith`` / ``endswith`` (a literal
 collection prefix, bare or in a tuple/list), ``in`` / ``not_in`` (against the
 literal ``"__"``) and ``primitive_call``. RDR-229 Technical Design item 4
-widens the fifth and adds seven more:
+widens the fifth and adds the rest:
 
-- ``primitive_call`` is now a call to ANY function in the DERIVED helper set
-  (:func:`derive_parser_helpers`), not the three typed in
-  ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES``: every ``corpus.py`` function
-  that reaches a name parser through the module's own call graph.
+- ``primitive_call`` is a call to ANY function in the DERIVED helper set
+  (:func:`derive_parser_helpers`): every ``corpus.py`` function that reaches a
+  name parser through the module's own call graph. The three typed in
+  ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES`` are its non-vacuity floor.
 - ``fstring_prefix``: ``startswith``/``endswith`` on an f-string with a
   literal part ending in ``__``, or on a local bound to one.
-- ``const_prefix``: ``startswith``/``endswith`` on a module constant that
-  holds a collection prefix (a tuple, a dict's keys, a tuple of pairs).
-- ``loop_prefix``: ``startswith``/``endswith`` on a name bound by a ``for``
-  loop or comprehension over such a constant, its ``.items()``/``.keys()``,
-  or a literal tuple of prefixes; scoped per function.
-- ``substring``: ``"__<x>__" in name``, the f-string form, or a local bound
-  to it.
+- ``concat_prefix``: the same on ``<expr> + "__"``, ``"%s__" % x`` or
+  ``"{}__".format(x)``, or a local bound to one.
+- ``const_prefix``: on a module constant that holds a collection prefix (a
+  tuple, a dict's keys, a tuple of pairs, or a comprehension/generator over
+  prefix-ending f-strings). Constants are collected across every file under
+  the scanned tree and matched by name, imported or not.
+- ``loop_prefix``: on a name bound by a ``for`` loop or comprehension over such
+  a constant, its ``.items()``/``.keys()``, or a literal tuple of prefixes;
+  scoped per function.
+- ``local_prefix``: on a local bound to a prefix literal or a tuple/list of
+  them.
+  Locals bind through Assign, AnnAssign, walrus and tuple-unpack.
+- ``strip_prefix``: ``removeprefix`` / ``removesuffix`` / ``.replace`` whose
+  first argument is a collection prefix (a literal, or any shape above).
+- ``substring``: ``"__<x>__" in name``, the f-string form, or a local bound to
+  it. A Python dunder name (``__init__``, ``__pycache__``: :data:`_PY_DUNDERS`)
+  is not a collection segment and never matches.
+- ``dunder_find``: ``.find`` / ``.index`` / ``.count`` / ``.rfind`` /
+  ``.rindex`` of ``"__"``.
+- ``hash_suffix``: ``rsplit("-", ..)`` on a receiver that names a collection,
+  and ``endswith(f"-{..}")`` in a function holding such an ``rsplit``: the
+  legacy two-segment name's 8-character hash suffix.
+- ``endswith`` also matches the literal ``"__"`` (a family-prefix test).
+- ``split``/``in``/... also take ``sep="__"`` and a name bound to the string
+  ``"__"``.
 - ``glob_default``: a string constant ``"<type>__*"``.
 - ``sql_prefix``: a SQL string (it holds SELECT, WHERE or FROM) with
   ``starts_with(.., '<type>__')``, ``LIKE '<type>..'`` or
@@ -36,25 +54,39 @@ widens the fifth and adds seven more:
 
 ``taxonomy__`` joined the prefix set (the routing census scans it).
 
-A docstring, a comment, or a bare string expression never contributes a hit:
-the walk matches ``ast.Call`` / ``ast.Compare`` nodes and skips string
-statements.
+A docstring, a comment, or a bare string expression never contributes a hit.
+
+KNOWN LIMITS (documented, not closed). (6) SQL is matched in the case the
+scan's patterns spell: ``SELECT/WHERE/FROM`` upper case, ``LIKE`` upper case.
+(7) An aliased import (``from fnmatch import fnmatch as fm``; a helper imported
+under another name) is not followed; a call is matched by its spelled name.
+(8) A nested ``def`` closing over an outer loop variable or binding does not
+see it: bindings are scoped to the function that makes them. (12) A constant
+is matched by NAME across the whole tree, so a generic name (``_REGISTRY``,
+``_DEFAULTS``) that holds a prefix in one file and something else in another
+matches in both; and a prefix reached only through a call result, a
+``getattr`` or a dict lookup is invisible. ``scripts/`` is not scanned.
+The hash-suffix leg needs a receiver spelled with ``collection`` in it, so
+``suffix.rsplit("-", 1)`` on a local derived from a collection name
+(``commands/catalog.py``'s per-file recovery) is not matched.
 
 THE LEDGER. Every hit is one site. A site carries one class from
 :data:`CLASSES` (the RDR's five, the two non-parse labels for ``fnmatch``,
-and an explicit ``holdover`` that must carry a note naming the step that
-moves it). The ledger is a table of :class:`Site` entries, content-anchored
-through ``tests._lint_line_anchor`` the way ``_EXCLUDED_SITES`` is: the entry
-holds the site's own stripped source text plus its nearest preceding
-non-blank line, and its current line number is re-derived on every run.
-:func:`diff_ledger` returns the unlabelled live sites and the stale ledger
-entries; each message names file, line and shape.
+and ``holdover``). A ``holdover`` is a site no final class fits yet; its note
+must name the Phase 2 step (``P2.n``) that moves it, and the census test
+checks that. The ledger is a table of :class:`Site` entries, content-anchored
+through ``tests._lint_line_anchor``: the entry holds the site's own stripped
+source text plus its nearest preceding non-blank line, and its current line
+number is re-derived on every run. :func:`diff_ledger` returns the unlabelled
+live sites and the stale ledger entries; each message names file, line and
+shape.
 """
 from __future__ import annotations
 
 import ast
 import pathlib
 import re
+import types
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -75,8 +107,9 @@ _CT_PREFIXES = ("code__", "docs__", "rdr__", "knowledge__", "taxonomy__")
 
 SHAPES = (
     "split", "rsplit", "partition", "rpartition", "startswith", "endswith",
-    "in", "not_in", "primitive_call", "fstring_prefix", "const_prefix",
-    "loop_prefix", "substring", "glob_default", "sql_prefix", "fnmatch",
+    "in", "not_in", "primitive_call", "fstring_prefix", "concat_prefix",
+    "const_prefix", "loop_prefix", "local_prefix", "strip_prefix", "substring",
+    "dunder_find", "hash_suffix", "glob_default", "sql_prefix", "fnmatch",
 )
 
 #: The RDR-229 Technical Design item 1 classes, then the two labels for a
@@ -88,6 +121,8 @@ NON_PARSE_CLASSES = ("label-pattern", "file-path")
 CLASSES = (*PARSE_CLASSES, *NON_PARSE_CLASSES, "holdover")
 
 _STR_SPLITTERS = ("split", "rsplit", "partition", "rpartition")
+_FIND_CALLS = ("find", "index", "count", "rfind", "rindex")
+_STRIP_CALLS = ("removeprefix", "removesuffix", "replace")
 _GLOB_DEFAULT_RE = re.compile(r"^(?:code|docs|rdr|knowledge|taxonomy)__\*$")
 _SQL_KEYWORD_RE = re.compile(r"\b(?:SELECT|WHERE|FROM)\b")
 _SQL_PREFIX_RE = re.compile(
@@ -95,6 +130,17 @@ _SQL_PREFIX_RE = re.compile(
     r"|LIKE\s+'(?:code|docs|rdr|knowledge|taxonomy|quarantine)"
     r"|(?i:split_part\s*\([^)]*'__')"
     r"|'quarantine-'"
+)
+
+#: Python dunder names a ``"__x__" in name`` test is about, never a collection
+#: owner segment: the object/type/module protocol names and the usual module
+#: and package dunders.
+_PY_DUNDERS = frozenset(
+    {n for n in (*dir(object), *dir(type), *dir(types.ModuleType)) if n.startswith("__")}
+    | {"__pycache__", "__main__", "__all__", "__version__", "__path__",
+       "__file__", "__name__", "__spec__", "__slots__", "__dict__",
+       "__module__", "__init_subclass__", "__post_init__", "__enter__",
+       "__exit__", "__iter__", "__len__", "__call__", "__getitem__"}
 )
 
 
@@ -106,6 +152,12 @@ def _str_const(node: ast.AST) -> str | None:
 
 def _is_prefix_text(s: str) -> bool:
     return s.startswith(_CT_PREFIXES) or s.startswith("quarantine-")
+
+
+def _ends_dunder_prefix(lit: str) -> bool:
+    """A literal that ends a collection prefix (``"__"``, ``"x__"``), not a
+    whole dunder name (``"__init__"``)."""
+    return lit.endswith("__") and not (len(lit) > 4 and lit.startswith("__"))
 
 
 def _ref_name(node: ast.AST) -> str | None:
@@ -128,11 +180,6 @@ def _fstring_literals(node: ast.AST) -> list[str]:
     return [str(v.value) for v in node.values if isinstance(v, ast.Constant)]
 
 
-def _fstring_ends_dunder(node: ast.AST) -> bool:
-    """An f-string with a literal part ending in ``__``."""
-    return any(lit.endswith("__") for lit in _fstring_literals(node))
-
-
 def _fstring_dunder_both_ends(node: ast.AST) -> bool:
     """``f"__{x}__"``: the first literal opens and the last closes with ``__``."""
     if not isinstance(node, ast.JoinedStr) or len(node.values) < 3:
@@ -144,9 +191,50 @@ def _fstring_dunder_both_ends(node: ast.AST) -> bool:
     )
 
 
+def _dunder_expr_shape(node: ast.AST) -> str | None:
+    """The shape of a computed prefix: an f-string with a literal part ending
+    in ``__`` (``fstring_prefix``), or ``<expr> + "__"``, ``"%s__" % x``,
+    ``"{}__".format(x)`` (``concat_prefix``). ``None`` otherwise."""
+    if any(_ends_dunder_prefix(lit) for lit in _fstring_literals(node)):
+        return "fstring_prefix"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        if any(
+            (s := _str_const(side)) is not None and _ends_dunder_prefix(s)
+            for side in (node.left, node.right)
+        ):
+            return "concat_prefix"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        s = _str_const(node.left)
+        if s is not None and _ends_dunder_prefix(s):
+            return "concat_prefix"
+    if (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "format"
+    ):
+        s = _str_const(node.func.value)
+        if s is not None and _ends_dunder_prefix(s):
+            return "concat_prefix"
+    return None
+
+
+def _value_prefix_shape(node: ast.AST) -> str | None:
+    """The shape a LOCAL bound to *node* gives a later ``startswith``."""
+    s = _str_const(node)
+    if s is not None:
+        return "local_prefix" if s in TYPE_PREFIXES else None
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        for e in node.elts:
+            es = _str_const(e)
+            if es is not None and es in TYPE_PREFIXES:
+                return "local_prefix"
+        return None
+    return _dunder_expr_shape(node)
+
+
 def module_prefix_constants(tree: ast.Module) -> dict[str, tuple[str, ...]]:
     """Module-level names whose value holds a collection prefix anywhere in it
-    (a str, a tuple, a dict's keys, a tuple of pairs): name -> prefixes."""
+    (a str, a tuple, a dict's keys, a tuple of pairs, or a comprehension over
+    prefix-ending f-strings): name -> prefixes."""
     out: dict[str, tuple[str, ...]] = {}
     for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
@@ -155,6 +243,10 @@ def module_prefix_constants(tree: ast.Module) -> dict[str, tuple[str, ...]]:
             s for x in ast.walk(node.value)
             if (s := _str_const(x)) is not None and _is_prefix_text(s)
         })
+        if not found and any(
+            _dunder_expr_shape(x) is not None for x in ast.walk(node.value)
+        ):
+            found = ["<computed>__"]
         if not found:
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -162,6 +254,17 @@ def module_prefix_constants(tree: ast.Module) -> dict[str, tuple[str, ...]]:
             if isinstance(t, ast.Name):
                 out[t.id] = tuple(found)
     return out
+
+
+def module_dunder_names(tree: ast.Module) -> frozenset[str]:
+    """Module-level names bound to the string ``"__"``."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            if _str_const(node.value) == "__":
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                names |= {t.id for t in targets if isinstance(t, ast.Name)}
+    return frozenset(names)
 
 
 def _read(path: pathlib.Path) -> str | None:
@@ -181,18 +284,33 @@ def _parse(path: pathlib.Path) -> ast.Module | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def live_prefix_constants() -> dict[str, tuple[str, ...]]:
-    """Every prefix-holding module constant under ``src/nexus``, by name (a
-    constant is imported by name, so the name is the cross-file key)."""
+def _py_files(src: pathlib.Path) -> list[pathlib.Path]:
+    return [p for p in sorted(src.rglob("*.py")) if "__pycache__" not in p.parts]
+
+
+def tree_constants(
+    src: pathlib.Path,
+) -> tuple[dict[str, tuple[str, ...]], frozenset[str]]:
+    """Every prefix-holding module constant and every ``"__"`` name under
+    *src*, by name (a constant is imported by name, so the name is the
+    cross-file key)."""
     consts: dict[str, tuple[str, ...]] = {}
-    for path in sorted(SRC.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    dunders: set[str] = set()
+    for path in _py_files(src):
         tree = _parse(path)
         if tree is not None:
             consts.update(module_prefix_constants(tree))
-    return consts
+            dunders |= module_dunder_names(tree)
+    return consts, frozenset(dunders)
+
+
+@lru_cache(maxsize=1)
+def _live_tree_constants() -> tuple[dict[str, tuple[str, ...]], frozenset[str]]:
+    return tree_constants(SRC)
+
+
+def live_prefix_constants() -> dict[str, tuple[str, ...]]:
+    return _live_tree_constants()[0]
 
 
 def _module_functions(tree: ast.Module) -> dict[str, ast.AST]:
@@ -289,13 +407,29 @@ def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
     return out
 
 
+def _bind(binds: dict[str, str], target: ast.AST, value: ast.AST) -> None:
+    """Record what *value* gives the local(s) in *target*: a plain name, or a
+    tuple-unpack matched pairwise against a tuple/list value."""
+    if isinstance(target, ast.Name):
+        shape = _value_prefix_shape(value)
+        if shape is not None:
+            binds.setdefault(target.id, shape)
+    elif (
+        isinstance(target, (ast.Tuple, ast.List))
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(target.elts) == len(value.elts)
+    ):
+        for t, v in zip(target.elts, value.elts):
+            _bind(binds, t, v)
+
+
 def _scope_bindings(
     nodes: list[ast.AST], consts: dict[str, tuple[str, ...]],
-) -> tuple[set[str], set[str], set[str]]:
-    """(loop-bound prefix names, f-string-prefix locals, f-string-substring
-    locals) in one scope."""
-    loopvars: set[str] = set()
-    fprefix: set[str] = set()
+) -> tuple[dict[str, str], set[str]]:
+    """``({local name: shape}, f-string-substring locals)`` in one scope. A
+    local binds through ``for``/comprehension over a prefix source
+    (``loop_prefix``), Assign, AnnAssign, walrus and tuple-unpack."""
+    binds: dict[str, str] = {}
     fsub: set[str] = set()
     for n in nodes:
         gens: list[tuple[ast.AST, ast.AST]] = []
@@ -318,55 +452,95 @@ def _scope_bindings(
                 if isinstance(target, ast.Tuple) and target.elts else target
             )
             if isinstance(first, ast.Name):
-                loopvars.add(first.id)
+                binds.setdefault(first.id, "loop_prefix")
         if isinstance(n, ast.Assign):
+            for t in n.targets:
+                _bind(binds, t, n.value)
             names = {t.id for t in n.targets if isinstance(t, ast.Name)}
-            if _fstring_ends_dunder(n.value):
-                fprefix |= names
             if _fstring_dunder_both_ends(n.value):
                 fsub |= names
-    return loopvars, fprefix, fsub
+        elif isinstance(n, ast.AnnAssign) and n.value is not None:
+            _bind(binds, n.target, n.value)
+            if isinstance(n.target, ast.Name) and _fstring_dunder_both_ends(n.value):
+                fsub.add(n.target.id)
+        elif isinstance(n, ast.NamedExpr):
+            _bind(binds, n.target, n.value)
+            if _fstring_dunder_both_ends(n.value):
+                fsub.add(n.target.id)
+    return binds, fsub
+
+
+def _expr_prefix_shape(
+    e: ast.AST, consts: dict[str, tuple[str, ...]], binds: dict[str, str],
+    *, literal_ok: bool,
+) -> str | None:
+    """The prefix shape one argument expression has, ``None`` for none. A
+    literal collection prefix returns ``"literal"`` when *literal_ok*."""
+    if isinstance(e, ast.NamedExpr):
+        e = e.value
+    s = _str_const(e)
+    if s is not None:
+        return "literal" if literal_ok and s in TYPE_PREFIXES else None
+    if isinstance(e, (ast.Name, ast.Attribute)):
+        if _ref_name(e) in consts:
+            return "const_prefix"
+        if isinstance(e, ast.Name) and e.id in binds:
+            return binds[e.id]
+        return None
+    return _dunder_expr_shape(e)
+
+
+def _arg_shapes(
+    call: ast.Call, consts: dict[str, tuple[str, ...]], binds: dict[str, str],
+    first_only: bool = False,
+) -> list[str]:
+    elts: list[ast.AST] = []
+    args = call.args[:1] if first_only else call.args
+    for arg in args:
+        elts.extend(arg.elts if isinstance(arg, (ast.Tuple, ast.List)) else [arg])
+    shapes = [
+        sh for e in elts
+        if (sh := _expr_prefix_shape(e, consts, binds, literal_ok=True))
+    ]
+    return shapes
 
 
 def _startswith_shape(
-    call: ast.Call, consts: dict[str, tuple[str, ...]],
-    loopvars: set[str], fprefix: set[str],
+    call: ast.Call, consts: dict[str, tuple[str, ...]], binds: dict[str, str],
 ) -> str | None:
-    """The one shape a ``startswith``/``endswith`` call matches, by priority:
-    a literal prefix, a prefix constant, a loop-bound name, an f-string."""
-    elts: list[ast.AST] = []
-    for arg in call.args:
-        elts.extend(arg.elts if isinstance(arg, (ast.Tuple, ast.List)) else [arg])
+    """The one shape a ``startswith``/``endswith`` call matches: a literal
+    prefix (the method's own name), else the first prefix shape found."""
     attr = call.func.attr  # type: ignore[attr-defined]
-    if any((s := _str_const(e)) is not None and s in TYPE_PREFIXES for e in elts):
+    shapes = _arg_shapes(call, consts, binds)
+    if "literal" in shapes:
         return attr
-    if any(isinstance(e, (ast.Name, ast.Attribute)) and _ref_name(e) in consts for e in elts):
-        return "const_prefix"
-    if any(isinstance(e, ast.Name) and e.id in loopvars for e in elts):
-        return "loop_prefix"
-    if any(
-        _fstring_ends_dunder(e) or (isinstance(e, ast.Name) and e.id in fprefix)
-        for e in elts
-    ):
-        return "fstring_prefix"
-    return None
+    if attr == "endswith" and any(_str_const(a) == "__" for a in call.args):
+        return attr
+    return shapes[0] if shapes else None
 
 
-def _compare_shapes(node: ast.Compare, fsub: set[str]) -> list[str]:
+def _is_dunder_arg(node: ast.AST, dunders: frozenset[str]) -> bool:
+    return _str_const(node) == "__" or (
+        isinstance(node, ast.Name) and node.id in dunders
+    )
+
+
+def _compare_shapes(
+    node: ast.Compare, fsub: set[str], dunders: frozenset[str],
+) -> list[str]:
     shapes: list[str] = []
     for op, comp in zip(node.ops, node.comparators):
         if not isinstance(op, (ast.In, ast.NotIn)):
             continue
-        left = _str_const(node.left)
-        right = _str_const(comp)
-        if left == "__" or right == "__":
+        if _is_dunder_arg(node.left, dunders) or _is_dunder_arg(comp, dunders):
             shapes.append("not_in" if isinstance(op, ast.NotIn) else "in")
             continue
         for side in (node.left, comp):
             text = _str_const(side)
             if (
                 (text is not None and len(text) > 4
-                 and text.startswith("__") and text.endswith("__"))
+                 and text.startswith("__") and text.endswith("__")
+                 and text not in _PY_DUNDERS)
                 or _fstring_dunder_both_ends(side)
                 or (isinstance(side, ast.Name) and side.id in fsub)
             ):
@@ -375,48 +549,24 @@ def _compare_shapes(node: ast.Compare, fsub: set[str]) -> list[str]:
     return shapes
 
 
-def scan_file(
-    path: pathlib.Path,
-    consts: dict[str, tuple[str, ...]] | None = None,
-    helpers: frozenset[str] | None = None,
-) -> list[tuple[int, str]]:
-    """``(lineno, shape)`` for every collection-name-parse-shaped site in one
-    file, BEFORE any exclusion. *consts* is the prefix-constant map (default:
-    this file's own module-level constants); *helpers* is the derived helper
-    set (default: derived from the live ``corpus.py``)."""
-    text = _read(path)
-    tree = _parse(path)
-    if text is None or tree is None:
-        return []
-    lines = text.splitlines()
-    consts = {**module_prefix_constants(tree), **(consts or {})}
-    helpers = live_parser_helpers() if helpers is None else helpers
-    hits: list[tuple[int, str]] = []
-    docstrings = {
-        id(n.value) for n in ast.walk(tree)
-        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
-    }
-    scopes: list[ast.AST] = [tree] + [
-        n for n in ast.walk(tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-    for scope in scopes:
-        nodes = _scope_nodes(scope)
-        loopvars, fprefix, fsub = _scope_bindings(nodes, consts)
-        for node in nodes:
-            if isinstance(node, ast.Call):
-                hits.extend(_call_hits(node, consts, loopvars, fprefix, helpers))
-            elif isinstance(node, ast.Compare):
-                hits.extend((node.lineno, s) for s in _compare_shapes(node, fsub))
-    for node in ast.walk(tree):
-        text = _str_const(node)
-        if text is None or id(node) in docstrings:
-            continue
-        if _GLOB_DEFAULT_RE.match(text):
-            hits.append((node.lineno, "glob_default"))
-        elif _SQL_KEYWORD_RE.search(text) and (m := _SQL_PREFIX_RE.search(text)):
-            hits.append((_sql_hit_line(node, m.group(0), lines), "sql_prefix"))
-    return sorted(hits)
+def _mentions_collection(node: ast.AST) -> bool:
+    return any(
+        (isinstance(x, ast.Name) and "collection" in x.id.lower())
+        or (isinstance(x, ast.Attribute) and "collection" in x.attr.lower())
+        for x in ast.walk(node)
+    )
+
+
+def _hash_suffix_fstring(call: ast.Call) -> bool:
+    """``endswith(f"-{...}")``: an f-string opening with a hyphen."""
+    if not call.args:
+        return False
+    a = call.args[0]
+    return (
+        isinstance(a, ast.JoinedStr) and bool(a.values)
+        and isinstance(a.values[0], ast.Constant)
+        and str(a.values[0].value).startswith("-")
+    )
 
 
 def _sql_hit_line(node: ast.AST, matched: str, lines: list[str]) -> int:
@@ -432,8 +582,8 @@ def _sql_hit_line(node: ast.AST, matched: str, lines: list[str]) -> int:
 
 
 def _call_hits(
-    node: ast.Call, consts: dict[str, tuple[str, ...]],
-    loopvars: set[str], fprefix: set[str], helpers: frozenset[str],
+    node: ast.Call, consts: dict[str, tuple[str, ...]], binds: dict[str, str],
+    helpers: frozenset[str], dunders: frozenset[str], has_hash_rsplit: bool,
 ) -> list[tuple[int, str]]:
     func = node.func
     name = func.attr if isinstance(func, ast.Attribute) else (
@@ -446,31 +596,121 @@ def _call_hits(
     if not isinstance(func, ast.Attribute):
         return []
     if name in _STR_SPLITTERS:
-        if node.args and _str_const(node.args[0]) == "__":
+        sep = node.args[0] if node.args else next(
+            (k.value for k in node.keywords if k.arg == "sep"), None,
+        )
+        if sep is not None and _is_dunder_arg(sep, dunders):
             return [(node.lineno, name)]
+        if (
+            name == "rsplit" and sep is not None and _str_const(sep) == "-"
+            and _mentions_collection(func.value)
+        ):
+            return [(node.lineno, "hash_suffix")]
+        return []
+    if name in _FIND_CALLS:
+        if node.args and _is_dunder_arg(node.args[0], dunders):
+            return [(node.lineno, "dunder_find")]
+        return []
+    if name in _STRIP_CALLS:
+        if _arg_shapes(node, consts, binds, first_only=True):
+            return [(node.lineno, "strip_prefix")]
         return []
     if name in ("startswith", "endswith"):
-        shape = _startswith_shape(node, consts, loopvars, fprefix)
+        if name == "endswith" and has_hash_rsplit and _hash_suffix_fstring(node):
+            return [(node.lineno, "hash_suffix")]
+        shape = _startswith_shape(node, consts, binds)
         return [(node.lineno, shape)] if shape else []
     return []
+
+
+def scan_file(
+    path: pathlib.Path,
+    consts: dict[str, tuple[str, ...]] | None = None,
+    helpers: frozenset[str] | None = None,
+    dunders: frozenset[str] | None = None,
+) -> list[tuple[int, str]]:
+    """``(lineno, shape)`` for every collection-name-parse-shaped site in one
+    file, BEFORE any exclusion. *consts* is the prefix-constant map (this
+    file's own module-level constants are always added), *helpers* the
+    derived helper set (default: derived from the live ``corpus.py``) and
+    *dunders* the names bound to ``"__"`` (this file's own are added)."""
+    text = _read(path)
+    tree = _parse(path)
+    if text is None or tree is None:
+        return []
+    lines = text.splitlines()
+    consts = {**module_prefix_constants(tree), **(consts or {})}
+    dunders = module_dunder_names(tree) | (dunders or frozenset())
+    helpers = live_parser_helpers() if helpers is None else helpers
+    hits: list[tuple[int, str]] = []
+    docstrings = {
+        id(n.value) for n in ast.walk(tree)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+    }
+    scopes: list[ast.AST] = [tree] + [
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for scope in scopes:
+        nodes = _scope_nodes(scope)
+        binds, fsub = _scope_bindings(nodes, consts)
+        has_hash_rsplit = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "rsplit" and n.args
+            and _str_const(n.args[0]) == "-" and _mentions_collection(n.func.value)
+            for n in nodes
+        )
+        for node in nodes:
+            if isinstance(node, ast.Call):
+                hits.extend(_call_hits(
+                    node, consts, binds, helpers, dunders, has_hash_rsplit,
+                ))
+            elif isinstance(node, ast.Compare):
+                hits.extend(
+                    (node.lineno, s) for s in _compare_shapes(node, fsub, dunders)
+                )
+    for node in ast.walk(tree):
+        text_value = _str_const(node)
+        if text_value is None or id(node) in docstrings:
+            continue
+        if _GLOB_DEFAULT_RE.match(text_value):
+            hits.append((node.lineno, "glob_default"))
+        elif _SQL_KEYWORD_RE.search(text_value) and (m := _SQL_PREFIX_RE.search(text_value)):
+            hits.append((_sql_hit_line(node, m.group(0), lines), "sql_prefix"))
+    return sorted(hits)
 
 
 def raw_sites(
     src: pathlib.Path = SRC, repo_root: pathlib.Path = REPO_ROOT,
     consts: dict[str, tuple[str, ...]] | None = None,
+    helpers: frozenset[str] | None = None,
 ) -> dict[str, list[tuple[int, str]]]:
     """Every raw match under *src*, keyed by path relative to *repo_root*,
-    with no exclusion applied. ``primitive_call`` hits inside ``corpus.py``
-    are dropped: the helpers call one another by construction, and the
-    coordinator's ruling (RDR-204 nexus-ft04v.26) scopes the fifth class to
-    callers outside ``corpus.py``'s own bodies."""
-    consts = live_prefix_constants() if consts is None else consts
+    with no exclusion applied. Prefix constants and ``"__"`` names are
+    collected from *src* itself, so a constant defined in one file is seen in
+    another. ``primitive_call`` hits inside ``corpus.py`` are dropped: the
+    helpers call one another by construction, and the coordinator's ruling
+    (RDR-204 nexus-ft04v.26) scopes the fifth class to callers outside
+    ``corpus.py``'s own bodies.
+
+    Raises ``ValueError`` naming any file that does not parse: a file the
+    walk cannot read is a hole in the census, never a quiet zero."""
+    if consts is None:
+        tree_consts, dunders = (
+            _live_tree_constants() if src == SRC else tree_constants(src)
+        )
+    else:
+        tree_consts, dunders = consts, tree_constants(src)[1]
+    unparsed = [
+        p.relative_to(repo_root).as_posix() for p in _py_files(src)
+        if _parse(p) is None
+    ]
+    if unparsed:
+        raise ValueError(f"census: file(s) did not parse: {unparsed}")
     found: dict[str, list[tuple[int, str]]] = {}
-    for path in sorted(src.rglob("*.py")):
-        if "__pycache__" in path.parts:
-            continue
+    for path in _py_files(src):
         rel = path.relative_to(repo_root).as_posix()
-        hits = scan_file(path, consts)
+        hits = scan_file(path, tree_consts, helpers, dunders)
         if rel == CORPUS_REL:
             hits = [(ln, s) for ln, s in hits if s != "primitive_call"]
         if hits:
@@ -483,9 +723,9 @@ class Site:
     """One ledger entry: a site's content anchor, shape, class and note.
 
     *anchor* is the site's stripped source text preceded by its nearest
-    non-blank line (more lines when that is ambiguous). *n* is the number
+    non-blank line (more when that is ambiguous). *n* is the number
     of hits of this shape on that line. A ``holdover`` must carry a *note*
-    naming the step that moves it; other classes may.
+    naming the Phase 2 step (``P2.n``) that moves it; other classes may.
     """
     rel: str
     anchor: tuple[str, ...]
@@ -495,9 +735,14 @@ class Site:
     n: int = 1
 
 
+_STEP_RE = re.compile(r"\bP2\.[0-9]+\b")
+
+
 def ledger_problems(sites: list[Site]) -> list[str]:
     """Structural defects in the ledger itself: an unknown class or shape,
-    a holdover with no note, a duplicate (file, anchor, shape) entry."""
+    a holdover whose note names no ``P2.n`` step, an fnmatch labelled as
+    something it is not, a non-fnmatch carrying a fnmatch-only label, a
+    duplicate (file, anchor, shape) entry."""
     problems: list[str] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()
     for s in sites:
@@ -506,10 +751,12 @@ def ledger_problems(sites: list[Site]) -> list[str]:
             problems.append(f"{where}: class {s.cls!r} is not one of {CLASSES}")
         if s.shape not in SHAPES:
             problems.append(f"{where}: shape {s.shape!r} is not one of {SHAPES}")
-        if s.cls == "holdover" and not s.note.strip():
-            problems.append(f"{where}: a holdover must carry a note naming the step that moves it")
+        if s.cls == "holdover" and not _STEP_RE.search(s.note):
+            problems.append(f"{where}: a holdover's note must name the Phase 2 step (P2.n) that moves it")
         if s.shape == "fnmatch" and s.cls not in (*NON_PARSE_CLASSES, "routing"):
             problems.append(f"{where}: an fnmatch is a label-pattern, a file-path or routing, not {s.cls!r}")
+        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES:
+            problems.append(f"{where}: {s.cls!r} is for an fnmatch; a {s.shape} site is a parse class")
         key = (s.rel, s.anchor, s.shape)
         if key in seen:
             problems.append(f"{where}: duplicate ledger entry")

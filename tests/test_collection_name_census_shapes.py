@@ -91,6 +91,89 @@ _NEW_SHAPE_EXPECTED: dict[str, str] = {
 }
 
 
+#: Review round 1 (RDR-229 P1.1): fixture id -> (source, line, expected shape).
+_REVIEW_FIXTURES: dict[str, tuple[str, int, str]] = {
+    # item 1: concatenated and formatted prefixes
+    "concat_plus": (
+        'def f(entry, parent):\n    return entry.startswith(parent + "__")\n',
+        2, "concat_prefix"),
+    "concat_percent": (
+        'def f(name, o):\n    return name.startswith("%s__" % o)\n', 2, "concat_prefix"),
+    "concat_format": (
+        'def f(name, o):\n    return name.endswith("{}__".format(o))\n',
+        2, "concat_prefix"),
+    "concat_via_local": (
+        'def f(name, o):\n    p = o + "__"\n    return name.startswith(p)\n',
+        3, "concat_prefix"),
+    # item 2: bindings beyond a plain Assign, and the prefix sources
+    "binding_annassign": (
+        'def f(name, x):\n    p: str = f"{x}__"\n    return name.startswith(p)\n',
+        3, "fstring_prefix"),
+    "binding_walrus": (
+        'def f(name, x):\n    if (p := f"{x}__") and name.startswith(p):\n'
+        '        return 1\n', 2, "fstring_prefix"),
+    "binding_walrus_inline": (
+        'def f(name, x):\n    return name.startswith(p := f"{x}__")\n',
+        2, "fstring_prefix"),
+    "binding_tuple_unpack": (
+        'def f(name, x, y):\n    a, b = f"{x}__", f"{y}__"\n'
+        '    return name.startswith(b)\n', 3, "fstring_prefix"),
+    "binding_local_literal": (
+        'def f(name):\n    p = "code__"\n    return name.startswith(p)\n',
+        3, "local_prefix"),
+    "binding_local_literal_tuple": (
+        'def f(name):\n    ps = ("code__", "docs__")\n    return name.endswith(ps)\n',
+        3, "local_prefix"),
+    "const_from_generator": (
+        '_TYPES = ("a", "b")\n_PFX = tuple(f"{t}__" for t in _TYPES)\n\n'
+        'def f(name):\n    return name.startswith(_PFX)\n', 5, "const_prefix"),
+    # item 3: strip-prefix, find, split(sep=), a named "__" constant
+    "strip_removeprefix": (
+        'def f(name):\n    return name.removeprefix("docs__")\n', 2, "strip_prefix"),
+    "strip_removesuffix": (
+        'def f(name):\n    return name.removesuffix("rdr__")\n', 2, "strip_prefix"),
+    "strip_replace": (
+        'def f(name):\n    return name.replace("knowledge__", "")\n', 2, "strip_prefix"),
+    "find_dunder": (
+        'def f(name):\n    return name.find("__")\n', 2, "dunder_find"),
+    "index_dunder": (
+        'def f(name):\n    return name.index("__")\n', 2, "dunder_find"),
+    "count_dunder": (
+        'def f(name):\n    return name.count("__")\n', 2, "dunder_find"),
+    "split_sep_keyword": (
+        'def f(name):\n    return name.split(sep="__")\n', 2, "split"),
+    "split_named_constant": (
+        '_SEP = "__"\n\ndef f(name):\n    return name.split(_SEP)\n', 4, "split"),
+    "in_named_constant": (
+        '_SEP = "__"\n\ndef f(name):\n    return _SEP in name\n', 4, "in"),
+    # item 6 and 12
+    "hash_suffix_rsplit": (
+        'def f(collection_name):\n    return collection_name.rsplit("-", 1)\n',
+        2, "hash_suffix"),
+    "hash_suffix_endswith": (
+        'def f(collection_name, h):\n    parts = collection_name.rsplit("-", 1)\n'
+        '    m = lambda n: n.endswith(f"-{h}")\n    return parts, m\n',
+        3, "hash_suffix"),
+    "endswith_family_marker": (
+        'def f(scope):\n    return scope.endswith("__")\n', 2, "endswith"),
+}
+for _fid, (_src, _ln, _shape) in _REVIEW_FIXTURES.items():
+    _NEW_SHAPE_FIXTURES[_fid] = (_src, _ln)
+    _NEW_SHAPE_EXPECTED[_fid] = _shape
+
+#: A fixture whose source holds a second hit of the same shape (the hash-suffix
+#: ``endswith`` leg needs the ``rsplit`` that names it).
+_EXTRA_HITS: dict[str, list[tuple[int, str]]] = {
+    "hash_suffix_endswith": [(2, "hash_suffix")],
+}
+
+
+def _expected_hits(fixture_id: str, lineno: int) -> list[tuple[int, str]]:
+    return sorted(
+        [(lineno, _NEW_SHAPE_EXPECTED[fixture_id]), *_EXTRA_HITS.get(fixture_id, [])]
+    )
+
+
 @pytest.mark.parametrize("fixture_id", sorted(_NEW_SHAPE_FIXTURES))
 def test_each_new_shape_is_matched_and_named(
     fixture_id: str, tmp_path: pathlib.Path,
@@ -98,7 +181,7 @@ def test_each_new_shape_is_matched_and_named(
     source, lineno = _NEW_SHAPE_FIXTURES[fixture_id]
     sample = tmp_path / "sample.py"
     sample.write_text(source, encoding="utf-8")
-    assert _scan.scan_file(sample) == [(lineno, _NEW_SHAPE_EXPECTED[fixture_id])]
+    assert _scan.scan_file(sample) == _expected_hits(fixture_id, lineno)
 
 
 @pytest.mark.parametrize("fixture_id", sorted(_NEW_SHAPE_FIXTURES))
@@ -112,11 +195,11 @@ def test_a_new_site_of_each_shape_fails_the_census_naming_the_shape(
     sample.write_text(source, encoding="utf-8")
     live = _scan.live_counter({"src/nexus/new_site.py": _scan.scan_file(sample)})
     unlabelled, stale = _scan.diff_ledger(live, {})
-    shape = _NEW_SHAPE_EXPECTED[fixture_id]
     assert not stale
     assert unlabelled == [
-        f"src/nexus/new_site.py:{lineno} shape={shape}: "
+        f"src/nexus/new_site.py:{ln} shape={shape}: "
         "UNLABELLED, add a ledger entry with a class"
+        for ln, shape in _expected_hits(fixture_id, lineno)
     ]
 
 
@@ -150,6 +233,31 @@ _NEGATIVE_FIXTURES: dict[str, str] = {
 }
 
 
+_REVIEW_NEGATIVES: dict[str, str] = {
+    # item 11: a Python dunder is not a collection owner segment
+    "pycache_in_path_parts": (
+        'def f(p):\n    return "__pycache__" in p.parts\n'),
+    "init_in_name": ('def f(name):\n    return "__init__" in name\n'),
+    "main_in_argv": ('def f(a):\n    return "__main__" in a\n'),
+    # item 6: a hash tail of something that is not a collection name
+    "rsplit_hyphen_on_a_model_token": (
+        'def f(token):\n    return token.rsplit("-", 1)[-1]\n'),
+    "endswith_hyphen_fstring_without_a_collection_rsplit": (
+        'def f(name, h):\n    return name.endswith(f"-{h}")\n'),
+    # item 3: replace of an ordinary string, a plain concat
+    "replace_of_an_ordinary_token": (
+        'def f(name):\n    return name.replace("_", " ")\n'),
+    "startswith_concat_without_a_dunder": (
+        'def f(name, p):\n    return name.startswith(p + "_")\n'),
+    "local_prefix_literal_that_is_not_a_prefix": (
+        'def f(name):\n    p = "mcp__"\n    return name.startswith(p)\n'),
+    "walrus_binding_that_is_not_a_prefix": (
+        'def f(name, x):\n    return name.startswith(p := f"{x}-")\n'),
+}
+for _fid, _src in _REVIEW_NEGATIVES.items():
+    _NEGATIVE_FIXTURES[_fid] = _src
+
+
 @pytest.mark.parametrize("fixture_id", sorted(_NEGATIVE_FIXTURES))
 def test_negative_fixtures_match_nothing(
     fixture_id: str, tmp_path: pathlib.Path,
@@ -159,3 +267,52 @@ def test_negative_fixtures_match_nothing(
     assert _scan.scan_file(sample) == []
 
 
+
+
+# ---------------------------------------------------------------------------
+# The production path (review round 1, item 5), and the unparsed-file guard.
+# ---------------------------------------------------------------------------
+
+
+def _write_tree(root: pathlib.Path, files: dict[str, str]) -> pathlib.Path:
+    src = root / "src" / "nexus"
+    for rel, text in files.items():
+        target = src / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return src
+
+
+def test_production_path_names_a_cross_file_constant_shape(tmp_path: pathlib.Path) -> None:
+    """``raw_sites`` over a tmp ``src/``: a prefix constant defined in one file
+    and imported into another is matched as ``const_prefix`` in the importer
+    (constants are collected across the tree), and ``diff_ledger`` refuses it
+    naming the shape."""
+    src = _write_tree(tmp_path, {
+        "consts.py": '_PFX = ("docs__", "rdr__")\n',
+        "user.py": (
+            "from nexus.consts import _PFX\n\n"
+            "def is_prose(name):\n    return name.startswith(_PFX)\n"
+        ),
+    })
+    raw = _scan.raw_sites(src, tmp_path)
+    assert raw == {"src/nexus/user.py": [(4, "const_prefix")]}
+    unlabelled, stale = _scan.diff_ledger(_scan.live_counter(raw), {})
+    assert not stale
+    assert unlabelled == [
+        "src/nexus/user.py:4 shape=const_prefix: UNLABELLED, add a ledger entry with a class"
+    ]
+
+
+def test_production_path_refuses_a_file_that_does_not_parse(tmp_path: pathlib.Path) -> None:
+    src = _write_tree(tmp_path, {"ok.py": "x = 1\n", "broken.py": "def f(:\n"})
+    with pytest.raises(ValueError, match=r"did not parse.*broken\.py"):
+        _scan.raw_sites(src, tmp_path)
+
+
+def test_a_dunder_name_constant_is_followed_across_files(tmp_path: pathlib.Path) -> None:
+    src = _write_tree(tmp_path, {
+        "seps.py": 'SEP = "__"\n',
+        "user.py": "from nexus.seps import SEP\n\ndef f(n):\n    return n.split(SEP)\n",
+    })
+    assert _scan.raw_sites(src, tmp_path) == {"src/nexus/user.py": [(4, "split")]}
