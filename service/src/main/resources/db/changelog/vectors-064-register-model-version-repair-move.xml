@@ -29,15 +29,21 @@
     gate-probe-124, docs____m__v1 with an empty owner, docs__o__1m__v1 whose model starts with a digit, a name ending __v1x, a
     quarantine- prefix on a name that is not conformant). The move has no skipped-row counter, so the operator reads what is left
     with this query, run as nexus_admin (the migrating role reads every tenant's rows through vectors-065's policy):
-        SELECT tenant_id, name FROM nexus.catalog_collections WHERE model_version = '' AND name !~ '<rule>'
+        SELECT tenant_id, name FROM nexus.catalog_collections WHERE model_version = '' AND name !~ '^(quarantine-|)(code|docs|rdr|knowledge)__[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*__[a-z][a-z0-9-]*__v[0-9]+$'
     nx catalog collections-census also counts them ("unusable model_versions"); it lands with RDR-229 P1.2.
 
     READERS DURING THE MOVE (RDR-246, Readers during a move). QuarantineOrigin.rowsOf matches a quarantine sibling to its origin by
-    equal owner_id, embedding_model, model_version and content_type, so both rows of a pair must change together: the template
-    repairs a sibling with its origin, each to the version its own name carries, which is the same vN for a pair. Until the chunk
-    that holds the pair has run, both are still '' and still equal. collectionForTuple orders a '' version as 0 and the repaired
-    value is the name's own version; the production census found 0 tuples whose winner changes. Any other reader falls back to
-    the name's version until completed_at is set.
+    equal owner_id, embedding_model, model_version and content_type (its attribute arm; its other arm matches the reaper's sibling,
+    quarantine- plus the origin's name, by name and is unaffected by model_version). The template repairs a sibling with its
+    origin, each to the version its own name carries, so for a pair whose sibling name carries its origin's version both change
+    together, and a tenant whose registry fits in one chunk (chunk_size 100000; the registry holds 171 and 42 rows on the two
+    production tenants) repairs every pair in one transaction. A larger tenant would have a window between chunks, until
+    completed_at, in which an origin is repaired and its sibling is not (chunks tile the primary key (tenant_id, name), and
+    docs__x and quarantine-docs__x sort apart), and the attribute arm misses the sibling there. A sibling whose own name carries
+    another version than its origin's is repaired to its own name's version and stops matching its origin by attributes; the
+    census found no quarantine row at '' on either production tenant, and CatalogModelVersionRepairMoveIntegrationTest pins this
+    case. collectionForTuple orders a '' version as 0 and the repaired value is the name's own version; the production census
+    found 0 tuples whose winner changes. Any other reader falls back to the name's version until completed_at is set.
 
     CUT COUPLING. This move lands on develop only together with D1 (nexus-p2m1x.10: upsertCollection refuses a blank
     model_version) and P1.4 commit A (on develop at 7dd321122), as part of RDR-229's Phase 2 engine cut. Writers produce only the
@@ -58,9 +64,10 @@
                   AND (t.tenant_id = $1 OR $1 IS NULL)
     A non-conformant empty is not in it, so gate-probe-124 and the like never fail the move.
 
-    PARAMETERS. chunk_size 500, sleep_ms 0, statement_timeout_ms 30000. The table is the collection registry: a few hundred
-    rows across all tenants (171 on tenant nexus, 43 on gate-xr789), so a tenant's rows are one chunk and the pause between
-    chunks that throttles a large move has nothing to throttle. 30 s bounds the verification SELECT on a table that small
+    PARAMETERS. chunk_size 100000, sleep_ms 0, statement_timeout_ms 30000. The table is the collection registry: a few hundred
+    rows across all tenants (171 on tenant nexus, 43 on gate-xr789), so a tenant's rows are one chunk, each chunk is one UPDATE
+    of tiny rows, and the pause between chunks that throttles a large move has nothing to throttle. The chunk is large on
+    purpose, so that a quarantine pair is repaired in one transaction (READERS above). 30 s bounds the verification SELECT on a table that small
     many times over. The move is per tenant, as RDR-246 prescribes for a tenant-scoped table: the worker lists the default
     tenant, every service_tokens tenant and every tenant holding rows, and runs the template under each one's nexus.tenant.
 
@@ -89,7 +96,7 @@ INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, ch
                               statement_timeout_ms, verification, on_complete, changeset_id)
 VALUES ('repair-catalog-collection-model-version',
         'UPDATE <driving_table> SET model_version = substring(t.name from ''__(v[0-9]+)$'') WHERE <chunking_clause> AND t.model_version = '''' AND t.name ~ ''^(quarantine-|)(code|docs|rdr|knowledge)__[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*__[a-z][a-z0-9-]*__v[0-9]+$''',
-        'nexus', 'catalog_collections', 500, 0, 30000,
+        'nexus', 'catalog_collections', 100000, 0, 30000,
         'SELECT 1 FROM nexus.catalog_collections t WHERE t.model_version = '''' AND t.name ~ ''^(quarantine-|)(code|docs|rdr|knowledge)__[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*__[a-z][a-z0-9-]*__v[0-9]+$'' AND (t.tenant_id = $1 OR $1 IS NULL)',
         NULL, 'vectors-064-1');
         ]]></sql>

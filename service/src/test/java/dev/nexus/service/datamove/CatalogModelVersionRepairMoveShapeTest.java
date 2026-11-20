@@ -68,7 +68,7 @@ class CatalogModelVersionRepairMoveShapeTest {
         assertThat(sql).doesNotContainIgnoringCase("policy");
         assertThat(ROW_DML.matcher(withoutLiterals(sql)).results().count())
             .as("the one INSERT and no other row DML").isEqualTo(1);
-        assertThat(sql).contains("VALUES ('" + LABEL + "',");
+        assertThat(sql).contains("('" + LABEL + "',");
         assertThat(LABEL).as("data_moves_label_check").doesNotContain("/");
         // the verification text is the last quoted value before NULL, on_complete: no question mark anywhere in the INSERT's
         // template or verification (the driver binds one), and the one bind parameter is the standalone $1
@@ -79,6 +79,30 @@ class CatalogModelVersionRepairMoveShapeTest {
         var rule = Pattern.compile("'\\^\\(quarantine-\\|\\)\\(code\\|docs\\|rdr\\|knowledge\\)__\\[a-zA-Z0-9-\\]\\+\\(_\\[a-zA-Z0-9-\\]\\+\\)\\*__\\[a-z\\]\\[a-z0-9-\\]\\*__v\\[0-9\\]\\+\\$'");
         assertThat(rule.matcher(sql.replace("''", "'")).results().count()).as("the rule, in the template and in the verification").isEqualTo(2);
         assertThat(cs.getElementsByTagNameNS("*", "comment").item(0).getTextContent()).contains("DATA EFFECT:");
+        // the parameters the header explains: a registry table is one chunk per tenant, so a quarantine pair repairs in one transaction
+        assertThat(sql).as("driving table, chunk_size, sleep_ms, statement_timeout_ms")
+            .contains("'nexus', 'catalog_collections', 100000, 0, 30000,");
+    }
+
+    /** The operator's SELECT in the header and in the changelog fragment names the rule the move uses, not a paraphrase of it. */
+    @Test
+    void theOperatorSelectInTheHeaderAndTheFragmentCarriesTheMovesRuleText() throws Exception {
+        String sql = forwardSql(children(changelog(REGISTER), "changeSet").get(0));
+        var found = Pattern.compile("''(\\^\\(quarantine-\\|\\)[^']+)''").matcher(sql).results()
+            .map(r -> r.group(1)).distinct().toList();
+        assertThat(found).as("one rule text, in the template and in the verification").hasSize(1);
+        // not written as a statement: the SQL-string-literal gate counts a literal that opens with a SQL verb
+        String select = "FROM nexus.catalog_collections WHERE model_version = '' AND name !~ '" + found.get(0) + "'";
+        String header;
+        try (InputStream in = CatalogModelVersionRepairMoveShapeTest.class.getClassLoader().getResourceAsStream(REGISTER)) {
+            assertThat(in).isNotNull();
+            header = new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        }
+        assertThat(header).as("the header's operator SELECT").contains(select);
+        // the fragment is folded into CHANGELOG.md at release and deleted: read whichever holds it
+        var fragment = java.nio.file.Path.of("..", "changelog", "unreleased", "nexus-f3yqd.2.23.md");
+        var holder = java.nio.file.Files.exists(fragment) ? fragment : java.nio.file.Path.of("..", "CHANGELOG.md");
+        assertThat(java.nio.file.Files.readString(holder)).as("the operator SELECT in " + holder).contains(select);
     }
 
     @Test

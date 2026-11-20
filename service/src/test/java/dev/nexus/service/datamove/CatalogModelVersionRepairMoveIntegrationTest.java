@@ -258,7 +258,8 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
             .containsEntry("on_complete", null).containsEntry("supersedes", null)
             .containsEntry("completed_at", null).containsEntry("failed_at", null);
         assertThat(registered.get("template").toString()).contains("<driving_table>").contains("<chunking_clause>");
-        assertThat((Integer) registered.get("chunk_size")).isBetween(1, 1_000_000);
+        assertThat((Integer) registered.get("chunk_size"))
+            .as("one chunk per tenant in practice, so a quarantine pair is repaired in one transaction").isEqualTo(100_000);
         assertThat((Integer) registered.get("statement_timeout_ms")).isPositive();
         // the walk is idempotent: a second walk registers nothing more
         installed();
@@ -459,6 +460,42 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
             .containsEntry("quarantine-gate-probe-124", "")
             .containsEntry("quarantine-" + EMPTY_OWNER, "")
             .containsEntry("quarantine-" + DIGIT_MODEL, "");
+    }
+
+    @Test
+    void aSiblingWhoseNameCarriesAnotherVersionThanItsOrigin_isRepairedToItsOwnNamesVersion_andStopsMatchingByAttributes()
+            throws Exception {
+        String origin = "docs__1-8__bge-base-en-v15-768__v1";
+        String sibling = "quarantine-docs__sib-8__bge-base-en-v15-768__v2";   // its name says v2, its origin's says v1
+        seed(ACME, origin, "");
+        seed(ACME, sibling, "");
+        ctx().update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "1-8")
+            .where(CC_TENANT.eq(ACME)).and(CC_NAME.eq(sibling)).execute();
+        PgContainerHelper.insertChunks(ctx(), ACME, sibling, List.of("cd".repeat(32)), List.of("quarantined"),
+            List.of(new float[768]), List.of(Map.of()));
+        assertThat(quarantineRowsOf(ACME, origin)).as("non-vacuity: both at '' they match by attributes").isEqualTo(1);
+
+        runToCompletion();
+
+        // what the move does here, stated: each row takes the version its own name carries, so the pair no longer shares
+        // a model_version and QuarantineOrigin's attribute arm (and the reaper-named arm, since the sibling is not
+        // quarantine- + origin) no longer finds the sibling. The census found no quarantine row at '' on either production
+        // tenant; vectors-064's header says the same.
+        assertThat(versions(ACME)).containsEntry(origin, "v1").containsEntry(sibling, "v2");
+        assertThat(quarantineRowsOf(ACME, origin)).as("the pair stops matching").isZero();
+    }
+
+    @Test
+    void aQuarantineSiblingPutBackAtEmptyAfterTheRuns_failsTheMove() {
+        seedCensusShape();
+        runToCompletion();
+        reopen();
+        seed(ACME, "quarantine-code__1-9__voyage-code-3__v1", "");
+
+        assertThat(productionWorker().runCycle()).isEqualTo(1);
+
+        assertThat(completedAt(LABEL)).as("an empty conformant quarantine sibling is an old-shape row").isNull();
+        assertThat(failedAt()).isNotNull();
     }
 
     /** {@code QuarantineOrigin.countRowsOf}, package-private in the engine: the quarantine rows that are {@code origin}'s. */
