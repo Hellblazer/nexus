@@ -53,7 +53,7 @@ def fake_row(monkeypatch):
     import nexus.mcp_infra as mi
 
     rows: dict[str, dict] = {}
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, **_kw: rows.get(name))
     return rows
 
 
@@ -68,7 +68,7 @@ def _fake_collection_rows(monkeypatch):
     via the ``fake_row`` fixture (function-scoped, applied after this one)."""
     import nexus.mcp_infra as mi
 
-    def _fake_get_collection_row(name: str) -> dict | None:
+    def _fake_get_collection_row(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
         content_type = name.partition("__")[0] if "__" in name else ""
         return {
             "content_type": content_type,
@@ -143,7 +143,28 @@ def test_voyage_model_for_collection_pinned(name: str, expected: str) -> None:
     ], strict=True)),
 )
 def test_default_projection_threshold_pinned(name: str, expected: float) -> None:
+    """The NAME derivation: since RDR-229 P2.4 (nexus-p2m1x.9) this is the NoRow /
+    Unreadable fallback of ``projection_threshold``, not what callers use."""
     assert default_projection_threshold(name) == expected
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    list(zip(_CT_INPUTS, [
+        0.70, 0.55, 0.50, 0.55,
+        0.70, 0.70, 0.70,
+        0.70, 0.70, 0.70,
+        0.70, 0.70, 0.70, 0.70,
+    ], strict=True)),
+)
+def test_projection_threshold_row_backed_table_pinned(name: str, expected: float) -> None:
+    """The same table read through the row (``_fake_collection_rows`` gives every name a row
+    whose content_type is its first segment): the row reading agrees with the name
+    derivation wherever the two agree, and the row wins where they differ (see
+    ``tests/test_rdr229_p24_taxonomy_threshold_row.py``)."""
+    from nexus.projection_threshold import projection_threshold
+
+    assert projection_threshold(name) == expected
 
 
 @pytest.mark.parametrize(

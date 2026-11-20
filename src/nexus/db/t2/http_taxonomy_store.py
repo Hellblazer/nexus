@@ -2660,11 +2660,11 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         computes quantiles and stopword matching Python-side for exact parity
         with CatalogTaxonomy.audit_collection.
         """
-        from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         resolved_threshold = (
             threshold if threshold is not None
-            else default_projection_threshold(collection)
+            else projection_threshold(collection)
         )
 
         r = self._get("/audit", {"collection": collection, "top_n": top_n})
