@@ -275,7 +275,7 @@ _FOR_TUPLE = r"""
 from nexus.commands.catalog import _get_catalog
 # RDR-229 P1.4: collection_for reads the next version from the for_tuple row (the probe subject's tuple; a
 # missing row answers 404 and the client falls back to v1, so the route is exercised either way).
-print(_get_catalog().collection_for("knowledge", "cloud-leg-probe", "voyage-context-3"))
+print(_get_catalog().collection_for("knowledge", "1.9999", "voyage-context-3"))
 """
 
 _LOCATORS = r"""
