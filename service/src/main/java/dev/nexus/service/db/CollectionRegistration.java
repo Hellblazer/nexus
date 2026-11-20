@@ -71,6 +71,25 @@ public final class CollectionRegistration {
         return quarantine ? "quarantine" : "live";
     }
 
+    /** True when {@code name} and {@code state} break "a quarantine- name is quarantine, and only one is". */
+    private static boolean disagrees(String name, String state) {
+        return (name != null && name.startsWith(QuarantineOrigin.PREFIX)) != "quarantine".equals(state);
+    }
+
+    /**
+     * Refuses a NEW registration, in every form, whose name and effective {@code lifecycle_state} disagree (review
+     * N1): a {@code quarantine-} name takes only {@code quarantine}, and a plain name never does. The engine's own
+     * mint passes {@code quarantine} for its prefixed sibling, so it is unaffected; the SQL movers write their rows
+     * directly and do not pass through here.
+     */
+    static void requireNameAgreesWithState(String name, String effectiveState) {
+        if (disagrees(name, effectiveState)) {
+            throw new IllegalArgumentException("registering collection '" + name + "' with lifecycle_state '"
+                + effectiveState + "' is refused: a quarantine- name takes lifecycle_state 'quarantine' only, and "
+                + "any other name never does");
+        }
+    }
+
     /**
      * Refuses an import batch holding a NEW row whose explicit {@code lifecycle_state} and name disagree: a
      * {@code quarantine-} name must say {@code quarantine}, and any other name must not (review, linda 2026-11-20).
@@ -83,7 +102,7 @@ public final class CollectionRegistration {
         for (Map<String, Object> coll : newRows) {
             String state = explicitLifecycleState(coll);
             String name = CatalogRepository.s(coll, "name");
-            if (state != null && (name != null && name.startsWith(QuarantineOrigin.PREFIX)) != "quarantine".equals(state)) {
+            if (state != null && disagrees(name, state)) {
                 bad.add("'" + name + "' (lifecycle_state=" + state + ")");
             }
         }

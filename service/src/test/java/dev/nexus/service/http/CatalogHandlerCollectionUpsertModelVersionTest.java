@@ -147,6 +147,24 @@ class CatalogHandlerCollectionUpsertModelVersionTest extends AtomicWriteTestBase
     }
 
     @Test
+    void aBatchLargerThanOneBindChunkImportsAndSkipsItsExistingRows() {
+        // Review M2: the existing-names SELECT binds one parameter per name, so it is chunked like the INSERT
+        // (PostgreSQL allows 32767 binds); a batch over the budget must neither fail nor re-insert.
+        String t = newTenant();
+        int n = 33_000;   // over PostgreSQL's 32767 bind limit
+        List<Map<String, Object>> rows = new java.util.ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            rows.add(row("knowledge__big" + i + "__minilm-l6-v2-384__v1", "v1"));
+        }
+
+        assertThat(repo.importCollectionsBatch(t, rows)).isEqualTo(n);
+        assertThat(repo.importCollectionsBatch(t, rows)).as("a second pass skips every existing row").isEqualTo(n);
+
+        assertThat(version(t, "knowledge__big0__minilm-l6-v2-384__v1")).isEqualTo("v1");
+        assertThat(version(t, "knowledge__big" + (n - 1) + "__minilm-l6-v2-384__v1")).isEqualTo("v1");
+    }
+
+    @Test
     void anImportRowThatCarriesAVersionKeepsIt_overTheNamesSuffix() {
         String t = newTenant();
         String name = conformant("keeps", 3);

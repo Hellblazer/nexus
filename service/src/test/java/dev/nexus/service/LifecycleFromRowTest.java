@@ -146,9 +146,9 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     // ── (a) registration takes an explicit lifecycle_state ───────────────────
 
     @Test
-    void registrationHonoursAnExplicitLifecycleState_underANameWithNoPrefix() throws Exception {
+    void registrationHonoursAnExplicitQuarantineState_forAQuarantinePrefixedName() throws Exception {
         String t = newTenant();
-        String name = col("a1");
+        String name = prefixed(col("a1"));
 
         repo.upsertCollection(t, reg(name, "quarantine"));
 
@@ -156,21 +156,37 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
     }
 
     @Test
-    void aRegistrationThatNamesNoStateIsLive_evenWhenItsNameOrContentTypeCarriesThePrefix() throws Exception {
+    void aNewRowWhoseNameAndEffectiveStateDisagreeIsRefused_inEveryForm_namingBoth() throws Exception {
+        // Review N1: 'prefix iff quarantine'. A quarantine- name takes only 'quarantine', a plain name never does.
+        String t = newTenant();
+        String prefixedNoState = prefixed(col("a1a"));
+        String prefixedLive = prefixed(col("a1b"));
+        String prefixedDormant = prefixed(col("a1c"));
+        String plainQuarantine = col("a1d");
+
+        for (var c : List.of(reg(prefixedNoState, null), reg(prefixedLive, "live"), reg(prefixedDormant, "dormant"),
+                             reg(plainQuarantine, "quarantine"))) {
+            String name = (String) c.get("name");
+            assertThatThrownBy(() -> repo.upsertCollection(t, c))
+                .as("engine form " + name).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(name).hasMessageContaining("lifecycle_state").hasMessageContaining("quarantine-");
+            assertThat(state(t, name)).as("nothing written for " + name).isNull();
+        }
+    }
+
+    @Test
+    void aRegistrationThatNamesNoStateIsLive_evenWhenItsContentTypeCarriesThePrefix() throws Exception {
         String t = newTenant();
         String plain = col("a2p");
-        String byName = prefixed(col("a2n"));
         String byContentType = col("a2c");
         Map<String, Object> ct = reg(byContentType, null);
         ct.put("content_type", "quarantine-knowledge");
 
         repo.upsertCollection(t, reg(plain, null));
-        repo.upsertCollection(t, reg(byName, null));
         repo.upsertCollection(t, ct);
 
         assertThat(state(t, plain)).isEqualTo("live");
-        assertThat(state(t, byName)).as("the prefix is no longer read at registration").isEqualTo("live");
-        assertThat(state(t, byContentType)).as("nor is a content_type prefix").isEqualTo("live");
+        assertThat(state(t, byContentType)).as("a content_type prefix is not read at registration").isEqualTo("live");
     }
 
     @Test
@@ -205,6 +221,22 @@ class LifecycleFromRowTest extends AtomicWriteTestBase {
 
         repo.upsertCollection(t, reg(prefixedNew, "quarantine"));
         assertThat(state(t, prefixedNew)).as("the engine form mints a quarantine- row").isEqualTo("quarantine");
+    }
+
+    @Test
+    void anExistingRowIsNotJudgedForDisagreement_whenReRegistered() throws Exception {
+        // The agreement rule is for a NEW row; an existing one (an engine-minted sibling, a legacy row) is untouched.
+        String t = newTenant();
+        String legacyPrefixedLive = prefixed(col("a4f"));
+        String plainQuarantine = col("a4g");
+        row(t, legacyPrefixedLive, "live");
+        row(t, plainQuarantine, "quarantine");
+
+        repo.upsertCollection(t, reg(legacyPrefixedLive, null));
+        repo.upsertCollection(t, reg(plainQuarantine, "live"));
+
+        assertThat(state(t, legacyPrefixedLive)).isEqualTo("live");
+        assertThat(state(t, plainQuarantine)).isEqualTo("quarantine");
     }
 
     @Test

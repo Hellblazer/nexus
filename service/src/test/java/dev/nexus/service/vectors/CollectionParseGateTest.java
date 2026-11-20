@@ -369,6 +369,11 @@ class CollectionParseGateTest {
      * CatalogRepository's literals), its state-and-name agreement check, and the client route's refusal of a new
      * {@code quarantine-} name. The bypass-set readers (ChunkKeyPlan, ChunkConstraintAdmin, ChunkKeyAllowlistCheck,
      * ChunkKeySweep) are unchanged pending the allow-list CHECK ruling.
+     *
+     * <p>Review round 2 (N1), 34 -> 35: ReembedHandler 0 -> 1, {@code requireRegistrable}'s refusal of a re-embed
+     * target named {@code quarantine-...}, so the prefix guard stays "a quarantine- name is an engine mint". It is a
+     * name read for a name no row exists for yet, the same class as the client route's refusal in
+     * CollectionRegistration.
      */
     private static final Map<String, Integer> QUARANTINE_READ_CENSUS = Map.ofEntries(
         Map.entry("dev/nexus/service/ChunkReaper.java", 3),
@@ -377,13 +382,14 @@ class CollectionParseGateTest {
         Map.entry("dev/nexus/service/db/CollectionRegistration.java", 4),
         Map.entry("dev/nexus/service/db/QuarantineOrigin.java", 4),
         Map.entry("dev/nexus/service/http/CatalogHandler.java", 4),
+        Map.entry("dev/nexus/service/http/ReembedHandler.java", 1),
         Map.entry("dev/nexus/service/vectors/ChunkConstraintAdmin.java", 2),
         Map.entry("dev/nexus/service/vectors/ChunkKeyAllowlistCheck.java", 1),
         Map.entry("dev/nexus/service/vectors/ChunkKeyPlan.java", 6),
         Map.entry("dev/nexus/service/vectors/ChunkKeySweep.java", 1),
         Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 2));
 
-    private static final int QUARANTINE_READ_TOTAL_CEILING = 34;
+    private static final int QUARANTINE_READ_TOTAL_CEILING = 35;
 
     private static final Pattern QUARANTINE_READ = Pattern.compile(
         "(?<!String\\s{1,40})\\bQUARANTINE_PREFIX\\b"

@@ -686,6 +686,11 @@ public final class ReembedHandler implements HttpHandler {
                 + "name: a re-embed target is registered under a conformant name (content type, owner, model and a "
                 + "v<n> version, joined by double underscores)");
         }
+        if (requested.startsWith(dev.nexus.service.db.QuarantineOrigin.PREFIX)) {
+            // The prefix is the engine's own: a target registered under it would be a live row named like a quarantine.
+            throw new IllegalArgumentException("target_collection " + requested + " starts with quarantine-, a name "
+                + "prefix only the engine's own quarantine siblings carry; choose another target name");
+        }
         Job asSource = firstMatch(locked, j -> j.sourceCollection().equals(requested));
         if (asSource != null) {
             throw heldBy(asSource, "target_collection " + requested + " is held as the source of");

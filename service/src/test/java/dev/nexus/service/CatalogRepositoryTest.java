@@ -1900,10 +1900,12 @@ class CatalogRepositoryTest {
     private static final String OWN_MODEL = "voyage-code-3";
 
     private void registerColl(String tenant, String name, String contentType, String ownerId) {
+        // RDR-229 P2.5: a quarantine- name registers only as 'quarantine', which the caller now says explicitly.
         repo.upsertCollection(tenant, Map.of(
             "name", name, "content_type", contentType, "owner_id", ownerId,
             "embedding_model", contentType.equals("code") ? OWN_MODEL : "voyage-context-3",
-            "model_version", "v1"));
+            "model_version", "v1",
+            "lifecycle_state", name.startsWith("quarantine-") ? "quarantine" : "live"));
     }
 
     private void putDoc(String tenant, String tumbler, String contentType, String collection) {

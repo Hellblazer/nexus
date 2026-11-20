@@ -9805,6 +9805,7 @@ public final class CatalogRepository {
                     CollectionRegistration.requireClientNameNotQuarantine(name);
                 }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
+                CollectionRegistration.requireNameAgreesWithState(name, requestedState != null ? requestedState : "live");
                 String  profileModel     = null;
                 Integer profileDimension = null;
                 // contentType is already proven non-null/non-blank by the guard above
@@ -13573,9 +13574,17 @@ public final class CatalogRepository {
 
     /** The names among {@code names} that already have a {@code catalog_collections} row for {@code tenant}. */
     private static Set<String> existingCollectionNames(DSLContext ctx, String tenant, List<String> names) {
-        return new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.in(names)))
-            .fetch(CATALOG_COLLECTIONS.NAME));
+        // One bind per name plus the tenant, so the IN list is chunked to the same bind budget as the INSERT
+        // (PostgreSQL's protocol allows 32767 parameters).
+        Set<String> out = new java.util.HashSet<>();
+        final int chunk = Math.max(1, MAX_BATCH_PARAMS - 1);
+        for (int start = 0; start < names.size(); start += chunk) {
+            out.addAll(ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_COLLECTIONS.NAME.in(names.subList(start, Math.min(start + chunk, names.size())))))
+                .fetch(CATALOG_COLLECTIONS.NAME));
+        }
+        return out;
     }
 
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {

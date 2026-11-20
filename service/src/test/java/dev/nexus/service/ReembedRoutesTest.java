@@ -1089,6 +1089,26 @@ class ReembedRoutesTest {
     }
 
     @Test
+    void aQuarantinePrefixedTargetIsRefusedByPlanAndStart_andNoRowAndNoJobIsCreated() throws Exception {
+        // Review N1: a re-embed target named quarantine-<conformant> would mint a live row under the engine's prefix.
+        Tn t = tenant("qtarget");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String quarantineName = "quarantine-" + t.tgt();
+
+        var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + quarantineName + "\"}");
+        var start = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + quarantineName + "\"}");
+
+        assertThat(plan.statusCode()).as(plan.body()).isEqualTo(400);
+        assertThat(start.statusCode()).as(start.body()).isEqualTo(400);
+        assertThat(json(plan).get("error").toString()).contains(quarantineName).contains("quarantine-");
+        assertThat(json(start).get("error").toString()).contains(quarantineName).contains("quarantine-");
+        assertThat(catalog.getCollection(t.tenant(), quarantineName)).as("no row").isNull();
+        assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).as("no job").isEmpty();
+    }
+
+    @Test
     void planOfASourceAJobHoldsIsRefusedNamingTheJob() throws Exception {
         Tn t = tenant("planheld");
         UUID jobId = id(startOk(t, t.src()));
