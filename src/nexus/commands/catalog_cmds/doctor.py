@@ -191,6 +191,18 @@ EXIT_COULD_NOT_CHECK = 3
     ),
 )
 @click.option(
+    "--uri-residue",
+    "uri_residue",
+    is_flag=True,
+    help=(
+        "RDR-229 P1.2 (nexus-p2m1x.2): count the chroma:// source-URI rows whose segment has no "
+        "rdr__/docs__/code__ prefix, split by whether their collection is code/docs/rdr, and the nx-note:// "
+        "rows of such a collection with a prefix-free segment, across catalog_documents, document_aspects and "
+        "document_highlights. One engine read (engine-service 0.1.199), no catalog walk. WARN on any; never "
+        "changes the exit status. Not checked, never a pass, on an engine without the route."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -207,6 +219,7 @@ def doctor_cmd(
     sensitive_with_aspects: bool,
     sensitive_in_external_embedder: bool,
     sensitivity_mcp_output: bool,
+    uri_residue: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -232,6 +245,7 @@ def doctor_cmd(
         or link_coverage or visible_outside_manifest
         or sensitive_in_aspect_eligible or sensitive_with_aspects
         or sensitive_in_external_embedder or sensitivity_mcp_output
+        or uri_residue
     )
     if not any_check:
         raise click.UsageError(
@@ -240,8 +254,8 @@ def doctor_cmd(
             "--t3-vs-catalog, --name-vs-embed-dim, "
             "--store-put-integrity, --link-coverage, "
             "--visible-outside-manifest, --sensitive-in-aspect-eligible, "
-            "--sensitive-with-aspects, --sensitive-in-external-embedder, or "
-            "--sensitivity-mcp-output."
+            "--sensitive-with-aspects, --sensitive-in-external-embedder, "
+            "--sensitivity-mcp-output, or --uri-residue."
         )
 
     overall_pass = True
@@ -373,6 +387,19 @@ def doctor_cmd(
             overall_pass = False
         elif check == "check_sensitive_with_aspects" and _sd.is_not_checked(report):
             could_not_check = True
+
+    if uri_residue:
+        from nexus.catalog import uri_residue_doctor as _ur  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost
+
+        report = _ur.check_uri_residue()
+        if as_json:
+            json_payload[report["name"]] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            for line in _ur.render_text(report):
+                click.echo(line)
+            _printed_anything = True
 
     if as_json:
         click.echo(json.dumps(json_payload, indent=2))
