@@ -81,7 +81,8 @@ def render_text(rep: dict) -> list[str]:
                  f"created_at-then-NAME picks a different winner than NAME ASC in {d['count']} "
                  f"({p14['created_at_winner_is_legacy_or_nonconformant_count']} of them a legacy or non-conformant "
                  f"created_at winner; {p14['tied_candidates_without_created_at']} tied candidate(s) have no created_at). "
-                 "The P1.4 switch holds unless this count is zero.")
+                 "The P1.4 switch holds unless this count is zero. NAME ASC winners are computed in codepoint "
+                 "order; the cloud database collation is unverified, so check each listed tie against the engine.")
     _shown(lines, d["tuples"], lambda x: f"({x['content_type']}, {x['owner_id']}, {x['embedding_model']}): NAME ASC "
                                          f"{x['winner_name_asc']}, created_at {x['winner_created_at_then_name']}"
                                          + (" [legacy/non-conformant]" if x["created_at_winner_is_legacy_or_nonconformant"] else "")

@@ -449,3 +449,21 @@ def test_an_unreadable_created_at_is_counted_and_sorts_last() -> None:
     assert p14["tied_candidates_with_unreadable_created_at"] == 1
     [t] = p14["created_at_winner_differs"]["tuples"]
     assert t["winner_created_at_then_name"] == b["name"]
+
+
+def test_two_spellings_of_one_instant_tie_and_fall_to_the_name() -> None:
+    """Confirmation-round finding: equal instants in T and space spellings must tie, so NAME ASC decides and the
+    created_at winner agrees with the name winner (no false 'differs')."""
+    rows = [
+        {"name": "docs__1-1__voyage-context-3__v1", "content_type": "docs", "owner_id": "1-1",
+         "embedding_model": "voyage-context-3", "model_version": "v1", "superseded_by": "",
+         "lifecycle_state": "live", "legacy_grandfathered": False, "created_at": "2026-11-20T09:56:57Z"},
+        {"name": "zslug", "content_type": "docs", "owner_id": "1-1",
+         "embedding_model": "voyage-context-3", "model_version": "v1", "superseded_by": "",
+         "lifecycle_state": "live", "legacy_grandfathered": False, "created_at": "2026-11-20 09:56:57+00"},
+    ]
+    report = crc.census(rows, tenant_label="t", generated_at="2026-11-20T00:00:00Z")
+    p14 = report["multi_candidate_tuples"]["p14_created_at_tie_break"]
+    assert p14["tied_tuples_with_filter"] == 1
+    assert p14["created_at_winner_differs"]["count"] == 0
+    assert "codepoint" in p14["switch_condition"]
