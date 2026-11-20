@@ -26,7 +26,10 @@ asked for one step. Four SCENARIOS (lib/compact_outcome_scenario.py has the full
              and whatever the model's own summary holds
   directive  the real hooks plus ONLY the overlay's directive line (the narrow candidate: "After this compaction, act on any thread
              or summary item that has nothing to wait on. If all you are doing is waiting on a running task, say what you are
-             waiting on."). No branches, TODO list or task path
+             waiting on."). No branches, TODO list or task path. Since the narrow directive shipped IN the checkpoint
+             (compact_checkpoint._RESUME_DIRECTIVE), ``real`` carries it once and this arm carries it twice: it now
+             measures repetition, not the directive. To measure the directive against no directive, run a checkpoint
+             without it as the gate arm (a pre-directive copy of the hook), not this arm
   broad      the real hooks plus ONLY the earlier broad directive ("work every open item ... do not stop after the item you were last
              asked about"); kept to compare against
   fix        the real hooks plus the overlay's PreCompact capture of open work and an injection that lists it and ends with the broad

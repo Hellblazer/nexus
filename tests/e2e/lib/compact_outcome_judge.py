@@ -292,7 +292,8 @@ def injection_evidence(events: list[dict], board_words: tuple[str, ...] = ("alph
                 texts.append("")
     joined = "\n".join(texts)
     return {"hook_responses": len(texts), "chars": len(joined), "names_branches": all(w in joined for w in board_words),
-            "has_directive": NARROW_PHRASE in joined, "has_broad": BROAD_PHRASE in joined, "has_overlay_list": LIST_HEADER in joined,
+            "has_directive": NARROW_PHRASE in joined, "directive_count": joined.count(NARROW_PHRASE),
+            "has_broad": BROAD_PHRASE in joined, "has_overlay_list": LIST_HEADER in joined,
             "names_indep": bool(indep_marker and indep_marker in joined)}
 
 
@@ -344,15 +345,20 @@ def hook_evidence_problem(arm: str, injected: dict, checkpoint_written: bool, un
         return "the planted-bad injection carries the board: the plant failed" if injected.get("names_branches") else None
     if not injected.get("names_branches"):
         return f"the injection does not carry the board ({', '.join(scenario.board_words)}): the stub and the hook have drifted apart"
-    has = {k: injected.get(k) for k in ("has_directive", "has_broad", "has_overlay_list")}
-    if arm == "directive" and not (has["has_directive"] and not has["has_broad"] and not has["has_overlay_list"]):
+    # The shipped checkpoint itself carries the narrow directive once (compact_checkpoint._RESUME_DIRECTIVE), so the
+    # overlay's narrow line shows up as a SECOND copy; the broad line and the list come only from the overlay.
+    has = {k: injected.get(k) for k in ("has_broad", "has_overlay_list")}
+    narrow = int(injected.get("directive_count") or 0)
+    if arm == "directive" and not (narrow >= 2 and not has["has_broad"] and not has["has_overlay_list"]):
         return "the directive arm's injection is not the real checkpoint plus the narrow directive alone"
-    if arm == "broad" and not (has["has_broad"] and not has["has_directive"] and not has["has_overlay_list"]):
+    if arm == "broad" and not (has["has_broad"] and narrow <= 1 and not has["has_overlay_list"]):
         return "the broad arm's injection is not the real checkpoint plus the broad directive alone"
     if arm == "fix" and not (has["has_broad"] and has["has_overlay_list"]):
         return "the fix overlay's list and directive are not in the injection: the overlay did not run"
-    if arm == "real" and (has["has_directive"] or has["has_broad"] or has["has_overlay_list"]):
+    if arm == "real" and (narrow > 1 or has["has_broad"] or has["has_overlay_list"]):
         return "the real arm's injection carries overlay text: not the shipped hooks"
+    if arm == "real" and narrow == 0:
+        return "the real arm's injection lacks the shipped directive: the hook and the gate have drifted apart"
     return None
 
 

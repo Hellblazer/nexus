@@ -249,8 +249,10 @@ class TestScenarioKinds:
 
 
 class TestHookEvidence:
-    GOOD = {"hook_responses": 1, "names_branches": True, "has_directive": False, "has_broad": False, "has_overlay_list": False,
-            "names_indep": False}
+    # The shipped checkpoint carries the narrow directive once (compact_checkpoint._RESUME_DIRECTIVE), so a real
+    # injection holds exactly one copy; the directive arm's overlay adds a second.
+    GOOD = {"hook_responses": 1, "names_branches": True, "has_directive": True, "directive_count": 1, "has_broad": False,
+            "has_overlay_list": False, "names_indep": False}
 
     def problem(self, arm, injected=None, written=True, unknown=(), known=3, scenario=OPEN):
         return jd.hook_evidence_problem(arm, {**self.GOOD, **(injected or {})}, written, list(unknown), known_calls=known, scenario=scenario)
@@ -269,14 +271,21 @@ class TestHookEvidence:
         assert self.problem("control", {"hook_responses": 0}, written=False, known=0) is None
 
     def test_the_directive_arm_is_the_real_checkpoint_plus_the_narrow_line_alone(self) -> None:
-        ok = {"has_directive": True}
+        ok = {"directive_count": 2}
         assert self.problem("directive", ok) is None
-        assert "narrow directive alone" in self.problem("directive")
+        assert "narrow directive alone" in self.problem("directive")                  # the hook's copy only: no overlay
         assert "narrow directive alone" in self.problem("directive", {**ok, "has_overlay_list": True})
         assert "narrow directive alone" in self.problem("directive", {**ok, "has_broad": True})
-        assert self.problem("broad", {"has_broad": True}) is None and self.problem("broad", {"has_directive": True, "has_broad": True})
+        assert self.problem("broad", {"has_broad": True}) is None
+        assert self.problem("broad", {"has_broad": True, "directive_count": 2})       # the narrow overlay ran too
         assert self.problem("fix", {"has_broad": True, "has_overlay_list": True}) is None and "overlay" in self.problem("fix", {"has_broad": True})
-        assert "shipped hooks" in self.problem("real", {"has_directive": True})
+
+    def test_the_real_arm_carries_the_shipped_directive_once_and_no_overlay_text(self) -> None:
+        assert self.problem("real") is None
+        assert "shipped hooks" in self.problem("real", {"directive_count": 2})
+        assert "shipped hooks" in self.problem("real", {"has_broad": True})
+        assert "shipped hooks" in self.problem("real", {"has_overlay_list": True})
+        assert "shipped directive" in self.problem("real", {"has_directive": False, "directive_count": 0})
 
     def test_the_meanwhile_item_must_live_only_in_the_summary(self) -> None:
         assert "scheme_of" in self.problem("real", {"names_indep": True}, scenario=MEANWHILE)
@@ -317,6 +326,8 @@ class TestHookEvidence:
         ev = inj("board alpha beta\n" + overlay.DIRECTIVE)
         e = jd.injection_evidence(ev)
         assert (e["has_directive"], e["has_broad"], e["has_overlay_list"], e["names_branches"]) == (True, False, False, True)
+        assert e["directive_count"] == 1
+        assert jd.injection_evidence(inj("board alpha beta\n" + overlay.DIRECTIVE + "\n" + overlay.DIRECTIVE))["directive_count"] == 2
         e = jd.injection_evidence(inj(overlay.render({"tasks": [{"id": "b", "output": "/o"}], "branches": ["alpha"], "todo": [], "head_branch": "main"})))
         assert (e["has_broad"], e["has_overlay_list"], e["has_directive"]) == (True, True, False)
 
