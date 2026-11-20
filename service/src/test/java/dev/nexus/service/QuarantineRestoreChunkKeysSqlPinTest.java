@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-l003p: the SQL of vectors-053 cannot read {@link ChunkMetadataKeys}, so it names the CHUNK keys as literals in
+ * nexus-l003p: the SQL of vectors-053 (live body now vectors-063-2) cannot read {@link ChunkMetadataKeys}, so it names the CHUNK keys as literals in
  * the INSERT that puts a restored chunk back into its origin. This holds those literals equal to the generated set (the
  * RDR-236 key table), the way {@code GcRestoreChunkKeysSqlPinTest} does for the two gc restores, so a key-table change
  * that adds a CHUNK key fails here rather than silently dropping the key on a restore. It also holds the changeset to
@@ -25,7 +25,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class QuarantineRestoreChunkKeysSqlPinTest {
 
-    private static final String CHANGESET = "db/changelog/vectors-053-quarantine-restore-chunk-keys-only.xml";
+    /**
+     * The LAST definer of quarantine_restore_chunks: vectors-063-2 (RDR-229 P2.6) redefined the vectors-053-1 body with
+     * only the origin's name-prefix refusal removed, so every contract pinned here still holds of the live body.
+     */
+    private static final String CHANGESET = "db/changelog/vectors-063-live-functions-read-collection-row.xml";
+    private static final String CHANGESET_ID = "vectors-063-2";
 
     /** A code line that builds the restored row's metadata; comment lines never match (they start with dashes). */
     private static final Pattern BUILD = Pattern.compile("^\\s+jsonb_build_object\\((.*)\\),\\s*$", Pattern.MULTILINE);
@@ -35,8 +40,10 @@ class QuarantineRestoreChunkKeysSqlPinTest {
         try (var in = QuarantineRestoreChunkKeysSqlPinTest.class.getClassLoader().getResourceAsStream(CHANGESET)) {
             assertThat(in).as("the changeset is on the classpath").isNotNull();
             String xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            int sql = xml.indexOf("<sql ");
-            int rollback = xml.indexOf("<rollback>");
+            int own = xml.indexOf("<changeSet id=\"" + CHANGESET_ID + "\"");
+            assertThat(own).as("the changeset file carries " + CHANGESET_ID).isGreaterThanOrEqualTo(0);
+            int sql = xml.indexOf("<sql ", own);
+            int rollback = xml.indexOf("<rollback>", own);
             assertThat(sql).as("the changeset carries a forward sql element").isPositive();
             assertThat(rollback).as("the changeset carries a rollback element").isGreaterThan(sql);
             return xml.substring(sql, rollback);

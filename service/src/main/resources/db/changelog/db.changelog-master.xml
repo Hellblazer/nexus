@@ -2194,6 +2194,16 @@
     <include file="db/changelog/vectors-062-topic-set-search.xml"/>
 
     <!--
+        Bead nexus-p2m1x.11 (RDR-229 P2.6): chash_conformance_report, quarantine_restore_chunks and reaper_expire_client_quarantine read the
+        collection's catalog row (embedding_model, lifecycle_state) in place of parsing its name: the nine split_part(collection, '__', 3)
+        model lists and the two 'quarantine-' prefix tests are gone. A manifest row whose collection has no catalog row is reported on its
+        own line, not guessed. Each function keeps its signature (CREATE OR REPLACE); the rollback of each restores the previous last
+        definer (vectors-005-11, vectors-053-1, vectors-056-2). No DATA EFFECT: function definitions only. After vectors-062, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-063-live-functions-read-collection-row.xml"/>
+
+    <!--
         Bead nexus-7fku2.1.2 (RDR-134 Step 2): nexus.taxonomy_coverage_counts_384/768/1024(p_collection), one row (has_taxonomy,
         chunks, unassigned) per collection, from which the engine computes the topic coverage the routed search gates on. Numerator and
         denominator share one live-chunk predicate; why a new function beside taxonomy_unassigned_chashes_<dim>, and where the
