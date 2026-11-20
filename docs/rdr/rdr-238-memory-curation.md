@@ -14,6 +14,8 @@ related_rdrs: [RDR-057, RDR-207, RDR-209, RDR-074, RDR-192, RDR-205, RDR-239, RD
 
 # RDR-238: Memory Curation: Supersession by Deletion, a Bounded Always-Loaded Index, and Habits That Run Themselves
 
+> **Close note (2026-11-19).** The title is the record's name and keeps its first-draft word; Phase 1 shipped quarantine, not deletion (a replaced T2 row is hidden from every read, restorable with `nx memory restore <id>`, and never reaped), so each site below that says "delete" is amended in place and points at the 2026-11-02 Key Discoveries entry, whose "Supersedes for Phase 1" list names them, and at the code: `memory_put`'s `replaces` parameter in `src/nexus/mcp/core.py` and `put_replacing` with `with_lineage_line` in `src/nexus/db/t2/http_memory_store.py`.
+
 > Revise during planning; lock at implementation.
 > If wrong, abandon code and iterate RDR.
 
@@ -51,8 +53,11 @@ this matters: an obsolete version of a fact in context did more harm than an
 unrelated one, taking Qwen2.5 from 100% to 44.6%, and every harmful flip in
 its final intervention was a stale selection. A TTL ages an entry; it never
 says what replaced it. The fix delivers a way for a write to name the entry it
-replaces, and the replaced entry is deleted, on T2 rows and on memory files.
-The new entry keeps one line of lineage naming what it replaced.
+replaces. As first drafted, the replaced entry was deleted, on T2 rows and on
+memory files. As built (Sam, 2026-11-02; Key Discoveries of that date), a T2
+row is quarantined instead: hidden from every read, restorable with
+`nx memory restore <id>`, and never reaped. A memory file is still deleted by
+its writer. The new entry keeps one line of lineage naming what it replaced.
 
 #### Gap 2: The always-loaded index has no budget and no admission rule
 
@@ -110,12 +115,12 @@ revision.
 | Prior RDR | Relationship | What it means for this one |
 | --- | --- | --- |
 | RDR-057 Progressive Formalization Across Memory Tiers | Origin of the tier model | Its "graduation" idea is the T2 to T3 case. This RDR is the curation case beside it: replacement and admission to context. |
-| RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine deletes it in the same transaction. A quarantined target is refused, as `mergeMemories` refuses a quarantined id (Technical Design 1). |
+| RDR-207 Summarization at the T2 Expiry Boundary | Beside, no shared path | It owns what expiry may destroy (quarantine, rollup, reap only rolled-up rows). Replacement is not expiry: a writer names a row and the engine quarantines it in the same transaction (as built; first drafted as a delete; the replaced row carries `ttl_days` NULL, so the rollup and `reap` skip it, Key Discoveries 2026-11-02). A quarantined target is refused, as `mergeMemories` refuses a quarantined id (Technical Design 1). |
 | RDR-209 Heat-Based Graduation Between Memory Tiers | Sibling, accepted (narrowed, 2026-11-16) | It owns heat and graduation, and takes the gate-record rollup as an amendment (same date). Its Phase 0b, a read counter that means "a caller received this row", landed in engine-service-v0.1.196 and conexus 8.5.0. This RDR's index audit does not read that counter yet: for T2 it reads `last_accessed` in the window and RDR-240's `memory` transcript query: per title from `memory_get` calls, per project from `memory_search` calls (Technical Design 5). |
 | RDR-240 Procedures as Sandboxed Lua Scripts | Prerequisite of Phase 2 and of `nx memory curate` | Split from this RDR. Its `transcripts` procedure owns transcript scanning; this RDR calls four of its queries and builds no scanner, with one exception: to count sessions it reads each main transcript only to its first start, to an 8 MiB bound, through the transcripts verb's own `first_start` (Technical Design 5, item 5). Phase 1 does not depend on it. |
 | RDR-239 The Tuple-Space Dictionary | Accepted; prerequisite of one `--cold` row | Its dictionary view (`writers`, last post time per subspace) is the source of the report's tuple-subspace row (Technical Design 4), built by nexus-qo7ie.20 on nexus-mdbds.2.17. |
 | RDR-205 Linda Tuple Space over Postgres | Closed; its ledger template is being retired | Its `ledger/<session_id>` template and 40,785 rows outlived their writer (nexus-onjvw): one of the cases that motivate `--cold`. |
-| RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` deletes it, because explicit deletion is always the project's prerogative (Sam, 2026-10-31: "expiry is the def; explicit del is always our collective prerogative"). |
+| RDR-074 Permanence Mode | Deferred, compatible | Permanence guards a row against expiry only. Naming a permanent row in `replaces` overrides the permanence: first drafted as a delete, as built a quarantine (Key Discoveries 2026-11-02). The override rests on Sam's ruling of 2026-10-31: "expiry is the def; explicit del is always our collective prerogative". |
 | RDR-192 Superseded Note Chunks Outlive Manifest-Less Is-Live | Different layer | It concerns T3 chunks a re-put replaced. This RDR concerns whole T2 rows and memory files a writer replaced. No shared code. |
 
 Searched the RDR corpus for: rollup, quarantine, expiry, consolidation,
@@ -205,11 +210,18 @@ here are the ones each pass found on a named page or table.
   (not Phase 2's baseline, which is taken at the split): em dash in
   prose 11.2 per 100 sessions; `git stash` 4.3; full-disk `find` 2.1;
   Claude-Session trailer 1.1; backtick in a quoted nx or bd argument 1.1. Only
-  the em dash rule has the volume for a 14-day comparison. *Source: T2
+  the em dash rule was thought to have the volume for a 14-day comparison.
+  *Corrected 2026-11-09:* the Phase 2 baseline, taken with RDR-240's
+  `violations` query, found the em dash rule in 3 of 79 main sessions over 14
+  days, 3.8 per 100, not 11.2, so a 14-day before-and-after test has less power
+  than this entry implied (Key Discoveries 2026-11-09; T2
+  `nexus/rdr-238-compliance-pre-emdash-2026-11-09`). The 11.2 figure came from
+  a different scanner and a different 14-day window. *Source: T2
   `238-research-4`.*
 - **Assumed:** moving a rule out of the always-loaded index into an
   on-demand tier does not lower compliance with it. No paper measures this
-  for rules over a long session. This is A3, measured in Phase 2.
+  for rules over a long session. This is A3. It was to be measured in Phase 2
+  and is untested at close (Critical Assumptions; Key Discoveries 2026-11-19).
 - **2026-11-01, Implementation (Phase 1):** the K4 title-pattern backstop was
   chosen by Sam as option (a). `replaces` also refuses a target whose title
   carries one of thirteen tokens: `review`, `code-review`, `commit-review`,
@@ -359,6 +371,66 @@ here are the ones each pass found on a named page or table.
   replaces that day's full report; since 2026-11-10 a run that adds `--cold` to all three does too
   (`-files-t2-agents-cold`), so a later default run does not replace it. `docs/cli-reference.md`, the command's help
   and `report_title` said so; TD4 item 4 is amended to match.
+- **2026-11-09, Phase 2 Step 1 baseline (nexus-qo7ie.12 closed).** Taken at
+  about 19:50Z on split day D, 2026-11-09, before any index line moved, with the
+  `violations` query of RDR-240's `transcripts` procedure (detector
+  `src/nexus/procedures/transcripts.lua` at develop `9dddd2064`, blob
+  `df9b0e5cf748`). Scope: the nexus project's main sessions only, counted as
+  main sessions with at least one hit; every page queried with the same
+  `until`, 2026-11-09T19:49:00Z. *Em dash,* 14 days from 2026-10-26: 3 of 79
+  main sessions, 3.8 per 100, with 6 records cut at the 1 MB line bound and not
+  scanned (T2 `nexus/rdr-238-compliance-pre-emdash-2026-11-09`). *Four rare rules
+  pooled,* 30 days from 2026-10-10: 162 main sessions and a pooled count of 9,
+  the sum of the four per-rule session counts (a session that hit two rules
+  counts twice), 5.6 per 100: `git stash` 7, full-disk `find` 1, Claude-Session
+  trailer 0, backtick in a quoted argument 1, with 13 records cut at the line
+  bound (T2 `nexus/rdr-238-compliance-pre-rare-2026-11-09`). The `git stash`
+  detector counts only a stash that changes state (Sam, ask `q12-stash-scope`,
+  option 1). The detector reads only the command word of each shell segment, so
+  a stash inside `bash -c` or ssh quoting is not counted: the counts are a
+  floor, and Step 3 must use the same detector for the comparison to hold. The
+  em dash figure corrects research 4's 11.2 per 100 (Key Discoveries above).
+- **2026-11-09, the split (nexus-qo7ie.13 closed).** Done at about 19:55Z, right
+  after the baseline, on the 173 files of the nexus checkout's Claude Code
+  memory directory. Before: `MEMORY.md` 18,451 bytes, 159 lines, 146 index
+  lines, 27 files indexed only through `project_key_technical_facts.md`. After
+  the split: 3,587 bytes (about 897 tokens at bytes divided by 4, budget 1,500),
+  25 always-tier entries and one line naming `MEMORY-ondemand.md`, which holds
+  the other 148. The admission rule: an entry stays in the always tier only if
+  (a) it binds on most turns of most sessions and (b) no CLAUDE.md, hot rule or
+  skill already states it. S-8: 4 of the 5 measured rules moved (`git stash` and
+  full-disk `find` together in one file, the trailer, the backtick); the em dash
+  rule stayed, because it binds on every prose turn, so it is not a test of A3.
+  Four moved from 5 clears Sam's minimum of 3. Record, with a reason for each
+  moved entry: T2 `nexus/rdr-238-split-2026-11-09`; the pre-split text: T2
+  `nexus/rdr-238-split-2026-11-09-pre-text`.
+- **2026-11-09, Phase 2 critique and the split's revision (nexus-qo7ie.14
+  closed).** A fresh substantive-critic read all 25 always-tier files against
+  the admission rule and returned not-justified: 2 Critical, 5 Significant, 2
+  ship-blockers (T2 `nexus/rdr-238-p2-critique-2026-11-09`). Both blockers were
+  fixed in the memory directory: `feedback_test_runs_before_push.md` moved out
+  (the pre-push-review skill and AGENTS.md rules 5 and 13 state it), and
+  `feedback_arm_a_monitor_when_you_say_you_will_check.md` moved out and its body
+  rewritten to `nx ci wait`, because it told sessions to poll the check-runs
+  API, against AGENTS.md worktree rule 7. Clause (a) was then applied evenly:
+  nine entries moved out in all, one moved back in
+  (`feedback_sessions_choose_their_own_name.md`, which binds at turn 1), each
+  kept entry got a recorded reason, and the two contradicting index lines were
+  reconciled. The revised split: `MEMORY.md` 2,612 bytes (653 tokens), 17
+  always-tier entries plus the pointer line, `MEMORY-ondemand.md` 156 entries,
+  173 of 173 files named exactly once; S-8 unchanged, 4 of 5 moved (T2
+  `nexus/rdr-238-split-2026-11-09`, its revision section). The critique also
+  found three confounds in the A3 re-measure, carried into Phase 2 Step 3.
+- **2026-11-19, A2 and A3 at close.** A2 is measured and resolved by Sam's
+  decision, not confirmed (the 2026-11-02 entry above: the gate tripped on the
+  agent read and Sam chose quarantine). A3 is untested at close: the pooled
+  rare-rule read is due 2026-12-09 or 12-10 and the em dash read on 2026-11-24,
+  both under bead nexus-qo7ie.15 (Phase 2 Step 3), and the confounds there mean
+  even a clean pooled read leaves A3 assumed unless a rule exceeds its bound.
+  The em dash line never left the always tier (T2
+  `nexus/rdr-238-split-2026-11-09`), so its read is a control and tests nothing
+  about A3. Source: T2 `nexus/critique-5476be38d-nexus-qo7ie-2026-11-20`; bead
+  nexus-qo7ie.15, comment of 2026-11-20.
 
 ### Critical Assumptions
 
@@ -367,33 +439,49 @@ here are the ones each pass found on a named page or table.
   the memory directory unprompted. **Resolved 2026-10-31:** the limit is 200
   lines or 25 KB; topic files load on demand; subagents get the index at
   2.1.316 although the docs say they should not (research 1 and 2).
-- **A2 (Assumed):** Deleting the replaced row, and keeping only its name on
+- **A2 (measured 2026-11-02; resolved by Sam's decision, not confirmed):** as
+  first written, deleting the replaced row, and keeping only its name on
   the new row, loses nothing anyone needs, for the row kinds `replaces` may
   target. Audit records are excluded: `replaces` refuses a target carrying
   any of the tags `kind:gate`, `gate`, `critique`, `research`, `fix-check` or `commit-review`, matched as whole tags (Technical Design 1), so
-  a round-2 critique cannot delete round 1. Replaced rows are a small share
-  (research 3). Verification: Phase 1 Step 3, before `replaces` is announced
-  to agents: research 3's title-chain method is rerun, Sam reads 20 of the
-  earlier chain members it lists that carry none of those tags, and marks
-  each "content needed" or not; one "needed" brings the bitemporal
-  alternative back before anything is deleted.
-- **A3:** Rules moved to the on-demand tier keep their compliance.
-  Verification: Phase 2's before-and-after sample.
+  a round-2 critique cannot replace round 1. Replaced rows are a small share
+  (research 3). Verification was Phase 1 Step 3, before `replaces` is announced
+  to agents: research 3's title-chain method rerun, 20 earlier chain members
+  read, each marked "content needed" or not; one "needed" brings the bitemporal
+  alternative back before anything is deleted. *Outcome (Key Discoveries
+  2026-11-02, nexus-qo7ie.8):* Sam could not judge the rows, so an agent read
+  the first 20 replacement-type rows: 6 yes, 11 maybe, 3 no. The stop rule
+  tripped, so A2 was neither confirmed nor refuted, and the loss it risked was
+  irreversible under delete. Sam decided that a replace quarantines its target
+  (restorable, never reaped) instead of deleting it, so the loss A2 feared is
+  recoverable in Phase 1 as built. The audit-tag exclusion stands.
+- **A3 (untested at close):** Rules moved to the on-demand tier keep their
+  compliance. Verification: Phase 2's before-and-after sample. The split ran on
+  2026-11-09 and 4 of the 5 measured rules moved (Key Discoveries 2026-11-09),
+  but the post-split reads have not run at close (2026-11-19). The follow-up is
+  nexus-qo7ie.15, due 2026-12-10 for the pooled rare-rule read (2026-11-24 for
+  the em dash read, a control only). Confounds (Phase 2 Step 3) mean a clean
+  read leaves A3 assumed; only the backtick rule is a clean observation.
 
 ## Proposed Solution
 
 ### Approach
 
-Delete what is replaced, bound the index, then make both run without anyone
-remembering them.
+Retire what is replaced (first drafted as deleting it; as built, a T2 row is
+quarantined and a memory file is deleted), bound the index, then make both run
+without anyone remembering them.
 
-**Supersession by deletion (Gap 1).** A T2 write may name the row it
-replaces. In the same transaction the engine deletes the old row and writes
-the new one, whose content ends with one line of lineage, `replaces: <old
-title>`. Memory files do
-the same: the new file names what it replaces in frontmatter, and the old file
-is deleted. Lineage is that one line and nothing else; the replaced content is
-gone.
+**Supersession by deletion (Gap 1; as built, by quarantine for T2 rows).** A
+T2 write may name the row it replaces. In the same transaction the engine
+quarantines the old row (it stamps `quarantined_at`, so every read hides the
+row) and writes the new one, whose content ends with one line of lineage,
+`replaces: <old title>`. Memory files do the same in frontmatter: the new file
+names what it replaces, and the writer deletes the old file. Lineage is that
+one line. A quarantined T2 row keeps its content and comes back with
+`nx memory restore <id>`; a deleted memory file's content is gone. Sam decided
+this on 2026-11-02 (Key Discoveries; the code is `replaces` in `memory_put`,
+`src/nexus/mcp/core.py`, and `put_replacing`,
+`src/nexus/db/t2/http_memory_store.py`).
 
 **A bounded index (Gap 2).** `MEMORY.md` keeps an **always** tier under a
 token budget (proposed: 1.5K tokens, about 40 lines). A rule enters it only if
@@ -421,24 +509,46 @@ them.
    content's last line before sending (not repeated if the
    content already ends with it), so the stored content equals what was sent
    and `_verify_t2_write_landed` (`src/nexus/mcp/core.py`) still passes. In
-   one transaction the engine deletes the target row and writes the new row.
-   Refused, with nothing written or deleted: a missing target, the row being
+   one transaction the engine quarantines the target row (as built; first
+   drafted as a delete, Key Discoveries 2026-11-02) and writes the new row.
+   Refused, with nothing written or quarantined: a missing target, the row being
    written, a quarantined target (as `mergeMemories` refuses a quarantined
    id), and a target carrying any tag in the set `AUDIT_TAGS` (`kind:gate`, `gate`, `critique`, `research`, `fix-check` or `commit-review`),
    matched as whole tags, as RDR-209 Phase 3 Step 0 matches `kind:gate`. One
    named constant holds the set, and the `--t2` list reads the same one.
-   The put response echoes the replaced title and the deleted row's content,
-   and `memory_put`'s result carries that content to the writer;
+   The put response echoes the replaced row's id, title and content,
+   and `memory_put`'s result carries them to the writer, with the restore
+   command;
    the client fails the call when it sent `replaces` and gets no echo, so a
    new client against an engine without the feature (whose `MemoryHandler`
    ignores unknown fields) errors instead of reporting "Stored" with the old
    row alive. Such an old engine has already written the new row by then;
-   the error says the old row is still alive. The echo is the row-level
-   recovery: re-put its content. No
+   the error says the old row is still alive. The row-level recovery is
+   `nx memory restore <id>` (first drafted as re-putting the echoed content). No
    schema change and no Liquibase changeset: the lineage is a line of
    content, not a column. Additive on the wire; the wire-contract ledger
    entry states both directions (old client: never sends it; new client, old
    engine: fails on the missing echo).
+
+   *As built (Key Discoveries 2026-11-01 and 2026-11-02; sources
+   `src/nexus/tables/audit-tags.toml`, `put_replacing` in
+   `src/nexus/db/t2/http_memory_store.py`).* Besides the audit tags, `replaces`
+   refuses a target whose title carries one of thirteen tokens (`review`,
+   `code-review`, `commit-review`, `critique`, `critic`, `gate`, `fix-check`,
+   `fixcheck`, `confirm`, `confirmation`, `rereview`, `codereview`, `audit`) or
+   ends in the series suffix `-research-N` (fourteen patterns in all). A token
+   is a whole word bounded by the title's start or end or by `-`, `_`, `.`, `:`
+   or a space, matched case-insensitively as a search, not a full match; this
+   backstop exists because older audit rows carry no tag (Sam chose option (a)
+   of K4). 409 cases: a target already quarantined (so a second replace of the
+   same target, and A to B then B to A), a new title that already names another
+   row, live or quarantined, and a quarantine that affects other than one row;
+   a present but blank `replaces` is 400. K5 limit: a replace is never retried,
+   so a response lost to a replace that landed loses the echo; the new row exists
+   and the old one is quarantined, and its id comes from
+   `nx memory list --quarantined` (the client raises
+   `ReplacesOutcomeUnknownError`). A later plain put at the old title
+   overwrites the quarantined row in place.
 2. **File-memory frontmatter.** An optional `replaces: [name, ...]`. The
    index check (3) reads it.
 3. **SessionStart curation check.** A conexus hook verb (stdlib only, under
@@ -552,7 +662,7 @@ them.
 
 | Need | Exists | Plan |
 | --- | --- | --- |
-| Delete a T2 row | Explicit `memory_delete`, which calls `MemoryRepository.delete(tenant, project, title)` (`MemoryHandler.java:449`) with no quarantine check | A new repository method: look up by (tenant, project, title), refuse quarantined and audit-tagged targets, delete and write in one transaction, as `mergeMemories` does |
+| Delete a T2 row | Explicit `memory_delete`, which calls `MemoryRepository.delete(tenant, project, title)` (`MemoryHandler.java:449`) with no quarantine check | A new repository method: look up by (tenant, project, title), refuse quarantined and audit-tagged targets, quarantine (first drafted as delete) and write in one transaction, as `mergeMemories` does |
 | Schema change | Liquibase memory changesets 001-005 | None needed; lineage is a content line |
 | SessionStart hook verbs | conexus `nx-hook` dispatch | One more verb |
 | Transcript read counts | Ad hoc scan (survey, 2026-10-31) | RDR-240's `transcripts` procedure; `nx memory curate` calls it |
@@ -570,6 +680,16 @@ only part of the lineage anyone has asked for, the name of what was replaced.
 The index is bounded by a budget, not curated by taste, because a budget
 checked by a hook survives a busy week and taste does not.
 
+*Amended at close (2026-11-19).* Sam's decision of 2026-11-02 took the
+alternative this rationale argues against, for T2 rows: a replace quarantines
+its target, which is the mark. The reason was not a retrieval argument but A2's
+measure (6 of the first 20 replacement-type rows read as holding content the
+newest row lacks and wanted, 11 maybe, 3 no; Key Discoveries 2026-11-02), and
+the loss under delete is irreversible. The argument above was overruled, not
+refuted: quarantine hides the row from every read, the rollup and `reap` skip it
+and the summaries route refuses it, so a reader does not meet it, but it
+stays stored and restorable. Memory files are still deleted.
+
 ## Alternatives Considered
 
 ### Alternative 1: Bitemporal T2
@@ -583,7 +703,11 @@ case.
 **Cons:** two time columns on every row, and query changes on every read
 path, to answer a question nobody has asked of T2.
 
-**Reason for rejection:** A2. Revisit if as-of-date queries appear.
+**Reason for rejection:** as first written, A2. A2 then tripped (Key
+Discoveries 2026-11-02), so it did not decide the matter: the deciding reason
+is Sam's decision of 2026-11-02 to quarantine a replaced row instead, which
+keeps its content restorable without two time columns. Quarantine does not
+answer "what did we believe on date D". Revisit if as-of-date queries appear.
 
 ### Alternative 2: Retrieve memories per prompt
 
@@ -603,14 +727,19 @@ If the on-demand tier works, this is a refinement of it.
 
 - **Mark the old row and filter reads (the first draft):** leaves the stale
   row stored and retrievable by flag or by direct read; see Decision
-  Rationale.
+  Rationale. Taken after all for T2 rows, as quarantine, by Sam's decision of
+  2026-11-02 (Key Discoveries); the Decision Rationale's close amendment says
+  why.
 
 ## Trade-offs
 
 ### Consequences
 
 - An additive wire field (`replaces`) and no engine changeset.
-- A replaced row is gone; only its name survives, on the new row.
+- A replaced T2 row is hidden from every read and restorable with
+  `nx memory restore <id>`; its name is on the new row. A replaced memory file
+  is gone, and only its name survives, on the new file (first drafted for T2
+  rows too; Key Discoveries 2026-11-02).
 - A session sees fewer rules up front and has to look in the on-demand index
   for the rest.
 
@@ -618,19 +747,23 @@ If the on-demand tier works, this is a refinement of it.
 
 - **A rule drops out of the always tier and stops being followed.**
   Mitigation: Phase 2 measures compliance before and after for the five rules
-  whose violations show in transcripts, and a rule goes back if its rate
+  whose violations show in transcripts (four of them moved; the em dash line
+  stayed, Key Discoveries 2026-11-09), and a rule goes back if its rate
   rises past the stated bound. The other moved rules (most of about 150) are
   not measured; their guard is that the on-demand index names them and that
   Phase 2 counts reads of moved files.
-- **A write names the wrong row and deletes it.** Mitigation: the target must
+- **A write names the wrong row and quarantines it** (first drafted as
+  deleting it). Mitigation: the target must
   be an exact title in the writer's own tenant and project, audit records
   cannot be targets, the new row records the name it replaced, and the put
-  response returns the deleted row's content so the writer can re-put it.
+  response returns the quarantined row's id and content, so
+  `nx memory restore <id>` brings it back. For a memory file that the writer
+  deleted, only Time Machine helps (Day 2 Operations).
   Point-in-time recovery exists only on the managed cloud engine and is a
   cluster fork, too heavy for one row, so it is not the guard.
 - **The heuristic report marks a live row as replaced.** Mitigation: the
-  report only lists; the writer names the replacement and the engine deletes
-  only a row a write names.
+  report only lists; the writer names the replacement and the engine
+  quarantines only a row a write names.
 - **The SessionStart line becomes noise.** Mitigation: at most one line,
   silent when clean, opt-in per repo, and shipped only after the Phase 2
   split, with the proposed 1.5K-token budget; Phase 2's result may retune it.
@@ -638,8 +771,9 @@ If the on-demand tier works, this is a refinement of it.
 ### Failure Modes
 
 - Replace target missing, the row being written, quarantined, or tagged as
-  an audit record: refused, nothing written or deleted, error names the
-  target and the reason.
+  an audit record: refused, nothing written or quarantined, error names the
+  target and the reason. Further refusals as built are listed in Technical
+  Design 1 (the title backstop, the 409 cases, a blank `replaces`).
 - New client, old engine: no echo in the put response; the client fails the
   call and says the engine lacks `replaces`.
 - `nx memory curate` without RDR-240's runtime, or with a query over its
@@ -659,26 +793,31 @@ If the on-demand tier works, this is a refinement of it.
       2026-10-31; this RDR does not depend on it landing).
 - [x] RDR-239's dictionary view built (nexus-mdbds.2.17). Only the `--cold`
       tuple-subspace row waited for it (nexus-qo7ie.20).
-- [ ] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
-      procedure). Phase 2 Steps 1 and 3, the transcript-backed rows of
+- [x] RDR-240 Phase 1 Step 1 landed (the runner and the `transcripts`
+      procedure; nexus-qo7ie.31 closed, shipped on develop at `a5cacc5ec`).
+      Phase 2 Steps 1 and 3, the transcript-backed rows of
       `nx memory curate` and the release step that runs it wait for it;
       Phase 1 does not. The SessionStart check waits for Phase 2 Step 2, so
       through Phase 2 Step 1 it waits for RDR-240 too.
 
 ### Minimum Viable Validation
 
-On a test substrate: write row A, then row B with `replaces=A`. A is gone:
-`memory_get(A)` finds nothing and search does not return it. B exists, its
+On a test substrate: write row A, then row B with `replaces=A`. A is hidden (first drafted: gone):
+`memory_get(A)` finds nothing but a line naming the quarantined row, and search
+does not return it. B exists, its
 content ends with the line `replaces: A`, and the put response echoes A's
-title and content. A `replaces` naming a row in
+id, title and content; `nx memory restore <id>` brings A back. A `replaces` naming a row in
 another project is refused, and B is not written.
 
-### Phase 1: T2 replacement by deletion
+### Phase 1: T2 replacement by deletion (as built, by quarantine)
+
+*Amended at close: the steps below say "delete" where the build quarantines;
+Key Discoveries 2026-11-02 rules (Sam's decision of that date).*
 
 #### Step 1: Engine write path
 
 A new `MemoryRepository` method: the lookup by (tenant, project, title), the
-delete and the write in one put transaction, the refusal cases (missing
+quarantine (first drafted as a delete) and the write in one put transaction, the refusal cases (missing
 target, self, quarantined, audit-tagged), and the echo. The method is
 classified in `MemoryRepositoryQuarantineReadPathTest` alongside the other
 write paths. Java tests against PG. No changeset.
@@ -686,7 +825,8 @@ write paths. Java tests against PG. No changeset.
 #### Step 2: Client and MCP
 
 `HttpMemoryStore` appends the lineage line; `memory_put(replaces=...)` fails
-on a missing echo and returns the deleted content in its result; the
+on a missing echo and returns the quarantined row's id and content, with the
+restore command, in its result (first drafted: the deleted content); the
 wire-ledger entry states both directions; `tests/test_mcp_wire_snapshot.py`
 is regenerated for the new parameter; Python tests against the engine.
 
@@ -698,6 +838,9 @@ version suffixes), take 20 earlier chain members that carry no `AUDIT_TAGS`
 tag, and Sam marks each "content needed" or not. One "needed" stops the
 feature until the bitemporal alternative is reconsidered.
 
+*Run 2026-11-02 as a measurement, with an agent's marks in place of Sam's; the
+stop rule tripped and Sam chose quarantine (Key Discoveries 2026-11-02).*
+
 ### Phase 2: The bounded index
 
 #### Step 1: Measure
@@ -706,8 +849,10 @@ Before any move: count violations and main sessions for rules whose
 violations show in transcripts, with RDR-240's `violations` query, over
 windows that end on the day of the split. Research 4's ad hoc scan sized those windows
 and is not the baseline, so before and after come from one scanner.
-The measured domain is five rules: the em dash rule, which has the volume
-for a 14-day window, and four rare rules (`git stash`, full-disk `find`, the
+The measured domain is five rules: the em dash rule, sized by research 4 at
+11.2 per 100 sessions and so thought to have the volume for a 14-day window
+(the baseline measured 3.8 per 100, 3 of 79 main sessions, Key Discoveries
+2026-11-09), and four rare rules (`git stash`, full-disk `find`, the
 Claude-Session trailer, backticks in quoted arguments), pooled into one rate
 over 30 days, the most transcripts keep (about 30 days, inferred; research
 9). Each count is stored in T2 when it is taken. The `git stash` rule counts only a
@@ -716,10 +861,15 @@ stash that changes state: `git stash list`, `show` and `create` touch neither
 q12-stash-scope; over 14 days the detector found 31 of 78 main sessions with
 any stash command and 4 with one that changes state).
 
+*Done 2026-11-09 (nexus-qo7ie.12); counts in Key Discoveries 2026-11-09.*
+
 #### Step 2: Split
 
 Write the always tier under the budget and the on-demand index file; move
 the rest. Record what moved and why.
+
+*Done 2026-11-09 (nexus-qo7ie.13), revised after the Phase 2 critique
+(nexus-qo7ie.14); record: T2 `nexus/rdr-238-split-2026-11-09`.*
 
 #### Step 3: Re-measure
 
@@ -734,6 +884,55 @@ group exceeds its bound all four return. Phase 2 ends 30 days after the split. T
 when no rule returns, the always tier is under its budget, and the `memory`
 query shows moved files being read on demand; if no moved file is read in
 those 30 days, the on-demand tier is not working and the split is revisited.
+
+*Status at close (2026-11-19).* The split ran on 2026-11-09, so the windows
+start 2026-11-10 and Phase 2 ends 2026-12-09 (nexus-qo7ie.13). Step 3 has not
+run; it survives as bead nexus-qo7ie.15 with two dated reads (the RDR closed
+about 20 days before Phase 2's own end, see Close).
+
+*The em dash read is a control.* The em dash line never left the always tier
+(S-8 counts it as not moved; T2 `nexus/rdr-238-split-2026-11-09`), so its
+read, due 2026-11-24 over the 14 days from 2026-11-10, cannot test A3, and the
+rule "a rule returns to the always tier" has nothing to return for it. It
+shows whether the rate moved for other reasons.
+
+*The pooled rare-rule read has confounds* (T2 `nexus/rdr-238-split-2026-11-09`,
+revision section; critique T2 `nexus/rdr-238-p2-critique-2026-11-09`). The
+baseline is 9 events in 162 main sessions over 30 days: `git stash` 7,
+full-disk `find` 1, Claude-Session trailer 0, backtick 1.
+
+- `git stash` and full-disk `find` (8 of the 9 events) gained a live advisory
+  hook, conexus `destructive_action_advice`, on 2026-11-08, inside the baseline
+  window. It stays live after the split, so a post-split count under the bound
+  cannot be credited to the memory tier.
+- The trailer rule (0 events) is also a hot rule in AGENTS.md ("Never include AI
+  attribution") and is in Sam's user CLAUDE.md, both always loaded, so moving
+  its memory file removes nothing a session reads.
+- The detector is a floor (Key Discoveries 2026-11-09): it reads only each shell
+  segment's command word, so stashes inside `bash -c` or ssh quoting are missed.
+- Only the backtick rule (1 event) is a clean observation of A3. Its count is
+  too small to bound alone, and Step 3 reports it on its own as well as in the
+  pool.
+- Power, illustrated, not predicted: if the post-split window held 162 main
+  sessions, the expectation would be 9 and the 97.5th percentile of a Poisson
+  distribution with mean 9 is 15 (computed for this edit with the standard
+  library and stated in the close critique), so only 16 or more events, about
+  1.8 times the baseline, would trip it. The real bound uses the realised
+  session count.
+
+*How the pooled outcome is worded.* Unless a rule exceeds its bound, the verdict
+reads "no regression observed; A3 stays assumed", never "A3 verified" and never
+"the split passed on compliance". If the pool exceeds its bound, all four rules
+return, as above, and the record says which rule drove it.
+
+*Read date and window truncation.* Transcripts are kept about 30 days (inferred
+from file dates; research 9), so the pooled window of 30 days from 2026-11-10
+sits at the edge of retention: its first days may already be gone when it is
+read. Read it on 2026-12-09 or on 2026-12-10 at the latest, record the realised
+window start (the earliest transcript date the query actually covered), and
+state whether the window was truncated. A truncated window uses the realised
+main-session count in the expectation. The em dash window (14 days) lies well
+inside retention.
 
 ### Phase 3: Habits
 
@@ -761,7 +960,7 @@ never blocks the release.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Replaced T2 rows | none; the row is gone, its name is on the new row | `nx memory get` of the new row | the replacing write | `nx memory curate --t2` | the deleted content `memory_put` returns to the writer, kept only if the writer keeps it |
+| Replaced T2 rows (as built: quarantined, Key Discoveries 2026-11-02) | `nx memory list --quarantined`; its name is on the new row | `nx memory get` of the new row | an explicit `delete` by id; the replacing write only quarantines | `nx memory curate --t2` | `nx memory restore <id>`; the id is in the `memory_put` result |
 | Memory files | `ls` the memory directory | the file | by the writer, with `replaces` | SessionStart check, `nx memory curate --files` | Time Machine |
 
 ### New Dependencies
@@ -771,17 +970,19 @@ interpreter RDR-240's runtime RDR chooses.
 
 ## Test Plan
 
-- Engine: replace in one transaction (old row gone, new row stored as
-  sent, echo carries the old content); refusal (missing target, self,
+- Engine: replace in one transaction (old row quarantined, so hidden from
+  every read, first drafted as gone; new row stored as
+  sent, echo carries the old row's id and content); refusal (missing target, self,
   quarantined, and one case per `AUDIT_TAGS` tag, including a target tagged
   `kind:gate,bead:nexus-x` and one whose body mentions `kind:gate` but whose
   tags do not, which is not refused) leaves both rows unchanged; a numeric title `238` is read as a title; a title that
   exists only in another project is "missing"; a chain A, B, C leaves only C
-  ending `replaces: B`.
+  live, ending `replaces: B`, with A and B quarantined. (This plan is the
+  first draft amended at close; the test files were not re-read for this edit.)
 - Client: after a replacing put, search and `memory_get` no longer find the
   old row, and `_verify_t2_write_landed` passes; against an engine stub that
   returns no echo, the call fails; the `memory_put` result carries the
-  deleted content.
+  quarantined row's id and content and the restore command.
 - Hook: over budget, an unindexed file, a replaced file still present and an
   index entry naming a missing file each print one line; clean prints
   nothing; a repo without `MEMORY-ondemand.md` prints nothing; an unreadable
@@ -800,7 +1001,8 @@ compliance counts from RDR-240's `violations` query, stored in T2.
 
 ### Performance Expectations
 
-A replacing put adds one indexed lookup and one delete to the put. The
+A replacing put adds one indexed lookup and one quarantine stamp on the
+target row to the put (first drafted as one delete). The
 SessionStart check reads one directory of about 150 small files, well under
 its hook budget.
 
@@ -808,9 +1010,12 @@ its hook budget.
 
 ### Contradiction Check
 
-The three gaps, the design and the plan agree: a replacing write deletes
-in one transaction, a budget bounds the index, and a hook plus a report run
-the checks. This revision fixes one contradiction. The Approach said the
+The three gaps, the design and the plan agree: a replacing write quarantines
+(first drafted: deletes) in one transaction, a budget bounds the index, and a
+hook plus a report run the checks. At close (2026-11-19) the sections that
+still said "delete" disagreed with the build, because Sam's decision of
+2026-11-02 changed Phase 1 and rewrote only Key Discoveries; they are now
+amended in place and point at that entry. This revision fixes one contradiction. The Approach said the
 SessionStart hook compares a new file's text to detect a reversal, but
 Technical Design 3 only checks that a replaced file is gone. A hook cannot
 tell that one rule reverses another, so the Approach now states what the
@@ -821,21 +1026,27 @@ gate's fix made RDR-240 a prerequisite of Phase 2 and the transcript-backed
 report rows; the round-2 fix settled `replaces` as a title-only, same-project
 target with an echo, excluded audit records, and gave the hook, the report
 and Phase 2 their bounds.
-Decision Rationale and the RDR-074 row agree that deletion overrides
-permanence, as Sam ruled.
+Decision Rationale and the RDR-074 row agree that an explicit replace
+overrides permanence (a quarantine as built, a delete as first drafted), as
+Sam ruled.
 
 ### Assumption Verification
 
 A1 is verified (research 1 and 2): the index loads up to 200 lines or 25 KB
 and topic files load on demand; subagents also get it at Claude Code
-2.1.316, against the docs, so the budget rests on main sessions alone. A2 is
-assumed: research 3 counts title chains, not whether a replaced row's
-content is needed; audit records are excluded as targets, and Sam's read of
-20 earlier chain members in Phase 1 Step 3 tests the rest before the feature
-is announced. A3 is open on purpose:
-no paper measures it, so Phase 2 measures compliance before and after the
-split with one `violations` query (research 4 only sized the windows), and a
-rule whose rate rises past its bound goes back.
+2.1.316, against the docs, so the budget rests on main sessions alone. A2 was
+assumed at the gate: research 3 counts title chains, not whether a replaced
+row's content is needed. At close it is measured and resolved by Sam's
+decision, not confirmed: the Phase 1 Step 3 read (an agent's marks on the
+first 20 replacement-type rows: 6 yes, 11 maybe, 3 no) tripped the stop rule on
+2026-11-02, and Sam chose quarantine, so the loss is recoverable (Key
+Discoveries 2026-11-02; nexus-qo7ie.8). A3 is untested at close: no paper
+measures it, and Phase 2 was to measure compliance before and after the
+split with one `violations` query (research 4 only sized the windows). The
+split and the baseline are done (2026-11-09); the post-split reads are open
+under nexus-qo7ie.15, due 2026-12-10 (pooled rare rules; the em dash read on
+2026-11-24 is a control only). With the confounds in Phase 2 Step 3, a clean
+read leaves A3 assumed; a rule whose count exceeds its bound still goes back.
 
 #### API Verification
 
@@ -876,12 +1087,15 @@ the report lists it, and any deletion of data rides its own change.
   sends it, and a new client against an old engine fails on the missing
   echo.
 - **Tenancy.** The target is looked up only in the writer's tenant and
-  project, so a replace cannot cross either; the delete runs under the same
-  RLS as the put.
-- **Irreversibility.** A replaced row is gone. The guards are the
+  project, so a replace cannot cross either; the quarantine runs under the
+  same RLS as the put.
+- **Irreversibility.** A replaced T2 row is not gone: it is quarantined,
+  never reaped, and `nx memory restore <id>` brings it back with its content,
+  tags and title (first drafted as irreversible; Key Discoveries 2026-11-02).
+  A deleted memory file is gone. The guards are the
   exact-title, same-project rule, the audit-record exclusion, the lineage
-  line on the new row, and the echo of the deleted content. Point-in-time
-  recovery is cloud-only and is not relied on.
+  line on the new row, and the restore path with the id echoed to the
+  writer. Point-in-time recovery is cloud-only and is not relied on.
 - **Hook cost.** The SessionStart check is stdlib only, opt-in per repo,
   reads one small directory, prints at most one line and never blocks a
   session.
@@ -915,6 +1129,38 @@ so the rest does not wait for them.
 - Harness Engineering: Anatomy, Architecture, and Evolution of Coding Agents
   (D0B8FF87)
 
+## Close
+
+RDR-238 is closed as Implemented on 2026-11-19 by Sam's ruling (T2
+`nexus/sam-ruling-rdr-closeout-batch-2026-11-19`: close the RDRs whose build is
+done and only a measurement remains; each measurement still runs on its date as
+a dated follow-up and its result is appended to the post-mortem). That is about
+20 days before Phase 2's own end, 2026-12-09 (30 days after the 2026-11-09
+split, nexus-qo7ie.13), so Phase 2 Step 3 had not run when the RDR closed.
+
+What was built, as the close critique read it (T2
+`nexus/critique-5476be38d-nexus-qo7ie-2026-11-20`, sha `5476be38d`, outcome
+partial: 0 Critical, 6 Significant, 0 ship-blockers): Gap 1, `replaces` on T2
+rows and on `memory_put`, quarantining as Sam decided on 2026-11-02; Gap 2, the
+`MEMORY.md` split of 2026-11-09; Gap 3, the SessionStart check, `nx memory
+curate --files`, `--t2`, `--agents` and `--cold`, and the release step 12a. A
+scan of the memory directory for the critique found 200 files, 0 unindexed, 0
+dangling index entries and 2 over the size limit.
+
+Surviving follow-up: bead nexus-qo7ie.15, with two dated reads. On 2026-11-24,
+the em dash read over the 14 days from 2026-11-10: a control only, because the
+em dash line never left the always tier. On 2026-12-09, or 2026-12-10 at the
+latest, the pooled rare-rule read, with the realised window start and any
+truncation recorded and the outcome worded as Phase 2 Step 3 says. Both results
+are appended to the post-mortem. A3 stays assumed; A2 is resolved by Sam's
+decision (Critical Assumptions). The parent bead nexus-qo7ie stays open
+(`bd show nexus-qo7ie.15` lists it open on 2026-11-19; critique finding 6).
+
+One observation from the critique, not acted on here: the always tier grew from
+17 entries at the revised split to 25 in ten days, 955 of the 1,500-token
+budget (64 percent). The SessionStart check of Technical Design 3 prints a line
+when the index passes the budget.
+
 ## Revision History
 
 | Date | Change |
@@ -931,3 +1177,7 @@ so the rest does not wait for them.
 | 2026-11-02 | Sam reversed the 2026-10-31 "supersession becomes deletion" for Phase 1: replace quarantines. A2 was measured (first 20 replacement-type rows: 6 yes, 11 maybe, 3 no by an agent read), which trips Step 3's stop rule; Sam chose quarantine instead of deletion on the A2 read; Alternative 1 was not taken. A replaced row is quarantined with `ttl_days` NULL: the rollup skips it, the engine refuses it as a summary source, and `reap` never deletes it. A later plain put at the old title overwrites the quarantined row in place, and the `replaced_id` the writer was given then names that new live row. Key Discoveries 2026-11-02 rules for Phase 1; decision sections not rewritten (nexus-ov3zi). |
 | 2026-11-09 | Technical Design 4's tuple-subspace row amended to the reviewed nexus-qo7ie.20 code (standing grant 3): writerless means no verified writer, since today's candidates `board/<topic>` and `queue/<name>` carry only `Unverified: ` entries and no template has `writers: []`; a consumed-only subspace counts; `--days` is uncapped; a doc-less engine reads "not available". The Relationships row and the RDR-239 prerequisite now record the view as built. Review: T2 `nexus/rdr-238-p3s3b-review-2026-11-09`. |
 | 2026-11-10 | Technical Design 5 and its restatements amended to code (standing grant 3; Sam approved in session elsinore, nexus-qo7ie.27; sites: Gap 3, Relationship to Prior RDRs, Scope Verification): the "no transcript scanner" sentence names one exception, curate's read of each main transcript's first start (looking back 365 days, to an 8 MiB bound per file; a file with no start in the bound is counted apart and named) to count sessions, through the transcripts verb's own first-record function and file listing (`first_start`, `repo_main_transcripts`), pinned by a parity test against `sessions()` for files within the bound; calling `sessions()` itself measured 0.4 s to 25 s on 255 sessions. Technical Design 4's report-title text covers a `--cold` run (`-files-t2-agents-cold`), so a later default run does not replace it. |
+| 2026-11-09 | Phase 2 Step 1 baseline recorded (nexus-qo7ie.12): em dash 3 of 79 main sessions in 14 days (3.8 per 100, correcting research 4's 11.2); four rare rules pooled 9 in 162 main sessions in 30 days (stash 7, find 1, trailer 0, backtick 1); detector blob `df9b0e5cf748`. T2 `nexus/rdr-238-compliance-pre-emdash-2026-11-09`, `-pre-rare-2026-11-09`. Entered at close (2026-11-19). |
+| 2026-11-09 | Phase 2 Step 2 split recorded (nexus-qo7ie.13): 173 memory files, `MEMORY.md` 18,451 to 3,587 bytes, 4 of the 5 measured rules moved (S-8 met), em dash stayed. T2 `nexus/rdr-238-split-2026-11-09`. Entered at close. |
+| 2026-11-09 | Phase 2 critique recorded (nexus-qo7ie.14): not-justified, 2 ship-blockers fixed, `MEMORY.md` revised to 2,612 bytes and 17 entries, 3 confounds on A3 carried into Step 3. T2 `nexus/rdr-238-p2-critique-2026-11-09`. Entered at close. |
+| 2026-11-19 | Close edit (sources: T2 `nexus/critique-5476be38d-nexus-qo7ie-2026-11-20`, which found six Significant and no ship-blocker, and Sam's ruling T2 `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`). S1: Phase 2 Steps 1 and 2, the Phase 2 critique and the A2 and A3 status entered in Key Discoveries and above; A2 marked measured and resolved by Sam's decision, A3 untested at close with follow-up nexus-qo7ie.15 due 2026-12-10, in Critical Assumptions and Assumption Verification. S2: the em dash premise corrected (3.8 per 100, not 11.2); its line never left the always tier, so the 2026-11-24 read is a control. S3: the pooled rare-rule confounds and the outcome wording written into Phase 2 Step 3. S4: Phase 1 shipped quarantine, not deletion; the sites that said "delete" are amended in place and point at the 2026-11-02 entry, Alternative 1's rejection reason corrected, the thirteen-token title backstop, the 409 cases and the K5 limit added to Technical Design 1. S5: the 2026-12-10 read sits at the edge of the transcript retention (read 2026-12-09 or 12-10, record the realised window start). S6: the Close section records the close on 2026-11-19, about 20 days before Phase 2's end. The RDR-240 Phase 1 Step 1 prerequisite is ticked (nexus-qo7ie.31). |
