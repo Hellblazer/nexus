@@ -23,7 +23,9 @@ import pytest
 from click.testing import CliRunner
 
 from nexus import doc_indexer
+from nexus.catalog.factory import make_catalog_reader
 from nexus.catalog.http_catalog_client import HttpCatalogClient
+from nexus.catalog.tumbler import Tumbler
 from nexus.cli import main
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_file_path
 from tests.integration.test_rdr223_pdf_journey import _FakeChunker, _FakeExtractor
@@ -148,6 +150,20 @@ def test_moved_pdf_over_the_incremental_threshold_prints_the_hint(tmp_path, monk
     _old, new, old_tumbler, second = _moved("pdf", tmp_path, _unique("hint-big"))
     assert second.exit_code == 0, second.output
     assert _hint_lines(second) == [f"{_HINT}{old_tumbler} --new-path {shlex.quote(str(new))}"]
+
+
+def test_owner_documents_page_is_one_ordered_page_on_the_real_engine(tmp_path):
+    """The one-page read the repository hints and the census flag share, against the real ``/list`` route: the first
+    ``limit`` live documents of an owner in tumbler order, and all of them when the limit is larger."""
+    corpus = _unique("hint-page")
+    paths = [_pdf(tmp_path / "a", body=f"%PDF-1.4 page {i}\n%%EOF\n".encode(), name=f"p{i}.pdf") for i in range(3)]
+    for path in paths:
+        assert _index("pdf", path, corpus).exit_code == 0
+    reader = make_catalog_reader()
+    tumblers = [_tumbler(p) for p in paths]
+    owner = str(Tumbler.parse(tumblers[0]).owner_address())
+    assert [str(d.tumbler) for d in reader.owner_documents_page(owner, 2)] == sorted(tumblers)[:2]
+    assert [str(d.tumbler) for d in reader.owner_documents_page(owner, 200)] == sorted(tumblers)
 
 
 def test_second_run_of_unchanged_file_prints_none_and_makes_no_documents_by_meta_call(tmp_path, monkeypatch):
