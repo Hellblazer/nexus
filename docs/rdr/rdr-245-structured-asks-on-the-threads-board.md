@@ -433,8 +433,9 @@ ask and a rule (`_unopened_asks` and `lint`, `threads.py:892-971`):
 - `bad-value`: `reversible:` or `blocking:` holding something other than `yes`
   or `no`, or a `rec:` that is not one to three digits.
 - `repeated-field`: a single-valued key given more than once.
-- `no-session`: asks in an entry with no `session:` line.
+- `no-session`: asks in an entry with neither an `identity:` nor a `session:` line.
 - `duplicate-session`: two entries carrying the same `session:` id (compared lower-cased), when at least one of them holds asks.
+- `duplicate-identity`: two entries carrying the same `identity:` id, whether or not either holds asks.
 - `unreadable-entry`: an entry that could not be read, so its asks are not
   checked.
 
@@ -574,7 +575,7 @@ and refused otherwise.
   hours) and `digest_skipped` (titles of `asks` rows the digest could not
   read).
 - `nx ask show <entry>/<id> [--json]`: every field, numbered options with the
-  recommendation marked, version, asker session and entry age. The answer
+  recommendation marked, version, asker identity (when the entry has one), asker session and entry age. The answer
   record it reports is cut to its closed-pattern fields (status, `via`, time,
   choice, `answer_id`, tuple id): nothing a writer typed freely into the answer
   record (its `sam_words`, `note`, `tty`, `error`, and its copies of the question
@@ -592,7 +593,7 @@ and refused otherwise.
   neither a readable answer nor a readable batch record are named, not
   hidden, unless the row's own time is older than the 7-day window.
 
-`answer` refuses (`ask.py:844-1011`) when `--expect` differs from the current
+`answer` refuses (`ask.py:852-1030`) when `--expect` differs from the current
 version (and prints the current text), when the ask has `after:`, when the
 entry has neither an `identity:` nor a `session:` line, when (with no identity
 line) its `session:` is not a lower-case canonical UUID, when two or more
@@ -614,7 +615,7 @@ even with `--replace`), and per `via`:
 
 1. `nx ask answer` passes its checks.
 2. **First record wins.** The record lives in T2 project `asks`, title
-   `<asker session id>/<ask id>/<version>`. A `sent` record with that title
+   `<asker identity, or session id when the entry has no identity: line>/<ask id>/<version>`. A `sent` record with that title
    is refused without `--replace` ("already answered at <time> via <via>").
    A `sending` record under 10 minutes old is refused ("send in progress");
    one older than 10 minutes, or a `failed` one, is retried without
@@ -930,7 +931,8 @@ indentation and colons in values. A new `kind` would need an engine release
 - **Sessions drift from the convention.** The legacy path never loses an
   unstructured ask; `nx ask list` shows structured asks against its "Legacy
   asks (N)" count (there is no `nx ask lint` command).
-- **Stale `session:` line after `/clear`.** The answer lands in the old
+- **Stale `session:` line after `/clear`** (an entry with no `identity:` line;
+  an identity-routed entry avoids this). The answer lands in the old
   mailbox; RDR-208's cleared record drains it only while the record exists.
   `nx ask show` prints the entry's age, which the mediator can read there.
 - **Over-claimed `blocking: yes`.** The interrupt count per day is a metric.
@@ -1178,7 +1180,7 @@ RDR-212 anything.
   (p50 122 ms, p95 176 ms, 50 calls; nexus-wc4jj.5); the local engine is
   loopback under the same 0.9 s budget and was not measured.
 - **Ambiguous board entries**: the CLI refuses when two entries carry the
-  asker's `session:` id, and a bare id that more than one entry has
+  asker's identity, or (for an entry with no identity line) its `session:` id, and a bare id that more than one entry has
   (Decision 8).
 - **Retention**: mail lives seven days; a replay finds its old version's
   record, and the asker's re-read treats it as stale.
@@ -1220,7 +1222,8 @@ dependency, no new surface, no second parser.
    is its tool and Sam's fallback.
 7. **Windows and Desktop** (research-8): the hook change must work on both.
 8. **One writer is unenforced** (round-1 S2): the CLI refuses when two
-   entries carry the same `session:` id.
+   entries carry the same `session:` id (since RDR-253 Step 5, the same
+   identity for an entry with an `identity:` line).
 9. **Ask versioning** (round-1 C2): content hash plus `asked:`.
 10. **Stronger than escaping** (round-1 S3): Sam's words from the record in a
     nonce fence; outside it, only fixed text and closed-pattern values.
