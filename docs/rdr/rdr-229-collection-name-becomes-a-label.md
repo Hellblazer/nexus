@@ -541,15 +541,24 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
   `model_version` sees `''` on those rows until D2 completes in the cloud, and
   only `collection_for` has the fallback. — **Method**: Spike (P1.2's census on
   both tenants; T2 `nexus_rdr/229-p1.2-census-2026-11-20`).
-- [ ] The row cache (`mcp_infra.get_collection_row`) is populated for every
+- [x] The row cache (`mcp_infra.get_collection_row`) is populated for every
   collection a write path names, so a row-first read on the write path costs
-  no extra round trip. A collection with no row yet, or a failed read,
+  no extra round trip. That holds for the process-default tenant's client. A
+  client for another tenant has no shared cache and lists once per `nx index
+  md` call (`db/http_vector_client.py:3662`, `_resolve_collection_row` case
+  3), as it has since nexus-7jy5r; P3.8's registering call that returns the
+  row removes that read. A collection with no row yet, or a failed read,
   answers as item 1 says, not with an error. The cache cannot hold a
   collection with no chunk yet: "The listing omits a registered collection
   that holds no chunk yet" (`corpus.embedding_model_row_preferred`; T2
   `229-research-41`). So from P3.8 the registering call returns the row and
   the writer uses it. The name fallback applies only to a legacy name
-  registered before P3.8. — **Status**: Unverified —
+  registered before P3.8. — **Status**: Verified for the process-default
+  tenant (P2.3, nexus-p2m1x.8): `nx index md` over 2 files and over 6 makes
+  1 and 1 listings into an existing collection, 2 and 2 into a new one with
+  no row, and a repo run adds at most 3 for 4 more documents
+  (`tests/integration/test_rdr229_p23_write_path_gaps.py`,
+  `tests/integration/test_rdr229_p23_repo_model_from_row.py`) —
   **Method**: Source Search of `get_collection_row`'s refresh path plus a
   test that counts HTTP calls per indexed document before and after, on an
   existing collection and a new one (P2.3).
