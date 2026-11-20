@@ -173,6 +173,7 @@ public final class TupleHandler implements HttpHandler {
     /** RDR-253 Step 2: the ownership and generation checks of the owner's mailbox claims. */
     private final IdentityFence fence;
     private final dev.nexus.service.board.OwnerOutHook ownerHook;
+    private final dev.nexus.service.board.AckIdentity ackIdentity;
 
     public TupleHandler(TupleRepository repo, IdentityFence fence) {
         this(repo, fence, dev.nexus.service.board.OwnerOutHook.NONE);
@@ -180,6 +181,13 @@ public final class TupleHandler implements HttpHandler {
 
     /** {@code ownerHook} runs after a committed write has been answered (RDR-252's owner stamper); it never throws. */
     public TupleHandler(TupleRepository repo, IdentityFence fence, dev.nexus.service.board.OwnerOutHook ownerHook) {
+        this(repo, fence, ownerHook, dev.nexus.service.board.AckIdentity.NONE);
+    }
+
+    /** {@code ackIdentity} names the identity an ack to a {@code --owner} topic is stamped with (RDR-252, nexus-igea9.4). */
+    public TupleHandler(TupleRepository repo, IdentityFence fence, dev.nexus.service.board.OwnerOutHook ownerHook,
+                        dev.nexus.service.board.AckIdentity ackIdentity) {
+        this.ackIdentity = ackIdentity;
         this.ownerHook = ownerHook;
         this.repo = repo;
         this.fence = fence;
@@ -297,6 +305,18 @@ public final class TupleHandler implements HttpHandler {
                 return;
             }
         }
+        // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
+        // ONLY from what AuthFilter resolved, never from the request body (a "sender_session" body
+        // field is not read), and its absence is not a refusal. RDR-253 Step 2: with an identity
+        // token it is the session id of the identity's newest binding row under the token's
+        // generation (IdentityFence.senderSession); otherwise the minted session's, as before.
+        // A send is not a fenced operation: it is open to any caller, token or none.
+        String senderSession = fence.senderSession(tenant);
+        // RDR-252 (nexus-igea9.4): an ack on --owner has its from set to the identity the owner decision counts this
+        // stamp for (the session index's, a delegated one as its parent), whatever the client typed.
+        if (BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(subspace)) && BoardCiGuard.isOwnerAck(subspace, dims)) {
+            dims = BoardCiGuard.stampAckFrom(subspace, dims, ackIdentity.of(tenant, senderSession));
+        }
         String tupleBody = (String) body.get("body");
         String nonce = (String) body.get("nonce");
         Long ttlSeconds = wholeSecondsOrNull("ttl_seconds", body.get("ttl_seconds"));
@@ -308,13 +328,6 @@ public final class TupleHandler implements HttpHandler {
             throw new SchemaViolationException("mode", "must be absent or \"replace\"");
         }
 
-        // nexus-fetre (F3 step 2, JDR-002): sender_session is a server-written fact. It comes
-        // ONLY from what AuthFilter resolved, never from the request body (a "sender_session" body
-        // field is not read), and its absence is not a refusal. RDR-253 Step 2: with an identity
-        // token it is the session id of the identity's newest binding row under the token's
-        // generation (IdentityFence.senderSession); otherwise the minted session's, as before.
-        // A send is not a fenced operation: it is open to any caller, token or none.
-        String senderSession = fence.senderSession(tenant);
         if (modeRaw != null) {
             var res = repo.outReplace(tenant, subspace, keys, dims, tupleBody, nonce, ttlSeconds, senderSession,
                     delaySeconds);
@@ -521,6 +534,13 @@ public final class TupleHandler implements HttpHandler {
         // nexus-g2ckl: a reply is stamped with the acker's session, as out stamps its rows (an identity
         // token's current session, else the minted one); never read from the body.
         String senderSession = fence.senderSession(tenant);
+        if (reply != null && BOARD_CI_TEMPLATE_NAME.equals(repo.resolveTemplateName(reply.subspace()))
+            && BoardCiGuard.isOwnerAck(reply.subspace(), reply.dims())) {
+            Map<String, String> stamped = BoardCiGuard.stampAckFrom(reply.subspace(), reply.dims(), ackIdentity.of(tenant, senderSession));
+            if (stamped != reply.dims()) {
+                reply = new TupleRepository.ReplySpec(reply.subspace(), reply.keys(), stamped, reply.body(), reply.ttlSeconds());
+            }
+        }
         byte[] replyId = repo.ackWithReply(tenant, claimId, claimant, reply, senderSession);
         HttpUtil.send(ex, 200, "{\"acked\":true,\"reply_id\":"
                 + (replyId == null ? "null" : HttpUtil.jsonString(HEX.formatHex(replyId)))
@@ -679,6 +699,9 @@ public final class TupleHandler implements HttpHandler {
         take.put("max_attempts", t.take().maxAttempts());
         m.put("take", take);
         m.put("retention_seconds", t.retentionSeconds());
+        if (!t.retentionBySuffix().isEmpty()) {
+            m.put("retention_by_suffix", new java.util.TreeMap<>(t.retentionBySuffix()));   // RDR-252: --owner rows live longer
+        }
         if (t.maxBodyBytes() != null) {
             m.put("max_body_bytes", t.maxBodyBytes());
         }
