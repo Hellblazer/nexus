@@ -20,7 +20,7 @@ from structlog.testing import capture_logs
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 
 _OWNER = "1.1"
-_MODEL = "voyage-code-3"
+_MODEL = "bge-base-en-v15-768"
 
 
 def _client(monkeypatch: pytest.MonkeyPatch, row: dict | None) -> HttpCatalogClient:
@@ -39,7 +39,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, row: dict | None) -> HttpCatalogCli
     return client
 
 
-def _row(*, name: str = "code__1-1__voyage-code-3__v1", **over: object) -> dict:
+def _row(*, name: str = "code__1-1__bge-base-en-v15-768__v1", **over: object) -> dict:
     return {
         "name": name, "content_type": "code", "owner_id": "1-1",
         "embedding_model": _MODEL, "model_version": "v1", **over,
@@ -67,7 +67,7 @@ def test_a_new_tuple_is_still_v1(monkeypatch) -> None:
 @pytest.mark.parametrize("bad", ["3", "v", "vx", "v-1", "v0", "V2", " v2", None])
 def test_a_malformed_row_version_is_loud(monkeypatch, bad) -> None:
     """No fallback to the name for a non-empty bad value (n9xjy). v0 is malformed."""
-    row = _row(name="code__1-1__voyage-code-3__v9")
+    row = _row(name="code__1-1__bge-base-en-v15-768__v9")
     if bad is None:
         del row["model_version"]
     else:
@@ -78,17 +78,17 @@ def test_a_malformed_row_version_is_loud(monkeypatch, bad) -> None:
 
 
 def test_an_empty_row_version_falls_back_to_the_conformant_name_loudly(monkeypatch) -> None:
-    cat = _client(monkeypatch, _row(name="code__1-1__voyage-code-3__v4", model_version=""))
+    cat = _client(monkeypatch, _row(name="code__1-1__bge-base-en-v15-768__v4", model_version=""))
     with capture_logs() as logs:
         assert cat.collection_for("code", _OWNER, _MODEL).model_version == 4
         assert cat.collection_for("code", _OWNER, _MODEL, bump=True).model_version == 5
     warned = [e for e in logs if e["event"] == "collection_for_row_model_version_empty"]
     assert len(warned) == 2
-    assert all(e["collection"] == "code__1-1__voyage-code-3__v4" for e in warned)
+    assert all(e["collection"] == "code__1-1__bge-base-en-v15-768__v4" for e in warned)
     assert all(e["log_level"] == "warning" for e in warned)
 
 
-@pytest.mark.parametrize("name", ["a-legacy-slug", "code__1-1__voyage-code-3__v0"])
+@pytest.mark.parametrize("name", ["a-legacy-slug", "code__1-1__bge-base-en-v15-768__v0"])
 def test_an_empty_row_version_with_no_usable_name_version_raises(monkeypatch, name) -> None:
     cat = _client(monkeypatch, _row(name=name, model_version=""))
     with pytest.raises(ValueError, match="empty model_version"):
@@ -97,7 +97,7 @@ def test_an_empty_row_version_with_no_usable_name_version_raises(monkeypatch, na
 
 @pytest.mark.parametrize(
     "field,value",
-    [("content_type", "docs"), ("owner_id", "1-2"), ("embedding_model", "voyage-context-3")],
+    [("content_type", "docs"), ("owner_id", "1-2"), ("embedding_model", "minilm-l6-v2-384")],
 )
 def test_a_row_for_another_tuple_is_loud(monkeypatch, field, value) -> None:
     """The engine answered for some other tuple: never take its version."""
