@@ -964,7 +964,11 @@ def _migrate_legacy_collections(
                     "content_type": conformant_name.content_type,
                     "owner_id": conformant_name.owner_id,
                     "embedding_model": conformant_name.embedding_model,
-                    "model_version": f"v{conformant_name.model_version}",
+                    # A registered row with no readable version (engine 0.1.200, RDR-229
+                    # P2.8) has none to carry over: register it blank, never "vNone".
+                    "model_version": (
+                        "" if conformant_name.model_version is None else f"v{conformant_name.model_version}"
+                    ),
                 }
                 if is_conformant_collection_name(conformant):
                     ensure_collection_registered(

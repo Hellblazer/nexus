@@ -103,6 +103,7 @@ from nexus.catalog.collection_name import (
     find_collection_row,
     owner_segment_for_tumbler,
     version_from_for_tuple_row,
+    version_unreadable_message,
 )
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
@@ -3884,7 +3885,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         embedding_model: str,
         *,
         bump: bool = False,
-    ) -> CollectionName:
+    ) -> "CollectionName | CollectionAttributes":
         # Mirror canonical _DocumentOps.collection_for: the catalog RENDERS the name; a
         # NEW tuple lands at v1 (never a 404/None), an existing tuple returns vN, and
         # bump returns vN+1. The service /collections/for_tuple is lookup-only (404 on a
@@ -3911,6 +3912,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     result, content_type=content_type, owner_id=owner_id,
                     embedding_model=embedding_model,
                 )
+                if existing_version is None:  # grandfathered row, no readable version (engine 0.1.200)
+                    if bump:
+                        raise ValueError(version_unreadable_message(result["name"]))
+                    return CollectionAttributes.from_for_tuple(
+                        result, content_type=content_type, owner_id=owner_id,
+                        embedding_model=embedding_model,
+                    )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
                 raise
