@@ -355,3 +355,27 @@ def repo_hints(repo: Path, *, reader: Any = None) -> list[str]:
         return rename_hint_lines(r, prefix, root, page, vanished, Budget()) if vanished else []
 
     return lines + fail_open("rename", _renamed, default=[])
+
+
+def annotate_census(reader: Any, classes: dict[str, list[dict]]) -> None:
+    """Add the move fields to the census rows of ``nx catalog owners --census`` (RDR-254, Census), in place.
+
+    Each row (``{"tumbler", "repo_root", ...}``, grouped by root class) gains ``docs_outside_root``: ``True``/``False``
+    from the owner's first page of documents (one ``/list`` request each, never a second page), or ``None`` when the
+    page could not be read. The flag is information beside the root class and never a class: it does not decide
+    which owners the deactivate arm may act on. When the engine reports the move routes, a ``path_vanished`` row also
+    gains ``move_command`` (the owner move with the :data:`NEW_ROOT_PLACEHOLDER`, since its own root is gone) and
+    any other flagged row gains ``move_command`` with its own root. Fail-open per owner: a page that cannot be read
+    leaves that row with ``docs_outside_root = None`` and no line."""
+    supported = engine_supports_moves(reader)
+    for cls, rows in classes.items():
+        for row in rows:
+            prefix, root = str(row.get("tumbler") or ""), row.get("repo_root") or ""
+            flag = docs_outside_root_flag(reader, prefix, root) if prefix else None
+            row["docs_outside_root"] = flag
+            if not supported or not prefix:
+                continue
+            if cls == "path_vanished":
+                row["move_command"] = owner_move_line(prefix)
+            elif flag:
+                row["move_command"] = owner_move_line(prefix, root)
