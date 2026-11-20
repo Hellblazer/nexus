@@ -1711,6 +1711,14 @@ A sensitive document keeps its flag through a move. A deny rule you wrote agains
 
 A failed write says what is known. A 400 or 409 from the engine means nothing was written. Any other failure (a 5xx, a gateway or edge answer, a timeout or lost connection after the request went out) leaves the outcome unknown: the command says so and tells you to re-run it as a dry run, which is safe, to see what is left to move. The write is never resent automatically.
 
+#### Move hints
+
+Index runs print one line naming the move command when the catalog shows the signs of a move (RDR-254 Phase 3). A hint detects and never acts: it writes nothing, it is always the command's dry-run form (never `--no-dry-run --confirm`), its paths are shell-quoted, and it is printed only when the engine reports the move routes, so a client never prints a command its engine refuses. Every catalog read a hint makes is advisory: a refused or failed read, a timeout or an engine without the metadata route drops the hint, logs it, and leaves the exit code as it was.
+
+**A moved curator file (`nx index pdf`, `nx index md`).** The run that registers the file at its new path asks the metadata route for live documents with the same `meta.content_hash` under the same curator owner, and prints `nx catalog owners --execute move --document <old tumbler> --new-path <new path>` for each one whose file is absent on this machine (a copy whose original is still on disk is two documents, not a move; an alias row and an in-repo markdown file get none). The line is the last line of the run's output. It prints on a run that writes the document, which includes the one that creates the duplicate; an unchanged file re-indexed later returns at the staleness check before any writer and prints nothing and asks nothing (the hint is not repeated on every run). The documented command repairs the duplicate at any time.
+
+A document indexed by a client older than v7.95.0 (before 2026-11-03) and not indexed since carries no `meta.content_hash`, so the hint cannot see it. Before a planned move of such a file, run `nx index pdf --force` (or `md`) on it once; the hint then works. For a file that already moved, the old row can no longer be stamped: find its tumbler with `nx catalog search '<file name>'` (`nx search` prints paths, not tumblers) and run the document move by hand. Every single-file writer stamps the hash, including a document large enough for the batched writer; only the repository indexers' oversize writer does not, and it never writes a curator document.
+
 ### nx catalog backfill-owner-id (removed)
 
 Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote

@@ -13,6 +13,7 @@ import click
 import structlog
 from tqdm import tqdm
 
+from nexus.catalog.engine_writes.hints import prints_hints as _prints_hints  # RDR-254: move hints printed after the run
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
@@ -3230,6 +3231,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+@_prints_hints
 def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
@@ -3908,6 +3910,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+@_prints_hints
 def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
