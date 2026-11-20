@@ -52,7 +52,6 @@ import msgpack
 import pytest
 from click.testing import CliRunner
 
-import nexus.catalog.recovery_bundle as rb
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -474,7 +473,7 @@ def test_the_indexer_migrates_a_legacy_collection_with_no_row_to_the_write_model
     assert registry.update.call_args_list == [call(repo, **{f"{ct}_collection": targets[ct]}) for ct in cts]
 
 
-# ── source 4: the .nxexp import (exporter.import_collection) ────────────────
+# ── source 5: the .nxexp import (exporter.import_collection) ────────────────
 
 
 class _Captured(Exception):
@@ -518,6 +517,8 @@ def _engine_leg_arguments(tmp_path, monkeypatch, *, target, header_model, assume
     _write_nxexp(path, source="code__nsgoldexport", header_model=header_model)
     db = object.__new__(HttpVectorClient)  # a service-backed handle: only its row reader is read before the stop
     db._resolve_collection_row = lambda collection, strict=False: row  # type: ignore[method-assign]
+    # A P2.2 repoint to a find_collection read sees the same row (or none), not an AttributeError.
+    db.find_collection = lambda *a, **kw: row  # type: ignore[method-assign]
     with pytest.raises(_Captured) as stopped:
         import_collection(db, path, target_collection=target, assume_model=assume_model, hooks=MagicMock())
     return stopped.value.kwargs
@@ -542,7 +543,7 @@ _NXEXP_CASES = [
 def test_an_nxexp_import_into_a_target_with_no_row_names_the_model_the_target_registers_with(
     request, tmp_path, monkeypatch, mode, target, header_model, assume_model, wire_model,
 ):
-    """Non-stranding guard (RDR-229 item 9; keep until P4.4): source 4, ``exporter.import_collection``.
+    """Non-stranding guard (RDR-229 item 9; keep until P4.4): source 5, ``exporter.import_collection``.
 
     A ``.nxexp`` file comes from another install or an older era (the census labels its name sites
     migration-source), so the target collection often has no row here yet, and a legacy two-segment target
@@ -565,7 +566,7 @@ def test_an_nxexp_import_into_a_target_with_no_row_names_the_model_the_target_re
 
 
 def test_an_nxexp_import_into_a_target_that_has_a_row_names_the_rows_model(tmp_path, monkeypatch):
-    """Non-stranding guard (RDR-229 item 9; keep until P4.4): source 4, a control.
+    """Non-stranding guard (RDR-229 item 9; keep until P4.4): source 5, a control.
 
     The same file into a legacy target that DOES have a row sends the row's model, not the registration's
     derivation."""

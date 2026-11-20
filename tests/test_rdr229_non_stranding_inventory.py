@@ -57,14 +57,29 @@ _JAVA_GUARDS = (
 _MIN_JAVA_GUARDS = 3
 
 
-def _python_guards() -> dict[str, str]:
-    """Every top-level test function of the guards module, with its docstring."""
+def _python_guard_nodes() -> dict[str, ast.FunctionDef]:
+    """Every top-level test function of the guards module."""
     tree = ast.parse(_PY_FILE.read_text(encoding="utf-8"))
     return {
-        node.name: (ast.get_docstring(node) or "")
+        node.name: node
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     }
+
+
+def _python_guards() -> dict[str, str]:
+    """Every top-level test function of the guards module, with its docstring."""
+    return {name: (ast.get_docstring(node) or "") for name, node in _python_guard_nodes().items()}
+
+
+def _asserts_something(node: ast.FunctionDef) -> bool:
+    """A guard body that still checks: an ``assert`` statement or a ``pytest.raises`` block inside it."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assert):
+            return True
+        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) and sub.func.attr == "raises":
+            return True
+    return False
 
 
 def test_every_python_non_stranding_guard_is_present_and_says_why_it_stays():
@@ -78,6 +93,9 @@ def test_every_python_non_stranding_guard_is_present_and_says_why_it_stays():
     assert len(found) >= _MIN_PY_GUARDS, f"only {len(found)} guards present, the floor is {_MIN_PY_GUARDS}"
     unmarked = [name for name in _PY_GUARDS if _PHRASE not in " ".join(found[name].lower().split())]
     assert not unmarked, f"guard docstrings without the phrase {_PHRASE!r}: {unmarked}"
+    nodes = _python_guard_nodes()
+    emptied = [name for name in _PY_GUARDS if not _asserts_something(nodes[name])]
+    assert not emptied, f"guards whose body no longer asserts anything (emptied or gutted): {emptied}"
 
 
 def test_the_java_etl_import_guard_class_and_its_tests_are_present_and_say_why_they_stay():
