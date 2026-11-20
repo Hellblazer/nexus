@@ -151,6 +151,8 @@ def _wire(monkeypatch: pytest.MonkeyPatch, distinct: list[str]) -> _Taxonomy:
     monkeypatch.setattr("nexus.commands.taxonomy_cmd._command_shared_t2_client", lambda: None)
     monkeypatch.setattr("nexus.commands.taxonomy_cmd._without_superseded", lambda cols: cols)
     monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+    # The prune path asks the engine's /version for the exact-name mode; no tenant here, so no probe.
+    monkeypatch.setattr("nexus.commands.taxonomy_cmd.prune_supports_exact", lambda: False)
     return tax
 
 
