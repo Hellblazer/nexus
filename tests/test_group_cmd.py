@@ -530,8 +530,8 @@ def test_ack_times_names_the_owner_by_alias_and_falls_back_to_the_id() -> None:
     assert "acked by halcyon at" in text and "acked by i6 at" in text and "acked by i4" not in text
 
 
-def _with_lookups(env: GroupEnv, alias: Any = None, session: Any = None) -> GroupEnv:
-    return dataclasses.replace(env, alias_lookup=alias, session_lookup=session)
+def _with_lookups(env: GroupEnv, alias: Any = None, session: Any = None, identity: Any = None) -> GroupEnv:
+    return dataclasses.replace(env, alias_lookup=alias, session_lookup=session, identity_lookup=identity)
 
 
 def _ack_times(env: GroupEnv) -> list[dict[str, Any]]:
@@ -544,9 +544,9 @@ _RED = dict(owner="i4", next="i5", reason="earliest_suspect", episode_at="2026-1
 SESS_OWNER, SESS_OTHER = "3d4bd7aa-1691-4bc1-b59b-0af9dccfd153", "4e5c8bb0-2792-4cd2-8c6c-1b0aeddfe264"
 
 
-def _times(rows: list[Any], alias: Any = None, session: Any = None, **kw: Any) -> list[dict[str, Any]]:
+def _times(rows: list[Any], alias: Any = None, session: Any = None, identity: Any = None, **kw: Any) -> list[dict[str, Any]]:
     wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
-    return _ack_times(_with_lookups(_env(wire, tuples=_Tuples(rows), **kw), alias, session))
+    return _ack_times(_with_lookups(_env(wire, tuples=_Tuples(rows), **kw), alias, session, identity))
 
 
 class _Lookup:
@@ -560,13 +560,13 @@ class _Lookup:
         answer = self.table[key]
         if isinstance(answer, Exception):
             raise answer
-        return {"identity": answer}
+        return answer if isinstance(answer, dict) else {"identity": answer}
 
 
-def _api_error(status: int) -> Exception:
+def _api_error(status: int, code: str = "x") -> Exception:
     from nexus.identity.bind_client import IdentityApiError  # noqa: PLC0415
 
-    return IdentityApiError(status, "x", "no")
+    return IdentityApiError(status, code, "no")
 
 
 def test_the_engines_rule_an_ack_counts_when_its_sender_session_maps_to_the_owner_whatever_from_says() -> None:
@@ -596,7 +596,7 @@ def test_an_ack_whose_session_the_index_does_not_know_counts_for_nobody_as_in_th
         _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
         _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OTHER),
     ]
-    [red] = _times(rows, session=_Lookup({SESS_OTHER: _api_error(404)}))
+    [red] = _times(rows, session=_Lookup({SESS_OTHER: _api_error(404, "unknown_session")}))
     assert red["acked_at"] is None
 
 
@@ -619,7 +619,7 @@ def test_a_transient_lookup_error_is_noted_on_stderr_and_never_cached_as_nobody(
     result = _run(env, "ack-times", "push-train", "--json")
     [red] = json.loads(result.stdout)["reds"]
     assert red["acked_at"] == "2026-11-19T10:07:00Z", "the second ack asked again: the failure was not remembered as nobody"
-    assert "1 acks could not be resolved; counts may be low" in result.stderr, result.stderr
+    assert "1 ack could not be resolved; counts may be low" in result.stderr, result.stderr
 
 
 def test_a_clean_run_prints_no_resolution_note() -> None:
@@ -694,7 +694,7 @@ def test_a_name_ack_does_not_count_unless_it_resolves_to_the_owner(how: str) -> 
     ]
     # In the stamped case the lookup WOULD name the owner: only the stamped pair (tamsin is next up, i5) keeps it from counting.
     answer = {"lookup-says-another-identity": "i5", "stamped-pair-says-another-identity": "i4",
-              "unknown-name": _api_error(404), "lookup-fails": RuntimeError("no identity routes")}[how]
+              "unknown-name": _api_error(404, "unknown_name"), "lookup-fails": RuntimeError("no identity routes")}[how]
     names = _Lookup({"tamsin": answer})
     [red] = _times(rows, alias=names)
     assert red["acked_at"] is None and red["minutes"] is None
@@ -854,3 +854,142 @@ def test_a_verb_with_a_dead_credential_prints_one_line_and_exits_one(argv: tuple
     assert res.exception is None or isinstance(res.exception, SystemExit), repr(res.exception)
     assert "Traceback" not in res.output
     assert len(res.output.strip().splitlines()) == 1 and "the engine is not answering" in res.output, res.output
+
+
+# ── round 2: delegated identities, red tips, the engine's state rows, the 404 codes ──────────────────────
+
+
+def test_a_delegated_childs_ack_counts_for_its_parent_as_in_the_engine() -> None:
+    """BoardReads.identities maps a delegated identity to its parent. The session route answers the child's own id with
+    kind=delegated and no parent, so the parent is read from the child's identity record."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i8", sender_session=SESS_OTHER),
+    ]
+    sessions = _Lookup({SESS_OTHER: {"identity": "i8", "kind": "delegated"}})
+    records = _Lookup({"i8": {"kind": "delegated", "parent": "i4"}})
+    [red] = _times(rows, session=sessions, identity=records)
+    assert (red["acked_at"], red["acked_by"]) == ("2026-11-19T10:07:00Z", "i4")
+    assert records.asked == ["i8"]
+
+
+def test_a_delegated_session_answer_that_names_its_parent_needs_no_second_lookup() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i8", sender_session=SESS_OTHER),
+    ]
+    records = _Lookup({})
+    [red] = _times(rows, session=_Lookup({SESS_OTHER: {"identity": "i8", "kind": "delegated", "parent": "i4"}}), identity=records)
+    assert red["acked_by"] == "i4" and records.asked == []
+
+
+def test_a_delegated_child_of_another_identity_does_not_count_for_the_owner() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OTHER),
+    ]
+    records = _Lookup({"i8": {"kind": "delegated", "parent": "i5"}})
+    [red] = _times(rows, session=_Lookup({SESS_OTHER: {"identity": "i8", "kind": "delegated"}}), identity=records)
+    assert red["acked_at"] is None
+
+
+@pytest.mark.parametrize("how", ["record-unreadable", "no-record-lookup", "record-has-no-parent"])
+def test_a_delegated_childs_parent_that_cannot_be_read_is_unresolved_and_noted_never_nobody(how: str) -> None:
+    """Counted as unresolved and said on stderr, and not remembered: the engine-side fix is `parent` in lookupSession."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:06:00Z", SHA1, who="i8", sender_session=SESS_OTHER),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i8", sender_session=SESS_OTHER),
+    ]
+    table = {"record-unreadable": _api_error(403, "forbidden"), "no-record-lookup": None,
+             "record-has-no-parent": {"kind": "delegated"}}
+    records = None if how == "no-record-lookup" else _Lookup({"i8": table[how]})
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), None, _Lookup({SESS_OTHER: {"identity": "i8", "kind": "delegated"}}), records)
+    result = _run(env, "ack-times", "push-train", "--json")
+    assert json.loads(result.stdout)["reds"][0]["acked_at"] is None
+    assert "2 acks could not be resolved; counts may be low" in result.stderr, result.stderr
+    if records is not None:
+        assert records.asked == ["i8", "i8"], "a failure is not cached as nobody"
+
+
+def test_an_ack_of_a_suspect_that_is_no_red_tip_does_not_count() -> None:
+    """The engine counts a red tip only; a suspect an owner row names may be untested or green."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED, suspects=[SHA2]),
+        _row("ack", "2026-11-19T10:07:00Z", SHA2, who="i4"),
+    ]
+    [red] = _times(rows)
+    assert red["acked_at"] is None
+    rows[1] = _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4")
+    assert _times(rows)[0]["acked_at"] == "2026-11-19T10:07:00Z"
+
+
+def test_an_owner_or_clear_row_a_session_wrote_is_not_state_as_in_the_engine() -> None:
+    """The engine's isState: from=engine, a null sender stamp, a parseable body. A session can post kind=owner or
+    kind=clear (BoardCiGuard refuses only from=engine), and the engine ignores both."""
+    forged = {**_RED, "owner": "i9", "episode_at": "2026-11-19T10:03:00Z"}
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("clear", "2026-11-19T10:02:00Z", SHA1, who="i9", sender_session=SESS_OTHER),
+        _row("owner", "2026-11-19T10:03:00Z", SHA3, who="i9", sender_session=SESS_OTHER, **forged),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+    ]
+    reds = _times(rows)
+    assert [(r["sha"], r["owner"], r["cleared_at"], r["acked_at"]) for r in reds] == [(SHA1, "i4", None, "2026-11-19T10:07:00Z")]
+
+
+def test_an_owner_row_with_no_readable_body_is_not_state() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        SimpleNamespace(id="bad", created_at="2026-11-19T10:01:00Z", dims={"from": "engine", "kind": "owner", "sha": SHA3},
+                        body="{not json", sender_session=None),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4"),
+    ]
+    assert [r["sha"] for r in _times(rows)] == [SHA1]
+
+
+def test_a_404_that_is_not_unknown_session_is_unresolved_and_noted_not_nobody() -> None:
+    """A route-less engine answers 404 for any session id: that says nothing about the session."""
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OWNER),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), None, _Lookup({SESS_OWNER: _api_error(404, None)}))
+    result = _run(env, "ack-times", "push-train", "--json")
+    assert json.loads(result.stdout)["reds"][0]["acked_at"] is None
+    assert "1 ack could not be resolved; counts may be low" in result.stderr
+
+
+def test_a_sender_stamp_that_is_no_uuid_is_unresolved_and_noted_not_silently_nobody() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session="not-a-uuid"),
+    ]
+    sessions = _Lookup({})
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), None, sessions), "ack-times", "push-train", "--json")
+    assert json.loads(result.stdout)["reds"][0]["acked_at"] is None and sessions.asked == []
+    assert "1 ack could not be resolved" in result.stderr
+
+
+def test_a_name_route_404_with_no_code_is_unresolved_while_a_retired_name_is_final() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="tamsin"),
+    ]
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), _Lookup({"tamsin": _api_error(404, None)}))
+    assert "1 ack could not be resolved" in _run(env, "ack-times", "push-train", "--json").stderr
+    env = _with_lookups(_env(wire, tuples=_Tuples(rows)), _Lookup({"tamsin": _api_error(410, "renamed")}))
+    assert "could not be resolved" not in _run(env, "ack-times", "push-train", "--json").stderr, "a retired name is final"
+
+
+def test_with_no_session_lookup_an_ack_that_carries_a_stamp_is_read_by_its_from() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _row("ack", "2026-11-19T10:07:00Z", SHA1, who="i4", sender_session=SESS_OWNER),
+    ]
+    [red] = _times(rows)
+    assert red["acked_by"] == "i4" and red["acked_at"] == "2026-11-19T10:07:00Z"

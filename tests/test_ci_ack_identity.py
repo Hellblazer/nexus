@@ -33,11 +33,17 @@ SHA = "ae619ef56" + "0" * 31
 ME = "i5"
 
 
+#: What the identity service answers for an identity (``IdentityClient.show``); an identity not named here is a seat.
+VIEWS: dict[str, dict[str, Any]] = {}
+
+
 @pytest.fixture(autouse=True)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(HttpTupleStore, "_rejected_sessions", {})
     monkeypatch.setenv("NX_SERVICE_TOKEN", "data-token")
     monkeypatch.delenv("NX_T1_SESSION", raising=False)
+    VIEWS.clear()
+    monkeypatch.setattr("nexus.ci_ack.identity_view", lambda who: VIEWS.get(who, {"identity": who, "kind": "seat"}), raising=False)
 
 
 @pytest.fixture
@@ -419,9 +425,73 @@ def test_the_sites_that_describe_the_stamp_say_the_engine_counts_the_sender_sess
     assert "sender-session" in (root / "src/nexus/procedures/ci_red_notice.lua").read_text(encoding="utf-8")
     for doc in ("docs/auras.md", "docs/cli-reference.md"):
         text = (root / doc).read_text(encoding="utf-8")
-        assert "counted by no read of this board" not in text or "sender" in text, doc
         assert "a name in `from` counts as no ack" not in text, doc
         assert "an ack carrying a name was counted as no ack" not in text, doc
-    assert "sender-session" in (root / "docs/auras.md").read_text(encoding="utf-8")
+        assert "the identity id the engine records from the token" not in text, doc
+    # Each anchor sits in the one place that makes the claim, so removing it from that place fails here.
+    auras = (root / "docs/auras.md").read_text(encoding="utf-8")
+    assert "The engine never reads the row's `from`" in auras
+    reference = (root / "docs/cli-reference.md").read_text(encoding="utf-8")
+    ack_section = reference.split("### nx ci ack")[1].split("\n## ")[0]
+    assert "The engine counts the row's sender-session stamp, never `from`" in ack_section
+    times_section = reference.split("### nx group ack-times")[1].split("\n## ")[0]
+    assert "sender-session stamp is mapped through the identity service's session index" in times_section
+    assert "an `ack` whose reply is such a row" in reference.split("### nx tuple out")[1].split("### nx tuple rd")[0]
     assert "identity" in (mcp_core.tuple_out.__doc__ or "") and "--owner" in (mcp_core.tuple_out.__doc__ or "")
     assert "--owner" in (root / "docs/tuple-space.md").read_text(encoding="utf-8").split("`board/ci/<topic>` (RDR-220)")[1][:3000]
+
+
+# ── round 2: a delegated child acks as its parent, and the board's state rows are the engine's alone ──────
+
+CHILD = "i7"
+
+
+def test_a_delegated_childs_ack_is_stamped_with_its_parents_id(wire: _Wire, identity: list[str]) -> None:
+    """BoardReads.identities maps a delegated identity to its parent, so the ack counts for the parent: its `from`
+    is the parent's id, not the child's."""
+    identity[:] = [CHILD]
+    VIEWS[CHILD] = {"identity": CHILD, "kind": "delegated", "parent": ME}
+    wire.store.out(OWNER_SUBSPACE, TOPIC_KEY, _ack_dims(**{"from": CHILD}), nonce="n1")
+    assert wire.sent[0]["dims"]["from"] == ME
+
+
+def test_a_delegated_child_whose_parent_cannot_be_read_is_refused_not_stamped_with_its_own_id(wire: _Wire, identity: list[str]) -> None:
+    identity[:] = [CHILD]
+    VIEWS[CHILD] = {"identity": CHILD, "kind": "delegated"}
+    with pytest.raises(ValueError, match="parent"):
+        wire.store.out(OWNER_SUBSPACE, TOPIC_KEY, _ack_dims(), nonce="n1")
+    assert wire.sent == []
+
+
+def test_nx_ci_ack_accepts_a_delegated_child_of_the_owner_and_posts_as_the_parent(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    _open_red(wire)
+    identity[:] = [CHILD]
+    VIEWS[CHILD] = {"identity": CHILD, "kind": "delegated", "parent": ME}
+    result = _ack([SHA[:7]], wire, monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert wire.sent[0]["dims"] == {"kind": "ack", "from": ME, "sha": SHA}
+
+
+def test_nx_ci_ack_refuses_a_delegated_child_of_someone_else(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    _open_red(wire)
+    identity[:] = [CHILD]
+    VIEWS[CHILD] = {"identity": CHILD, "kind": "delegated", "parent": "i9"}
+    result = _ack([SHA[:7]], wire, monkeypatch)
+    assert result.exit_code != 0 and "an ack from i9 counts for nobody" in result.output and wire.sent == [], result.output
+
+
+def test_nx_ci_ack_ignores_owner_and_clear_rows_a_session_wrote(wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's isState: from=engine, a null sender stamp. A session can post kind=owner or kind=clear, and the
+    engine ignores both; a stray clear must not read as 'no open red', nor a stray owner row as a new red."""
+    _open_red(wire)
+    session = "3d4bd7aa-1691-4bc1-b59b-0af9dccfd153"
+    stray_clear = _owner_row("e" * 40, "2026-11-20T14:30:00Z", kind="clear")
+    stray_owner = _owner_row("c" * 40, "2026-11-20T14:35:00Z", episode_at="2026-11-20T14:35:00Z", owner="i9")
+    for stray in (stray_clear, stray_owner):
+        stray["dims"]["from"] = "i9"
+        stray["sender_session"] = session
+    wire.rows = [stray_owner, stray_clear, *wire.rows]
+    result = _ack([SHA[:7]], wire, monkeypatch)
+    assert result.exit_code == 0, result.output
+    assert wire.sent[-1]["dims"]["sha"] == SHA
+    assert _ack(["c" * 7], wire, monkeypatch).exit_code != 0, "the stray owner row's sha is no tip"
