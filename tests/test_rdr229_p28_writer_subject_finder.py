@@ -19,7 +19,7 @@ from click.testing import CliRunner
 
 import nexus.catalog.factory as factory
 import nexus.corpus as corpus
-from nexus.catalog.collection_attributes import CollectionAttributes
+from nexus.catalog.collection_name import CollectionAttributes
 from nexus.cli import main
 from nexus.commands.dt import _resolve_dt_collection
 from nexus.corpus import CollectionRegistryUnreadableError, t3_collection_name
