@@ -6,6 +6,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -63,6 +65,64 @@ class CatalogReconcileCommitNoteUriRuleTest extends CatalogReconcileTestBase {
         assertThat(col(t, a, "source_uri")).as("residue keeps its segment").isEqualTo(residueUri);
         assertThat(col(t, b, "source_uri")).as("a file-routed nx-note:// value keeps its segment").isEqualTo(noteUri);
         assertThat(col(t, h, "source_uri")).isEqualTo("chroma://plainlabel/a.md");
+        assertThat(isNoteByClassifier(col(t, a, "source_uri"))).as("still file-routed residue by NoteUri.isNote").isFalse();
+        assertThat(isNoteByClassifier(col(t, b, "source_uri"))).isFalse();
+        assertThat(staleRepairListed(t)).as("the stale-note repair skips both").doesNotContain(a, b);
+    }
+
+    /**
+     * The repoint UPDATE (the third rewrite of {@code catalog-049-1}, {@code WHERE w.repoint}): a staged row found by its
+     * derived {@code source_uri} under another file_path (same_owner_by_uri) whose document is an ALIAS repoints the
+     * alias's CANONICAL document to the staged collection, and the canonical's own URI is the value the rewrite sees. The
+     * canonical documents here sit in a file-routed collection and carry {@code chroma://} residue and an
+     * {@code nx-note://<file-routed>} value; both keep their segment when the document moves onto a prefix-free label.
+     */
+    @Test
+    void aSameOwnerByUriRepoint_leavesResidueAndAFileRoutedNoteValueOnTheirOldSegment() {
+        String t = tenantWithOwner();
+        String residueUri = "chroma://docs__old/a.md";
+        String noteUri = "nx-note://docs__old/b.md";
+        String canonA = seed(t, OWNER, "canon-a.md", Map.of("physical_collection", "docs__old", "content_type", "docs"));
+        String canonB = seed(t, OWNER, "canon-b.md", Map.of("physical_collection", "docs__old", "content_type", "docs"));
+        setUri(t, canonA, residueUri);
+        setUri(t, canonB, noteUri);
+        // the rows the staged paths are found by (their derived file:// URI), each an alias of a canonical document above
+        String aliasA = seed(t, OWNER, "old/pa.md", Map.of("source_uri", "file:///r/moved/pa.md",
+            "physical_collection", "code__old", "content_type", "docs"));
+        String aliasB = seed(t, OWNER, "old/pb.md", Map.of("source_uri", "file:///r/moved/pb.md",
+            "physical_collection", "code__old", "content_type", "docs"));
+        setDoc(t, aliasA, CATALOG_DOCUMENTS.ALIAS_OF, canonA);
+        setDoc(t, aliasB, CATALOG_DOCUMENTS.ALIAS_OF, canonB);
+
+        Map<String, Object> out = reconcile(t, OWNER, "r1", "partial",
+            present(0, "moved/pa.md").set("physical_collection", "plainlabel").set("content_type", "docs"),
+            present(1, "moved/pb.md").set("physical_collection", "plainlabel").set("content_type", "docs"));
+
+        assertThat(actionOf(out, "moved/pa.md")).as("the repoint arm, not the update arm").isEqualTo("same_owner_by_uri");
+        assertThat(actionOf(out, "moved/pb.md")).isEqualTo("same_owner_by_uri");
+        assertThat(col(t, canonA, "physical_collection")).as("the canonical document was repointed").isEqualTo("plainlabel");
+        assertThat(col(t, canonB, "physical_collection")).isEqualTo("plainlabel");
+        assertThat(col(t, canonA, "source_uri")).as("residue keeps its segment").isEqualTo(residueUri);
+        assertThat(col(t, canonB, "source_uri")).as("a file-routed nx-note:// value keeps its segment").isEqualTo(noteUri);
+        assertThat(isNoteByClassifier(col(t, canonA, "source_uri"))).isFalse();
+        assertThat(isNoteByClassifier(col(t, canonB, "source_uri"))).isFalse();
+        assertThat(staleRepairListed(t)).as("the stale-note repair skips both").doesNotContain(canonA, canonB);
+    }
+
+    private static boolean isNoteByClassifier(String uri) {
+        return dev.nexus.service.db.NoteUri.isNote(uri);
+    }
+
+    /** Every tumbler the engine's stale-note census lists for the tenant, over all its sample classes. */
+    private List<String> staleRepairListed(String tenant) {
+        var census = repo.repairStaleNoteUris(tenant, false, 1000, 1000);
+        List<String> listed = new ArrayList<>();
+        for (Object bucket : ((Map<?, ?>) census.get("sample")).values()) {
+            for (Object row : (List<?>) bucket) {
+                listed.add((String) ((Map<?, ?>) row).get("tumbler"));
+            }
+        }
+        return listed;
     }
 
     /** A note of a note collection still follows the move: the rule narrows the rewrite, it does not remove it. */

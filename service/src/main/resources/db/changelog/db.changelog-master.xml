@@ -2314,7 +2314,8 @@
 
     <!--
         Bead nexus-p2m1x.15 (RDR-229 P2.10): the owner-read SELECT policies of the three driving tables of those moves
-        (catalog-050-1 to -3), RDR-246's pattern, each guarded as vectors-029 is. DDL only. After catalog-049, before the
+        (catalog-050-1 to -3) and of nexus.catalog_collections, which their verifications join (catalog-050-4), RDR-246's
+        pattern, each guarded as vectors-029 is. DDL only. After catalog-049, before the
         grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/catalog-050-note-uri-residue-owner-read.xml"/>

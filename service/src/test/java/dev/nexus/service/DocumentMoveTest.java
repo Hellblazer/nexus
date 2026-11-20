@@ -1107,6 +1107,14 @@ class DocumentMoveTest {
         for (String row : List.of(residueUri, noteUri)) {
             assertThat(catalog.documentsBySourceUri(TENANT, row, 0, 0)).as(row).hasSize(1);
         }
+        var census = catalog.repairStaleNoteUris(TENANT, false, 10_000, 10_000);
+        List<String> listed = new ArrayList<>();
+        for (Object bucket : ((Map<?, ?>) census.get("sample")).values()) {
+            for (Object row : (List<?>) bucket) {
+                listed.add((String) ((Map<?, ?>) row).get("tumbler"));
+            }
+        }
+        assertThat(listed).as("the stale-note repair skips both values: they are not notes").doesNotContain(residue, note);
     }
 
     @Test

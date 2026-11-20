@@ -101,8 +101,28 @@ public final class DrivingTableIsolationCheck {
                 out.add(t);
             }
         }
+        // tables a registered move's verification reads under an owner-read policy of their own, though they drive no move
+        var label = DSL.field(DSL.name("label"), SQLDataType.VARCHAR);
+        for (var support : SUPPORT_TABLES.entrySet()) {
+            boolean registered = admin.fetchExists(DSL.table(DSL.name("nexus", "data_moves")),
+                DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, label, DSL.val(support.getKey()))));
+            if (registered && !out.contains(support.getValue())) {
+                out.add(support.getValue());
+            }
+        }
         return out;
     }
+
+    /**
+     * Tables that carry an owner-read policy for a move's VERIFICATION and drive no move, keyed by the label prefix of the
+     * moves that read them. RDR-229 P2.10 ({@code catalog-050-4}): the three residue-repair verifications join
+     * {@code nexus.catalog_collections} for the content type, and the table-wide verification (the backstop for a tenant
+     * the list missed) runs as the migrating role with no tenant, which under FORCE row level security sees no
+     * collection without it. The policy is as exposed as a driving table's, so it gets the same boot question while any
+     * of those moves is registered, in any state.
+     */
+    static final java.util.Map<String, Table> SUPPORT_TABLES =
+        java.util.Map.of("rdr229-residue-", new Table("nexus", "catalog_collections"));
 
     /**
      * {@code nexus.chunks}: {@link ChunksIsolationCheck#violations(DSLContext)} asks the policy question of it alone. Its
