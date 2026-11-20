@@ -44,8 +44,9 @@ its actor is Sam (it addresses "you", asks a question, says "say go and I'll", i
 names Sam, or is gated on an approval: a gate word (once, when, after, until, pending, if, awaits, needs,
 hold for) governing an approval predicate, however it is phrased: "once it is cleared", "when someone gives
 the word", "pending the ack"; see ``is_sam_gated``. An approval word alone, as the subject of a test or a
-log ("approval-flow tests", "the decision log"), gates nothing) or when it names a peer, mailbox, notification or restart as the wake, or when it is
-a past-tense report. If the LAST clause asks Sam something, tells him to do something or gates on his
+log ("approval-flow tests", "the decision log"), gates nothing) or when it names a peer, mailbox, notification or restart as the wake (a peer named only as the
+recipient of the session's own step, "handing the draft to halcyon", is not the wake: :func:`_recipients_stripped`), or
+when it is a past-tense report. If the LAST clause asks Sam something, tells him to do something or gates on his
 approval, the whole message is allowed: Sam's reply is the wake. A courtesy to him ("I'll keep you posted",
 "see you then") is not such a clause.
 
@@ -415,6 +416,17 @@ _RECIPIENT_PEER = re.compile(
 )
 #: The session as the actor of the clause: only then is a peer after "to"/"for" its step's recipient.
 _FIRST_PERSON = re.compile(r"\b(?:i|i'll|i'm|i've|i'd|we|we'll|we're|me|my)\b|^(?:after that|next|then)\b", re.I)
+def _recipients_stripped(clause: str) -> str:
+    """*clause* with a peer recipient of the session's own step removed, else unchanged. Only a clause whose actor
+    is the session, and none that carries a wait cue ("the test for wren once she's back" waits on wren); a leading
+    "after that" sequences my own steps and is not a wait cue."""
+    if not _FIRST_PERSON.search(clause):
+        return clause
+    if _WAIT_WORD.search(re.sub(r"^after that\b", "", clause, flags=re.I)):
+        return clause
+    return _RECIPIENT_PEER.sub(" ", clause)
+
+
 _PEER = re.compile(
     r"\b(?:" + "|".join(re.escape(n) for n in _PEER_NAMES) + r")\b"
     # "the go" is a peer's go-ahead, but "the go build" is the Go toolchain.
@@ -466,12 +478,14 @@ _PROMISE_VERBS = (
 _PROMISE = re.compile(
     r"\b(?:i'll|i will|i'm going to|i am going to|i shall)\s+(?:then\s+|also\s+|next\s+)?(?:" + _PROMISE_VERBS + r")\b"
     r"|\bcheck(?:ing)? back\b"
-    r"|^(?:next|then)\b[:,]?\s+(?:i|we)(?:'m|'re)?\s+\w+"
+    r"|^(?:next|then)\b[:,]?\s+(?:i|we)\s+\w+"
     # Present-tense own action (turn-end census, T2 nexus/turn-end-owned-idle-census-2026-11-19): "I'm doing the
-    # switch myself", "Next I'm starting Step 5". A negation ("I'm taking no action") is a restraint, not a step.
-    r"|(?<!anything )(?<!everything )(?<!what )\b(?:i'm|i am)\s+(?:now\s+|also\s+|next\s+)?(?:doing|starting|writing|running|building|fixing|drafting|"
-    r"taking|picking up|working on|moving on to|beginning|checking)\b(?!\s+(?:no|nothing|none)\b)"
-    r"|^after that,? (?:comes?|is)\b"
+    # switch myself", "Next I'm starting Step 5". Only at the start of a clause, so a relative or subordinate use
+    # ("anything I'm doing", "since I'm doing it", "the part I'm working on") is not a step; a negation ("I'm doing
+    # nothing") is a restraint.
+    r"|^(?:(?:next|then|now|so)\b[:,]?\s+)?(?:i'm|i am)\s+(?:now\s+|also\s+|next\s+)?(?:doing|starting|writing|fixing|"
+    r"drafting|picking up|moving on to)\b(?!\s+(?:to|no|nothing|none|zero|only|little|well|fine|ok|okay)\b)"
+    r"|^after that,? comes?\b"
     r"|^next\b[^.]{0,30}\b(?:is|are|comes)\b"
     r"|\bis next\b"
     r"|^moving on to\b"
@@ -583,7 +597,7 @@ def evaluate_text(text: str, ci_covered: "Callable[[str], bool] | None" = None) 
         if _PAST_REPORT.search(clause):
             past += 1
             continue
-        if _PEER.search(_RECIPIENT_PEER.sub(" ", clause) if _FIRST_PERSON.search(clause) else clause):
+        if _PEER.search(_recipients_stripped(clause)):
             peer += 1
             chain = 1 if _WAIT_WORD.search(clause) else 0
             gap = 0

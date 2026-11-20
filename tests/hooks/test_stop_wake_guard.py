@@ -369,6 +369,28 @@ def test_a_present_tense_own_step_at_the_turn_end_blocks(text: str, clause: str)
     "I'm not starting anything else tonight.",
     # corpus false positive (f1b056f7 11-19 01:14): the object of a denial, not a step
     "This doesn't change anything I'm doing right now.",
+    # critic probes: a state, a relative or subordinate clause, a reasoning report
+    "Then I'm done.",
+    "Next we're at the release gate.",
+    "Next I'm blocked on the jar.",
+    "Nothing I'm doing depends on it.",
+    "Whatever I'm doing, it is not affected.",
+    "Since I'm doing it in my own worktree, nothing else is affected.",
+    "If I'm starting from develop, the rebase is clean.",
+    "That is the part I'm working on, and it is done.",
+    "I'm taking this to be a no-op.",
+    "I'm checking whether the file exists; it does not.",
+    # code-review probes: an idiom, a state, a restraint the old lookahead missed
+    "I'm starting to think this is a race.",
+    "I'm beginning to see the problem.",
+    "I'm working on the assumption that it's green.",
+    "I'm running low on context.",
+    "I'm doing well, thanks.",
+    "I'm doing none of it.",
+    "The hold stands: I'm starting zero new work.",
+    "I'm starting only what's already approved.",
+    "After that is merged, the release proceeds.",
+    "After that is done, we're finished.",
 ])
 def test_a_present_tense_restraint_does_not_block(text: str) -> None:
     assert swg.evaluate_text(text).block is False, text
@@ -386,6 +408,12 @@ def test_a_present_tense_restraint_does_not_block(text: str) -> None:
     # is stripped only from a clause whose actor is me
     ("marginalia then asked for one more test for wren: timing how long dropping the search index takes while "
      "searches are running.", False),
+    # a wait cue anywhere in the clause keeps the peer as the wake (code review r1)
+    ("I'll run the test for wren once she's back.", False),
+    ("I'm doing the review for wren after the diff arrives.", False),
+    # the wait-word lookbehind and the possessive each keep a peer wake
+    ("Waiting for halcyon, I'll run the check.", False),
+    ("I'll rebase for halcyon's window.", False),
 ])
 def test_a_peer_as_recipient_is_not_the_wake(text: str, blocks: bool) -> None:
     assert swg.evaluate_text(text).block is blocks, swg.evaluate_text(text)
@@ -1254,6 +1282,7 @@ def test_a_subscription_change_republishes_the_record(tmp_path: Path, monkeypatc
 
 
 def test_the_continuation_never_licenses_held_back_work() -> None:
-    """The same exception as the post-compaction checkpoint directive (wren, 8.5.2): one rule in both places."""
+    """The sentence wren's post-compaction checkpoint directive uses too (compact_checkpoint.py, in flight for 8.5.2), so
+    the two read as one rule once both land."""
     for cls in (swg.CLASS_PROMISE, swg.CLASS_TIMED, swg.CLASS_CI_WAIT):
         assert "Never start work the user held back or asked you to wait on." in swg.block_reason(cls, "I'm doing it.")

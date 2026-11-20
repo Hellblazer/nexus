@@ -47,6 +47,6 @@ it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/hooks/scripts/stop_wake_guard.py`: turn-end census (T2 nexus/turn-end-owned-idle-census-2026-11-19): a present-tense own step ("I'm doing X", "Next I'm starting X", "After that comes X") is a promise; a peer named only as the recipient of the session's own step is not the wake; the continuation never licenses work the user held back.
+- `conexus/hooks/scripts/stop_wake_guard.py`: turn-end census (T2 nexus/turn-end-owned-idle-census-2026-11-19): a present-tense own step at a clause start ("I'm doing X", "Next I'm starting X", "After that come X") is a promise; a peer named only as the recipient of the session's own step, with no wait cue in the clause, is not the wake; the continuation never licenses work the user held back.
 
 ## Deferred to the next client release
