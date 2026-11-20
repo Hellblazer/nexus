@@ -543,9 +543,16 @@ def _parse_ts(value: str) -> datetime | None:
 
 
 def _repo_projects(db: Any, repo: str) -> list[str]:
-    rows = db.get_projects_with_prefix(repo)
-    names = {(r.get("project") if isinstance(r, dict) else r) for r in rows}
-    return sorted(n for n in names if n == repo or (n and n.startswith(f"{repo}_")))
+    """The repo's own projects (``<repo>`` and ``<repo>_*``) and the per-identity ones (``identity/<id>``, RDR-253 Step 6
+    part 3: a seat's own notes, which no repo prefix finds)."""
+    from nexus.db.t2.http_memory_store import IDENTITY_PROJECT_PREFIX  # noqa: PLC0415 — deferred: only this report reads T2
+
+    def names_of(prefix: str) -> set[str]:
+        return {(r.get("project") if isinstance(r, dict) else r) for r in db.get_projects_with_prefix(prefix)}
+
+    own = {n for n in names_of(repo) if n == repo or (n and n.startswith(f"{repo}_"))}
+    identity = {n for n in names_of(IDENTITY_PROJECT_PREFIX) if n and n.startswith(IDENTITY_PROJECT_PREFIX)}
+    return sorted(own | identity)
 
 
 def t2_findings(db: Any, repo: str, *, closed_rdrs: set[str], now: datetime,

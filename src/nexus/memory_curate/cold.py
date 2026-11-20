@@ -279,6 +279,16 @@ def _files(q: _Queries, directory: Path | None, repo: str) -> list[str]:
 # ── T2 namespaces ────────────────────────────────────────────────────────────────────
 
 
+def _project_of(name: str) -> str:
+    """The T2 project a transcript ``memory_get`` name (``<project>/<title>``) belongs to: the part before the first ``/``,
+    except under ``identity/``, whose project is ``identity/<id>`` (RDR-253 Step 6 part 3)."""
+    from nexus.db.t2.http_memory_store import IDENTITY_PROJECT_PREFIX  # noqa: PLC0415 — deferred: only the T2 section needs it
+
+    if name.startswith(IDENTITY_PROJECT_PREFIX):
+        return "/".join(name.split("/", 2)[:2])
+    return name.split("/", 1)[0]
+
+
 def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any]]) -> list[str]:
     label = "T2 namespaces"
     rows = q.rows("memory")
@@ -291,7 +301,7 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
     assert since is not None
     used: dict[str, str] = {}
     for name, stamp in _used(rows, "t2_get").items():
-        project = name.split("/", 1)[0]
+        project = _project_of(name)
         used[project] = _later(used.get(project), stamp)
     searched = _used(rows, "t2_search")
     for project, stamp in searched.items():
@@ -310,7 +320,7 @@ def _t2(q: _Queries, repo: str, open_db: Callable[[], AbstractContextManager[Any
             continue
         n = len(data[project])
         cold.append(ColdRow(project, _show(written, "none"), _NEVER, f"{n} row{'' if n == 1 else 's'}", repo))
-    out = _listing(label, cold, len(projects), f" (projects {repo} and {repo}_*)")
+    out = _listing(label, cold, len(projects), f" (projects {repo}, {repo}_* and identity/*)")
     if all_search:
         out.append("  (a memory_search naming no project was seen: it is credited to no project, since the engine "
                    "stamps last_accessed only on the rows it returned, so a project it hit is used only through "
