@@ -109,21 +109,20 @@ class CollectionNameSqlLiveBodyGateTest {
      * {@code 1d341b77f} (RDR-229 P1.3, the first live run). Equal to research-23's 11 expressions in 3 functions.
      * Reduce-only: a phase that removes a site lowers its entry in the same edit, and an entry that reaches zero is
      * removed. The first cut keyed the nine {@code chash_conformance_report} sites as {@code split_part}; review round 1
-     * made the shape the literal, so the same nine sites are {@code dunder-literal}.
+     * made the shape the literal, so the same nine sites are {@code dunder-literal}. RDR-229 P2.6 (vectors-063,
+     * nexus-p2m1x.11) removed all eleven: the three functions read the collection's catalog row, so every entry
+     * reached zero and was removed.
      */
-    static final Map<String, Integer> NAME_PARSING_CENSUS = Map.of(
-        "nexus.chash_conformance_report|" + DUNDER_LITERAL, 9,
-        "nexus.quarantine_restore_chunks|" + QUARANTINE_LITERAL, 1,
-        "nexus.reaper_expire_client_quarantine|" + QUARANTINE_LITERAL, 1);
+    static final Map<String, Integer> NAME_PARSING_CENSUS = Map.of();
 
-    /** Pinned total; lowered with {@link #NAME_PARSING_CENSUS} (a test asserts the two agree). */
-    static final int NAME_PARSING_TOTAL_CEILING = 11;
+    /** Pinned total; lowered with {@link #NAME_PARSING_CENSUS} (a test asserts the two agree). 11 -> 0 at P2.6. */
+    static final int NAME_PARSING_TOTAL_CEILING = 0;
 
     /** The functions the RDR rewrites, each with the changelog that last defines it: the scan must resolve all three. */
     static final Map<String, String> REQUIRED_LIVE = Map.of(
-        "nexus.chash_conformance_report", "vectors-005-repoint-functions-views.xml",
-        "nexus.quarantine_restore_chunks", "vectors-053-quarantine-restore-chunk-keys-only.xml",
-        "nexus.reaper_expire_client_quarantine", "vectors-056-gc-quarantine-expires-at.xml");
+        "nexus.chash_conformance_report", "vectors-063-live-functions-read-collection-row.xml",
+        "nexus.quarantine_restore_chunks", "vectors-063-live-functions-read-collection-row.xml",
+        "nexus.reaper_expire_client_quarantine", "vectors-063-live-functions-read-collection-row.xml");
 
     /** Floors on the real tree (234 includes and 119 live functions: 233 at the first run, 234 at develop 118701321); a scan below them read too little. */
     static final int INCLUDES_FLOOR = 234;
