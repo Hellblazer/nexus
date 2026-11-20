@@ -155,7 +155,7 @@ class CollectionName:
 
 def version_from_for_tuple_row(
     row: dict, *, content_type: str, owner_id: str, embedding_model: str,
-) -> int:
+) -> int | None:
     """The existing collection version of a ``/collections/for_tuple`` row.
 
     RDR-229 P1.4: the version is the ROW's ``model_version`` (``"v<N>"``,
@@ -173,8 +173,12 @@ def version_from_for_tuple_row(
 
     An EMPTY ``model_version`` (the column is ``NOT NULL DEFAULT ''`` and an
     upsert never rewrites it, so such rows exist and cannot be repaired by
-    re-registering) falls back to the returned conformant name, with a warning;
-    a row whose name cannot parse either raises.
+    re-registering) falls back to the returned conformant name, with a warning.
+    When the name carries no version either (a legacy slug or a non-conformant
+    label: ``for_tuple`` answers such a ``legacy_grandfathered`` row since engine
+    0.1.200, RDR-229 P2.8) the answer is ``None``, a row with no readable version:
+    the caller answers the row as it is and refuses only a bump. A name that
+    parses to version 0 raises.
 
     The fallback is temporary: P1.2's production census (nexus-p2m1x.2) counts
     rows with an empty ``model_version``, and the fallback comes out once that
@@ -198,11 +202,9 @@ def version_from_for_tuple_row(
         name = row.get("name")
         try:
             version = CollectionName.parse(name).model_version  # type: ignore[arg-type]
-        except (ValueError, TypeError, AttributeError) as exc:
-            raise ValueError(
-                f"collection row {name!r} has an empty model_version and a name that "
-                "does not carry one"
-            ) from exc
+        except (ValueError, TypeError, AttributeError):
+            _log.warning("collection_for_row_model_version_unreadable", collection=name)
+            return None
         if version < 1:
             raise ValueError(f"collection row {name!r} has an empty model_version and name version v0")
         _log.warning("collection_for_row_model_version_empty", collection=name)
@@ -228,7 +230,9 @@ class CollectionAttributes:
     ``collection_id`` is ``None`` until the engine carries the surrogate key
     (RDR-229 P3.1), and for a name that is about to be minted. ``label`` is the
     registered name; until the engine sends a separate label field it is the
-    row's ``name``.
+    row's ``name``. ``model_version`` is ``None`` for a registered row whose
+    ``model_version`` is blank and whose name carries none (a grandfathered slug):
+    nothing can be bumped from it.
     """
 
     collection_id: int | None
@@ -236,9 +240,13 @@ class CollectionAttributes:
     content_type: str
     owner_id: str
     embedding_model: str
-    model_version: int
+    model_version: int | None
     dimension: int | None
     lifecycle_state: str | None
+
+    def render(self) -> str:
+        """The registered name, unchanged (a label of any shape)."""
+        return self.label
 
     @classmethod
     def from_for_tuple(
@@ -248,6 +256,7 @@ class CollectionAttributes:
 
         Raises ``ValueError`` when the row is for another tuple or carries a
         malformed version (:func:`version_from_for_tuple_row`), or has no name.
+        A blank version the name cannot supply answers ``model_version=None``.
         """
         label = row.get("label") or row.get("name")
         if not isinstance(label, str) or not label:
@@ -279,6 +288,14 @@ class CollectionAttributes:
             embedding_model=embedding_model, model_version=model_version,
             dimension=None, lifecycle_state=None,
         )
+
+
+def version_unreadable_message(label: str) -> str:
+    """The refusal for a bump asked on a registered row that has no readable version."""
+    return (
+        f"collection {label!r} is registered with no readable model_version, so no next version "
+        "can be minted from it: set the row's model_version, or re-register the collection"
+    )
 
 
 def find_collection_row(
@@ -359,6 +376,8 @@ def collection_for_repo_row(
     row = find_collection(content_type, owner_id, embedding_model)
     if row is not None and not bump:
         return row
+    if row is not None and row.model_version is None:
+        raise ValueError(version_unreadable_message(row.label))
     version = row.model_version + 1 if row is not None else 1
     return CollectionAttributes.minted(
         label=CollectionName(
