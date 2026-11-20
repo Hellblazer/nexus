@@ -374,6 +374,27 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
         assert scope_owner(world.client) == alpha
 
 
+def row_an_agent_is_a_kind_of_work_and_a_wait_for_a_ci_run_survives_the_work_limit_purge(world: World) -> None:
+    """RDR-253 Step 6 part 1 (nexus-hczdo): the real engine accepts ``kind=agent`` (identity-005 widens the CHECK as well
+    as the service's own list) and marks it done in place; an engine from before it answers ``bad_kind``, which the hooks
+    log and carry on past. A ``nx ci wait`` row (``kind=wait``, ref ``ci:<branch>@<sha>``) is not a wait for a session, so
+    the 200-row purge never drops it as a superseded one."""
+    alpha = world.seat("alpha")
+    world.process(100, name="alpha")
+    world.hook(100, "startup", "s1")
+    ref = "agent:a220cf773a02bf4d7"
+    assert work.register(world.client, alpha, "agent", ref).state == "running"
+    assert work.mark_done(world.client, alpha, "agent", ref).state == "done"
+    assert [(w.kind, w.ref, w.state) for w in work.owners(world.client, "agent", ref)] == [("agent", ref, "done")]
+    assert work.register_own("agent", "agent:b1", client=world.client, identity=alpha) is True
+    ci = "ci:develop@0123456789abcdef"
+    work.register(world.client, alpha, "wait", ci)
+    for n in range(197):                                                        # 3 rows above + 197 = the 200-row limit
+        world.client.put_work(alpha, "labrun", f"c{n}", "done" if n < 150 else "running")
+    assert work.register(world.client, alpha, "labrun", "fresh").state == "running", "the purge made room"
+    assert ci in {w.ref for w in work.of(world.client, alpha)}, "a CI wait is not a superseded session wait"
+
+
 ROWS = (
     row_a_membership_write_by_a_non_owner_is_refused_and_the_owners_stays,
     row_identity_scratch_survives_a_clear_and_a_session_close_and_is_refused_to_a_non_owner,
@@ -384,4 +405,5 @@ ROWS = (
     row_a_note_in_the_identity_project_is_still_found_after_a_rename,
     row_work_rows_follow_the_identity_and_a_crashed_owners_running_row_is_stale,
     row_the_work_limit_forgets_finished_rows_once_and_registers,
+    row_an_agent_is_a_kind_of_work_and_a_wait_for_a_ci_run_survives_the_work_limit_purge,
 )

@@ -306,6 +306,199 @@ def test_list_by_session_and_json_carry_the_stale_flag(box: Box) -> None:
     assert json.loads(box.run("work", "list", "--session", "sid-100", "--running", "--json").stdout)["work"] == []
 
 
+# ── agent work and the liveness probe (RDR-253 Step 6 part 1, nexus-hczdo) ───
+
+
+HOUR = 3600.0
+
+
+def listed(box: Box, session: str = "sid-100") -> dict[tuple[str, str], bool]:
+    """``(kind, ref) -> stale`` of the identity's running rows, as ``nx identity work list --json`` reports them."""
+    import json
+
+    out = json.loads(box.run("work", "list", "--session", session, "--json").stdout)
+    return {(w["kind"], w["ref"]): w["stale"] for w in out["work"] if w["state"] == "running"}
+
+
+def seed(box: Box, identity: str, kind: str, ref: str, *, age_s: float = 0.0, state: str = "running") -> None:
+    box.engine.put_work(identity, kind, ref, state)
+    box.engine.work[(identity, kind, ref)] = (state, box.env().clock() - age_s)
+
+
+def test_agent_is_a_kind_of_work_the_cli_accepts(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nexus.identity import work
+
+    assert "agent" in work.KINDS
+    i1 = box.running_seat("alpha", 100)
+    as_caller(monkeypatch, i1)
+    assert box.run("work", "register", "--kind", "agent", "--ref", "agent:a1").exit_code == 0
+    assert box.engine.work[(i1, "agent", "agent:a1")][0] == "running"
+    assert box.run("work", "done", "--kind", "agent", "--ref", "agent:a1").exit_code == 0
+    assert box.engine.work[(i1, "agent", "agent:a1")][0] == "done"
+
+
+def test_an_engine_that_does_not_know_the_agent_kind_is_logged_and_the_registrar_carries_on(box: Box) -> None:
+    """Engine 0.1.198 answers 400 bad_kind for a kind it does not list. The hooks register through register_own: one log
+    line, False, never an exception into the dispatch."""
+    from nexus.identity import work
+    from nexus.identity.bind_client import IdentityApiError
+
+    i1 = box.running_seat("alpha", 100)
+
+    def refuse(*a, **k):
+        raise IdentityApiError(400, "bad_kind", "kind must be one of ['labrun', 'tmux', 'wait', 'watcher', 'worktree']", {})
+
+    box.engine.put_work = refuse                                       # type: ignore[method-assign]
+    assert work.register_own("agent", "agent:a1", client=box.engine, identity=i1) is False
+
+
+def test_a_running_row_older_than_the_ttl_is_stale_for_the_kinds_that_end_with_their_process(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    for kind in ("wait", "labrun", "agent", "watcher"):
+        seed(box, i1, kind, "x:old", age_s=work.ROW_TTL_S + HOUR)
+        seed(box, i1, kind, "x:new", age_s=HOUR)
+    seed(box, i1, "tmux", "x:old", age_s=work.ROW_TTL_S + HOUR)
+    seed(box, i1, "worktree", P_REAL, age_s=work.ROW_TTL_S + HOUR)
+    rows = listed(box)
+    assert work.ROW_TTL_S == 12 * HOUR
+    for kind in ("wait", "labrun", "agent", "watcher"):
+        assert rows[(kind, "x:old")] is True, kind
+        assert rows[(kind, "x:new")] is False, kind
+    assert rows[("tmux", "x:old")] is False, "a tmux server outlives the session: no TTL"
+
+
+def test_a_row_whose_registering_process_is_gone_is_stale_and_one_whose_process_runs_is_not(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    box.procs.start(300, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.start(301, "2026-11-17T09:00:00Z", registry=False)
+    for pid, ref in ((300, "alive"), (301, "dead"), (302, "reused")):
+        seed(box, i1, "labrun", ref, age_s=work.ROW_TTL_S + HOUR if ref == "alive" else 60)
+    work.record_owner(box.identity_dir, i1, "labrun", "alive", pid=300, start="2026-11-17T09:00:00Z", host=box.procs.host)
+    work.record_owner(box.identity_dir, i1, "labrun", "dead", pid=301, start="2026-11-17T09:00:00Z", host=box.procs.host)
+    work.record_owner(box.identity_dir, i1, "labrun", "reused", pid=300, start="2026-11-16T01:00:00Z", host=box.procs.host)
+    box.procs.stop(301)
+    rows = listed(box)
+    assert rows[("labrun", "alive")] is False, "the process is the authority: older than the TTL is not stale while it runs"
+    assert rows[("labrun", "dead")] is True, "its process is gone"
+    assert rows[("labrun", "reused")] is True, "the pid runs, but it is another process (a reused pid)"
+
+
+def test_a_labrun_ref_that_names_its_host_pid_and_start_is_probed_without_any_owner_record(box: Box) -> None:
+    """lab-remote registers kind=labrun with ref ``<host>:<pid>:<started>`` (host = this machine's short name, pid = its
+    own pid, started = epoch seconds at its start). A SIGKILL'd lab-remote leaves such a row: its pid is gone, or the pid
+    runs but began after <started> (reused). The ready check must list it as stale, never block on it."""
+    from nexus.identity import holder, work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    began = holder.epoch_seconds("2026-11-17T09:00:00Z")
+    box.procs.start(400, "2026-11-17T09:00:00Z", registry=False)                  # running, began exactly at <started>
+    box.procs.start(401, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.start(402, "2026-11-17T10:00:00Z", registry=False)                  # running, began an hour after <started>
+    box.procs.stop(401)
+    rows = {"alive": f"{box.procs.host}:400:{began}", "dead": f"{box.procs.host}:401:{began}",
+            "reused": f"{box.procs.host}:402:{began}", "elsewhere": f"another-host:403:{began}"}
+    for name, ref in rows.items():
+        seed(box, i1, "labrun", ref, age_s=work.ROW_TTL_S + HOUR if name == "alive" else 60)
+    got = listed(box)
+    assert got[("labrun", rows["alive"])] is False, "its process runs and began at <started>: the pid is the authority, not the TTL"
+    assert got[("labrun", rows["dead"])] is True, "its pid is gone"
+    assert got[("labrun", rows["reused"])] is True, "the pid runs but began after <started>: another process"
+    assert got[("labrun", rows["elsewhere"])] is False, "another host's pid says nothing here"
+    assert rows["dead"] not in box.run("work", "list", "i1", "--running").output, "--running drops it"
+    assert "its process is gone" in box.run("work", "list", "i1").output
+
+
+def test_a_labrun_ref_whose_process_start_cannot_be_read_is_not_judged_gone(box: Box) -> None:
+    from nexus.identity import holder
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    began = holder.epoch_seconds("2026-11-17T09:00:00Z")
+    box.procs.start(400, "2026-11-17T09:00:00Z", registry=False)
+    box.procs.os_start = lambda pid: None                                          # type: ignore[method-assign]
+    ref = f"{box.procs.host}:400:{began}"
+    seed(box, i1, "labrun", ref, age_s=60)
+    assert listed(box)[("labrun", ref)] is False
+
+
+def test_an_owner_record_from_another_host_is_not_judged_here(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.engine.sessions["sid-100"] = (i1, 1)
+    seed(box, i1, "labrun", "elsewhere", age_s=60)
+    work.record_owner(box.identity_dir, i1, "labrun", "elsewhere", pid=999, start="x", host="another-host")
+    assert listed(box)[("labrun", "elsewhere")] is False
+
+
+def test_the_stale_listing_says_why(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    seed(box, i1, "agent", "agent:old", age_s=work.ROW_TTL_S + HOUR)
+    out = box.run("work", "list", "i1").output
+    assert "stale" in out and "agent:old" in out and "12 h" in out, out
+
+
+def test_running_filter_drops_an_expired_row(box: Box) -> None:
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    seed(box, i1, "agent", "agent:old", age_s=work.ROW_TTL_S + HOUR)
+    seed(box, i1, "agent", "agent:new", age_s=60)
+    out = box.run("work", "list", "i1", "--running").output
+    assert "agent:new" in out and "agent:old" not in out, out
+
+
+def test_the_label_records_its_process_at_start_and_clears_it_at_done(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.procs.start(os.getpid(), "2026-11-17T09:00:00Z", registry=False)
+    assert work.register_own("wait", "ci:develop@abc", client=box.engine, identity=i1, owner_dir=box.identity_dir, procs=box.procs)
+    record = work.read_owner(box.identity_dir, i1, "wait", "ci:develop@abc")
+    assert record is not None and record["pid"] == os.getpid() and record["start"] == "2026-11-17T09:00:00Z"
+    assert work.finish_own("wait", "ci:develop@abc", client=box.engine, identity=i1, owner_dir=box.identity_dir, procs=box.procs)
+    assert work.read_owner(box.identity_dir, i1, "wait", "ci:develop@abc") is None
+
+
+def test_a_label_asks_register_own_to_record_its_process_and_work_run_does_too(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The long-lived registrars (Label: nx ci wait, nx tuple wait; work run) record their pid so a killed process reads
+    stale; the hooks, whose process exits at once, do not."""
+    from nexus.identity import work
+
+    seen: list[dict] = []
+    monkeypatch.setattr(work, "register_own", lambda kind, ref, state="running", **k: seen.append(k) or True)
+    as_caller(monkeypatch, "i1")
+    label = work.Label("wait", "ci:develop@abc")
+    assert label.start() is True
+    label.finish()
+    assert [bool(k.get("owner_dir")) for k in seen] == [True, True]
+
+
+def test_work_run_records_its_process_while_the_command_runs_and_clears_it_after(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+
+    from nexus.identity import work
+
+    i1 = box.running_seat("alpha", 100)
+    box.procs.start(os.getpid(), "2026-11-17T09:00:00Z", registry=False)
+    as_caller(monkeypatch, i1)
+    during: list[object] = []
+    work.run_command(box.env(), "labrun", "full", ["x"], runner=lambda argv: during.append(work.read_owner(box.identity_dir, i1, "labrun", "full")) or 0)
+    assert during[0] is not None and during[0]["pid"] == os.getpid()
+    assert work.read_owner(box.identity_dir, i1, "labrun", "full") is None
+
+
 # ── memberships (the fence is the engine's; the engine rows check the real one) ──
 
 

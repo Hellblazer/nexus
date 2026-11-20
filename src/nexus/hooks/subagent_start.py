@@ -75,6 +75,7 @@ import subprocess
 from pathlib import Path
 
 from nexus._hook_runtime._io import HookResult, additional_context
+from nexus.hooks import subagent_work
 
 __all__ = ["run"]
 
@@ -600,6 +601,11 @@ def run(payload: dict | None) -> HookResult:
     task_text = " ".join([str(data.get("task", "")), str(data.get("prompt", ""))]).lower()
     agent_id = str(data.get("agent_id") or "")
     agent_type = str(data.get("agent_type") or "")
+
+    try:
+        subagent_work.register_start(data)   # RDR-253 Step 6: the dispatch is work its identity owns; never blocks it
+    except Exception:  # noqa: BLE001 — a label never blocks a dispatch
+        pass
 
     env = _nx_env(session_id)
     repo_root = _repo_root(env)

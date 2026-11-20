@@ -298,8 +298,8 @@ class FakeEngine:
         self.calls.append(("put_work", (identity, kind, ref, state)))
         self._maybe_refuse("put_work")
         self._get(identity)
-        if kind not in ("watcher", "wait", "labrun", "worktree", "tmux"):
-            raise _refuse(400, "bad_kind", "kind must be one of ['labrun', 'tmux', 'wait', 'watcher', 'worktree']")
+        if kind not in ("watcher", "wait", "labrun", "worktree", "tmux", "agent"):
+            raise _refuse(400, "bad_kind", "kind must be one of ['agent', 'labrun', 'tmux', 'wait', 'watcher', 'worktree']")
         if state not in ("running", "done"):
             raise _refuse(400, "bad_state", "state must be running or done")
         if (identity, kind, ref) not in self.work and sum(1 for k in self.work if k[0] == identity) >= 200:

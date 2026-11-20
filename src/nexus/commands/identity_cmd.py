@@ -191,7 +191,7 @@ def purge_cmd(ctx: click.Context, identity: str, operator: bool) -> None:
 
 
 
-_KINDS = ["worktree", "tmux", "watcher", "wait", "labrun"]
+_KINDS = ["worktree", "tmux", "watcher", "wait", "labrun", "agent"]
 _KIND = click.option("--kind", required=True, type=click.Choice(_KINDS), help="The kind of work or resource.")
 _REF = click.option("--ref", required=True,
                     help="Its label: an absolute worktree path, a tmux -L socket name, or the work's own name.")
@@ -218,7 +218,7 @@ def may_stop_cmd(ctx: click.Context, kind: str, ref: str) -> None:
 
 @identity_group.group("work")
 def work_group() -> None:
-    """Work this session owns: worktrees, tmux servers, waits, watchers and lab runs (RDR-253)."""
+    """Work this session owns: worktrees, tmux servers, waits, watchers, lab runs and dispatched agents (RDR-253)."""
 
 
 @work_group.command("register")

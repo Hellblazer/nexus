@@ -2549,20 +2549,30 @@ def session_tasks(s: dict) -> list[str] | None:
 WORK_TIMEOUT_S = 5
 
 #: Work that runs under the session and ends with it: a restart cuts these off. A worktree or a tmux server outlives it.
-WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun")
+WORK_ENDS_WITH_SESSION = ("wait", "watcher", "labrun", "agent")
+
+#: ``session_work`` marks a row that reads stale (its registering process is gone, nobody wrote it for 12 hours, or its
+#: identity is not alive) with this suffix: the report lists it, the ready check does not block on it.
+STALE_MARK = " (stale)"
+
+
+def is_stale(work_line: str) -> bool:
+    return work_line.endswith(STALE_MARK)
 
 
 def session_work(s: dict) -> list[str] | None:
     """The background work the session's identity has registered and is still running (RDR-253 Step 6), one line each,
-    or None when it cannot be read. Read through ``nx identity work list --running``: a running row of an identity whose
-    holder is gone is stale there and never listed, so a crashed session's work does not read as busy. A session with no
-    identity has none. The session's own standing mail wait (kind wait, ref its session id) is meant to run, as with
-    ``session_tasks``, and is left out. The ready check blocks on the wait, watcher and labrun lines (``blocking_work``)."""
+    or None when it cannot be read. Read through ``nx identity work list --json``, which marks a running row stale when its
+    identity is not alive, its registering process is gone or it has not been written for 12 hours: a stale row is
+    listed with ``STALE_MARK`` and never blocks (``blocking_work``), so a crashed session's or a killed ``lab-remote``'s
+    row does not read as busy. A finished (done) row is left out. A session with no identity has none. The session's own
+    standing mail wait (kind wait, ref its session id) is meant to run, as with ``session_tasks``, and is left out. The
+    ready check blocks on the wait, watcher, labrun and agent lines that are not stale (``blocking_work``)."""
     sid = s.get("sessionId") or ""
     if not sid:
         return None
     try:
-        done = _nx_identity("work", "list", "--session", sid, "--running", "--json", timeout=WORK_TIMEOUT_S)
+        done = _nx_identity("work", "list", "--session", sid, "--json", timeout=WORK_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -2579,14 +2589,15 @@ def session_work(s: dict) -> list[str] | None:
         rows = json.loads(done.stdout)["work"]
     except (ValueError, KeyError, TypeError):
         return None
-    return [f"{r['kind']} {r['ref']}" for r in rows if not (r.get("kind") == "wait" and r.get("ref") == sid)]
+    return [f"{r['kind']} {r['ref']}" + (STALE_MARK if r.get("stale") else "")
+            for r in rows if r.get("state", "running") == "running" and not (r.get("kind") == "wait" and r.get("ref") == sid)]
 
 
 def blocking_work(work: list[str] | None) -> list[str]:
-    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a labrun or a watcher (a wait
-    is in the set too, but none arrives: the session's standing wait is left out by ``session_work`` and a wait from an
-    earlier session is stale). A worktree or a tmux server outlives the session, so it never blocks ready."""
-    return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+    """The lines of *work* (``session_work``'s ``kind ref``) that a restart would cut off: a labrun, a watcher, an agent or
+    a wait (the session's standing wait is left out by ``session_work``) that is not stale. A stale row is listed, never
+    blocking. A worktree or a tmux server outlives the session, so it never blocks ready."""
+    return [w for w in work or [] if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION and not is_stale(w)]
 
 
 def work_note(work: list[str] | None) -> str:
@@ -2594,19 +2605,24 @@ def work_note(work: list[str] | None) -> str:
         return "This script could not read the work your identity has registered. "
     if not work:
         return "Your identity has no running work registered. "
-    cut = [w for w in work if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
-    kept = [w for w in work if w not in cut]
+    stale = [w for w in work if is_stale(w)]
+    live = [w for w in work if not is_stale(w)]
+    cut = [w for w in live if w.split(" ", 1)[0] in WORK_ENDS_WITH_SESSION]
+    kept = [w for w in live if w not in cut]
 
     def shown(rows: list[str]) -> str:
         return "; ".join(rows[:5]) + (f"; and {len(rows) - 5} more" if len(rows) > 5 else "")
 
     out = f"Your identity has {len(work)} running work row(s) registered. "
     if cut:
-        out += (f"A restart cuts off {len(cut)} of them, which run under your session and end with it (a wait, watcher or "
-                f"lab run): {shown(cut)}. Answer not ready unless you can lose them. ")
+        out += (f"A restart cuts off {len(cut)} of them, which run under your session and end with it (a wait, watcher, "
+                f"lab run or dispatched agent): {shown(cut)}. Answer not ready unless you can lose them. ")
     if kept:
         out += (f"{len(kept)} outlive a restart and a restart leaves them alone (a worktree or tmux server): {shown(kept)}. "
                 f"Mark finished ones done or forget them (`nx identity work done|forget`). ")
+    if stale:
+        out += (f"{len(stale)} stale row(s), listed and not blocking (their process is gone or nobody has written them for "
+                f"12 hours): {shown([w[:-len(STALE_MARK)] for w in stale])}. Mark them done or forget them. ")
     return out
 
 
@@ -2958,8 +2974,8 @@ def readiness(found: list[dict], manifest: dict, now: float, max_age: int, calle
                         row["blocker"] = "said ready, but its background tasks could not be listed; check it, or --force"
                     elif s.get("pane") != caller_pane:
                         # Sam 2026-11-19 (T2 nexus/sam-ruling-step6-ready-gate-2026-11-19): ps AND the work rows. A
-                        # running labrun or watcher row of a live identity is work a restart would cut off (a wait row
-                        # never reaches here: session_work drops the standing one, and --running drops older ones).
+                        # running labrun, watcher or agent row of a live identity is work a restart would cut off (a wait row
+                        # never reaches here: session_work drops the standing one, and a stale row is marked and never blocks).
                         row["work"] = work = session_work(s)
                         cut = blocking_work(work)
                         if cut:

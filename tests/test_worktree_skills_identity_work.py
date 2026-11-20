@@ -62,3 +62,13 @@ def test_the_hand_run_guide_launches_labrun_and_watcher_through_work_run() -> No
     guide = (DOCS / "test-running.md").read_text(encoding="utf-8")
     assert "nx identity work run --kind labrun --ref <label> -- lab-remote" in guide
     assert "nx identity work run --kind watcher --ref <label> --" in guide
+
+
+def test_the_pre_push_skill_tells_a_hand_started_long_job_to_register_and_end_its_wait() -> None:
+    """RDR-253 Step 6 part 1 (nexus-hczdo): a wait or a job started by hand has no hook behind it, so the skill an agent
+    reads before such a job says to register it and mark it done, and that the label never blocks the job."""
+    skill = " ".join((Path(__file__).resolve().parent.parent / ".claude" / "skills" / "pre-push-review" / "SKILL.md")
+                     .read_text(encoding="utf-8").split())
+    assert "nx identity work register --kind wait --ref <what>" in skill
+    assert "nx identity work done --kind wait --ref <what>" in skill
+    assert skill.index("work register --kind wait") < skill.index("work done --kind wait")

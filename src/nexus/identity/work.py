@@ -28,12 +28,18 @@ and a process with no identity token registers nothing.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import re
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -43,9 +49,30 @@ from nexus.identity.ops import IdentityCommandError, IdentityEnv, find, is_alive
 
 _log = structlog.get_logger(__name__)
 
-KINDS: tuple[str, ...] = ("watcher", "wait", "labrun", "worktree", "tmux")
+KINDS: tuple[str, ...] = ("watcher", "wait", "labrun", "worktree", "tmux", "agent")
 RUNNING = "running"
 DONE = "done"
+
+#: The kinds whose rows end with the process that registered them (a worktree or a tmux server outlives its session).
+#: A running row of one of these gets the liveness probe of :func:`stale_why`.
+PROBED_KINDS: tuple[str, ...] = ("wait", "labrun", "agent", "watcher")
+
+#: A running row of a probed kind that no process vouches for (no owner record, no probe in its ref) reads stale once it
+#: has not been written for this long. 12 hours: past the longest wait or lab run anyone starts by hand.
+ROW_TTL_S = 12 * 3600.0
+
+#: Seconds a process may have begun after the start a ref records and still be the same process: ``ps`` floors a start to
+#: the second and the registrar read the clock after it began.
+START_SKEW_S = 2
+
+#: ``<host>:<pid>:<started>``: the ref lab-remote registers its ``labrun`` row under (host = the machine's short name,
+#: pid = lab-remote's own, started = epoch seconds at its start). The ref carries its own probe.
+_PROBE_REF = re.compile(r"^(?P<host>[A-Za-z0-9_-]+):(?P<pid>[0-9]+):(?P<started>[0-9]+)$")
+
+#: Where a registrar that stays alive records its process (see :func:`record_owner`), under the identity directory.
+OWNER_DIR_NAME = "work-owners"
+#: An owner record nothing cleared (its registrar was killed) is removed by the next registration after this long.
+OWNER_RECORD_KEEP_S = 14 * 86400.0
 
 #: Whether an identity (by id) has a live holder: :func:`nexus.identity.ops.is_alive` bound to an env, or a stand-in.
 Alive = Callable[[str], bool]
@@ -101,8 +128,11 @@ def current_session(client: Any, identity: str) -> str | None:
 
 def wait_superseded(row: Mapping[str, Any], session: str | None) -> bool:
     """A ``wait`` row for a session other than the identity's current one: that wait parked in an earlier session, which
-    has ended or moved, so the row is left over. With no current session known, nothing is judged superseded."""
-    return row.get("kind") == "wait" and session is not None and str(row.get("ref") or "") != session
+    has ended or moved, so the row is left over. With no current session known, nothing is judged superseded. Only a
+    session id is judged: a wait labelled for a CI run (``ci:<branch>@<sha>``, ``nx ci wait``) is not about a session, and
+    the liveness probe judges it (:func:`process_stale_why`)."""
+    ref = str(row.get("ref") or "")
+    return row.get("kind") == "wait" and session is not None and ":" not in ref and ref != session
 
 
 def worktree_gone(row: Mapping[str, Any]) -> bool:
@@ -153,6 +183,124 @@ def live_owners(client: Any, kind: str, ref: str, alive: Alive) -> list[Work]:
     return out
 
 
+# ── the liveness probe of a running row ─────────────────────────────────────
+
+
+def default_owner_dir() -> Path:
+    """The identity directory of this machine's config; owner records live in its ``work-owners`` subdirectory."""
+    from nexus import config  # noqa: PLC0415 — deferred: leaf import cost
+    from nexus.identity.token_file import identity_dir  # noqa: PLC0415
+
+    return identity_dir(config.nexus_config_dir())
+
+
+def _owner_path(directory: Path, identity: str, kind: str, ref: str) -> Path:
+    return Path(directory) / OWNER_DIR_NAME / (hashlib.sha256(f"{identity}\0{kind}\0{ref}".encode()).hexdigest()[:32] + ".json")
+
+
+def record_owner(directory: Path, identity: str, kind: str, ref: str, *, pid: int, start: str | None, host: str) -> None:
+    """Record the process that registered a row and stays alive while its work runs (``nx ci wait``, ``nx tuple wait``,
+    ``nx identity work run``): its pid, its OS start time and the host. The engine row has no column for it, and a hook's
+    process exits at once, so only a registrar that outlives its registration writes one. Removes records older than
+    :data:`OWNER_RECORD_KEEP_S` first (a registrar killed before its end never cleared its own)."""
+    records = Path(directory) / OWNER_DIR_NAME
+    records.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - OWNER_RECORD_KEEP_S
+    for old in records.glob("*.json"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    path = _owner_path(directory, identity, kind, ref)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"pid": pid, "start": start, "host": host}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_owner(directory: Path, identity: str, kind: str, ref: str) -> dict[str, Any] | None:
+    try:
+        record = json.loads(_owner_path(directory, identity, kind, ref).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) and isinstance(record.get("pid"), int) else None
+
+
+def clear_owner(directory: Path, identity: str, kind: str, ref: str) -> None:
+    try:
+        _owner_path(directory, identity, kind, ref).unlink()
+    except OSError:
+        pass
+
+
+def _short(host: object) -> str:
+    return str(host or "").split(".")[0]
+
+
+def _epoch(value: object) -> float | None:
+    """An engine instant (an ISO string, or epoch seconds as a stand-in gives it) as epoch seconds."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value:
+        try:
+            moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+    return None
+
+
+def _process_gone(procs: Any, here: str, host: str, pid: int, *, start: str | None, began: float | None) -> tuple[bool, bool]:
+    """``(judged, gone)`` for a process another party recorded. Not judged: the record names another host. Gone: the pid
+    runs no longer, or it runs but began at another time than recorded (the pid was reused): by *start* (the OS start time
+    string) when the record has one, else by *began* (epoch seconds, with :data:`START_SKEW_S` of slack). A start time that
+    cannot be read is never gone: a reader that cannot prove it must not say it."""
+    if _short(host) != _short(here):
+        return False, False
+    if not procs.alive(pid):
+        return True, True
+    now_start = procs.os_start(pid)
+    if now_start is None:
+        return True, False
+    if start is not None:
+        return True, now_start != start
+    if began is not None:
+        from nexus.identity.holder import epoch_seconds  # noqa: PLC0415 — deferred: leaf import cost
+
+        try:
+            return True, epoch_seconds(now_start) > began + START_SKEW_S
+        except ValueError:
+            return True, False
+    return True, False
+
+
+def process_stale_why(env: IdentityEnv, identity: str, w: Work, *, now: float | None = None) -> str | None:
+    """Why a running row of a probed kind reads stale, or None. Three witnesses, in order. The ref, when it is
+    ``<host>:<pid>:<started>`` (lab-remote's ``labrun`` row): its process gone or reused. An owner record the registrar
+    wrote (:func:`record_owner`): the same. When a process on this host vouches for the row (it runs, and is the one
+    recorded), the row is not stale however old. Otherwise a row nobody has written for :data:`ROW_TTL_S` is stale."""
+    if w.state != RUNNING or w.kind not in PROBED_KINDS:
+        return None
+    gone_reason = "its process is gone"
+    match = _PROBE_REF.match(w.ref)
+    if match:
+        judged, gone = _process_gone(env.procs, env.host, match["host"], int(match["pid"]), start=None, began=float(match["started"]))
+        if judged:
+            return gone_reason if gone else None
+    record = read_owner(env.identity_dir, identity, w.kind, w.ref)
+    if record is not None:
+        judged, gone = _process_gone(env.procs, env.host, str(record.get("host") or ""), int(record["pid"]),
+                                     start=record.get("start") if isinstance(record.get("start"), str) else None, began=None)
+        if judged:
+            return gone_reason if gone else None
+    written = _epoch(w.updated_at)
+    if written is not None and (now if now is not None else env.clock()) - written > ROW_TTL_S:
+        return f"not written for over {int(ROW_TTL_S // 3600)} h"
+    return None
+
+
 # ── the caller ──────────────────────────────────────────────────────────────
 
 
@@ -196,31 +344,62 @@ LABEL_TIMEOUT_S = 2.0
 
 
 def register_own(kind: str, ref: str, state: str = RUNNING, *, client: Any = None, identity: str | None = None,
-                 timeout: float = LABEL_TIMEOUT_S) -> bool:
+                 timeout: float = LABEL_TIMEOUT_S, owner_dir: Path | None = None, procs: Any = None) -> bool:
     """Register work for *identity* (default: the one this process holds). True when a row was written. No identity, no
     engine, or any refusal gives False and a log line: the work this labels must never fail, or wait on a slow engine,
-    because its label could not be written."""
+    because its label could not be written. An engine that predates a kind (``bad_kind``) is such a refusal.
+
+    *owner_dir* is for a registrar whose process stays alive while its work runs: the row's liveness probe is then this
+    process (:func:`record_owner`), written when the row goes running and removed when it goes done. A hook, whose process
+    exits at once, passes none."""
     try:
         who = identity or caller_identity()
         if who is None:
             return False
         owned = client is None
         engine = IdentityClient.from_config(timeout=timeout) if owned else client
+        label = norm_ref(kind, ref)
         try:
-            register(engine, who, kind, norm_ref(kind, ref), state)
+            register(engine, who, kind, label, state)
         finally:
             if owned:
                 engine.close()
-        return True
     except Exception as exc:  # noqa: BLE001 — a label never fails its work
         _log.warning("identity_work_register_failed", kind=kind, ref=ref, state=state, error=f"{type(exc).__name__}: {exc}")
         return False
+    if owner_dir is not None:
+        _own_record(owner_dir, who, kind, label, state, procs)
+    return True
+
+
+def _own_record(owner_dir: Path, identity: str, kind: str, ref: str, state: str, procs: Any) -> None:
+    """The owner record of a row this process registered: written when it goes running, removed when it goes done. Best
+    effort: the row is already written, and a record that is missing only leaves the row to the TTL."""
+    try:
+        if state != RUNNING:
+            clear_owner(owner_dir, identity, kind, ref)
+            return
+        from nexus.identity.holder import Processes  # noqa: PLC0415 — deferred: leaf import cost
+
+        table = procs if procs is not None else Processes()
+        pid = os.getpid()
+        record_owner(owner_dir, identity, kind, ref, pid=pid, start=table.os_start(pid), host=table.host)
+    except Exception as exc:  # noqa: BLE001 — as above
+        _log.warning("identity_work_owner_record_failed", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
 
 
 def finish_own(kind: str, ref: str, *, client: Any = None, identity: str | None = None,
-               timeout: float = LABEL_TIMEOUT_S) -> bool:
+               timeout: float = LABEL_TIMEOUT_S, owner_dir: Path | None = None, procs: Any = None) -> bool:
     """The registrar's clean end: ``done``. Same failure rule as :func:`register_own`."""
-    return register_own(kind, ref, DONE, client=client, identity=identity, timeout=timeout)
+    return register_own(kind, ref, DONE, client=client, identity=identity, timeout=timeout, owner_dir=owner_dir, procs=procs)
+
+
+def _safe_owner_dir() -> Path | None:
+    try:
+        return default_owner_dir()
+    except Exception as exc:  # noqa: BLE001 — a label never fails its work
+        _log.warning("identity_work_owner_dir_unreadable", error=f"{type(exc).__name__}: {exc}")
+        return None
 
 
 class Label:
@@ -244,7 +423,8 @@ class Label:
         except Exception as exc:  # noqa: BLE001 — reading the token file never fails the work
             _log.warning("identity_work_caller_unreadable", error=f"{type(exc).__name__}: {exc}")
             return False
-        self._started = bool(self.identity) and register_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout)
+        self._started = bool(self.identity) and register_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout,
+                                                             owner_dir=_safe_owner_dir())
         return self._started
 
     def finish(self, *, skip: bool = False) -> None:
@@ -253,7 +433,7 @@ class Label:
         self._finished = True
         self._disarm()
         if not skip:
-            finish_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout)
+            finish_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout, owner_dir=_safe_owner_dir())
 
     def arm_sigterm(self) -> None:
         """Mark the row done on SIGTERM or SIGHUP (a closed terminal), then let the signal do what it would have done: call
@@ -359,8 +539,9 @@ def _target(env: IdentityEnv, seat: str | None, session: str | None, who: Callab
 def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = None, *, only_running: bool = False,
               who: Callable[[], str | None] | None = None) -> dict[str, Any]:
     """``{"identity", "alive", "work": [row + "stale"]}``. A running row is stale when its identity is not alive, when it
-    is a ``worktree`` whose path is not a directory on this host, or when it is a ``wait`` for a session the identity no
-    longer holds (none of those three can still be running work of this identity); *only_running* keeps the rows that are
+    is a ``worktree`` whose path is not a directory on this host, when it is a ``wait`` for a session the identity no
+    longer holds, or when it is a wait, lab run, agent or watcher whose registering process is gone or that nobody has
+    written for 12 hours (:func:`process_stale_why`); the stale row carries ``why``. *only_running* keeps the rows that are
     ``running`` and not stale."""
     identity = _target(env, seat, session, who)
     alive = _call(is_alive, env, identity)
@@ -368,10 +549,22 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
     rows = []
     for w in _call(of, env.client, identity):
         row = {"kind": w.kind, "ref": w.ref}
-        stale = w.state == RUNNING and (not alive or worktree_gone(row) or wait_superseded(row, current))
-        if only_running and (w.state != RUNNING or stale):
+        why = None
+        if w.state == RUNNING:
+            if not alive:
+                why = "the identity is not alive"
+            elif worktree_gone(row):
+                why = "the worktree is gone"
+            elif wait_superseded(row, current):
+                why = "a wait from an earlier session"
+            else:
+                why = process_stale_why(env, identity, w)
+        if only_running and (w.state != RUNNING or why):
             continue
-        rows.append({"kind": w.kind, "ref": w.ref, "state": w.state, "updated_at": w.updated_at, "stale": stale})
+        entry = {"kind": w.kind, "ref": w.ref, "state": w.state, "updated_at": w.updated_at, "stale": bool(why)}
+        if why:
+            entry["why"] = why
+        rows.append(entry)
     return {"identity": identity, "alive": alive, "work": rows}
 
 
@@ -386,11 +579,7 @@ def list_lines(report: Mapping[str, Any]) -> list[str]:
 
 
 def _why_stale(report: Mapping[str, Any], row: Mapping[str, Any]) -> str:
-    if not report["alive"]:
-        return "the identity is not alive"
-    if worktree_gone(row):
-        return "the worktree is gone"
-    return "a wait from an earlier session"
+    return str(row.get("why") or "stale")
 
 
 def owners_lines(env: IdentityEnv, kind: str, ref: str) -> list[str]:
@@ -452,6 +641,7 @@ def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: st
         if identity is not None:
             engine = env() if callable(env) else env
             register(engine.client, identity, kind, ref, RUNNING)
+            _own_record(engine.identity_dir, identity, kind, ref, RUNNING, engine.procs)
     except Exception as exc:  # noqa: BLE001 — a label never fails its work
         _log.warning("identity_work_run_not_registered", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
         engine = None
@@ -461,6 +651,7 @@ def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: st
         if engine is not None and identity is not None:
             try:
                 mark_done(engine.client, identity, kind, ref)
+                _own_record(engine.identity_dir, identity, kind, ref, DONE, engine.procs)
             except Exception as exc:  # noqa: BLE001 — as above
                 _log.warning("identity_work_run_not_marked_done", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
     return code
