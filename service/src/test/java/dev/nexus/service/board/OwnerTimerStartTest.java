@@ -72,7 +72,10 @@ class OwnerTimerStartTest {
     }
 
     private String[] redOnY() {
-        String t = se.tenant();
+        return redOnY(se.tenant());
+    }
+
+    private String[] redOnY(String t) {
         String l = se.env.seat(t, "lead");
         String a = se.env.seat(t, "alpha");
         String c = se.env.seat(t, "carol");
@@ -80,6 +83,38 @@ class OwnerTimerStartTest {
         se.push(t, StamperEnv.BASE, "X", "G0", "sess-alpha");
         se.push(t, StamperEnv.BASE, "Y", "X", "sess-carol");
         return new String[] {t, l, a, c};
+    }
+
+    /**
+     * A tenant whose open red's episode is long past, that the restart rebuild visits AFTER every other tenant: its id
+     * sorts last ({@code t-zzzz} follows every {@code t-<hex>} the fixture mints), and the rebuild arms it at 0 ms. The
+     * rebuild visits every tenant of the class's database, so a test that reads "the" last deadline instead of its own
+     * tenant's reads this one. Seeding it makes that order the one every run sees, not the one JUnit's method order
+     * happens to give.
+     */
+    private void seedStaleRedTenantVisitedLast() {
+        Instant now = se.env.ids.clock.instant();
+        se.env.ids.clock.set(Instant.parse("2026-11-16T00:00:00Z"));
+        String[] stale = redOnY("t-zzzz" + UUID.randomUUID().toString().substring(0, 4));
+        se.done(stale[0], StamperEnv.BASE, "Y", "failure");
+        se.env.ids.clock.set(now);
+    }
+
+    /**
+     * The deadlines the live engine has armed for {@code tenant} (one per open-red topic). The recorded one-shots carry
+     * no tenant: each is the timer's private {@code run(key)}. So this asks the engine's own tenant-reset evictor, which
+     * cancels exactly the tenant's armed deadlines, and returns the recorded ones whose futures that cancelled. It ends
+     * the tenant's deadlines, so call it once, last, when the test is done with them.
+     */
+    private List<RecordingScheduler.Scheduled> deadlinesArmedFor(String tenant) {
+        var evictor = NexusServiceTestAccess.tenantKeyedState(service).stream()
+            .filter(s -> s.name().equals("AckDeadlineTimer")).findFirst().orElseThrow();
+        var cancelledBefore = engineScheduler.deadlines().stream().filter(d -> engineScheduler.futureOf(d).isCancelled()).toList();
+        int armed = evictor.evictTenant(tenant);
+        var own = engineScheduler.deadlines().stream()
+            .filter(d -> engineScheduler.futureOf(d).isCancelled() && !cancelledBefore.contains(d)).toList();
+        assertThat(own).as("the tenant's %d armed topic(s), as the recorded one-shots the evictor cancelled", armed).hasSize(armed);
+        return own;
     }
 
     private void seedToken(String raw, String tenant, String scope) throws Exception {
@@ -303,15 +338,16 @@ class OwnerTimerStartTest {
         String[] f = redOnY();
         seedToken("adapter-" + UUID.randomUUID(), f[0], TokenStore.SCOPE_BOARD_CI);   // a token makes the tenant one the engine knows
         se.done(f[0], StamperEnv.BASE, "Y", "failure");   // posted by the fixture's stamper: an owner row and no armed deadline
+        seedStaleRedTenantVisitedLast();
         RecordingScheduler.Scheduled rebuild = engineScheduler.rebuild();
         assertThat(rebuild).as("NexusService scheduled the rebuild on its sweep scheduler").isNotNull();
-        int before = engineScheduler.deadlines().size();
 
         rebuild.task().run();
 
-        var armed = engineScheduler.deadlines();
-        assertThat(armed).as("the rebuild read the engine's tenants and armed the open red").hasSizeGreaterThan(before);
-        assertThat(armed.getLast().millis()).isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
+        var own = deadlinesArmedFor(f[0]);
+        assertThat(own).as("the rebuild read the engine's tenants and armed this tenant's open red, once").hasSize(1);
+        assertThat(own.getFirst().millis()).as("this tenant's deadline, not the stale tenant the rebuild visits last")
+            .isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
     }
 
     @Test
@@ -319,13 +355,15 @@ class OwnerTimerStartTest {
         se.env.ids.clock.set(Instant.now());
         String[] f = redOnY();   // no seedToken: the tenant is in tuple_tenants (its rows) and not in service_tokens
         se.done(f[0], StamperEnv.BASE, "Y", "failure");
+        seedStaleRedTenantVisitedLast();
         RecordingScheduler.Scheduled rebuild = engineScheduler.rebuild();
-        int before = engineScheduler.deadlines().size();
 
         rebuild.task().run();
 
-        assertThat(engineScheduler.deadlines()).as("the rebuild reached a tenant with owner rows and no token").hasSizeGreaterThan(before);
-        assertThat(engineScheduler.deadlines().getLast().millis()).isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
+        var own = deadlinesArmedFor(f[0]);
+        assertThat(own).as("the rebuild reached a tenant with owner rows and no token, and armed its red once").hasSize(1);
+        assertThat(own.getFirst().millis()).as("this tenant's deadline, not the stale tenant the rebuild visits last")
+            .isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
     }
 
     @Test
