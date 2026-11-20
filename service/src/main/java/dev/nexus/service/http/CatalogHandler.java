@@ -65,6 +65,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/fill      fill exactly those rows as a background job: 202 {job_id, created} (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
+ *   GET   /v1/catalog/uri_segment_census?limit=N  chroma:// and nx-note:// source-URI rows grouped by table, scheme, segment and collection, with the collection's content type (RDR-229 P1.2)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the six locator fields, sensitive included (nexus-uwggq.2.5)
  *   GET   /v1/catalog/docs/by-scheme?scheme=S&limit=&offset=  live documents whose urlparse(source_uri).scheme is S lowercased, a page of at most 1000 with the exact count (nexus-uwggq.1.5)
@@ -360,6 +361,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/docs/by-meta"          -> handleDocsByMeta(exchange, tenant, method);
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
+                case "/uri_segment_census"    -> handleUriSegmentCensus(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -3692,6 +3694,9 @@ public final class CatalogHandler implements HttpHandler {
 
     /** GET /v1/catalog/manifest/foreign_collection?limit=N (GH #1611): the body is {@link CatalogBoundedReadRoutes#foreignCollection}. */
     private void handleManifestForeignCollection(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.foreignCollection(exchange, tenant, method); }
+
+    /** GET /v1/catalog/uri_segment_census?limit=N (RDR-229 P1.2): the body is {@link CatalogBoundedReadRoutes#uriSegmentCensus}. */
+    private void handleUriSegmentCensus(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.uriSegmentCensus(exchange, tenant, method); }
 
     /** GET /v1/catalog/sensitive?limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#sensitive}. */
     private void handleSensitiveList(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.sensitive(exchange, tenant, method); }

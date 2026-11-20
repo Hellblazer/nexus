@@ -1717,6 +1717,19 @@ Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
 through a raw SQLite handle on the local catalog, which no longer exists;
 it already refused in service mode, now the only mode.
 
+### nx catalog collections-census
+
+```
+nx catalog collections-census [--tenant-label TEXT] [--json]
+```
+
+Read-only census of this tenant's `catalog_collections` rows against their names (RDR-229 P1.2, nexus-p2m1x.2). One read of the registry (every lifecycle state), no write, no catalog walk. Counts: row versus name for `content_type`, `embedding_model` and `model_version` on each live row whose name parses (a `quarantine-` row against the name it quarantines), with `owner_id` differences in a separate bucket and `lifecycle_state` checked against the `quarantine-` prefix on every live row; live names held by more than one live row (what a partial UNIQUE on live `(tenant_id, name)` would refuse); live `(content_type, owner_id, embedding_model)` tuples with more than one candidate row, counted with and without the `legacy_grandfathered` filter `collectionForTuple` applies today; live names matching `^c[0-9]+$`; and tombstones whose `superseded_by` names no row. Run it once per tenant and store the `--json` report.
+
+| Flag | Description |
+|------|-------------|
+| `--tenant-label TEXT` | Name the tenant in the report (not sent anywhere) |
+| `--json` | Print the whole report as JSON instead of counts and the first rows of each list |
+
 ### nx catalog backfill-source-uri
 
 ```
@@ -1911,7 +1924,8 @@ nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-tex
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity]
                   [--link-coverage] [--visible-outside-manifest]
                   [--sensitive-in-aspect-eligible] [--sensitive-with-aspects]
-                  [--sensitive-in-external-embedder] [--sensitivity-mcp-output] [--json]
+                  [--sensitive-in-external-embedder] [--sensitivity-mcp-output]
+                  [--uri-residue] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -1930,6 +1944,7 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable and not-checked rules; the row reads the same bounded list, never the catalog's documents. A row that reads **not checked** exits **3**, "could not check", so a gate that could not run is not a pass; a fail still exits 1 and wins over 3. Over 10,000 sensitive documents this gate exits 3 until the list can be paged (RDR-241 Phase 2). See [Sensitivity, Doctor rows](sensitivity.md#doctor-rows).
 - `--sensitive-in-external-embedder` (RDR-243, nexus-rfvyy.8.7): WARN for each sensitive document in a collection embedded by an external service: a Voyage model token, or a legacy name that carries none. A collection whose name carries a local model token (`bge-base-en-v15-768`, `minilm-l6-v2-384`) is not flagged. Does not change the exit status. Same not-applicable and not-checked rules as the two rows above.
 - `--sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7): prints the posture the MCP tools apply for `sensitivity.mcp_output` (`withhold`, the default, or `flag`), read through the tools' own reader: the global `config.yml` only, never a repo's `.nexus.yml`. WARN when it is `flag` (sensitive content reaches the session model with a badge), when the value is not one of the two (the tools withhold, and the row says so), or when the file cannot be read (the tools withhold). A config row, so it never reads not applicable. Does not change the exit status.
+- `--uri-residue` (RDR-229 P1.2, nexus-p2m1x.2): counts the `chroma://` source-URI rows whose collection segment has no `rdr__`/`docs__`/`code__` prefix on `catalog_documents`, `document_aspects` and `document_highlights`, split by whether the row's collection has content type `code`, `docs` or `rdr` and by whether the segment is the row's own collection, and the `nx-note://` rows of such a collection with a prefix-free segment. It also reports the `chroma://` rows whose segment is file-routed, the residue [`nx catalog backfill-source-uri`](#nx-catalog-backfill-source-uri) repairs. One engine read (`GET /v1/catalog/uri_segment_census`, engine-service 0.1.199) groups the rows; the client classifies them with `aspect_readers.FILE_ROUTED_PREFIXES` and never walks the catalog. WARN on any such row; never changes the exit status: it is a pre-flight whose repair is RDR-229 P2.10's data move, and a FAIL would exit `nx doctor` non-zero on installs that cannot yet clear it. Reads `not checked`, never a pass, on an engine without the route, on a timeout, or on an answer above 10,000 groups; N/A on a catalog with no `chroma://` or `nx-note://` row.
 
 Returns 1 on any check failure, and 3 when `--sensitive-with-aspects` could not check (a failure wins over 3). `--json` emits the per-check result for CI consumption.
 
@@ -3832,7 +3847,7 @@ own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
 `ghost-sweep`, `harness-grant`, `docs-aspects-config`, `sensitive-in-aspect-eligible`, `sensitive-with-aspects`,
-`sensitive-in-external-embedder`, `sensitivity-mcp-output`
+`sensitive-in-external-embedder`, `sensitivity-mcp-output`, `uri-residue`
 (the last six have no `--check-ghost-sweep` / `--check-harness-grant` /
 `--check-docs-aspects-config` flag; they only run as part of this
 supplementary set).
@@ -3857,6 +3872,7 @@ fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 
 `nx doctor` does not. See [Sensitivity, Doctor rows](sensitivity.md#doctor-rows).
 `sensitive-in-external-embedder` and `sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7) are the rows `nx catalog
 doctor --sensitive-in-external-embedder` and `--sensitivity-mcp-output` print; both warn and neither gates.
+`uri-residue` (RDR-229 P1.2, nexus-p2m1x.2) is the row `nx catalog doctor --uri-residue` prints (see that flag above); it warns and never gates.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
