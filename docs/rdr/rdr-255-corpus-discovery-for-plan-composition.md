@@ -360,6 +360,10 @@ Research records (T2 `nexus_rdr/255-research-1` to `-18`, 2026-11-19):
   *Source: T2 nexus/plan10-rerank-cloud-timing-result-2026-11-19; ca239f405; GH #1667 comment 7016198283 (255-research-20)*
 - **✅ Verified** (spike) — The coverage-off control: stock with coverage off scores 0.0 on the same 45, because switching coverage off also removes the exact-key join. The plan beats it on every subset (+0.39, 95% CI 0.30 to 0.49, 31/14/0). Part 1 did not win only by answering where stock withheld; which plan difference carries the gain is still open.
   *Source: T2 nexus_rdr/herb-plan-experiment-control-result-2026-11-19; assetops-kg feature/herb-full-pool e5abe1a (255-research-21)*
+- **✅ Verified** (spike) — Part 2: planner-generated plans from a hand-written profile score 32.1 against part 1's 34.4 on 26 of the 45 questions (the budget stopped the rest): -0.02, 95% CI -0.20 to +0.15. They beat part 1 on max-count and score 0 on the four previous-release questions. All 26 fetched entity records and joined on the key; none used groupby or aggregate. The profile supplied the key retrieval tricks, and n=26 cannot show equivalence.
+  *Source: T2 nexus_rdr/herb-plan-experiment-part2-result-2026-11-19, prereg addendum-4; assetops-kg feature/herb-full-pool 72fd76b (255-research-22)*
+- **✅ Verified** (source search) — The inline planner as shipped cannot compose part 1's plan. Its tool reference documents `generate` as returning `{text}` (`src/nexus/mcp/core.py:11104` on develop) while the operator returns `{output}` (`operator_requests.py:200`); that mismatch caused three of part 2's four declines. Its `search` signature omits `lexical` (`core.py:11026`), and its step whitelist drops `groupby`, `aggregate`, `filter` and `resolve` (`core.py:13351-13355`).
+  *Source: source search on origin/develop 480c61bf3; the part 2 patch in prereg addendum-4 (255-research-23)*
 
 ### Critical Assumptions
 
@@ -525,8 +529,8 @@ when told about the corpus (part 2).
 ## The Deciding Experiment
 
 Pre-registered before any plan was written
-(T2 `nexus_rdr/herb-plan-experiment-prereg-2026-11-19`). Part 1 is in; part 2 is
-not run yet.
+(T2 `nexus_rdr/herb-plan-experiment-prereg-2026-11-19`). Both parts and a control
+have run; the whole experiment spent $19.64 of its $20.
 
 **Part 1 result** (T2 `nexus_rdr/herb-plan-experiment-part1-result-2026-11-19`,
 finding 19). Only the 68 test questions the shape rule routes were eligible; a
@@ -550,6 +554,23 @@ differences carries the gain: the aggregation, the question reaching the final
 step, entity records in context, or retrieval that keeps the keys. Stock with
 coverage on stays the baseline for part 2. On the table below this is the
 "large gain" row; part 2 decides between its first two lines.
+
+**Part 2 result** (T2 `nexus_rdr/herb-plan-experiment-part2-result-2026-11-19`,
+findings 22 and 23). The inline planner, given a hand-written profile and forced
+to plan inline, had to run on a sandbox patch: as shipped it documents the wrong
+output field for `generate`, does not offer lexical search, and drops `groupby`,
+`aggregate` and `filter` steps (finding 23). The budget stopped the run at 26 of
+the 45 questions, a random subset. On those 26 the generated plans score 32.1
+against part 1's 34.4 (a difference of -0.02, 95% CI -0.20 to +0.15) and against
+stock's 7.3 (+0.25, CI +0.10 to +0.40). On max-count questions they beat part 1
+(37.9 against 31.4); on the four previous-release questions they scored 0 where
+part 1 scored 51. Every generated plan fetched the entity records and joined on
+the key; none used `groupby` or `aggregate`. The point estimate meets the
+pre-registered "within 5 points", but 26 questions cannot show equivalence, and
+the profile itself handed the planner the two retrieval tricks that matter. The
+reading is the first line of the table, provisionally: the planner composes the
+plan when the profile tells it about the corpus, on a planner fixed as in
+finding 23, with previous-release questions still unsolved.
 
 - **Split.** Development set: SearchFlow, ActionGenie, AnomalyForce,
   AutoTuneForce, CoachForce (27 questions). Test set: the other 25 products
@@ -725,6 +746,7 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-20: research findings 22-23 (part 2 result; the inline planner's tool reference and step vocabulary as shipped); Deciding Experiment records part 2.
 - 2026-11-19: research finding 21 (the coverage-off control); Sam's answers to Q5 (profile and gate together) and Q6 (Voyage arm dropped) recorded.
 - 2026-11-19: Sam answered open questions 1-7 (recorded under Open Questions for Sam).
 - 2026-11-19: research findings 19-20 added (plan experiment part 1 result and its confounds; the 8.5.1 cloud rerank timing as a corpus-profile fact); Deciding Experiment records the part 1 result.
