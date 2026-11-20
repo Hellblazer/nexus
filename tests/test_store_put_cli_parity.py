@@ -50,6 +50,9 @@ def _make_stub_t3():
         def __exit__(self, *a):
             pass
 
+        def collection_exists(self, name):  # the write probe in t3_collection_name must answer (RDR-229 P2.8)
+            return False
+
         def put(self, *, collection, content, title="", **kwargs):
             # Mirrors T3Database.put: chunk_text_hash[:32] (RDR-108 D1).
             return hashlib.sha256(content.encode()).hexdigest()[:32]
