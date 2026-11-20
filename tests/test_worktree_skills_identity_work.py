@@ -76,12 +76,15 @@ def test_the_pre_push_skill_tells_a_hand_started_long_job_to_register_and_end_it
 
 def test_the_plugin_orchestration_skill_carries_the_hand_started_job_line() -> None:
     """Review item 8: the line sat only in the nexus repo's pre-push-review skill, which a session in another repo never
-    reads; the plugin's orchestration skill ships it (conexus/PENDING_RELEASE.md lists the file)."""
+    reads; the plugin's orchestration skill ships it (the pending list, or after a release the plugin changelog, names the file)."""
     root = Path(__file__).resolve().parent.parent
     skill = " ".join((SKILLS / "orchestration" / "SKILL.md").read_text(encoding="utf-8").split())
     assert "nx identity work register --kind wait --ref <what>" in skill
     assert "nx identity work done --kind wait --ref <what>" in skill
-    assert "conexus/skills/orchestration/SKILL.md" in (root / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8")
+    # Before a release the pending list names the file; the release empties that list into conexus/CHANGELOG.md.
+    shipped = (root / "conexus" / "PENDING_RELEASE.md").read_text(encoding="utf-8") + (
+        root / "conexus" / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "conexus/skills/orchestration/SKILL.md" in shipped
 
 
 def test_the_rdr_and_the_cli_reference_name_the_registrars_the_agent_kind_and_the_stale_witnesses() -> None:
