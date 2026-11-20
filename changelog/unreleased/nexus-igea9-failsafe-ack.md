@@ -1,0 +1,3 @@
+### Fixed
+
+- **Engine: an acknowledged red no longer escalates when the liveness read fails (RDR-252).** When the deadline's evaluation and then the fail-safe's liveness read both failed, the fail-safe read nobody as live, could not match the owner's ack to the row, and posted an `escalated` row with `owner` null that woke every member, although the owner had acknowledged. The failed read now throws and the deadline timer retries after 30 seconds. A hand-off that keeps failing is retried without end, and its twelfth consecutive failure, and every twelfth after it, raises the error event `board_ack_deadline_stuck`.

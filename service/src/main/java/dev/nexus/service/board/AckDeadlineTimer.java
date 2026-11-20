@@ -23,7 +23,9 @@ import java.util.concurrent.TimeUnit;
  * evaluation and a superseded episode keeps no timer.
  *
  * <p>A task never ends its own schedule: nothing here throws out of the executor's thread, and a hand-off that
- * fails is retried after {@link #RETRY}.
+ * fails is retried after {@link #RETRY}, and is never given up: a lost deadline is the worse failure. The
+ * {@value #STUCK_ATTEMPTS}th consecutive failure of a topic, and every {@value #STUCK_ATTEMPTS} after it, raises the
+ * error-level event {@code board_ack_deadline_stuck}.
  */
 public final class AckDeadlineTimer {
 
@@ -38,12 +40,16 @@ public final class AckDeadlineTimer {
     /** How long after a failed hand-off the same topic is tried again. */
     static final Duration RETRY = Duration.ofSeconds(30);
 
+    /** After this many consecutive failures of one topic's hand-off, and every this many after, an error event says so. */
+    static final int STUCK_ATTEMPTS = 12;
+
     private record Key(String tenant, String base) { }
 
     private final ScheduledExecutorService scheduler;
     private final Clock clock;
     private final Handoff handoff;
     private final Map<Key, Armed> armed = new ConcurrentHashMap<>();
+    private final Map<Key, Integer> failures = new ConcurrentHashMap<>();
 
     private record Armed(Instant due, ScheduledFuture<?> future) { }
 
@@ -58,6 +64,7 @@ public final class AckDeadlineTimer {
         Key key = new Key(tenant, base);
         if (due == null) {
             cancel(key);
+            failures.remove(key);   // nothing is owed any more, so a later failure counts from one
             return;
         }
         Armed existing = armed.get(key);
@@ -81,8 +88,13 @@ public final class AckDeadlineTimer {
         armed.remove(key);   // the hand-off re-arms from the state it leaves
         try {
             handoff.fire(key.tenant(), key.base());
+            failures.remove(key);
         } catch (Throwable t) {
             log.warn("event=board_ack_deadline_failed tenant={} base={} error={}", key.tenant(), key.base(), t.getMessage(), t);
+            int attempt = failures.merge(key, 1, Integer::sum);
+            if (attempt % STUCK_ATTEMPTS == 0) {
+                log.error("event=board_ack_deadline_stuck tenant={} base={} attempt={}", key.tenant(), key.base(), attempt);
+            }
             // A transient failure must not drop the deadline: retry shortly, unless the hand-off armed something itself.
             if (!armed.containsKey(key)) {
                 arm(key.tenant(), key.base(), clock.instant().plus(RETRY));
@@ -96,6 +108,7 @@ public final class AckDeadlineTimer {
         for (Key key : java.util.List.copyOf(armed.keySet())) {
             if (key.tenant().equals(tenant)) {
                 cancel(key);
+                failures.remove(key);
                 n++;
             }
         }

@@ -138,8 +138,8 @@ public final class OwnerStamper implements OwnerOutHook {
     /**
      * The timer's hand-off: re-decide from fresh rows, and post a hand-off or the escalation when it is due. If the
      * evaluation throws, the fail-safe still escalates a due row from the current owner row alone, so a deterministic
-     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run either throws, and the
-     * timer tries again after its retry delay.
+     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run, a failed liveness read
+     * included, throws, and the timer tries again after its retry delay.
      */
     public void onDeadline(String tenant, String base) {
         try {
@@ -184,21 +184,21 @@ public final class OwnerStamper implements OwnerOutHook {
         });
     }
 
-    /** The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock; the liveness read may fail soft. */
+    /**
+     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. A failed liveness read is
+     * not softened to "nobody is live": that would escalate an acknowledged red with no owner and wake every member, so
+     * it throws and the timer retries.
+     */
     private void failSafe(String tenant, String base) {
         scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
-            Identities ids;
-            try {
-                ids = group == null ? new Identities(Map.of(), Map.of())
-                    : liveness.read(identities, tenant, List.of(), owners, group);
-            } catch (Throwable t) {
-                // Nobody can be shown live: the row then names no one and wakes every member, as the RDR says for that case.
-                log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
-                ids = new Identities(Map.of(), Map.of());
-            }
+            // A liveness read that fails propagates: without it the row's owner cannot be matched to its ack, and an
+            // acknowledged red must never escalate. The timer retries after its delay; a read that stays down raises its
+            // stuck event.
+            Identities ids = group == null ? new Identities(Map.of(), Map.of())
+                : liveness.read(identities, tenant, List.of(), owners, group);
             OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, clock.instant());
             if (d.post() != null) {
                 post(ctx, tenant, base, d.post());
