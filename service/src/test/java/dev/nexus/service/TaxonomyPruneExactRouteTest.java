@@ -112,7 +112,8 @@ class TaxonomyPruneExactRouteTest {
 
     /** A fresh stem so no test sees another's rows; the pair is {@code stem} and {@code stem + suffix}. */
     private String stem(String base) {
-        return base + seq.incrementAndGet();
+        // Fixed width: a stem must never be a prefix of another test's stem (art1 / art10).
+        return base + String.format("%03d", seq.incrementAndGet());
     }
 
     private long topic;
@@ -264,15 +265,50 @@ class TaxonomyPruneExactRouteTest {
     }
 
     @Test
-    void aNullMatchField_behavesAsAbsent() throws Exception {
+    void aNullMatchField_behavesAsAbsent_whichIsPrefix() throws Exception {
         String art = stem("docs__art");
+        String artX = art + "-x";
         collection(art);
+        collection(artX);
         var body = new java.util.LinkedHashMap<String, Object>();
         body.put("source_collection_prefix", art);
         body.put("min_similarity", FLOOR);
         body.put("match", null);
 
-        assertThat(removed(prune(body))).isEqualTo(1);
+        // A longer-named pair, so null read as "exact" (removed 1) is told apart from null read as prefix (2).
+        assertThat(removed(prune(body))).as("null is prefix: both weak rows go").isEqualTo(2);
+
+        assertThat(rows(art)).isEqualTo(1);
+        assertThat(rows(artX)).isEqualTo(1);
+    }
+
+    // ── the reply echoes the mode the engine applied ──────────────────────────
+
+    private String echoed(HttpResponse<String> resp) throws Exception {
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+        JsonNode match = MAPPER.readTree(resp.body()).get("match");
+        assertThat(match).as("the reply carries match: %s", resp.body()).isNotNull();
+        return match.asText();
+    }
+
+    @Test
+    void theReplyEchoesExact_soAClientCanConfirmTheEngineHonouredIt() throws Exception {
+        String art = stem("docs__art");
+        collection(art);
+        assertThat(echoed(prune(art, "exact"))).isEqualTo("exact");
+    }
+
+    @Test
+    void theReplyEchoesPrefix_forAnExplicitAnAbsentAndANullMatch() throws Exception {
+        String art = stem("docs__art");
+        collection(art);
+        assertThat(echoed(prune(art, "prefix"))).isEqualTo("prefix");
+        assertThat(echoed(prune(art, null))).as("absent: an old client's reply names prefix").isEqualTo("prefix");
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("source_collection_prefix", art);
+        body.put("min_similarity", FLOOR);
+        body.put("match", null);
+        assertThat(echoed(prune(body))).as("null").isEqualTo("prefix");
     }
 
     @Test
