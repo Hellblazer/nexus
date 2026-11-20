@@ -42,9 +42,6 @@ TAXONOMY_LEGACY: str = (
 QUAR_NOROW: str = (
     "The quarantine- half of the schema-bypass test, for a name with no row or a row with no lifecycle_state only: a row's lifecycle_state decides when there is one (P2.5). Goes with the name parsers at P4."
 )
-WM_P24: str = (
-    "Taxonomy threshold keyed by the name's prefix; becomes a row read at P2.4."
-)
 WM_P22: str = (
     'RDR-204 (b) read-path model read from the name; becomes a resolve_collection Row read at P2.2.'
 )
