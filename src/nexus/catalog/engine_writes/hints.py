@@ -375,21 +375,24 @@ def derived_root_uri(file_path: str, source_uri: str, repo_root: str) -> str | N
     return "file://" + joined
 
 
-def count_docs_outside_root(docs: Iterable[Any], repo_root: str) -> int:
+def count_docs_outside_root(docs: Iterable[Any], repo_root: str) -> int | None:
     """How many of *docs* the engine's owner move would REWRITE at *repo_root*: root-derived rows whose current
     ``source_uri`` differs from :func:`derived_root_uri`. An entry of an unexpected shape (a non-string field) is
-    skipped and logged, so one malformed row costs its own count, not the whole answer."""
-    n = 0
+    skipped and logged, so one malformed row costs its own count, not the whole answer. When EVERY entry of a
+    non-empty page is malformed nothing was read, so the answer is ``None`` (unknown), never a count of zero."""
+    n = read = total = 0
     for d in docs:
+        total += 1
         try:
             uri = d.source_uri or ""
             derived = derived_root_uri(d.file_path or "", uri, repo_root)
         except Exception as exc:  # noqa: BLE001 — one malformed catalog entry must not cost the hint or the run
             _log.warning("move_hints.entry_skipped", error_type=type(exc).__name__, error=str(exc))
             continue
+        read += 1
         if derived is not None and derived != uri:
             n += 1
-    return n
+    return None if total and not read else n
 
 
 def first_page(reader: Any, owner_prefix: str) -> list[Any]:
@@ -490,7 +493,7 @@ def repo_hints(repo: Path, *, reader: Any = None) -> list[str]:
         return []
     r, prefix, root, page = found
     lines: list[str] = []
-    if fail_open("outside-root-count", count_docs_outside_root, page, root, default=0) > 0:
+    if (fail_open("outside-root-count", count_docs_outside_root, page, root, default=None) or 0) > 0:
         lines.append(owner_move_line(prefix, root))
 
     def _renamed() -> list[str]:

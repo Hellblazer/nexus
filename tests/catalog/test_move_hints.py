@@ -399,3 +399,27 @@ def test_a_run_that_checked_every_file_ends_with_no_such_line(new_pdf):
         for i in range(3):
             hints.record_curator_hint(f"1.1.{i + 10}", "a" * 64, reader=reader)
         assert scope.drain() == []
+
+
+# ── the census flag on a page of malformed entries ──────────────────────────
+
+
+class _BadDoc:
+    file_path = "src/a.py"
+    source_uri = 12345
+
+
+class _GoodDoc:
+    file_path = "src/a.py"
+    source_uri = "file:///r/src/a.py"
+
+
+def test_a_page_of_only_malformed_entries_reads_unknown_not_false():
+    class _Page:
+        def owner_documents_page(self, owner, limit):
+            return [_BadDoc(), _BadDoc()]
+
+    assert hints.count_docs_outside_root([_BadDoc(), _BadDoc()], "/r") is None
+    assert hints.docs_outside_root_flag(_Page(), "1.2", "/r") is None, "unknown, not 'no document is outside'"
+    assert hints.count_docs_outside_root([_BadDoc(), _GoodDoc()], "/r") == 0, "one readable entry: a known zero"
+    assert hints.count_docs_outside_root([], "/r") == 0, "an empty page is a known zero"

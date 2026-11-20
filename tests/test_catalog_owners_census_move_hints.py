@@ -209,4 +209,5 @@ def test_a_malformed_catalog_entry_does_not_fail_the_census(healthy_root):
     engine.docs["1.2"][1]["source_uri"] = ["not", "a", "string"]
     result = _census(engine, "--json")
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["healthy"][0]["docs_outside_root"] is False, "no readable entry is outside: false"
+    (row,) = json.loads(result.stdout)["healthy"]
+    assert row["docs_outside_root"] is None and "move_command" not in row, "nothing on the page was readable: unknown"
