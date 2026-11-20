@@ -48,11 +48,12 @@ import shutil
 #: compact_checkpoint entries on PreCompact, PostCompact and compact-only
 #: SessionStart, nexus-3lqxv, plus the SubagentStop T1 nudge, nexus-mtheb.3, plus
 #: the Stop wake guard, nexus-4cgop, plus the destructive-action advice hook,
-#: nexus-qo7ie.36; it was 20 before that hook; it
+#: nexus-qo7ie.36, plus the SessionEnd(clear) resume-pointer writer, RDR-253 Step 6
+#: part 2; it was 21 before that writer, 20 before the advice hook; it
 #: was 18 while the nexus-i93tz integrity check was registered on
 #: Pre/Post/PostToolUseFailure Bash, removed again 2026-10-25). A stated floor,
 #: not a derived one, on purpose: a derived count falls with the manifest.
-DEFAULT_MIN_EXECUTED = 21
+DEFAULT_MIN_EXECUTED = 22
 
 #: What the launcher writes when it finds no CLI (_cli_lookup.missing_note).
 _MISSING_MARK = "is not installed"
