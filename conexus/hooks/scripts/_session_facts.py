@@ -37,6 +37,9 @@ MAX_LISTED = 8
 #: The body of a Bash-tool shell's ``eval '...'``. Its quotes come out as ``'\''`` or, in macOS ``ps``,
 #: ``'"'"'``; a newline shows as ``\012``.
 _EVAL_RE = re.compile(r"""\beval '((?:[^']|'\\''|'"'"')*)'""")
+#: A one-word command comes out of the shell unquoted (``eval ./watcher.sh < /dev/null && pwd -P >| ...``): the text between
+#: ``eval `` and the ``< /dev/null`` that always follows it. Tried only when there is no quoted body.
+_EVAL_BARE_RE = re.compile(r"\beval ([^'\s][^<]*?) < /dev/null\b")
 _PS_ROW_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$")
 
 Runner = Callable[[list[str], float], "tuple[int, str]"]
@@ -134,9 +137,11 @@ def ancestors(table: Iterable[Proc], pid: int) -> set[int]:
 
 
 def task_command(command: str) -> str:
-    """The command a Bash-tool shell runs: the ``eval '...'`` body, unquoted; else the whole line."""
+    """The command a Bash-tool shell runs: the ``eval '...'`` body, unquoted; for a one-word command the bare word between
+    ``eval `` and ``< /dev/null``; else the whole line."""
     m = _EVAL_RE.search(command)
-    body = m.group(1).replace("'\\''", "'").replace("'\"'\"'", "'") if m else command
+    bare = None if m else _EVAL_BARE_RE.search(command)
+    body = m.group(1).replace("'\\''", "'").replace("'\"'\"'", "'") if m else bare.group(1) if bare else command
     return " ".join(body.replace("\\012", " ").split())
 
 
