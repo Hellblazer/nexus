@@ -184,7 +184,6 @@ tests/test_changelog_rls_lint.py 1441
 tests/test_changelog_validate_precondition_lint.py 1737
 tests/test_chunk_batcher.py 1471
 tests/test_collection_cmd.py 2022
-tests/test_collection_name_parse_census.py 1152
 tests/test_collection_registration.py 1313
 tests/test_command_context_command.py 2495
 tests/test_commands_dt.py 3404

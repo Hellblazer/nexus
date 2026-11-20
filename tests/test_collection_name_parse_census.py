@@ -250,6 +250,29 @@ is recorded as a checked zero, not a silent omission
 than dropped" discipline of the private-handle census this gate is modelled
 on (``tests/test_private_handle_access_census.py``).
 
+RDR-229 P1.1 (2026-11-20, nexus-p2m1x.1) WIDENED THE CENSUS and re-pinned it
+at the measured count: 46 -> 235. The five classes above kept their names;
+the scanner (now ``tests/_collection_name_census_scan.py``) gained seven shapes
+(``fstring_prefix``, ``const_prefix``, ``loop_prefix``, ``substring``,
+``glob_default``, ``sql_prefix``, ``fnmatch``) and its fifth class now covers
+every ``corpus.py`` function that reaches a parser, DERIVED from the module's
+call graph (23 helpers), not the three typed in
+``_CANDIDATE_STRING_PRIMITIVES``; ``taxonomy__`` joined the prefix set. The
+census is now a per-site LEDGER (``tests/_collection_name_census_ledger.py``,
+content-anchored the way the exclusions are): each site carries one class from
+the RDR's set (mint, migration source, diagnostic, routing, URI-string
+classifier) or one of the two non-parse fnmatch labels (label pattern, file
+path) or an explicit holdover with a note naming the step that moves it, and
+a live site with no entry is refused, naming file, line and shape. The pin is
+the measured total, per class and per shape; the per-file table below is
+derived from the ledger. 189 sites are new: 130 more calls to derived
+helpers, and 59 of the raw and routing shapes (the routing census scans 60 on
+this tree, 59 when T2 ``229-research-39`` measured it, less the two it shares
+with the 46, plus ``repo_identity``'s ``__owner__`` substring test). The 46
+are all still there. ``scripts/`` (10 raw sites, T2 ``229-research-21``) stays outside
+``SRC`` and so outside this gate. Phase 2 lowers the pins by deleting ledger
+entries.
+
 WHY A CENSUS-IN-TEST-FILE RATHER THAN A ``src/`` LINT MODULE (the
 alternative the bead names, ``storage_boundary_lint.py``-style). Nothing in
 ``src/nexus`` needs to call this scanner at runtime or share it across
@@ -260,347 +283,53 @@ an import surface with no production consumer.
 from __future__ import annotations
 
 import ast
+import inspect
 import pathlib
+import re
+from collections import Counter
 
 import pytest
 
+import nexus.corpus as corpus_mod
+from tests import _collection_name_census_scan as _scan
+from tests._collection_name_census_exclusions import EXCLUDED_SITES as _EXCLUDED_SITES
+from tests._collection_name_census_ledger import LEDGER
+from tests._collection_name_census_notes import BYPASS as _BYPASS_NOTE
 from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 pytestmark = pytest.mark.lint
 
-REPO_ROOT = pathlib.Path(__file__).parent.parent
-SRC = REPO_ROOT / "src" / "nexus"
+REPO_ROOT = _scan.REPO_ROOT
+SRC = _scan.SRC
 
 #: Collection-type / lifecycle prefixes a raw ``startswith``/``endswith``
-#: call names when it is parsing a collection NAME rather than checking an
-#: unrelated string. Per RDR-204 Phase 3 item 1's four pattern classes.
-_TYPE_PREFIXES = frozenset({"code__", "docs__", "rdr__", "knowledge__", "quarantine-"})
+#: call names when it is parsing a collection NAME (RDR-204 Phase 3 item 1;
+#: RDR-229 P1.1 added ``taxonomy__``). Single-sourced in the scan module.
+_TYPE_PREFIXES = _scan.TYPE_PREFIXES
 
-#: (relative-path, content-anchor) -> one-line reason, for sites the raw
-#: AST scan WOULD flag but which the RDR-204 Phase 3 item 1 exclusion rule
-#: (``mcp__`` tool names, ``rdr-`` document ids) removes from the pin.
-#:
-#: CONTENT-KEYED, not line-keyed (nexus-vkpr3): the anchor is the
-#: exempted line's own stripped source text PLUS its nearest preceding
-#: non-blank line (the mandatory two-line convention -- see
-#: ``tests._lint_line_anchor``'s MANDATORY TWO-LINE MINIMUM section for
-#: why a single line is not enough), resolved to its CURRENT line number
-#: by ``tests._lint_line_anchor.resolve_anchor`` on every run. A
-#: line-number key silently re-targets onto whatever different code now
-#: sits at the stored number the moment anything is inserted above it;
-#: this file's entries were themselves retargeted by line-shift
-#: arithmetic several times before the conversion (7887 -> 7900 -> 7934
-#: -> 8317 -> 8501 -> 8528 -> 8630 -> 8644 for the mcp/core.py entry
-#: alone) — exactly the churn a content anchor makes structurally
-#: impossible, since the anchor's own text does not move. Every entry
-#: here is independently verified as a real raw match by
-#: ``test_excluded_sites_are_real_matches_not_omissions`` — an anchor
-#: that no longer resolves (STALE) or resolves ambiguously is a stale
-#: judgement call, not a quieter gate.
-_EXCLUDED_SITES: dict[tuple[str, tuple[str, ...]], str] = {
-    (
-        "src/nexus/mcp/core.py",
-        (
-            'raw_tool = step.get("tool", "")',
-            'bare = raw_tool.rsplit("__", 1)[-1] if '
-            'raw_tool.startswith("mcp__") else raw_tool',
-        ),
-    ): (
-        "mcp__ tool name: `raw_tool.rsplit(\"__\", 1)[-1] if "
-        'raw_tool.startswith("mcp__")` strips an MCP tool-name prefix for '
-        "planner-step normalization, not a collection name."
-    ),
-    (
-        "src/nexus/plans/answer_kind.py",
-        ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
-    ): (
-        "mcp__ tool name: `terminal_is_retrieval_only` strips the mcp__...__ "
-        "prefix from a plan's last step the way the runner does (nexus-0vh80)."
-    ),
-    (
-        "src/nexus/plans/bundle.py",
-        ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
-    ): (
-        "mcp__ tool name: `_extract_tool_name`'s own docstring says it "
-        '"strips any mcp__...__ prefix" from a plan step\'s tool identifier.'
-    ),
-    (
-        "src/nexus/plans/cost_estimate.py",
-        ('if tool.startswith("mcp__"):', 'tool = tool.rsplit("__", 1)[-1]'),
-    ): (
-        "mcp__ tool name: `_extract_tool`, the documented local copy of "
-        "bundle._extract_tool_name, strips the same mcp__...__ prefix."
-    ),
-    (
-        "src/nexus/plans/runner.py",
-        ('if t.startswith("mcp__"):', 't = t.rsplit("__", 1)[-1]'),
-    ): (
-        "mcp__ tool name: strips an mcp__...__ prefix from a resolved plan "
-        "step's tool identifier before dispatch, guarded by the same "
-        '`startswith("mcp__")` check as the other three sites.'
-    ),
-    (
-        "src/nexus/mcp/hooks.py",
-        ('*parents, leaf = flat_name.split("__")',),
-    ): (
-        "not a collection name at all: RDR-215's tool-tier hook_<name> "
-        'registration flattens a dotted payload field path (e.g. '
-        '"tool_input.command") to a valid tool-parameter/JSON-Schema '
-        "identifier by joining segments with `__` (`flatten_field_name`); "
-        "`nest_payload` is the exact inverse, splitting that identifier "
-        "back into the nested dict a ported hook's `run()` reads. No "
-        "collection ever passes through this path."
-    ),
+#: The per-site ledger's count per file, DERIVED (RDR-229 P1.1): the old
+#: hand-kept dict, with its per-file prose, became the ledger's per-site
+#: classes and notes. A dropped file and an absent file both read as zero.
+COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {}
+for _site in LEDGER:
+    COLLECTION_NAME_PARSE_CENSUS[_site.rel] = (
+        COLLECTION_NAME_PARSE_CENSUS.get(_site.rel, 0) + _site.n
+    )
+
+#: THE PIN (RDR-229 P1.1, 2026-11-20, measured on develop 970f73223):
+#: 235 sites, by class and by shape. Phase 2 lowers these by deleting ledger
+#: entries; nothing here may rise without a ledger entry and a reason.
+PARSE_SITE_PIN: int = 235
+CLASS_PIN: dict[str, int] = {
+    "mint": 101, "holdover": 42, "routing": 36, "diagnostic": 26,
+    "migration-source": 14, "label-pattern": 9, "file-path": 5,
+    "uri-classifier": 2,
 }
-
-#: 2026-09-09 census of collection-name parse sites, per file, AFTER the
-#: `_EXCLUDED_SITES` filter. Pin sum: 13 (nexus-ft04v.21 lowered the
-#: 79-site 2026-09-09 baseline to 54; nexus-ft04v.23 funnelled a further
-#: 32 of those 54 -- the commands/ CLI surface -- lowering the pin to
-#: 22; nexus-ft04v.22 funnelled 9 more -- the db/ and catalog/ surface --
-#: lowering the pin to 13). This may only shrink — each of
-#: nexus-ft04v.21/.22/.23 (the funnel slices) lowers the entries for its
-#: files as raw sites move to the three CollectionName helpers; when a
-#: file reaches zero, drop its entry (a dropped key and an absent file
-#: both read as zero to the guards below).
-#:
-#: nexus-ft04v.21 (funnel slice 1, corpus.py/scoring.py/collection_shape.py/
-#: context.py/search_engine.py/exporter.py/mcp/core.py) landed 2026-09-09:
-#: scoring.py, context.py, search_engine.py, exporter.py and mcp/core.py
-#: reached zero and were dropped; corpus.py fell from 16 to 2 (the two
-#: `collection_content_type` / `collection_owner` helpers' own shared
-#: internal parse -- see `_split_legacy_collection_name` in nexus/corpus.py
-#: -- is the accepted floor those two helpers leave behind, per the bead's
-#: "sites inside the three helpers themselves ... stay counted" rule).
-#: collection_shape.py's 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not
-#: overlooked, per the coordinator's ruling on nexus-ft04v.21's hand-off
-#: report: `collection_attributes`'s positional 4-field decode of a
-#: malformed name is the same class as the commands/collection.py site
-#: below -- the funnel helpers' "owner = whole remainder" convention
-#: cannot reproduce a strict positional decode byte-for-byte, and this
-#: bead forbids behaviour change. These stay raw and counted until
-#: nexus-ft04v.26 (the repoint), where the decode reads the catalog row
-#: directly instead of parsing.
-#:
-#: nexus-ft04v.26 (THE REPOINT) landed 2026-09-09 and added the FIFTH
-#: pattern class (coordinator ruling: a caller of split_candidate_collection_name/
-#: embedding_model_for_collection_name outside corpus.py's own helper
-#: bodies re-derives the same fact the four original classes did, just
-#: behind a function call -- "parsing that moves into one helper with N
-#: callers while the gate reads zero" is exactly the failure this closes).
-#: corpus.py's own floor (2, the two funnel helpers' shared internal
-#: parse) dropped to 0: `split_candidate_collection_name` (renamed from
-#: `_split_legacy_collection_name`) is now REGEX-based
-#: (`_LEGACY_SPLIT_RE.match`), which is invisible to the ORIGINAL four
-#: classes by construction (a regex `.match()` call is none of split/
-#: rsplit/partition/rpartition/startswith/endswith/"__" in) -- the
-#: mechanism moved, so the site the four original classes tracked
-#: genuinely no longer exists there. The 38 primitive_call sites below are
-#: every caller of those two functions outside corpus.py, each classified
-#: per the coordinator's four dispositions (see the per-site comments in
-#: source for the reason; a-d recorded here for the census reader):
-#:   a) mint/candidate-time (no row can exist yet -- registering, minting,
-#:      renaming, or dispatching on a --collection/--corpus argument that
-#:      may not name a real collection at all)
-#:   b) write-model resolution the write authority (effective_embedding_model_for_writes/
-#:      resolve_write_embedding_model) cannot serve without a content_type
-#:      already in hand (batch-sizing dispatch); reads the row first,
-#:      falls to the conformant name's own embedded model token (the
-#:      write authority's decision at render time, read back rather than
-#:      re-derived) only when no row exists
-#:   c) filtering/best-effort dispatch over a list where a row-absent
-#:      result is simply excluded, not parsed -- converted to a direct
-#:      nexus.mcp_infra.get_collection_row read wherever that was possible
-#:      without losing coverage; the residual primitive_call sites below
-#:      are the ones where a plain string comparison remained necessary
-#:      (e.g. matching against the STRING VALUE of a --corpus token)
-#:   d) backfill/reconcile/doctor diagnostics whose purpose IS to report a
-#:      name-versus-row disagreement or discover an unregistered
-#:      collection -- the RDR's own named exception
-COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
-    # nexus-ft04v.26 item 6: `quarantine_collection_name` (RDR-204 Phase 3
-    # THE REPOINT) no longer raw-splits -- it now PREFERS *origin*'s
-    # catalog row (content_type/owner_id/embedding_model, authoritative
-    # per Gap 1) and falls to the shared candidate-string primitive
-    # `split_candidate_collection_name` (one primitive_call, counted here)
-    # only when *origin* has no row. Live-tested against the real GC
-    # integration suite (tests/test_rdr191_gc_serverside_prune.py): a
-    # fixture collection there frequently has NO catalog row (never
-    # registered before its first GC pass), so this deliberately does NOT
-    # fail loud on a missing row the way collection_content_type/
-    # collection_owner/collection_model do -- one unregistered origin must
-    # not abort the whole GC sweep. This is the coordinator's own named
-    # exception for "chunk_quarantine's sibling minting IF IT MUST"
-    # (ruling 2026-09-08). The fallback branch still preserves the ENTIRE
-    # tail after the content-type segment (owner + model + version) so the
-    # quarantine sibling keeps exactly the source's model/version --
-    # `collection_owner()` alone would discard model/version.
-    #
-    # nexus-ft04v.28 item 6 (this file, 1 -> 2): the fifth class's
-    # primitive set gained `model_version_for_collection_name` (previously
-    # an uncounted third primitive, same regex-based shape as the other
-    # two -- see nexus.corpus._CANDIDATE_STRING_PRIMITIVES's own docstring
-    # for why it belongs). One class-(d) site: `quarantine_collection_
-    # name`'s call (line ~91, reading the origin's own model_version
-    # segment -- the catalog row never carries a version field, so this is
-    # the only place that fact lives, same allowance as the primitive_call
-    # above it). The C1 fix's `quarantine_registration_kwargs` (a second
-    # such call) was deleted 2026-09-09 with the client-side sibling
-    # pre-registration it fed: the engine registers the sibling from the
-    # origin's row on first insert, and the client's row was the
-    # nexus-syfes drift the shakeout's Phase E caught (3 -> 2).
-    "src/nexus/catalog/chunk_quarantine.py": 2,
-    # class (a) mint/candidate-time (nexus-ucagi): rename_collection_cascade
-    # sends the NEW name's model token so the engine can refuse a rename whose
-    # target names another model than the source row. The target has no row
-    # yet, so its name is the only place that token lives; the source's model
-    # is read from its row on the engine side.
-    "src/nexus/catalog/http_catalog_client.py": 1,
-    # class (d): _content_type_for_collection synthesizes a row for the
-    # orphan GC backfill -- the collection being registered has no row by
-    # construction.
-    "src/nexus/catalog/orphan_backfill.py": 1,
-    # (a) mint/candidate-time: resolve_owner_scope's _is_corpus_scope reads
-    # the first segment of a user-typed --scope / corpus token to decide
-    # whether it names a corpus at all (GH #1527 review fix, batch-2).
-    "src/nexus/catalog/owner_scope.py": 1,
-    "src/nexus/collection_shape.py": 3,
-    # class (d): _backfill_knowledge/_backfill_rdrs/_backfill_papers (3
-    # sites) find and register T3 collections NOT YET in the catalog;
-    # :1421/:1427/:1455 recover-per-file reads a possibly-broken
-    # collection's shape from the string, not a row it may not have;
-    # :1613/:1614 `register --from-t3` discovers unregistered collections
-    # to register. All 8 are the RDR's named backfill-and-doctor
-    # exception.
-    "src/nexus/commands/catalog.py": 8,
-    # class (d): _run_name_vs_embed_dim compares what the NAME claims
-    # against the actual embedding dim (a name-vs-reality diagnostic; a
-    # row read would make it vacuous by construction under Phase 1).
-    "src/nexus/commands/catalog_cmds/doctor.py": 1,
-    # class (d): reports a catalog document whose physical_collection may
-    # itself be drifted/unregistered.
-    "src/nexus/commands/catalog_cmds/integrity.py": 1,
-    # class (d): reconcile-stale's whole purpose is diagnosing drifted
-    # catalog entries, which can reference a physical_collection with no
-    # row (2 sites: the no-provenance classifier and the single-chunk
-    # heuristic).
-    "src/nexus/commands/catalog_cmds/reconcile_stale.py": 2,
-    # :525/:526 rename_cmd, class (a): `new` is the rename TARGET, no row
-    # yet; `old` may be a never-registered legacy collection this rename
-    # is meant to fix. :371, class (d): _find_dimension_mismatched_collections
-    # compares the NAME's declared dim against the active embedder (same
-    # shape as catalog_cmds/doctor.py:980 above). :713/:787/:816
-    # reindex_cmd, class (a): the row was just deleted by
-    # purge_collection_cascade and only best-effort re-registered, so
-    # every content-type dispatch in that function must not assume a row.
-    # :780 (2 hits, "in"+"split") is nexus-ft04v.23's ORIGINAL raw
-    # holdout -- see its own comment below.
-    "src/nexus/commands/collection.py": 8,
-    # nexus-ft04v.23: `corpus = name.split("__", 1)[1] if "__" in name
-    # else ""` in `reindex_cmd` is deliberately left raw. It derives a
-    # re-index provenance label from EVERYTHING after the first "__", not
-    # just the owner segment -- for a genuinely conformant 4-segment name
-    # (`<type>__<owner>__<model>__v<n>`) that differs from
-    # `collection_owner()` (which returns only the second segment), so
-    # funnelling it would silently truncate the label instead of leaving
-    # behaviour byte-identical. Confirmed by the coordinator's ruling on
-    # nexus-ft04v.23's hand-off report; nexus-ft04v.26 (THE REPOINT) did
-    # not touch this ONE site (item 6 in the bead's own list) -- open
-    # work, tracked in the hand-off report.
-    # class (d): the census census, prefers the row (already fetched for
-    # this same fan-out-floor scan) and falls to candidate-string
-    # derivation only for a genuinely unregistered collection this
-    # diagnostic must still report on.
-    "src/nexus/commands/doctor.py": 1,
-    # class (a): `collection` reaches here because select_config already
-    # rejected it as unsupported -- may be a mistyped --collection
-    # argument with no row at all.
-    "src/nexus/commands/enrich.py": 1,
-    # class (d) (nexus-ft04v.26, fixture-seam fix round): check_chash_
-    # conformance_report's unroutable-collection probe reads
-    # embedding_model_for_collection_name(name) directly -- the whole
-    # POINT of this scan is to report on a conformant-SHAPED collection
-    # /v1/vectors/stats lists that may carry no catalog row at all
-    # (unregistered, or a legacy pre-Phase-1 collection); the strict
-    # row-reading collection_model (class b) it previously called raised
-    # CollectionNotRegisteredError for exactly that case, silently
-    # zeroing the whole scan inside this method's blanket `except
-    # Exception` and masking the false-clean-by-omission finding this
-    # probe exists to catch (nexus-4ijv4).
-    "src/nexus/health.py": 1,
-    # nexus-kk4ut: re-grepped against the real call sites, which had
-    # drifted from this comment's anchors. :115 class (a), registering
-    # `new_name`; :1135/:1144 class (a), first-index synthesis explicitly
-    # for the not-yet-registered case; :1898 class (a), the function's OWN
-    # docstring defines "kind" as the name prefix, not a catalog fact. (The
-    # index-md extractor-warning site was removed with the warning itself,
-    # also nexus-kk4ut -- that removal is why this file's line numbers
-    # moved out from under the comment in the first place.)
-    "src/nexus/commands/index.py": 4,
-    # class (a): `collection` is the raw --collection CLI argument for
-    # `nx store export`, not necessarily an existing registered name.
-    "src/nexus/commands/store.py": 1,
-    "src/nexus/corpus.py": 0,
-    # class (b): per_collection_chunk_cap/_upsert_byte_budget size the
-    # write that will create a collection's FIRST-EVER chunks, so they
-    # structurally cannot rely on a row in the common first-write case.
-    # _write_model_for_collection prefers the row (the re-write case,
-    # authoritative) and falls to embedding_model_for_collection_name
-    # (reading the model the write authority already embedded in an
-    # already-rendered conformant name at mint time, not re-deriving it)
-    # only when no row exists; :2364 is an existing, pre-nexus-ft04v.26
-    # call unrelated to this bead's own additions. A fourth site,
-    # _is_cce_collection (fixture-seam fix round, 2026-09-09), was added
-    # to REPLACE per_collection_chunk_cap/_upsert_byte_budget's original
-    # ``_model == "voyage-context-3"`` model-STRING comparison, which was
-    # a real regression: content_type, not the model token, is the
-    # correct CCE-vs-code signal (fragile to any model rename or
-    # non-canonical fixture token otherwise) -- it falls to
-    # split_candidate_collection_name (a DIFFERENT primitive than
-    # embedding_model_for_collection_name above) for the same no-row
-    # first-write case. The retired put() carried one more
-    # embedding_model_for_collection_name call; it went with the method
-    # (38f4167be, nexus-nt76j).
-    "src/nexus/db/http_vector_client.py": 3,
-    # _infer_content_type (write-path metadata normalization, prefers the
-    # row, falls to its own documented "anything but code -> prose"
-    # default) and the two TTL-expire sweeps (class (c), a collection
-    # with no row is simply skipped this pass) all read
-    # nexus.mcp_infra.get_collection_row directly and do NOT call either
-    # primitive. 3 of this file's 4 counted sites are PRE-EXISTING
-    # embedding_model_for_collection_name calls (RDR-109 nexus-6e6u1/
-    # nexus-a4h7b's conformant-name fast paths, unrelated to
-    # nexus-ft04v.26's own additions) the fifth class now also tracks.
-    # The 4th, class (d): T3Database.list_collections() (the retired
-    # Chroma-era, TEST-ONLY substrate -- RDR-155 P4a.2 made
-    # HttpVectorClient the only production path) synthesizes a row from
-    # the name since it has no catalog to join against; without this,
-    # nexus.mcp_infra's row cache reports "no row" for every
-    # T3Database-backed test, silently emptying resolve_corpus's
-    # bare-content-type fan-out for the test suite's primary substrate
-    # (found live: test_store_put_invalidates_page_cache /
-    # test_store_delete_invalidates_page_cache in tests/test_mcp_server.py).
-    "src/nexus/db/t3.py": 4,
-    # class (b)/pre-existing: embedding_model_for_collection's conformant-
-    # name fast path (RDR-109 nexus-6e6u1), unrelated to nexus-ft04v.26's
-    # own additions -- the fifth class now also tracks it.
-    "src/nexus/exporter.py": 1,
-    # class (a): *part* is a user-typed --corpus TOKEN, not necessarily an
-    # existing collection.
-    "src/nexus/mcp/core.py": 1,
-    # class (b)/pre-existing: embedding_model_for_collection's conformant-
-    # name fast path, same as exporter.py above.
-    "src/nexus/search_engine.py": 1,
+SHAPE_PIN: dict[str, int] = {
+    "primitive_call": 171, "const_prefix": 31, "fnmatch": 14,
+    "loop_prefix": 7, "startswith": 4, "split": 2, "fstring_prefix": 2,
+    "in": 1, "glob_default": 1, "sql_prefix": 1, "substring": 1,
 }
-
-PARSE_SITE_PIN: int = sum(COLLECTION_NAME_PARSE_CENSUS.values())
-
-
-def _get_str_const(node: ast.expr) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    return None
-
 
 #: The candidate-string PRIMITIVES the funnel helpers themselves are
 #: allowed to use (RDR-204 Phase 3 repoint, nexus-ft04v.26 THE REPOINT --
@@ -628,11 +357,6 @@ def _get_str_const(node: ast.expr) -> str | None:
 #: are deliberately NOT primitives here despite also being regex-based.
 from nexus.corpus import _CANDIDATE_STRING_PRIMITIVES  # noqa: E402 — import after the module docstring/constants above it, matching this file's existing style
 
-_PRIMITIVE_CALL_NAMES = frozenset(_CANDIDATE_STRING_PRIMITIVES)
-
-_CORPUS_PY_REL = "src/nexus/corpus.py"
-
-
 def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
     """Non-vacuity for the single-sourcing itself: every name in
     ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES`` must be a real,
@@ -642,10 +366,6 @@ def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
     the primitive set that matches nothing (silently undercounting,
     since no call site can ever match a name nothing is defined under),
     with no test noticing."""
-    import inspect
-
-    import nexus.corpus as corpus_mod
-
     assert _CANDIDATE_STRING_PRIMITIVES, "the primitive tuple must not be empty"
     for name in _CANDIDATE_STRING_PRIMITIVES:
         obj = getattr(corpus_mod, name, None)
@@ -657,85 +377,18 @@ def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
 
 
 def _scan_tree(path: pathlib.Path) -> list[tuple[int, str]]:
-    """(lineno, pattern_class) for every raw collection-name-parse-shaped
-    site in one file -- BEFORE the ``_EXCLUDED_SITES`` filter is applied.
-
-    AST-based by construction: a match requires an actual ``ast.Call`` to
-    ``split``/``rsplit``/``partition``/``rpartition``/``startswith``/
-    ``endswith`` with a literal argument, an actual ``ast.Compare`` with
-    ``In``/``NotIn`` against the literal ``"__"``, or an actual ``ast.Call``
-    to one of :data:`_PRIMITIVE_CALL_NAMES`'s functions (pattern class
-    ``"primitive_call"``) -- never a text match, so a comment or docstring
-    mentioning ``"__"`` or a primitive's name cannot contribute a hit. A
-    primitive call counts in EITHER form (RDR-204 Phase 3 fix round,
-    nexus-ft04v.28 item 6): bare-name (``split_candidate_collection_name(x)``,
-    a module-level import) or attribute (``corpus.split_candidate_
-    collection_name(x)``, a module-qualified reference) -- the earlier
-    bare-name-only check let an attribute-form caller (``import
-    nexus.corpus as corpus; corpus.split_candidate_collection_name(x)``)
-    through undetected.
-    """
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (SyntaxError, OSError, UnicodeDecodeError):
-        return []
-    hits: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            attr = node.func.attr
-            if attr in ("split", "rsplit", "partition", "rpartition"):
-                if node.args and _get_str_const(node.args[0]) == "__":
-                    hits.append((node.lineno, attr))
-            elif attr in ("startswith", "endswith"):
-                matched = False
-                for arg in node.args:
-                    sv = _get_str_const(arg)
-                    if sv is not None and sv in _TYPE_PREFIXES:
-                        matched = True
-                    elif isinstance(arg, (ast.Tuple, ast.List)):
-                        for elt in arg.elts:
-                            if _get_str_const(elt) in _TYPE_PREFIXES:
-                                matched = True
-                if matched:
-                    hits.append((node.lineno, attr))
-            elif attr in _PRIMITIVE_CALL_NAMES:
-                # Attribute-form primitive call, e.g.
-                # ``corpus.split_candidate_collection_name(x)``.
-                hits.append((node.lineno, "primitive_call"))
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in _PRIMITIVE_CALL_NAMES:
-                hits.append((node.lineno, "primitive_call"))
-        elif isinstance(node, ast.Compare):
-            for op, comparator in zip(node.ops, node.comparators):
-                if not isinstance(op, (ast.In, ast.NotIn)):
-                    continue
-                if _get_str_const(node.left) == "__" or _get_str_const(comparator) == "__":
-                    hits.append((node.lineno, "not_in" if isinstance(op, ast.NotIn) else "in"))
-    return hits
+    """(lineno, shape) for every raw collection-name-parse-shaped site in
+    one file, BEFORE the exclusion filter. The walk itself lives in
+    ``tests/_collection_name_census_scan.py`` (its docstring lists the
+    shapes); a fixture file sees its own module-level prefix constants."""
+    return _scan.scan_file(path)
 
 
 def _raw_collection_name_parse_sites() -> dict[str, list[tuple[int, str]]]:
-    """Every raw match under SRC, keyed by path relative to REPO_ROOT,
-    with NO exclusion filter applied. Used to prove exclusions are real.
-
-    ``primitive_call`` hits inside ``corpus.py`` itself are dropped here,
-    not via ``_EXCLUDED_SITES``: the coordinator's ruling scopes the fifth
-    class to callers OUTSIDE corpus.py's own helper bodies (the funnel
-    helpers necessarily call their own shared string-shape primitive), a
-    file-level exclusion distinct in kind from the per-line judgement
-    calls ``_EXCLUDED_SITES`` records for the original four classes.
-    """
-    found: dict[str, list[tuple[int, str]]] = {}
-    for path in SRC.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        hits = _scan_tree(path)
-        if rel == _CORPUS_PY_REL:
-            hits = [(ln, cls) for ln, cls in hits if cls != "primitive_call"]
-        if hits:
-            found[rel] = hits
-    return found
+    """Every raw match under SRC, keyed by path relative to REPO_ROOT, with
+    NO exclusion filter applied (``primitive_call`` hits inside ``corpus.py``
+    are dropped, see ``raw_sites``)."""
+    return _scan.raw_sites()
 
 
 def _resolve_excluded_sites() -> tuple[dict[str, dict[int, tuple[str, ...]]], list[str]]:
@@ -982,38 +635,80 @@ def test_synthetic_shrink_without_lowering_pin_fails_the_stale_guard() -> None:
     assert shrunk == [f"{some_file}: {live[some_file]} < {COLLECTION_NAME_PARSE_CENSUS[some_file]}"]
 
 
+def _live_and_ledger() -> tuple[
+    Counter[tuple[str, int, str]], dict[tuple[str, int, str], _scan.Site],
+]:
+    """The live widened scan (exclusions applied) and the ledger resolved to
+    current lines. An unresolved anchor fails ``test_ledger_anchors_resolve``."""
+    excluded, _problems = _resolve_excluded_sites()
+    raw = {
+        rel: [(ln, sh) for ln, sh in hits if ln not in excluded.get(rel, {})]
+        for rel, hits in _raw_collection_name_parse_sites().items()
+    }
+    resolved, _problems = _scan.resolve_sites(REPO_ROOT, list(LEDGER))
+    return _scan.live_counter(raw), resolved
+
+
+def test_ledger_is_well_formed_and_every_anchor_resolves() -> None:
+    """Every entry has a known class and shape, a holdover carries a note,
+    an fnmatch is labelled by what it matches, and every content anchor
+    resolves to exactly one current line (neither STALE nor AMBIGUOUS)."""
+    assert not _scan.ledger_problems(list(LEDGER))
+    _resolved, problems = _scan.resolve_sites(REPO_ROOT, list(LEDGER))
+    assert not problems, "ledger anchor(s) failed to resolve:\n  " + "\n  ".join(problems)
+
+
 def test_no_new_parse_sites() -> None:
-    """THE GUARD. A new raw collection-name parse site outside the three
-    RDR-204 helpers is exactly the regression Phase 3 exists to prevent --
-    each funnel slice is supposed to LOWER this census, never add to it."""
-    live = {f: len(h) for f, h in _collection_name_parse_sites().items()}
-    grown = _grown(live, COLLECTION_NAME_PARSE_CENSUS)
-    assert not grown, (
-        f"collection-name parse sites GREW at {grown}.\n"
-        "RDR-204 moved collection identity (content type, model, lifecycle "
-        "state) to catalog_collections; a new raw split/partition/"
-        "startswith/\"__\" in\" parse re-derives a fact the row already "
-        "carries and can drift from it (docs/rdr/"
-        "rdr-204-embedding-profile-and-collection-authority.md § "
-        "Implementation Plan Phase 3). Use the three CollectionName "
-        "helpers the funnel slices (nexus-ft04v.21/.22/.23) route existing "
-        "sites through instead. If this is a genuine mcp__ tool-name or "
-        "rdr- document-id parse, add it to _EXCLUDED_SITES with the guard "
-        "named."
+    """THE GUARD. Every live site has a ledger entry carrying a class; one
+    without is refused, naming file, line and shape. (Phase 3's whole point is
+    that nothing re-derives from the name a fact the row carries, so a site
+    that cannot be labelled is a site that should not exist.)"""
+    live, resolved = _live_and_ledger()
+    unlabelled, _stale = _scan.diff_ledger(live, resolved)
+    assert not unlabelled, (
+        "UNLABELLED collection-name parse site(s) (RDR-229 P1.1):\n  "
+        + "\n  ".join(unlabelled)
+        + "\nRoute the read through the row (resolve_collection / the "
+        "CollectionName helpers), or add a ledger entry with one class "
+        "from tests._collection_name_census_scan.CLASSES and the reason. A "
+        "genuine mcp__ tool-name or rdr- document-id parse goes in "
+        "tests/_collection_name_census_exclusions.py instead."
     )
 
 
 def test_census_has_no_stale_entries() -> None:
-    """Exact-census discipline, matching test_no_new_sqlite and
-    test_private_handle_access_census's own stale-entry guard: a pin that
-    overstates the live tree is a lie about how much of Phase 3 is left,
-    and hides a later regrowth inside the slack."""
-    live = {f: len(h) for f, h in _collection_name_parse_sites().items()}
-    shrunk = _shrunk(live, COLLECTION_NAME_PARSE_CENSUS)
-    assert not shrunk, (
-        f"stale census entry {shrunk}: the site was removed (good, a "
-        "funnel slice landed) -- lower the count so the pin stays exact."
+    """Exact-census discipline: a ledger entry whose site is gone overstates
+    how much is left and hides a later regrowth inside the slack."""
+    live, resolved = _live_and_ledger()
+    _unlabelled, stale = _scan.diff_ledger(live, resolved)
+    assert not stale, (
+        "stale ledger entr(y/ies), the site was removed (good): delete the "
+        "entry and lower the pins.\n  " + "\n  ".join(stale)
     )
+
+
+def test_per_file_table_still_matches_the_live_scan() -> None:
+    live, _resolved = _live_and_ledger()
+    per_file: Counter[str] = Counter()
+    for (rel, _ln, _shape), n in live.items():
+        per_file[rel] += n
+    assert not _grown(dict(per_file), COLLECTION_NAME_PARSE_CENSUS)
+    assert not _shrunk(dict(per_file), COLLECTION_NAME_PARSE_CENSUS)
+
+
+def test_pins_are_the_measured_counts_by_total_class_and_shape() -> None:
+    """The pin is the scanner's own measurement: total, per class and per
+    shape, each exact in both directions."""
+    live, resolved = _live_and_ledger()
+    assert sum(live.values()) == PARSE_SITE_PIN
+    by_class: Counter[str] = Counter()
+    by_shape: Counter[str] = Counter()
+    for key, site in resolved.items():
+        by_class[site.cls] += site.n
+        by_shape[key[2]] += site.n
+    assert dict(by_class) == CLASS_PIN
+    assert dict(by_shape) == SHAPE_PIN
+    assert sum(CLASS_PIN.values()) == sum(SHAPE_PIN.values()) == PARSE_SITE_PIN
 
 
 def test_pin_matches_documented_total() -> None:
@@ -1045,8 +740,129 @@ def test_pin_matches_documented_total() -> None:
     two parse helpers were deleted as dead code, nexus-z0o2p.25; then 46 -- 45
     on 2026-10-21 when HttpVectorClient.put was retired, nexus-nt76j; then 45 -- 46
     on 2026-11-03 for the rename's class-(a) target-model token in
-    HttpCatalogClient.rename_collection_cascade, nexus-ucagi) is derived from the same dict the guards above check
-    against -- this catches a hand-edited docstring number drifting from
-    the dict it claims to summarize."""
+    HttpCatalogClient.rename_collection_cascade, nexus-ucagi; then 46 -- 235
+    on 2026-11-20 when RDR-229 P1.1 (nexus-p2m1x.1) widened the scanner and
+    made the census a per-site ledger, see the module docstring) is derived
+    from the same ledger the guards above check against -- this catches a
+    hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 46
+    assert PARSE_SITE_PIN == 235
+
+
+# ---------------------------------------------------------------------------
+# The derived helper set, the class labels, and the measured routing class.
+# ---------------------------------------------------------------------------
+
+
+def test_derived_helper_set_is_non_empty_and_holds_the_current_primitives() -> None:
+    """The fifth class is DERIVED from corpus.py's call graph (RDR-229 item
+    4): it must hold the three typed primitives, the two conformant-name
+    parser roots, and more than the typed three (a helper that reaches a
+    parser through another function)."""
+    helpers = _scan.live_parser_helpers()
+    assert helpers
+    assert set(_CANDIDATE_STRING_PRIMITIVES) <= helpers
+    assert {"is_conformant_collection_name", "parse_conformant_collection_name"} <= helpers
+    assert {"ensure_collection_registered", "t3_collection_name"} <= helpers
+    assert len(helpers) > len(_CANDIDATE_STRING_PRIMITIVES)
+
+
+def test_derivation_follows_the_call_graph_and_aliases(tmp_path: pathlib.Path) -> None:
+    sample = tmp_path / "corpus_like.py"
+    sample.write_text(
+        "import re\n"
+        "_RE = re.compile(r'^a__b$')\n"
+        "def root(n):\n    return _RE.match(n)\n"
+        "def mid(n):\n    return root(n)\n"
+        "def top(n):\n    return mid(n)\n"
+        "def raw(n):\n    return n.split('__')\n"
+        "def unrelated(n):\n    return n.upper()\n"
+        "alias = top\n",
+        encoding="utf-8",
+    )
+    tree = ast.parse(sample.read_text(encoding="utf-8"))
+    assert _scan.derive_parser_helpers(tree) == {
+        "root", "mid", "top", "raw", "alias",
+    }
+
+
+def test_the_census_refuses_a_live_site_with_no_class() -> None:
+    """Drop one ledger entry: the site goes UNLABELLED and is named."""
+    live, resolved = _live_and_ledger()
+    key = next(k for k, v in sorted(resolved.items()) if v.shape == "const_prefix")
+    without = {k: v for k, v in resolved.items() if k != key}
+    unlabelled, stale = _scan.diff_ledger(live, without)
+    assert not stale
+    assert unlabelled == [
+        f"{key[0]}:{key[1]} shape=const_prefix: UNLABELLED, add a ledger entry with a class"
+    ]
+
+
+def test_the_census_refuses_a_bad_class_a_bare_holdover_and_a_mislabelled_fnmatch() -> None:
+    def site(tag: str, shape: str, cls: str, note: str = "") -> _scan.Site:
+        return _scan.Site("src/nexus/x.py", (tag,), shape, cls, note)
+
+    problems = _scan.ledger_problems([
+        site("a", "startswith", "parse"),
+        site("b", "startswith", "holdover"),
+        site("c", "startswith", "holdover", "P2.9"),
+        site("d", "fnmatch", "mint"),
+    ])
+    assert len(problems) == 3, problems
+    assert "class 'parse'" in problems[0]
+    assert "a holdover must carry a note" in problems[1]
+    assert "an fnmatch is a label-pattern" in problems[2]
+
+
+def _by_class(cls: str) -> list[_scan.Site]:
+    return [s for s in LEDGER if s.cls == cls]
+
+
+def test_every_fnmatch_is_labelled_by_what_it_matches() -> None:
+    """14 fnmatch sites: 9 match user-configured name patterns (label
+    patterns), 5 match source file paths. None is routing and none is a
+    parse class, so the exporter's include/exclude filter never inflates
+    the routing count."""
+    fn = [s for s in LEDGER if s.shape == "fnmatch"]
+    assert len(fn) == 14
+    assert Counter(s.cls for s in fn) == {"label-pattern": 9, "file-path": 5}
+    paths = {(s.rel, s.anchor[-1]) for s in fn if s.cls == "file-path"}
+    assert any(rel == "src/nexus/exporter.py" for rel, _ in paths)
+    assert not [s for s in fn if s.cls == "routing"]
+
+
+def test_the_routing_class_is_measured_not_listed() -> None:
+    """RDR-229 P2.9 must empty a class the census counted, over every shape
+    the routing census scans. 36 sites: the 23 content-type tests, the
+    shipped ``code__*`` default, and the taxonomy__ half of the 12
+    ``_BYPASS_SCHEMA_PREFIXES`` tests (229-research-39)."""
+    routing = _by_class("routing")
+    assert sum(s.n for s in routing) == CLASS_PIN["routing"] == 36
+    assert {s.shape for s in routing} == {
+        "const_prefix", "loop_prefix", "startswith", "glob_default",
+    }
+    assert sum(1 for s in routing if s.note == _BYPASS_NOTE) == 12
+    assert [s.shape for s in routing if s.shape == "glob_default"] == ["glob_default"]
+    # Recovery-bundle classification of ANOTHER install's name is a migration
+    # source, never routing (item 1); the URI-string classifiers stay at 2.
+    bundle = [s for s in LEDGER if s.rel.endswith("catalog/recovery_bundle.py")]
+    assert bundle and {s.cls for s in bundle} == {"migration-source"}
+    uri = {(s.rel.rsplit("/", 1)[-1], s.shape) for s in _by_class("uri-classifier")}
+    assert uri == {("aspect_readers.py", "const_prefix"), ("note_uri_pairs.py", "sql_prefix")}
+
+
+def test_only_the_five_rdr_classes_and_the_two_fnmatch_labels_are_final() -> None:
+    """``holdover`` is the one provisional label, and it never stands bare:
+    each carries a note that names the Phase 2 step that moves it (P2.3
+    write-model, P2.4 taxonomy threshold, P2.7 retire the name matcher) or
+    says it needs an owner, because no step in the RDR names it yet."""
+    assert set(_scan.CLASSES) == {
+        "mint", "migration-source", "diagnostic", "routing", "uri-classifier",
+        "label-pattern", "file-path", "holdover",
+    }
+    holdovers = _by_class("holdover")
+    assert sum(s.n for s in holdovers) == CLASS_PIN["holdover"]
+    assert all(
+        re.search(r"\bP2\.[0-9]+\b", s.note) or "needs an owner" in s.note
+        for s in holdovers
+    ), "a holdover note must name its Phase 2 step or say it needs an owner"
