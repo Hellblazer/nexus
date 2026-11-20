@@ -4487,6 +4487,18 @@ public final class CatalogRepository {
         if (chosen.isEmpty()) return new Rewritten(0, List.of());
         lockDocumentRowsSorted(ctx, tenant, true, chosen.stream().map(StaleNote::tumbler).toArray(String[]::new));
         noteUriRepairStage("locked");
+        // RDR-229: a collection retyped since the census is no longer proven a note collection. Read the rows that still
+        // are AND hold a share lock on them until this transaction ends, so a concurrent upsertCollection that would retype
+        // one waits for the repair to commit instead of landing between this read and the UPDATE. Sorted by name, as
+        // lockDocumentRowsSorted sorts by tumbler, so two repairs (or a repair and an upsert) take them in one order.
+        java.util.Set<String> stillKnowledge = new java.util.HashSet<>(ctx.select(CATALOG_COLLECTIONS.NAME)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.NAME.in(chosen.stream().map(StaleNote::collection).distinct().toList()))
+                   .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("knowledge")))
+            .orderBy(CATALOG_COLLECTIONS.NAME)
+            .forShare()
+            .fetch(CATALOG_COLLECTIONS.NAME));
         // Re-read under the lock: a row that moved or died since the census is left to the next pass.
         record Fresh(String uri, String collection) {}
         Map<String, Fresh> fresh = new HashMap<>();
@@ -4494,14 +4506,9 @@ public final class CatalogRepository {
                 .from(CATALOG_DOCUMENTS)
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                        .and(CATALOG_DOCUMENTS.TUMBLER.in(chosen.stream().map(StaleNote::tumbler).toList()))
-                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
-                       // RDR-229: a collection retyped since the census is no longer proven a note collection.
-                       .and(DSL.exists(DSL.selectOne().from(CATALOG_COLLECTIONS)
-                           .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                                  .and(CATALOG_COLLECTIONS.NAME.eq(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
-                                  .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq("knowledge"))))))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .fetch()) {
-            fresh.put(r.value1(), new Fresh(r.value2(), r.value3()));
+            if (stillKnowledge.contains(r.value3())) fresh.put(r.value1(), new Fresh(r.value2(), r.value3()));
         }
         List<StaleNote> rows = new ArrayList<>();
         for (StaleNote c : chosen) {
