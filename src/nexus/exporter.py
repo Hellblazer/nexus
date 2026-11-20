@@ -1846,8 +1846,15 @@ def import_collection(
         require_note_uri_engine()
     # RDR-229 P2.5: a quarantine sibling is the target's row saying so, read through the db's own row
     # resolver (the cached listing a service-backed client already holds), not its `quarantine-` label.
+    # A failed lookup is not a reason to abort the import: with no row the label decides, as it did
+    # before P2.5 (review round 2, M1).
     row_resolver = getattr(db, "_resolve_collection_row", None)
-    target_row = row_resolver(collection_name) if callable(row_resolver) else None
+    target_row = None
+    if callable(row_resolver):
+        try:
+            target_row = row_resolver(collection_name)
+        except Exception as exc:  # noqa: BLE001 — any resolver failure falls back to the label rule
+            _log.warning("import_target_row_unresolved", collection=collection_name, error=str(exc))
     bypass_schema = bypasses_canonical_schema(collection_name, target_row)
     if _owners_apply(db) and bypass_schema:
         # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs

@@ -173,6 +173,28 @@ def test_import_refuses_a_quarantine_row_not_a_quarantine_name(tmp_path, target,
                 import_collection(db, path, target_collection=target)
 
 
+@pytest.mark.parametrize(
+    ("target", "refused"),
+    [(PREFIXED_NOROW, True), ("odd-label", False)],
+    ids=["prefixed", "plain"],
+)
+def test_import_falls_back_to_the_label_when_the_row_lookup_fails(tmp_path, target, refused):
+    # Review round 2, M1: a resolver that raises must not abort the import; with no row the label decides.
+    def _boom(name, **_k):
+        raise RuntimeError("listing unavailable")
+
+    db = SimpleNamespace(_resolve_collection_row=_boom)
+    path = _export_header(tmp_path)
+    with patch("nexus.exporter._owners_apply", return_value=True), \
+            patch("nexus.db.serving_engine_version.require_note_uri_engine"):
+        if refused:
+            with pytest.raises(NexusError, match="not supported"):
+                import_collection(db, path, target_collection=target)
+        else:
+            with pytest.raises(FormatVersionError, match="embedding_model"):
+                import_collection(db, path, target_collection=target)
+
+
 # ── commands/collection.py:783 ──────────────────────────────────────────────
 
 
