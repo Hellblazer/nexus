@@ -761,6 +761,9 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   v0.1.111; hygiene-005-3 promoted back only rows still `'dormant'`.
   A plain name with an explicit `'quarantine'` and a plain content type
   has no legacy evidence behind it and is refused.
+  A `quarantine-` name with an explicit `'dormant'` or `'disputed'`
+  imports as given and resolves, because those states are orthogonal to
+  the name.
 - *The registration-side `quarantine-` prefix refusal: the engine mints the
   `quarantine-` name; this guard stops a client minting one.* The client
   route (`POST /v1/catalog/collections/upsert`) also registers `live` only,
