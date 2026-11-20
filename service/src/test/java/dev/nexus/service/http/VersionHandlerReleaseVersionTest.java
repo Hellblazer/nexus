@@ -344,6 +344,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheRdr229UriSegmentCensusRoute_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogUriSegmentCensusCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_uri_segment_census_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheRdr241Route_CatalogSensitiveLocators_AsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogSensitiveLocatorsCapabilityField(body);

@@ -287,7 +287,7 @@ STUB_METADATA_TIMED_OUT = object()
 #: roughly 30 s cut.
 STUB_METADATA_TIMEOUT_S = 28.0
 from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
-from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators
+from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators, uri_segments as _uri_segments
 from nexus.catalog.engine_writes import move as _move
 # engine_writes/floors.py owns the hand-kept CATALOG_*_MIN_ENGINE_VERSION constants: a copy re-exported here would
 # be a second place to edit by mistake, so only the error and the require_* function are re-exported.
@@ -1291,6 +1291,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def sensitive_locators(self, limit: int = 10_000) -> dict:
         """``GET /sensitive/locators`` (nexus-uwggq.2.13): see ``engine_reads.sensitive_locators``."""
         return _locators.read_sensitive_locators(self, limit)
+
+    def uri_segment_census(self, limit: int = 10_000) -> dict:
+        return _uri_segments.read_uri_segment_census(self, limit)  # GET /uri_segment_census (RDR-229 P1.2): see engine_reads.uri_segments
 
     def chash_conformance_report(self, dim: int) -> dict:
         """Per-table chash width-conformance report for *dim* (RDR-180, bead
