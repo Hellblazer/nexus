@@ -715,18 +715,23 @@ lifecycle (`QuarantineOrigin`, `ChunkReaper` routing, `VectorHandler`,
 `quarantine-` prefix stays on the labels that already have it. The ETL
 import path, which receives rows from another install, takes
 `lifecycle_state` from the imported row when present and falls back to the
-prefix as a migration source. A new imported row whose state and name
-disagree (a `quarantine-` name with `live`, or any other name with
-`quarantine`) refuses the whole batch with a message that counts and names
-the rows; rows already registered are skipped first.
+prefix as a migration source. A new imported row whose effective state
+(its own, or the fallback from its name or content type) and name disagree
+refuses the whole batch with a message that counts and names the rows;
+rows already registered are skipped first.
 
 Every new row keeps the `quarantine-` prefix and the `'quarantine'` state
-together. `upsertCollection` refuses, for every caller, a new row whose
-name and state disagree, so the engine's quarantine mint passes
-`'quarantine'` and a re-embed target cannot carry the prefix. The SQL
-movers register the sibling as `'quarantine'` themselves. The import
-refuses as above. The production census found no existing row that breaks
-the pairing (T2 `nexus_rdr/229-p1.2-census-2026-11-20`).
+together. A name and a state disagree in exactly two cases: a `quarantine-`
+name with `'live'`, or any other name with `'quarantine'`. `'dormant'` and
+`'disputed'` are admin states independent of the name (hygiene-002 marks
+rows `'disputed'`), so they never disagree. `upsertCollection` refuses,
+for every caller, a new row whose name and state disagree. So the engine's
+quarantine mint passes `'quarantine'`, and a re-embed target cannot carry
+the prefix. The SQL movers register the sibling as `'quarantine'`
+themselves, and `POST /v1/vectors/gc/quarantine-orphans` refuses a
+`quarantine_collection` without the prefix. The import refuses as above.
+The production census found no existing row that breaks the pairing (T2
+`nexus_rdr/229-p1.2-census-2026-11-20`).
 
 These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
 
@@ -744,7 +749,10 @@ These name reads stay, as named residuals (P2.5, nexus-p2m1x.10):
   and refuses a new row named `quarantine-...` with a 400. The engine's
   own callers of `upsertCollection` and the SQL movers are not subject to
   these two client rules, and neither is the ETL import. All of them are
-  subject to the pairing check above.
+  subject to the pairing check above. Two refusals of the same class read
+  the prefix: re-embed refuses a `quarantine-` target before registering
+  a new row, and the gc quarantine-orphans route refuses a mover sibling
+  without it.
 - *The engine's own mint and the lookups of what it minted.* The mint is
   `ChunkReaper`'s sibling label (`QuarantineOrigin.PREFIX + name`, passed
   to the move) and the SQL movers that register that sibling as
