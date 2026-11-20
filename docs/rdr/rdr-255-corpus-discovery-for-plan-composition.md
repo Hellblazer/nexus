@@ -358,6 +358,8 @@ Research records (T2 `nexus_rdr/255-research-1` to `-18`, 2026-11-19):
   *Source: T2 nexus_rdr/herb-plan-experiment-part1-result-2026-11-19; assetops-kg feature/herb-full-pool ebb4ba7 (255-research-19)*
 - **✅ Verified** (spike) — A retrieval choice that wins on one store loses on another. Plan 10 with the lexical rerank gained recall on HERB (one pooled collection), but on a production store of about 100 collections the pre-registered timing gave a median of 43.7 s against 4.5 s and lost the gold document 11 times with no gains, because a search over all corpora reranks each collection separately and the rerank service rate-limits it. The change was reverted before 8.5.1. Collection count and fan-out are corpus-profile facts a plan composer has to read; a shipped plan cannot fix them as constants.
   *Source: T2 nexus/plan10-rerank-cloud-timing-result-2026-11-19; ca239f405; GH #1667 comment 7016198283 (255-research-20)*
+- **✅ Verified** (spike) — The coverage-off control: stock with coverage off scores 0.0 on the same 45, because switching coverage off also removes the exact-key join. The plan beats it on every subset (+0.39, 95% CI 0.30 to 0.49, 31/14/0). Part 1 did not win only by answering where stock withheld; which plan difference carries the gain is still open.
+  *Source: T2 nexus_rdr/herb-plan-experiment-control-result-2026-11-19; assetops-kg feature/herb-full-pool e5abe1a (255-research-21)*
 
 ### Critical Assumptions
 
@@ -537,8 +539,17 @@ wins 22 and loses none; on the 12 stock answered the two are level (36.3 against
 "the plan is better": the plan ran with the coverage boundary off, and its final
 step sees the question while stock's does not. So part 1 shows that a plan can
 answer where stock withholds; it does not yet show that the plan counts better.
-A stock run with coverage off on the same 45 (about $3) separates the two, and it
-decides which row of the table below applies.
+**Control** (T2 `nexus_rdr/herb-plan-experiment-control-result-2026-11-19`,
+finding 21). Stock with coverage off on the same 45 scores 0.0: switching
+coverage off also removes the exact-key join that turns `CUST` keys into company
+names, so stock then answers without them. The plan beats it everywhere (+0.39,
+95% CI 0.30 to 0.49, 31 wins, 14 ties, no losses), on the questions stock
+declined and on the ones it answered. Part 1 therefore did not win only by
+answering where stock withheld. The control cannot say which of the plan's
+differences carries the gain: the aggregation, the question reaching the final
+step, entity records in context, or retrieval that keeps the keys. Stock with
+coverage on stays the baseline for part 2. On the table below this is the
+"large gain" row; part 2 decides between its first two lines.
 
 - **Split.** Development set: SearchFlow, ActionGenie, AnomalyForce,
   AutoTuneForce, CoachForce (27 questions). Test set: the other 25 products
@@ -692,8 +703,8 @@ Not run; this RDR is a draft.
 2. **Facet extraction spend:** all records, no ceiling. Discovery extracts facets from every document, not only key-carrying record types, and does not stop to ask on cost. The run should still report what it spent.
 3. **Facet schema owner:** the model proposes a schema per collection and Sam confirms it (accept, edit or reject) before it is used.
 4. **Shipped plans:** shape-generic only. Dataset wording, field names and retrieval settings come from the corpus profile as bindings; `entity-resolution.yml`'s dataset wording moves out of the shipped library.
-5. **Scope:** decided after the coverage-off control. If the plan still wins once both paths may answer, the profile and the gate stay together here; if the gap closes, this RDR keeps the profile alone and the gate is dropped.
-6. **Voyage arm:** held until the coverage-off control is read.
+5. **Scope:** profile and gate together in this RDR (decided after the control showed the plan still wins once both paths may answer).
+6. **Voyage arm:** dropped for this RDR. Stock lost by declining and by missing the key join, on the same local bge retrieval the plan won with; revisit only if ranking becomes the suspect.
 7. **Where discovery lives:** split. The engine runs the clustering compute; the tuple space carries stage fan-out and lifecycle status, outside the lookup path.
 
 ## References
@@ -714,6 +725,7 @@ Not run; this RDR is a draft.
 
 - 2026-11-19: drafted. Experiment results pending.
 - 2026-11-19: shape census moved from Assumed to Verified (T2 record).
+- 2026-11-19: research finding 21 (the coverage-off control); Sam's answers to Q5 (profile and gate together) and Q6 (Voyage arm dropped) recorded.
 - 2026-11-19: Sam answered open questions 1-7 (recorded under Open Questions for Sam).
 - 2026-11-19: research findings 19-20 added (plan experiment part 1 result and its confounds; the 8.5.1 cloud rerank timing as a corpus-profile fact); Deciding Experiment records the part 1 result.
 - 2026-11-19: research findings 16-18 added (record-shaped lexical retrieval; AgenticScholar full text: scope/task split, conservative reuse, offline curation); finding 4 marked superseded; Option B gains the scope/task step.
