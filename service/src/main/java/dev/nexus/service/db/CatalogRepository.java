@@ -10529,28 +10529,29 @@ public final class CatalogRepository {
                               // wins a tuple", not this predicate.
                               .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
                        // nexus-6pbwx: catalog-044 gives a legacy slug-named repo collection the
-                       // documents' owner segment, so it can now share a (content_type, owner_id,
+                       // documents' owner segment, so it can share a (content_type, owner_id,
                        // embedding_model) tuple with the conformant collection of the same owner.
-                       // At equal version the tie goes to the lexically LOWER name (NAME ASC, it was
-                       // DESC): the conformant name carries the hyphenated tumbler segment right after
-                       // the content_type prefix, and a digit sorts below the letter a slug starts
-                       // with, so the conformant collection wins. That is an ordering, not a parse of
-                       // the name (RDR-204, CollectionParseGateTest), and it is the reason the census
-                       // stays at zero here. Quarantine and grandfathered rows are filtered above, so
-                       // no other pair of rows can tie. Version still dominates: a slug at v2 beats a
-                       // conformant v1. CatalogRepositoryTest pins both; do not flip this back.
-                       // The ordering is a PROXY: a slug that starts with '0' sorts below a
-                       // conformant '1-..' segment and wins the tie (a test documents it). That
-                       // changes only WHICH of two same-version names is returned: the only consumers of
-                       // /collections/for_tuple, HttpCatalogClient.collection_for and
-                       // _tuple_registered, read the returned ROW's model_version (collection_for, since
-                       // RDR-229 P1.4, nexus-p2m1x.4; it no longer parses the name) or only its
-                       // existence, and re-render the collection name from owner_id themselves.
-                       // The tie STAYS by name (Sam 2026-11-20, T2 nexus/sam-ruling-rdr229-p14-tie-2026-11-20):
-                       // it moves to created_at ascending (the rule collection_id will follow) only after
-                       // P1.2's production census (nexus-p2m1x.2) shows no tuple where a legacy slug is
-                       // older than its conformant sibling. Until then do not change this order.
-                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.asc())
+                       // Version dominates (a slug at v2 beats a conformant v1). At equal version
+                       // the tie goes to the collection REGISTERED FIRST: created_at ascending, then
+                       // the name only so the order is total (the one unique column until P3.1;
+                       // equal stamps fall to it). nexus-p2m1x.4 (RDR-229 P1.4; Sam 2026-11-20, T2
+                       // nexus/sam-ruling-rdr229-p14-tie-2026-11-20, taken only after P1.2's census
+                       // showed no tuple whose legacy slug is older than its conformant sibling):
+                       // this was name ASC, a proxy that picked a '0'-leading slug over the conformant
+                       // name and made the winner depend on how a collection is NAMED. created_at is
+                       // a timestamptz stamped on insert and never rewritten by a re-registration. It
+                       // is first registration, except that a row backfilled by hygiene-001-6 carries
+                       // its first document's indexed_at, or the migration time, and a rename copies it
+                       // onto the successor, so it is the age of the collection's lineage. A later
+                       // sibling cannot change what an existing tuple resolves to, whatever it is
+                       // called. P3.1's collection_id (identity) replaces created_at here with the
+                       // same meaning, and TargetSelection (reembed) orders the same way.
+                       // An ordering, not a parse of the name (RDR-204, CollectionParseGateTest).
+                       // Consumers read the returned row's model_version (HttpCatalogClient.collection_for)
+                       // or only its existence (_tuple_registered); both siblings carry the same version
+                       // at a tie, and the client re-renders the name from owner_id itself.
+                       // CatalogRepositoryTest pins the tie, the flip, the total order and the D5 case.
+                       .orderBy(COL_VERSION_NUM.desc(), F_COL_CRTAT.asc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
