@@ -43,17 +43,8 @@ above -- still declared there is correct, not stale -- and stays exactly where
 it is until moved back deliberately.
 
 ---
-## Awaiting the next release (pinned: v8.5.2)
+## Awaiting the next release (pinned: v8.5.3)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/skills/nexus/SKILL.md`: a "Where a note goes" table (identity/<id> is a seat's own standing context, project T2 is for facts other sessions need, memory files are Sam's rules, the threads board is the public view) and the one line on writing `memory_put(project="identity/<id>", ...)` (RDR-253 Step 6 part 3, nexus-hczdo).
-- `conexus/skills/orchestration/SKILL.md`: a line telling a long job or wait started by hand to register itself as work its session owns (`nx identity work register|done --kind wait --ref <what>`), nexus-hczdo.
-- `conexus/hooks/scripts/compact_checkpoint.py`: a comment only: ready beads and memory titles are not kept because a session loads them with `nx brief beads` and `nx brief memory` (SessionStart no longer injects them), nexus-hczdo.
-
 ## Deferred to the next client release
-- `conexus/hooks/scripts/compact_checkpoint.py`: PreCompact, and the new SessionEnd (matcher `clear`) `end` mode, write the identity-scratch resume pointer (RDR-253 Step 6 part 2) through `_resume_pointer.py`; needs `nx scratch --scope identity`, which 8.5.2's nx does not have, so it ships with the next client release.
-- `conexus/hooks/scripts/_resume_pointer.py`: new. One line tagged `resume-pointer` (thread, worktree, state, waiting_on; at most 1 KB), put before the earlier pointers are deleted; any failure logs one line and writes nothing else.
-- `conexus/hooks/hooks.json`: a SessionEnd group with matcher `clear` running `compact_checkpoint.py end` (15 s).
-- `conexus/README.md`: the hook table's new SessionEnd row and the PreCompact note.
-- `conexus/README.md`: the SessionStart progressive-disclosure change: the `session-context` hook row now says what it prints, and the `brief` MCP tool joins the tool catalog (46 core tools, 56 for agents), auto-approved like the other read-only tools.
