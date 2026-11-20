@@ -264,7 +264,10 @@ def ci_ack_cmd(sha: str, topic: str) -> None:
         raise click.ClickException(f"{sha!r} is not a commit sha: give 7 to 40 hex digits")
     if not _OWNER_TOPIC.fullmatch(topic):
         raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in nexus-develop--owner")
-    identity = ci_ack.own_identity()
+    try:
+        identity = ci_ack.counted_identity()
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     if not identity:
         raise click.ClickException(ci_ack.NO_IDENTITY_MESSAGE)
     subspace = f"board/ci/{topic}"

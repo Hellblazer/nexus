@@ -46,6 +46,9 @@ class GroupEnv:
     #: lookup is not made (a name then resolves only through the owner rows' own stamped pairs).
     alias_lookup: Callable[[str], Mapping[str, Any]] | None = None
     session_lookup: Callable[[str], Mapping[str, Any]] | None = None
+    #: The identity record route (``IdentityClient.show``), read for the parent of a delegated identity: the engine counts
+    #: a delegated child's ack for its parent, and the session route names only the child.
+    identity_lookup: Callable[[str], Mapping[str, Any]] | None = None
 
     @classmethod
     def real(cls) -> GroupEnv:
@@ -54,10 +57,12 @@ class GroupEnv:
 
             return HttpTupleStore()
 
-        from nexus.tuple_directory import identity_alias_lookup, identity_session_lookup  # noqa: PLC0415 — deferred: CLI startup cost
+        from nexus.tuple_directory import (  # noqa: PLC0415 — deferred: CLI startup cost
+            identity_alias_lookup, identity_record_lookup, identity_session_lookup)
 
         return cls(client=GroupsClient.from_config(), caller=groups.own_identity_id, tuples=tuples,
-                   alias_lookup=identity_alias_lookup(), session_lookup=identity_session_lookup())
+                   alias_lookup=identity_alias_lookup(), session_lookup=identity_session_lookup(),
+                   identity_lookup=identity_record_lookup())
 
 
 def _env(ctx: click.Context) -> GroupEnv:
@@ -350,7 +355,9 @@ def reds_from(rows: list[Any], resolver: AckResolver | None = None) -> list[dict
         episode, cleared = red.rows, red.cleared
         start = episode[0][0]
         end = cleared if cleared is not None else (reds[index + 1].rows[0][0] if index + 1 < len(reds) else None)
-        tips = {(r.dims or {}).get("sha") for _, r, _ in episode} | {s for _, _, b in episode for s in (b.get("suspects") or [])}
+        # Red tips only: the sha of each owner row. A suspect an owner row names may be untested or green, and the engine
+        # counts an ack of a red tip alone.
+        tips = {(r.dims or {}).get("sha") for _, r, _ in episode}
         acked: tuple[datetime, Any] | None = None
         acked_alias: str | None = None
         acked_by: str | None = None
@@ -405,7 +412,7 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
     if not topics:
         raise click.ClickException(f"{name} serves no topic, so it has no owner post to read")
     store = env.tuples()
-    resolver = AckResolver(env.alias_lookup, env.session_lookup)
+    resolver = AckResolver(env.alias_lookup, env.session_lookup, env.identity_lookup)
     reds: list[dict[str, Any]] = []
     for topic in topics:
         subspace = f"board/ci/{topic}--owner"
@@ -417,7 +424,8 @@ def ack_times_cmd(ctx: click.Context, name: str, as_json: bool) -> None:
             click.echo(f"note: stopped at {len(rows)} rows of {subspace}; later reds are not shown", err=True)
         reds.extend({"topic": topic, **red} for red in reds_from(rows, resolver))
     if resolver.unresolved:
-        click.echo(f"note: {resolver.unresolved} acks could not be resolved; counts may be low", err=True)
+        n = resolver.unresolved
+        click.echo(f"note: {n} ack{'s' if n != 1 else ''} could not be resolved; counts may be low", err=True)
     if as_json:
         click.echo(json.dumps({"group": name, "reds": reds}, indent=2, sort_keys=True))
         return

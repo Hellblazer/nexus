@@ -11,8 +11,9 @@ in ``from``, whatever the caller typed. :func:`stamp_ack_from` does it in ``Http
 ``out`` and ``out_replace`` send from (so ``nx tuple out``, the ``tuple_out`` MCP tool and ``nx ci ack`` alike), and
 :func:`stamp_ack_reply` does it for a reply an ``ack`` writes as it consumes a claim. The identity is the token
 record's, as ``nx group`` reads it: no session-bound fallback, so a child that shares its parent's session but holds no
-token of its own is refused, not signed as the parent. A caller with no identity is refused rather than written under a
-name.
+token of its own is refused, not signed as the parent. A delegated identity (a ``claude -p`` child with a token of its
+own) is signed as its PARENT, because the engine maps the child's session stamp to the parent (:func:`counted_identity`).
+A caller with no identity is refused rather than written under a name.
 """
 from __future__ import annotations
 
@@ -47,6 +48,37 @@ def own_identity() -> str:
     return str(record.identity)
 
 
+def identity_view(identity: str) -> Mapping[str, Any]:
+    """The identity service's record of *identity* (``IdentityClient.show``): ``kind``, and ``parent`` for a delegated one.
+    A seam: a test replaces it."""
+    from nexus.tuple_directory import identity_record_lookup  # noqa: PLC0415 -- deferred: leaf import cost on the write path
+
+    return identity_record_lookup()(identity)
+
+
+def counted_identity() -> str:
+    """The identity an ack from this process counts for, or "" when it holds none: :func:`own_identity`, except that a
+    delegated identity (a ``claude -p`` child) is mapped to its parent, as the engine maps the child's session stamp
+    (``BoardReads.identities``). Only a delegated child pays the record read: a seat's token record says nothing about
+    its kind, so the identity service is asked, and a seat's answer (or a failed read of it) leaves the identity as it
+    is. A delegated identity whose parent cannot be read is refused (``ValueError``): its own id would be a label the
+    engine does not count."""
+    own = own_identity()
+    if not own:
+        return ""
+    try:
+        view = identity_view(own)
+    except Exception:  # noqa: BLE001 -- unreadable: the label stays the token's own id, which is right for a seat
+        return own
+    if view.get("kind") != "delegated":
+        return own
+    parent = str(view.get("parent") or "")
+    if not looks_like_identity_id(parent):
+        raise ValueError(f"{own} is a delegated identity and its parent could not be read, so an ack from it cannot be "
+                         "signed as the identity the engine counts it for; ack from the parent's session")
+    return parent
+
+
 def is_ack_write(subspace: str, dims: Mapping[str, str] | None) -> bool:
     """True for a ``kind=ack`` row on a ``board/ci/<topic>--owner`` subspace."""
     return bool(OWNER_SUBSPACE.fullmatch(subspace)) and (dims or {}).get("kind") == "ack"
@@ -60,7 +92,7 @@ def stamp_ack_from(subspace: str, dims: dict[str, str] | None) -> dict[str, str]
     if not is_ack_write(subspace, dims):
         return dims
     assert dims is not None
-    identity = own_identity()
+    identity = counted_identity()
     if not identity:
         raise ValueError(NO_IDENTITY_MESSAGE)
     typed = dims.get("from")
