@@ -1281,7 +1281,7 @@ class TestETLFidelity:
         assert cat.find_collection("knowledge", "p213-no-such-subject", "bge-base-en-v15-768") is None
 
     def test_a_grandfathered_slug_with_a_blank_version_is_answered_as_it_is(self, cat) -> None:
-        """RDR-229 P2.8, engine 0.1.200 (RDR-229 line <TBD>): the lead's row through the real engine
+        """RDR-229 P2.8, engine 0.1.200 (RDR-229 Technical Design item 11 (legacy_grandfathered goes, D5): "the P2.8 test for that row is not yet written"): the lead's row through the real engine
         route: ``legacy_grandfathered`` true, a non-conformant slug name, an empty ``model_version``.
         ``for_tuple`` answers it; the client answers the row as it is with no version, and only a
         bump refuses, naming both fixes."""
