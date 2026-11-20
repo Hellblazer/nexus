@@ -554,7 +554,10 @@ lapse.
 it to `~/.config/nexus/identity/<claude pid>.<startedAt>.token` (mode 0600):
 one file per process start, so two processes that resume one session id
 never share a file, and a superseded process's children never read the new
-holder's token. The file holds the identity, the generation, the token and when
+holder's token (except across an in-place `/restart`: the Claude pid stays, the
+registry's `startedAt` changes and the new generation's token is in a new file;
+the file name comes from the registry's current `startedAt`, read on every
+call, so a process that outlives the restart reads the new file). The file holds the identity, the generation, the token and when
 it expires, the current session id and every session id the process has held
 under that identity (a cross-seat switch starts the list again), the process's
 pid, `startedAt`, `proc_start` and host, and the registry directory the
@@ -573,7 +576,10 @@ every new process start (`startup`, and a `resume`, `/restart` or `--revive`
 in a new process), the new MCP server reads the token file of its own Claude
 process, found by its nearest Claude ancestor's pid and that process's
 registry `startedAt` (`nexus_rdr/253-research-9` (c)), polling once a second
-for up to 30 seconds, since the hook and the server start together; it does
+for up to 30 seconds, since the hook and the server start together (a server that
+outlives an in-place `/restart` re-resolves that name on every call, and its lease on
+every heartbeat, so it follows the registry's new `startedAt` to the new file;
+nexus-hczdo); it does
 not rely on the marker, which a new server would discard
 (`nexus_rdr/253-research-8` (b)). If the file has not appeared it runs
 unbound and keeps checking on its heartbeat. On every heartbeat the server
@@ -638,10 +644,15 @@ while its process's token file now names the new one.
 A Bash child's `nx` sends the token of its nearest Claude ancestor's token
 file, and only on the requests the engine fences: memory writes, mailbox
 claims (`in`, `inp`, `ack`, `nack`, `renew`, `release`) and identity-scope
-scratch. It also sends it on a mailbox send, so the send's stamp comes from the
+scratch writes (an identity-scope read is open at the engine and goes without
+it). It also sends it on a mailbox send, so the send's stamp comes from the
 identity's current binding. Every other request, reads included, goes without
-it, because a token the engine cannot resolve is a 401 on any route. A process
-with no Claude ancestor, or an ancestor with no token file, sends none.
+it, because a token the engine cannot resolve is a 401 on any route. The token
+file is named by the registry's current `startedAt`, read on every call; a
+registry or token file that cannot be read is read once more after about 10 ms,
+and a process that still finds none sends none (it never falls back to the name
+an earlier call found). A process with no Claude ancestor, or an ancestor with no
+token file, sends none.
 
 Before it sends a fenced write, a process whose session id is not one its token
 file lists asks the resolver whether that session still belongs to the
@@ -655,7 +666,9 @@ server: it never sees the new session id after a cross-seat `/resume`, so its
 spawn-time session id says nothing about its identity, and it is not checked.
 
 On an HTTP 401 for a request that carried a token, the client re-reads the
-token file once and resends if the file now holds a different usable token. A
+token file once and resends if the file now holds a different usable token (the
+T2 stores, `nx group` and the identity-scope scratch writes; the session-token and
+bearer heals of the scratch store come after it, never before). A
 send that still gets a 401 is resent once without the token, since the stamp is
 a courtesy and the mail is not. A claim, or any other fenced write, is never
 resent without a token, which JDR-002's 401 fallback would otherwise do. On a
@@ -1178,6 +1191,13 @@ None.
 - Every policy-table row, including startup with no seat, a non-seat `-n`
   (ephemeral), a live seat (ephemeral with the holder), resume of an unindexed
   id, `compact`, a lapsed seat on `clear`, and `/branch`.
+- A long-lived process (the MCP server) across an in-place `/restart`: its
+  identity-scope scratch put and list after the generation bump use the new
+  token file (the old file stays on disk and unexpired, so a stale name is
+  answered `409 generation_superseded` on a write), a registry mid-write is read
+  once more, an identity-scope read carries no token, and a write's 401 re-reads
+  the file once (tests/identity/test_work_engine_rows.py and
+  tests/identity/test_token_header_restart.py; nexus-hczdo).
 - First write after `/clear` succeeds; a Bash child from before the `/clear`
   still writes; a freshly started MCP server reads its token file.
 - Each restart mode (exit and relaunch, in-place `/restart`, `--revive` after a
@@ -1352,3 +1372,4 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-19: wording matched to the reviewed client fix-later round (grant 3; reviews T2 `nexus/review-fix-later-client-2026-11-19-r1` and `nexus/critique-fix-later-client-2026-11-19-r1`): the Cost line said one refresh every half hour; the lease and the delegated child refresh once a token has under 50 minutes of its hour left, about every ten minutes.
 - 2026-11-19: wording matched to the reviewed engine 0.1.198 promote code (nexus-hczdo B4b, 71f0e972a, f85aa29eb; grant 3; reviews T2 `nexus/review-d288f22ec-rdr252-alias-b4b-2026-11-19` and `nexus/critique-d288f22ec-rdr252-alias-b4b-2026-11-19`): promote retitles the threads entry in the same transaction on both routes; on a taken title rename refuses and promote keeps the old title (`board_retitle: title_taken`).
 - 2026-11-19: wording matched to the reviewed lease fork-race fix (grant 3; bead nexus-hczdo, develop run 44659989781; reviews T2 `nexus/review-0feb06c39-nexus-hczdo-2026-11-20-r1` and `nexus/critique-forkrace-2026-11-19-r1`): an unknown registry session id gets one renewal of grace before its `fork` row, so a `/clear` whose hook binds within it leaves no `fork` row.
+- 2026-11-20: wording matched to the reviewed token-file fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/review-token-file-restart-2026-11-20-r1` and `nexus/critique-token-file-restart-2026-11-20-r1`): the token file name comes from the registry's current `startedAt`, read on every call, so a process that outlives an in-place `/restart` follows it to the new file; a registry or token file that cannot be read is read once more after about 10 ms; the identity token goes only on identity-scope scratch writes, and a write's 401 re-reads the file once; Test Plan line for the long-lived process across an in-place `/restart`.
