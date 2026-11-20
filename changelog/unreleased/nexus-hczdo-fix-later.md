@@ -5,3 +5,4 @@
 - **The MCP server reaches its identity lease through a guarded seam.** A failure to import the lease is logged and no longer reaches server start, the T1 handoff tick or the exit path (nexus-hczdo).
 - **An aura's group gate follows the engine's verdict that a group is no longer live,** including a group whose `ends` the client cannot parse (nexus-igea9).
 - **`nx group join` and `nx group list` print one line and exit 1 over a malformed membership or roster row,** instead of a KeyError traceback (nexus-igea9).
+- A `/clear` no longer leaves an extra `fork` row in the identity's binding log. Claude writes the new session id before the SessionStart hook binds it, and the MCP server's `/branch` check could fork in that gap. An unknown session id now gets one renewal of grace, so a `/branch` gets its `fork` row about a minute later than before.
