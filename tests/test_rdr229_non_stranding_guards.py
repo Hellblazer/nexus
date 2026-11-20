@@ -25,6 +25,7 @@ pytest plugin kept outside the tree makes each name-parse or name-derivation fun
 and the test goes red; the red runs are on the bead's notes): the recovery bundle test
 ``nexus.corpus.parse_conformant_collection_name`` and ``nexus.corpus.split_candidate_collection_name``, the
 migrate-fallback test ``nexus.corpus.voyage_model_for_collection``, the indexer test
+``nexus.corpus.is_conformant_collection_name`` (the census's migration-source site on the registration shape),
 ``nexus.indexer._migration_source_candidates`` (the name-derived discovery of a legacy collection that has no
 row to find it by) and ``nexus.corpus.resolve_row_preferred`` (the row-else-name fallback).
 
