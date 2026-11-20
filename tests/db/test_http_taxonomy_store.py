@@ -1591,7 +1591,7 @@ class TestPersist:
             return {"removed": 42}
 
         monkeypatch.setattr(client, "_post", _post)
-        assert client.prune_projection_below("code__", 0.7) == 42
+        assert client.prune_projection_below("code__", 0.7) == (42, None)
         assert calls == [("/assignments/prune_projection",
                           {"source_collection_prefix": "code__", "min_similarity": 0.7})]
 
