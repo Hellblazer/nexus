@@ -485,7 +485,7 @@ def test_a_group_gated_aura_loads_through_the_real_wiring_and_fires_with_me_fill
     first_loader = loader
     assert subs.aura_topics() == [owner_subspace] and loader.loaded_identity == "i7"
     assert _ran(before) == 1
-    ack = f" Ack: post kind=ack sha={_RED_SHA} to {owner_subspace}."
+    ack = f" Ack: nx ci ack {_RED_SHA[:7]}."
     assert f"state: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n" in _entry(title), "me was i7"
     assert [text for text, _meta in sender.calls] == [channel_notice(aura, owner_subspace, "o1")]
     assert sorted(set(calls)) == ["GET /v1/group/push-train", "GET /v1/identity/i7/memberships"], "one read of each"
@@ -581,7 +581,7 @@ def test_a_server_that_starts_with_no_token_loads_the_gated_aura_when_the_lease_
     assert loader.loaded_identity == "i7" and loader.decisions["ci_develop_red"].loaded
     assert sorted(set(calls)) == ["GET /v1/group/push-train", "GET /v1/identity/i7/memberships"]
     assert _ran(before) == 1, "the owner row ran the procedure once"
-    ack = f" Ack: post kind=ack sha={_RED_SHA} to {owner_subspace}."
+    ack = f" Ack: nx ci ack {_RED_SHA[:7]}."
     assert f"state: Develop is red at 8b30c16, first red in your push. Diagnose it.{ack}\n" in _entry(title), "me was i7"
     assert [text for text, _meta in sender.calls] == [channel_notice(load_aura("ci_develop_red", cwd=None), owner_subspace, "o1")]
 
@@ -617,7 +617,7 @@ def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(rep
             consumed_by=None, expires_at=None, created_at=None, sender_session=None, sender_session_known=True,
         )
 
-    ack = f" Ack: post kind=ack sha={sha} to {owner_subspace}."
+    ack = f" Ack: nx ci ack {sha[:7]}."
     before = len(_REAL_RUNS)
     rt.offer(owner_subspace, [owner_row("t1", "i7", None, "earliest_suspect", False)])
     _settle(rt)
