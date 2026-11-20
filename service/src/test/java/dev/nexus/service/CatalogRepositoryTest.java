@@ -2268,6 +2268,58 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * nexus-p2m1x.13 (engine 0.1.200), the case the test above cannot exercise: there the grandfathered
+     * row is the newest and highest-named, so it loses with the {@code legacy_grandfathered = false}
+     * filter on or off. Here it is OLDER and LOWER-named than the conformant row, so the filter drop
+     * moves the winner: before it, the conformant row won (the grandfathered one was not a candidate);
+     * now the equal-version tie goes to the lexically lower name, which is the grandfathered row (the
+     * documented limit of the name proxy, as for a '0'-leading slug). The census found no tuple like
+     * this on either production tenant (0 winner changes, T2 nexus_rdr/229-p1.2-census-2026-11-20),
+     * and the held created_at-ascending tie would also pick the older row, so both orderings agree.
+     */
+    @Test @Order(60)
+    void collectionForTuple_anOlderLowerNamedGrandfatheredRowWinsTheTieOnceTheFilterIsGone() {
+        String tenant = "p2m1x13-older-gf-tenant";
+        String conformant = "code__1-45__voyage-code-3__v1";
+        String grandfathered = "code__0grand-p2m1x13__voyage-code-3__v1";
+        registerCollAt(tenant, grandfathered, "1-45", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, conformant, "1-45", OWN_MODEL, "v1", "2026-03-01T00:00:00Z", false);
+        assertThat(grandfathered.compareTo(conformant)).as("guard: it sorts below the conformant name").isLessThan(0);
+
+        assertThat(repo.collectionForTuple(tenant, "code", "1-45", OWN_MODEL).get("name"))
+            .as("the older, lower-named grandfathered row is the tuple's winner").isEqualTo(grandfathered);
+    }
+
+    /**
+     * nexus-p2m1x.13: {@code collectionForTuple} and the re-embed target selection drop the
+     * {@code legacy_grandfathered} filter together, so they name the same winner on every tuple,
+     * a grandfathered row included (RDR-229 P2.8, the lead's condition from the Phase 1 critique).
+     */
+    @Test @Order(60)
+    void collectionForTuple_andTheReembedTargetSelectionPickTheSameWinnerWithAGrandfatheredRow() {
+        String tenant = "p2m1x13-parity-tenant";
+        registerCollAt(tenant, "code__0grand-parity__voyage-code-3__v1", "1-46", OWN_MODEL, "v1",
+            "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, "code__1-46__voyage-code-3__v1", "1-46", OWN_MODEL, "v1",
+            "2026-03-01T00:00:00Z", false);
+        registerCollAt(tenant, "notes-parity-only", "field-parity", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, "code__zgrand-parity__voyage-code-3__v3", "1-47", OWN_MODEL, "v3",
+            "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, "code__1-47__voyage-code-3__v1", "1-47", OWN_MODEL, "v1",
+            "2026-03-01T00:00:00Z", false);
+        var rows = repo.listCollections(tenant, "code", null).stream()
+            .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
+
+        for (String owner : List.of("1-46", "field-parity", "1-47")) {
+            var forTuple = repo.collectionForTuple(tenant, "code", owner, OWN_MODEL);
+            var selected = dev.nexus.service.reembed.TargetSelection.select(rows, "code", owner, OWN_MODEL);
+            assertThat(forTuple).as("guard: the tuple answers for " + owner).isNotNull();
+            assertThat(selected).as("same winner for " + owner)
+                .isEqualTo(new dev.nexus.service.reembed.TargetSelection.Live((String) forTuple.get("name")));
+        }
+    }
+
+    /**
      * nexus-p2m1x.13 (engine 0.1.200): the {@code legacy_grandfathered = false} predicate is gone from
      * {@code collectionForTuple}, so a flagged row is a candidate like any other. Ordering is unchanged
      * (highest {@code model_version}, then the first registered, P1.4): a grandfathered row alone on its
