@@ -340,14 +340,15 @@ class EmbeddingProfileMismatchError(RuntimeError):
         )
 
 
-class CollectionRegistryUnreadableError(RuntimeError):
+class CollectionRegistryUnreadableError(click.ClickException, RuntimeError):
     """A write could not read the catalog row for the collection it names
     (RDR-229 P2.8, item 1's Unreadable outcome).
 
     A read falls back to the name resolution when the registry cannot be read,
     but a write must not: the subject's collection may be registered under a
     label the render does not produce, and writing to the rendered name would
-    split the subject across two collections.
+    split the subject across two collections. A ``ClickException``, so a CLI
+    writer (``nx index md``/``pdf``, ``nx dt index``) exits 1 with the message.
     """
 
 
