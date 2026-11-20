@@ -403,6 +403,18 @@ _PEER_NAMES = (
     "restarts", "restarted", "restarting", "ready ask", "all-clear", "roll call", "go comes", "their",
     "reconnect", "reconnects", "reconnected", "resumes", "resumed", "compaction", "compacts", "compacted",
 )
+#: A peer named only as the recipient of the session's own step ("send it to halcyon", "the summary for marlowe")
+#: is not the wake: the step is the session's, and nothing will arrive for it. Not after a wait word ("waiting for
+#: halcyon" is a wait) and not possessive ("halcyon's window" is theirs). Turn-end census, 986abbe7 11-19.
+_RECIPIENT_PEER = re.compile(
+    r"(?<!wait )(?<!waits )(?<!waiting )(?<!waited )\b(?:to|for)\s+(?:the\s+)?(?:"
+    + "|".join(re.escape(n) for n in ("bob", "linda", "wren", "halcyon", "kimi", "marlowe", "tamsin", "steve",
+                                      "steven", "kestrel", "elsinore", "labrun", "peer", "peers"))
+    + r")\b(?!'s)",
+    re.I,
+)
+#: The session as the actor of the clause: only then is a peer after "to"/"for" its step's recipient.
+_FIRST_PERSON = re.compile(r"\b(?:i|i'll|i'm|i've|i'd|we|we'll|we're|me|my)\b|^(?:after that|next|then)\b", re.I)
 _PEER = re.compile(
     r"\b(?:" + "|".join(re.escape(n) for n in _PEER_NAMES) + r")\b"
     # "the go" is a peer's go-ahead, but "the go build" is the Go toolchain.
@@ -454,7 +466,12 @@ _PROMISE_VERBS = (
 _PROMISE = re.compile(
     r"\b(?:i'll|i will|i'm going to|i am going to|i shall)\s+(?:then\s+|also\s+|next\s+)?(?:" + _PROMISE_VERBS + r")\b"
     r"|\bcheck(?:ing)? back\b"
-    r"|^(?:next|then)\b[:,]?\s+(?:i|we)\s+\w+"
+    r"|^(?:next|then)\b[:,]?\s+(?:i|we)(?:'m|'re)?\s+\w+"
+    # Present-tense own action (turn-end census, T2 nexus/turn-end-owned-idle-census-2026-11-19): "I'm doing the
+    # switch myself", "Next I'm starting Step 5". A negation ("I'm taking no action") is a restraint, not a step.
+    r"|(?<!anything )(?<!everything )(?<!what )\b(?:i'm|i am)\s+(?:now\s+|also\s+|next\s+)?(?:doing|starting|writing|running|building|fixing|drafting|"
+    r"taking|picking up|working on|moving on to|beginning|checking)\b(?!\s+(?:no|nothing|none)\b)"
+    r"|^after that,? (?:comes?|is)\b"
     r"|^next\b[^.]{0,30}\b(?:is|are|comes)\b"
     r"|\bis next\b"
     r"|^moving on to\b"
@@ -566,7 +583,7 @@ def evaluate_text(text: str, ci_covered: "Callable[[str], bool] | None" = None) 
         if _PAST_REPORT.search(clause):
             past += 1
             continue
-        if _PEER.search(clause):
+        if _PEER.search(_RECIPIENT_PEER.sub(" ", clause) if _FIRST_PERSON.search(clause) else clause):
             peer += 1
             chain = 1 if _WAIT_WORD.search(clause) else 0
             gap = 0
@@ -750,8 +767,8 @@ def block_reason(cls: str, clause: str) -> str:
            "until-loop for another run, " if cls == CLASS_CI_WAIT else
            "a Monitor or a background Bash until-loop for a run or CI, ")
         + "ScheduleWakeup or CronCreate for a timed step. "
-        f"{do_now}If the wake is someone else (the user, a peer, a notification), say "
-        "plainly in one sentence who it is, then end the turn."
+        f"{do_now}Never start work the user held back or asked you to wait on. If the wake is someone else (the "
+        "user, a peer, a notification), say plainly in one sentence who it is, then end the turn."
     )
 
 

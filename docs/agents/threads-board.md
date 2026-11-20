@@ -13,6 +13,8 @@ Each field is one line, `key: value`, and belongs to the nearest `#`, `##` or `#
 | `due:` | `YYYY-MM-DD`, or `YYYY-MM-DDTHH:MM[:SS[.f]]` with an optional `Z` or `±HH:MM` | console, SessionStart, the PreCompact checkpoint |
 | `worktree:` | an absolute path, or another stable id for where the work lives: an artifact slug or a file path | console, the PreCompact checkpoint |
 
+A thread whose `waiting_on:` is `none` is one you are working on now. When it is finished, delete the block; when it waits on someone or something, name that in `waiting_on:`. A stale `none` (an umbrella lane, a `(done)` thread left in place) reads as open work to the checkpoint and to anyone reading the board: in the turn-end census of 2026-11-12..19, 1999 turn ends showed a `none` thread and a sample of 14 long idles held no real miss (T2 `nexus/turn-end-owned-idle-census-2026-11-19`).
+
 ## `due:` (nexus-ct74m)
 
 When the thread wants attention again: a measurement window, a recount date, a deploy reading. Write it instead of relying on a session-only cron or a reminder in the conversation, both of which a restart or a `/clear` loses.
