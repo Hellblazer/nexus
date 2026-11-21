@@ -37,14 +37,18 @@ class CollectionLifecycleWritersPinTest {
     private static final Map<String, List<String>> WRITERS = Map.of(CATALOG_REPOSITORY, List.of(
         "insert  upsertCollection: a new row, state from the request (live by default); the DO UPDATE arm leaves "
             + "lifecycle_state out, so an existing row's state never changes. No eviction needed.",
-        "insert  renameCollectionTxn target upsert: copies the SOURCE row's state onto the new name and sets it in "
-            + "its DO UPDATE arm; renameCollection evicts oldName and newName after commit, and the state is not "
-            + "flipped to or from quarantine (rename refuses a quarantine source and target).",
         "update  sweepGhostsAndMarkDormant, live to dormant: live and dormant only, never quarantine, so an "
             + "is-quarantine answer is unchanged; the sweep evicts the rows it deletes.",
         "update  sweepGhostsAndMarkDormant, dormant to live: same.",
         "insert  importCollectionsBatch: ON CONFLICT DO NOTHING, fresh rows only (an import never overwrites).",
-        "insert  doImportCollection: the single-row form of the same."));
+        "insert  doImportCollection: the single-row form of the same."),
+        "dev/nexus/service/db/CollectionRename.java", List.of(
+        "insert  retireAndRegister target upsert (RDR-229 P3.8 moved it out of renameCollectionTxn): copies the SOURCE "
+            + "row's state onto the new name and sets it in its DO UPDATE arm; renameCollection evicts oldName and newName "
+            + "after commit, and the state is not flipped to or from quarantine (rename refuses a quarantine source and target)."),
+        "dev/nexus/service/db/CollectionMint.java", List.of(
+        "insert  mint (RDR-229 P3.8): a NEW row under a freshly minted label, ON CONFLICT DO NOTHING, so no cached row "
+            + "exists to go stale; the state is live on the client route and never quarantine (refused before the insert)."));
 
     @Test
     void everyWriterOfLifecycleStateIsListedWithItsEvictionCheck() throws IOException {

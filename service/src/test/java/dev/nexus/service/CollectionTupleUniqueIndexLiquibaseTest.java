@@ -52,10 +52,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * FORCE ROW LEVEL SECURITY. The counter is a plain SECURITY INVOKER SQL function that never lifts FORCE (a boot in the
  * cloud must not take ACCESS EXCLUSIVE on the registry, {@link #aWalkWithADuplicateTakesNoAccessExclusiveLock}); it
  * reads every tenant's rows through D2's owner-read policy {@code catalog_collections_owner_read}
- * (RDR-229 D2, changeset vectors-065), which this changeset does not create. D2 is not on this branch, so the tests
- * install {@link #standInOwnerRead}, the policy by the datamove fixture marlowe's move test uses, and
- * {@link #theCounterReadsEveryTenantThroughTheOwnerReadPolicy} pins both halves: blind without the policy, every
- * tenant with it. Rows are seeded as superuser, which bypasses RLS, as an engine writing through a tenant scope does.
+ * (RDR-229 D2, changeset vectors-065, included before this one), which this changeset does not create.
+ * {@link #theCounterReadsEveryTenantThroughTheOwnerReadPolicy} pins both halves: it drops the policy to show the
+ * counter blind, then restores it to show every tenant. Rows are seeded as superuser, which bypasses RLS, as an engine writing through a tenant scope does.
  */
 class CollectionTupleUniqueIndexLiquibaseTest {
 
@@ -154,7 +153,6 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             }
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
-                standInOwnerRead(adminDs);
                 try (Connection su = pg.createConnection("")) {
                     registerMove(su, MOVE, true);
                     seed(su, "t1", "docs__a", "docs", "owner-1", MODEL, "", "live", "");
@@ -196,6 +194,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             }
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
+                dropOwnerRead(pg);
                 try (Connection su = pg.createConnection("")) {
                     // Two tenants, each with one duplicated tuple; a third tuple that is NOT a duplicate (a
                     // quarantine sibling, a superseded row and a different model_version do not collide).
@@ -217,7 +216,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                         .isEqualTo(0L);
                 }
 
-                standInOwnerRead(adminDs);
+                restoreOwnerRead(adminDs);
 
                 try (Connection admin = adminDs.getConnection()) {
                     DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
@@ -251,7 +250,6 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             }
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
-                standInOwnerRead(adminDs);
                 try (Connection su = pg.createConnection("")) {
                     registerMove(su, MOVE, true);
                     seed(su, "t1", "docs__a", "docs", "owner-1", MODEL, "", "live", "");
@@ -350,7 +348,6 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             }
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
-                standInOwnerRead(adminDs);
                 try (Connection admin = adminDs.getConnection()) {
                     assertThat(duplicates(admin)).isEqualTo(0L);
                 }
@@ -622,6 +619,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                     CollectionMintSupport.insertLiveRow(ctx, "t1", "id-fn-a", "owner-id-fn-a", MODEL, 500L);
                     CollectionMintSupport.insertLiveRow(ctx, "t2", "id-fn-b", "owner-id-fn-b", MODEL, 900L);
                 }
+                dropOwnerRead(pg);
                 try (Connection admin = adminDs.getConnection()) {
                     DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
                     assertThat(CollectionMintSupport.callTaken(ctx, 900L))
@@ -630,7 +628,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                         .as("no policy: the floor is the caller's alone").isLessThan(900L);
                 }
 
-                standInOwnerRead(adminDs);
+                restoreOwnerRead(adminDs);
 
                 try (Connection admin = adminDs.getConnection()) {
                     DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
@@ -682,19 +680,23 @@ class CollectionTupleUniqueIndexLiquibaseTest {
 
     // ── fixtures ────────────────────────────────────────────────────────────────
 
-    /**
-     * STAND-IN for D2's changeset vectors-065 (RDR-229 owner-is-source), which is not on this branch: the owner-read
-     * SELECT policy {@code catalog_collections_owner_read} for the migration role, by the same datamove fixture and
-     * guard marlowe's {@code Rdr229ReownRepoStemsMoveIntegrationTest.standIn} uses. When vectors-065 lands the
-     * migration walk creates the policy itself; swap this for the real changeset and delete it.
-     */
-    private static void standInOwnerRead(HikariDataSource adminDs) throws Exception {
+    /** Drops vectors-065's owner-read policy, so a test can show what the migration role reads without it. */
+    private static void dropOwnerRead(PostgreSQLContainer<?> pg) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.dropPolicyIfExists(su, CATALOG_COLLECTIONS, "catalog_collections_owner_read");
+            assertThat(PgCatalogProbes.policyExists(DSL.using(su, SQLDialect.POSTGRES), "nexus", "catalog_collections",
+                "catalog_collections_owner_read")).as("the owner-read policy is gone").isFalse();
+        }
+    }
+
+    /** Puts the owner-read policy back after {@link #dropOwnerRead}, by the datamove fixture marlowe's move test uses. */
+    private static void restoreOwnerRead(HikariDataSource adminDs) throws Exception {
         try (Connection admin = adminDs.getConnection()) {
             PgContainerHelper.runSuperuserTestChangelog(admin, "datamove/owner-read-policy/policy.xml",
                 "databasechangelog_test_ctuple_owner_read",
                 Map.of("driving_schema", "nexus", "driving_table", "catalog_collections"));
             assertThat(PgCatalogProbes.policyExists(DSL.using(admin, SQLDialect.POSTGRES), "nexus", "catalog_collections",
-                "catalog_collections_owner_read")).as("the stand-in policy is in place (the guard did not skip it)").isTrue();
+                "catalog_collections_owner_read")).as("the owner-read policy is back (the guard did not skip it)").isTrue();
         }
     }
 
@@ -705,6 +707,10 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             .set(DATA_MOVES.CHUNK_SIZE, 100).set(DATA_MOVES.SLEEP_MS, 0).set(DATA_MOVES.STATEMENT_TIMEOUT_MS, 60000)
             .set(DATA_MOVES.VERIFICATION, "the verification query of a move").set(DATA_MOVES.CHANGESET_ID, "test-fixture")
             .set(DATA_MOVES.COMPLETED_AT, completed ? java.time.OffsetDateTime.now() : null)
+            // vectors-067 registers MOVE itself (open): a test that needs it completed or open updates that row.
+            .onConflict(DATA_MOVES.LABEL).doUpdate()
+            .set(DATA_MOVES.COMPLETED_AT, completed ? java.time.OffsetDateTime.now() : null)
+            .setNull(DATA_MOVES.FAILED_AT)
             .execute();
     }
 

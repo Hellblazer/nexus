@@ -47,7 +47,7 @@ class CatalogCollectionsStubInsertRetirementTest {
     private static final Pattern CALL_SITE = Pattern.compile(Pattern.quote("insertInto(CATALOG_COLLECTIONS"));
 
     @Test
-    void exactlyFourSurvivingInsertSites() throws IOException {
+    void onlyTheRegistrationImportRenameAndMintInsertSitesSurvive() throws IOException {
         Path root = Path.of("src", "main", "java");
         assertThat(root).as("service/src/main/java must exist from the test's working directory").exists();
 
@@ -72,14 +72,13 @@ class CatalogCollectionsStubInsertRetirementTest {
 
         assertThat(hits)
             .as("insertInto(CATALOG_COLLECTIONS call sites under service/src/main/java — "
-                + "the seven RDR-204 stub-insert paths are retired; only the four "
-                + "registration/import paths carrying client-supplied attributes "
-                + "(CatalogRepository.upsertCollection, the rename copy, "
-                + "importCollectionsBatch, doImportCollection) may remain. A hit "
-                + "outside dev/nexus/service/db/CatalogRepository.java here means a "
-                + "stub-insert path was reintroduced.")
-            .hasSize(4)
-            .allMatch(f -> f.equals("dev/nexus/service/db/CatalogRepository.java"),
-                "every surviving call site must be in CatalogRepository.java");
+                + "the seven RDR-204 stub-insert paths are retired; only the registration/import paths carrying "
+                + "client-supplied attributes may remain: CatalogRepository.upsertCollection, importCollectionsBatch and "
+                + "doImportCollection, the rename copy (CollectionRename, RDR-229 P3.8) and the mint of a new collection "
+                + "from its attributes (CollectionMint, RDR-229 P3.8). Any other hit means a stub-insert path was reintroduced.")
+            .containsExactlyInAnyOrder(
+                "dev/nexus/service/db/CatalogRepository.java", "dev/nexus/service/db/CatalogRepository.java",
+                "dev/nexus/service/db/CatalogRepository.java", "dev/nexus/service/db/CollectionRename.java",
+                "dev/nexus/service/db/CollectionMint.java");
     }
 }
