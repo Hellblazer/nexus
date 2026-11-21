@@ -33,8 +33,8 @@ import java.util.function.UnaryOperator;
 /**
  * RDR-229 P3.1 B (nexus-p2m1x.17): a tenant restore under the dual write's NOT VALID CHECKs. A pre-P3.1 backup has names and
  * no ids, and the CHECK refuses every such row, so the load fills each id from the RESTORED registry row on
- * {@code (tenant_id, name)} before the insert ({@code RestoreIdFill}); a backup that already carries ids is refused until
- * P3.11 remaps them ({@code RestoreTwinGuard}).
+ * {@code (tenant_id, name)} before the insert ({@code RestoreIdFill}). A file's ids, where it has any, are never
+ * trusted: the restore refills every id from the restored registry by name.
  *
  * <p>Every case restores the committed old-release fixture ({@code rdr248-tenant-backup.nxtenant}, written before the id
  * columns existed) or a copy of it edited at the byte level, through the import routes, on a real Postgres.
@@ -233,15 +233,57 @@ class Rdr229RestoreIdFillTest {
         assertThat(env.count("chunks", tenant)).isZero();
     }
 
-    @Test
-    void aBackupWithANonNullIdTwinIsRefusedNamingP311() throws Exception {
-        ImportTestEnv.BackupFile file = fixture().withColumn("chunks", "collection_id", "bigint", bigint(4242)).seal();
-        String tenant = "t-p31-fill-twin";
-        JsonNode end = env.restore(env.newTenant(tenant), file);
+    // ── a file's ids are never trusted ──────────────────────────────────────────────────────────
 
-        assertThat(status(end)).startsWith("failed: restore_twin_ids_unsupported").contains("RDR-229 P3.11").contains("chunks.collection_id");
-        assertThat(env.count("catalog_collections", tenant)).as("the refusal writes nothing").isZero();
-        assertThat(env.count("chunks", tenant)).isZero();
+    @Test
+    void aFileWhoseIdsAreAnotherInstallationsIsRefilledByNameAndNeverTrusted() throws Exception {
+        ImportTestEnv.BackupFile poisoned = fixture()
+            .withColumn("chunks", "collection_id", "bigint", bigint(4242))
+            .withColumn("catalog_collections", "collection_id", "bigint", bigint(4243))
+            .withColumn("catalog_collections", "superseded_by_id", "bigint", bigint(4244)).seal();
+        String tenant = "t-p31-fill-poisoned";
+        JsonNode end = env.restore(env.newTenant(tenant), poisoned);
+        assertThat(status(end)).as(end.toString()).isEqualTo("committed");
+
+        Site chunks = new Site("chunks", "collection", "collection_id");
+        assertThat(num(ctx -> examined(ctx, tenant, chunks))).isPositive();
+        assertThat(num(ctx -> wrongIds(ctx, tenant, chunks))).as("chunks carry the registry rows' ids, not the file's 4242").isZero();
+        assertThat(num(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections")),
+            DSL.field(DSL.name("tenant_id"), String.class).eq(tenant),
+            DSL.field(DSL.name("collection_id"), Long.class).in(4243L, 4244L)))).isZero();
+        assertThat(num(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections")),
+            DSL.field(DSL.name("tenant_id"), String.class).eq(tenant),
+            DSL.field(DSL.name("superseded_by_id"), Long.class).isNotNull(),
+            DSL.field(DSL.name("superseded_by"), String.class).eq("")))).as("no live row takes a successor id").isZero();
+    }
+
+    @Test
+    void aBackupTakenOnThisEngineRestoresWithEveryIdTheRestoredRegistryRowsAndNeverTheFiles() throws Exception {
+        String source = "t-p31-fill-src";
+        JsonNode first = env.restore(env.newTenant(source), fixture());
+        assertThat(status(first)).as(first.toString()).isEqualTo("committed");
+        ImportTestEnv.BackupFile taken = env.export(env.anotherToken(source));
+        int chunkId = taken.columnIndex("chunks", "collection_id");
+        assertThat(allRows(taken, "chunks").stream().filter(r -> r.fields().get(chunkId) != null).count())
+            .as("non-vacuity: the file carries non-null twins").isPositive();
+        java.util.Set<Long> fileIds = new java.util.HashSet<>();
+        int registryId = taken.columnIndex("catalog_collections", "collection_id");
+        allRows(taken, "catalog_collections").forEach(r -> fileIds.add(ByteBuffer.wrap(r.fields().get(registryId)).getLong()));
+
+        String tenant = "t-p31-fill-thisengine";
+        JsonNode end = env.restore(env.newTenant(tenant), taken);
+        assertThat(status(end)).as(end.toString()).isEqualTo("committed");
+
+        for (Site site : exportedSites()) {
+            assertThat(num(ctx -> examined(ctx, tenant, site))).as("non-vacuity %s", site).isPositive();
+            assertThat(num(ctx -> wrongIds(ctx, tenant, site))).as("rows of %s whose id is not the registry row's", site).isZero();
+        }
+        java.util.List<Long> restored = env.su(ctx -> ctx.select(DSL.field(DSL.name("collection_id"), Long.class))
+            .from(DSL.table(DSL.name("nexus", "catalog_collections")))
+            .where(DSL.field(DSL.name("tenant_id"), String.class).eq(tenant)).fetch(0, Long.class));
+        assertThat(restored).as("the registry's ids come from the target's sequence, never the file's")
+            .isNotEmpty().doesNotContainAnyElementsOf(fileIds);
+        assertThat(num(ctx -> CollectionTombstones.invariantViolations(ctx, tenant))).isZero();
     }
 
     // ── tombstones and the sequence ─────────────────────────────────────────────────────────────

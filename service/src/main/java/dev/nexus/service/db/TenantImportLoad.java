@@ -94,7 +94,6 @@ final class TenantImportLoad {
         skipDerivedWithRows(ctx, plan, skipped);
         Map<String, TablePlan> loading = new LinkedHashMap<>(plan);
         loading.keySet().removeAll(skipped.keySet());
-        RestoreTwinGuard.check(ctx, loading, stages);
         RestoreIdFill.refuseOrphans(ctx, loading, stages);
         List<TableResult> results = new ArrayList<>();
         List<SoftResult> softs = new ArrayList<>();
