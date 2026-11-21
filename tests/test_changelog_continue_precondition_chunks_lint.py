@@ -83,6 +83,11 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
     # no lock on the registry, so the build cannot be what either statement waits behind.
     ("collections-001-tuple-unique-index.xml", "collections-001-2"): "gated live-tuple unique index (RDR-229 P3.8)",
+    # CREATE UNIQUE INDEX on nexus.catalog_collections (tenant_id, name) under SET LOCAL lock_timeout = '5s' (SHARE on
+    # that one table for one build of a registry of hundreds of rows), failOnError="false" so a build that cannot get
+    # its lock is retried at the next boot; the guard reads pg_class through to_regclass and takes no lock. No chunk
+    # table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds no lock on the registry.
+    ("catalog-053-live-label-unique.xml", "catalog-053-1"): "live-label unique index (RDR-229 P3.6)",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
