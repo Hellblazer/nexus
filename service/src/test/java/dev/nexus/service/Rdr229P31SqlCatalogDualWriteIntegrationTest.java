@@ -102,8 +102,8 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
         walk(ADMIN_ROLE, su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS), scenarios, 5, (pg, ds, w) -> {
             var before = w.before();
             var after = w.after();
-            // "after" is the whole migration, so it also holds what the changesets AFTER vectors-069 add (collections-001/-002); each
-            // such function is named in ADDED_AFTER_DUAL_WRITE with the reason it writes no guarded table. Anything else that
+            // "after" is the whole migration, so it also holds what the changesets AFTER vectors-069 add (vectors-071-1, collections-001/-002);
+            // each such function is named in ADDED_AFTER_DUAL_WRITE with the reason it writes no guarded table. Anything else that
             // appeared or went still fails here.
             Set<String> addedAfter = new TreeSet<>();
             for (String key : after.keySet()) {
@@ -239,14 +239,16 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
     private static final Set<String> KNOWN_OTHER_WRITERS = new TreeSet<>(Set.of());
 
     /**
-     * Functions that exist only after vectors-069, added by RDR-229 P3.8's changesets (collections-001 and -002). None writes a
-     * guarded table (the live scan below would flag one that did, and does not): the first is a read-only SECURITY INVOKER count
-     * over nexus.catalog_collections (collections-001-1); the other two are SECURITY DEFINER and only read
-     * nexus.catalog_collections, one for max(collection_id) and the sequence's last value and a nextval loop on the sequence (a
-     * sequence is not a guarded table), the other an EXISTS on collection_id (collections-002).
+     * Functions that exist only after vectors-069. nexus.rdr229_restamp(text), added by vectors-071-1 (RDR-229 P3.1 fix round A),
+     * writes one table, nexus.data_moves (the stamp move's re-registration), which is not a CHECK-guarded collection-name table; it
+     * only READS the tables whose CHECKs it finishes (an EXISTS for an orphan row) and the registry. RDR-229 P3.8's changesets
+     * (collections-001 and -002) add three: a read-only SECURITY INVOKER count over nexus.catalog_collections (collections-001-1),
+     * and two SECURITY DEFINER functions that only read nexus.catalog_collections, one for max(collection_id) and the sequence's
+     * last value and a nextval loop on the sequence (a sequence is not a guarded table), the other an EXISTS on collection_id
+     * (collections-002). The live scan below flags a writer of a guarded table, and flags none of them.
      */
     private static final Set<String> ADDED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of(
-        "catalog_collection_tuple_duplicates_unscoped", "collection_id_seq_heal", "collection_id_taken"));
+        "catalog_collection_tuple_duplicates_unscoped", "collection_id_seq_heal", "collection_id_taken", "rdr229_restamp"));
 
     /**
      * Functions vectors-069 does not touch whose body a later changeset replaces: collections-003-1 narrows

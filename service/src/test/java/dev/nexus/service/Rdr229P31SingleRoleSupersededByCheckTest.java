@@ -47,7 +47,9 @@ class Rdr229P31SingleRoleSupersededByCheckTest {
 
     @Test
     void aRenamedCollectionsTombstoneDoesNotWedgeTheBoot_andTheCheckEndsNotValid() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        // a container of its own: nexus_svc IS the migrating role here, and the shared cluster holds that role already (it cannot be
+        // declared exclusive and dropped), the same reason TextGateProbeSingleRoleGuardIntegrationTest takes startDedicated
+        PostgreSQLContainer<?> pg = PgContainerHelper.startDedicated();
         try {
             try (Connection su = pg.createConnection("")) {
                 PgContainerHelper.bootstrapNonSuperuserOwner(su, SVC, SVC_PASSWORD);   // nexus_svc IS the migrating role

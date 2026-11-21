@@ -426,6 +426,11 @@ class VectorSensitivityRouteParityTest {
         CLASSIFIED_DEFINITION_READERS.put("reaper_quarantine_chunks(p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_row_limit integer, p_grace interval, p_floor_fraction double precision, p_floor_min_chunks integer, p_dry_run boolean)",
             new Classified("TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)", Exposure.NO_TEXT,
                 "moves reapable chunks to quarantine: returns counts and a refusal flag"));
+        CLASSIFIED_DEFINITION_READERS.put("rdr229_restamp(p_table text)",
+            new Classified("text", Exposure.NO_TEXT,
+                "RDR-229 P3.1 operator step (vectors-071-1): looks for an orphan row in the table it is given, chunk tables included, "
+                + "by an EXISTS over its name and collection_id columns, and registers one nexus.data_moves row; it never selects "
+                + "chunk_text. The result is a status string built from the table name and a fixed phrase, so it carries no chunk text"));
         CLASSIFIED_DEFINITION_READERS.put("service_tokens_create_tenant_partitions()",
             new Classified("trigger", Exposure.NO_TEXT,
                 "partition maintenance: returns a count, a flag or nothing"));

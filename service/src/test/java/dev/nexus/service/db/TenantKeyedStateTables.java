@@ -828,8 +828,6 @@ final class TenantKeyedStateTables {
     /** RDR-229 P3.1 (nexus-p2m1x.17): the completion check, its reporter and the two callbacks that wake it. */
     private static void fillCompletionCheck(Map<String, String> notKeyed) {
         String bookkeeping = COMPLETION_ENGINE_WIDE + "this is the reporter's own bookkeeping, nothing a tenant's reset has to clear";
-        notKeyed.put("CompletionBootWork.published", COMPLETION_ENGINE_WIDE + "the boot_work ids (the summary, a missing "
-            + "CHECK, a VALIDATE waiting on a table) it has registered, kept so a vanished one is finished");
         notKeyed.put("CompletionBootWork.eventExecutor", "the executor an event's read runs on (the reporter's own "
             + "single thread, or a test's direct executor); holds no data");
         notKeyed.put("CompletionBootWork.readOwed", bookkeeping + " (a flag: an event asked for a read)");
@@ -858,6 +856,18 @@ final class TenantKeyedStateTables {
         notKeyed.put("CompletionCheck.Result.violators", RESULT + "; it holds table and constraint names and counts");
         notKeyed.put("CompletionCheck.Result.gate3Uncovered", RESULT + "; empty while Gate3Source is NOT_INSTALLED, and "
             + "replaced whole by the next sample once P3.4 supplies one");
+        notKeyed.put("CompletionCheck.Dangling.byContentType", RESULT + "; R7's dangling-tombstone count by content type "
+            + "(a few fixed labels such as code or knowledge), summed over every tenant's registry rows by one GROUP BY on "
+            + "content_type: no tenant id or collection name is kept, and the next sample re-derives it");
+        notKeyed.put("CompletionCheck.Dangling.selfIdByContentType", RESULT + "; the count of tombstones the stamp resolved "
+            + "to their own id, by content type, summed over every tenant as byContentType is; no tenant id or name");
+        notKeyed.put("CompletionBootWork.TableWait.constraints", RESULT + "; the CHECK constraint names (fixed by the "
+            + "changesets) of one table whose VALIDATE waits, merged across its name columns by byTable; no tenant's");
+        notKeyed.put("BootWorkRegistry.rdr229Completion", "the supplier of /v1/status's rdr229_completion, bound once at "
+            + "boot: it renders the completion check's last read from memory, which is engine-wide counts and labels summed "
+            + "over every tenant (CompletionBootWork.latest), and holds no tenant data itself");
+        notKeyed.put("StatusHandler.rdr229Completion", "the same supplier, bound once at boot by the status route; a "
+            + "callback over the engine-wide completion state, not keyed by tenant");
         notKeyed.put("DataMoveWorker.onMoveCompleted", "the listener the engine hands the worker at boot "
             + "(CompletionBootWork::onMoveCompleted), run when a move records completed_at; a callback, no data");
         notKeyed.put("PciReconciler.passEnded", "the listener the engine hands the reconciler at boot "

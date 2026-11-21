@@ -500,6 +500,9 @@ public final class PgContainerHelper {
      *   <li>{@code TextGateProbeSingleRoleGuardIntegrationTest} -- asserts role membership
      *       edges on {@code nexus_svc} and the owner ({@code grantRoleMembership}), which would leak
      *       into every later class on a shared cluster.</li>
+     *   <li>{@code Rdr229P31SingleRoleSupersededByCheckTest} -- migrates as {@code nexus_svc} itself (the single-role
+     *       posture the registry's owner-read changeset and vectors-068-19 key on by name); the shared cluster holds
+     *       {@code nexus_svc} from the template migration and it cannot be declared exclusive and dropped.</li>
      *   <li>{@code Rdr192LiveCExplainEvidenceIntegrationTest}, {@code ReadPathLeafPruningIntegrationTest} --
      *       read the plans {@code auto_explain} writes to the CONTAINER's log ({@link #serverLog}); a shared
      *       cluster's log holds every class's output, and {@code ALTER ROLE nexus_svc SET auto_explain...}
