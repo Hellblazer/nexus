@@ -167,7 +167,7 @@ class TargetSelectionTest {
     // ---- the tie at equal version: the first registered, then the name (nexus-p2m1x.4) ----
 
     private static CollectionRow rowAt(String name, String createdAt) {
-        return new CollectionRow(name, CT, OWNER, MODEL, "v1", false, "", "live", createdAt);
+        return new CollectionRow(name, CT, OWNER, MODEL, "v1", false, "", "live", createdAt, null);
     }
 
     @Test
@@ -305,5 +305,45 @@ class TargetSelectionTest {
         var failed = new LockHolder(UUID.randomUUID(), "failed");
         assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, failed)).isInstanceOf(Refuse.class);
         assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null)).isEqualTo(new Revive("t"));
+    }
+
+    // ---- selection: the registry id breaks a tie at one version (RDR-229 P3.8) ----
+
+    private static CollectionRow withId(String name, String version, String createdAt, Long id) {
+        return new CollectionRow(name, CT, OWNER, MODEL, version, false, "", "live", createdAt, id);
+    }
+
+    @Test
+    void atOneVersionTheLowestCollectionIdWinsWhateverTheAgeOrTheName() {
+        var lowId = withId("z-late-low-id", "v1", "2026-03-01 00:00:00+00", 3L);
+        var highId = withId("a-early-high-id", "v1", "2026-01-01 00:00:00+00", 9L);
+        assertThat(select(highId, lowId)).isEqualTo(new Live("z-late-low-id"));
+        assertThat(select(lowId, highId)).as("the order of the rows is not the order of the answer").isEqualTo(new Live("z-late-low-id"));
+    }
+
+    @Test
+    void aHigherVersionStillBeatsALowerCollectionId() {
+        assertThat(select(withId("v1-low-id", "v1", "", 1L), withId("v2-high-id", "v2", "", 50L)))
+            .isEqualTo(new Live("v2-high-id"));
+    }
+
+    @Test
+    void aRowWithNoIdSortsAfterEveryRowWithOneAndTiesAmongThemByAgeThenName() {
+        var noId = withId("a-no-id", "v1", "2026-01-01 00:00:00+00", null);
+        assertThat(select(noId, withId("z-has-id", "v1", "2026-09-01 00:00:00+00", 40L))).isEqualTo(new Live("z-has-id"));
+        assertThat(select(withId("b-newer", "v1", "2026-02-01 00:00:00+00", null),
+            withId("c-older", "v1", "2026-01-01 00:00:00+00", null))).as("no ids: age, as before").isEqualTo(new Live("c-older"));
+        assertThat(select(withId("b", "v1", "", null), withId("a", "v1", "", null))).as("no ids, no age: name, as before")
+            .isEqualTo(new Live("a"));
+    }
+
+    @Test
+    void fromMapReadsTheCollectionIdTheCallerAdded() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("name", "n");
+        m.put("collection_id", 17L);
+        assertThat(CollectionRow.fromMap(m).collectionId()).isEqualTo(17L);
+        m.remove("collection_id");
+        assertThat(CollectionRow.fromMap(m).collectionId()).isNull();
     }
 }

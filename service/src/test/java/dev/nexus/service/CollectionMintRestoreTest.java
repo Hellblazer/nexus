@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code collection_id} is a client-supplied id like any other, so the load drops it and the sequence assigns every
  * restored row its own (the same doctrine as the other serial keys: "the engine role cannot setval, so ids are
  * always reassigned"); and a file holding two live rows on one tuple is refused, naming both collections, once the
- * partial UNIQUE index exists and would refuse the load with a bare 23505. P3.9 decides how a bundle carries the id.
+ * partial UNIQUE index is present (it would refuse the load with a bare 23505) and when it is absent alike. P3.9 decides how a bundle carries the id.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CollectionMintRestoreTest {
@@ -91,9 +91,16 @@ class CollectionMintRestoreTest {
     }
 
     @Test
-    void aFileWithTwoLiveRowsOnOneTupleIsRefusedNamingBothOnceTheIndexExists() throws Exception {
-        String src = "t-mint-restore-twin-src";
-        String dst = "t-mint-restore-twin-dst";
+    void aFileWithTwoLiveRowsOnOneTupleIsRefusedNamingBoth_withTheIndexPresent() throws Exception {
+        assertTwinFileIsRefused(true, "t-mint-restore-twin-on-src", "t-mint-restore-twin-on-dst");
+    }
+
+    @Test
+    void aFileWithTwoLiveRowsOnOneTupleIsRefusedNamingBoth_withTheIndexAbsent() throws Exception {
+        assertTwinFileIsRefused(false, "t-mint-restore-twin-off-src", "t-mint-restore-twin-off-dst");
+    }
+
+    private void assertTwinFileIsRefused(boolean indexed, String src, String dst) throws Exception {
         String srcToken = env.newTenant(src);
         seedCollections(src);
         // the second live row of one tuple, as an install that predates the index can hold (D4's accepted duplicate)
@@ -114,9 +121,12 @@ class CollectionMintRestoreTest {
         // the duplicate leaves the source, then the index can be built (a duplicate anywhere refuses its build)
         env.su(ctx -> {
             CollectionMintSupport.deleteRow(ctx, src, "twin-of-bge-p38");
-            CollectionMintSupport.createIndex(ctx);
+            if (indexed) {
+                CollectionMintSupport.createIndex(ctx);
+            }
             return null;
         });
+        assertThat(env.su(CollectionMintSupport::indexPresent)).as("guard: the index state under test").isEqualTo(indexed);
         String dstToken = env.newTenant(dst);
 
         JsonNode end = env.restore(dstToken, file);

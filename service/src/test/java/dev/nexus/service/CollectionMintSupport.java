@@ -102,6 +102,27 @@ final class CollectionMintSupport {
         ctx.alterSequence(DSL.sequence(sequenceName, Long.class)).maxvalue(max).cycle().execute();
     }
 
+    /** The signature of the definer function that heals the sequence (changeset collections-002). */
+    static final String HEAL_FUNCTION = "nexus.collection_id_seq_heal(bigint)";
+
+    /** Whether {@code role} may EXECUTE the heal function (an error when the function does not exist). */
+    static boolean holdsExecuteOnHeal(DSLContext ctx, String role) {
+        return Boolean.TRUE.equals(ctx.select(DSL.function("has_function_privilege", Boolean.class,
+            DSL.val(role), DSL.val(HEAL_FUNCTION), DSL.val("EXECUTE"))).fetchOne(0, Boolean.class));
+    }
+
+    /** The heal function's own definition text: its SECURITY DEFINER and its pinned search_path are read from it. */
+    static String healFunctionDefinition(DSLContext ctx) {
+        return ctx.select(DSL.function("pg_get_functiondef", String.class,
+            DSL.function("to_regprocedure", Object.class, DSL.val(HEAL_FUNCTION)))).fetchOne(0, String.class);
+    }
+
+    /** Call the heal function as the connection's own role: the sequence's last value afterwards (or null). */
+    static Long callHeal(DSLContext ctx, Long floor) {
+        return ctx.select(DSL.function(DSL.name("nexus", "collection_id_seq_heal"), Long.class, DSL.val(floor, org.jooq.impl.SQLDataType.BIGINT)))
+            .fetchOne(0, Long.class);
+    }
+
     /** Whether {@code role} holds UPDATE on the {@code collection_id} sequence. */
     static boolean holdsUpdateOnSequence(DSLContext ctx, String role) {
         return Boolean.TRUE.equals(ctx.select(DSL.function("has_sequence_privilege", Boolean.class,
