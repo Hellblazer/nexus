@@ -38,7 +38,12 @@ final class CollectionMintSupport {
     }
 
     static void dropIndex(DSLContext ctx) {
-        ctx.dropIndexIfExists(DSL.name("nexus", INDEX)).execute();
+        var drop = ctx.dropIndexIfExists(DSL.name("nexus", INDEX));
+        drop.execute();
+        if (indexPresent(ctx)) {
+            throw new IllegalStateException("the index is still there after: " + drop.getSQL() + " (autocommit "
+                + ctx.connectionResult(c -> c.getAutoCommit()) + ")");
+        }
     }
 
     /** The partial UNIQUE index of changeset collections-001-2, built by hand (the changeset waits for the re-own move). */
