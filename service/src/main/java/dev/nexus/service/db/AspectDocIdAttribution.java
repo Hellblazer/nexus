@@ -27,9 +27,11 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
  * yet started waits for this transaction. The order is catalog row, then {@code document_aspects}, the move's order.
  * It is the REVERSE of {@code renameCollectionTxn} and the collection delete ({@code COLLECTION_SCOPED_TABLES} lists
  * {@code document_aspects} before {@code catalog_documents}), so an UNFENCED upsert running during a rename or delete
- * of the same collection can deadlock, and PostgreSQL aborts one of the two. Accepted residual: a fenced (worker)
- * upsert takes the claim's tuples row lock first, which serializes it with the rename's task rewrite before either
- * reaches these tables.
+ * of the same collection can deadlock, and PostgreSQL aborts one of the two. Both sides run their whole transaction
+ * under {@link DeadlockRetry} (the upsert in {@link AspectRepository#upsertAspect}, the rename and the delete through
+ * {@code CatalogRepository.manifestWriteTxn}), so the aborted one reruns and neither answers a deadlock error. A fenced
+ * (worker) upsert takes the claim's tuples row lock first, which serializes it with the rename's task rewrite before
+ * either reaches these tables.
  */
 final class AspectDocIdAttribution {
 
