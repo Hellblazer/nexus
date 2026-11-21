@@ -25,7 +25,7 @@ public final class CollectionRegistration {
 
     /** {@code <content_type>__<owner>__<embedding_model>__v<n>}, as the client's {@code _CONFORMANT_COLLECTION_RE}. */
     private static final Pattern CONFORMANT_VERSION =
-        Pattern.compile("^[a-z][a-z0-9-]*__.+__[a-z][a-z0-9-]*__(v[0-9]+)$");
+        Pattern.compile("^[a-z][a-z0-9-]*__.+__([a-z][a-z0-9-]*)__(v[0-9]+)$");
 
     private CollectionRegistration() {
     }
@@ -37,6 +37,22 @@ public final class CollectionRegistration {
      * ({@link #importModelVersion}) and {@code ReembedHandler.register}.
      */
     public static String versionOfConformantName(String name) {
+        if (name == null) {
+            return null;
+        }
+        Matcher m = CONFORMANT_VERSION.matcher(name);
+        return m.matches() ? m.group(2) : null;
+    }
+
+    /**
+     * The embedding-model token of a conformant collection name, or {@code null} when the name is not conformant.
+     * The same migration-source read as {@link #versionOfConformantName} (the one regex, so the declared parse-site
+     * count is unchanged), for one caller: {@code TargetSelection.foreignOrigin}, which reads the model of a re-embed
+     * job's source whose registry row is gone (a default cutover deletes it). A model never changes on a collection,
+     * so the name's token is what the row held. Retired with the name parsers at RDR-229 P4; the caller then treats
+     * a gone row's model as unknown, which refuses.
+     */
+    public static String modelOfConformantName(String name) {
         if (name == null) {
             return null;
         }

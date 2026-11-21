@@ -98,10 +98,14 @@ import java.util.function.Supplier;
  *       or mark failed is healed by the retry;</li>
  *   <li>otherwise 409 naming the row, its successor, or the job that holds it.</li>
  * </ul>
- * Two refusals come before any of those (nexus-p2m1x.28), because the lookup tuple (content type, owner, model) is not
- * unique when two sources share a curator owner: a source with another live collection on its own tuple is 409, and
- * so is a live target that a job from a different source collection was moved into (read from the job log). Both
- * name the collections involved.
+ * Two more refusals (nexus-p2m1x.28), because the lookup tuple (content type, owner, model) is not unique when two
+ * sources share a curator owner. The first runs before the target is looked at: a source with another live
+ * collection on its own tuple is 409. The second runs after the decision and only when the target is live
+ * ({@code UseLive}; a revive names this source as the successor): a live target that the job log shows another
+ * source with the same tuple was moved into is 409 ({@link TargetSelection#foreignOrigin}: only a job that moved a
+ * document counts, by {@code documents_moved}; the other source's model is read from its row, or from its name when
+ * the row is gone). A v2 of an already-moved source is refused too, deliberately: the log is keyed by name. Both
+ * name the collections involved and say that an owner changes only through an engine data move.
  * The refusals that need no write all run before the first write. The source lock is taken by the start itself; a
  * start that loses it to a concurrent start after a registration or a revive leaves that in place and answers 409
  * naming the winner.
@@ -413,13 +417,14 @@ public final class ReembedHandler implements HttpHandler {
             throw new Reply(409, MAPPER.writeValueAsString(refusal));
         }
         if (decision instanceof UseLive u) {
-            // The job log is the record of where a target's documents came from: a live target another source was
-            // moved into is not this source's to join (a Revive names this source as its successor, so it is exempt).
-            Job foreign = firstMatch(jobs.listAll(tenant),
-                j -> j.targetCollection().equals(u.name()) && !j.sourceCollection().equals(source));
+            // The job log is the record of where a target's documents came from: a live target that another source
+            // sharing this source's tuple was moved into is not this source's to join. A Revive names this source as
+            // the successor, so it is exempt.
+            Job foreign = TargetSelection.foreignOrigin(jobs.listAll(tenant), tenantRows, u.name(), source,
+                contentType, owner, sourceModel);
             if (foreign != null) {
                 throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
-                    "error", TargetSelection.foreignOriginReason(source, u.name(), foreign.sourceCollection()),
+                    "error", TargetSelection.foreignOriginReason(source, u.name(), foreign),
                     "collection", u.name(), "origin_source", foreign.sourceCollection(),
                     "job_id", foreign.jobId().toString(), "state", foreign.state())));
             }
