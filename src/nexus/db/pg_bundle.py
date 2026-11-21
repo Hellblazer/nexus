@@ -135,11 +135,10 @@ def bundle_major(bin_dir: Path, *, platform: str | None = None) -> int | None:
     (``pg_ctl --version``: ``pg_ctl (PostgreSQL) 17.5`` is 17), or ``None`` when it cannot
     be run or says nothing a version can be read from."""
     pg_ctl = PgBinaries.from_dir(bin_dir, platform=platform).pg_ctl
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 - deferred, keeps this module's import light
+
     try:
-        done = subprocess.run(  # noqa: S603 - a binary of our own bundle, no shell, no user text
-            [str(pg_ctl), "--version"], capture_output=True, text=True,
-            timeout=_PG_TOOL_VERSION_TIMEOUT_S, check=False,
-        )
+        done = run_bounded([str(pg_ctl), "--version"], timeout=_PG_TOOL_VERSION_TIMEOUT_S)
     except (OSError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
@@ -168,8 +167,7 @@ def _refuse_major_change(old_root: Path, new_root: Path) -> None:
         f"the PostgreSQL bundle in service is PostgreSQL {old} and the incoming one "
         f"{'reports no version' if new is None else 'is PostgreSQL ' + str(new)}: not swapped. "
         "The data directory belongs to the major version that made it, and a bundle swap moves "
-        "no data, so a major change needs pg_upgrade or a dump and restore first "
-        "(docs/migration-runbook.md)."
+        "no data, so a major change needs pg_upgrade or a dump and restore first."
     )
 
 
