@@ -516,6 +516,12 @@ public final class CatalogHandler implements HttpHandler {
             // /update. Same 409 shape as CollectionMergeRefused above: a
             // refusal, not a server error.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (dev.nexus.service.db.MintedLabel.SequenceBehindDataException
+                 | dev.nexus.service.db.MintedLabel.LabelsTakenException
+                 | dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
+            // RDR-229 P3.8: a refusal of the collection mint or of a registering row that would hold a live tuple
+            // another collection holds. The message names the collections or the remedy; nothing was written.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
             // RDR-204 Phase 1 (bead nexus-ft04v.8): the request is
             // well-formed, but this install's collection authority (the
@@ -2473,6 +2479,14 @@ public final class CatalogHandler implements HttpHandler {
                 // registration can never 400 on an unrecognised content_type.
                 combinedWriteService.seedEmbeddingProfileForContentType(tenant, s);
             }
+        }
+        if (!(body.get("name") instanceof String registeredName) || registeredName.isBlank()) {
+            // RDR-229 P3.8: no name, the engine mints one and answers the row it registered (collection_id, name and
+            // the attributes), beside the "ok" every answer of this route has carried.
+            Map<String, Object> minted = new LinkedHashMap<>(repo.mintCollection(tenant, body, true));
+            minted.put("ok", true);
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(minted));
+            return;
         }
         repo.upsertCollection(tenant, body, true);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");

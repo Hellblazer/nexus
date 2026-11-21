@@ -2,10 +2,15 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import org.jooq.DSLContext;
+
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
+import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE;
 
 /**
  * What a collection registration (or an ETL import row) must say about the collection's own attributes, decided
@@ -220,6 +225,58 @@ public final class CollectionRegistration {
             throw new IllegalArgumentException("registering collection '" + name + "' is refused: the quarantine- "
                 + "name prefix is the engine's own; a client cannot register a collection under it");
         }
+    }
+
+    /** The model and vector width a NEW collection row binds (see {@link #resolveNewRowModel}). */
+    record ModelChoice(String model, Integer dimension) {
+    }
+
+    /**
+     * The embedding model and dimension of a NEW row of {@code contentType} for {@code tenant}: the tenant's embedding
+     * profile for the content type when it has one (a request naming another model is refused), else the requested
+     * model with its registered dimension. {@code label} names the collection in the refusal messages. Shared by
+     * {@code upsertCollection} (named) and {@link CollectionMint} (minted) so the two cannot drift.
+     *
+     * @throws CatalogRepository.EmbeddingProfileConflictException a 422: the request disagrees with the profile, or no
+     *         model is named and no profile exists
+     */
+    static ModelChoice resolveNewRowModel(DSLContext ctx, String tenant, String contentType, String requestedModel,
+                                          String label) {
+        String profileModel = null;
+        Integer profileDimension = null;
+        var profileRow = ctx.select(EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
+            .from(EMBEDDING_PROFILE)
+            .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
+            .and(EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))
+            .fetchOne();
+        if (profileRow != null) {
+            profileModel = profileRow.value1();
+            profileDimension = profileRow.value2();
+        }
+        if (profileModel != null) {
+            if (requestedModel != null && !requestedModel.isBlank() && !requestedModel.equals(profileModel)) {
+                throw new CatalogRepository.EmbeddingProfileConflictException(
+                    "the embedding profile for content_type '" + contentType + "' is '"
+                    + profileModel + "'; refusing to register '" + label
+                    + "' with embedding_model '" + requestedModel + "'");
+            }
+            return new ModelChoice(profileModel, profileDimension);
+        }
+        String model = requestedModel == null ? "" : requestedModel;
+        // nexus-ft04v.8 review Significant 3: no embedding profile exists for this content_type and the caller supplied
+        // no model either -- refuse loud, naming the missing field, rather than binding "" into the INSERT's VALUES
+        // list and letting hygiene-002-1's catalog_collections_embedding_model_chk surface as an opaque 23514.
+        if (model.isBlank()) {
+            throw new CatalogRepository.EmbeddingProfileConflictException(
+                "registering collection '" + label + "' requires embedding_model; "
+                + "no embedding profile exists for content_type '" + contentType
+                + "' and none was supplied");
+        }
+        Integer dimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
+            .from(EMBEDDING_MODELS)
+            .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(model))
+            .fetchOne(EMBEDDING_MODELS.DIMENSION);
+        return new ModelChoice(model, dimension);
     }
 
     /** The {@code model_version} a NEW registration sends; blank or absent is refused. */
