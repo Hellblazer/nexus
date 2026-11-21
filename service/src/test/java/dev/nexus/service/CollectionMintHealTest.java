@@ -33,8 +33,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * RDR-229 P3.8 (nexus-p2m1x.28): the mint when the {@code collection_id} sequence is behind the data. A restore that
  * writes explicit ids and runs no {@code setval} leaves the sequence below the rows it wrote; the next mint draws an id
- * that is already a row. The mint heals ONCE (a {@code setval} to the largest id, as the engine role, which holds
- * UPDATE on that one sequence by {@code collections-002}), logs a WARN naming the old and new values, and draws again;
+ * that is already a row. The mint heals ONCE (through {@code nexus.collection_id_seq_heal}, the definer function of
+ * {@code collections-002}: the engine role holds no UPDATE on the shared sequence, and the function only raises it), logs a WARN naming the old and new values, and draws again;
  * a second taken id is a {@link MintedLabel.SequenceBehindDataException} (lead ruling T2
  * {@code nexus_rdr/229-lead-ruling-collection-id-by-default-2026-11-21}). Its own database: it moves the sequence.
  */
@@ -163,14 +163,21 @@ class CollectionMintHealTest {
     void theHealFunctionOnlyMovesTheSequenceForward() {
         long next = nextSequenceValue();
 
-        Long raised = svc(ctx -> CollectionMintSupport.callHeal(ctx, next + 100));
+        Long raised = healAs(next + 100);
         assertThat(raised).as("a floor above the sequence raises it").isEqualTo(next + 100);
         assertThat(nextSequenceValue()).isEqualTo(next + 101);
 
-        assertThat(svc(ctx -> CollectionMintSupport.callHeal(ctx, 1L))).as("a lower floor leaves it").isEqualTo(next + 100);
-        assertThat(svc(ctx -> CollectionMintSupport.callHeal(ctx, next + 50))).isEqualTo(next + 100);
-        assertThat(svc(ctx -> CollectionMintSupport.callHeal(ctx, null))).as("no floor leaves it").isEqualTo(next + 100);
+        Long lower = healAs(1L);
+        Long middle = healAs(next + 50);
+        Long none = healAs(null);
+        assertThat(lower).as("a lower floor leaves it").isEqualTo(next + 100);
+        assertThat(middle).isEqualTo(next + 100);
+        assertThat(none).as("no floor leaves it").isEqualTo(next + 100);
         assertThat(nextSequenceValue()).as("nothing moved it back").isEqualTo(next + 101);
+    }
+
+    private Long healAs(Long floor) {
+        return svc(ctx -> CollectionMintSupport.callHeal(ctx, floor));
     }
 
     @Test @Order(4)
