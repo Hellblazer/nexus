@@ -54,6 +54,8 @@ KEY_PREFIX = "nxh1-"
 _DOMAIN = b"nexus.identity.host.v1:"
 #: ``readlink /proc/self/ns/pid`` of the initial pid namespace (the kernel's PROC_PID_INIT_INO), the same on every boot.
 INIT_PID_NS = "pid:[4026531836]"
+#: macOS ships it here; an absolute path no PATH or working directory can change.
+_IOREG = "/usr/sbin/ioreg"
 _MACHINE_ID_FILES = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 _UUID = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
@@ -72,10 +74,7 @@ def _macos_uuid(run: Callable[..., Any] | None) -> str | None:
 
         run = run_bounded
     try:
-        from nexus.util.nx_argv import argv_off_cwd  # noqa: PLC0415
-
-        out = run(argv_off_cwd(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]), timeout=5, stderr=subprocess.DEVNULL,
-                  check=True).stdout
+        out = run([_IOREG, "-rd1", "-c", "IOPlatformExpertDevice"], timeout=5, stderr=subprocess.DEVNULL, check=True).stdout
     except Exception:  # noqa: BLE001 — no ioreg, a timeout, a failure: no identifier
         return None
     found = _IOREG_UUID.search(str(out))
