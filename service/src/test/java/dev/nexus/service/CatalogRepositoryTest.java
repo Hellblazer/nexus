@@ -2275,9 +2275,8 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, Map.of("name", name, "content_type", "code", "owner_id", owner, "embedding_model", "voyage-code-3", "model_version", version));
     }
 
-    private void registerCollAt(String tenant, String name, String owner, String model, String version,
-                                String createdAt, boolean legacyGrandfathered) {
-        // two live rows of one tuple are D4's accepted duplicate, which a named upsert refuses (RDR-229 P3.8): superuser insert
+    /** Two live rows of one tuple are D4's accepted duplicate, which a named upsert refuses (RDR-229 P3.8): superuser insert. */
+    private void registerCollAt(String tenant, String name, String owner, String model, String version, String createdAt, boolean legacyGrandfathered) {
         try (Connection su = pg.createConnection("")) {
             CollectionMintSupport.insertCodeRowAt(DSL.using(su, SQLDialect.POSTGRES), tenant, name, owner, model, version, createdAt, legacyGrandfathered);
         } catch (java.sql.SQLException e) { throw new IllegalStateException(e); }
