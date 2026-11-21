@@ -43,10 +43,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 class TelemetrySchemaLiquibaseTest {
 
     private static final Set<String> RELEVANCE_LOG_COLS = Set.of(
-        "id", "tenant_id", "query", "chunk_id", "collection", "action", "session_id", "timestamp");
+        "id", "tenant_id", "query", "chunk_id", "collection", "action", "session_id", "timestamp",
+        "collection_id");
     private static final Set<String> SEARCH_TELEMETRY_COLS = Set.of(
         "tenant_id", "ts", "query_hash", "collection", "raw_count", "kept_count",
-        "top_distance", "threshold");
+        "top_distance", "threshold", "collection_id");
     private static final Set<String> TIER_WRITES_COLS = Set.of(
         "id", "tenant_id", "session_id", "ts", "tool", "tier", "agent", "project", "target_title");
     // telemetry-018-1 (nexus-mtheb.4): one row per agent dispatch with its T1 put count.
@@ -61,7 +62,7 @@ class TelemetrySchemaLiquibaseTest {
         "out_of_step_cost_usd");
     private static final Set<String> HOOK_FAILURES_COLS = Set.of(
         "id", "tenant_id", "doc_id", "collection", "hook_name", "error", "occurred_at",
-        "batch_doc_ids", "is_batch", "chain");
+        "batch_doc_ids", "is_batch", "chain", "collection_id");
     // RDR-196 .p1c (nexus-nyry9.9): per-step cost/quality telemetry, child of nx_answer_runs.
     // telemetry-008 (nexus-ndoke): the two prompt-cache token columns.
     private static final Set<String> NX_ANSWER_STEPS_COLS = Set.of(
