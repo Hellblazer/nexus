@@ -2061,7 +2061,7 @@ def search_cross_corpus(
     _probe = getattr(t3, "supports_topic_route", None)
     routable = (
         topic_route is not None
-        and any(is_prose(c) for c in collections)
+        and any(is_prose(c, content_type_of) for c in collections)
         and unrouted_reason(where=effective_where, chash_allow=_allow) is None
         and callable(_probe)
         and _probe() is True
@@ -2074,7 +2074,7 @@ def search_cross_corpus(
     route_tally = (
         TopicRouteTally(
             topic_route, collections, where=effective_where, chash_allow=_allow,
-            per_collection_route=per_collection_route,
+            per_collection_route=per_collection_route, content_type_of=content_type_of,
         )
         if topic_route is not None else None
     )
