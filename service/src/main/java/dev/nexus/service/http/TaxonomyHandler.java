@@ -1121,11 +1121,13 @@ public final class TaxonomyHandler implements HttpHandler {
     }
 
     private String queryParam(HttpExchange ex, String key) {
-        String q = ex.getRequestURI().getQuery();
+        // The RAW query, decoded once per value: getQuery() already percent-decodes, so a second URLDecoder pass turned a
+        // label's '%', '+' or an encoded '&' into something else (RDR-229 P3.6 review I1).
+        String q = ex.getRequestURI().getRawQuery();
         if (q == null) return null;
         for (String p : q.split("&")) {
             String[] kv = p.split("=", 2);
-            if (kv[0].equals(key)) return kv.length > 1 ? java.net.URLDecoder.decode(kv[1], java.nio.charset.StandardCharsets.UTF_8) : "";
+            if (java.net.URLDecoder.decode(kv[0], java.nio.charset.StandardCharsets.UTF_8).equals(key)) return kv.length > 1 ? java.net.URLDecoder.decode(kv[1], java.nio.charset.StandardCharsets.UTF_8) : "";
         }
         return null;
     }
