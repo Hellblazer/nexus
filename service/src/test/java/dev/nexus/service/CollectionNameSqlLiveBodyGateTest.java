@@ -121,8 +121,10 @@ class CollectionNameSqlLiveBodyGateTest {
     /** The functions the RDR rewrites, each with the changelog that last defines it: the scan must resolve all three. */
     static final Map<String, String> REQUIRED_LIVE = Map.of(
         "nexus.chash_conformance_report", "vectors-063-live-functions-read-collection-row.xml",
-        "nexus.quarantine_restore_chunks", "vectors-063-live-functions-read-collection-row.xml",
-        "nexus.reaper_expire_client_quarantine", "vectors-063-live-functions-read-collection-row.xml");
+        // RDR-229 P3.1 stage 2b: vectors-069 redefines these two once more to set collection_id (a body change of the id writes only;
+        // the census below is unchanged because no name-parsing expression moved).
+        "nexus.quarantine_restore_chunks", "vectors-069-collection-id-dual-write-functions.xml",
+        "nexus.reaper_expire_client_quarantine", "vectors-069-collection-id-dual-write-functions.xml");
 
     /** Floors on the real tree (234 includes and 119 live functions: 233 at the first run, 234 at develop 118701321); a scan below them read too little. */
     static final int INCLUDES_FLOOR = 234;

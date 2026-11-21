@@ -158,7 +158,10 @@ class Rdr229P31SqlDualWriteIntegrationTest {
 
     /** A chunk written under the older layout (no id column yet); returns its chash. */
     private static byte[] chunk(Env e, String tenant, String coll, String tag, int dim, String metadataJson, int ageDays) {
-        byte[] hash = Chash.ofText(coll + "/" + tag).toBytes();
+        return chunk(e, tenant, coll, Chash.ofText(coll + "/" + tag).toBytes(), tag, dim, metadataJson, ageDays);
+    }
+
+    private static byte[] chunk(Env e, String tenant, String coll, byte[] hash, String tag, int dim, String metadataJson, int ageDays) {
         e.ctx().insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, coll)
@@ -277,16 +280,16 @@ class Rdr229P31SqlDualWriteIntegrationTest {
     private static List<Scenario> scenarios() {
         List<Scenario> s = new ArrayList<>();
         // quarantine moves: the sibling's chunk rows and the audit row
-        s.add(move("gc_quarantine_orphans", "mv1", "gc_quarantine_orphans",
+        s.add(move("gc_quarantine_orphans (sibling already holds a legacy row)", "mv1", "gc_quarantine_orphans", true,
             (e, o, q) -> e.ctx().selectFrom(GC_QUARANTINE_ORPHANS.call(768, T, o, q, TS, 20)).fetch(), null));
-        s.add(move("gc_quarantine_orphans_bounded", "mv2", "gc_quarantine_orphans_bounded",
+        s.add(move("gc_quarantine_orphans_bounded (sibling already holds a legacy row)", "mv2", "gc_quarantine_orphans_bounded", true,
             (e, o, q) -> e.ctx().selectFrom(GC_QUARANTINE_ORPHANS_BOUNDED.call(768, T, o, q, TS, 20, 100)).fetch(), null));
         s.add(move("gc_quarantine_orphans_floored (move with expiry)", "mv3", "gc_quarantine_orphans",
             (e, o, q) -> e.ctx().selectFrom(GC_QUARANTINE_ORPHANS_FLOORED.call(768, T, o, q, TS, 20, null, null, null, false, EXPIRES)).fetch(),
             (e, q, hash) -> assertThat(e.ctx().select(CHUNKS.METADATA).from(CHUNKS)
                     .where(CHUNKS.TENANT_ID.eq(T)).and(CHUNKS.COLLECTION.eq(q)).and(CHUNKS.CHASH.eq(hash)).fetchOne(CHUNKS.METADATA).data())
                 .as("the expiry stamp the wrapper writes is still written").contains(EXPIRES)));
-        s.add(move("reaper_quarantine_chunks", "mv4", "reaper_quarantine",
+        s.add(move("reaper_quarantine_chunks (sibling already holds a legacy row)", "mv4", "reaper_quarantine", true,
             (e, o, q) -> e.ctx().selectFrom(REAPER_QUARANTINE_CHUNKS.call(T, o, q, TS, 100, null, 1.0, 0, false)).fetch(), null));
         // restores
         s.add(restore("gc_restore_rereferenced", "rs1", "gc_restore_rereferenced",
@@ -338,6 +341,14 @@ class Rdr229P31SqlDualWriteIntegrationTest {
 
     /** An orphan chunk moves from {@code origin} to its quarantine sibling: the sibling's row and the audit row carry ids. */
     private static Scenario move(String name, String tag, String auditOp, MoveCall call, Extra extra) {
+        return move(name, tag, auditOp, false, call, extra);
+    }
+
+    /**
+     * With {@code siblingExists} the sibling is already registered and already holds a legacy (unstamped) row of the same chunk, so the
+     * move takes the two ON CONFLICT DO UPDATE paths: the registry upsert (superseded_by_id) and the chunk upsert (collection_id).
+     */
+    private static Scenario move(String name, String tag, String auditOp, boolean siblingExists, MoveCall call, Extra extra) {
         String origin = docs(tag);
         String sibling = quarantine(origin);
         byte[][] hash = new byte[1][];
@@ -345,6 +356,10 @@ class Rdr229P31SqlDualWriteIntegrationTest {
             e -> {
                 register(e, T, origin);
                 hash[0] = chunk(e, T, origin, "orphan", 768, "{}", 90);
+                if (siblingExists) {
+                    register(e, T, sibling);
+                    chunk(e, T, sibling, hash[0], "stale copy", 768, "{\"origin_collection\": \"" + origin + "\"}", 90);
+                }
             },
             e -> call.run(e, origin, sibling),
             e -> {
@@ -984,7 +999,7 @@ class Rdr229P31SqlDualWriteIntegrationTest {
 
     private static Set<String> redefinedFunctions() throws Exception {
         Set<String> out = new LinkedHashSet<>();
-        Matcher m = Pattern.compile("CREATE OR REPLACE FUNCTION nexus\\.(\\w+)\\(").matcher(stripXmlComments(Files.readString(CHANGELOG_FILE)));
+        Matcher m = Pattern.compile("(?i)CREATE\\s+OR\\s+REPLACE\\s+FUNCTION\\s+nexus\\.(\\w+)\\(").matcher(stripXmlComments(Files.readString(CHANGELOG_FILE)));
         while (m.find()) out.add(m.group(1));
         return new TreeSet<>(out);
     }
