@@ -236,12 +236,12 @@ def _upgrade_steps(
 def _report_pending_pg_bundle() -> None:
     """``--dry-run``: say so when this install's PostgreSQL bundle lacks pg_background. Read-only, never raises."""
     try:
-        from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        import nexus.config as _config  # noqa: PLC0415 — deferred, keeps the CLI cold start light
         from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, as above
         from nexus.daemon.pg_bundle_refresh import refresh_when_pg_background_is_missing  # noqa: PLC0415 — deferred, as above
 
         for line in refresh_when_pg_background_is_missing(
-            PINNED_SERVICE_TAG, nexus_config_dir(), dry_run=True, acquire=True,
+            PINNED_SERVICE_TAG, _config.nexus_config_dir(), dry_run=True, acquire=True,
         ):
             click.echo(line)
     except Exception:  # noqa: BLE001 — a preview line never fails the command
