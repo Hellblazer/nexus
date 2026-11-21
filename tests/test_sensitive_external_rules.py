@@ -423,7 +423,11 @@ def test_the_same_refusal_when_the_document_matches_by_source_uri(t2_service_env
         main, ["index", "md", str(md), "--corpus", "rfvyy-ext", "--sensitive", "--source-uri", "x-devonthink-item://RFVYY-S-B"])
     assert out.exit_code != 0, out.output
     assert tumbler in out.output and _VOYAGE["docs"] in out.output
-    assert "differs" not in out.output and "move" not in out.output.lower().split("does not move")[0]
+    # Read the refusal's own line: the rest of the output carries log lines whose checkout path is the
+    # caller's (a worktree named "...-moves" put "move" in it), which says nothing about the refusal.
+    refusal = next((line for line in out.output.splitlines() if line.startswith("Error:")), "")
+    assert refusal, out.output
+    assert "differs" not in refusal and "move" not in refusal.lower().split("does not move")[0]
     entry = _entry(tumbler)
     assert entry.sensitive is False and entry.physical_collection == _VOYAGE["docs"]
 
