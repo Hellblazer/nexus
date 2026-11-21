@@ -172,9 +172,15 @@ public final class CollectionMint {
                     .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
                 .doNothing().execute()
             : insert.execute();
-        Map<String, Object> row = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
+        return minted(liveRow(ctx, tenant, contentType, owner, requestedModel, version), inserted, contentType, owner,
+            requestedModel, version);
+    }
+
+    /** The row a mint answers: {@code row}, or, when the insert left no live row of the tuple visible, an internal error. */
+    public static Map<String, Object> minted(Map<String, Object> row, int inserted, String contentType, String owner,
+                                             String model, String version) {
         if (row == null) {
-            throw new IllegalStateException("minting a collection for (" + contentType + ", " + owner + ", " + requestedModel
+            throw new IllegalStateException("minting a collection for (" + contentType + ", " + owner + ", " + model
                 + ", " + version + "): the insert reported " + inserted + " rows and no live row of the tuple is visible");
         }
         return row;

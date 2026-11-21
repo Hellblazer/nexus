@@ -501,6 +501,153 @@ class CollectionTupleUniqueIndexLiquibaseTest {
         }
     }
 
+    // ── the mint's ON CONFLICT against the index the changeset built ────────────────────────────
+
+    /**
+     * The mint is {@code INSERT ... ON CONFLICT (tuple) WHERE superseded_by = '' AND lifecycle_state <> 'quarantine' DO
+     * NOTHING}; PostgreSQL infers the arbiter index by that predicate, so it must be the predicate of the index the
+     * CHANGESET builds (the mint tests build theirs by hand). An insert on a free tuple writes one row, and one on a held
+     * tuple writes none and does not raise (42P10 would mean no matching index).
+     */
+    @Test
+    void theIndexTheChangesetBuildsIsTheArbiterOfTheMintsOnConflictInsert() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            }
+            try (HikariDataSource adminDs = adminPool(pg)) {
+                migrateUpTo(adminDs, INDEX_CHANGESET);
+                try (Connection su = pg.createConnection("")) {
+                    registerMove(su, MOVE, true);
+                }
+                assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
+                assertApplied(pg);
+
+                try (Connection su = pg.createConnection("")) {
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    int first = mintInsert(ctx, "t1", "c-first", "owner-arbiter");
+                    int second = mintInsert(ctx, "t1", "c-second", "owner-arbiter");
+                    int otherTenant = mintInsert(ctx, "t2", "c-third", "owner-arbiter");
+
+                    assertThat(first).as("a free tuple writes one row").isEqualTo(1);
+                    assertThat(second).as("a held tuple writes none, and does not raise").isZero();
+                    assertThat(otherTenant).as("another tenant's tuple is free").isEqualTo(1);
+                }
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    private static int mintInsert(DSLContext ctx, String tenant, String name, String owner) {
+        return ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .values(tenant, name, "knowledge", owner, MODEL, "v1", "live")
+            .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+            .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline("")).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
+            .doNothing().execute();
+    }
+
+    // ── the build takes its lock under a timeout ────────────────────────────────────────────────
+
+    /**
+     * {@code CREATE UNIQUE INDEX} takes SHARE on the registry, which waits behind every open writer. A boot must not wait
+     * behind one for ever: the build runs under a {@code lock_timeout}, fails, is rolled back and logged
+     * ({@code failOnError="false"}), the walk goes on, nothing is recorded, and the next boot retries it. An open transaction
+     * holding a row insert on the registry is the writer; without the timeout the walk never returns.
+     */
+    @Test
+    void anIndexBuildThatCannotGetItsLockInTimeFailsQuietlyAndTheNextBootBuildsIt() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        ExecutorService walker = Executors.newSingleThreadExecutor();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            }
+            try (HikariDataSource adminDs = adminPool(pg)) {
+                migrateUpTo(adminDs, INDEX_CHANGESET);
+                try (Connection su = pg.createConnection("")) {
+                    registerMove(su, MOVE, true);
+                }
+                try (Connection writer = pg.createConnection("")) {
+                    writer.setAutoCommit(false);
+                    seed(writer, "t1", "docs__lock", "docs", "owner-lock", MODEL, "", "live", "");   // open: ROW EXCLUSIVE on the registry
+                    Future<?> walk = walker.submit(() -> {
+                        SchemaMigrator.migrate(adminDs);
+                        return null;
+                    });
+                    try {
+                        walk.get(120, TimeUnit.SECONDS);
+                    } catch (TimeoutException e) {
+                        writer.rollback();
+                        walk.get(60, TimeUnit.SECONDS);
+                        throw new AssertionError("the index build waited behind an open writer for more than two minutes: "
+                            + "it has no lock_timeout");
+                    }
+                    writer.rollback();
+                }
+                assertWaiting(pg);
+
+                assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
+                assertApplied(pg);
+            }
+        } finally {
+            walker.shutdownNow();
+            pg.stop();
+        }
+    }
+
+    // ── the id functions of collections-002 read every tenant through the owner-read policy ─────
+
+    /**
+     * RDR-229 D-a (linda's ruling): an id is unique across the installation, so the heal's floor and the mint's id-taken
+     * check read every tenant's {@code collection_id}, through definer functions owned by the migration role that answer a
+     * number and a boolean. The migration role is NOBYPASSRLS and the table FORCE ROW LEVEL SECURITY, so like the counter they
+     * read nothing until D2's {@code catalog_collections_owner_read} policy exists, and every tenant once it does.
+     */
+    @Test
+    void theIdFunctionsReadEveryTenantThroughTheOwnerReadPolicy() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            }
+            try (HikariDataSource adminDs = adminPool(pg)) {
+                assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
+                try (Connection su = pg.createConnection("")) {
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    CollectionMintSupport.insertLiveRow(ctx, "t1", "id-fn-a", "owner-id-fn-a", MODEL, 500L);
+                    CollectionMintSupport.insertLiveRow(ctx, "t2", "id-fn-b", "owner-id-fn-b", MODEL, 900L);
+                }
+                try (Connection admin = adminDs.getConnection()) {
+                    DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
+                    assertThat(CollectionMintSupport.callTaken(ctx, 900L))
+                        .as("no owner-read policy, no rows read: the function lifts nothing").isFalse();
+                    assertThat(CollectionMintSupport.callHeal(ctx, 1L))
+                        .as("no policy: the floor is the caller's alone").isLessThan(900L);
+                }
+
+                standInOwnerRead(adminDs);
+
+                try (Connection admin = adminDs.getConnection()) {
+                    DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
+                    assertThat(CollectionMintSupport.callTaken(ctx, 900L)).as("tenant t2's id, read by the migration role").isTrue();
+                    assertThat(CollectionMintSupport.callTaken(ctx, 500L)).as("tenant t1's id").isTrue();
+                    assertThat(CollectionMintSupport.callTaken(ctx, 700L)).as("an id nobody holds").isFalse();
+                    assertThat(CollectionMintSupport.callHeal(ctx, 1L))
+                        .as("the floor is the largest id of ANY tenant, read through the policy").isGreaterThanOrEqualTo(900L);
+                    assertThat(PgCatalogProbes.rowSecurity(ctx, "nexus", "catalog_collections").forced())
+                        .as("FORCE ROW LEVEL SECURITY stays on").isTrue();
+                }
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
     // ── assertions ──────────────────────────────────────────────────────────────
 
     /** The helper ran, the index changeset was skipped without a record, the index is absent, the walk went on. */

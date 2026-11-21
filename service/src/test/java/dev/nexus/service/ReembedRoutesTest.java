@@ -445,6 +445,56 @@ class ReembedRoutesTest {
     }
 
     @Test
+    void aTargetRegistrationThatLosesARaceOnItsTupleIs409NamingBothCollections_notA500() throws Exception {
+        // RDR-229 P3.8: with the live-tuple index present, a registration that passes its pre-check and then meets a
+        // concurrent insert of the same tuple raises the index's own 23505. The route answers the named refusal (409, both
+        // collections), not "internal server error". A row of another tuple is registered and committed first; an open
+        // transaction moves it onto the target's tuple and does not commit, so the start's pre-check cannot see it.
+        Tn t = tenant("race");
+        var collections = dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+        String fresh = name(t, MINI, 2);
+        String blocker = "reembed-race-blocker-" + t.owner();
+        su(ctx -> {
+            ctx.deleteFrom(collections).where(collections.TENANT_ID.eq(t.tenant())).and(collections.NAME.eq(t.tgt())).execute();
+            PgContainerHelper.insertCollection(ctx, t.tenant(), blocker);
+            CollectionMintSupport.createIndex(ctx);
+            return null;
+        });
+        var racer = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection open = pg.createConnection("")) {
+            open.setAutoCommit(false);
+            DSL.using(open, SQLDialect.POSTGRES).update(collections)
+                .set(collections.CONTENT_TYPE, TYPE).set(collections.OWNER_ID, t.owner())
+                .set(collections.EMBEDDING_MODEL, MINI).set(collections.MODEL_VERSION, "v2")
+                .where(collections.TENANT_ID.eq(t.tenant())).and(collections.NAME.eq(blocker)).execute();
+            var start = racer.submit(() -> post(t, "/jobs", "{\"source_collection\":\"" + t.src()
+                + "\",\"target_collection\":\"" + fresh + "\"}"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            while (!su(CollectionMintSupport::someSessionWaitsOnALock)) {
+                if (start.isDone() || System.nanoTime() > deadline) {
+                    open.rollback();
+                    throw new AssertionError("the start did not wait on the open transaction's row (done: " + start.isDone() + ")");
+                }
+                Thread.sleep(25);
+            }
+            open.commit();
+
+            var r = start.get(60, TimeUnit.SECONDS);
+
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+            assertThat(json(r).get("error").toString()).contains(blocker).contains(fresh);
+            assertThat(catalog.getCollection(t.tenant(), fresh)).as("the loser wrote nothing").isNull();
+            assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).as("and started no job").isEmpty();
+        } finally {
+            racer.shutdownNow();
+            su(ctx -> {
+                CollectionMintSupport.dropIndex(ctx);
+                return null;
+            });
+        }
+    }
+
+    @Test
     void aClientNamedTargetThatIsRegisteredWithAnotherTupleIs409_andIsNotRepointed() throws Exception {
         Tn t = tenant("mismatch");
         su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
