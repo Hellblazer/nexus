@@ -1290,6 +1290,8 @@ def import_cmd(
             f"its source could not be found ({result.get('owner_fallback_reason') or 'no reason given'}). "
             "The knowledge curator is not its source."
         )
+    if result.get("owner_hint"):
+        click.echo(f"  Note: {result['owner_hint']}")
     _echo_left_out(result)
     if result.get("rehashed_count"):
         click.echo(

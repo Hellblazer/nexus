@@ -18,11 +18,13 @@ from pathlib import Path
 import msgpack
 import numpy as np
 import pytest
+from click.testing import CliRunner
 
 import nexus.catalog.http_catalog_client as hcc
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.repo_identity import _repo_identity_with_main
+from nexus.commands.store import import_cmd
 from nexus.exporter import _resolve_import_owner_tumbler, export_collection, import_collection
 from tests._chunk_seed import seed_chunks_direct
 
@@ -116,11 +118,43 @@ def test_a_docs_only_corpus_takes_its_corpus_curator(t2_service_env):
     # the way the doc indexer names it: the second call finds the same curator
     assert _resolve_import_owner_tumbler(
         _name("docs", "r229-wow-addon-dev"), reader, writer, content_type="docs", on_fallback=hook) == got
-    # a repo-shaped stem with NO code collection of it is a corpus too
-    lone = _resolve_import_owner_tumbler(
-        _name("docs", "r229lone-cafe1234"), reader, writer, content_type="docs", on_fallback=hook)
-    assert _owner_row(reader, lone)["owner_type"] == "curator"
     assert seen == []
+
+
+def test_a_docs_collection_whose_repo_owner_exists_takes_it_with_no_code_collection(t2_service_env):
+    """The widened case 2 (lead ruling): the target catalog already holds a repo owner with the stem's
+    hash (an earlier ``nx index repo`` or a code import), and no ``code__`` collection of the stem
+    exists anywhere, so the docs and rdr collections still resolve to that repo owner."""
+    reader, writer = make_catalog_reader(), make_catalog_writer()
+    repo = writer.register_owner("r229-known-repo", "repo", repo_hash="7e7e7e7e", repo_root="/src/known")
+    seen, hints = _fallbacks()
+    hint_seen, on_hint = _fallbacks()
+    for ctype in ("docs", "rdr"):
+        got = _resolve_import_owner_tumbler(
+            _name(ctype, "r229known-7e7e7e7e"), reader, writer, content_type=ctype,
+            on_fallback=hints, on_hint=on_hint)
+        assert got == repo
+    assert seen == [] and hint_seen == []                   # a source was found: no fallback, no hint
+
+
+def test_a_repo_shaped_docs_stem_with_no_repo_stays_with_its_curator_and_hints_once(t2_service_env):
+    reader, writer = make_catalog_reader(), make_catalog_writer()
+    seen, hook = _fallbacks()
+    hints, on_hint = _fallbacks()
+    stem = "r229lone-cafe1234"
+    got = _resolve_import_owner_tumbler(
+        _name("docs", stem), reader, writer, content_type="docs", on_fallback=hook, on_hint=on_hint)
+    row = _owner_row(reader, got)
+    assert (row["owner_type"], row["name"]) == ("curator", stem)
+    assert seen == []                                       # not the knowledge curator: no fallback
+    assert hints == [
+        f"{stem} looks like a repo's collection; import its code__ bundle first, and this collection "
+        "stays with its corpus curator otherwise"]
+    # a docs stem with no hash is plainly a corpus: no hint
+    hints.clear()
+    _resolve_import_owner_tumbler(
+        _name("docs", "r229-plain-corpus"), reader, writer, content_type="docs", on_hint=on_hint)
+    assert hints == []
 
 
 # ── (4) the knowledge curator, loudly ─────────────────────────────────────────
@@ -179,15 +213,36 @@ def test_the_import_summary_counts_a_fallback_and_the_cli_warns(t2_service_env, 
     _write_bundle(g, stemmed, ["r229 summary stem chunk"])
     result = import_collection(db=client, input_path=g, target_collection=stemmed)
     assert result["owner_fallback_count"] == 0 and result["owner_fallback_reason"] == ""
+    assert result["owner_hint"] == ""
     doc = make_catalog_reader().by_source_uri(f"nxexp://{stemmed}/{g.name}")
     assert doc is not None
     assert _owner_row(make_catalog_reader(), doc.tumbler.owner_address())["repo_hash"] == "1a2b3c4d"
 
 
+def test_the_import_summary_and_cli_carry_the_repo_looking_docs_hint(t2_service_env, tmp_path):
+    client = HttpVectorClient(tenant=t2_service_env)
+    writer = make_catalog_writer()
+    writer.register_owner("knowledge", "curator")
+    docs = _name("docs", "r229hint-9a9a9a9a")
+    f = tmp_path / "hint.nxexp"
+    _write_bundle(f, docs, ["r229 hint chunk"])
+    result = import_collection(db=client, input_path=f, target_collection=docs)
+    hint = (f"r229hint-9a9a9a9a looks like a repo's collection; import its code__ bundle first, and this "
+            "collection stays with its corpus curator otherwise")
+    assert result["owner_hint"] == hint and result["owner_fallback_count"] == 0
+
+    again = _name("docs", "r229hint2-8b8b8b8b")
+    g = tmp_path / "hint2.nxexp"
+    _write_bundle(g, again, ["r229 hint chunk two"])
+    out = CliRunner().invoke(import_cmd, [str(g), "--collection", again])
+    assert out.exit_code == 0, out.output
+    assert "r229hint2-8b8b8b8b looks like a repo's collection; import its code__ bundle first" in out.output
+
+
 def test_an_export_carries_the_repo_owner_and_an_import_reads_it(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
     reader, writer = make_catalog_reader(), make_catalog_writer()
-    owner = writer.register_owner("r229-roundtrip", "repo", repo_hash="c3c3c3c3", repo_root="/src/rt")
+    owner = writer.register_owner("r229-roundtrip", "repo", repo_hash="c3c3c3c3", repo_root="/r229")
     src = _name("code", "r229roundtrip-c3c3c3c3")
     writer.register_collection(src, content_type="code", owner_id=str(owner), embedding_model=_MODEL)
     text = "r229 roundtrip chunk"
@@ -206,7 +261,7 @@ def test_an_export_carries_the_repo_owner_and_an_import_reads_it(t2_service_env,
     export_collection(db=client, collection_name=src, output_path=out)
     with open(out, "rb") as fh:
         header = json.loads(fh.readline().decode())
-    assert header["owner"] == {"name": "r229-roundtrip", "repo_hash": "c3c3c3c3", "repo_root": "/src/rt"}
+    assert header["owner"] == {"name": "r229-roundtrip", "repo_hash": "c3c3c3c3", "repo_root": "/r229"}
 
     # a rename onto a name with no stem still lands under the bundle's repo owner, with no fallback
     dst = _name("code", "r229roundtrip-renamed")
