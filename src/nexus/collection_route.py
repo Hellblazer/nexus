@@ -13,8 +13,69 @@ This module parses no name.
 """
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Collection, Mapping
 from typing import Any
+
+import structlog
+
+_log = structlog.get_logger(__name__)
+
+
+#: One re-read of the client row cache per this many seconds before NoRow is taken: not while the cache is
+#: younger than this (a scan over any number of rowless names pays for at most one extra listing per interval),
+#: and not twice for one name. The unreadable warning is likewise once per name per interval.
+_NOROW_RECHECK_INTERVAL_S: float = 10.0
+_norow_rechecked: dict[str, float] = {}
+_unreadable_warned: dict[str, float] = {}
+_norow_lock = threading.Lock()
+
+
+def once_per_interval(seen: dict[str, float], name: str) -> bool:
+    """True the first time *name* is seen in *seen* within the interval (and records it)."""
+    now = time.monotonic()
+    with _norow_lock:
+        last = seen.get(name)
+        if last is not None and now - last < _NOROW_RECHECK_INTERVAL_S:
+            return False
+        seen[name] = now
+        if len(seen) > 4096:
+            seen.clear()
+            seen[name] = now
+        return True
+
+
+def norow_recheck_due(name: str) -> bool:
+    """Whether to invalidate the row cache and read again before taking NoRow for *name*."""
+    from nexus.mcp_infra import collections_cache_age  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+    age = collections_cache_age()
+    if age is not None and age < _NOROW_RECHECK_INTERVAL_S:
+        return False  # the cache was filled inside the interval: a miss now means no row as of then
+    return once_per_interval(_norow_rechecked, name)
+
+
+def read_row_for_write(name: str, *, db: Any = None) -> str | None:
+    """The row's ``content_type`` for a router that WRITES (item 1's Row and NoRow outcomes), or ``None``.
+
+    A name with no row gets one bounded cache re-read (:func:`norow_recheck_due`) before ``None``, so a
+    collection whose first chunk landed after the cache was filled is found. A listing that cannot be read
+    is the Unreadable outcome: ``None`` and a warning once per name per interval, never a silent miss.
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+    from nexus.mcp_infra import ServiceNotReadyError, invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+    try:
+        content_type = row_content_type(name, db=db, strict=True)
+        if content_type is None and norow_recheck_due(name):
+            invalidate_collections_cache()
+            content_type = row_content_type(name, db=db, strict=True)
+    except (ServiceNotReadyError, VectorServiceError) as exc:
+        if once_per_interval(_unreadable_warned, name):
+            _log.warning("routing_content_type_unreadable", collection=name, error=f"{type(exc).__name__}: {exc}")
+        return None
+    return content_type
 
 
 def row_content_type(name: str, *, db: Any = None, strict: bool = False) -> str | None:
