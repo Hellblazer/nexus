@@ -278,12 +278,30 @@ class CollectionParseGateTest {
      * classification), and {@code ReembedHandler.register}, which reads the version off the target name the client
      * minted. It is the only place the engine reads a version out of a name, and it is retired at P4 with the name
      * parsers.
+     *
+     * <p>The same regex also reads a MODEL out of a name ({@code CollectionRegistration.modelOfConformantName}),
+     * which adds no literal, so this per-file census cannot see it. Its callers are pinned separately by
+     * {@link #NAME_MODEL_READ_CALLS} (nexus-p2m1x.28): the one caller is {@code TargetSelection.foreignOrigin}, a
+     * MIGRATION-SOURCE read of a re-embed source row deleted by cutover; it retires at P4, with the name parsers.
      */
     private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of(
         "dev/nexus/service/db/CollectionRegistration.java", 1,
         "dev/nexus/service/db/NoteUri.java", 3);
 
     private static final int COLLECTION_LITERAL_TOTAL_CEILING = 4;
+
+    /**
+     * Per-file declared count of calls to {@code CollectionRegistration.modelOfConformantName}, the engine's one
+     * read of a model out of a collection name (nexus-p2m1x.28). A migration-source site: a re-embed source row
+     * deleted by cutover leaves only its name in the job log, and {@code TargetSelection.foreignOrigin} reads the
+     * model token from it to tell a sibling on another model from a twin. It reuses the version regex, so the literal
+     * census above does not count it; this pin does, in both directions. Retires at RDR-229 P4 (P4.3 finds it here):
+     * delete the call, treat a gone row's model as unknown (which refuses), and empty this map.
+     */
+    private static final Map<String, Integer> NAME_MODEL_READ_CALLS = Map.of(
+        "dev/nexus/service/reembed/TargetSelection.java", 1);
+
+    private static final Pattern NAME_MODEL_READ = Pattern.compile("CollectionRegistration\\s*\\.\\s*modelOfConformantName\\s*\\(");
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the
@@ -645,6 +663,29 @@ class CollectionParseGateTest {
             .isGreaterThanOrEqualTo(declaredLiterals);
         assertThat(totalReads).as("non-vacuity: a broken scanner reports fewer reads than the census declares")
             .isGreaterThanOrEqualTo(declaredReads);
+    }
+
+    /** The model-out-of-a-name read has exactly its declared callers (see {@link #NAME_MODEL_READ_CALLS}). */
+    @Test
+    void nameModelReads_areExactlyTheDeclaredMigrationSourceCallers() throws IOException {
+        Path root = Path.of("src", "main", "java");
+        Map<String, Integer> actual = new TreeMap<>();
+        int filesWalked;
+        try (Stream<Path> files = Files.walk(root)) {
+            List<Path> javaFiles = files.filter(p -> p.toString().endsWith(".java")).toList();
+            filesWalked = javaFiles.size();
+            for (Path p : javaFiles) {
+                Matcher m = NAME_MODEL_READ.matcher(blankComments(Files.readString(p)));
+                int n = 0;
+                while (m.find()) n++;
+                if (n > 0) actual.put(root.relativize(p).toString().replace(java.io.File.separatorChar, '/'), n);
+            }
+        }
+        assertThat(filesWalked).as("non-vacuity: the walk saw the tree").isGreaterThan(0);
+        assertThat(NAME_MODEL_READ_CALLS).as("non-vacuity: a declared caller exists to find").isNotEmpty();
+        assertThat(actual).as("callers of modelOfConformantName: a new one is a new name-read site and needs a "
+            + "declared reason; a removed one lowers this pin (nexus-p2m1x.28, retires at RDR-229 P4)")
+            .isEqualTo(NAME_MODEL_READ_CALLS);
     }
 
     /** Each total ceiling equals the sum of its declared census, so lowering a census and forgetting its ceiling fails. */
