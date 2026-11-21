@@ -45,6 +45,20 @@ final class CatalogIdStamps {
         return DSL.coalesce(id, own);
     }
 
+    /**
+     * {@link CollectionIds#require} with a per-call memo, for a batch that names the same collections many times. The
+     * memo lives in the caller's transaction, so no id outlives it.
+     */
+    static Long requireMemo(DSLContext ctx, String tenant, String name, java.util.Map<String, Long> memo) {
+        if (name == null || name.isEmpty()) return null;
+        Long id = memo.get(name);
+        if (id == null) {
+            id = CollectionIds.require(ctx, tenant, name);
+            memo.put(name, id);
+        }
+        return id;
+    }
+
     /** {@code catalog_documents.physical_collection_id} for an UPDATE that does not name {@code physical_collection}. */
     static Field<Long> keepDocumentId() {
         return keep(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.TENANT_ID,

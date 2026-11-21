@@ -75,6 +75,26 @@ public final class CollectionTombstones {
     }
 
     /**
+     * A registration of {@code names} in {@code tenant}: every tombstone whose {@code superseded_by} names one of them
+     * takes that row's id, replacing the self id ("retired, no successor") a delete of the earlier row gave it (or a
+     * stale one). Run in the registration's own transaction, after the insert, so the invariant (a row of the named
+     * successor exists, so its id) holds at commit. A tombstone that already has the right id is not written.
+     *
+     * @return the number of tombstones re-pointed
+     */
+    static int repointTombstonesNaming(DSLContext ctx, String tenant, java.util.Collection<String> names) {
+        if (names.isEmpty()) return 0;
+        var s = CATALOG_COLLECTIONS.as("reg");
+        Field<Long> registered = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+        return ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, registered)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names))
+            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(registered))
+            .execute();
+    }
+
+    /**
      * The parity check of the superseded_by invariant, for one tenant: the number of {@code catalog_collections} rows
      * that break it. The invariant: a live row has no {@code superseded_by_id}; a tombstone's {@code superseded_by_id}
      * is the id of the row its {@code superseded_by} names whenever such a row exists in the tenant, and its own
