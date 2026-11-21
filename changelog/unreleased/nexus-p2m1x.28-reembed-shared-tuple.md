@@ -1,0 +1,3 @@
+### Fixed
+
+- **Engine: a re-embed start or plan is refused with a 409 when its source shares the lookup tuple (content type, owner, model) with another live collection, or when the live target it would use already took documents from a different source collection.** Two sources under one curator owner (`docs__arcaneum-2ad2825c` and `docs__wow-addon-dev` on one tenant, both owner `1-40`) hold two live rows on one tuple, and the target is chosen by that tuple, so the second source's re-embed would have merged into the first source's target. The refusal names both collections and says why. A source alone on its tuple, and a restart of a source into its own earlier target, are unchanged.
