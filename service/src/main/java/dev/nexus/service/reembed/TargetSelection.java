@@ -217,7 +217,8 @@ public final class TargetSelection {
      *
      * <p><b>Scope:</b> this closes same-model twins only. The target is keyed on content type, owner and the PROFILE
      * model, while both guards key on the SOURCE model, so two shared-curator sources on different source models
-     * still re-embed into one target and merge. That residual is not closed here (it is put to Sam).
+     * still re-embed into one target and merge. That is an accepted residual, not a pending one: Sam ruled "Accept,
+     * documented" (T2 {@code nexus/sam-ruling-reembed-guard-residual-2026-11-21}).
      *
      * <p>A v2 of an already-moved source has the same model and a different name, so it is refused too: a deliberate
      * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin. The
