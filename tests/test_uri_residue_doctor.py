@@ -245,6 +245,16 @@ def test_render_names_the_counts_and_the_split() -> None:
     assert "P2.10" in text, "names the repair that clears it"
 
 
+def test_a_warn_render_names_the_p31_replacement_moves_as_well_as_the_p210_ones() -> None:
+    """RDR-229 P3.1 supersedes each open P2.10 residue move with a replacement that also sets the collection id, so the move
+    that runs on an upgraded install carries the rdr229-p31-residue-* label; the row names both, and an operator sees the move
+    that actually runs."""
+    text = "\n".join(ur.render_text(ur.check_uri_residue(reader=_Reader(_fixture()))))
+    for label in ("rdr229-residue-*", "rdr229-p31-residue-catalog-documents", "rdr229-p31-residue-document-aspects",
+                  "rdr229-p31-residue-document-highlights"):
+        assert label in text, label
+
+
 def test_a_pass_render_prints_the_other_bucket_and_the_file_routed_total_too() -> None:
     groups = [g("catalog_documents", "chroma", KNOW, KNOW, "knowledge", 40),
               g("catalog_documents", "chroma", DOCS, DOCS, "docs", 11)]
