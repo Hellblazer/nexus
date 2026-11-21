@@ -359,12 +359,6 @@ public final class CollectionMint {
         ctx.select(DSL.function("pg_advisory_xact_lock", Object.class, hashed)).fetch();
     }
 
-    /** {@code row} with its {@code collection_id}, as the routes that answer a registry row to the client carry it (null when the row has none). */
-    static Map<String, Object> withId(Map<String, Object> row, Long collectionId) {
-        row.put("collection_id", collectionId);
-        return row;
-    }
-
     /** Every collection's {@code collection_id} by name, for one tenant. */
     static Map<String, Long> idsByName(DSLContext ctx, String tenant) {
         return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
