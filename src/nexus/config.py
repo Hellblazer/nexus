@@ -1384,11 +1384,17 @@ _DEFAULTS: dict[str, Any] = {
         "collections": {},
     },
     "taxonomy": {
-        # Glob patterns for collections to exclude from auto-discover
-        # in LOCAL MODE ONLY. Local mode uses MiniLM which clusters
-        # poorly on source code. Cloud mode uses voyage-code-3 and
-        # is unaffected. Set to [] to enable taxonomy for all collections.
-        "local_exclude_collections": ["code__*"],
+        # Glob patterns, matched against collection LABELS, for collections to
+        # exclude from auto-discover in LOCAL MODE ONLY. Empty by default.
+        "local_exclude_collections": [],
+        # Content types, matched against each collection's catalog row (RDR-229
+        # P2.9), to exclude from auto-discover in LOCAL MODE ONLY. Local mode
+        # uses MiniLM which clusters poorly on source code. Cloud mode uses
+        # voyage-code-3 and is unaffected. A config that sets
+        # local_exclude_collections (even to []) and not this key owns the
+        # exclusion: this default stands down (applied in load_config), so
+        # `local_exclude_collections: []` enables taxonomy for all collections.
+        "local_exclude_content_types": ["code"],
         # Auto-label topics with Claude haiku after discover.
         # Requires `claude` CLI on PATH. Set False to keep c-TF-IDF labels.
         "auto_label": True,
@@ -1844,6 +1850,13 @@ def _validate_entity_layer(layer: dict[str, Any], path: Path | None) -> None:
     validate_entity_config(layer, source=str(path) if path is not None else "")
 
 
+def _taxonomy_keys_set_in(data: dict[str, Any]) -> set[str]:
+    """The ``taxonomy`` keys a user's config layer sets (so a shipped default that pairs with one of
+    them can stand down; see :func:`load_config`)."""
+    section = data.get("taxonomy")
+    return set(section) if isinstance(section, dict) else set()
+
+
 def load_config(repo_root: Path | None = None) -> dict[str, Any]:
     """Load and merge configuration.
 
@@ -1855,6 +1868,7 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
       4. Env vars        — ``NX_*`` variables
     """
     config = copy.deepcopy(_DEFAULTS)
+    user_taxonomy_keys: set[str] = set()
 
     # Global config
     global_path = nexus_config_dir() / "config.yml"
@@ -1865,6 +1879,7 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
             _log.warning("global config is not a dict, ignoring", path=str(global_path))
             data = {}
         _validate_entity_layer(data, global_path)
+        user_taxonomy_keys |= _taxonomy_keys_set_in(data)
         config = _deep_merge(config, data)
 
     # Per-repo config
@@ -1876,7 +1891,13 @@ def load_config(repo_root: Path | None = None) -> dict[str, Any]:
             _log.warning("repo config is not a dict, ignoring", path=str(repo_config_path))
             data = {}
         _validate_entity_layer(data, repo_config_path)
+        user_taxonomy_keys |= _taxonomy_keys_set_in(data)
         config = _deep_merge(config, data)
+
+    # RDR-229 P2.9: a user who wrote ``local_exclude_collections`` (``[]`` included, the documented opt-out
+    # for code taxonomy) owns the local exclusion; the shipped content-type default does not ride beside it.
+    if "local_exclude_collections" in user_taxonomy_keys and "local_exclude_content_types" not in user_taxonomy_keys:
+        config["taxonomy"]["local_exclude_content_types"] = []
 
     # Env var overrides
     config = _empty_none_sections(_apply_env_overrides(config))

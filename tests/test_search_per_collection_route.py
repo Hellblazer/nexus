@@ -27,6 +27,8 @@ from nexus.db.http_vector_client import PerCollectionEnvelopeError, VectorServic
 from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus.search_engine import LexicalLegUnavailableError, SearchDiagnostics, search_cross_corpus
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _ROUTE = "/v1/vectors/search-per-collection"
 _SEARCH = "/v1/vectors/search"
 _HYBRID = "/v1/vectors/hybrid-search"

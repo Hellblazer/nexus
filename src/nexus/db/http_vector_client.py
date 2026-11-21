@@ -3698,6 +3698,11 @@ class HttpVectorClient:
             }
         if self._row_resolver is None:
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+            # No refresh here, deliberately: a name missing from the cache (cold, as after an explicit-name
+            # ``nx search`` that skipped the listing, or warm with no chunk-holding row) is answered by the
+            # search resolvers from the candidate name's own segment (RDR-229 P2.9, item 1's NoRow outcome),
+            # which for a conformant name is the row's content type by construction.
             return {n: get_collection_row(n, refresh=False) for n in names}
         rows: dict[str, dict | None] = {}
         for n in names:
@@ -6901,11 +6906,11 @@ class HttpVectorClient:
             # nexus-enej7: only on a miss, so a title that its chunks carry
             # costs no catalog round trip (store_get probes every collection
             # in its scope).
-            ids = self._catalog_chashes_for_title(collection, title)
+            ids = self._catalog_chashes_for_title(collection, title, db=self)
         return ids
 
     @staticmethod
-    def _catalog_chashes_for_title(collection: str, title: str) -> list[str]:
+    def _catalog_chashes_for_title(collection: str, title: str, *, db: object = None) -> list[str]:
         """Manifest chashes of the live document the catalog registers under
         (*collection*, *title*) (nexus-enej7).
 
@@ -6921,7 +6926,7 @@ class HttpVectorClient:
         from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred: catalog-side helper
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
 
-        uri = uri_for(collection, title) if title else None
+        uri = uri_for(collection, title, db=db) if title else None
         if not uri:
             return []
         reader = None

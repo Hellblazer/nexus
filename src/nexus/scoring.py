@@ -505,8 +505,8 @@ def quality_score(
 # Default boost weight — how much quality_score influences hybrid_score.
 _QUALITY_BOOST_WEIGHT: float = 0.1
 
-# Collections eligible for quality boost (bibliographic metadata expected).
-_QUALITY_ELIGIBLE_PREFIXES = ("knowledge__", "docs__", "rdr__")
+# Content types eligible for quality boost (bibliographic metadata expected); read from the row (RDR-229 P2.9).
+_QUALITY_ELIGIBLE_CONTENT_TYPES = ("knowledge", "docs", "rdr")
 
 
 def apply_quality_boost(
@@ -516,7 +516,7 @@ def apply_quality_boost(
     """Boost hybrid_score of results whose owning document has bibliographic quality metadata.
 
     Mutates ``hybrid_score`` in place: ``score += boost_weight × quality_score``.
-    Only applies to knowledge__/docs__/rdr__ collections.
+    Only applies to knowledge, docs and rdr collections (their catalog row's content type).
 
     The citation count and year are the OWNING document's, stamped on the hit as
     ``OWNER_QUALITY_KEY`` by ``search_engine._attach_display_paths`` from the owner lookup the page
@@ -527,9 +527,12 @@ def apply_quality_boost(
     """
     from datetime import date  # noqa: PLC0415 — branch-local helper import
 
+    from nexus.collection_route import row_content_type  # noqa: PLC0415 — deferred: collection_route reaches mcp_infra
+
     today = date.today()
+    eligible = {c: row_content_type(c) in _QUALITY_ELIGIBLE_CONTENT_TYPES for c in {r.collection for r in results}}
     for r in results:
-        if not r.collection.startswith(_QUALITY_ELIGIBLE_PREFIXES):
+        if not eligible[r.collection]:
             continue
         stamp = r.metadata.get(OWNER_QUALITY_KEY) or {}
         count = int(stamp.get("bib_citation_count", 0) or 0)

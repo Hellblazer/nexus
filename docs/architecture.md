@@ -662,7 +662,7 @@ operator's manual order of operations).
 
 Taxonomy ([RDR-070](rdr/rdr-070-incremental-taxonomy-clustered-search.md)) builds a topic hierarchy over T3 collections using existing embeddings, without re-embedding. HDBSCAN clusters the vectors already stored in T3 (pgvector via `nexus-service`), labels them with c-TF-IDF, and persists topic assignments to T2. Every subsequent `store_put` call assigns the new document to the nearest centroid via ANN lookup. Search then uses these assignments to boost same-topic results and group output.
 
-In local mode, `code__*` collections are excluded by default because the general-purpose local embedder (bge-768) clusters code poorly. Cloud mode uses `voyage-code-3` and is unaffected. (As of 6.0, discovery/rebuild/assignment run on the nexus-service backend per nexus-7ydks; `nx taxonomy split` and `project` run there too.)
+In local mode, collections whose catalog row says `content_type` `code` are excluded by default (`taxonomy.local_exclude_content_types`, RDR-229) because the general-purpose local embedder (bge-768) clusters code poorly. Cloud mode uses `voyage-code-3` and is unaffected. (As of 6.0, discovery/rebuild/assignment run on the nexus-service backend per nexus-7ydks; `nx taxonomy split` and `project` run there too.)
 
 ### Data Flow
 
@@ -783,7 +783,8 @@ threshold calibration, ICF rationale, upsert semantics, troubleshooting.
 | Key | Default | Effect |
 |-----|---------|--------|
 | `auto_label` | `true` | Run Claude haiku labeling after `discover` |
-| `local_exclude_collections` | `["code__*"]` | Skip these collections in local mode |
+| `local_exclude_content_types` | `["code"]` | Skip collections of these content types (read from the catalog row) in local mode |
+| `local_exclude_collections` | `[]` | Skip collections whose label matches these glob patterns in local mode |
 
 ## Post-Store Hooks
 

@@ -29,8 +29,9 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: Collection-name prefixes that may be routed. Code collections never are.
-PROSE_PREFIXES: Final[tuple[str, ...]] = ("knowledge__", "docs__", "rdr__", "paper__")
+#: Content types, read from the collection's catalog row (RDR-229 P2.9), whose collections may be routed.
+#: Code collections never are.
+PROSE_CONTENT_TYPES: Final[tuple[str, ...]] = ("knowledge", "docs", "rdr", "paper")
 MODES: Final[tuple[str, ...]] = ("top1", "band")
 EVENT: Final = "search_topic_route"
 
@@ -43,7 +44,9 @@ REASON_CAPABILITY: Final = "capability_absent"
 
 
 def is_prose(collection: str) -> bool:
-    return collection.startswith(PROSE_PREFIXES)
+    from nexus.collection_route import row_content_type  # noqa: PLC0415 — deferred: collection_route reaches mcp_infra
+
+    return row_content_type(collection) in PROSE_CONTENT_TYPES
 
 
 def _parse(topic_route: Mapping[str, Any]) -> tuple[str, float | None, float | None, list[str] | None]:

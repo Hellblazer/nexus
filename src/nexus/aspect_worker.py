@@ -1237,8 +1237,8 @@ def _attributed(record: "AspectRecord", row: object) -> "AspectRecord":
 
     record = with_doc_id(record, getattr(row, "doc_id", "") or "")
     if not record.source_uri and record.doc_id:
-        from nexus.aspect_readers import FILE_ROUTED_PREFIXES  # noqa: PLC0415 — deferred to avoid circular import (aspect_readers)
-        if record.collection.startswith(FILE_ROUTED_PREFIXES):
+        from nexus.aspect_readers import is_file_routed_collection  # noqa: PLC0415 — deferred to avoid circular import (aspect_readers)
+        if is_file_routed_collection(record.collection):
             resolved_uri = _resolve_source_uri_from_doc_id(
                 record.collection, record.doc_id,
             )
@@ -1263,10 +1263,10 @@ def _is_unattributable(record: "AspectRecord") -> bool:
     always attributable-by-title, so this only ever fires for the
     filesystem-identity collections.
     """
-    from nexus.aspect_readers import FILE_ROUTED_PREFIXES  # noqa: PLC0415 — deferred to avoid circular import (aspect_readers)
+    from nexus.aspect_readers import is_file_routed_collection  # noqa: PLC0415 — deferred to avoid circular import (aspect_readers)
 
     return bool(
-        not record.source_uri and record.collection.startswith(FILE_ROUTED_PREFIXES)
+        not record.source_uri and is_file_routed_collection(record.collection)
     )
 
 
