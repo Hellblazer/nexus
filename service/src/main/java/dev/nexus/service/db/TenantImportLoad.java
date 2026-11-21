@@ -92,6 +92,10 @@ final class TenantImportLoad {
             if (!tp.loads()) skipped.put(tp.name(), tp.skipReason());
         }
         skipDerivedWithRows(ctx, plan, skipped);
+        Map<String, TablePlan> loading = new LinkedHashMap<>(plan);
+        loading.keySet().removeAll(skipped.keySet());
+        RestoreTwinGuard.check(ctx, loading, stages);
+        RestoreIdFill.refuseOrphans(ctx, loading, stages);
         List<TableResult> results = new ArrayList<>();
         List<SoftResult> softs = new ArrayList<>();
         for (ExportTable e : TenantExport.TABLES) {
@@ -100,7 +104,9 @@ final class TenantImportLoad {
             status.accept("loading " + e.name());
             Stage st = stages.get(e.name());
             if (st.mapName() != null) fillMap(ctx, e, st);
+            RestoreIdFill.fill(ctx, tenant, e, st, CollectionIdMap.empty());
             results.add(loadTable(ctx, tenant, tp, stages, staged.getOrDefault(e.name(), 0L), softs));
+            RestoreIdFill.afterLoad(ctx, tenant, e);
         }
         status.accept("verifying");
         verify(ctx, tenant, plan, stages, skipped, softs);
@@ -214,6 +220,9 @@ final class TenantImportLoad {
         checkSeededRowsMatch(ctx, tenant, tp, st);
 
         List<String> columns = new ArrayList<>(tp.loadColumns());
+        for (String filled : RestoreIdFill.filledColumns(ctx, e, st)) {
+            if (!columns.contains(filled)) columns.add(filled);   // RDR-229 P3.1: ids a file older than the column lacks
+        }
         if (tp.tenantScoped() && !columns.contains("tenant_id")) columns.add(0, "tenant_id");
         List<Field<?>> targets = new ArrayList<>();
         List<Field<?>> values = new ArrayList<>();
