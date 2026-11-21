@@ -183,6 +183,39 @@ final class TenantImportLoad {
 
     // ── one table ───────────────────────────────────────────────────────────────────────────────
 
+    /**
+     * RDR-229 P3.8: a file holding two live rows of one tuple fails the load, naming both collections, once the partial
+     * UNIQUE index of the live tuple exists (it would refuse the INSERT with a bare unique violation). Without the
+     * index the rows load as before: an install that predates the re-own move keeps its accepted duplicate (D4).
+     */
+    private static void refuseLiveTupleConflicts(DSLContext ctx, TablePlan tp, Stage st) {
+        List<String> needed = List.of("name", "content_type", "owner_id", "embedding_model", "model_version",
+            "superseded_by", "lifecycle_state");
+        if (!tp.loadColumns().containsAll(needed) || !CollectionMint.tupleIndexExists(ctx)) return;
+        Table<?> a = TenantImportStaging.stageTable(st).as("a");
+        Table<?> b = TenantImportStaging.stageTable(st).as("b");
+        Condition sameTuple = DSL.trueCondition();
+        for (String column : List.of("content_type", "owner_id", "embedding_model", "model_version")) {
+            sameTuple = sameTuple.and(DSL.field(DSL.name("a", column), String.class).eq(DSL.field(DSL.name("b", column), String.class)));
+        }
+        Field<String> aName = DSL.field(DSL.name("a", "name"), String.class);
+        Field<String> bName = DSL.field(DSL.name("b", "name"), String.class);
+        Condition bothLive = DSL.trueCondition();
+        for (String alias : List.of("a", "b")) {
+            bothLive = bothLive.and(DSL.field(DSL.name(alias, "superseded_by"), String.class).eq(""))
+                .and(DSL.field(DSL.name(alias, "lifecycle_state"), String.class).ne("quarantine"));
+        }
+        Record twin = ctx.select(aName, bName, DSL.field(DSL.name("a", "content_type"), String.class),
+                DSL.field(DSL.name("a", "owner_id"), String.class), DSL.field(DSL.name("a", "embedding_model"), String.class),
+                DSL.field(DSL.name("a", "model_version"), String.class))
+            .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).limit(1).fetchOne();
+        if (twin != null) {
+            throw new LoadFailedException(CollectionMint.conflict(twin.get(1, String.class), twin.get(0, String.class),
+                twin.get(2, String.class), twin.get(3, String.class), twin.get(4, String.class), twin.get(5, String.class))
+                .getMessage());
+        }
+    }
+
     private static TableResult loadTable(DSLContext ctx, String tenant, TablePlan tp, Map<String, Stage> stages,
                                          long stagedClaimed, List<SoftResult> softs) {
         ExportTable e = tp.entry();
@@ -217,6 +250,7 @@ final class TenantImportLoad {
             }
         }
         checkSeededRowsMatch(ctx, tenant, tp, st);
+        if ("catalog_collections".equals(e.name())) refuseLiveTupleConflicts(ctx, tp, st);
 
         List<String> columns = new ArrayList<>(tp.loadColumns());
         for (String filled : RestoreIdFill.filledColumns(ctx, e, st)) {
