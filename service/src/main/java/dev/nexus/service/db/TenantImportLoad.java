@@ -214,10 +214,10 @@ final class TenantImportLoad {
         Condition aLive = stagedOrDefault(tp, "a", "superseded_by", "").eq("")
             .and(stagedOrDefault(tp, "a", "lifecycle_state", "live").ne("quarantine"));
         if (!CollectionMint.tupleIndexExists(ctx)) {
-            ctx.selectDistinct(tupleOfA).from(a).where(aLive).fetch().stream()
-                .map(r -> CollectionMint.tupleKey(tenant, r.get(0, String.class), r.get(1, String.class),
+            CollectionTupleLock.lock(ctx, ctx.selectDistinct(tupleOfA).from(a).where(aLive).fetch().stream()
+                .map(r -> new CollectionTupleLock.Tuple(tenant, r.get(0, String.class), r.get(1, String.class),
                     r.get(2, String.class), r.get(3, String.class)))
-                .sorted().forEach(k -> CollectionMint.lockKey(ctx, k));
+                .toList());
         }
         Record twin = ctx.select(aName, bName, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
             .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).limit(1).fetchOne();
