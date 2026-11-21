@@ -184,9 +184,11 @@ class TenantImportFixtureTest {
             .as("child rows of the load whose collection_id is null although their name names a restored registry row").isEmpty();
         assertThat(found.stream().filter(f -> f.mismatched() > 0).map(Object::toString).toList())
             .as("child rows whose collection_id is not that registry row's").isEmpty();
-        // a check that examined nothing proves nothing: the chunks and the manifest are what the id exists for
-        assertThat(found.stream().filter(f -> f.site().startsWith("chunks.") || f.site().startsWith("catalog_document_chunks.")).toList())
-            .as("the chunk and manifest sites were examined").hasSize(2).allMatch(f -> f.examined() > 0);
+        // A check that examined nothing proves nothing. The fixture holds rows in every exported table (see regenerate), so every
+        // exported site must examine some; a zero is a setup failure. The tables the backup excludes are not in a backup file, so
+        // the round-trip test audits those, on a source it seeds itself.
+        assertThat(CollectionIdSites.unexamined(found)).as("sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
+        assertThat(found).as("the fixture audit covered every exported site").hasSize(CollectionIdSites.exportedSites().size());
         Long nullChunkIds = env.su(ctx -> ctx.fetchOne("select count(*) from nexus.chunks where tenant_id = ? and collection_id is null", tenant)
             .get(0, Long.class));
         assertThat(nullChunkIds).as("chunks with a null collection_id").isZero();

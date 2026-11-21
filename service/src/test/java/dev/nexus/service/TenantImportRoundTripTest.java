@@ -484,7 +484,8 @@ class TenantImportRoundTripTest {
     /**
      * A source tenant as an engine at P3.1 would hold it: seeded as the battery seeds it, then every id column stamped from
      * the tenant's own registry (the seed inserts by name, as the engine's data move stamps old rows), one collection
-     * tombstoned under another so {@code superseded_by_id} holds a value to map. Returns the tenant's token.
+     * tombstoned under another so {@code superseded_by_id} holds a value to map, and one row in each table the backup does not carry.
+     * Returns the tenant's token.
      */
     private String stampedSource(String tenant, String tombstone, String successor) throws Exception {
         String token = env.newTenant(tenant);
@@ -502,6 +503,9 @@ class TenantImportRoundTripTest {
                 ctx.execute("update nexus.\"" + s.table() + "\" t set \"" + id + "\" = (select c.collection_id from nexus.catalog_collections c "
                     + "where c.tenant_id = t.tenant_id and c.name = t.\"" + s.nameColumn() + "\") where t.tenant_id = ?", tenant);
             }
+            // the battery seed reaches no table the backup excludes; the audit below covers them too, so they are seeded here
+            CollectionIdSites.seedUnexported(ctx, tenant, TenantExportBatteryTest.Seed.collection(tenant, 768),
+                TenantExportBatteryTest.Seed.collection(tenant, 384));
             ctx.execute("update nexus.catalog_collections t set superseded_by = ?, superseded_by_id = s.collection_id, superseded_at = now() "
                 + "from nexus.catalog_collections s where t.tenant_id = ? and s.tenant_id = t.tenant_id and s.name = ? and t.name = ?",
                 successor, tenant, successor, tombstone);
@@ -518,7 +522,9 @@ class TenantImportRoundTripTest {
         // the source is sound, and the check that follows can fail: it holds ids at every exported site, none null
         CollectionIdSites.Finding srcRegistry = env.su(ctx -> CollectionIdSites.registryAudit(ctx, src));
         assertThat(srcRegistry.clean() && srcRegistry.examined() == 3).as("the source registry: " + srcRegistry).isTrue();
-        List<CollectionIdSites.Finding> srcFindings = env.su(ctx -> CollectionIdSites.audit(ctx, src, CollectionIdSites.exportedSites()));
+        // every site of item 6, excluded tables too: a table the test did not seed is a setup failure, never a pass
+        List<CollectionIdSites.Finding> srcFindings = env.su(ctx -> CollectionIdSites.audit(ctx, src, CollectionIdSites.SITES));
+        assertThat(CollectionIdSites.unexamined(srcFindings)).as("source sites with no row; rows examined per site: " + CollectionIdSites.counts(srcFindings)).isEmpty();
         assertThat(srcFindings.stream().filter(f -> !f.clean()).toList()).as("the stamped source").isEmpty();
         Map<String, Long> srcIds = registryIds(src);
         assertThat(srcIds.values()).doesNotContainNull().hasSize(3);
@@ -545,8 +551,17 @@ class TenantImportRoundTripTest {
         // every chunk and child row is on its collection's NEW id, and none is on the source's
         List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, dst, CollectionIdSites.exportedSites()));
         assertThat(found.stream().filter(f -> !f.clean()).toList()).as("child rows whose id is null or is not the target registry's").isEmpty();
-        assertThat(found.stream().filter(f -> f.examined() == 0).map(Object::toString).toList())
-            .as("sites with no row to check (the seed must reach every one)").isEmpty();
+        assertThat(CollectionIdSites.unexamined(found)).as("restored sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
+        // the tables the backup excludes come back empty: the restore carries none of the source's rows, so none of its ids
+        List<String> carried = new ArrayList<>();
+        env.su(ctx -> {
+            for (String table : CollectionIdSites.SITES.stream().filter(x -> !x.exported()).map(CollectionIdSites.Site::table).distinct().toList()) {
+                long n = ctx.fetchOne("select count(*) from nexus.\"" + table + "\" where tenant_id = ?", dst).get(0, Long.class);
+                if (n != 0) carried.add(table + "=" + n);
+            }
+            return null;
+        });
+        assertThat(carried).as("excluded tables that hold rows after the restore").isEmpty();
         Set<Long> childIds = new TreeSet<>();
         env.su(ctx -> {
             for (CollectionIdSites.Site s : CollectionIdSites.exportedSites()) {
@@ -564,14 +579,34 @@ class TenantImportRoundTripTest {
         Long successorId = env.su(ctx -> ctx.fetchOne("select superseded_by_id from nexus.catalog_collections where tenant_id = ? and name = ?",
             dst, tombstone).get(0, Long.class));
         assertThat(successorId).as("the tombstone points at the target's id of its successor").isEqualTo(dstIds.get(successor));
+    }
 
-        // a mint after the restore draws above everything restored: no collision with an id the restore wrote
+    /**
+     * Linda's ruling (RDR-229 P3.11 round 2): restore a set of ids, mint exactly one new collection afterwards, and the new id is
+     * greater than every restored id. P3.1's id is GENERATED BY DEFAULT, so an import that wrote explicit ids without moving the
+     * sequence would hand a later mint an id a restored row already holds (a 23505 on UNIQUE (tenant_id, collection_id), or a
+     * collection that shares an id); an import that takes ids from the sequence cannot.
+     */
+    @Test
+    void aCollectionMintedAfterARestoreHasAnIdAboveEveryRestoredId() throws Exception {
+        String src = "t-imp-mint-src", dst = "t-imp-mint-dst";
+        String successor = TenantExportBatteryTest.Seed.collection(src, 768), tombstone = TenantExportBatteryTest.Seed.collection(src, 1024);
+        ImportTestEnv.BackupFile backup = env.export(stampedSource(src, tombstone, successor));
+        assertThat(env.restore(env.newTenant(dst), backup).get("status").asText()).isEqualTo("committed");
+        Map<String, Long> restored = registryIds(dst);
+        assertThat(restored).as("the restored set of ids").hasSize(3);
+        assertThat(restored.values()).as("every restored registry row has an id").doesNotContainNull();
+
         String fresh = TenantExportBatteryTest.Seed.collection(dst + "-fresh", 768);
         long minted = env.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, dst, fresh);
             return ctx.fetchOne("select collection_id from nexus.catalog_collections where tenant_id = ? and name = ?", dst, fresh)
                 .get(0, Long.class);
         });
-        assertThat(minted).as("the next collection after the restore").isGreaterThan(java.util.Collections.max(dstIds.values()));
+
+        assertThat(registryIds(dst)).as("exactly one collection was minted").hasSize(restored.size() + 1);
+        assertThat(restored.values()).as("the minted id " + minted + " is not one a restored row holds").doesNotContain(minted);
+        assertThat(minted).as("the minted id is above every restored id " + restored.values())
+            .isGreaterThan(java.util.Collections.max(restored.values()));
     }
 }

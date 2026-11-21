@@ -140,7 +140,7 @@ class TenantExportCollectionIdParityTest {
         long sites = CollectionIdSites.SITES.stream().filter(Site::exported).count();
         assertThat(sites).as("the check examined the exported tables of RDR-229 item 6").isGreaterThanOrEqualTo(10);
 
-        assertThat(undeclaredAmong(true)).as("exported tables whose collection id the registry does not declare").isEmpty();
+        assertThat(undeclaredAmong(true)).as("exported tables whose collection id the registry does not declare (examined " + sites + " sites)").isEmpty();
     }
 
     @Test
@@ -150,6 +150,6 @@ class TenantExportCollectionIdParityTest {
         long sites = CollectionIdSites.SITES.stream().filter(s -> !s.exported()).count();
         assertThat(sites).as("the check examined the excluded tables of RDR-229 item 6").isGreaterThanOrEqualTo(6);
 
-        assertThat(undeclaredAmong(false)).as("excluded tables whose collection id the registry does not declare").isEmpty();
+        assertThat(undeclaredAmong(false)).as("excluded tables whose collection id the registry does not declare (examined " + sites + " sites)").isEmpty();
     }
 }
