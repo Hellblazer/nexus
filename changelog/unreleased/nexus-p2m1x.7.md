@@ -1,3 +1,0 @@
-### Changed
-
-- **`nx collection info`, `nx collection list` over MCP, `nx collection export` and the re-embed source model now read a collection's embedding model from its catalog row (RDR-229 P2.2).** A collection whose row names another model than its name does (a rename keeps the source row's model) shows, exports and re-embeds with the row's model; a name with no row still answers from the name as before. The token window `nx index` checks chunks against follows the row's model too. Name parsing moved into one module, `nexus.catalog.rows.legacy_names`, and the name-parsing functions are no longer importable from `nexus.corpus`.
