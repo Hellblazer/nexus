@@ -5,6 +5,7 @@ package dev.nexus.service;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import dev.nexus.service.db.TenantExport;
 import dev.nexus.service.db.TenantExport.ExportClass;
 import dev.nexus.service.db.TenantExport.ExportTable;
@@ -608,5 +609,54 @@ class TenantImportRoundTripTest {
         assertThat(restored.values()).as("the minted id " + minted + " is not one a restored row holds").doesNotContain(minted);
         assertThat(minted).as("the minted id is above every restored id " + restored.values())
             .isGreaterThan(java.util.Collections.max(restored.values()));
+    }
+
+    /**
+     * After P3.1 a row whose collection has no registry row is refused (422, UnregisteredCollectionException, from the NULLIF
+     * CHECK's guard), so a restore must load {@code catalog_collections} before every table that names a collection, whatever order
+     * the backup file holds them in. Today the plan is in registry order and ignores the header's order
+     * ({@code TenantImportPlan.java:115} and {@code :141-145}), the load walks {@code TenantExport.TABLES}
+     * ({@code TenantImportLoad.java:97}), and the open answer lists the tables in that order for the client to upload
+     * ({@code TenantImportSessions.java:436-437}; {@code requireOrder}, {@code :557-565}, refuses a table that arrives before an
+     * earlier one closed). The file format therefore does not fix the order, and such a file can exist: this one is the export with
+     * its tables in the reverse order, {@code catalog_collections} last.
+     */
+    @Test
+    void aBackupWhoseReferencingTablesPrecedeCatalogCollectionsStillRestoresOnTheTargetsNewIds() throws Exception {
+        String src = "t-imp-ord-src", dst = "t-imp-ord-dst";
+        String successor = TenantExportBatteryTest.Seed.collection(src, 768), tombstone = TenantExportBatteryTest.Seed.collection(src, 1024);
+        ImportTestEnv.BackupFile backup = env.export(stampedSource(src, tombstone, successor));
+        ImportTestEnv.BackupFile reversed = new ImportTestEnv.BackupFile(backup.header.deepCopy());
+        ArrayNode tables = reversed.header.withArray("tables");
+        List<JsonNode> held = new ArrayList<>();
+        tables.forEach(held::add);
+        Collections.reverse(held);
+        tables.removeAll();
+        held.forEach(tables::add);
+        for (String name : reversed.tableNames()) reversed.pages.put(name, new ArrayList<>(backup.pages.get(name)));
+        reversed.seal();
+        List<String> inFile = reversed.tableNames();
+        List<String> exportedSites = CollectionIdSites.exportedSites().stream().map(CollectionIdSites.Site::table).distinct().toList();
+        for (String t : exportedSites) {
+            assertThat(inFile.indexOf(t)).as(t + " precedes catalog_collections in the file").isNotNegative()
+                .isLessThan(inFile.indexOf("catalog_collections"));
+        }
+        // the property that matters, whatever the file order: the load order has the registry before every table that names a collection
+        List<String> loadOrder = TenantExport.TABLES.stream().map(ExportTable::name).toList();
+        for (String t : exportedSites) {
+            assertThat(loadOrder.indexOf("catalog_collections")).as("catalog_collections loads before " + t)
+                .isLessThan(loadOrder.indexOf(t));
+        }
+        Map<String, Long> srcIds = registryIds(src);
+
+        JsonNode end = env.restore(env.newTenant(dst), reversed);
+
+        assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("committed");
+        Map<String, Long> dstIds = registryIds(dst);
+        assertThat(dstIds.keySet()).isEqualTo(srcIds.keySet());
+        assertThat(dstIds.values()).as("the restore writes no id of the source").doesNotContainNull().doesNotContainAnyElementsOf(srcIds.values());
+        List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, dst, CollectionIdSites.exportedSites()));
+        assertThat(CollectionIdSites.unexamined(found)).as("restored sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
+        assertThat(found.stream().filter(f -> !f.clean()).toList()).as("rows on a collection's id that is not the target registry's").isEmpty();
     }
 }
