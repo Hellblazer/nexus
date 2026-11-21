@@ -207,7 +207,9 @@ public final class TargetSelection {
      * rows are listed): same content type, owner and model. A source whose row is gone (a default cutover deletes it)
      * is read by the model token of its conformant name, since a model never changes on a collection and the target
      * already fixed its owner and content type; a name that is not conformant reads as an unknown model, which counts
-     * (a refusal, never a merge). The newest such job wins ({@code jobs} is newest first).
+     * (a refusal, never a merge). The newest such job wins ({@code jobs} is newest first). The name read is a
+     * migration-source site, declared in {@code CollectionParseGateTest.NAME_MODEL_READ_CALLS}: a re-embed source
+     * row deleted by cutover; retires at RDR-229 P4.
      *
      * <p>A v2 of an already-moved source has the same model and a different name, so it is refused too: a deliberate
      * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin.
