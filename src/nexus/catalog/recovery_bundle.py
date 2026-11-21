@@ -924,7 +924,9 @@ def _plan_collections(reader: Any, writer: Any, records: list[dict], summary: Im
     * a live row with that label, the same content_type and owner_id: this row (an idempotent re-import);
     * a row with that label and another content_type or owner_id, or one that is not live: the collection is
       refused, naming both labels and their attributes. So is a collection the engine refuses to register (its
-      label rule, a live tuple held under another label);
+      label rule, a live tuple held under another label), and one whose model this install's configuration picks
+      but the engine's embedding profile does not (the seam's ``EmbeddingProfileMismatchError`` text, before any
+      register call);
     * a label of the minted form (``c<digits>``): not kept and never clashing. The engine mints this install's
       label for the row's attributes, or answers the live collection that already has them, and the notes go there.
 
@@ -994,6 +996,13 @@ def _resolve_collection(reader: Any, writer: Any, rec: dict, registry: dict[str,
         changed = {"from_model": bundle_model, "to_model": model} if model and model != bundle_model else None
         return _Resolved(label=label, row=existing, changed_model=changed)
     model = effective_embedding_model_for_writes(content_type)
+    # The registration seam's profile check (ensure_collection_registered), made here because this site registers
+    # outside the seam: effective_embedding_model_for_writes reads local.embed_model, not the engine's embedding
+    # profile. No row holds this label on the target, so RDR-210 Gap 9's existing-row allowance never applies.
+    from nexus.corpus import EmbeddingProfileMismatchError, _profile_model_for_content_type  # noqa: PLC0415 — as above
+    profile_model = _profile_model_for_content_type(content_type)
+    if profile_model is not None and profile_model != model:
+        return _Resolved(refusal=str(EmbeddingProfileMismatchError(content_type, model, profile_model)))
     version = (rec.get("model_version") or "v1") if model == bundle_model else "v1"
     changed = {"from_model": bundle_model, "to_model": model} if model != bundle_model else None
     if minted:
