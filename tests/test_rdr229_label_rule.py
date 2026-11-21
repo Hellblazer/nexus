@@ -3,8 +3,8 @@
 
 A collection's ``name`` is a label (RDR-229 item 7): what a person types and reads, not a key and not a
 ChromaDB identifier. The rule is non-empty, valid UTF-8, no control character, at most 255 UTF-8 bytes, not of
-the minted form ``c`` + ASCII digits (the engine's own, item 8), and (pending Sam's ruling on the board ask
-``rdr229-label-slash``) no ``/``. The engine twin is ``dev.nexus.service.db.CollectionLabel.validateUserLabel``;
+the minted form ``c`` + ASCII digits (the engine's own, item 8), and no ``/`` (Sam's ruling, T2
+``nexus/sam-ruling-rdr229-label-slash-2026-11-21``). The engine twin is ``dev.nexus.service.db.CollectionLabel.validateUserLabel``;
 ``service/src/test/java/dev/nexus/service/db/CollectionLabelTest.java`` pins the same table.
 
 The conformant-shape check for a NEW collection (``is_conformant_collection_name``) is a different gate and is
@@ -98,11 +98,10 @@ def test_a_label_over_the_old_63_character_cap_no_longer_carries_the_overflow_hi
     assert "nx catalog collection-name" not in str(ei.value)
 
 
-# The '/' clause is PENDING Sam's ruling (board ask rdr229-label-slash): NoteUri.collectionOf ends a collection at
-# the first '/', so a label holding one would mis-parse nx-note:// URIs, and no audit yet covers where a label
-# meets a file path. It is refused until he rules. If he allows '/', flip LABEL_REFUSES_SLASH in
-# src/nexus/corpus.py and CollectionLabel.REFUSE_SLASH in the engine, and change this one test.
-def test_a_slash_is_refused_until_sam_rules_on_it() -> None:
+# The '/' clause is Sam's ruling (T2 nexus/sam-ruling-rdr229-label-slash-2026-11-21): NoteUri.collectionOf ends a
+# collection at the first '/', and file paths are built from a label. It is one named clause, LABEL_REFUSES_SLASH in
+# src/nexus/corpus.py and CollectionLabel.REFUSE_SLASH in the engine; a later ruling flips both and changes this test.
+def test_a_label_holding_a_slash_is_refused() -> None:
     assert corpus.LABEL_REFUSES_SLASH is True
     with pytest.raises(ValueError, match="/"):
         validate_collection_name("a/b")

@@ -25,12 +25,11 @@ _log = structlog.get_logger(__name__)
 _CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
 
 
-#: RDR-229 item 7, the label rule's one pending clause: a label holding ``/`` is refused. PENDING Sam's ruling
-#: (board ask ``rdr229-label-slash``): ``NoteUri.collectionOf`` ends a collection at the first ``/``, so such a label
-#: would mis-parse ``nx-note://<label>/...``, and no audit yet covers where a label meets a file path
-#: (``checkpoint.checkpoint_path`` and ``orphan_backfill`` build paths from one). If he allows ``/``, set this
-#: ``False`` here and ``CollectionLabel.REFUSE_SLASH`` in the engine, and change ``test_rdr229_label_rule.py``'s one
-#: slash test.
+#: RDR-229 item 7: a label holding ``/`` is refused (Sam's ruling, T2 ``nexus/sam-ruling-rdr229-label-slash-2026-11-21``).
+#: ``NoteUri.collectionOf`` ends a collection at the first ``/``, so such a label would mis-parse
+#: ``nx-note://<label>/...``, and file paths are built from a label (``checkpoint.checkpoint_path``,
+#: ``orphan_backfill.dump_csvs``). One named clause so a later ruling is one line here and one in the engine
+#: (``CollectionLabel.REFUSE_SLASH``), plus ``test_rdr229_label_rule.py``'s one slash test.
 LABEL_REFUSES_SLASH: bool = True
 
 #: The engine's own label form, ``c`` + ASCII digits (RDR-229 item 8). The client never mints one; the engine's
