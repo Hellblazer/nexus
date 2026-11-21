@@ -12,6 +12,7 @@ the stack (``default_ops``), so the swap, the marker and the major-version guard
 from __future__ import annotations
 
 import hashlib
+import inspect
 import sys
 import tarfile
 from pathlib import Path
@@ -20,8 +21,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nexus.commands import daemon as daemon_cmds
 from nexus.daemon import binary_install as b
+from nexus.daemon import pg_bundle_refresh
 from nexus.daemon import replace_quiesce as rq
+from nexus.daemon.pg_bundle_refresh import bundle_has_pg_background, install_and_extract_pg_bundle
 from nexus.db import pg_bundle
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import PoisonProbe, converge_engine
@@ -50,17 +54,17 @@ def _txz(dest_dir: Path, name: str, *, background: bool, pg_version: str = "17.5
     (bundle / "bin").mkdir(parents=True)
     for tool in ("initdb", "pg_ctl", "psql", "createdb"):
         f = bundle / "bin" / tool
-        f.write_text(f"#!/bin/sh\necho '{tool} (PostgreSQL) {pg_version}'\n")
+        f.write_text(f"#!/bin/sh\necho '{tool} (PostgreSQL) {pg_version}'\n", encoding="utf-8")
         f.chmod(0o755)
     ext = bundle / "share" / "postgresql" / "extension"
     ext.mkdir(parents=True)
-    (ext / "vector.control").write_text("default_version = '0.8.0'\n")
+    (ext / "vector.control").write_text("default_version = '0.8.0'\n", encoding="utf-8")
     if background:
-        (ext / "pg_background.control").write_text("default_version = '1.0'\n")
+        (ext / "pg_background.control").write_text("default_version = '1.0'\n", encoding="utf-8")
     (bundle / "lib").mkdir()
     if variant:
-        (bundle / "share" / "VARIANT").write_text(variant + "\n")
-    (bundle / ".build_prefix").write_text("/build/prefix/nexus-pg\n")
+        (bundle / "share" / "VARIANT").write_text(variant + "\n", encoding="utf-8")
+    (bundle / ".build_prefix").write_text("/build/prefix/nexus-pg\n", encoding="utf-8")
     archive = dest_dir / name
     with tarfile.open(archive, "w:xz") as tf:
         tf.add(bundle, arcname="bundle")
@@ -94,7 +98,7 @@ class _World:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.cfg = tmp_path / "cfg"
         self.cfg.mkdir()
-        (self.cfg / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n")
+        (self.cfg / "pg_credentials").write_text("NX_DB_URL=postgresql://x/nexus\n", encoding="utf-8")
         self.release = tmp_path / "release"
         self.release.mkdir()
         self.work = tmp_path / "work"
@@ -174,12 +178,10 @@ def test_the_real_pg_background_control_path_is_under_share_postgresql_extension
     """Verified against the shipped archive layout: the control files sit at
     ``bundle/share/postgresql/extension/`` (``vector.control`` beside it), not
     ``bundle/share/extension/``."""
-    from nexus.daemon.pg_bundle_refresh import bundle_has_pg_background
-
     world.install_old(background=False)
     assert bundle_has_pg_background(world.root) is False
     assert (world.root / "bundle/share/postgresql/extension/vector.control").is_file()
-    (world.root / _CONTROL).write_text("default_version = '1.0'\n")
+    (world.root / _CONTROL).write_text("default_version = '1.0'\n", encoding="utf-8")
     assert bundle_has_pg_background(world.root) is True
 
 
@@ -392,8 +394,6 @@ def test_extract_bundle_refuses_a_major_change_and_allows_the_same_major(tmp_pat
 
 
 def test_the_shared_function_installs_then_extracts_and_a_repeat_swaps_nothing(world):
-    from nexus.daemon.pg_bundle_refresh import install_and_extract_pg_bundle
-
     world.ship(background=True)
     seen: list[Path] = []
 
@@ -412,11 +412,6 @@ def test_the_shared_function_installs_then_extracts_and_a_repeat_swaps_nothing(w
 
 def test_install_binary_and_converge_share_the_one_function():
     """No copy: both call sites go through ``install_and_extract_pg_bundle``."""
-    import inspect
-
-    from nexus.commands import daemon as daemon_cmds
-    from nexus.daemon import pg_bundle_refresh
-
     assert "install_and_extract_pg_bundle" in inspect.getsource(daemon_cmds._install_binary_steps)
     assert "install_and_extract_pg_bundle" in inspect.getsource(pg_bundle_refresh)
     assert "extract_bundle(" not in inspect.getsource(daemon_cmds._install_binary_steps)
