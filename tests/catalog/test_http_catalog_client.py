@@ -2181,7 +2181,7 @@ class TestHttpCatalogClientRoundTrip:
         with pytest.raises(httpx.HTTPStatusError):
             client.supersede_collection("old__coll", "new__coll")
 
-    # ── nexus-cecqy: legacy_grandfathered is DERIVED, not defaulted False ────
+    # ── RDR-229 P3.8 (item 11): legacy_grandfathered is no longer derived or sent (was nexus-cecqy) ────
 
     def _upsert_body(self, client: HttpCatalogClient, *a: object, **kw: object) -> dict:
         """Call register_collection and return the body it POSTed."""
@@ -2196,41 +2196,22 @@ class TestHttpCatalogClientRoundTrip:
         client.register_collection(*a, **kw)  # type: ignore[arg-type]
         return sent
 
-    def test_legacy_grandfathered_derivation_journey(
+    def test_registration_sends_no_legacy_flag_and_derives_nothing_from_the_name(
         self, client: HttpCatalogClient,
     ) -> None:
-        from nexus.catalog.rows.legacy_names import is_conformant_collection_name
-
-        # The BARE ``register_collection(name)`` shape — by construction the
-        # non-conformant branch of every call site's conformance fork — must
-        # send ``legacy_grandfathered=True``. It used to send the kwarg's
-        # False default, so non-conformant names landed un-flagged in
-        # service mode. The engine infers nothing (``upsertCollection`` binds
-        # the caller's value), so whatever this sends IS the stored flag.
-        name = "docs__cecqy-legacy"
-        # Non-vacuity: the fix is only observable on a non-conformant name.
-        assert not is_conformant_collection_name(name)
-        assert self._upsert_body(client, name)["legacy_grandfathered"] is True
-
-        # The other half of the derivation. Pins against a 'fix' that
-        # blanket-flags every bare registration True — the conformant case
-        # was correct by accident at the old False default, which is what
-        # hid the defect.
-        conformant_name = "docs__cecqy-conf__stub-docs-1024__v1"
-        assert is_conformant_collection_name(conformant_name)
-        assert self._upsert_body(client, conformant_name)["legacy_grandfathered"] is False
-
-        # Deriving must not take the override away: a caller that must force
-        # the flag still can, in BOTH directions.
-        forced_on = self._upsert_body(
-            client, conformant_name, legacy_grandfathered=True,
-        )
-        assert forced_on["legacy_grandfathered"] is True
-
-        forced_off = self._upsert_body(
-            client, name, legacy_grandfathered=False,
-        )
-        assert forced_off["legacy_grandfathered"] is False
+        attrs = {
+            "content_type": "docs", "owner_id": "cecqy",
+            "embedding_model": "stub-docs-1024", "model_version": "v1",
+        }
+        # Both shapes the old derivation told apart: a non-conformant name (it flagged True) and a conformant one.
+        for name in ("docs__cecqy-legacy", "docs__cecqy-conf__stub-docs-1024__v1"):
+            body = self._upsert_body(client, name, **attrs)
+            assert "legacy_grandfathered" not in body, f"{name}: the flag is no longer written"
+            assert body["name"] == name
+            assert {k: body[k] for k in attrs} == attrs, "the attributes are sent as given, never parsed from the name"
+        # A name alone derives nothing: the four attributes are required.
+        with pytest.raises(TypeError):
+            self._upsert_body(client, "docs__cecqy-legacy")
 
     def test_rename_collection_journey(self, client: HttpCatalogClient) -> None:
         # Sends {old_name, new_name} (canonical form)
