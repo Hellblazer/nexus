@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.8 (bead nexus-p2m1x.28): a partial UNIQUE index on the live collection tuple.
+
+    THE INDEX. nexus.catalog_collections gets
+        UNIQUE (tenant_id, content_type, owner_id, embedding_model, model_version)
+        WHERE superseded_by = '' AND lifecycle_state <> 'quarantine'
+    The predicate is exactly the candidate set of CatalogRepository.collectionForTuple, so a tuple can never have two
+    answers at the same model_version: a dormant or disputed row still holds its tuple (it is what the lookup
+    answers), a quarantine sibling and a superseded row do not. model_version is in the key so a same-model re-embed
+    target (registered live while its source still is, at a higher version) or a revive is never refused. The mint
+    becomes INSERT ... ON CONFLICT ... DO NOTHING plus a re-read, which is race-safe with no advisory lock. The
+    design of record is T2 nexus_rdr/229-p3.8-design-gate-v2-2026-11-21, accepted by Sam 2026-11-21 (T2
+    nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21). Reversible: drop the index.
+
+    THE INDEX WAITS (RDR-246, "Finishing a move"). On the managed tenant gate-xr789 the curator's two docs
+    collections share one tuple until the re-own move of the P3 plan (marlowe's, label
+    'rdr229-reown-repo-stems-from-curator') has run, and a UNIQUE index cannot be built over a duplicate. The changeset
+    is therefore a preCondition with onFail="CONTINUE" and onError="CONTINUE", on purpose:
+      - never HALT: a boot-time halt crash-loops an install (the nexus-lgdel.l1 no-wedge directive);
+      - never MARK_RAN: that would record the changeset as run and stop it being retried. CONTINUE skips the
+        changeset WITHOUT recording it, so every boot re-evaluates it and the index lands the first boot both
+        conditions hold: (a) the nexus.data_moves row with that label has completed_at set, and (b)
+        nexus.catalog_collection_tuple_duplicates_unscoped() returns 0.
+    The move is named by its LABEL, not by a changeset id: the move is registered by an engine boot, not by this
+    file. A fresh install therefore takes two boots: boot 1's migration runs before the move exists (skipped), the
+    engine then registers it and its worker completes it (nothing to move), and boot 2 applies the index.
+    The two conditions are ONE sqlCheck on purpose: the CASE reaches the counter only when the move has completed.
+    The counter takes ACCESS EXCLUSIVE on the registry for the length of one count (below), so a boot that is still
+    waiting for the move must not call it; nothing in Liquibase promises the order of two nested checks.
+
+    THE COUNTER IS NOT A PLAIN count(*). nexus.catalog_collections is FORCE ROW LEVEL SECURITY with the policy
+    `tenant_id = current_setting('nexus.tenant', true)` (catalog-001-5), and the migration role owns the table with
+    no BYPASSRLS (the nexus-1wjmq class, catalog-013-1b's header). With no tenant GUC set, a count by that role sees
+    ZERO rows on every tenant, so a naive guard would read "no duplicate" on a registry that holds one. The helper
+    (collections-001-1) lifts FORCE for the length of one count and puts back what it found, the pattern and the
+    reasoning of aspects-005-1's aspect_queue_rows_unscoped(). It counts TUPLES (the key and the predicate above)
+    held by more than one row, across all tenants.
+
+    THE GUARD CANNOT HALT A BOOT. A sqlCheck that THROWS (the migration role does not own the table, so the ALTER TABLE
+    is refused) is an error, not a failed check, and onError="CONTINUE" turns it into the same skip. The body is a
+    single CREATE UNIQUE INDEX with failOnError="false": a duplicate that lands between the precondition and the body
+    (Liquibase ends the precondition's transaction first) makes the index build raise, Liquibase rolls the body back,
+    logs it, and writes NO DATABASECHANGELOG row (MarkChangeSetRanGenerator refuses a FAILED changeset), so it is
+    retried at the next boot exactly like a precondition skip. The build reads the heap and is not subject to RLS, so
+    it sees every tenant's rows. nx doctor names any duplicate tuple that holds the index back.
+
+    LOCKS. The counter's ALTER TABLE and the index build lock nexus.catalog_collections only (ACCESS EXCLUSIVE for one
+    count; SHARE for one build of a registry of hundreds of rows). Neither names a chunk table, a chunk leaf or the
+    index builder, so tests/test_changelog_continue_precondition_chunks_lint.py allows the CONTINUE changeset and
+    SchemaMigrator keeps a running per-collection index build through it.
+
+    DATA EFFECT: none. collections-001-1 creates a function and no row is read or written by a changeset; the counter
+    reads rows, and restores the table's FORCE flag. collections-001-2 builds an index and writes no row.
+
+    Placed after identity-005 and before the runAlways grants blocks (the D0.1 late-append convention).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <!-- ── Changeset 1: the guard's duplicate counter ───────────────────────────────────────────────── -->
+    <changeSet id="collections-001-1" author="nexus-p2m1x.28">
+        <comment>Create nexus.catalog_collection_tuple_duplicates_unscoped(): the number of live tuples (tenant_id, content_type, owner_id, embedding_model, model_version, over rows with superseded_by = '' and lifecycle_state other than quarantine, the candidate set of collectionForTuple) that more than one row of nexus.catalog_collections holds, across ALL tenants, counted with FORCE ROW LEVEL SECURITY lifted for the length of the count and put back as it was found (the migration role owns the table with no BYPASSRLS, so a count under FORCE sees zero rows on every tenant). Returns 0 when the table is gone. Used by collections-001-2's precondition. DATA EFFECT: none (a function is created; no row is read or written by the changeset).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() RETURNS bigint
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    v_forced boolean;
+    v_dups   bigint;
+BEGIN
+    SELECT c.relforcerowsecurity INTO v_forced
+      FROM pg_class c
+     WHERE c.oid = to_regclass('nexus.catalog_collections');
+    IF NOT FOUND THEN
+        RETURN 0;
+    END IF;
+    ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
+    SELECT count(*) INTO v_dups FROM (
+        SELECT 1
+          FROM nexus.catalog_collections
+         WHERE superseded_by = '' AND lifecycle_state &lt;&gt; 'quarantine'
+         GROUP BY tenant_id, content_type, owner_id, embedding_model, model_version
+        HAVING count(*) &gt; 1
+    ) d;
+    IF v_forced THEN
+        ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+    END IF;
+    RETURN v_dups;
+END
+$fn$;
+
+REVOKE ALL ON FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() FROM PUBLIC;
+        </sql>
+        <rollback>
+            DROP FUNCTION IF EXISTS nexus.catalog_collection_tuple_duplicates_unscoped();
+        </rollback>
+    </changeSet>
+
+    <!-- ── Changeset 2: the index, once the move has completed and no duplicate is left ──────────────── -->
+    <changeSet id="collections-001-2" author="nexus-p2m1x.28" failOnError="false">
+        <preConditions onFail="CONTINUE" onError="CONTINUE">
+            <sqlCheck expectedResult="0">SELECT CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label = 'rdr229-reown-repo-stems-from-curator' AND completed_at IS NOT NULL) THEN nexus.catalog_collection_tuple_duplicates_unscoped() ELSE -1 END</sqlCheck>
+        </preConditions>
+        <comment>Create the partial UNIQUE index catalog_collections_live_tuple_uq on nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model, model_version) WHERE superseded_by = '' AND lifecycle_state is not quarantine (the candidate set of collectionForTuple). Guarded by a preCondition with onFail="CONTINUE" onError="CONTINUE": the nexus.data_moves row labelled rdr229-reown-repo-stems-from-curator has completed_at set (the re-own move of RDR-229 P3), and nexus.catalog_collection_tuple_duplicates_unscoped() is 0 (one sqlCheck: the counter is reached only once the move has completed). Otherwise the changeset is skipped, boot continues, and the changeset is NOT recorded as run (a precondition skip records nothing, and a failed build with failOnError="false" is not recorded either), so it is retried at every boot, never HALT and never MARK_RAN. DATA EFFECT: none; an index is built and no row is read for writing or written.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE UNIQUE INDEX catalog_collections_live_tuple_uq
+    ON nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model, model_version)
+    WHERE superseded_by = '' AND lifecycle_state &lt;&gt; 'quarantine';
+        </sql>
+        <rollback>
+            DROP INDEX IF EXISTS nexus.catalog_collections_live_tuple_uq;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
