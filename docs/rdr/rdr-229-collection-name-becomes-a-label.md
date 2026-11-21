@@ -1544,6 +1544,25 @@ that the widened census measures. P3.9 gives the recovery-bundle sites the
 bundle's row in place of the recorded name. After both, no site on this
 install routes a minted collection by a prefix it does not have (item 12).
 
+A live collection's tuple is unique (Sam, P3.8 design gate v2, T2
+`nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`, on "owner is the
+source", T2 `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`): a
+partial UNIQUE index on `(tenant_id, content_type, owner_id,
+embedding_model, model_version)` over `collectionForTuple`'s candidates
+(not superseded, not quarantine). It waits, through an `onFail="CONTINUE"`
+precondition, for the re-own move and for no duplicate to remain, and
+`nx doctor` names a duplicate it waits on. A mint is `INSERT ... ON
+CONFLICT DO NOTHING` and a re-read, or, before the index exists, a
+per-tuple advisory lock and a re-read; a conflicting import, restore,
+rename or named registration is a 409 naming both collections. A minted
+label that is already live takes the next id, bounded at 16 draws, then
+409, so `label == "c" + collection_id` holds for every minted row. The id
+comes only from the column's own sequence; a drawn id that is already a
+row draws forward once, never resetting the sequence backward, and an id
+is unique across the installation where D2's owner-read policy lets the
+checks read every tenant. No route accepts a client-supplied
+`collection_id`.
+
 **9. The non-stranding rule.** Phase 2 may repoint a reader only after every
 migration source it serves has a test that runs a row-less legacy name
 through it and passes. Those tests are written first (P2.1) and stay in the
@@ -2808,9 +2827,7 @@ To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
   give an id.
 
 Still open, for a design call: whether the label alphabet excludes `/`,
-which `NoteUri.collectionOf` treats as the end of the collection; what
-makes a live `(content_type, owner_id, embedding_model)` tuple unique once
-minting removes the name from that job; the safe engine downgrade
+which `NoteUri.collectionOf` treats as the end of the collection; the safe engine downgrade
 point after P3.3, which matters most from P3.7, when the name columns go
 dead (Approach, item 7; S-6 above); a repair for residue whose segment no
 longer names its collection and for residue `note-uri-001` rewrote to
@@ -2873,9 +2890,7 @@ S-2 to S-8, go to beads at accept (Contradiction Check).
 Still without one: P3.5b's plan measurement of each both-shapes reader
 has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
-stores, apart from its residue count, which runs on every install; no
-rule says what a mint does when a live label already has the
-minted form (P1.2 only counts such labels); no audit covers where a
+stores, apart from its residue count, which runs on every install; no audit covers where a
 label meets a file path beyond P3.6's Windows test; and no repair covers
 the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
@@ -3066,3 +3081,4 @@ large, and moved under a ratchet.
 - 2026-11-21: recorded late, P2.4's two amendments of 2026-11-20 and 2026-11-21. P2.4 owns a small engine half: the prune route's `match` field (`exact` or `prefix`), echoed in the answer, with `/version`'s `taxonomy_prune_exact_supported` flag, which the client checks before any exact prune; the P2.R step, Versioning, item 1 and Day 2 follow (b7e8f448e3, grant 3, nexus-p2m1x.9); and the verification sentinel is a name no collection has, and the guarantee is the name, not the threshold (20baca2d8f, nexus-p2m1x.9).
 - 2026-11-21: the 0.1.200 contents (P2.R step, Versioning), item 5's stem rule and `catalog-051-2` tuple guard with its lock key, the Prerequisites' first registered moves and their deploy-go gate (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`), and the MVV's numeric Phase 2 pins match the integration tree eb1e4cd42b (grant 3; P2.R critique T2 `nexus/critique-eb1e4cd42b-nexus-p2m1x.16-2026-11-21-r1`, nexus-p2m1x.16).
 - 2026-11-21: item 5's tuple guard and re-own move match a92f88c6a0: one held predicate (unsuperseded and not in quarantine, P3.8's index predicate), the guard on the stored version and the move on the effective one, the move taking the tuple lock for its chunk's tuples in key order, and which paths re-run a 40P01; item 12's client census is 217 with `owner_stem` in `legacy_names` (grant 3; P2.R critique S2, S3, S5, nexus-p2m1x.16).
+- 2026-11-21: P3.8 amendment (grant 3, matching reviewed code, nexus-p2m1x.28): item 8 states the live-tuple UNIQUE and the minted-label collision rule; the two open questions on tuple uniqueness and minted-form collisions (Contradiction Check, Scope Verification) are closed by Sam's ruling T2 `nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`.
