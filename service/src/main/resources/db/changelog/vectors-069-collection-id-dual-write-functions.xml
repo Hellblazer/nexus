@@ -7666,7 +7666,7 @@ $fn$;
     </changeSet>
 
     <changeSet id="vectors-069-24" author="nexus-p2m1x.17">
-        <comment>RDR-229 P3.1 stage 2b: nexus.canary_query_ring_upsert sets the collection id beside the name on the three canary_query_ring inserts and their ON CONFLICT updates (collection_id from the registry; an entry whose collection has no registry row is skipped like a foreign-key violation, not refused by the id CHECK). Replaces the definition in vectors-054-canary-query-ring.xml, changeset vectors-054-2 (line 113), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.1 stage 2b: nexus.canary_query_ring_upsert sets the collection id beside the name on the three canary_query_ring inserts and their ON CONFLICT updates (collection_id from the registry; an entry whose name does not resolve under the caller's row-level security, a cross-tenant name or one with no registry row, raises SQLSTATE 23503 instead of being skipped). Replaces the definition in vectors-054-canary-query-ring.xml, changeset vectors-054-2 (line 113), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.canary_query_ring_upsert(
     p_tenant      text,
@@ -7702,11 +7702,18 @@ BEGIN
         v_vec  := p_vectors[i]::nexus.vector;
         v_dims := nexus.vector_dims(v_vec);
         CONTINUE WHEN v_dims NOT IN (384, 768, 1024);
-        -- the entry's collection id, from the registry in this statement's transaction; a collection with no row is
-        -- gone (S6) and is skipped like a foreign-key violation, not refused by the id CHECK
+        -- the entry's collection id, from the registry in this statement's transaction. A name that does not resolve under the
+        -- caller's row-level security (a cross-tenant name, or one with no registry row, including a collection deleted since the
+        -- entry was enqueued) raises SQLSTATE 23503, the code assign_from_chashes uses for the same refusal; the id CHECK would
+        -- refuse a NULL id anyway, and a silent skip hid the defect (RDR-229 P3.1, linda's ruling). PciQueryRing's writer retries a
+        -- failed batch entry by entry, so one such entry does not drop the others.
         SELECT cc.collection_id INTO v_cid FROM nexus.catalog_collections cc
          WHERE cc.tenant_id = p_tenant AND cc.name = p_collections[i];
-        CONTINUE WHEN v_cid IS NULL;
+        IF v_cid IS NULL THEN
+            RAISE EXCEPTION 'canary_query_ring_upsert: collection % is not registered for tenant % -- register it first via POST /v1/catalog/collections/upsert',
+                p_collections[i], p_tenant
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
         BEGIN
             IF v_dims = 384 THEN
                 INSERT INTO nexus.canary_query_ring
