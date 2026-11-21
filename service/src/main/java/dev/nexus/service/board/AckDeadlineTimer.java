@@ -23,9 +23,11 @@ import java.util.concurrent.TimeUnit;
  * evaluation and a superseded episode keeps no timer.
  *
  * <p>A task never ends its own schedule: nothing here throws out of the executor's thread, and a hand-off that
- * fails is retried after {@link #RETRY}, and is never given up: a lost deadline is the worse failure. The
- * {@value #STUCK_ATTEMPTS}th consecutive failure of a topic, and every {@value #STUCK_ATTEMPTS} after it, raises the
- * error-level event {@code board_ack_deadline_stuck}.
+ * fails is retried after {@link #RETRY} for as long as the cause lasts. What fails and is retried is a red that may
+ * already be acknowledged, or a fault in the database; an unacknowledged red is escalated by the stamper whether or
+ * not the identity read works. The {@value #STUCK_ATTEMPTS}th consecutive failure of a topic, and every
+ * {@value #STUCK_ATTEMPTS} after it, raises the error-level log event {@code board_ack_deadline_stuck}; it posts no
+ * row. The failed attempt that starts a run logs its stack, the later ones their message.
  */
 public final class AckDeadlineTimer {
 
@@ -90,8 +92,14 @@ public final class AckDeadlineTimer {
             handoff.fire(key.tenant(), key.base());
             failures.remove(key);
         } catch (Throwable t) {
-            log.warn("event=board_ack_deadline_failed tenant={} base={} error={}", key.tenant(), key.base(), t.getMessage(), t);
             int attempt = failures.merge(key, 1, Integer::sum);
+            if (attempt == 1) {
+                log.warn("event=board_ack_deadline_failed tenant={} base={} attempt=1 error={}", key.tenant(), key.base(),
+                    t.getMessage(), t);
+            } else {
+                log.warn("event=board_ack_deadline_failed tenant={} base={} attempt={} error={}", key.tenant(), key.base(),
+                    attempt, t.getMessage());
+            }
             if (attempt % STUCK_ATTEMPTS == 0) {
                 log.error("event=board_ack_deadline_stuck tenant={} base={} attempt={}", key.tenant(), key.base(), attempt);
             }

@@ -195,8 +195,22 @@ public final class OwnerDecision {
             body(target, null, REASON_ESCALATED, suspects, total, now, false, ((Number) body.get("handoffs")).intValue() + 1)), null);
     }
 
-    /** Whether an ack row exists on the current owner row's tip, posted at or after the row; needs no identity read. */
+    /**
+     * Whether an ack row exists on the current owner row's own tip, posted at or after the row. It needs no identity
+     * read, so the fail-safe can tell "possibly acknowledged" from "plainly not" when the liveness read is down; it
+     * does not say whose ack it is. The time bound keeps a handed-away owner's late ack from suppressing the next
+     * owner's escalation.
+     */
     static boolean ackOnTip(List<BoardRow> owners) {
+        BoardRow cur = currentRow(owners);
+        if (cur == null || cur.sha() == null) {
+            return false;
+        }
+        for (BoardRow a : owners) {
+            if ("ack".equals(a.kind()) && cur.sha().equals(a.sha()) && !a.createdAt().isBefore(cur.createdAt())) {
+                return true;
+            }
+        }
         return false;
     }
 
