@@ -478,6 +478,31 @@ class StatusHandlerTest {
             .doesNotContain("chunks_gate_probe_owner_read").doesNotContain("nexus_admin");
     }
 
+    // ── RDR-229 P3.8 (nexus-p2m1x.28), [additive]: collection_tuple_index_present ────────────────────────────────
+
+    @Test
+    void collectionTupleIndex_keyIsAbsentWhenNoSupplierIsWired_andWhenTheProbeCouldNotRun() throws Exception {
+        start(new StatusHandler(null));
+        assertThat(get().has("collection_tuple_index_present")).as("an engine that predates the field").isFalse();
+        stop();
+        start(new StatusHandler(null).collectionTupleIndex(() -> null));
+        assertThat(get().has("collection_tuple_index_present")).as("a probe that could not run").isFalse();
+    }
+
+    @Test
+    void collectionTupleIndex_reportsTrueAndFalse_asABooleanOnly() throws Exception {
+        start(new StatusHandler(null).collectionTupleIndex(() -> Boolean.TRUE));
+        assertThat(get().get("collection_tuple_index_present").isBoolean()).isTrue();
+        assertThat(get().get("collection_tuple_index_present").asBoolean()).isTrue();
+        stop();
+        start(new StatusHandler(null).collectionTupleIndex(() -> Boolean.FALSE));
+        JsonNode body = get();
+        assertThat(body.get("collection_tuple_index_present").isBoolean()).isTrue();
+        assertThat(body.get("collection_tuple_index_present").asBoolean()).isFalse();
+        assertThat(body.toString()).as("an unauthenticated route never names the index or a collection")
+            .doesNotContain("catalog_collections_live_tuple_uq");
+    }
+
     // ── nexus-43ulx.23 (RDR-227 Step 2), [additive]: per_collection_indexes ─────────────────────────────────────
 
     private static final java.time.Instant READ_AT = java.time.Instant.parse("2026-10-10T08:00:00Z");
