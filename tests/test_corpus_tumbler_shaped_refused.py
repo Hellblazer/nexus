@@ -86,8 +86,11 @@ def test_nx_index_corpus_refuses_a_tumbler_shaped_name_before_any_work(verb, tmp
 def test_nx_index_with_a_collection_does_not_refuse_the_corpus_it_never_turns_into_a_docs_name(verb, tmp_path):
     target = tmp_path / ("a.md" if verb == "md" else "a.pdf")
     target.write_bytes(b"# t\n\nbody\n" if verb == "md" else b"%PDF-1.4\n")
-    with patch("nexus.corpus.t3_collection_name", side_effect=lambda c, **_: c):
+    # The run is stopped at the collection resolver, which both commands call right after the corpus check, so
+    # nothing past it (storage, an extractor) runs; what is pinned is that the corpus check did not refuse first.
+    with patch("nexus.corpus.t3_collection_name", side_effect=click.ClickException("stopped at the resolver")):
         result = CliRunner().invoke(index, [verb, str(target), "--corpus", "1-20", "--collection", "knowledge__x"])
+    assert "stopped at the resolver" in result.output, result.output
     assert "owner segment" not in result.output, result.output
 
 
