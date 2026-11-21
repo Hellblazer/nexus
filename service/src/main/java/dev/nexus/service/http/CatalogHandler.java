@@ -92,8 +92,8 @@ import java.util.*;
  *   POST  /v1/catalog/owners/reactivate  clear an owner's deactivated_at (nexus-cw262)
  *   GET   /v1/catalog/owners/by_repo     get owner by repo_hash
  *   POST  /v1/catalog/collections/upsert upsert collection
- *   GET   /v1/catalog/collections/list   list collections
- *   GET   /v1/catalog/collections/get    get collection by name
+ *   GET   /v1/catalog/collections/list   list collections (rows carry collection_id, RDR-229 P3.5a, read-only)
+ *   GET   /v1/catalog/collections/get    get collection by name (row carries collection_id; so does /collections/for_tuple)
  *   POST  /v1/catalog/collections/supersede supersede collection
  *   POST  /v1/catalog/collections/rename rename collection (cascade)
  *   POST  /v1/catalog/collections/rehome re-home a collection onto a live target (one txn)
