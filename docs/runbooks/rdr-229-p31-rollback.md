@@ -6,13 +6,24 @@ engine revert is relay-mediated and conexus-owned (`docs/contributing.md`, "Engi
 
 ## The rule
 
-**Down-step first, then the tag flip. Never the tag flip alone.**
+**Pause the open stamp moves, then run the down-step, then flip the tag. Never the tag flip alone, and never the down-step
+without the pause.**
 
 RDR-229 P3.1's engine adds a CHECK to every table that names a collection, `NOT VALID`. A `NOT VALID` CHECK is enforced on
 every new row version, so an engine from before P3.1 (it knows no id column) can no longer write: its chunk INSERT, its
 supersede UPDATE and its carrier INSERTs fail with SQLSTATE 23514 (what it looks like: "If the tag was flipped without the
 down-step", below). The previous engine's tag is therefore flipped back only after the CHECKs are dropped. The id columns and
 the registry's identity column stay: an old engine ignores a column it does not know.
+
+**Why the pause.** The previous engine has a move worker (RDR-246). It works every open row of `nexus.data_moves`, including P3.1's
+stamp moves, which it did not register. With the CHECKs gone, a stamp move still runs its UPDATEs and then fails in its
+`on_complete`, because `VALIDATE CONSTRAINT` names a constraint that no longer exists. The result is a failed move that the next
+P3.1 engine must supersede, and rows the previous engine stamped for nothing. Paused moves are not started by any worker, so
+pausing first leaves the registry as the P3.1 engine wrote it.
+
+**The pause is a data write.** It updates rows of `nexus.data_moves`. On the cloud it is a data write under the same go as the
+down-step: whoever authorises the down-step authorises the pause with it, and conexus runs both in the one change window. It
+needs no separate approval, and it must not be run without the down-step's go.
 
 The 20 constraints are one list, `service/src/main/resources/db/rdr229/p31-checks.tsv`. The SQL below is generated from it
 (`scripts/rdr229_p31_downstep.py`, with a drift check) and the same file ships as
@@ -38,7 +49,19 @@ release notes; it does not exist before that release).
 ## Procedure
 
 1. **Check the window** (above). Zero completed stamp moves.
-2. **Run the down-step.** As `nexus_admin`, in one transaction. The engine may keep serving while it runs: each statement waits
+2. **Pause the open stamp moves.** As `nexus_admin`. This holds every stamp move that is not complete, so no worker (this engine's
+   or the previous one's) starts one. The worker reads `paused_at` at the start of a move's turn and before each run (one CALL, one tenant and leaf),
+   so a run already in flight finishes first and the move stops at the run boundary; it keeps the rows it has stamped. The statement skips a move someone else has already paused, so a hold of the operator's own
+   survives the unpause in step 7.
+
+<!-- p31-pause:begin -->
+```sql
+UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'rdr229 down-step'
+ WHERE label LIKE 'rdr229-stamp-%' AND completed_at IS NULL AND paused_at IS NULL;
+```
+<!-- p31-pause:end -->
+
+3. **Run the down-step.** As `nexus_admin`, in one transaction. The engine may keep serving while it runs: each statement waits
    at most 5 s for its lock and the whole transaction fails if one cannot get it, so re-run in a quieter moment rather than
    raising the timeout. `chunks` and `taxonomy_centroids` are partitioned; dropping a constraint on the parent drops its copies
    on every leaf, and the test for this file asserts it. `psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql`
@@ -50,7 +73,8 @@ release notes; it does not exist before that release).
 -- service/src/main/resources/db/rdr229/p31-checks.tsv: edit the list and run that script with --write, never this file.
 --
 -- Drops every CHECK RDR-229 P3.1 added, NOT VALID or validated, so a pre-P3.1 engine can write again. Run it as
--- nexus_admin (the table owner), in one transaction, BEFORE the previous engine's tag is flipped back in
+-- nexus_admin (the table owner), in one transaction, AFTER the open stamp moves are paused and BEFORE the previous
+-- engine's tag is flipped back in
 -- (docs/runbooks/rdr-229-p31-rollback.md):
 --   psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql
 -- It leaves the id columns, the registry's identity column and every row of the registry of moves alone, and it is
@@ -79,7 +103,7 @@ ALTER TABLE IF EXISTS nexus.reembed_jobs DROP CONSTRAINT IF EXISTS reembed_jobs_
 ```
 <!-- p31-downstep:end -->
 
-3. **Verify.** The query returns no row when every listed constraint is gone, on the parents and the leaves:
+4. **Verify.** The query returns no row when every listed constraint is gone, on the parents and the leaves:
 
 <!-- p31-verify:begin -->
 ```sql
@@ -89,12 +113,21 @@ SELECT conrelid::regclass AS relation, conname FROM pg_catalog.pg_constraint
 ```
 <!-- p31-verify:end -->
 
-4. **Flip the tag.** Relay the previous `engine-service-v*` identity for redeploy
+5. **Flip the tag.** Relay the previous `engine-service-v*` identity for redeploy
    (`conexus-dev-engine-redeploy`: `docker stop -t 30 conexus-engine`, `docker rm -f`, `docker run -d` of the new tag on the one
    `Role=db-engine` host; stop-start, one replica, no overlap, reconfirmed by bob after conexus RDR-007's database move,
    2026-11-21). Only now.
-5. **Confirm.** `nx service probe` (reads `/version` live), then a write: index one document, or watch the engine log for
+6. **Confirm.** `nx service probe` (reads `/version` live), then a write: index one document, or watch the engine log for
    SQLSTATE 23514, which must not appear.
+7. **After the next P3.1 deploy, release the pause.** The stamp moves then run under that engine. This releases only the rows step 2
+   paused:
+
+<!-- p31-unpause:begin -->
+```sql
+UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL
+ WHERE label LIKE 'rdr229-stamp-%' AND paused_by = 'rdr229 down-step';
+```
+<!-- p31-unpause:end -->
 
 ## If the tag was flipped without the down-step
 
@@ -109,7 +142,7 @@ ERROR: new row for relation "topics" violates check constraint "topics_collectio
 
 The first is a chunk write (index, upsert, quarantine move), the second a collection supersede or re-embed cutover, the third
 a taxonomy write; every `*_collection_id_check` and `*_collection_id_not_null` name on the list means the same thing. Reads and
-searches are unaffected. The fix is steps 2 and 3; no restart is needed, because the dropped constraint no longer applies to
+searches are unaffected. The fix is steps 3 and 4 (and the pause, step 2, if a stamp move is open); no restart is needed, because the dropped constraint no longer applies to
 the engine's next write. Nothing is lost: a refused write wrote nothing.
 
 ## What the down-step leaves, and one hazard
@@ -118,13 +151,8 @@ the engine's next write. Nothing is lost: a refused write wrote nothing.
   existed keep their ids.
 - The registry of moves (`nexus.data_moves`) is not touched: within the window no stamp has completed, so nothing has to
   re-attach.
-- **Hazard, not covered by the ruling.** The previous engine has a move worker (RDR-246) and works every open row of
-  `nexus.data_moves`, including P3.1's stamp moves it did not register. With the CHECKs dropped, a stamp move still runs its
-  UPDATEs and then fails in its `on_complete` (`VALIDATE CONSTRAINT` names a constraint that is gone), leaving a failed move that
-  the next P3.1 engine reports and must supersede. If conexus would rather not meet that, pause the open stamp moves before the
-  tag flip: `UPDATE nexus.data_moves SET paused_at = now(), paused_by = 'rdr229 down-step' WHERE label LIKE 'rdr229-stamp-%' AND completed_at IS NULL;`
-  and clear `paused_at`/`paused_by` after the next P3.1 deploy. Whether to do this is linda's call; the ruling says to leave the
-  rows alone.
+- A pause outlives the down-step until step 7 releases it: while it is held, the open stamp moves do not run, and the completion
+  check reports them incomplete (that is accurate).
 
 ## Local and bring-your-own installs
 

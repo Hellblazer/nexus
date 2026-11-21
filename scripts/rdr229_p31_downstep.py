@@ -4,8 +4,9 @@
 
 A pre-P3.1 engine cannot write a row the P3.1 CHECKs guard (a NOT VALID CHECK applies to every new row version): its chunk
 INSERT, its supersede UPDATE and its carrier INSERTs fail with SQLSTATE 23514. The rollback after P3.1 is therefore this
-down-step (DROP CONSTRAINT IF EXISTS on every listed constraint) first and the tag flip second. conexus runs it; the
-runbook is docs/runbooks/rdr-229-p31-rollback.md.
+down-step (DROP CONSTRAINT IF EXISTS on every listed constraint) first and the tag flip second, with the open stamp moves
+paused before the down-step (the previous engine's move worker would otherwise run moves whose on_complete fails once the
+CHECKs are gone). conexus runs it; the runbook is docs/runbooks/rdr-229-p31-rollback.md.
 
 The constraint names come from service/src/main/resources/db/rdr229/p31-checks.tsv, the list the changesets, the
 completion check and this script share, so a table added to it is added to the down-step.
@@ -13,8 +14,8 @@ completion check and this script share, so a table added to it is added to the d
 Usage: rdr229_p31_downstep.py [--root DIR] (--print | --write | --check)
   --print   the down-step SQL on stdout
   --write   rewrite service/src/main/resources/db/rdr229/p31-downstep.sql
-  --check   exit 1 when the committed SQL file, or the SQL and the verification query embedded in the runbook, differ
-            from a fresh run (a drift check)
+  --check   exit 1 when the committed SQL file, or the down-step, the verification query, the pause and the unpause
+            embedded in the runbook, differ from a fresh run (a drift check)
 """
 from __future__ import annotations
 
@@ -31,6 +32,13 @@ DOWN_BEGIN = "<!-- p31-downstep:begin -->"
 DOWN_END = "<!-- p31-downstep:end -->"
 VERIFY_BEGIN = "<!-- p31-verify:begin -->"
 VERIFY_END = "<!-- p31-verify:end -->"
+PAUSE_BEGIN = "<!-- p31-pause:begin -->"
+PAUSE_END = "<!-- p31-pause:end -->"
+UNPAUSE_BEGIN = "<!-- p31-unpause:begin -->"
+UNPAUSE_END = "<!-- p31-unpause:end -->"
+
+# What paused_by says, so the unpause releases only the rows this procedure paused and never an operator's own hold.
+PAUSED_BY = "rdr229 down-step"
 
 _NAME = re.compile(r"^\w+$")
 
@@ -68,7 +76,8 @@ def generate_down_step(list_text: str) -> str:
         "-- service/src/main/resources/db/rdr229/p31-checks.tsv: edit the list and run that script with --write, never this file.",
         "--",
         "-- Drops every CHECK RDR-229 P3.1 added, NOT VALID or validated, so a pre-P3.1 engine can write again. Run it as",
-        "-- nexus_admin (the table owner), in one transaction, BEFORE the previous engine's tag is flipped back in",
+        "-- nexus_admin (the table owner), in one transaction, AFTER the open stamp moves are paused and BEFORE the previous",
+        "-- engine's tag is flipped back in",
         "-- (docs/runbooks/rdr-229-p31-rollback.md):",
         "--   psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql",
         "-- It leaves the id columns, the registry's identity column and every row of the registry of moves alone, and it is",
@@ -88,6 +97,22 @@ def generate_verification(list_text: str) -> str:
     )
 
 
+def generate_pause() -> str:
+    """Holds every open stamp move, so the previous engine's move worker starts none of them (its on_complete would fail)."""
+    return (
+        f"UPDATE nexus.data_moves SET paused_at = now(), paused_by = '{PAUSED_BY}'\n"
+        " WHERE label LIKE 'rdr229-stamp-%' AND completed_at IS NULL AND paused_at IS NULL;\n"
+    )
+
+
+def generate_unpause() -> str:
+    """Releases the rows generate_pause held, after the next P3.1 deploy; a hold someone else set (another paused_by) stays."""
+    return (
+        "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL\n"
+        f" WHERE label LIKE 'rdr229-stamp-%' AND paused_by = '{PAUSED_BY}';\n"
+    )
+
+
 def _embedded(text: str, begin: str, end: str) -> str | None:
     """The SQL inside the ```sql fence between two markers, or None when the markers or the fence are missing."""
     m = re.search(re.escape(begin) + r"\s*```sql\n(.*?)```\s*" + re.escape(end), text, re.S)
@@ -95,11 +120,13 @@ def _embedded(text: str, begin: str, end: str) -> str | None:
 
 
 def runbook_problems(runbook_text: str, list_text: str) -> list[str]:
-    """What is wrong with the runbook's two embedded blocks against a fresh run; empty when it matches."""
+    """What is wrong with the runbook's four embedded blocks against a fresh run; empty when it matches."""
     problems = []
     for label, begin, end, expected in (
         ("down-step", DOWN_BEGIN, DOWN_END, generate_down_step(list_text)),
         ("verification query", VERIFY_BEGIN, VERIFY_END, generate_verification(list_text)),
+        ("pause", PAUSE_BEGIN, PAUSE_END, generate_pause()),
+        ("unpause", UNPAUSE_BEGIN, UNPAUSE_END, generate_unpause()),
     ):
         found = _embedded(runbook_text, begin, end)
         if found is None:

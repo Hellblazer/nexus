@@ -148,3 +148,22 @@ def test_the_runbook_says_down_step_first_then_the_tag_flip_and_the_symptom_with
 def test_the_runbook_is_pointed_at_from_the_engine_deploy_revert_paragraph():
     text = (ROOT / "docs" / "contributing.md").read_text(encoding="utf-8")
     assert "docs/runbooks/rdr-229-p31-rollback.md" in text
+
+
+def test_the_runbook_pauses_the_open_stamp_moves_before_the_down_step_and_says_why():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    pause = text.index("Pause the open stamp moves")
+    down = text.index("Run the down-step")
+    flip = text.index("Flip the tag")
+    assert pause < down < flip, "pause, then the down-step, then the tag flip"
+    # why: the previous engine's move worker runs moves whose on_complete fails once the CHECKs are gone
+    assert "move worker" in text and "on_complete" in text and "VALIDATE CONSTRAINT" in text
+    # on the cloud the pause is a data write under the same go as the down-step
+    flat = " ".join(text.split())
+    assert "data write" in flat and "same go as the down-step" in flat
+    # the pause and its release are the generated, pinned statements, and the release touches only what the pause held
+    mod = _load()
+    assert mod.runbook_problems(text, LIST.read_text(encoding="utf-8")) == []
+    assert "paused_by = 'rdr229 down-step'" in mod.generate_pause() + mod.generate_unpause()
+    drifted = text.replace("paused_at IS NULL;", "paused_at IS NOT NULL;", 1)
+    assert mod.runbook_problems(drifted, LIST.read_text(encoding="utf-8")), "a drifted pause statement is reported"

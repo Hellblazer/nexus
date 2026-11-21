@@ -2,7 +2,8 @@
 -- service/src/main/resources/db/rdr229/p31-checks.tsv: edit the list and run that script with --write, never this file.
 --
 -- Drops every CHECK RDR-229 P3.1 added, NOT VALID or validated, so a pre-P3.1 engine can write again. Run it as
--- nexus_admin (the table owner), in one transaction, BEFORE the previous engine's tag is flipped back in
+-- nexus_admin (the table owner), in one transaction, AFTER the open stamp moves are paused and BEFORE the previous
+-- engine's tag is flipped back in
 -- (docs/runbooks/rdr-229-p31-rollback.md):
 --   psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql
 -- It leaves the id columns, the registry's identity column and every row of the registry of moves alone, and it is
