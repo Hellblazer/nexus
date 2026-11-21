@@ -34,17 +34,24 @@ def test_the_first_document_of_a_new_collection_registers_the_collection_first(t
         assert cat.get_collection(collection) is not None
 
 
-def test_a_profile_the_engine_will_not_register_is_refused_before_a_document_is_minted(tmp_path: Path) -> None:
-    """A voyage-named docs collection on the bge-profile substrate: the registration refuses it (client side), and the
-    refusal is the run's error, not a bare 'catalog registration failed' after the engine's 422."""
-    from nexus.catalog.write_outcome import client_side_refusals
-    from nexus.doc_indexer import _register_or_lookup_doc_id
+def test_a_refusal_the_client_raises_before_sending_is_the_runs_error_not_a_registration_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The collection's registration refuses on the client's own checks (a profile that disagrees with the engine's, a
+    retired name, a voyage intent with no key, a bad argument): nothing reached the engine, and the refusal is what the
+    run reports, not a bare 'catalog registration failed' after the engine's 422 for the unregistered collection."""
+    from nexus.catalog.write_outcome import PreSendArgumentError
+    import nexus.doc_indexer as doc_indexer
 
+    def refuse(*_a: object, **_k: object) -> None:
+        raise PreSendArgumentError("the client refused before it sent anything")
+
+    monkeypatch.setattr(doc_indexer, "ensure_collection_registered", refuse)
     note = tmp_path / "second.md"
     note.write_text("# Second\n\nbody\n")
 
-    with pytest.raises(client_side_refusals()):
-        _register_or_lookup_doc_id(
+    with pytest.raises(PreSendArgumentError):
+        doc_indexer._register_or_lookup_doc_id(
             note, "p31preflight", content_type="markdown",
-            physical_collection="docs__p31preflight__voyage-context-3__v1",
+            physical_collection="docs__p31preflight__bge-base-en-v15-768__v1",
         )
