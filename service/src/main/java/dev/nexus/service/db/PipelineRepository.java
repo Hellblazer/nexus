@@ -143,9 +143,11 @@ public final class PipelineRepository {
     private final TenantScope tenantScope;
 
     /** RDR-229 P3.1: the id of the row's own collection name, set by every UPDATE of a pdf_pipeline row (the NOT VALID
-     *  CHECK looks at each updated row, and a row not stamped yet has a name and no id). */
-    private static final Field<Long> OWN_ID =
-        CollectionIds.idOf(PDF_PIPELINE.TENANT_ID, PDF_PIPELINE.COLLECTION);
+     *  CHECK looks at each updated row, and a row not stamped yet has a name and no id). An id already stored is kept:
+     *  the name is not changing, and the registry row may be gone by then (a cutover deletes it), which would null
+     *  the id beside a non-empty name. */
+    private static final Field<Long> OWN_ID = DSL.coalesce(PDF_PIPELINE.COLLECTION_ID,
+        CollectionIds.idOf(PDF_PIPELINE.TENANT_ID, PDF_PIPELINE.COLLECTION));
 
     public PipelineRepository(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
