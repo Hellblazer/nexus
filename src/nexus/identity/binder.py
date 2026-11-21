@@ -412,7 +412,9 @@ class SessionBinder:
             state = row.get("state")
             holder = row.get("holder") or {}
             if state in ("live", "lapsed"):
-                ours = (holder_is_local(holder, host=facts.host, identity_dir=self._idir) and holder.get("pid") == facts.claude_pid
+                ours = (holder_is_local(holder, host=facts.host, identity_dir=self._idir,
+                                        process=(facts.claude_pid, holder.get("started_at")))
+                        and holder.get("pid") == facts.claude_pid
                         and holder.get("proc_start") == facts.proc_start)
                 if not ours:
                     return None  # held by another process now

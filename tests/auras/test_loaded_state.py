@@ -23,6 +23,7 @@ from nexus.auras.session import state_writer
 from nexus.commands import aura_cmd
 from nexus.commands.aura_cmd import aura_group
 from nexus.identity.holder import this_host
+from nexus.identity.hostname import host_key
 from nexus.identity.token_file import TokenFile, token_path, write_token_file
 from nexus.lua_runtime import library
 from nexus.mcp import identity_lease
@@ -181,6 +182,24 @@ def test_a_file_from_another_host_is_left_alone(adir: Path, procs: FakeProcesses
     other = ls.LoadedState(**{**other.__dict__, "host": "elsewhere"})
     path = _put(adir, other)
     assert ls.clean_gone(adir, procs) == [] and path.exists()
+
+
+def test_a_file_under_a_lost_hostname_is_cleaned_when_this_machines_registry_proves_its_process_was_local(adir: Path, procs: FakeProcesses) -> None:
+    """A state file written before the host key existed, by a process with no token file, names a hostname the machine may
+    have lost. This machine's own registry file for that pid and startedAt (a crash leaves it behind) proves the process
+    was local; no registry file (a clean exit) proves nothing, and a key of another machine is never local."""
+    procs.start(4242, START, started_at=4242000)
+    procs.stop(4242, keep_registry=True)                          # crashed: its registry file stays
+    crashed = _put(adir, ls.LoadedState(**{**_state(pid=4242, started_at=4242000).__dict__, "host": "ip-102"}))
+    exited = _put(adir, ls.LoadedState(**{**_state(pid=4343, started_at=4343000).__dict__, "host": "ip-102"}))
+    procs.start(4545, START, started_at=4545000)
+    procs.stop(4545, keep_registry=True)
+    foreign = _put(adir, ls.LoadedState(**{**_state(pid=4545, started_at=4545000).__dict__,
+                                           "host": host_key("machine-id", "ab" * 16)}))
+    removed = ls.clean_gone(adir, procs)
+    assert crashed in removed and not crashed.exists()
+    assert exited.exists(), "no registry file: nothing proves it was this machine's"
+    assert foreign.exists(), "a key that is not this machine's is another machine's, whatever this registry holds"
 
 
 # -- the view `nx aura list` shows -------------------------------------------------------------------------------------

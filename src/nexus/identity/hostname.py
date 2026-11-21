@@ -176,8 +176,13 @@ def _stable_host_cached() -> str | None:
 
 
 def this_host() -> str:
-    """The name bindings carry for this machine: its stable key, else ``gethostname()``."""
-    return _stable_host_cached() or socket.gethostname()
+    """The name bindings carry for this machine: its stable key, else ``gethostname()``, escaped when the hostname itself
+    starts with the key prefix, so a fallback name can never be read as a key (:func:`is_key`)."""
+    key = _stable_host_cached()
+    if key is not None:
+        return key
+    name = socket.gethostname()
+    return f"host-{name}" if name.startswith(KEY_PREFIX) else name
 
 
 def is_key(name: object) -> bool:

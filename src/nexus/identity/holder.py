@@ -133,9 +133,16 @@ class Processes:
     def __init__(self, *, sessions_dir: Path | None = None, host: str | None = None, platform: str | None = None,
                  win_api: Any = None) -> None:
         self.sessions_dir = sessions_dir if sessions_dir is not None else claude_sessions_dir()
-        self.host = host if host is not None else this_host()
+        self._host = host
         self.platform = platform if platform is not None else sys.platform
         self.win_api = win_api
+
+    @property
+    def host(self) -> str:
+        """The name bindings carry for this machine: the one a caller gave, else :func:`this_host` read NOW, so a key probe
+        that failed when this object was built (and is retried by :mod:`nexus.identity.hostname`) heals for a long-lived
+        holder of it, the MCP lease."""
+        return self._host if self._host is not None else this_host()
 
     def alive(self, pid: int) -> bool:
         from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
