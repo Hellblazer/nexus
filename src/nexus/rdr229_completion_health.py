@@ -6,7 +6,8 @@ finished and so whether the engine's id readers, the one-row rename and the inde
 item 6). It reports in ``/v1/status`` ``boot_work`` (``CompletionBootWork.java``); this module reads those entries:
 
 * ``rdr229-completion``: where the three gates stand. One ok row. The gates wait by design across releases (gate 3 cannot
-  hold until P3.4 builds its id indexes), so the row informs and never warns.
+  hold until P3.4 builds its id indexes), so the row informs and never warns. The engine sends it only while a gate waits
+  (``boot_work`` is work in progress), so no entry at all means nothing waits, or the engine predates the check.
 * ``rdr229-check:<constraint>``: a listed CHECK that is missing. A warning. The superseded_by one is held back on purpose by
   its changeset while a registry tombstone with a blank ``model_version`` has no ``superseded_by_id`` (D2's repair UPDATE
   would hit 23514); the engine says how many rows, and the wait clears by itself.
@@ -36,7 +37,9 @@ CHECK_PREFIX = "rdr229-check:"
 VALIDATE_PREFIX = "rdr229-validate:"
 
 SUMMARY_LABEL = "RDR-229 completion"
-NOT_APPLICABLE_NOT_REPORTED = "not applicable: this engine does not report RDR-229's completion check"
+NOT_APPLICABLE_NOT_REPORTED = (
+    "nothing waiting: the engine reports no RDR-229 completion state (every gate holds, or it predates the check)"
+)
 
 #: The CHECK whose changeset waits on D2's data (``CompletionCheck.SUPERSEDED_BY_CHECK``).
 SUPERSEDED_BY_CHECK = "catalog_collections_superseded_by_id_check"
@@ -108,7 +111,7 @@ def check_rdr229_completion(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
     """The summary row, a warning per missing CHECK and per table whose VALIDATE waits on orphans. Never red.
 
     *engine_status* is the ``GET /v1/status`` body the doctor already fetched (``None`` when that failed); left unset, this
-    fetches its own. Not applicable (ok) when the engine cannot be reached, predates ``boot_work`` or does not report the check.
+    fetches its own. Not applicable (ok) when the engine cannot be reached or predates ``boot_work``; "nothing waiting" (ok) when it reports none of these entries.
     """
     status: dict[str, Any] | None
     if engine_status is _ENGINE_STATUS_UNSET:

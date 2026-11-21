@@ -37,7 +37,8 @@ import java.util.concurrent.TimeUnit;
  * {@link #VIOLATOR_TTL} per table.
  *
  * <p>The entries, none of which names a collection or a tenant ({@code /v1/status} is unauthenticated): {@value #SUMMARY_ID}
- * (the three gates, {@code done} of {@code total} gates holding), {@value #CHECK_PREFIX}{@code <constraint>} for a listed
+ * (the three gates, {@code done} of {@code total} gates holding; absent once all three hold, because {@code boot_work} is
+ * work in progress and {@code nx upgrade} and {@code nx daemon status} repeat every entry), {@value #CHECK_PREFIX}{@code <constraint>} for a listed
  * CHECK that is missing (the superseded_by one waits on D2's data and says how many rows), and {@value #VALIDATE_PREFIX}
  * {@code <table>} for a table whose stamp is done and whose CHECK is still NOT VALID (orphan rows).
  */
@@ -179,7 +180,9 @@ public final class CompletionBootWork implements AutoCloseable {
     private int apply(CompletionCheck.Result r) {
         Map<String, Entry> desired = new LinkedHashMap<>();
         long holding = (r.gate1() ? 1 : 0) + (r.gate2() ? 1 : 0) + (r.gate3() ? 1 : 0);
-        desired.put(SUMMARY_ID, new Entry(summary(r), holding, 3L));
+        if (holding < 3) {   // boot_work is work in progress: nx upgrade and nx daemon status repeat every entry
+            desired.put(SUMMARY_ID, new Entry(summary(r), holding, 3L));
+        }
         for (CompletionCheck.CheckState c : r.checks()) {
             if (!c.present()) {
                 desired.put(CHECK_PREFIX + c.constraint(), new Entry(missing(c, r), null, null));
