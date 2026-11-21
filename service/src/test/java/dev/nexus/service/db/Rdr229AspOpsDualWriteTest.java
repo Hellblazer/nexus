@@ -348,4 +348,50 @@ class Rdr229AspOpsDualWriteTest {
         assertThat(ids).containsKey("hook-unknown");
         assertThat(ids.get("hook-unknown")).isNull();
     }
+
+    // ── an update never nulls an id that is already set (the registry row may be gone by then) ──────────────
+
+    @Test
+    void reembedJob_whoseSourceRegistryRowIsDeletedMidCutover_stillUpdates_andKeepsItsIds() throws Exception {
+        String src = "docs__aspops-gone-src__bge-base-en-v15-768__v1";
+        String tgt = "docs__aspops-gone-tgt__minilm-l6-v2-384__v1";
+        su(d -> { PgContainerHelper.insertCollection(d, T, src); PgContainerHelper.insertCollection(d, T, tgt); return null; });
+        long srcId = su(d -> registryId(d, src));
+        long tgtId = su(d -> registryId(d, tgt));
+        var repo = new ReembedJobRepository(scope);
+        var job = repo.start(T, src, tgt, null, false, false);
+        repo.applyTransition(T, job.jobId(), ReembedJobRepository.PLANNED, null, ReembedJobRepository.RUNNING,
+            ReembedJobRepository.Transition.NONE);
+        repo.applyTransition(T, job.jobId(), ReembedJobRepository.RUNNING, null, ReembedJobRepository.CUTOVER,
+            ReembedJobRepository.Transition.NONE);
+        // the cutover removed the source's registry row (the job row has no FK to it)
+        su(d -> d.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(T))
+            .and(CATALOG_COLLECTIONS.NAME.eq(src)).execute());
+
+        assertThat(repo.setCutoverStep(T, job.jobId(), "superseded")).isTrue();
+        assertThat(repo.setLastError(T, job.jobId(), ReembedJobRepository.CUTOVER, "x")).isTrue();
+        assertThat(repo.applyTransition(T, job.jobId(), ReembedJobRepository.CUTOVER, "superseded",
+            ReembedJobRepository.DONE, ReembedJobRepository.Transition.disposition("deleted"))).isPresent();
+
+        var row = su(d -> d.select(REEMBED_JOBS.SOURCE_COLLECTION_ID, REEMBED_JOBS.TARGET_COLLECTION_ID).from(REEMBED_JOBS)
+            .where(REEMBED_JOBS.TENANT_ID.eq(T)).and(REEMBED_JOBS.JOB_ID.eq(job.jobId())).fetchOne());
+        assertThat(row.value1()).as("source id kept").isEqualTo(srcId);
+        assertThat(row.value2()).as("target id kept").isEqualTo(tgtId);
+    }
+
+    @Test
+    void pipeline_whoseRegistryRowIsDeleted_stillUpdates_andKeepsItsId() throws Exception {
+        String c = "docs__aspops-gone-pipe__bge-base-en-v15-768__v1";
+        su(d -> { PgContainerHelper.insertCollection(d, T, c); return null; });
+        long id = su(d -> registryId(d, c));
+        var repo = new PipelineRepository(scope);
+        var created = repo.create(T, "hash-gone-1", "/p/g.pdf", c, true);
+        su(d -> d.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(T))
+            .and(CATALOG_COLLECTIONS.NAME.eq(c)).execute());
+        repo.updateProgress(T, PipelineRepository.PipelineRef.byId(created.pipelineId()), Map.of("pages_extracted", 2));
+        Long kept = su(d -> d.select(PDF_PIPELINE.COLLECTION_ID).from(PDF_PIPELINE)
+            .where(PDF_PIPELINE.TENANT_ID.eq(T)).and(PDF_PIPELINE.PIPELINE_ID.eq(created.pipelineId()))
+            .fetchOne(PDF_PIPELINE.COLLECTION_ID));
+        assertThat(kept).isEqualTo(id);
+    }
 }
