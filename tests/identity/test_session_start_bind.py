@@ -484,6 +484,46 @@ def row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start(worl
     assert world.identity(alpha)["state"] == "unheld"
 
 
+def row_a_seat_recorded_under_the_pre_key_hostname_is_found_gone_and_a_stranger_is_not(world: World) -> None:
+    """GitHub issue 1679. A binding written before the stable host key carries ``gethostname()``; the machine still
+    answers to that name, so its dead holder is found gone and the real engine takes the verdict (its ``holder_gone`` names
+    the host as the row records it). A holder under a name the machine does not answer to is another machine's: its live
+    lease still refuses the seat, though no such process exists here."""
+    legacy, stranger = world.q("legacy-102"), world.q("stranger")
+    world.procs.names = (world.host, legacy)
+    alpha, beta = world.seat("alpha"), world.seat("beta")
+    _held_by(world, alpha, 100, host=legacy)
+    _held_by(world, beta, 200, host=stranger)
+    world.process(101, os_start=T1)
+    mine = world.hook(101, "startup", "sid-a", seat="alpha")
+    assert (mine.action, mine.identity, mine.generation) == ("bound", alpha, 2)
+    row = world.log(alpha)[-1]
+    assert row["event"] == "start" and row["holder_gone"]["host"] == legacy and row["holder_gone"]["pid"] == 100
+    assert world.identity(alpha)["holder"]["host"] == world.host, "the new holder is recorded under the machine's key"
+    world.process(102, os_start=T2)
+    theirs = world.hook(102, "startup", "sid-b", seat="beta")
+    assert theirs.action == "ephemeral" and world.identity(beta)["holder"]["host"] == stranger
+
+
+def row_a_process_bound_before_the_host_key_keeps_its_identity_across_a_clear(world: World) -> None:
+    """GitHub issue 1679, upgrade path: a Claude bound under its ``gethostname()`` is still running when the new client
+    handles its ``/clear``. The engine compares ``host`` as a string on ``clear``, so the client speaks under the host the
+    holder row records; sent under the key it would be 409 ``holder_mismatch``, and the process would leave its identity for
+    a new ephemeral."""
+    legacy = world.q("legacy-102")
+    key = world.host
+    world.procs.names = (key, legacy)
+    world.process(100)
+    world.host = world.procs.host = legacy                # the process bound under the old name
+    first = world.hook(100, "startup", "sid-a")
+    world.host = world.procs.host = key                   # the upgraded client now names the machine by its key
+    cleared = world.hook(100, "clear", "sid-b")
+    assert (cleared.action, cleared.row, cleared.identity, cleared.generation) == ("bound", "clear_in_process", first.identity, 1)
+    assert world.identity(first.identity)["holder"]["host"] == legacy
+    assert world.events(first.identity) == ["start", "clear"]
+    assert read_token_file(token_path(world.identity_dir, 100, 100_000)).host == legacy
+
+
 # ── the table ───────────────────────────────────────────────────────────────
 
 ROWS = (
@@ -513,4 +553,6 @@ ROWS = (
     row_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_switch_and_sweeps_quietly,
     row_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat,
     row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start,
+    row_a_seat_recorded_under_the_pre_key_hostname_is_found_gone_and_a_stranger_is_not,
+    row_a_process_bound_before_the_host_key_keeps_its_identity_across_a_clear,
 )
