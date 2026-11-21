@@ -51,7 +51,7 @@ public final class CollectionMintSupport {
     }
 
     /** The partial UNIQUE index of changeset collections-001-2, built by hand (the changeset waits for the re-own move). */
-    static void createIndex(DSLContext ctx) {
+    public static void createIndex(DSLContext ctx) {
         ctx.createUniqueIndexIfNotExists(DSL.name(INDEX))
             .on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
                 CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
