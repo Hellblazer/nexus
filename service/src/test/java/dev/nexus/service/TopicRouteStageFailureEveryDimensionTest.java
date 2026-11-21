@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.TaxonomyCoverage;
@@ -151,10 +152,11 @@ class TopicRouteStageFailureEveryDimensionTest {
             String model = PgContainerHelper.collectionModel(dsl, TENANT, d.collection);
             long id = dsl.insertInto(TOPICS)
                 .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, label + " of " + d.collection)
-                .set(TOPICS.COLLECTION, d.collection).set(TOPICS.CREATED_AT, SEED_TS)
+                .set(TOPICS.COLLECTION, d.collection)
+                .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, d.collection)).set(TOPICS.CREATED_AT, SEED_TS)
                 .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
             dsl.insertInto(TAXONOMY_CENTROIDS)
-                .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT).set(TAXONOMY_CENTROIDS.COLLECTION, d.collection)
+                .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT).set(TAXONOMY_CENTROIDS.COLLECTION, d.collection).set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(TENANT, d.collection))
                 .set(TAXONOMY_CENTROIDS.TOPIC_ID, id).set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, model)
                 .set(TAXONOMY_CENTROIDS.LABEL, label)
                 .set(VectorSeeds.centroidEmbedding(d.dim),
@@ -164,7 +166,7 @@ class TopicRouteStageFailureEveryDimensionTest {
                 dsl.insertInto(TOPIC_ASSIGNMENTS)
                     .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT)
                     .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(hex))
-                    .set(TOPIC_ASSIGNMENTS.TOPIC_ID, id).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, d.collection)
+                    .set(TOPIC_ASSIGNMENTS.TOPIC_ID, id).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, d.collection).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, d.collection))
                     .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model)
                     .execute();
             }

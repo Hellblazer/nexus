@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import java.util.HexFormat;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -120,6 +121,12 @@ class Taxonomy010BackfillDirectIntegrationTest {
             // the pre-remediation shape the real migration walk saw.
             DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS).alterColumn(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION).dropNotNull()
                 .execute();
+            // RDR-229 P3.1: the same test-only relaxation, for the same reason. The replayed text is a pre-id statement:
+            // its backfill UPDATE sets source_collection and no source_collection_id, which the NOT VALID name/id CHECK
+            // of vectors-068 refuses on a row it touches. The CHECK is dropped in this throwaway database only; the
+            // product schema and the changeset keep theirs (no install runs taxonomy-010-1 after vectors-068).
+            DSL.using(su, SQLDialect.POSTGRES).alterTable(TOPIC_ASSIGNMENTS)
+                .dropConstraint("topic_assignments_source_collection_id_check").execute();
             // RDR-194 P3c (nexus-tk070.p3c): startAll()'s full migration now
             // ALSO runs taxonomy-011-1, converting doc_id to bytea. This test
             // replays taxonomy-010-1's OWN <sql> text unmodified (PgContainerHelper.replayChangeset,
@@ -283,6 +290,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             .set(TOPICS.TENANT_ID, tenant)
             .set(TOPICS.LABEL, label)
             .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(TOPICS.CREATED_AT, DSL.currentOffsetDateTime())
             .returningResult(TOPICS.ID)
             .fetchOne(TOPICS.ID);
@@ -316,6 +324,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_BY, "direct-test-seed")
             .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, sourceCollection))
             .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, "bge-base-en-v15-768")
             .execute();
     }
@@ -327,6 +336,7 @@ class Taxonomy010BackfillDirectIntegrationTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .set(CHUNKS.CHUNK_TEXT, "direct test chunk " + chashHex.substring(0, 8))

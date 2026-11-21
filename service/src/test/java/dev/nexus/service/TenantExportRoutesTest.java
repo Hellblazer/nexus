@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.MEMORY;
@@ -104,7 +105,7 @@ class TenantExportRoutesTest {
             for (int i = 0; i < CHUNK_COUNT; i++) {
                 String text = "routes chunk " + i;
                 dsl.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, A).set(CHUNKS.COLLECTION, COLLECTION)
+                    .set(CHUNKS.TENANT_ID, A).set(CHUNKS.COLLECTION, COLLECTION).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(A, COLLECTION))
                     .set(CHUNKS.CHASH, sha256(A + text)).set(CHUNKS.EMBEDDING_MODEL, MODEL)
                     .set(CHUNKS.CHUNK_TEXT, text).set(CHUNKS.EMBEDDING_768, Vector.of(new float[768]))
                     .execute();

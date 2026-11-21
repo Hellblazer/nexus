@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
@@ -1122,7 +1123,7 @@ class VectorSensitivityRouteParityTest {
             String model = PgContainerHelper.collectionModel(dsl, tenant, origin);
             for (var e : text.entrySet()) {
                 dsl.insertInto(CHUNKS)
-                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, origin)
+                    .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, origin).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexOf(e.getValue())))
                     .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, e.getValue())
                     .set(VectorSeeds.chunkEmbedding(384), VectorSeeds.vecXY(384, 1f, 0f))
@@ -1133,6 +1134,7 @@ class VectorSensitivityRouteParityTest {
                     .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, "doc-" + owned)
                     .set(CATALOG_DOCUMENTS.TITLE, "Doc " + owned).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
                     .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, origin)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CATALOG_DOCUMENTS.SENSITIVE, true)
                     .set(CATALOG_DOCUMENTS.DELETED_AT, owned.equals("owned-tomb") ? OffsetDateTime.now().minusDays(60) : null)
                     .execute();
@@ -1141,6 +1143,7 @@ class VectorSensitivityRouteParityTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(hexOf(text.get(owned))))
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, origin)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, origin))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                     .execute();
             }
