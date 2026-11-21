@@ -196,17 +196,23 @@ class CollectionRegistryTest {
     }
 
     @Test
-    void requireRegistered_skipsDbCheck_whenAlreadyCached() {
-        // Cache the pair WITHOUT a real row — proves requireRegistered trusts the
-        // cache and never re-checks the database once a pair is known-registered.
+    void renameIntoACachedButUnregisteredTarget_refusesWithTheTypedError() {
+        // Retired premise: a cached pair skipped the DB check. RDR-229 P3.1: ids never come from a cache, so a rename resolves the target's id from the registry in its own transaction.
         String collection = "code__cr-cached__voyage-code-3__v1";
         CollectionRegistry.markKnown(TENANT, collection,
             new CollectionRow("code", "cr-cached", "voyage-code-3", 1024, "live"));
+        assertThat(CollectionRegistry.isKnown(TENANT, collection)).isTrue();
         assertThat(rowExists(collection)).isFalse();
 
-        assertThatCode(() -> repo.renameCollection(TENANT, "cr-cached-src", collection))
-            .as("a cached (tenant, collection) pair must skip the DB existence check entirely")
-            .doesNotThrowAnyException();
+        assertThatThrownBy(() -> repo.renameCollection(TENANT, "cr-cached-src", collection))
+            .as("a cached (tenant, collection) pair with no registry row must not stand in for the row")
+            .isInstanceOf(UnregisteredCollectionException.class)
+            .hasMessageContaining(collection);
+
+        assertThat(rowExists(collection))
+            .as("the refused rename must create no catalog_collections row").isFalse();
+        assertThat(rowExists("cr-cached-src"))
+            .as("nor one for the source").isFalse();
     }
 
     // -------------------------------------------------------------------------
