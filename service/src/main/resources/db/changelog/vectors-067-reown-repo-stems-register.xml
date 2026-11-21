@@ -27,8 +27,9 @@
     (tenant_id, content_type, owner_id, embedding_model, model_version). A curator-owned stem row whose destination tuple
     (its content_type, embedding_model and model_version on the repo owner's owner_id) is already held by ANOTHER live,
     unsuperseded, non-quarantine row of the tenant (a native code__1-17__* collection beside a restored legacy
-    code__<slug>-<hash8>__*) is NOT moved: the move would create a duplicate tuple. It stays curator-owned, alone in its own
-    tuple (curator owner, its own owner_id), so the UNIQUE holds, and its quarantine sibling stays with it. Each such row is
+    code__<slug>-<hash8>__*) is NOT moved: the move would create a duplicate tuple. It stays curator-owned, in the curator tuple it
+    already had, so the move adds no duplicate tuple (two skipped rows of different repos under one curator, model and version
+    share that tuple after the move exactly as they did before it), and its quarantine sibling stays with it. Each such row is
     REPORTED: the statement writes one nexus.gc_audit row per skipped row (operation 'rdr229_reown_skipped', collection = the
     row's name, details = the reason, its owner_id, the destination owner_id and the name of the row that holds the tuple),
     once per row, so a rerun adds none. gc_audit is the engine's existing per-tenant audit; the worker keeps nothing per row
