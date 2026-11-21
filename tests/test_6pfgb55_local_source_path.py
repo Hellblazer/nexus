@@ -17,6 +17,8 @@ import nexus.search_engine as se
 from nexus.aspect_readers import uri_for
 from nexus.search_engine import _local_source_path
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 PATHS = [
     "/Users/x/plain/a.py",
     "/Users/x/my#dir/a.py",

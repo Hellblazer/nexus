@@ -33,6 +33,8 @@ from nexus.mcp_infra import (
     record_taxonomy_failure,
 )
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _NOW = 1_800_000_000.0
 
 

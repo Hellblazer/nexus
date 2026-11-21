@@ -53,9 +53,10 @@ class EntityKeyError(ValueError):
 
 
 def is_code_collection(collection: str) -> bool:
-    """True for a ``code__`` collection, which has no entity keys. The prefix table is
-    ``metadata_schema``'s, the one the chunk writer reads (a name-prefix dispatch, not a parse of
-    the name's segments: the collection may be new and have no catalog row yet)."""
+    """True for a ``code`` collection, which has no entity keys. The content type is
+    ``metadata_schema``'s, the one the chunk writer reads: the collection's catalog row, or, when
+    the collection may be new and has no row yet, the candidate name's own segment (item 1's NoRow
+    outcome)."""
     from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — deferred: keep this module's import light
 
     return chunk_content_type_for_collection(collection or "") == "code"

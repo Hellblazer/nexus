@@ -41,6 +41,8 @@ from tests.test_search_per_collection_route import (  # type: ignore[import-not-
 )
 from tests.test_search_topic_route_client import _engine, _search
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _TOP1 = {"mode": "top1"}
 _PROSE = {"taxonomy_domain": "prose"}
 
@@ -48,8 +50,12 @@ _PROSE = {"taxonomy_domain": "prose"}
 @pytest.fixture(autouse=True)
 def _tenant_free():
     """The runner's non-evidentiary hygiene and owner narrowing would ask the service; answer 'nothing'."""
+    # RDR-229 P2.9: a collection now routes by its row, so a search that finds rows returns a page, and the
+    # search records its trace against the T1 session (best-effort; "session may be unavailable in test
+    # contexts"). Answer "no session" rather than mint one for a test that holds no tenant.
     with patch("nexus.plans.runner._resolve_non_evidentiary_chashes", return_value=set()), \
-         patch("nexus.plans.owner_narrowing.narrow_args_by_owner", lambda args, owners: (args, None)):
+         patch("nexus.plans.owner_narrowing.narrow_args_by_owner", lambda args, owners: (args, None)), \
+         patch("nexus.mcp.core._get_t1", side_effect=RuntimeError("no T1 session in a tenant-free test")):
         yield
 
 

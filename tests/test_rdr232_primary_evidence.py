@@ -1635,7 +1635,7 @@ def test_the_aspect_extractor_name_this_module_trusts_is_the_rdr_frontmatter_ext
     from nexus.aspect_extractor import _REGISTRY
     from nexus.plans.primary_evidence import RDR_FRONTMATTER_EXTRACTOR
 
-    assert RDR_FRONTMATTER_EXTRACTOR == _REGISTRY["rdr__"].extractor_name
+    assert RDR_FRONTMATTER_EXTRACTOR == _REGISTRY["rdr"].extractor_name
 
 
 def test_the_recorded_id_is_the_aspect_rows_rdr_id() -> None:

@@ -36,6 +36,7 @@ from nexus.db import make_t3
 from nexus.health import _is_pdf_stub_metadata
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._chunk_seed import seed_chunks_direct
+from tests.conftest import catalog_row_for_collection_name
 
 _COLLECTION = "knowledge__rte90-pdf-stub__bge-base-en-v15-768__v1"
 _LABEL = "PDF chunk metadata"
@@ -216,7 +217,7 @@ class _IdCol:
 def _t3_of(col) -> object:
     class _T3:
         def list_collections(self):
-            return [{"name": _COLLECTION}]
+            return [{"name": _COLLECTION, **catalog_row_for_collection_name(_COLLECTION)}]
 
         def get_or_create_collection(self, name):
             return col

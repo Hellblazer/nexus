@@ -43,6 +43,9 @@ def test_the_walk_converts_a_comma_string_note_and_a_second_dry_run_is_converged
 ) -> None:
     cat, owner = catalog
     coll = f"knowledge__shk794tags__{MODEL}__v1"
+    # RDR-229 P2.9: the rung finds the notes' collections by their rows' content type, and a collection
+    # has a row once it holds a chunk, as a notes collection does.
+    seed_chunk(t2_service_env, coll, "a chunk of the notes collection", {})
     legacy = str(cat.register(
         owner, "legacy tags note", content_type="knowledge", physical_collection=coll,
         meta={"tags": "arch, decision,arch", "category": "design"}))
