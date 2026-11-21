@@ -431,12 +431,12 @@ class CollectionTupleUniqueIndexLiquibaseTest {
     }
 
     /**
-     * The migration role does not own the table: the index body is refused ("must be owner"), which with
-     * failOnError="false" skips the changeset unrecorded, never halts the boot. The counter reads nothing as a
-     * role with no owner-read policy and lifts nothing, so it cannot be what throws.
+     * The migration role does not own the table and holds no privilege on it: the counter is refused
+     * ("permission denied"). A precondition that THROWS is an error, not a failed check, and onError="CONTINUE" skips the
+     * changeset unrecorded; it never halts the boot.
      */
     @Test
-    void aBodyThatIsRefused_skipsTheChangeset_itDoesNotHaltTheBoot() throws Exception {
+    void aCounterThatIsRefused_skipsTheChangeset_itDoesNotHaltTheBoot() throws Exception {
         String otherOwner = "ctuple_other_owner";
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(otherOwner);
         try {
@@ -451,9 +451,9 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                     PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("nexus", "catalog_collections")), otherOwner);
                 }
                 try (Connection admin = adminDs.getConnection()) {
-                    assertThat(duplicates(admin))
-                        .as("non-vacuity: the counter passes (0), so the refused index build is what is skipped")
-                        .isEqualTo(0L);
+                    assertThatThrownBy(() -> duplicates(admin))
+                        .as("non-vacuity: the counter really is refused for a role with no privilege on the table")
+                        .hasMessageContaining("permission denied");
                 }
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
                 assertWaiting(pg);
@@ -467,9 +467,13 @@ class CollectionTupleUniqueIndexLiquibaseTest {
     void theStatusProbe_isNullWhenItCannotRun() throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
-            HikariDataSource closed = adminPool(pg);
-            closed.close();
-            assertThat(CollectionTupleIndexProbe.present(closed)).as("a probe that could not run answers null").isNull();
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            }
+            HikariDataSource pool = adminPool(pg);
+            assertThat(CollectionTupleIndexProbe.present(pool)).as("premise: it runs on a live pool").isFalse();
+            pool.close();
+            assertThat(CollectionTupleIndexProbe.present(pool)).as("a probe that could not run answers null").isNull();
         } finally {
             pg.stop();
         }
