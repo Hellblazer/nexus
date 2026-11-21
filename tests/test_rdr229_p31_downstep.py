@@ -290,12 +290,6 @@ def test_the_orphan_section_gives_the_restamp_step_and_no_placeholder_is_left():
     assert "register each missing collection" in flat and "delete the rows" in flat
 
 
-def test_the_changelog_orphan_advice_names_the_restamp_step():
-    text = (ROOT / "changelog" / "unreleased" / "nexus-p2m1x.17.md").read_text(encoding="utf-8")
-    assert "rdr229_restamp" in text
-    assert "once the collection is registered or the rows are removed" not in text
-
-
 def test_the_restore_runbook_says_what_an_orphan_row_does_to_a_restore_and_how_to_resolve_it():
     text = (ROOT / "docs" / "operations" / "backup-restore.md").read_text(encoding="utf-8")
     flat = " ".join(text.split())

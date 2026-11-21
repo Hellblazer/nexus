@@ -114,6 +114,11 @@ def test_any_other_missing_check_is_a_warning_that_names_the_changeset_file_and_
     text = " ".join(row.fix_suggestions)
     assert "vectors-068-collection-id-expand.xml" in text
     assert "rdr-229-p31-readd.sql" in text, "the generated re-add is the way back after the down-step"
+    # why: neither file ships in the installed package, so a bare repo path would point at nothing on the user's machine
+    assert "https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-229-p31-readd.sql" in text
+    assert "https://github.com/Hellblazer/nexus/blob/main/docs/runbooks/rdr-229-p31-rollback.md" in text
+    assert "psql -X -v ON_ERROR_STOP=1 --single-transaction -f rdr-229-p31-readd.sql" in text, "the command that runs it"
+    assert " docs/runbooks/" not in text, "no repo-relative path"
     _never_red(rows)
 
 

@@ -72,3 +72,35 @@ except httpx.HTTPStatusError as exc:
 else:
     raise SystemExit("match=bogus was accepted: the engine ignores the match field, or the edge strips it")
 """
+
+ENGINE_STATUS = r"""
+from nexus.db.http_engine_status import fetch_engine_status
+# RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check reports in an optional top-level key of this
+# body, `rdr229_completion`. The key is absent until the engine's first read, so the probe asserts the route
+# answers a JSON object and names the key only when it is there; fetch_engine_status returns None on any failure.
+status = fetch_engine_status(timeout=20.0)
+assert isinstance(status, dict), "GET /v1/status did not answer a JSON object"
+completion = status.get("rdr229_completion")
+assert completion is None or isinstance(completion, dict), "rdr229_completion is not an object"
+print("status keys:", len(status), "rdr229_completion:", "present" if completion is not None else "absent")
+"""
+
+DOC_REGISTER_UNREGISTERED = r"""
+from nexus.commands.catalog import _get_catalog
+from nexus.registration_retry import unregistered_collection_name
+# RDR-229 P3.1 (nexus-p2m1x.17): POST /v1/catalog/doc/register answers 422 `unregistered_collection` for a document
+# whose physical_collection has no registry row in the caller's tenant, and writes nothing. The probe names a
+# collection nothing registers (the run label makes the name unique), under the "knowledge" curator owner the note
+# puts use (an idempotent upsert), so the refusal that answers is the collection's and not the owner's. This
+# process never cached the name, so the client's one retry (which re-registers a name it cached) does not fire.
+cat = _get_catalog()
+owner = cat.curator_owner_tumbler_by_name("knowledge") or cat.register_owner("knowledge", "curator")
+name = "@label@-docreg-probe"
+try:
+    cat.register(owner, "@label@ doc register probe", content_type="knowledge", physical_collection=name)
+except Exception as exc:  # noqa: BLE001 - narrowed below to the one typed refusal
+    assert unregistered_collection_name(exc) == name, f"not the typed unregistered_collection 422: {exc!r}"
+    print("doc/register refused the unregistered collection with 422")
+else:
+    raise SystemExit("doc/register accepted a document under an unregistered collection: the engine does not refuse it")
+"""

@@ -44,6 +44,12 @@ NOT_KNOWN = (
     "not known: the engine has not reported its RDR-229 completion state yet (it has not read it, or it predates the check)"
 )
 
+#: The rollback runbook and its generated re-add SQL, as published on the repository's main branch: they are not in the
+#: installed package, so the doctor row names where to read them (the pattern of ``nexus.health``'s other runbook links).
+_DOCS_BLOB = "https://github.com/Hellblazer/nexus/blob/main/docs/runbooks"
+ROLLBACK_RUNBOOK_URL = f"{_DOCS_BLOB}/rdr-229-p31-rollback.md"
+READD_SQL_URL = f"{_DOCS_BLOB}/rdr-229-p31-readd.sql"
+
 #: The CHECK whose changeset waits on D2's data (``CompletionCheck.SUPERSEDED_BY_CHECK``).
 SUPERSEDED_BY_CHECK = "catalog_collections_superseded_by_id_check"
 
@@ -104,8 +110,9 @@ def _check_row(constraint: str, what: str) -> HealthResult:
     else:
         fix = [
             f"{constraint} is part of RDR-229 P3.1's expand (vectors-068-collection-id-expand.xml) and should exist. "
-            "If the R5 operator down-step ran and the engine was upgraded again, run the generated re-add "
-            "(docs/runbooks/rdr-229-p31-readd.sql, step 7 of docs/runbooks/rdr-229-p31-rollback.md) as nexus_admin; "
+            "If the R5 operator down-step ran and the engine was upgraded again, run the generated re-add as nexus_admin "
+            f"(the SQL: {READD_SQL_URL}, saved from its Raw view and run with psql -X -v ON_ERROR_STOP=1 "
+            f"--single-transaction -f rdr-229-p31-readd.sql; the steps around it: step 7 of {ROLLBACK_RUNBOOK_URL}); "
             "the engine refuses the id switch until the constraint is back",
         ]
     return HealthResult(label=f"RDR-229 CHECK {constraint}", ok=False, warn=True, detail=what, fix_suggestions=fix)

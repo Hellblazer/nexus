@@ -338,6 +338,11 @@ ROUTE_MAP: dict[str, Step] = {
                                                expect_route="/v1/catalog/uri_segment_census"),
     "POST /v1/catalog/collections/upsert": Step("route-collections-upsert", "py", ["-c", _routes.COLLECTION_UPSERT],
                                                 expect_route="/v1/catalog/collections/upsert"),
+    # RDR-229 P3.1 (nexus-p2m1x.17): the completion check's report, and the typed 422 of the dual write.
+    "GET /v1/status": Step("route-engine-status", "py", ["-c", _routes.ENGINE_STATUS], expect_route="/v1/status"),
+    "POST /v1/catalog/doc/register": Step("route-doc-register-unregistered", "py", ["-c", _routes.DOC_REGISTER_UNREGISTERED],
+                                          expect_route="/v1/catalog/doc/register",
+                                          expect_stdout="refused the unregistered collection with 422"),
     "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
                                                            expect_route="/v1/taxonomy/assignments/prune_projection",
                                                            expect_stdout="match=bogus refused 400"),
