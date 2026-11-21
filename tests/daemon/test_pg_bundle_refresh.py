@@ -28,22 +28,22 @@ import nexus.commands.upgrade as up
 from nexus.cli import main
 from nexus.commands import daemon as daemon_cmds
 from nexus.commands.daemon import service_install_binary_cmd
+import nexus.bounded_subprocess as bs
 from nexus.daemon import binary_install as b
 from nexus.daemon import replace_quiesce as rq
 from nexus.daemon import pg_bundle_refresh
 from nexus.daemon.pg_bundle_refresh import bundle_has_pg_background, install_and_extract_pg_bundle
 from nexus.db import pg_bundle
+from nexus.db.pg_provision import _bundle_lib_env
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import PoisonProbe, converge_engine
 from nexus.upgrade_ladder.preconditions import PreconditionReport
 from nexus.upgrade_finish import RunningEngine as _RunningEngine
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32", reason="the synthetic bundle's binaries are POSIX shell stubs",
-)
-
 _REQUIRED_STR = ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
 _PINNED_TAG = "engine-service-v" + _REQUIRED_STR
+_EXE = ".exe" if sys.platform == "win32" else ""  # the names PgBinaries looks for on this host
+_FAILS = "raise SystemExit(127)\n"  # a pg_ctl that does not run
 _CONTROL = Path("bundle") / "share" / "postgresql" / "extension" / "pg_background.control"
 
 
@@ -63,10 +63,11 @@ def _txz(
     bundle = stage / "bundle"
     (bundle / "bin").mkdir(parents=True)
     for tool in ("initdb", "pg_ctl", "psql", "createdb"):
-        f = bundle / "bin" / tool
-        body = pg_ctl_body if (tool == "pg_ctl" and pg_ctl_body is not None) else f"echo '{tool} (PostgreSQL) {pg_version}'"
-        f.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
-        f.chmod(0o755)
+        f = bundle / "bin" / (tool + _EXE)
+        f.write_text("", encoding="utf-8")  # the binaries' presence is what extraction checks; pg_ctl's answer is below
+    (bundle / "bin" / "pg_ctl.py").write_text(
+        pg_ctl_body if pg_ctl_body is not None else f'print("pg_ctl (PostgreSQL) {pg_version}")\n', encoding="utf-8",
+    )
     ext = bundle / "share" / "postgresql" / "extension"
     ext.mkdir(parents=True)
     (ext / "vector.control").write_text("default_version = '0.8.0'\n", encoding="utf-8")
@@ -80,6 +81,22 @@ def _txz(
     with tarfile.open(archive, "w:xz") as tf:
         tf.add(bundle, arcname="bundle")
     return archive
+
+
+@pytest.fixture(autouse=True)
+def _pg_ctl_runs_its_script(monkeypatch):
+    """The stub ``pg_ctl`` of a synthetic bundle is a Python script beside the (empty) binary, run through
+    ``sys.executable``: a shell script cannot be an ``.exe`` on Windows. Everything else about the probe is
+    real: the child, its environment, its exit code and output."""
+    real = bs.run_bounded
+
+    def _run(argv, **kw):
+        head = Path(argv[0])
+        if head.stem == "pg_ctl" and head.with_name("pg_ctl.py").is_file():
+            argv = [sys.executable, str(head.with_name("pg_ctl.py")), *argv[1:]]
+        return real(argv, **kw)
+
+    monkeypatch.setattr(bs, "run_bounded", _run)
 
 
 class _Stack:
@@ -615,7 +632,7 @@ def pg_bundle_refresh_noop():
 
 def test_the_guard_reads_the_data_directory_when_the_bundle_in_service_cannot_run(world):
     """Review: an in-service pg_ctl that does not run read as 'no major known' and the guard let a 17 -> 18 swap by."""
-    world.install_old(background=False, cluster="17", variant="old", pg_ctl_body="exit 127")
+    world.install_old(background=False, cluster="17", variant="old", pg_ctl_body=_FAILS)
     world.ship(background=True, pg_version="18.1", variant="new")
 
     actions, _install, _cycle = _converge(world, engine="converged")
@@ -626,7 +643,7 @@ def test_the_guard_reads_the_data_directory_when_the_bundle_in_service_cannot_ru
 
 def test_a_staged_tree_whose_major_cannot_be_read_is_refused(world):
     world.install_old(background=False, cluster="17", variant="old")
-    world.ship(background=True, variant="new", pg_ctl_body="exit 127")
+    world.ship(background=True, variant="new", pg_ctl_body=_FAILS)
 
     actions, _install, _cycle = _converge(world, engine="converged")
 
@@ -635,19 +652,24 @@ def test_a_staged_tree_whose_major_cannot_be_read_is_refused(world):
 
 
 def test_the_major_probe_gives_the_new_tree_its_own_libraries(tmp_path):
-    """The published bundles carry no RPATH: a bare pg_ctl --version exits 127 on a minimal Linux base."""
+    """The published bundles carry no RPATH: a bare pg_ctl --version exits 127 on a minimal Linux base. The stub
+    answers only when the child's loader path names the tree's own lib/ (Windows loads DLLs from the exe's own
+    directory and sets no loader variable, so there the stub answers and ``_bundle_lib_env`` is the identity)."""
     root = tmp_path / "tree"
     (root / "bin").mkdir(parents=True)
     (root / "lib").mkdir()
-    gate = (
-        'case "$LD_LIBRARY_PATH" in *"$(cd "$(dirname "$0")/.." && pwd)/lib"*) echo "pg_ctl (PostgreSQL) 17.5";; '
-        '*) exit 127;; esac'
-    )
     for tool in ("initdb", "pg_ctl", "psql", "createdb"):
-        f = root / "bin" / tool
-        f.write_text(f"#!/bin/sh\n{gate}\n", encoding="utf-8")
-        f.chmod(0o755)
+        (root / "bin" / (tool + _EXE)).write_text("", encoding="utf-8")
+    (root / "bin" / "pg_ctl.py").write_text(
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "lib = Path(sys.argv[0]).resolve().parent.parent / 'lib'\n"
+        "ok = os.name == 'nt' or str(lib) in os.environ.get('LD_LIBRARY_PATH', '').split(os.pathsep)\n"
+        "print('pg_ctl (PostgreSQL) 17.5') if ok else sys.exit(127)\n", encoding="utf-8",
+    )
     assert pg_bundle.bundle_major(root / "bin") == 17
+    if sys.platform == "win32":
+        assert _bundle_lib_env([str(root / "bin" / "pg_ctl.exe")], {"A": "1"}) == {"A": "1"}
 
 
 def test_a_major_refusal_has_its_own_message_and_no_retry_advice(world, tmp_path):
