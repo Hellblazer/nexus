@@ -412,14 +412,14 @@ for _site in LEDGER:
 #:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
 #:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
 #:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
-#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2. P3.1 (nexus-p2m1x.17): the registrations that must precede a catalog document (the engine refuses one under an unregistered collection: ``note_write`` (put_note), ``exporter`` (the import pre-pass), ``doc_indexer`` (the pre-flight), ``registration_retry`` (the 422 retry)) all go through ONE function, ``registration_retry.register_collection_for_write`` (its single call to ``ensure_collection_registered`` is the one new site; a wrapper's callers are not sites, the scan's documented limit 2), and ``HttpCatalogClient``'s three manifest-write registrations (``append_manifest_chunks``, ``append_manifest_many``, ``write_manifest_many``) call it too, so those three sites become the one. mint 135 -> 133, primitive_call 183 -> 181, total 217 -> 215; the pin does not rise in this step. P3.8's collection_mint replaces that one body.
-PARSE_SITE_PIN: int = 215
+#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2. P3.1 (nexus-p2m1x.17): the registrations that must precede a catalog document (the engine refuses one under an unregistered collection: ``note_write`` (put_note), ``exporter`` (the import pre-pass), ``doc_indexer`` (the pre-flight), ``registration_retry`` (the 422 retry)) all go through ONE function, ``registration_retry.register_collection_for_write`` (its single call to ``ensure_collection_registered`` is the one new site; a wrapper's callers are not sites, the scan's documented limit 2), and ``HttpCatalogClient``'s three manifest-write registrations (``append_manifest_chunks``, ``append_manifest_many``, ``write_manifest_many``) call it too, so those three sites become the one. mint 135 -> 133, primitive_call 183 -> 181, total 217 -> 215; the pin does not rise in this step. P3.8's collection_mint replaces that one body. P3.8 (nexus-p2m1x.28), -2: register_collection derives nothing from the name. mint 133 -> 131, primitive_call 181 -> 179, total 215 -> 213.
+PARSE_SITE_PIN: int = 213
 CLASS_PIN: dict[str, int] = {
-    "mint": 133, "diagnostic": 43, "migration-source": 22,
+    "mint": 131, "diagnostic": 43, "migration-source": 22,
     "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 181, "const_prefix": 5, "fnmatch": 14,
+    "primitive_call": 179, "const_prefix": 5, "fnmatch": 14,
     "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -843,11 +843,12 @@ def test_pin_matches_documented_total() -> None:
     at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then at P2.4,
     nexus-p2m1x.9, when the taxonomy threshold became a row read; then at P2.2,
     nexus-p2m1x.7, when the read-path model reads became row reads and the name
-    parsers moved to ``legacy_names``) is derived
+    parsers moved to ``legacy_names``; then 217 -- 215 at P3.8,
+    nexus-p2m1x.28, when ``register_collection`` stopped deriving from the name) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 215
+    assert PARSE_SITE_PIN == 213
 
 
 # ---------------------------------------------------------------------------
