@@ -32,11 +32,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
- * RDR-229 P3.1 (nexus-p2m1x.17): {@link CompletionBootWork}, the engine's report of the completion check in
- * {@code /v1/status} {@code boot_work}, which {@code nx doctor} reads. One entry for the three gates, one per missing CHECK
- * (the superseded_by one says how many registry rows hold its changeset back), one per table whose stamp is done and whose
- * CHECK is still NOT VALID (orphans). No entry names a collection or a tenant: the status is unauthenticated. Entries leave
- * when the state clears. A read that fails leaves the entries as they were.
+ * RDR-229 P3.1 (nexus-p2m1x.17): {@link CompletionBootWork}, the engine's report of the completion check in its own
+ * {@code /v1/status} field, {@code rdr229_completion}, which {@code nx doctor} reads. (Fix round A, critique B1: never in
+ * {@code boot_work}, which is work in progress; the three-gate state waits by design until P3.4.) The field carries the three
+ * gates, a row per missing CHECK (the superseded_by one says how many registry rows hold its changeset back) and a row per
+ * table whose stamp is done and whose CHECK is still NOT VALID (orphans). Nothing in it names a collection or a tenant: the
+ * status is unauthenticated. The field follows the state as it clears. A read that fails leaves the field as it was.
+ * {@link CompletionStatusFieldIntegrationTest} covers the rendered body and the dangling-tombstone count.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CompletionBootWorkTest {
@@ -97,10 +99,13 @@ class CompletionBootWorkTest {
         return new Fixed(() -> CompletionCheck.evaluate(ctx, readSet, CompletionCheck.Gate3Source.NOT_INSTALLED, CompletionCheck.DIRECT));
     }
 
-    private static Map<String, BootWorkRegistry.Entry> byId(BootWorkRegistry registry) {
-        Map<String, BootWorkRegistry.Entry> out = new java.util.LinkedHashMap<>();
-        registry.snapshot().forEach(e -> out.put(e.id(), e));
-        return out;
+    private static final com.fasterxml.jackson.databind.ObjectMapper MAPPER = new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /** The {@code rdr229_completion} field as the status route would send it. */
+    private static com.fasterxml.jackson.databind.JsonNode field(CompletionBootWork work) throws Exception {
+        String json = work.statusJson();
+        assertThat(json).as("the field is there once a sample was read").isNotNull();
+        return MAPPER.readTree(json);
     }
 
     private static Field<String> text(String name) {
@@ -110,49 +115,51 @@ class CompletionBootWorkTest {
     // ---- the summary ---------------------------------------------------------------------------------------------------
 
     @Test
-    void theSummaryEntrySaysWhereTheThreeGatesStand_withNoMoveRegistered() {
+    void theSummarySaysWhereTheThreeGatesStand_withNoMoveRegistered() throws Exception {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var work = new CompletionBootWork(registry, live(CompletionCheck.ReadSet.p31()));
         assertThat(work.latest()).isNull();
         assertThat(work.publish()).isEqualTo(1);
-        var entries = byId(registry);
-        assertThat(entries).containsOnlyKeys(CompletionBootWork.SUMMARY_ID);
-        var e = entries.get(CompletionBootWork.SUMMARY_ID);
-        assertThat(e.what()).startsWith("gate 1 waits (15 of 16 stamp moves incomplete)")
+        assertThat(registry.snapshot()).as("never boot_work: it is work in progress, and this waits by design").isEmpty();
+        var f = field(work);
+        assertThat(f.get("summary").asText()).startsWith("gate 1 waits (15 of 16 stamp moves incomplete)")
             .contains("gate 2 waits on gate 1").endsWith("gate 3 waits: gate 2 does not hold");
-        assertThat(e.done()).isZero();
-        assertThat(e.total()).isEqualTo(3L);
-        assertThat(e.unit()).isEqualTo("gates");
+        assertThat(f.get("gates_holding").asInt()).isZero();
+        assertThat(f.get("gates_total").asInt()).isEqualTo(3);
         assertThat(work.latest()).isNotNull();
         assertThat(work.latest().gate1()).isFalse();
     }
 
     @Test
-    void theSummaryCountsTheGatesThatHold() {
+    void theSummaryCountsTheGatesThatHold() throws Exception {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var work = new CompletionBootWork(registry, live(new CompletionCheck.ReadSet(List.of(), List.of())));
         work.publish();
-        var e = byId(registry).get(CompletionBootWork.SUMMARY_ID);
-        assertThat(e.what()).isEqualTo("gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), "
+        var f = field(work);
+        assertThat(f.get("summary").asText()).isEqualTo("gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), "
             + "so no collection has a valid one");
-        assertThat(e.done()).isEqualTo(2L);
+        assertThat(f.get("gates_holding").asInt()).isEqualTo(2);
     }
 
     @Test
-    void whenEveryGateHoldsAndNothingWaitsThereIsNoEntry_boot_workIsWorkInProgress_notAStatusLine() {
+    void whenEveryGateHoldsAndNothingWaitsNothingIsListed_theFieldIsStillThere() throws Exception {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var reader = new Fixed(() -> CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()),
             c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of("a"), Set.of())), CompletionCheck.DIRECT));
         var work = new CompletionBootWork(registry, reader);
-        assertThat(work.publish()).as("every gate holds: no entry, so nx upgrade and nx daemon status print nothing").isZero();
+        assertThat(work.publish()).as("every gate holds: nothing waits").isZero();
         assertThat(registry.snapshot()).isEmpty();
         assertThat(work.latest().gate3()).as("non-vacuity: gate 3 held").isTrue();
+        var f = field(work);
+        assertThat(f.get("gates_holding").asInt()).isEqualTo(3);
+        assertThat(f.get("checks_missing")).isEmpty();
+        assertThat(f.get("validate_waits")).isEmpty();
     }
 
     // ---- a missing CHECK and the VALIDATE that waits ---------------------------------------------------------------------
 
     @Test
-    void aMissingSupersededByCheckIsAnEntryThatSaysHowManyRowsHoldItBack_andLeavesWhenItLands() throws Exception {
+    void aMissingSupersededByCheckIsARowThatSaysHowManyRowsHoldItBack() throws Exception {
         PgContainerHelper.insertCollection(ctx, TENANT, "tomb-p31-cbw");
         Table<?> registryTable = DSL.table(DSL.name("nexus", "catalog_collections"));
         P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
@@ -162,13 +169,16 @@ class CompletionBootWorkTest {
             var registry = new BootWorkRegistry(Clock.systemUTC());
             var work = new CompletionBootWork(registry, live(new CompletionCheck.ReadSet(List.of(), List.of())));
             assertThat(work.publish()).isEqualTo(2);
-            var entries = byId(registry);
-            var id = CompletionBootWork.CHECK_PREFIX + CompletionCheck.SUPERSEDED_BY_CHECK;
-            assertThat(entries).containsKeys(CompletionBootWork.SUMMARY_ID, id);
-            assertThat(entries.get(id).what()).startsWith("waits: " + CompletionCheck.SUPERSEDED_BY_CHECK)
-                .contains("1 registry row(s) with a blank model_version and no superseded_by_id")
-                .contains("the switch is refused until then");
-            assertThat(entries.get(CompletionBootWork.SUMMARY_ID).what()).contains("the superseded_by CHECK is missing");
+            assertThat(registry.snapshot()).isEmpty();
+            var f = field(work);
+            assertThat(f.get("checks_missing")).singleElement().satisfies(c -> {
+                assertThat(c.get("constraint").asText()).isEqualTo(CompletionCheck.SUPERSEDED_BY_CHECK);
+                assertThat(c.get("what").asText()).startsWith("waits: " + CompletionCheck.SUPERSEDED_BY_CHECK)
+                    .contains("1 registry row(s) with a blank model_version and no superseded_by_id")
+                    .contains("the switch is refused until then");
+            });
+            assertThat(f.get("superseded_by_waiting").asInt()).isEqualTo(1);
+            assertThat(f.get("summary").asText()).contains("the superseded_by CHECK is missing");
 
             ctx.update(registryTable).set(DSL.field(DSL.name("superseded_by_id"), Long.class), DSL.field(DSL.name("collection_id"), Long.class))
                 .where(text("name").eq("tomb-p31-cbw")).execute();
@@ -179,7 +189,7 @@ class CompletionBootWorkTest {
     }
 
     @Test
-    void anOrphanThatKeepsACheckNotValidIsAnEntryWithTheCount_neverTheNameOrTheTenant_andLeavesOnceValidated() throws Exception {
+    void anOrphanThatKeepsACheckNotValidIsARowWithTheCount_neverTheNameOrTheTenant_andLeavesOnceValidated() throws Exception {
         Table<?> docs = DSL.table(DSL.name("nexus", "catalog_documents"));
         P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
         try {
@@ -200,17 +210,21 @@ class CompletionBootWorkTest {
             var registry = new BootWorkRegistry(Clock.systemUTC());
             var work = new CompletionBootWork(registry, live(new CompletionCheck.ReadSet(List.of(label), List.of())));
             assertThat(work.publish()).isEqualTo(2);
-            var entries = byId(registry);
-            var e = entries.get(CompletionBootWork.VALIDATE_PREFIX + "catalog_documents");
-            assertThat(e).isNotNull();
-            assertThat(e.what()).isEqualTo("waits: 1 orphan row(s) (a name with no registry row in its tenant) and 0 unstamped row(s) keep "
-                + "catalog_documents_physical_collection_id_check on catalog_documents NOT VALID; its VALIDATE waits instead of failing a boot");
-            assertThat(entries.values()).allSatisfy(x -> assertThat(x.what()).doesNotContain(GHOST).doesNotContain(TENANT));
+            assertThat(registry.snapshot()).isEmpty();
+            var f = field(work);
+            assertThat(f.get("validate_waits")).singleElement().satisfies(w -> {
+                assertThat(w.get("table").asText()).isEqualTo("catalog_documents");
+                assertThat(w.get("what").asText()).isEqualTo("waits: 1 orphan row(s) (a name with no registry row in its tenant) and 0 unstamped row(s) keep "
+                    + "catalog_documents_physical_collection_id_check on catalog_documents NOT VALID. To finish: register each missing collection or "
+                    + "delete the orphan rows, then run  SELECT nexus.rdr229_restamp('catalog_documents');  as the migrating role. It re-registers "
+                    + "this table's stamp move once no orphan remains; the move stamps the rows and validates the CHECK.");
+            });
+            assertThat(f.toString()).doesNotContain(GHOST).doesNotContain(TENANT);
 
             ctx.deleteFrom(docs).where(text("tenant_id").eq(TENANT)).execute();
             PgContainerHelper.validateConstraint(su, docs, "catalog_documents_physical_collection_id_check");
             work.publish();
-            assertThat(byId(registry)).as("the entry leaves once the CHECK is validated").containsOnlyKeys(CompletionBootWork.SUMMARY_ID);
+            assertThat(field(work).get("validate_waits")).as("the row leaves once the CHECK is validated").isEmpty();
         } finally {
             ctx.deleteFrom(docs).where(text("tenant_id").eq(TENANT)).execute();
         }
@@ -219,7 +233,7 @@ class CompletionBootWorkTest {
     // ---- reading ---------------------------------------------------------------------------------------------------------
 
     @Test
-    void aReadThatFailsLeavesTheEntriesAsTheyWere() {
+    void aReadThatFailsLeavesTheFieldAsItWas() throws Exception {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         AtomicInteger calls = new AtomicInteger();
         var reader = new Fixed(() -> {
@@ -231,21 +245,21 @@ class CompletionBootWorkTest {
         });
         var work = new CompletionBootWork(registry, reader);
         assertThat(work.publish()).isEqualTo(1);
-        var before = byId(registry).get(CompletionBootWork.SUMMARY_ID);
+        var before = work.statusJson();
         assertThat(work.publish()).as("the read failed").isEqualTo(-1);
-        assertThat(byId(registry).get(CompletionBootWork.SUMMARY_ID)).isEqualTo(before);
+        assertThat(work.statusJson()).isEqualTo(before);
         assertThat(work.publish()).as("and the next sample recovers").isEqualTo(1);
     }
 
     @Test
-    void closeTakesTheEntriesOffAndEndsTheRead() {
+    void closeTakesTheFieldOffAndEndsTheRead() {
         var registry = new BootWorkRegistry(Clock.systemUTC());
         var reader = (Fixed) live(new CompletionCheck.ReadSet(List.of(), List.of()));
         var work = new CompletionBootWork(registry, reader);
         work.publish();
-        assertThat(registry.snapshot()).hasSize(1);
+        assertThat(registry.rdr229Completion()).isNotNull();
         work.close();
-        assertThat(registry.snapshot()).isEmpty();
+        assertThat(registry.rdr229Completion()).as("a closed check leaves no field behind").isNull();
         assertThat(reader.aborted).isTrue();
         assertThat(reader.closed).isTrue();
         assertThat(work.publish()).as("a sample after close does nothing").isEqualTo(-1);

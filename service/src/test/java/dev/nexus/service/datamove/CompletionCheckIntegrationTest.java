@@ -401,14 +401,36 @@ class CompletionCheckIntegrationTest {
         assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("c"), Set.of(), Set.of()))).gate3()).isFalse();
     }
 
+    private void emptyCollectionRegistry() {
+        ctx.deleteFrom(DSL.table(DSL.name("nexus", "catalog_collections"))).where(text("tenant_id").eq(TENANT)).execute();
+    }
+
     @Test
-    void gate3HoldsWhenEveryPlannedCollectionIsCovered_orNoneIsPlanned_andNeverWithoutAReader() {
+    void gate3HoldsWhenEveryPlannedCollectionIsCovered_orNoneIsPlannedAndTheRegistryIsEmpty_andNeverWithoutAReader() {
+        emptyCollectionRegistry();
         assertThat(withGate3(everyIndexValid()).gate3()).isTrue();
         assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(), Set.of(), Set.of()))).gate3())
-            .as("nothing to index is covered").isTrue();
+            .as("nothing to index, and no collection registered: covered").isTrue();
         // an id index no planner wants does not matter; a planned one must be there
         assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of("a", "stale"), Set.of()))).gate3()).isTrue();
         assertThat(withGate3(CompletionCheck.Gate3Source.NOT_INSTALLED).gate3()).as("no id-index reader in this release").isFalse();
+    }
+
+    /** Review F5: an empty planned set is a pass only when there is nothing to plan (the registry is empty too). */
+    @Test
+    void gate3DoesNotPassVacuously_whenNothingIsPlannedButTheRegistryHoldsLiveCollections() {
+        PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
+        try {
+            CompletionCheck.Result r = withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(), Set.of(), Set.of())));
+            assertThat(r.gate2()).as("non-vacuity: gate 3 was asked").isTrue();
+            assertThat(r.gate3()).isFalse();
+            assertThat(r.gate3Why()).contains("plans no collection").contains("1 live collection");
+            // a planned set that is covered still holds: the registry only vetoes the EMPTY plan
+            assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(COLLECTION), Set.of(COLLECTION), Set.of()))).gate3())
+                .isTrue();
+        } finally {
+            emptyCollectionRegistry();
+        }
     }
 
     @Test

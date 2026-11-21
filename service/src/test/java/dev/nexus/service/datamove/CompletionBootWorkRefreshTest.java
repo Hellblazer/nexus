@@ -64,8 +64,12 @@ class CompletionBootWorkRefreshTest {
         public void close() { }
     }
 
-    private static String summary(BootWorkRegistry registry) {
-        return registry.snapshot().stream().filter(e -> e.id().equals(CompletionBootWork.SUMMARY_ID)).findFirst().orElseThrow().what();
+    private static String summary(CompletionBootWork work) {
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().readTree(work.statusJson()).get("summary").asText();
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
     }
 
     private static final Executor DIRECT = Runnable::run;
@@ -77,13 +81,13 @@ class CompletionBootWorkRefreshTest {
         var work = new CompletionBootWork(registry, reader, new Moving(), DIRECT);
         work.publish();
         assertThat(reader.reads.get()).isEqualTo(1);
-        assertThat(summary(registry)).contains("gate 1 waits");
+        assertThat(summary(work)).contains("gate 1 waits");
 
         reader.gate1 = true;   // the stamp the worker just completed lets gate 1 hold
         work.onMoveCompleted();
 
         assertThat(reader.reads.get()).as("one more read, caused by the event alone").isEqualTo(2);
-        assertThat(summary(registry)).contains("gate 1 holds");
+        assertThat(summary(work)).contains("gate 1 holds");
     }
 
     @Test
@@ -166,7 +170,7 @@ class CompletionBootWorkRefreshTest {
     }
 
     @Test
-    void aTableWithTwoCheckedColumnsIsOneValidateEntry_withTheSumOfItsOrphans() {
+    void aTableWithTwoCheckedColumnsIsOneValidateRow_withTheSumOfItsOrphans_andEveryConstraintNamed() {
         var merged = CompletionBootWork.byTable(List.of(
             new CompletionCheck.Violators("chash_remap", "chash_remap_source_collection_id_check", 0L, 1L, true),
             new CompletionCheck.Violators("chash_remap", "chash_remap_target_collection_id_check", 1L, 0L, true),
@@ -176,7 +180,8 @@ class CompletionBootWorkRefreshTest {
         assertThat(merged.get(0).table()).isEqualTo("chash_remap");
         assertThat(merged.get(0).orphans()).isEqualTo(1L);
         assertThat(merged.get(0).unstamped()).isEqualTo(1L);
-        assertThat(merged.get(0).constraint()).contains("source_collection_id_check").contains("target_collection_id_check");
+        assertThat(merged.get(0).constraints()).containsExactly("chash_remap_source_collection_id_check",
+            "chash_remap_target_collection_id_check");
         assertThat(merged.get(1).orphans()).isEqualTo(2L);
     }
 }
