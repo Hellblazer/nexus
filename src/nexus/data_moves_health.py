@@ -62,6 +62,17 @@ _RETRY_NOW = (
 _RESUME = "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label = '{label}'; (as nexus_admin)"
 
 
+def _install_bundle_command() -> str:
+    """The command that installs the pinned engine with its PostgreSQL bundle; the tag is read now, never hard-coded."""
+    try:
+        from nexus.daemon.binary_install import resolve_service_tag  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+        tag = resolve_service_tag()
+    except Exception:  # noqa: BLE001 — a hint must not crash `nx doctor`
+        tag = None
+    return f"`nx daemon service install-binary {tag or '<engine tag>'}`"
+
+
 def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
     """The data-move entries (moves and the worker's) of ``status['boot_work']``; ``None`` when the engine predates it."""
     work = status.get("boot_work")
@@ -147,7 +158,8 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
                 label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",
                 fix_suggestions=[
                     "The move waits for what it needs to be installed; nothing was changed and nothing is lost, and the "
-                    "engine retries by itself once it is there. The bundled engine carries pg_background: run `nx upgrade`. "
+                    "engine retries by itself once it is there. The bundled PostgreSQL of a local install carries "
+                    f"pg_background: {_install_bundle_command()} installs it. "
                     "A self-managed PostgreSQL needs pg_background installed (the full reason is in the engine log, "
                     "event=data_move_blocked)",
                 ],
