@@ -11,7 +11,7 @@ import click
 import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
-from nexus.corpus_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
+from nexus.knowledge_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
 
 _log = structlog.get_logger(__name__)
 
@@ -1364,7 +1364,7 @@ def t3_collection_name(
     short ``--collection`` arguments.
 
     RDR-229 P2.8: an empty conformant knowledge subject is found by its catalog row
-    (:func:`nexus.corpus_subject.knowledge_subject_label`), a label of any shape included.
+    (:func:`nexus.knowledge_subject.knowledge_subject_label`), a label of any shape included.
 
     nexus-hmxi: when *t3* is supplied, the resolver checks for an
     existing T3 collection at the user-typed name BEFORE returning
