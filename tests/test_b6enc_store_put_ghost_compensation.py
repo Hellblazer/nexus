@@ -681,6 +681,11 @@ class TestWriterCloseGuard:
                 self._inner.close()
                 raise RuntimeError("writer close blew up post-register")
 
+        # RDR-229 P3.1: the hook registers a document under a registered collection (the engine refuses one
+        # that is not, 422), as put_note arranges first.
+        from tests._catalog_fixture_ops import register_seed_collections
+
+        register_seed_collections("knowledge__x")
         with patch(
             "nexus.catalog.factory.make_catalog_writer",
             side_effect=lambda *a, **k: _CloseBomb(real_make(*a, **k)),

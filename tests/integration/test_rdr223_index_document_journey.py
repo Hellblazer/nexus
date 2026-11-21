@@ -86,7 +86,11 @@ def _write_file(tmp_path: Path, marker: str, lines: list[str]) -> Path:
 
 def _register(path: Path, marker: str, collection: str = _COLLECTION) -> tuple[str, bool]:
     from nexus.doc_indexer import _register_or_lookup_doc_id
+    from tests._catalog_fixture_ops import register_seed_collections
 
+    # RDR-229 P3.1: this seed calls the document register on its own, ahead of the indexer that registers the
+    # collection; the engine refuses a document under an unregistered collection, so register it first.
+    register_seed_collections(collection)
     doc_id, created = _register_or_lookup_doc_id(
         path, f"z0o2p13-{marker}", content_type="prose", physical_collection=collection,
         with_created=True)

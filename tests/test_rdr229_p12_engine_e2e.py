@@ -19,6 +19,7 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 from nexus.commands import doctor as doctor_mod
 from tests._catalog_fixture_ops import _run_psql
+from tests._chunk_seed import collection_id_sql
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -43,6 +44,12 @@ def _show(text: str) -> None:
 
 def _sql_str(v: str) -> str:
     return "'" + v.replace("'", "''") + "'"
+
+
+def _collection_id(tenant: str, collection: str) -> str:
+    """RDR-229 P3.1: a row naming a collection carries the registry's id beside the name (the CHECKs on
+    document_aspects and document_highlights); the registry row is made by ``register_collection`` above."""
+    return collection_id_sql(tenant, collection)
 
 
 def _seed(tenant: str) -> None:
@@ -98,11 +105,13 @@ def _seed(tenant: str) -> None:
     for i in range(3):
         sql.append(
             "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, "
-            f"extractor_name, source_uri, doc_id) VALUES ({_sql_str(tenant)}, {_sql_str(LABEL)}, 'p{i}.md', now(), 'm', "
-            f"'e', {_sql_str(f'chroma://{LABEL}/asp{i}')}, {_sql_str(aspect_docs[i])});")
+            "extractor_name, source_uri, doc_id, collection_id) "
+            f"VALUES ({_sql_str(tenant)}, {_sql_str(LABEL)}, 'p{i}.md', now(), 'm', "
+            f"'e', {_sql_str(f'chroma://{LABEL}/asp{i}')}, {_sql_str(aspect_docs[i])}, {_collection_id(tenant, LABEL)});")
     sql.append(
-        "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at) VALUES "
-        f"({_sql_str(tenant)}, {_sql_str(asp_hl_tumbler)}, {_sql_str(f'chroma://{LABEL}/hl')}, {_sql_str(LABEL)}, now());")
+        "INSERT INTO nexus.document_highlights (tenant_id, doc_id, source_uri, collection, ingested_at, collection_id) VALUES "
+        f"({_sql_str(tenant)}, {_sql_str(asp_hl_tumbler)}, {_sql_str(f'chroma://{LABEL}/hl')}, {_sql_str(LABEL)}, now(), "
+        f"{_collection_id(tenant, LABEL)});")
     sql.append(f"UPDATE nexus.catalog_collections SET model_version = '' "
                f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(NOVER)};")
     # the dangling tombstone: OLD is superseded by NEW, and NEW's row goes away

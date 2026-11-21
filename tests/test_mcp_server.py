@@ -373,7 +373,10 @@ class TestNexusHmxiRoundTripGrandfathering:
     diverged on the same input.
     """
 
-    def test_legacy_collection_grandfathered_when_present(self, t3, t2_service_env):
+    def test_legacy_collection_grandfathered_when_present(self, t3, t2_service_env, local_mode_write):
+        # RDR-229 P3.1: the put registers its collection before it catalogs the note, with the model the
+        # mode derives; the stub seed below registers the legacy row under the substrate's bge profile, so
+        # the write runs in local mode, where the derived model is that same one.
         # Pre-create a legacy 2-segment collection (simulating
         # operator's pre-Phase-5 state).
         t3.get_or_create_collection("knowledge__art", strict=False)
@@ -903,8 +906,10 @@ def test_store_put(t3, local_mode_write):
 
 
 @pytest.mark.t2_tenant
-def test_store_list(t3):
-    store_put(content="listed entry", collection="fixture-subject", title="list-test")
+def test_store_list(t3, local_mode_write):
+    # RDR-229 P3.1: the note's catalog document names a REGISTERED collection, so the write reaches the real
+    # substrate in local mode (the engine registers only its own profile's model) and its chunk is seeded first.
+    _put_id("listed entry", "fixture-subject", "list-test")
     result = store_list(collection="fixture-subject")
     assert not result.startswith("Error:")
     assert "entries" in result.lower() or "list-test" in result
@@ -965,10 +970,10 @@ def test_store_get_unknown_title_actionable_error(t3):
 
 
 @pytest.mark.t2_tenant
-def test_store_list_docs_chunk_count_numeric(t3):
+def test_store_list_docs_chunk_count_numeric(t3, local_mode_write):
     """--docs=true derives chunk count from the dedup pass; previously
     showed `?` for every entry because metadata didn't carry chunk_count."""
-    store_put(content="single chunk doc", collection="fixture-subject", title="docs-count-test")
+    _put_id("single chunk doc", "fixture-subject", "docs-count-test")
     result = store_list(collection="fixture-subject", docs=True)
     assert "?" not in result.split("\n")[1] if "\n" in result else True
     # A 1-chunk doc should report `1 chunks` (or `1 chunk`)
@@ -1207,16 +1212,20 @@ def test_store_put_empty_content(t3):
 
 
 @pytest.mark.t2_tenant
-def test_store_put_category_persisted_in_metadata(t3):
+def test_store_put_category_persisted_in_metadata(t3, local_mode_write):
     """RDR-103 Phase 3b: ``store_put(..., category=X)`` stamps the
     ``category`` field on the chunk metadata so post-mortems can be
     queried via ``where={"category": "rdr_postmortem"}`` against the
     conformant knowledge collection (replacing the old per-collection
     isolation in ``knowledge__rdr_postmortem__<repo>``).
     """
+    # RDR-229 P3.1: the catalog document names a registered collection, and the engine registers only its own
+    # profile's model, so the conformant name carries the substrate's bge model (it was a voyage name).
+    collection = "knowledge__1-1__bge-base-en-v15-768__v1"
+    _seed_for_store_put("post-mortem body", collection)
     store_put(
         content="post-mortem body",
-        collection="knowledge__1-1__voyage-context-3__v1",
+        collection=collection,
         title="rdr-103-postmortem",
         category="rdr_postmortem",
     )
@@ -1224,12 +1233,12 @@ def test_store_put_category_persisted_in_metadata(t3):
     # chunk row carries the CHUNK keys only.
     from nexus.catalog.factory import make_catalog_reader
 
-    col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
+    col = t3.get_or_create_collection(collection)
     rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["ids"] and all(set(m) <= {"chunk_text_hash", "embedding_model"} for m in rows["metadatas"])
     reader = make_catalog_reader()
     try:
-        entries = [e for e in reader.list_by_collection("knowledge__1-1__voyage-context-3__v1")
+        entries = [e for e in reader.list_by_collection(collection)
                    if e.title == "rdr-103-postmortem"]
     finally:
         reader.close()
@@ -1237,19 +1246,22 @@ def test_store_put_category_persisted_in_metadata(t3):
 
 
 @pytest.mark.t2_tenant
-def test_store_put_category_default_empty(t3):
+def test_store_put_category_default_empty(t3, local_mode_write):
     """When ``category`` is not passed, the stored chunk metadata
     treats it as empty so a category-filtered ``where`` query (e.g.
     ``where={"category": "rdr_postmortem"}``) does not match. This
     pins the absence of category leakage between unrelated store_put
     calls in the same collection.
     """
+    # RDR-229 P3.1: a registered collection of the substrate's own model, as in the test above.
+    collection = "knowledge__1-1__bge-base-en-v15-768__v1"
+    _seed_for_store_put("ordinary body", collection)
     store_put(
         content="ordinary body",
-        collection="knowledge__1-1__voyage-context-3__v1",
+        collection=collection,
         title="no-category",
     )
-    col = t3.get_or_create_collection("knowledge__1-1__voyage-context-3__v1")
+    col = t3.get_or_create_collection(collection)
     rows = col.get(include=["metadatas"], sensitivity="include")
     assert rows["ids"], "stored chunk must be retrievable"
     assert all("category" not in m for m in rows["metadatas"])  # no chunk row carries a category
@@ -2021,7 +2033,7 @@ def test_store_delete_invalidates_page_cache(t3, monkeypatch, local_mode_write):
 
 
 @pytest.mark.t2_tenant
-def test_store_put_invalidates_collections_cache(t3, monkeypatch):
+def test_store_put_invalidates_collections_cache(t3, monkeypatch, local_mode_write):
     """Cache-coherence review finding (Important, code-review-nexus-
     rbhci-516701aa3): unlike ``_page_cache``, ``_collections_cache``
     (names + fan-out-floor counts) was TTL-only -- a collection crossing
@@ -2033,6 +2045,7 @@ def test_store_put_invalidates_collections_cache(t3, monkeypatch):
     from nexus.mcp import core as mcp_core
     spy = MagicMock()
     monkeypatch.setattr(mcp_core, "_invalidate_collections_cache", spy)
+    _seed_for_store_put("cache invalidation trigger", "fixture-subject")
     store_put(content="cache invalidation trigger", collection="fixture-subject",
               title="civ-put")
     assert spy.called, (
@@ -2129,17 +2142,17 @@ def test_search_pagination_offset_beyond_end(t3):
 
 
 @pytest.mark.t2_tenant
-def test_store_list_pagination(t3):
+def test_store_list_pagination(t3, local_mode_write):
     for i in range(5):
-        store_put(content=f"entry {i}", collection="knowledge__pagtest", title=f"page-test-{i}")
+        _put_id(f"entry {i}", "knowledge__pagtest", f"page-test-{i}")
     page1 = store_list(collection="knowledge__pagtest", limit=2, offset=0)
     assert "showing 1-2; 5 stored" in page1 and "next: offset=2" in page1
     assert "showing 3-4; 5 stored" in store_list(collection="knowledge__pagtest", limit=2, offset=2)
 
 
 @pytest.mark.t2_tenant
-def test_store_list_pagination_offset_beyond_end(t3):
-    store_put(content="solo entry", collection="knowledge__pagend", title="one")
+def test_store_list_pagination_offset_beyond_end(t3, local_mode_write):
+    _put_id("solo entry", "knowledge__pagend", "one")
     assert "No entries at offset 100" in store_list(collection="knowledge__pagend", limit=10, offset=100)
 
 
@@ -2469,33 +2482,33 @@ def test_query_under_cap_is_unaffected():
 
 
 @pytest.mark.t2_tenant
-def test_store_list_caps_oversized_result(t3, monkeypatch):
+def test_store_list_caps_oversized_result(t3, monkeypatch, local_mode_write):
     from nexus.mcp import core as mcp_core
 
     monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
     for i in range(10):
-        store_put(content=f"entry {i}", collection="knowledge__capstore", title=f"cap-test-{i}")
+        _put_id(f"entry {i}", "knowledge__capstore", f"cap-test-{i}")
     out = store_list(collection="knowledge__capstore", limit=10)
     assert "[store_list: result capped at 100 chars" in out
     assert out.endswith("narrow the query, lower limit, or page with offset=...]")
 
 
 @pytest.mark.t2_tenant
-def test_store_list_under_cap_is_unaffected(t3):
-    store_put(content="solo entry", collection="knowledge__nocapstore", title="one")
+def test_store_list_under_cap_is_unaffected(t3, local_mode_write):
+    _put_id("solo entry", "knowledge__nocapstore", "one")
     out = store_list(collection="knowledge__nocapstore", limit=10)
     assert "result capped" not in out
 
 
 @pytest.mark.t2_tenant
-def test_store_list_docs_caps_oversized_result(t3, monkeypatch):
+def test_store_list_docs_caps_oversized_result(t3, monkeypatch, local_mode_write):
     # docs=True EXPLICITLY ignores limit/offset and scans the full
     # collection (nexus-2xjge audit's clearest unbounded case).
     from nexus.mcp import core as mcp_core
 
     monkeypatch.setattr(mcp_core, "_TEXT_RESULT_CAP_CHARS", 100)
     for i in range(10):
-        store_put(content=f"docs-entry {i}", collection="knowledge__capdocs", title=f"cap-doc-{i}")
+        _put_id(f"docs-entry {i}", "knowledge__capdocs", f"cap-doc-{i}")
     out = store_list(collection="knowledge__capdocs", docs=True)
     assert "[store_list: result capped at 100 chars" in out
 
@@ -2646,23 +2659,36 @@ def test_plan_delete_not_found(t2_path):
 # ── Query catalog-routing ────────────────────────────────────────────────────
 
 @pytest.fixture()
-def catalog_with_docs():
+def catalog_with_docs(monkeypatch):
     # nexus-i711w terminal deletion: seed through the ACTIVE (service)
     # catalog — query()'s catalog-routing resolves the same per-test
     # tenant, so the old local-Catalog pin on _get_catalog is gone with
     # the local Catalog itself.
     from tests._catalog_fixture_ops import ActiveCatalog
-    cat = ActiveCatalog()
+    # RDR-229 P3.1: the seed registers each collection before its documents, and the registration derives
+    # the model from the mode. The module's cloud_mode mock would derive voyage, which the substrate's
+    # engine (bge profile) refuses, so only the seeding runs as local mode; the test body keeps cloud mode.
+    with monkeypatch.context() as seeding:
+        seeding.setattr("nexus.config.is_local_mode", lambda: True)
+        return _seed_catalog_with_docs(ActiveCatalog())
+
+
+def _seed_catalog_with_docs(cat):
     o1 = cat.register_owner("nexus", "repo", repo_hash="571b8edd")
     o2 = cat.register_owner("papers", "curator")
+    # RDR-229 P3.1: a document names a registered collection, and the engine registers only its own
+    # profile's model (bge here), so these collections carry it (they were voyage names). ActiveCatalog
+    # registers each before the document.
+    code_col = "code__nexus__bge-base-en-v15-768__v1"
+    papers_col = "knowledge__papers__bge-base-en-v15-768__v1"
     cat.register(o1, "indexer.py", content_type="code", file_path="src/nexus/indexer.py",
-                 physical_collection="code__nexus__voyage-code-3__v1", chunk_count=10, author="hal")
+                 physical_collection=code_col, chunk_count=10, author="hal")
     cat.register(o1, "chunker.py", content_type="code", file_path="src/nexus/chunker.py",
-                 physical_collection="code__nexus__voyage-code-3__v1", chunk_count=5, author="hal")
+                 physical_collection=code_col, chunk_count=5, author="hal")
     cat.register(o2, "Attention Paper", content_type="paper",
-                 physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=20, author="Vaswani")
+                 physical_collection=papers_col, chunk_count=20, author="Vaswani")
     cat.register(o2, "BERT Paper", content_type="paper",
-                 physical_collection="knowledge__papers__voyage-context-3__v1", chunk_count=15, author="Devlin")
+                 physical_collection=papers_col, chunk_count=15, author="Devlin")
     # nexus-fgxmk: exact titles, never find()[0] — both seeds share the token "paper".
     cat.link(cat.find_by_title_exact("Attention Paper")[0].tumbler,
              cat.find_by_title_exact("BERT Paper")[0].tumbler, "cites", created_by="test")

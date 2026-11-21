@@ -20,6 +20,7 @@ from nexus.taxonomy import (
     get_topic_tree,
     get_topics,
 )
+from tests._chunk_seed import collection_id_for, collection_id_sql
 from tests._t2_fixture_ops import canonical_chunk_id
 from tests.conftest import make_vector_test_client
 
@@ -129,9 +130,9 @@ def _seed_chunk(topic_id: int, collection: str, chash_hex: str, *, dim: int = 76
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
         f"SELECT tenant_id, '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, "
-        f"'{model_for_dim}' "
+        f"'{model_for_dim}', {collection_id_for('topics.tenant_id', collection)} "
         f"FROM nexus.topics WHERE id = {topic_id} "
         "ON CONFLICT DO NOTHING;"
     )
@@ -186,14 +187,16 @@ def _seed_chunks(taxonomy: Any, collection: str, chash_hexes: list[str], *, dim:
         f"(tenant_id, '{collection}', decode('{c}', 'hex'), 'seed', '{vec}'::nexus.vector)"
         for c in chash_hexes
     )
+    # RDR-229 P3.1: each row carries the registry's collection_id beside the name, read by the row's tenant.
     sql = (
         "INSERT INTO nexus.catalog_collections "
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"SELECT tenant_id, '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live' "
         f"FROM nexus.topics WHERE id = {bootstrap_id} "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
-        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
+        f"SELECT v.*, '{model_for_dim}', {collection_id_for('v.tenant_id', collection)} "
+        f"FROM (VALUES {values}) AS v(tenant_id, collection, chash, chunk_text, {embed_col}) "
         "ON CONFLICT DO NOTHING;"
     )
     _run_seed_psql(sql, "_seed_chunks")
@@ -236,8 +239,9 @@ def _seed_chunks_for_tenant(
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
-        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
+        f"SELECT v.*, '{model_for_dim}', {collection_id_sql(tenant, collection)} FROM (VALUES {values}) AS v "
+        "ON CONFLICT DO NOTHING;"
     )
     psql = Path(state["pg_bin"]) / "psql"
     proc = subprocess.run(

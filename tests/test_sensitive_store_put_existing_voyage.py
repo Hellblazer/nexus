@@ -24,7 +24,10 @@ def _plain_note_in_voyage(title: str = _TITLE):
     """A live note that an earlier non-sensitive put left in the Voyage collection (the catalog row is what a
     re-put resolves)."""
     from nexus.catalog.factory import make_catalog_writer
+    from tests._catalog_fixture_ops import register_seed_collections
 
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
+    register_seed_collections(_VOYAGE["knowledge"])
     reader, writer = _reader(), make_catalog_writer()
     owner = reader.curator_owner_tumbler_by_name("rfvyy-ext") or writer.register_owner("rfvyy-ext", "curator")
     tumbler = writer.register(

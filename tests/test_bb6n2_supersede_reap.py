@@ -52,6 +52,11 @@ def _put_note(client, *, title: str, content: str) -> tuple[str, list[str]]:
         note_pieces,
     )
 
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    # RDR-229 P3.1: the hook registers a document under a registered collection (the engine refuses one that
+    # is not, 422), as put_note arranges first.
+    register_seed_collections(_COLLECTION)
     pieces = note_pieces(content, _COLLECTION)
     doc_id, manifest_metadatas = note_manifest_metadata(pieces)
     tumbler, _created = catalog_store_hook_tracked(

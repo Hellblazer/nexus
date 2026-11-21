@@ -194,9 +194,12 @@ def _seed_chunk(pg: dict, tenant: str, collection: str, chash_hex: str, *, dim: 
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_{dim}, embedding_model) "
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, embedding_{dim}, embedding_model, collection_id) "
         f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), 'seed', '{vec}'::nexus.vector, "
-        f"'{model_for_dim}') "
+        f"'{model_for_dim}', "
+        # RDR-229 P3.1: the chunk carries the registry's collection_id beside the name.
+        "(SELECT collection_id FROM nexus.catalog_collections "
+        f"WHERE tenant_id = '{tenant}' AND name = '{collection}')) "
         "ON CONFLICT DO NOTHING;"
     ))
 
@@ -212,6 +215,12 @@ def test_reimport_is_idempotent_against_the_real_engine(cat, pg_instance, tmp_pa
     # first (the store_hook does the same via curator_owner_tumbler_by_name).
     know_owner = cat.register_owner("knowledge", owner_type="curator")
     repo_owner = cat.register_owner("nexus", owner_type="repo")
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422), so
+    # both are registered first through this engine's own client, with the fields production derives from the name.
+    from nexus.corpus import collection_registration_kwargs
+
+    for name in (know_col, "code__nexus__bge-base-en-v15-768__v1"):
+        cat.register_collection(name, **collection_registration_kwargs(name))
     a = cat.register(
         know_owner, "recovery-note-a", content_type="knowledge",
         physical_collection=know_col,

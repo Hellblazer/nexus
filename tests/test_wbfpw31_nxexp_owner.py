@@ -43,6 +43,7 @@ from nexus.exporter import (
     import_collection,
 )
 from tests._chunk_seed import seed_chunks_direct
+from tests._catalog_fixture_ops import register_seed_collections
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself
 # and CI's default selection must run these import-owner pins.
@@ -66,6 +67,7 @@ def _owned_doc(writer, client, collection: str, owner_tumbler, title: str, conte
     """
 
     source_uri = uri_for(collection, title)
+    register_seed_collections(collection)
     tumbler = writer.register(
         owner=owner_tumbler, title=title, content_type="knowledge",
         physical_collection=collection, source_uri=source_uri,
@@ -504,6 +506,7 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     # document joins afterwards (nx index repo into the restored collection). The curator's
     # segment was only provisional, so the repo owner replaces it and the next resolve
     # returns the repo owner, not the curator.
+    register_seed_collections(dst)
     existing = writer.register(
         owner=owner, title="wbfpw33 existing", content_type="code",
         physical_collection=dst, source_uri=f"file:///wbfpw33/{dst}/existing.py",
@@ -562,6 +565,7 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
     owner = writer.register_owner("knowledge", "curator")
     dst = _coll("legacy-docid")
 
+    register_seed_collections(dst)
     live_doc = str(writer.register(
         owner=owner, title="wbfpw31 live legacy", content_type="knowledge",
         physical_collection=dst, source_uri=uri_for(dst, "wbfpw31 live legacy"),
@@ -633,6 +637,7 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
     dst = _coll("mixed-owner-legacy")
     title = "wbfpw31 mixed doc"
     doc_uri = uri_for(dst, title)
+    register_seed_collections(dst)
     doc = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=dst, source_uri=doc_uri,

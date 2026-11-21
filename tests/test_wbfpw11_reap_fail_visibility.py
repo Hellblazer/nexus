@@ -149,6 +149,10 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     collection = f"knowledge__wbfpw11-combined__{model_token}__v1"
     texts = {k: f"wbfpw11 combined write, chunk {k}: landed with its manifest in one request" for k in "ABC"}
     ch = {k: hashlib.sha256(t.encode()).hexdigest() for k, t in texts.items()}
+    from tests._catalog_fixture_ops import register_seed_collections
+
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
+    register_seed_collections(collection)
     doc = str(writer.register(
         owner, "wbfpw11-combined.md", content_type="knowledge",
         file_path="/tmp/wbfpw11/combined.md", physical_collection=collection, chunk_count=2,
@@ -171,6 +175,7 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     title, text = "wbfpw11 imported", "wbfpw11 imported note: exported with its manifest, then imported"
     source_uri = uri_for(src, title)
     assert source_uri is not None
+    register_seed_collections(src)
     src_doc = str(writer.register(
         owner=owner, title=title, content_type="knowledge",
         physical_collection=src, source_uri=source_uri,

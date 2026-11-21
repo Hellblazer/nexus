@@ -39,11 +39,59 @@ __all__ = [
     "give_chunks_a_live_owner",
     "only_document",
     "register_real_doc_id",
+    "register_seed_collections",
     "restore_fk_after_dangling_seeds",
     "seed_manifest_chunks",
     "seed_note_manifest",
     "unroutable_write_target",
 ]
+
+
+def register_seed_collections(*names: str) -> None:
+    """Register each collection in *names* before a seed registers a document under it.
+
+    RDR-229 P3.1 (nexus-p2m1x.17): the engine answers ``/v1/catalog/doc/register`` for a collection with no
+    registry row with a typed 422 (``unregistered_collection``), so a seed that names a collection in
+    ``physical_collection`` registers the collection first, the way every production writer does:
+    through :func:`nexus.corpus.ensure_collection_registered`, the client's own registration call (cached per
+    process, derived from the name, profile-checked). An empty name is skipped, and so is a collection that
+    already has a registry row: a test that registered it with fields of its own keeps them (the engine refuses
+    a second registration under a different model, and re-deriving the fields from the name could differ).
+
+    A name that carries a model the substrate's engine will not register (a ``voyage-context-3`` name on the
+    bge-profile substrate: a test of the external-embedder rules needs a collection registered under that model)
+    is refused by the registration. It then gets the registry row a superuser would write, with the model its name
+    carries, so the seed still names a registered collection.
+    """
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+    from nexus.corpus import ensure_collection_registered
+
+    wanted = list(dict.fromkeys(n for n in names if n))
+    if not wanted:
+        return
+    with HttpCatalogClient() as cat:
+        absent = [name for name in wanted if cat.get_collection(name) is None]
+    for name in absent:
+        try:
+            ensure_collection_registered(name)
+        except Exception:  # noqa: BLE001 — the engine's profile refused the model the name carries; seed the row directly
+            _register_collection_row(name)
+
+
+def _register_collection_row(name: str) -> None:
+    """The registry row for *name* as a superuser writes it, with the embedding model the name carries."""
+    from nexus.corpus import collection_registration_kwargs, embedding_model_for_collection_name
+    from tests._chunk_seed import _lit, ambient_tenant
+
+    fields = collection_registration_kwargs(name)
+    model = embedding_model_for_collection_name(name) or fields["embedding_model"]
+    _run_psql(
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ({_lit(ambient_tenant())}, {_lit(name)}, {_lit(fields['content_type'])}, "
+        f"{_lit(fields['owner_id'])}, {_lit(model)}, 'live') "
+        "ON CONFLICT (tenant_id, name) DO NOTHING;"
+    )
 
 
 def register_real_doc_id(
@@ -73,6 +121,7 @@ def register_real_doc_id(
     """
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
+    register_seed_collections(physical_collection)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             owner_name, "repo", repo_hash="test-aspect-fixture-hash",
@@ -117,6 +166,7 @@ def give_chunks_a_live_owner(
         return ""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
+    register_seed_collections(collection)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             owner_name, "repo", repo_hash="test-live-owner-fixture-hash",
@@ -407,10 +457,14 @@ def bypass_fk_seed_chunk(
         # RDR-225: the row's embedding_model is its collection's registered model (the
         # composite foreign key and the partition route both need it), so it is read
         # back from the registry row the statement above just made or found.
+        # RDR-229 P3.1: the chunk carries the registry's collection_id beside the name (the CHECK
+        # chunks_collection_id_check), read back from the same row.
         "INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, "
-        f"{vec_col}, embedding_model) VALUES ({tenant!r}, {collection!r}, "
+        f"{vec_col}, embedding_model, collection_id) VALUES ({tenant!r}, {collection!r}, "
         f"decode({chash!r}, 'hex'), 'fk-bypass-stub', {vec_literal!r}::nexus.vector, "
         "(SELECT embedding_model FROM nexus.catalog_collections "
+        f"WHERE tenant_id = {tenant!r} AND name = {collection!r}), "
+        "(SELECT collection_id FROM nexus.catalog_collections "
         f"WHERE tenant_id = {tenant!r} AND name = {collection!r})) "
         "ON CONFLICT (tenant_id, collection, chash, embedding_model) DO NOTHING;"
     )
@@ -575,6 +629,13 @@ class _WriteOp:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from nexus.catalog.factory import make_catalog_writer
 
+        # RDR-229 P3.1: a document names a registered collection, as every production writer arranges
+        # first (the engine refuses ``doc/register`` for an unregistered one, 422).
+        if self._op == "register":
+            register_seed_collections(kwargs.get("physical_collection", ""))
+        elif self._op == "register_many":
+            docs = args[1] if len(args) > 1 else kwargs.get("docs", [])
+            register_seed_collections(*(d.get("physical_collection", "") for d in docs))
         writer = make_catalog_writer()
         try:
             return getattr(writer, self._op)(*args, **kwargs)
