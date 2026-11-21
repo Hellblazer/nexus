@@ -140,4 +140,33 @@ class CollectionTombstonesSupersedeToIdTest {
         assertThat(supersededBy(x)).isEqualTo(y);
         assertThat(supersededId(x)).isEqualTo(910_002L);
     }
+
+    /**
+     * tamsin's condition on the overload (RDR-229 P3.8 on P3.1, 2026-11-21): a rename whose retire CAS matches no row of
+     * an X that exists (X was retired for a third collection while the rename ran) refuses, naming it, instead of a silent
+     * zero that would leave Y inserted with nothing pointing at it. Nothing is renamed: X stays retired for Z, and no Y row
+     * exists.
+     */
+    @Test
+    void aRenameWhoseRetireMatchesNoRowOfAnExistingSourceRefusesAndRegistersNothing() {
+        String x = name("lost-x"), y = name("lost-y"), z = name("lost-z");
+        register(x);
+        register(z);
+        Integer retiredForZ = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, z, DSL.currentOffsetDateTime()));
+        assertThat(retiredForZ).as("guard: X is already retired for Z").isEqualTo(1);
+
+        assertThatThrownBy(() -> scope.withTenant(T, ctx -> {
+            CollectionRename.retireAndRegister(ctx, T, x, y, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                new java.util.HashMap<>(), new String[4]);
+            return null;
+        }))
+            .isInstanceOf(CatalogRepository.CollectionMergeRefused.class)
+            .hasMessageContaining(x)
+            .hasMessageContaining("retired for another collection");
+
+        assertThat(supersededBy(x)).as("X stays retired for Z").isEqualTo(z);
+        Integer yRows = su(ctx -> ctx.fetchCount(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID.eq(T).and(CATALOG_COLLECTIONS.NAME.eq(y))));
+        assertThat(yRows).as("no row for Y was registered").isZero();
+    }
 }
