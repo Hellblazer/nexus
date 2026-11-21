@@ -716,6 +716,9 @@ public final class ReembedHandler implements HttpHandler {
             throw new IllegalArgumentException("no registered collection has " + need
                 + "; send target_collection to register one");
         }
+        // RDR-229 P3.6: the target is a label the engine registers on the user's say-so, so the label rule applies
+        // (before any read of the name, and ahead of the shape read below).
+        dev.nexus.service.db.CollectionLabel.validateUserLabel(requested);
         if (dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested) == null) {
             // The version of a new row is read off the target's minted name (D1), so a name to register must have one.
             // This applies only when a NEW row would be registered: an existing live target is used as-is.
