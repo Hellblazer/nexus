@@ -224,6 +224,9 @@ class CollectionMintHttpTest {
 
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
         assertThat(rowsOwnedBy("http-held-2")).isEqualTo(2);
+        // the duplicate is the test's own: later tests build the index, which a duplicate would refuse
+        su(ctx -> ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
+            + "' AND name = 'intruder-2-p38'"));
     }
 
     @Test @Order(8)
@@ -279,6 +282,7 @@ class CollectionMintHttpTest {
         var resp = post("/v1/catalog/collections/upsert", "{" + attrsJson("http-cycle-mint", "") + "}");
 
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+        assertThat(resp.body()).as("the refusal is the mint's, not a constraint violation").contains("sequence");
         assertThat(rowsOwnedBy("http-cycle-mint")).isZero();
     }
 
