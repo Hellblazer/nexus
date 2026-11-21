@@ -17,10 +17,19 @@
     tuple maps them to keys, dedupes, sorts ascending and only then locks (CollectionTupleLock.lock), so two such paths can
     never wait on each other's second lock.
 
-    FALSE SHARING IS ACCEPTED BY DESIGN (linda's ruling, within RDR-229): two unrelated tuples in one stripe serialize
-    their registrations for the length of the shorter transaction. Registrations are rare and short, and the lock only
-    matters in the window before the live-tuple index exists; once it exists the UNIQUE is the arbiter and the engine takes
-    no tuple lock at all (CollectionMint checks the index first).
+    FALSE SHARING IS ACCEPTED BY DESIGN (linda's ruling, within RDR-229). The stripes are global: the tenant is hashed into
+    the stripe, not partitioned out, so two unrelated tuples of any two tenants can share one. A writer that wants a stripe
+    another transaction holds waits for that whole transaction. A one-tuple registration holds its stripe briefly; a batch
+    of thousands of tuples (an import, a restore, a re-own chunk) holds nearly all 256 until it commits, and every other
+    lock-taking registration, in every tenant, waits for it. That only matters in the window before the live-tuple index
+    exists: once it does, the engine's Java paths take no tuple lock (the UNIQUE is the arbiter), except the mint's
+    fallback when the index exists but cannot be inferred for ON CONFLICT (42P10), which locks as the absent-index path does.
+
+    THE TRIGGERS STILL LOCK. The catalog-051-2 owner triggers take their row's stripe whatever the index state, one row at a
+    time in row order, which cannot be sorted across a statement's rows. Two transactions that fire them for several
+    collections in opposite orders can deadlock (40P01), and striping makes that likelier than one key per tuple did: any two
+    tuples whose stripes coincide qualify, not only the same two tuples. PostgreSQL picks a victim; the data-move worker
+    retries a chunk, and an unwrapped caller surfaces the 40P01.
 
     DATA EFFECT: none. Function definition only. Rollback restores catalog-051-1a's per-tuple body.
 -->
