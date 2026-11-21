@@ -73,7 +73,7 @@ unsure whether a new document belongs to an existing subject, it does.
 
 ## Rule 3: type the subject, never the machinery
 
-Give the bare subject and let the catalog render the rest:
+Give the bare subject and let `nx` find or create the collection:
 
 ```bash
 nx store put paper.md --collection distributed-systems
@@ -81,47 +81,71 @@ nx index md notes/overview.md --collection vector-search
 nx index pdf --dir ~/papers/oracles --collection augur-oracle-papers
 ```
 
-`distributed-systems` becomes `knowledge__distributed-systems__<model>__v1`
-on your install, with the model your install actually embeds with. Never
-type the four-segment form, a model token, or a version yourself. A name
-that encodes a model the install does not use is exactly how local
-collections once ended up labelled with a model that never embedded them
-(GH #667, RDR-109). RDR-204 is retiring the encoded name as an authority
-altogether; a name you type by hand today is a name that has to be
-migrated tomorrow.
+`distributed-systems` is a subject, not a collection name. `nx` looks the
+collection up by its attributes: content type `knowledge`, owner
+`distributed-systems`, and the embedding model your install actually embeds
+with. If no collection has those attributes, `nx` registers one with them
+and the engine gives it a label. Never type a four-segment name, a model
+token, or a version yourself. A name that encodes a model the install does
+not use is how local collections once ended up labelled with a model that
+never embedded them (GH #667, RDR-109).
+
+**A collection is found by its tuple and identified by its id.** The tuple
+is content type, owner, embedding model and model version. The registry row
+for the collection holds those attributes, its dimension and its lifecycle
+state, and the engine gives it a `collection_id`, a number that is unique
+across the installation. Which model embeds a collection, which content
+type it is and how a search routes to it are read from the row, never from
+the collection's name.
+
+**The name is a label.** It is the string you type and read in a command,
+and nothing is decided from it. A label is unique among a tenant's live
+collections, so a label in a command names one collection. A superseded
+collection keeps its label taken until RDR-229 Phase 4 drops the name as
+the registry's primary key. A label must be non-empty, valid UTF-8 with no
+control characters, and at most 255 bytes. It may not have the minted form
+`c<digits>` unless the engine minted it, so a label you choose can never
+collide with a later mint. Whether a label may contain `/` is not settled.
+
+**A new collection gets a minted label.** When `nx` registers a collection
+with no label, the engine sets the label to `c` followed by the
+`collection_id` (`c4812`). The label is opaque: it carries no content type,
+owner, model or version. `nx collection list`, the `collection_list` MCP
+tool and `nx catalog show` show the attributes beside it. If the minted
+label is already a live label, the engine takes the next id and retries a
+bounded number of times, then answers 409. Every minted row keeps the
+label `c` plus its `collection_id`. To give a collection a readable label,
+rename it:
+
+```bash
+nx collection rename c4812 distributed-systems-papers
+```
+
+Existing collections keep their names as labels. Those names are one of the
+shapes older releases rendered: the four-segment
+`<content_type>__<owner>__<embedding_model>__v<n>` and the two-segment
+`<content_type>__<repo>-<hash>`. They survive only as labels, and nothing
+parses them for meaning.
+
+**The tuple is unique among live collections, once the index exists.** A
+partial unique index over `(tenant_id, content_type, owner_id,
+embedding_model, model_version)` covers the live rows, those not superseded
+and not quarantined. A mint is an insert that does nothing on a conflict,
+followed by a re-read of the row that holds the tuple. An import or restore
+row that conflicts gets a 409. The engine creates the index only after the
+move that re-owns existing collections has completed and no duplicate
+remains. Until then the index is not there, and `nx doctor` names each
+duplicate it is waiting on.
 
 Subject names are lowercase, hyphen-separated, two or three words, ASCII.
-The owner segment of the four-segment name (and of the grandfathered
-two-segment form) admits letters, digits, hyphens, and a SINGLE underscore
-between two such tokens — `[a-zA-Z0-9-]+(_[a-zA-Z0-9-]+)*` — never a bare
-`__`, which stays reserved, unconditionally, for the segment separator. The
-engine's attribute-backfill walk (`hygiene-004-owner-grammar-underscore.xml`'s
-`hygiene-004-1`) and the Java test helper that seeds fixtures against it
-(`PgContainerHelper`'s `CONFORMANT_COLLECTION_NAME` /
-`CONFORMANT_QUARANTINE_COLLECTION_NAME`) both use exactly this grammar
-(nexus-ztafa). The client's own collection-name PARSING functions
-(`is_conformant_collection_name` / `parse_conformant_collection_name` in
-`src/nexus/corpus.py`) admit the same single-underscore owner: both match
-against `_CONFORMANT_COLLECTION_RE`, whose owner group is
-`_OWNER_SEGMENT_RE` — the identical grammar, one symbol, widened by
-nexus-ft04v.26. `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` stays a
-separate, whole-string ChromaDB shape check with no owner-segment
-concept; it is not the parser these two functions use.
 
-The `owner_id` column is not the name's owner segment for a repo
-collection (nexus-6pbwx). For `code`, `docs` and `rdr` collections the
-engine sets it to the owner segment of the tumbler prefix of the catalog
-documents that live in the collection, hyphenated (`1-15`, what
-`owner_segment_for_tumbler` gives), replacing a name-derived slug
-(`arcaneum-2ad2825c`) when the first document lands. A collection with no
-documents keeps the value it was registered with, and an owner that is
-already tumbler-shaped is a first registration that stands, unless it is the
-segment of a curator-type owner (an import into an empty collection files its
-documents under the knowledge curator; a repo document that arrives later
-replaces that provisional owner). A `knowledge`
-collection is different: its owner is its subject, whatever tumbler its
-documents live under. `catalog-044-collection-owner-from-documents.xml`
-carries the rule (two triggers) and a one-off repair of existing rows.
+**Owner is the source.** A collection's `owner_id` is set once, when the
+collection is registered, and is never re-derived from its documents. For a
+repo's `code`, `docs` and `rdr` collections it is the repo's tumbler
+segment, hyphenated (`1-15`). For a doc corpus it is the corpus's curator.
+For a `knowledge` collection it is the subject, whatever tumbler its
+documents live under. That is why a subject finds its collection: the
+subject is the owner.
 
 ## Rule 4: a collection holds many documents
 
