@@ -413,8 +413,6 @@ for _site in LEDGER:
 #:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
 #:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
 #:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2.
-#:     Written as +3 (the parse still in ``nxexp_owner.py``, one a ``split``) until owner_stem moved into the floor; measured
-#:     217 on the integrated tree after the move.
 PARSE_SITE_PIN: int = 217
 CLASS_PIN: dict[str, int] = {
     "mint": 135, "diagnostic": 43, "migration-source": 22,
