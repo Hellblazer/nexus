@@ -542,7 +542,35 @@ class AnalysisResult:
 # independently re-derivable from a live analyzer run, never hand-waved.
 # ---------------------------------------------------------------------------
 
-ALLOWLIST: tuple[tuple[str, str, str, str], ...] = ()
+ALLOWLIST: tuple[tuple[str, str, str, str], ...] = (
+    # RDR-229 P3.1 (nexus-p2m1x.17). vectors-068-19 adds the CHECK in its own first statement, so the constraint exists when its
+    # VALIDATE runs; the VALIDATE is guarded by a data predicate (no violating row), not by a pg_constraint lookup.
+    # Every vectors-070-N row below is a VALIDATE inside the string literal of a data_moves.on_complete value: it is data
+    # the engine runs after it serves, inside that value's own DO block guarded by pg_constraint conrelid and conname and by
+    # "no orphan row", never at the boot walk (the changeset is one INSERT). The lint's guard shape cannot see a doubled-quote
+    # literal, and each on_complete value is read back as data by CollectionIdStampMovesShapeTest.
+    ("vectors-068-19", "nexus.catalog_collections", "catalog_collections_superseded_by_id_check", "a data-predicate guard, constraint added in the same changeset"),
+    ("vectors-070-1", "nexus.catalog_collections", "catalog_collections_superseded_by_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-2", "nexus.catalog_documents", "catalog_documents_physical_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-3", "nexus.chash_remap", "chash_remap_source_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-3", "nexus.chash_remap", "chash_remap_target_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-4", "nexus.pdf_pipeline", "pdf_pipeline_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-5", "nexus.reembed_jobs", "reembed_jobs_source_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-5", "nexus.reembed_jobs", "reembed_jobs_target_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-6", "nexus.canary_query_ring", "canary_query_ring_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-7", "nexus.document_aspects", "document_aspects_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-8", "nexus.document_highlights", "document_highlights_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-9", "nexus.taxonomy_meta", "taxonomy_meta_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-10", "nexus.topics", "topics_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-11", "nexus.chunk_orphaned_at", "chunk_orphaned_at_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-12", "nexus.taxonomy_centroids", "taxonomy_centroids_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-12", "nexus.taxonomy_centroids", "taxonomy_centroids_collection_id_not_null", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-13", "nexus.catalog_document_chunks", "catalog_document_chunks_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-14", "nexus.topic_assignments", "topic_assignments_source_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-30", "nexus.aspect_extraction_queue", "aspect_extraction_queue_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-15", "nexus.chunks", "chunks_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+    ("vectors-070-15", "nexus.chunks", "chunks_collection_id_not_null", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
+)
 
 
 def _allowlist_keys(

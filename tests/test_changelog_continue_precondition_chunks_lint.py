@@ -69,6 +69,15 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # model_version and no superseded_by_id exists, so D2's repair UPDATE cannot meet it (RDR-229 P3.1, item e). The
     # precondition is a read of catalog_collections; the body names no chunk table, leaf or builder object.
     ("vectors-068-collection-id-expand.xml", "vectors-068-19"): "superseded_by CHECK waits on D2 data",
+    # One INSERT into nexus.data_moves (ROW EXCLUSIVE on that registry table only), inside a DO block that does nothing
+    # when nexus.aspect_extraction_queue is absent; the precondition and the block read pg_class and pg_attribute for the
+    # queue and take no lock on it. The body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
+    ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-30"): "aspect queue stamp move registration",
+    # SET LOCAL lock_timeout = '5s', then DROP POLICY IF EXISTS and CREATE POLICY on nexus.aspect_extraction_queue only
+    # (ACCESS EXCLUSIVE on that one table, bounded by the 5 s lock_timeout), inside a DO block that does nothing when the
+    # table is absent; the rest is reads of pg_roles, pg_policy and pg_class. The body names no chunk table, leaf or
+    # builder object (RDR-229 P3.1, residual R3).
+    ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-31"): "aspect queue owner-read policy",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
