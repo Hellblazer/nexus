@@ -477,8 +477,28 @@ def test_the_indexer_registers_the_owner_under_the_repo_identity_name() -> None:
 
     src = inspect.getsource(indexer)
     assert "_repo_basename, _repo_hash = _repo_identity(repo)" in src and "repo_name=_repo_basename," in src
-    assert 'name=repo_name,\n                owner_type="repo"' in src, (
-        "the catalog hook registers the repo owner under its repo_name argument")
+    assert ('name=repo_owner_name(cat, name=repo_name, repo_hash=repo_hash, repo_root=main_repo),\n'
+            '                owner_type="repo"') in src, (
+        "the catalog hook registers the repo owner under its repo_name argument (RDR-254 Phase 4: through the "
+        "second-clone rule, which returns that name unless another live clone already holds it)")
+
+
+def test_a_second_clones_owner_reads_the_project_the_rdr_tooling_writes() -> None:
+    """RDR-254 Phase 4: a second live clone's owner is ``proj-<repo hash>``, but the RDR tooling writes
+    ``<repo basename>_rdr``, so the project comes from the owner's recorded root, not its name."""
+    owners = {"1.3": {"tumbler_prefix": "1.3", "name": "proj-1a2b3c4d", "owner_type": "repo",
+                      "repo_hash": "1a2b3c4d", "repo_root": "/home/u/scratch/proj"}}
+    rows = {("proj_rdr", "084"): ART_META, ("proj_rdr", "084-gate-latest"): ART_GATE}
+    stream, t2, _ = _read(_resolution(_src(tumbler="1.3.9")), t2=FakeT2(rows), cat=FakeCatalog(owners))
+    (outcome,) = stream.sources
+    assert outcome.status == "read" and outcome.project == "proj_rdr"
+    assert {p for p, _ in t2.gets} == {"proj_rdr"}
+
+
+def test_an_owner_with_no_recorded_root_reads_the_project_from_its_name() -> None:
+    owners = {"1.3": {"tumbler_prefix": "1.3", "name": "proj", "owner_type": "repo", "repo_root": ""}}
+    stream, _, _ = _read(_resolution(_src(tumbler="1.3.9")), cat=FakeCatalog(owners))
+    assert stream.sources[0].project == "proj_rdr"
 
 
 # ── 4e. the reserved tokens: none is a prefix of another ─────────────────────────────────────
