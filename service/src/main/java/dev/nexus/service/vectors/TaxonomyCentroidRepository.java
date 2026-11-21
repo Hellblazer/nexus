@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.CollectionRow;
 import dev.nexus.service.db.ModelPartitions;
@@ -21,6 +22,7 @@ import java.util.Set;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_1024;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_384;
+import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_ANN_QUERY_768;
 
 /**
@@ -153,16 +155,23 @@ public final class TaxonomyCentroidRepository {
                        .and(ct.topicId().eq(r.topicId()))
                        .and(ct.embeddingModel().ne(model)))
                    .execute();
+                // RDR-229 P3.1 stage 2b (nexus-p2m1x.17): the collection's registry id, read in this transaction,
+                // set beside the name on insert and on the conflict arm. taxonomy_centroids carries NOT VALID
+                // CHECKs (the name and id both set or both unset; collection_id NOT NULL), evaluated on every row
+                // version, so a centroid without the id is refused (23514), and so is the conflict update of one
+                // the stamp has not reached.
                 ctx.insertInto(ct.table())
                    .columns(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel(),
-                            ct.embedding(), ct.label(), ct.docCount())
+                            ct.embedding(), ct.label(), ct.docCount(), TAXONOMY_CENTROIDS.COLLECTION_ID)
                    .values(tenant, r.collection(), r.topicId(), model,
-                           Vector.of(r.embedding()), r.label(), r.docCount())
+                           Vector.of(r.embedding()), r.label(), r.docCount(),
+                           CollectionIds.require(ctx, tenant, r.collection()))
                    .onConflict(ct.tenantId(), ct.collection(), ct.topicId(), ct.embeddingModel())
                    .doUpdate()
                    .set(ct.embedding(), DSL.excluded(ct.embedding()))
                    .set(ct.label(),     DSL.excluded(ct.label()))
                    .set(ct.docCount(),  DSL.excluded(ct.docCount()))
+                   .set(TAXONOMY_CENTROIDS.COLLECTION_ID, DSL.excluded(TAXONOMY_CENTROIDS.COLLECTION_ID))
                    .execute();
             }
             return null;
