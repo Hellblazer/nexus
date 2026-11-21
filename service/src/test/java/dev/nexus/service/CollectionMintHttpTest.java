@@ -177,20 +177,47 @@ class CollectionMintHttpTest {
     @Test @Order(3)
     void aRefusedCollectionIdSeedsNoEmbeddingProfileRow() throws Exception {
         // The seed is a write (a profile row for the request's content type) that used to run before the refusal. A request the
-        // route refuses for its collection_id writes nothing at all.
-        String type = "p38-seed-probe-refused";
-        var refused = post("/v1/catalog/collections/upsert",
-            "{\"content_type\":\"" + type + "\",\"owner_id\":\"http-seed-1\",\"embedding_model\":\"" + MODEL
-                + "\",\"model_version\":\"v1\",\"collection_id\":777005}");
-        assertThat(refused.statusCode()).as(refused.body()).isEqualTo(400);
-        assertThat(profileRows(type)).as("a refused request seeds no profile row").isZero();
+        // route refuses for its collection_id writes nothing at all. The seed only runs where the service has an embedder
+        // router, which this class's own service does not, so this test starts one that does.
+        var seeding = new NexusService(0, TOKEN, svcDs, new dev.nexus.service.vectors.EmbedderRouter(new dev.nexus.service.vectors.Embedder() {
+            @Override
+            public java.util.List<float[]> embed(java.util.List<String> texts) {
+                throw new UnsupportedOperationException("the route under test embeds nothing");
+            }
 
-        // non-vacuity: the same request without the id does reach the seed, so the zero above is the refusal's doing
-        String controlType = "p38-seed-probe-control";
-        post("/v1/catalog/collections/upsert",
-            "{\"content_type\":\"" + controlType + "\",\"owner_id\":\"http-seed-2\",\"embedding_model\":\"" + MODEL
-                + "\",\"model_version\":\"v1\"}");
-        assertThat(profileRows(controlType)).as("guard: a request that is not refused seeds one").isEqualTo(1L);
+            @Override
+            public dev.nexus.service.vectors.EmbedResult embedWithUsage(java.util.List<String> texts) {
+                throw new UnsupportedOperationException("the route under test embeds nothing");
+            }
+
+            @Override
+            public String modelToken() {
+                return "bge-base-en-v15-768";
+            }
+        }, "document"));
+        seeding.start();
+        try {
+            String type = "p38-seed-probe-refused";
+            var refused = postTo(seeding, "{\"content_type\":\"" + type + "\",\"owner_id\":\"http-seed-1\",\"embedding_model\":\""
+                + MODEL + "\",\"model_version\":\"v1\",\"collection_id\":777005}");
+            assertThat(refused.statusCode()).as(refused.body()).isEqualTo(400);
+            assertThat(profileRows(type)).as("a refused request seeds no profile row").isZero();
+
+            // non-vacuity: the same request without the id does reach the seed, so the zero above is the refusal's doing
+            String controlType = "p38-seed-probe-control";
+            postTo(seeding, "{\"content_type\":\"" + controlType + "\",\"owner_id\":\"http-seed-2\",\"embedding_model\":\""
+                + MODEL + "\",\"model_version\":\"v1\"}");
+            assertThat(profileRows(controlType)).as("guard: a request that is not refused seeds one").isEqualTo(1L);
+        } finally {
+            seeding.stop();
+        }
+    }
+
+    private HttpResponse<String> postTo(NexusService target, String body) throws Exception {
+        return http.send(TestHttp.request("http://127.0.0.1:" + target.getPort() + "/v1/catalog/collections/upsert")
+            .header("Authorization", "Bearer " + TOKEN).header("X-Nexus-Tenant", TENANT)
+            .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+            HttpResponse.BodyHandlers.ofString());
     }
 
     private long profileRows(String contentType) {
