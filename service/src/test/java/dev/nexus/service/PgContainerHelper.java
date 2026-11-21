@@ -1623,6 +1623,14 @@ public final class PgContainerHelper {
             Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "constraint", constraintName));
     }
 
+    /** {@code ALTER TABLE table ALTER COLUMN column DROP IDENTITY} (no typed form in jOOQ 3.20.11), through {@code db.changelog-test-drop-identity.xml}. */
+    public static void dropIdentity(Connection conn, Table<?> table, String column) throws Exception {
+        requireTestIdentifier(column);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-identity.xml",
+            "databasechangelog_test_drop_identity",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "column", column));
+    }
+
     /** The four row-level-security switches of {@code ALTER TABLE}, for {@link #setRowSecurity}. */
     public enum RowSecurityMode {
         ENABLE("ENABLE"), DISABLE("DISABLE"), FORCE("FORCE"), NO_FORCE("NO FORCE");
