@@ -197,8 +197,11 @@ public final class AspectRepository {
      * aborts one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under
      * {@link DeadlockRetry}: this one here, the rename and the delete through {@code manifestWriteTxn}. The
      * retried body is only the database transaction (nothing leaves it; the handler answers after it returns), so
-     * a rerun repeats no side effect, and a rename or delete that committed first answers the retried upsert as
-     * it would one that started after it (409 naming the successor, or 422 for a collection no longer registered).
+     * a rerun repeats no side effect. {@link DeadlockRetry} makes at most four attempts; after them the 40P01
+     * propagates and the handler answers 500. A retried upsert reads the collection through the in-process
+     * {@code CollectionRegistry}, which a rename or delete evicts only after its commit, so a retry that checks the
+     * name before that eviction can still write under the retired name (an orphan row; the same window as an
+     * upsert that started just before the rename committed). It is not a 409 or 422 in that case.
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
         // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
@@ -226,7 +229,9 @@ public final class AspectRepository {
             // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then the
             // catalog row (RDR-254) and document_aspects. This lookup takes the first lock; the write the rest.
             // A rename rewrites task bodies (tuple row locks) before its registry loop updates
-            // document_aspects, so the orders agree and neither can deadlock the other.
+            // document_aspects, so a claim on a task of the collection being renamed serializes with it. The claim
+            // check reads only doc_id, not the body's collection, so that is the usual case, not a guarantee: the
+            // DeadlockRetry around this transaction covers the rest.
             var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
