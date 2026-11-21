@@ -182,15 +182,25 @@ public final class TargetSelection {
             .toList();
     }
 
-    /** The 409 reason when {@link #tupleMates} finds any: names the source and its mates, says why, and the exit. */
+    /**
+     * The 409 reason when {@link #tupleMates} finds any: names the source and its mates, says why, and the exit. Tests pin
+     * fragments of it with {@code contains}, not the whole text, so a sentence may be added; this one points a source the
+     * re-own move skipped at the gc_audit query ({@link #REOWN_SKIPPED_QUERY}), since re-owning is not available for it.
+     */
     public static String sharedSourceTupleReason(String source, List<String> mates, String contentType,
                                                  String ownerId, String embeddingModel) {
         return "source collection " + source + " shares its lookup tuple (content type " + contentType + ", owner "
             + ownerId + ", model " + embeddingModel + ") with " + String.join(", ", mates)
             + ": collections with the same owner, content type and model cannot be told apart when the re-embed "
             + "target is chosen by that tuple, so " + source + " would be moved into a target that "
-            + String.join(", ", mates) + " also uses. " + ownerExit("one of the twins is re-owned or superseded");
+            + String.join(", ", mates) + " also uses. " + ownerExit("one of the twins is re-owned or superseded")
+            + " A collection the RDR-229 re-own move skipped, because the tuple it would move to was already held, "
+            + "cannot be re-owned; the move records each skip and its holder: " + REOWN_SKIPPED_QUERY;
     }
+
+    /** Where an operator reads the rows the re-own move (vectors-067) skipped, and the live collection that held each tuple. */
+    static final String REOWN_SKIPPED_QUERY =
+        "SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'";
 
     /** Why a client cannot fix a shared tuple in place, and what can. {@code then} finishes "can start once ...". */
     private static String ownerExit(String then) {

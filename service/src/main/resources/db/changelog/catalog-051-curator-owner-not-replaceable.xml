@@ -28,15 +28,18 @@
 
     SECOND AMENDMENT, catalog-051-2 (the tuple guard). The rule above leaves slug, dotted and '' owners replaceable,
     so catalog-044's triggers can still rewrite such a legacy owner onto a tuple another collection already holds.
-    The tuple is (tenant_id, content_type, owner_id, embedding_model, model_version), counted over rows that are
-    live (lifecycle_state = 'live'), unsuperseded (superseded_by = '') and of a code, docs or rdr content type (a
-    quarantine row carries a quarantine-* content_type and is outside the rule). Without a unique index on that
-    tuple the rewrite creates a silent duplicate; with the partial UNIQUE index on it that RDR-229 plans for P3.8 it raises a
-    bare 23505 from inside document registration. So both trigger functions now skip the rewrite when the owner
-    they would write lands a live, unsuperseded row on a tuple a different live, unsuperseded collection already
-    holds: the row keeps its old owner and the trigger RAISEs a NOTICE naming both collections and the owner it did
-    not take (the collection already holding the tuple is the lowest-named one). A row that is itself not live or
-    is superseded never counts toward the tuple, so its rewrite is unchanged. Two trigger functions are replaced, same
+    The tuple is (tenant_id, content_type, owner_id, embedding_model, model_version), and a row COUNTS toward it when it is
+    unsuperseded (superseded_by = '') and not in quarantine (lifecycle_state <> 'quarantine'): the candidate set of
+    for_tuple and the predicate of the partial UNIQUE index (tenant_id, content_type, owner_id, embedding_model,
+    model_version) WHERE superseded_by = '' AND lifecycle_state <> 'quarantine' that Sam ruled for P3.8 (T2
+    nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21, Q1), so a dormant or disputed holder holds its tuple like a live one.
+    The rule applies to code, docs and rdr collections only (a quarantine row carries a quarantine-* content_type and is
+    outside it). Without the index the rewrite creates a silent duplicate; with it the rewrite raises a bare 23505 from
+    inside document registration. So both trigger functions now skip the rewrite when the owner they would write lands a
+    counting row on a tuple a different counting collection already holds: the row keeps its old owner and the trigger
+    RAISEs a NOTICE naming both collections and the owner it did not take (the collection already holding the tuple is
+    the lowest-named one). A row that does not count (superseded, or in quarantine) never counts toward the tuple, so
+    its rewrite is unchanged. Two trigger functions are replaced, same
     signatures, SECURITY INVOKER, no new trigger: nexus.catalog_collections_owner_from_docs() (the BEFORE trigger on
     catalog_collections) and nexus.catalog_documents_owner_to_collection() (the AFTER trigger on catalog_documents).
     The check is a read, so two writers onto one free tuple could both pass it, and under the unique index the second
@@ -45,7 +48,12 @@
     toward the tuple: the second writer waits for the first to commit and then sees the holder (READ COMMITTED gives
     that SELECT a fresh snapshot). The lock is held to the end of the transaction. A transaction that already holds
     collection row locks and then waits on the tuple lock can in principle deadlock with one that holds the tuple lock
-    and waits for one of those rows, which the engine's 40P01 retry covers.
+    and waits for one of those rows. Which paths survive that is a fact about the caller, not about this changeset: the
+    deadlock victim gets 40P01, and DeadlockRetry (CatalogRepository.manifestWriteTxn) re-runs the transaction only on
+    the paths that go through it: deleteCollection, renameCollection, rehomeCollection, the manifest writes and the
+    chunk imports. A plain document registration (upsertDocument, registerDocument), upsertCollection and
+    supersedeCollection are not wrapped, so a victim there surfaces as the 40P01 error to its caller; the data move
+    worker classifies 40P01 as transient and retries the chunk (DataMoveFailureClassifier).
 
     THE LOCK KEY, catalog-051-1a (a new function, nexus.collection_tuple_lock_key, in its own changeSet before 049-2).
     Every writer that serialises on a tuple must derive the SAME key, or two writers on one tuple do not wait for each
@@ -136,7 +144,7 @@ DROP FUNCTION IF EXISTS nexus.collection_tuple_lock_key(text, text, text, text, 
     </changeSet>
 
     <changeSet id="catalog-051-2" author="nexus-p2m1x.14">
-        <comment>catalog-044's two owner-from-documents trigger functions skip the rewrite when the new owner would land a live, unsuperseded code/docs/rdr collection on a (tenant_id, content_type, owner_id, embedding_model, model_version) tuple another live, unsuperseded collection already holds: the old owner stays and a NOTICE names both collections and the owner not taken. Same signatures and SECURITY INVOKER; each takes the tuple's advisory lock through nexus.collection_tuple_lock_key before its holder lookup; no data effect.</comment>
+        <comment>catalog-044's two owner-from-documents trigger functions skip the rewrite when the new owner would land an unsuperseded, non-quarantine code/docs/rdr collection on a (tenant_id, content_type, owner_id, embedding_model, model_version) tuple another unsuperseded, non-quarantine collection already holds: the old owner stays and a NOTICE names both collections and the owner not taken. Same signatures and SECURITY INVOKER; each takes the tuple's advisory lock through nexus.collection_tuple_lock_key before its holder lookup; no data effect.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
     RETURNS TRIGGER
@@ -151,22 +159,22 @@ BEGIN
        AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
         v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
         IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
-            -- catalog-051-2: a live, unsuperseded row must not land on a tuple another such row holds. The
+            -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds. The
             -- transaction-scoped advisory lock on the tuple makes two writers onto one free tuple take turns, so the
             -- second one's SELECT sees the first one's committed row instead of racing it into the unique index.
-            IF NEW.lifecycle_state = 'live' AND NEW.superseded_by = '' THEN
+            IF NEW.lifecycle_state &lt;&gt; 'quarantine' AND NEW.superseded_by = '' THEN
                 PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
                     NEW.tenant_id, NEW.content_type, v_owner, NEW.embedding_model, NEW.model_version));
             END IF;
             SELECT h.name INTO v_holder
               FROM nexus.catalog_collections h
-             WHERE NEW.lifecycle_state = 'live' AND NEW.superseded_by = ''
+             WHERE NEW.lifecycle_state &lt;&gt; 'quarantine' AND NEW.superseded_by = ''
                AND h.tenant_id = NEW.tenant_id
                AND h.content_type = NEW.content_type
                AND h.owner_id = v_owner
                AND h.embedding_model = NEW.embedding_model
                AND h.model_version = NEW.model_version
-               AND h.lifecycle_state = 'live' AND h.superseded_by = ''
+               AND h.lifecycle_state &lt;&gt; 'quarantine' AND h.superseded_by = ''
                AND h.name &lt;&gt; NEW.name
              ORDER BY h.name
              LIMIT 1;
@@ -218,21 +226,21 @@ BEGIN
            AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
             v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
             IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
-                -- catalog-051-2: a live, unsuperseded row must not land on a tuple another such row holds; the
+                -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds; the
                 -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
-                IF v_ls = 'live' AND v_sb = '' THEN
+                IF v_ls &lt;&gt; 'quarantine' AND v_sb = '' THEN
                     PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
                         NEW.tenant_id, v_ct, v_new, v_em, v_mv));
                 END IF;
                 SELECT h.name INTO v_holder
                   FROM nexus.catalog_collections h
-                 WHERE v_ls = 'live' AND v_sb = ''
+                 WHERE v_ls &lt;&gt; 'quarantine' AND v_sb = ''
                    AND h.tenant_id = NEW.tenant_id
                    AND h.content_type = v_ct
                    AND h.owner_id = v_new
                    AND h.embedding_model = v_em
                    AND h.model_version = v_mv
-                   AND h.lifecycle_state = 'live' AND h.superseded_by = ''
+                   AND h.lifecycle_state &lt;&gt; 'quarantine' AND h.superseded_by = ''
                    AND h.name &lt;&gt; NEW.physical_collection
                  ORDER BY h.name
                  LIMIT 1;

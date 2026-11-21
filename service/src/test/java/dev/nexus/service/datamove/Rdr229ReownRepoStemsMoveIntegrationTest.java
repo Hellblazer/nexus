@@ -8,7 +8,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.CollectionTupleLock;
+import dev.nexus.service.db.DrivingTableIsolationCheck;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -131,6 +134,17 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
                 CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
             .values(tenant, name, contentType, owner,
                 contentType.contains("code") ? "voyage-code-3" : "voyage-context-3", "v1", lifecycle, supersededBy)
+            .execute();
+    }
+
+    /** A live collection whose stored model_version is {@code version} ({@code ""}: not yet written by D2's repair). */
+    private void collectionWithVersion(String tenant, String name, String owner, String lifecycle, String version) {
+        String contentType = name.substring(0, name.indexOf("__"));
+        ctx().insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .values(tenant, name, contentType, owner,
+                contentType.contains("code") ? "voyage-code-3" : "voyage-context-3", version, lifecycle, "")
             .execute();
     }
 
@@ -717,6 +731,196 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         runToCompletion();
 
         assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-40");
+    }
+
+    // ── S1: the version in a tuple is the one D2 will write ─────────────────────────────────────────────────
+
+    /** A native v1 collection of the repo, and its legacy twin under the curator whose model_version D2 has not yet written. */
+    private void blankVersionLegacyBesideNative(String tenant) {
+        owner(tenant, "1.40", "knowledge", "curator", null);
+        owner(tenant, "1.17", "arcaneum", "repo", "2ad2825c");
+        collection(tenant, "code__1-17__voyage-code-3__v1", "1-17");
+        collectionWithVersion(tenant, ARC_CODE, "1-40", "live", "");
+    }
+
+    @Test
+    void aBlankVersionLegacyRowBesideItsV1Twin_isSkippedAsHeld_whenTheMoveRunsBeforeD2() throws Exception {
+        blankVersionLegacyBesideNative(T);
+        register();
+
+        runToCompletion();
+
+        assertThat(ownerOf(T, ARC_CODE)).as("the blank-version row stays on the curator: D2 would make it v1 on the repo tuple")
+            .isEqualTo("1-40");
+        assertThat(skipReasons(T)).as("reported, held by the native v1 row")
+            .isEqualTo(Map.of(ARC_CODE, "destination tuple held by code__1-17__voyage-code-3__v1"));
+        assertThat(ctx().select(CATALOG_COLLECTIONS.MODEL_VERSION).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(ARC_CODE))
+            .fetchOne(CATALOG_COLLECTIONS.MODEL_VERSION)).as("non-vacuity: D2 has not run, the stored version is blank").isEmpty();
+    }
+
+    @Test
+    void dryCountParity_aBlankVersionRowBesideItsV1Twin() throws Exception {
+        blankVersionLegacyBesideNative(T);
+        register();
+        assertParity("reown=0 skip=1 sibling=0 new=0", T);
+    }
+
+    // ── S3: one definition of held: unsuperseded and not in quarantine ──────────────────────────────────────
+
+    @Test
+    void aDormantHolder_holdsItsTuple_soTheLegacyRowIsSkippedAndReported() throws Exception {
+        owner(T, "1.40", "knowledge", "curator", null);
+        owner(T, "1.17", "arcaneum", "repo", "2ad2825c");
+        collection(T, "code__1-17__voyage-code-3__v1", "1-17", "dormant", "");
+        collection(T, ARC_CODE, "1-40");
+        register();
+
+        runToCompletion();
+
+        assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-40");
+        assertThat(skipReasons(T)).isEqualTo(Map.of(ARC_CODE, "destination tuple held by code__1-17__voyage-code-3__v1"));
+    }
+
+    @Test
+    void aHolderInQuarantine_doesNotHold_soTheLegacyRowMoves() throws Exception {
+        owner(T, "1.40", "knowledge", "curator", null);
+        owner(T, "1.17", "arcaneum", "repo", "2ad2825c");
+        collection(T, "code__1-17__voyage-code-3__v1", "1-17", "quarantine", "");
+        collection(T, ARC_CODE, "1-40");
+        register();
+
+        runToCompletion();
+
+        assertThat(ownerOf(T, ARC_CODE)).as("a row in quarantine is outside the P3.8 index, so it holds nothing").isEqualTo("1-17");
+        assertThat(skipReasons(T)).isEmpty();
+    }
+
+    @Test
+    void aDormantRowOfARepoStem_isReownedLikeALiveOne() throws Exception {
+        gateXr789(T);
+        ctx().update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(ARC_DOCS)).execute();
+        register();
+
+        runToCompletion();
+
+        assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-41");
+        assertThat(ownerOf(T, ARC_DOCS)).as("a dormant row counts toward its tuple, so it moves with its repo").isEqualTo("1-41");
+    }
+
+    @Test
+    void dryCountParity_aDormantHolder() throws Exception {
+        owner(T, "1.40", "knowledge", "curator", null);
+        owner(T, "1.17", "arcaneum", "repo", "2ad2825c");
+        collection(T, "code__1-17__voyage-code-3__v1", "1-17", "dormant", "");
+        collection(T, ARC_CODE, "1-40");
+        register();
+        assertParity("reown=0 skip=1 sibling=0 new=0", T);
+    }
+
+    // ── S4: the tables the verification reads carry owner-read policies ─────────────────────────────────────
+
+    @Test
+    void theOwnerReadPoliciesOfCatalogOwnersAndGcAudit_areApplied_andTheBootCheckAsksAboutThem() throws Exception {
+        register();
+        assertThat(PgCatalogProbes.policyExists(ctx(), "nexus", "catalog_owners", "catalog_owners_owner_read")).isTrue();
+        assertThat(PgCatalogProbes.policyExists(ctx(), "nexus", "gc_audit", "gc_audit_owner_read")).isTrue();
+        assertThat(DrivingTableIsolationCheck.registeredDrivingTables(ctx()))
+            .contains(new DrivingTableIsolationCheck.Table("nexus", "catalog_owners"),
+                new DrivingTableIsolationCheck.Table("nexus", "gc_audit"));
+    }
+
+    @Test
+    void theTableWideVerification_seesTheUnmovedRows_soItDoesNotPassOnEmptyTables() throws Exception {
+        gateXr789(T);
+        register();
+        var verification = ctx().select(DSL.field(DSL.name("verification"), String.class)).from(table("nexus", "data_moves"))
+            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).fetchOne(DSL.field(DSL.name("verification"), String.class));
+        assertThat(verification).isNotNull();
+        String tableWide = verification.replace("$1", "NULL::text");
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
+            assertThat(DSL.using(c, SQLDialect.POSTGRES).resultQuery(tableWide).fetch())
+                .as("the migrating role, no tenant set: the unmoved repo stem is seen through the owner-read policies").isNotEmpty();
+        }
+        runToCompletion();
+        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
+            assertThat(DSL.using(c, SQLDialect.POSTGRES).resultQuery(tableWide).fetch()).as("and nothing is left once moved").isEmpty();
+        }
+    }
+
+    // ── S2: the destination tuple locks ─────────────────────────────────────────────────────────────────────
+
+    /** The advisory-lock waiter: its pid and the key it waits for, or null while nobody waits. */
+    private long[] waitingAdvisoryLock() {
+        Field<Long> classid = DSL.field(DSL.name("classid"), Long.class);
+        Field<Long> objid = DSL.field(DSL.name("objid"), Long.class);
+        Field<Integer> pid = DSL.field(DSL.name("pid"), Integer.class);
+        var r = ctx().select(classid, objid, pid).from(table("pg_catalog", "pg_locks"))
+            .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+            .and(DSL.field(DSL.name("granted"), Boolean.class).isFalse()).limit(1).fetchOne();
+        return r == null ? null : new long[] {(r.get(classid) << 32) | r.get(objid), r.get(pid)};
+    }
+
+    private List<Long> grantedAdvisoryKeys(int pid) {
+        Field<Long> classid = DSL.field(DSL.name("classid"), Long.class);
+        Field<Long> objid = DSL.field(DSL.name("objid"), Long.class);
+        List<Long> keys = new ArrayList<>();
+        for (var r : ctx().select(classid, objid).from(table("pg_catalog", "pg_locks"))
+                .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
+                .and(DSL.field(DSL.name("granted"), Boolean.class).isTrue())
+                .and(DSL.field(DSL.name("pid"), Integer.class).eq(pid)).fetch()) {
+            keys.add((r.get(classid) << 32) | r.get(objid));
+        }
+        return keys;
+    }
+
+    /**
+     * A Java holder of the HIGHER of the move's two destination-tuple keys (the one CollectionTupleLock.lock would take
+     * last) makes the move's chunk wait; while it waits, the move already holds the LOWER key and not the higher: the
+     * tuple locks are taken in ascending key order. Released, the move completes.
+     */
+    @Test
+    void theMoveTakesTheDestinationTupleLocksInAscendingOrder_andWaitsForAJavaHolderOfOne() throws Exception {
+        gateXr789(T);
+        register();
+        var codeTuple = new CollectionTupleLock.Tuple(T, "code", "1-41", "voyage-code-3", "v1");
+        var docsTuple = new CollectionTupleLock.Tuple(T, "docs", "1-41", "voyage-context-3", "v1");
+        long codeKey = CollectionTupleLock.key(ctx(), codeTuple);
+        long docsKey = CollectionTupleLock.key(ctx(), docsTuple);
+        assertThat(codeKey).isNotEqualTo(docsKey);
+        var high = codeKey > docsKey ? codeTuple : docsTuple;
+        long highKey = Math.max(codeKey, docsKey);
+        long lowKey = Math.min(codeKey, docsKey);
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher());
+        CompletableFuture<Integer> cycle;
+        try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
+            holder.setAutoCommit(false);
+            CollectionTupleLock.lockTuple(DSL.using(holder, SQLDialect.POSTGRES), high);
+            cycle = async(w::runCycle);
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            long[] waiting = null;
+            while (waiting == null && System.nanoTime() < deadline) {
+                assertThat(cycle.isDone()).as("the move must wait for the tuple lock, not finish").isFalse();
+                waiting = waitingAdvisoryLock();
+                if (waiting == null) {
+                    Thread.sleep(50);
+                }
+            }
+            assertThat(waiting).as("the move's chunk is waiting on an advisory lock").isNotNull();
+            assertThat(waiting[0]).as("it waits for the holder's tuple key, the higher one").isEqualTo(highKey);
+            assertThat(grantedAdvisoryKeys((int) waiting[1])).as("having taken the lower key first, and not the higher")
+                .contains(lowKey).doesNotContain(highKey);
+            assertThat(completedAt(LABEL)).isNull();
+            assertThat(ownerOf(T, ARC_CODE)).as("nothing moved while the lock was held").isEqualTo("1-40");
+            holder.rollback();
+        }
+        cycle.get(2, TimeUnit.MINUTES);
+
+        runToCompletion();
+        assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-41");
+        assertThat(ownerOf(T, ARC_DOCS)).isEqualTo("1-41");
     }
 
     // ── the owner-registration lock ─────────────────────────────────────────────────────────────────────────

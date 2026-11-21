@@ -59,6 +59,7 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
     PostgreSQLContainer<?> pg;
     HikariDataSource svcPool;
     Connection su;
+    private java.util.TreeSet<String> shippedOverCollections;
     private String registerBook;
     private String policyBook;
 
@@ -76,10 +77,23 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
         cfg.setMaximumPoolSize(2);
         svcPool = new HikariDataSource(cfg);
         SchemaMigrator.migrate(svcPool);
-        // RDR-229 P2.10's residue moves are not this test's (their driving tables are not under its single-role check);
-        // D2's repair move stays, since the test asserts it is blocked the same way as sr-move (nexus-f3yqd.2.23)
-        ctx().deleteFrom(DSL.table(DSL.name("nexus", "data_moves")))
-            .where(DSL.field(DSL.name("label"), String.class).like("rdr229-residue-%")).execute();
+        // The moves the walk registers are read from the master's registering changesets, not listed here. The residue moves
+        // of RDR-229 P2.10 drive other tables (their driving tables are not under this test's single-role check) and are not
+        // this test's, so they are deleted; every shipped move over catalog_collections stays (D2's repair and the re-own move
+        // of owner-is-source), since the test asserts they are blocked the same way as sr-move (nexus-f3yqd.2.23).
+        var driving = DSL.field(DSL.name("driving_table"), String.class);
+        var label = DSL.field(DSL.name("label"), String.class);
+        var shipped = ShippedMoveRegistrations.labels();
+        var registered = new java.util.TreeSet<>(ctx().select(label).from(DSL.table(DSL.name("nexus", "data_moves")))
+            .fetch(label));
+        assertThat(registered).as("non-vacuity: the walk registered exactly the shipped moves").isEqualTo(shipped);
+        var other = new java.util.TreeSet<>(ctx().select(label).from(DSL.table(DSL.name("nexus", "data_moves")))
+            .where(driving.ne("catalog_collections")).fetch(label));
+        ctx().deleteFrom(DSL.table(DSL.name("nexus", "data_moves"))).where(label.in(other)).execute();
+        shippedOverCollections = new java.util.TreeSet<>(shipped);
+        shippedOverCollections.removeAll(other);
+        assertThat(shippedOverCollections).as("non-vacuity: D2's repair and the re-own move are the moves kept")
+            .hasSizeGreaterThanOrEqualTo(2);
         PgContainerHelper.runSuperuserTestChangelog(su, FIXTURES, "databasechangelog_test_datamove_ownerread", Map.of());
         registerBook = migrate(REGISTER, "databasechangelog_test_ownerread_register");
         policyBook = migrate(POLICY, "databasechangelog_test_ownerread_policy");
@@ -163,10 +177,13 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
             new DataMoveWorker.Settings(Duration.ofMillis(50), Duration.ofMillis(10), null), "nexus-data-move-sr",
             Clock.systemUTC(), new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY, true);
         try {
-            assertThat(worker.runCycle()).as("this move and the first real one, which the walk registered").isEqualTo(2);
+            assertThat(worker.runCycle()).as("this move and every shipped move over catalog_collections, which the walk registered")
+                .isEqualTo(1 + shippedOverCollections.size());
             // nexus-f3yqd.2.23: the real move over catalog_collections is registered here too, its policy changeset
             // (vectors-065) MARK_RAN by the same guard, and it is blocked the same way and writes nothing
-            for (String label : List.of("sr-move", "repair-catalog-collection-model-version")) {
+            var blockedLabels = new java.util.ArrayList<String>(List.of("sr-move"));
+            blockedLabels.addAll(shippedOverCollections);
+            for (String label : blockedLabels) {
                 var blocked = worker.states().state(label).orElseThrow();
                 assertThat(blocked.kind()).as(label).isEqualTo(MoveStates.Kind.BLOCKED);
                 assertThat(blocked.reason()).as("%s: the install gate, which comes first in a single-role boot, and no other cause", label)
@@ -196,7 +213,10 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
             assertThat(DrivingTableIsolationCheck.registeredDrivingTables(session.ctx()))
                 .as("non-vacuity: the check asked about the move's table")
                 .containsExactlyInAnyOrder(new DrivingTableIsolationCheck.Table("dm_ownerread", "rows"),
-                    new DrivingTableIsolationCheck.Table("nexus", "catalog_collections"));   // and the first real move's
+                    new DrivingTableIsolationCheck.Table("nexus", "catalog_collections"),   // and the first real move's
+                    // the re-own move's verification reads these two (SUPPORT_TABLES), registered in every posture
+                    new DrivingTableIsolationCheck.Table("nexus", "catalog_owners"),
+                    new DrivingTableIsolationCheck.Table("nexus", "gc_audit"));
         }
     }
 }

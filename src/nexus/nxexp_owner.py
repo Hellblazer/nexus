@@ -39,28 +39,13 @@ from typing import Any, Callable
 
 import structlog
 
+from nexus.catalog.rows.legacy_names import owner_stem
 from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
 
-#: A repo-synth owner stem: ``<name>-<hash8>`` (``nexus.repo_identity._safe_collection``), the hash being
-#: the first 8 hex characters of the main repo path's sha256, which is the repo owner's ``repo_hash``.
-_REPO_STEM = re.compile(r"^(?P<slug>.+)-(?P<hash>[0-9a-f]{8})$")
-
 #: An owner TUMBLER in a name's owner segment (``docs__1-14__...``, the hyphenated form): not a corpus name.
 _TUMBLER_STEM = re.compile(r"^[0-9]+(-[0-9]+)*$")
-
-
-def owner_stem(collection_name: str) -> tuple[str, tuple[str, str] | None]:
-    """``(stem, repo)`` of *collection_name*: its owner segment (``<type>__<stem>__...``, ``""`` when there
-    is none) and, when that segment is ``<slug>-<hash8>``, ``(slug, hash8)``, else ``None``. The name is
-    read here because it comes from another install's bundle and no row of this catalog backs it (RDR-229
-    item 1, migration source): P2.2 moves this into ``legacy_names`` and P4.3 deletes it. The one place the
-    stem and its hash are read; every caller goes through it."""
-    parts = collection_name.split("__")
-    stem = parts[1] if len(parts) > 1 else ""
-    m = _REPO_STEM.match(stem)
-    return stem, ((m["slug"], m["hash"]) if m else None)
 
 
 def _repo_owner(reader: Any, writer: Any, repo_hash: str, *, root: str, name: str) -> Tumbler:

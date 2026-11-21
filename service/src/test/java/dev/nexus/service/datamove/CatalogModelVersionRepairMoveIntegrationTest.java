@@ -250,10 +250,11 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
 
     @Test
     void theMoveIsRegisteredExactlyOnce_withTheParametersRdr246Prescribes() {
-        // Every registered move the product changelog ships, by label: a new registration must be added here, so a stray
-        // one still fails this test (vectors-067, RDR-229 owner-is-source, is the second).
-        assertThat(labelsAtBoot).as("the walk registers exactly the shipped moves")
-            .containsExactlyInAnyOrder(LABEL, "rdr229-reown-repo-stems-from-curator");
+        // Every registered move the product changelog ships, by label, read from the master's registering includes: a new
+        // registration is picked up, and a label registered by anything else (a stray row) still fails this test.
+        assertThat(labelsAtBoot).as("the walk registers exactly the shipped moves").containsExactlyInAnyOrderElementsOf(
+            ShippedMoveRegistrations.labels());
+        assertThat(ShippedMoveRegistrations.labels()).as("the repair move is among them").contains(LABEL);
         assertThat(registeredRowsAtBoot).isEqualTo(1);
         assertThat(registered.get("label").toString()).doesNotContain("/").isEqualTo(LABEL);
         assertThat(registered).containsEntry("driving_schema", "nexus").containsEntry("driving_table", "catalog_collections")

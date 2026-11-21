@@ -57,12 +57,15 @@ class Catalog051OwnerGuardTest {
     private static final String SUPERSEDED_HOLDER = "code__gone-0badf00d__voyage-code-3__v1";
     private static final String SLUG_OVER_SUPERSEDED = "code__over-5ca1ab1e__voyage-code-3__v1";
 
-    /** The partial UNIQUE index RDR-229 plans for P3.8, on the live, unsuperseded rows of a tuple. */
-    static void createLiveTupleIndex(DSLContext ctx) {
+    /**
+     * The partial UNIQUE index Sam ruled for P3.8 (T2 nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21): the rows of a
+     * tuple that are unsuperseded and not in quarantine, the same predicate the catalog-051-2 guard counts.
+     */
+    static void createHeldTupleIndex(DSLContext ctx) {
         ctx.createUniqueIndex("catalog_collections_live_tuple_uq")
             .on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
                 CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-            .where(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live").and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            .where(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine").and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
             .execute();
     }
 
@@ -112,7 +115,7 @@ class Catalog051OwnerGuardTest {
     void withTheIndex_theSameRegistrationKeepsTheSlugOwnerAndRaisesNo23505() throws Exception {
         withMigratedDatabase((su, ctx) -> {
             seed(ctx);
-            createLiveTupleIndex(ctx);
+            createHeldTupleIndex(ctx);
             // non-vacuity: the index is live and does reject a duplicate tuple written directly
             assertThatThrownBy(() -> collection(ctx, "docs__dup-deadbeef__voyage-context-3__v1", "docs", "1-33",
                     DOCS_MODEL, "v1", "live", ""))
@@ -141,8 +144,11 @@ class Catalog051OwnerGuardTest {
      * Each predicate of the guard's holder lookup is pinned by a holder that differs in exactly that one respect (it must NOT
      * hold the tuple, so the slug row is still rewritten), on both trigger paths: the AFTER trigger (the collection is
      * registered, then a document lands) and the BEFORE trigger (the documents exist, then the collection registers).
-     * The last case pins the subject row's own predicate: a row that is not live, or is superseded, never counts toward the
-     * tuple, so even a live holder does not stop its rewrite.
+     * The last cases pin the "held" predicate itself (superseded_by = '' AND lifecycle_state <> 'quarantine', Sam's P3.8
+     * ruling): a dormant or disputed holder holds its tuple like a live one, so the slug row is NOT rewritten; a holder in
+     * quarantine, or a superseded holder, does not hold it. The same predicate decides whether the subject row counts: a
+     * superseded subject never counts toward the tuple, so even a live holder does not stop its rewrite, while a dormant
+     * subject counts and is held back.
      */
     @Test
     void eachPredicateOfTheGuardIsPinned_aHolderThatDiffersInOneRespectDoesNotHoldTheTuple() throws Exception {
@@ -151,22 +157,31 @@ class Catalog051OwnerGuardTest {
             SoftAssertions soft = new SoftAssertions();
             String sn = "docs__%s__voyage-context-3__v1";
             // embedding_model
-            assertRewrittenOnBothPaths(soft, su, ctx, "a holder of another embedding_model", 60, "live", "",
+            assertRewrittenOnBothPaths(soft, su, ctx, "a holder of another embedding_model", 60, "live", "", true,
                 o -> collection(ctx, "docs__" + o + "__other-model__v1", "docs", o, "voyage-code-3", "v1", "live", ""));
             // content_type
-            assertRewrittenOnBothPaths(soft, su, ctx, "a holder of another content_type", 61, "live", "",
+            assertRewrittenOnBothPaths(soft, su, ctx, "a holder of another content_type", 61, "live", "", true,
                 o -> collection(ctx, "code__" + o + "__voyage-context-3__v1", "code", o, DOCS_MODEL, "v1", "live", ""));
             // tenant (the test connection bypasses RLS, so only the tenant predicate keeps it out)
-            assertRewrittenOnBothPaths(soft, su, ctx, "a holder in another tenant", 62, "live", "",
+            assertRewrittenOnBothPaths(soft, su, ctx, "a holder in another tenant", 62, "live", "", true,
                 o -> collection(ctx, OTHER_TENANT, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "live", ""));
             // model_version
-            assertRewrittenOnBothPaths(soft, su, ctx, "a holder of another model_version", 63, "live", "",
+            assertRewrittenOnBothPaths(soft, su, ctx, "a holder of another model_version", 63, "live", "", true,
                 o -> collection(ctx, "docs__" + o + "__voyage-context-3__v2", "docs", o, DOCS_MODEL, "v2", "live", ""));
-            // the subject row's own state: a live holder of the tuple, a subject that does not count
-            assertRewrittenOnBothPaths(soft, su, ctx, "a dormant subject row", 64, "dormant", "",
+            // the subject row's own state: a live holder of the tuple. A superseded subject does not count; a dormant one does
+            assertRewrittenOnBothPaths(soft, su, ctx, "a dormant subject row", 64, "dormant", "", false,
                 o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "live", ""));
             assertRewrittenOnBothPaths(soft, su, ctx, "a superseded subject row", 65, "live", "docs__gone__voyage-context-3__v1",
-                o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "live", ""));
+                true, o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "live", ""));
+            // the holder's own state: dormant and disputed hold the tuple, quarantine and superseded do not
+            assertRewrittenOnBothPaths(soft, su, ctx, "a dormant holder", 66, "live", "", false,
+                o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "dormant", ""));
+            assertRewrittenOnBothPaths(soft, su, ctx, "a disputed holder", 67, "live", "", false,
+                o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "disputed", ""));
+            assertRewrittenOnBothPaths(soft, su, ctx, "a holder in quarantine", 68, "live", "", true,
+                o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "quarantine", ""));
+            assertRewrittenOnBothPaths(soft, su, ctx, "a superseded holder", 69, "live", "", true,
+                o -> collection(ctx, String.format(sn, o), "docs", o, DOCS_MODEL, "v1", "live", "docs__elsewhere__voyage-context-3__v1"));
             soft.assertAll();
         });
     }
@@ -180,7 +195,7 @@ class Catalog051OwnerGuardTest {
     @Test
     void twoWritersOntoOneFreeTuple_theSecondWaitsThenKeepsItsSlug_underTheIndex() throws Exception {
         withMigratedDatabase((su, ctx) -> {
-            createLiveTupleIndex(ctx);
+            createHeldTupleIndex(ctx);
             String s1 = "docs__race-aa000001__voyage-context-3__v1";
             String s2 = "docs__race-bb000002__voyage-context-3__v1";
             collection(ctx, s1, "docs", "race-aa000001", DOCS_MODEL, "v1", "live", "");
@@ -221,20 +236,23 @@ class Catalog051OwnerGuardTest {
      * against the BEFORE-trigger case), so the two paths use owners {@code 1-<n>0} and {@code 1-<n>1}.
      */
     private static void assertRewrittenOnBothPaths(SoftAssertions soft, Connection su, DSLContext ctx, String what, int n,
-                                                   String lifecycle, String supersededBy, HolderMaker holder) throws SQLException {
+                                                   String lifecycle, String supersededBy, boolean rewritten,
+                                                   HolderMaker holder) throws SQLException {
         String afterOwner = "1-" + n + "0";
         holder.make(afterOwner);
         String after = "docs__a" + n + "-ab12cd34__voyage-context-3__v1";
         collection(ctx, after, "docs", "a" + n + "-ab12cd34", DOCS_MODEL, "v1", lifecycle, supersededBy);
         insertDocument(su, "1." + n + "0.1", after);
-        soft.assertThat(ownerOf(ctx, after)).as("%s does not hold the tuple (AFTER trigger)", what).isEqualTo(afterOwner);
+        soft.assertThat(ownerOf(ctx, after)).as("%s: rewritten=%s (AFTER trigger)", what, rewritten)
+            .isEqualTo(rewritten ? afterOwner : "a" + n + "-ab12cd34");
 
         String beforeOwner = "1-" + n + "1";
         holder.make(beforeOwner);
         String before = "docs__b" + n + "-cd34ef56__voyage-context-3__v1";
         insertDocument(su, "1." + n + "1.1", before);
         collection(ctx, before, "docs", "b" + n + "-cd34ef56", DOCS_MODEL, "v1", lifecycle, supersededBy);
-        soft.assertThat(ownerOf(ctx, before)).as("%s does not hold the tuple (BEFORE trigger)", what).isEqualTo(beforeOwner);
+        soft.assertThat(ownerOf(ctx, before)).as("%s: rewritten=%s (BEFORE trigger)", what, rewritten)
+            .isEqualTo(rewritten ? beforeOwner : "b" + n + "-cd34ef56");
     }
 
     static boolean isWaitingOnALock(Connection su, int pid) {

@@ -116,9 +116,10 @@ def test_no_ledger_entry_still_waits_on_p22() -> None:
 def test_the_pin_fell_from_the_p29_count() -> None:
     """P2.9's reland pinned 229. P2.2 moves 13 of the 19 holdover sites to the row (they leave the ledger) and reclassifies the other 6 (five
     ``T3Database`` reads to mint, ``doctor_search``'s drift probe to diagnostic), 229 -> 218 on P2.2's own tree. On
-    the Phase 2 integration tree P2.4 (-3) and owner-is-source (+3) cancel, so the pin is the same measured 218, with
-    the classes differing (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks the scan)."""
-    assert PARSE_SITE_PIN == 218
+    the Phase 2 integration tree P2.4 (-3) and owner-is-source (+2: the two callers of ``legacy_names.owner_stem`` in
+    ``nxexp_owner.py``; the parse itself sits in the floor and is not a site) leave 217, measured by the scan
+    (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks it)."""
+    assert PARSE_SITE_PIN == 217
 
 
 def test_collection_attributes_is_one_type() -> None:

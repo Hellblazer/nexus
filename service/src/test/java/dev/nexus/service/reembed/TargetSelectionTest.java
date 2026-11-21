@@ -406,7 +406,8 @@ class TargetSelectionTest {
         assertThat(shared).contains(SOURCE).contains("docs__wow-addon-dev__x__v1").contains(OWNER)
             .contains("same owner").contains("client cannot change a collection's owner in place")
             .contains("engine data move").contains("rename that re-homes the collection")
-            .contains("owner-is-source").contains("re-owned or superseded");
+            .contains("owner-is-source").contains("re-owned or superseded")
+            .contains("rdr229_reown_skipped").contains(TargetSelection.REOWN_SKIPPED_QUERY);
         Job origin = job("docs__other__x__v1", 3);
         String foreign = TargetSelection.foreignOriginReason(SOURCE, TARGET, origin);
         assertThat(foreign).contains(SOURCE).contains(TARGET).contains("docs__other__x__v1")
