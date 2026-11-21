@@ -209,7 +209,7 @@ public final class TargetSelection {
      * is read by the model token of its conformant name, since a model never changes on a collection and the target
      * already fixed its owner and content type; a name that is not conformant reads as an unknown model, which counts
      * (a refusal, never a merge). The newest such job wins ({@code jobs} is newest first). The name read is a
-     * migration-source site, declared in {@code CollectionParseGateTest.NAME_MODEL_READ_CALLS}: a re-embed source
+     * migration-source site, declared in {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS}: a re-embed source
      * row deleted by cutover; retires at RDR-229 P4. When it retires, a job whose source row is gone reads as an
      * unknown model and refuses, so the sibling narrowing reverts to conservative for a deleted source (a sibling on
      * another model is refused again once the first source's row has been deleted); one whose row is kept is read

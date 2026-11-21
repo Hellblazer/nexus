@@ -281,7 +281,7 @@ class CollectionParseGateTest {
      *
      * <p>The same regex also reads a MODEL out of a name ({@code CollectionRegistration.modelOfConformantName}),
      * which adds no literal, so this per-file census cannot see it. Its callers are pinned separately by
-     * {@link #NAME_MODEL_READ_CALLS} (nexus-p2m1x.28): the one caller is {@code TargetSelection.foreignOrigin}, a
+     * {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS} (nexus-p2m1x.28): the one caller is {@code TargetSelection.foreignOrigin}, a
      * MIGRATION-SOURCE read of a re-embed source row deleted by cutover; it retires at P4, with the name parsers.
      */
     private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of(
@@ -289,39 +289,6 @@ class CollectionParseGateTest {
         "dev/nexus/service/db/NoteUri.java", 3);
 
     private static final int COLLECTION_LITERAL_TOTAL_CEILING = 4;
-
-    /**
-     * Per-file declared count of calls to {@code CollectionRegistration.modelOfConformantName}, the engine's one
-     * read of a model out of a collection name (nexus-p2m1x.28). A migration-source site: a re-embed source row
-     * deleted by cutover leaves only its name in the job log, and {@code TargetSelection.foreignOrigin} reads the
-     * model token from it to tell a sibling on another model from a twin. It reuses the version regex, so the literal
-     * census above does not count it; this pin does, in both directions. Retires at RDR-229 P4 (P4.3 finds it here):
-     * delete the call, treat a gone row's model as unknown (which refuses), and empty this map.
-     */
-    private static final Map<String, Integer> NAME_MODEL_READ_CALLS = Map.of(
-        "dev/nexus/service/reembed/TargetSelection.java", 1);
-
-    /** Every use of the read's name: a qualified call, a bare call under a static import, a method reference. */
-    private static final Pattern NAME_MODEL_READ = Pattern.compile("\\bmodelOfConformantName\\b");
-
-    private static final Pattern DECLARED_AS_STRING_METHOD = Pattern.compile("String\\s+$");
-
-    /**
-     * Uses of {@code modelOfConformantName} outside comments, import lines and the declaration of the method itself
-     * (the one preceded by its return type). A statically imported bare call and a method reference count, as a
-     * qualified call does.
-     */
-    static int countNameModelReads(String rawSource) {
-        String blanked = IMPORT_LINE.matcher(blankComments(rawSource)).replaceAll(m -> " ".repeat(m.group().length()));
-        Matcher m = NAME_MODEL_READ.matcher(blanked);
-        int n = 0;
-        while (m.find()) {
-            if (!DECLARED_AS_STRING_METHOD.matcher(blanked.substring(Math.max(0, m.start() - 12), m.start())).find()) {
-                n++;
-            }
-        }
-        return n;
-    }
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the
@@ -683,42 +650,6 @@ class CollectionParseGateTest {
             .isGreaterThanOrEqualTo(declaredLiterals);
         assertThat(totalReads).as("non-vacuity: a broken scanner reports fewer reads than the census declares")
             .isGreaterThanOrEqualTo(declaredReads);
-    }
-
-    /** The model-out-of-a-name read has exactly its declared callers (see {@link #NAME_MODEL_READ_CALLS}). */
-    @Test
-    void nameModelReads_areExactlyTheDeclaredMigrationSourceCallers() throws IOException {
-        Path root = Path.of("src", "main", "java");
-        Map<String, Integer> actual = new TreeMap<>();
-        int filesWalked;
-        try (Stream<Path> files = Files.walk(root)) {
-            List<Path> javaFiles = files.filter(p -> p.toString().endsWith(".java")).toList();
-            filesWalked = javaFiles.size();
-            for (Path p : javaFiles) {
-                int n = countNameModelReads(Files.readString(p));
-                if (n > 0) actual.put(root.relativize(p).toString().replace(java.io.File.separatorChar, '/'), n);
-            }
-        }
-        assertThat(filesWalked).as("non-vacuity: the walk saw the tree").isGreaterThan(0);
-        assertThat(NAME_MODEL_READ_CALLS).as("non-vacuity: a declared caller exists to find").isNotEmpty();
-        assertThat(actual).as("callers of modelOfConformantName: a new one is a new name-read site and needs a "
-            + "declared reason; a removed one lowers this pin (nexus-p2m1x.28, retires at RDR-229 P4)")
-            .isEqualTo(NAME_MODEL_READ_CALLS);
-    }
-
-    @Test
-    void nameModelReadCount_seesQualifiedBareAndReferenceUses_butNotTheDeclarationCommentsOrImports() {
-        String src = String.join("\n",
-            "import static dev.nexus.service.db.CollectionRegistration.modelOfConformantName;",
-            "// modelOfConformantName(commented)",
-            "class A {",
-            "    /** modelOfConformantName in javadoc */",
-            "    public static String modelOfConformantName(String n) { return null; }",
-            "    void q(String n) { CollectionRegistration.modelOfConformantName(n); }",
-            "    void b(String n) { modelOfConformantName(n); }",
-            "    void r() { java.util.function.Function<String, String> f = CollectionRegistration::modelOfConformantName; }",
-            "}");
-        assertThat(countNameModelReads(src)).isEqualTo(3);
     }
 
     /** Each total ceiling equals the sum of its declared census, so lowering a census and forgetting its ceiling fails. */
