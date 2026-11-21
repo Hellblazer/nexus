@@ -76,8 +76,10 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
         cfg.setMaximumPoolSize(2);
         svcPool = new HikariDataSource(cfg);
         SchemaMigrator.migrate(svcPool);
-        // the moves the shipped changelog registers (RDR-229 P2.10) are not this test's: its one open move is sr-move
-        ctx().deleteFrom(DSL.table(DSL.name("nexus", "data_moves"))).execute();
+        // RDR-229 P2.10's residue moves are not this test's (their driving tables are not under its single-role check);
+        // D2's repair move stays, since the test asserts it is blocked the same way as sr-move (nexus-f3yqd.2.23)
+        ctx().deleteFrom(DSL.table(DSL.name("nexus", "data_moves")))
+            .where(DSL.field(DSL.name("label"), String.class).like("rdr229-residue-%")).execute();
         PgContainerHelper.runSuperuserTestChangelog(su, FIXTURES, "databasechangelog_test_datamove_ownerread", Map.of());
         registerBook = migrate(REGISTER, "databasechangelog_test_ownerread_register");
         policyBook = migrate(POLICY, "databasechangelog_test_ownerread_policy");

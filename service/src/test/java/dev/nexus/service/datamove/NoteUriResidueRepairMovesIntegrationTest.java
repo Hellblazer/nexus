@@ -55,7 +55,9 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
 
     @BeforeAll
     void readWhatTheMigrationRegistered() {
-        registeredAtMigration = ctx().select(LABEL_F).from(MOVES).orderBy(LABEL_F).fetch(LABEL_F);
+        // P2.10's own labels: D2's repair-catalog-collection-model-version (vectors-064) is registered by the same walk
+        registeredAtMigration = ctx().select(LABEL_F).from(MOVES).where(LABEL_F.like("rdr229-residue-%"))
+            .orderBy(LABEL_F).fetch(LABEL_F);
         shipped = ctx().select().from(MOVES).where(LABEL_F.eq(DOCS_MOVE)).fetchOne();
     }
 
