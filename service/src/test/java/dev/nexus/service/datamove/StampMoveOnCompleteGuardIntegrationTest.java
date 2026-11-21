@@ -69,9 +69,7 @@ class StampMoveOnCompleteGuardIntegrationTest {
 
     /** Runs a move's on_complete as the worker does, on the migrating connection. */
     private void complete(String body) throws Exception {
-        try (var statement = su.createStatement()) {
-            statement.execute(body);
-        }
+        MoveSql.runOnComplete(su, body);   // the worker's own call
     }
 
     private void dropCheck(String table, String constraint) {

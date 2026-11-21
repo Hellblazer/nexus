@@ -142,8 +142,14 @@ class CompletionStatusFieldIntegrationTest {
                 dev.nexus.service.TestHttp.request("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/status").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
             assertThat(resp.statusCode()).isEqualTo(200);
-            ObjectNode body = (ObjectNode) MAPPER.readTree(resp.body());
-            body.put("process_start_time", "1970-01-01T00:00:00Z");   // the one field that is the process's own clock
+            ObjectNode whole = (ObjectNode) MAPPER.readTree(resp.body());
+            // The idle consumers read boot_work and the new field. The rest of the body holds the process's own counters and clock,
+            // which other classes in the same JVM move (raced_embeds_total and the like), so it is not part of what a fixture pins.
+            ObjectNode body = MAPPER.createObjectNode();
+            body.set("boot_work", whole.get("boot_work"));
+            if (whole.has("rdr229_completion")) {
+                body.set("rdr229_completion", whole.get("rdr229_completion"));
+            }
             return body;
         } finally {
             server.stop(0);

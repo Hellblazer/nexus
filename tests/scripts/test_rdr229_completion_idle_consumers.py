@@ -3,7 +3,8 @@
 count every non-parked ``boot_work`` entry as work (the bundle swap's ``engine_busy_reason`` and the 3h harness's
 ``boot_work_settled``) never see it.
 
-The fixtures are the engine's own ``/v1/status`` bodies in the three states the review named
+The fixtures are the engine's own ``/v1/status`` bodies (reduced to ``boot_work`` and ``rdr229_completion``: the rest is the
+process's own counters) in the three states the review named
 (``service/.../CompletionStatusFieldIntegrationTest`` renders them through ``StatusHandler`` and fails when they differ from
 these files; ``-Dnexus.rdr229.writeFixtures=true`` rewrites them):
 

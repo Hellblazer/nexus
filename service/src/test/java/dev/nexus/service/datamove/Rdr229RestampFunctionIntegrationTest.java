@@ -201,7 +201,7 @@ class Rdr229RestampFunctionIntegrationTest {
     /** The function carries its own copy of the list (the name and id columns and the constraints per table): the TSV is the one list, this pins them equal. */
     @Test
     void theFunctionsListIsTheSameAsP31ChecksTsv() throws IOException {
-        String xml = Files.readString(StampMoveSpecs.CHANGELOG_FILE);
+        String xml = Files.readString(java.nio.file.Path.of("src", "main", "resources", "db", "changelog", "vectors-071-collection-id-restamp.xml"));
         int examined = 0;
         for (var c : StampMoveSpecs.checks()) {
             if (!c.validated()) {

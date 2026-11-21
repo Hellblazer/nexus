@@ -2386,6 +2386,9 @@
     -->
     <include file="db/changelog/vectors-070-collection-id-stamp-moves.xml"/>
 
+    <!-- Bead nexus-p2m1x.17 (RDR-229 P3.1 fix round A): nexus.rdr229_restamp(table), the way back from an orphan; after the stamp moves it re-registers. -->
+    <include file="db/changelog/vectors-071-collection-id-restamp.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

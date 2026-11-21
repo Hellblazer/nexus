@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.P31TestSql;
+import dev.nexus.service.PgContainerHelper;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -324,6 +325,46 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
         var done = CompletionCheck.evaluate(ctx(), readSet, CompletionCheck.Gate3Source.NOT_INSTALLED, CompletionCheck.DIRECT);
         assertThat(done.labels().get(0).status()).as("%s: the label completes once validated", table).isEqualTo(CompletionCheck.Status.COMPLETE);
         assertThat(done.violators()).isEmpty();
+    }
+
+    /**
+     * Fix round A (critique S1, code review F4): the way back from an orphan. Registering the missing collection stamps nothing (the move is
+     * complete and does not run again); nexus.rdr229_restamp registers the move once more, the worker stamps the row that has become
+     * resolvable, and the VALIDATE the first run left waiting goes through.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("freeNameTables")
+    void anOrphanIsStampedAndValidatedByTheRerun_onceItsCollectionIsRegistered(String table) throws Exception {
+        String tenant = tenantFor(table, "restamp");
+        String label = StampMoveSpecs.LABEL_PREFIX + table;
+        var seeded = StampMoveSeeds.seed(ctx(), table, tenant, new StampMoveSeeds.Plan(2, true, false, true));
+        register(table, Map.of());
+        assertThat(productionWorker(0).runCycle()).isEqualTo(1);
+        assertThat(completedAt(label)).as("%s: the first run completes (failure: %s)", table, failure(table)).isNotNull();
+        for (String constraint : StampMoveSpecs.constraintsByTable().get(table)) {
+            assertThat(PgCatalogProbes.constraintValidated(ctx(), constraint)).as("non-vacuity: %s waits on the orphan", constraint).isFalse();
+        }
+        String refused = ctx().select(DSL.function(DSL.name("nexus", "rdr229_restamp"), SQLDataType.VARCHAR, DSL.val(table))).fetchOne(0, String.class);
+        assertThat(refused).as("%s: the orphan is still there", table).startsWith("not registered:").contains("orphan");
+
+        // the operator registers the collection the orphan names; the stamp does not run again by itself
+        // (the orphan name: the row's own on a one-name table, its target's on chash_remap and reembed_jobs, where the source resolves)
+        PgContainerHelper.insertCollection(ctx(), tenant, StampMoveSeeds.orphan(tenant, 4));
+        assertThat(StampMoveSeeds.rows(ctx(), table, tenant).get(seeded.orphan()).ids().values()).as("%s: registering stamps nothing", table).containsOnlyNulls();
+        assertThat(productionWorker(0).runCycle()).as("nothing is open").isZero();
+
+        String answer = ctx().select(DSL.function(DSL.name("nexus", "rdr229_restamp"), SQLDataType.VARCHAR, DSL.val(table))).fetchOne(0, String.class);
+        assertThat(answer).isEqualTo("registered: " + label + "-rerun-1");
+        assertThat(productionWorker(0).runCycle()).as("the re-run is worked").isEqualTo(1);
+
+        assertThat(completedAt(label + "-rerun-1")).as("%s: the re-run completes (failure: %s)", table, failure(table + "-rerun-1")).isNotNull();
+        assertThat(StampMoveSeeds.rows(ctx(), table, tenant).get(seeded.orphan()).ids().values()).as("%s: the row is stamped", table).doesNotContainNull();
+        for (String constraint : StampMoveSpecs.constraintsByTable().get(table)) {
+            assertThat(PgCatalogProbes.constraintValidated(ctx(), constraint)).as("%s validated by the re-run's on_complete", constraint).isTrue();
+        }
+        var done = CompletionCheck.evaluate(ctx(), new CompletionCheck.ReadSet(List.of(label), List.of()), CompletionCheck.Gate3Source.NOT_INSTALLED,
+            CompletionCheck.DIRECT);
+        assertThat(done.labels().get(0).status()).as("%s: the label completes", table).isEqualTo(CompletionCheck.Status.COMPLETE);
     }
 
     @ParameterizedTest(name = "{0}")

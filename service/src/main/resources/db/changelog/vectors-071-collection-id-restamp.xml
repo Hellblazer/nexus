@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.17 (RDR-229 P3.1 fix round A, critique S1 / code review F4): nexus.rdr229_restamp(table), the operator's way back from an
+    orphan. In its own file, after vectors-070, because vectors-070 only REGISTERS the stamp moves (every changeset there is one INSERT into
+    nexus.data_moves or one owner-read policy; CollectionIdStampMovesShapeTest reads it that way). The number is provisional, as vectors-070's is.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-071-1" author="nexus-p2m1x.17">
+        <comment>nexus.rdr229_restamp(p_table text) RETURNS text, the operator's way back from an orphan (RDR-229 P3.1 fix round A, critique S1 / code review F4). A stamp move whose on_complete found an orphan row (a name with no registry row in its tenant) COMPLETES and leaves the table's CHECK NOT VALID; it does not run again, so registering the missing collection stamped nothing and the VALIDATE kept raising 23514. SELECT nexus.rdr229_restamp('chunk_orphaned_at') registers the table's stamp move again: a new data_moves row (a label is the primary key) named rdr229-stamp-&lt;table&gt;-rerun-N that supersedes the previous move of the chain (the completed original, or the last re-run) and copies its template, verification, on_complete, throttle and changeset_id, so the worker stamps the rows that have become resolvable and validates the CHECK(s). It registers only when the chain's last move is complete, a CHECK of the table is NOT VALID and no orphan row remains (an orphan being a row that names a collection no registry row of its tenant carries); otherwise it says why, as text, and raises nothing and writes nothing. The list of tables, name columns, id columns and constraints is a copy of db/rdr229/p31-checks.tsv (the one list), pinned equal by Rdr229RestampFunctionIntegrationTest. SECURITY INVOKER and EXECUTE revoked from PUBLIC: nexus.data_moves is the migrating role's, nexus_svc holds no grant on it. It reads the registry and the table to look for an orphan (a bounded scan of the rows with a NULL id, as the on_complete guard does) and writes one row to nexus.data_moves; no row of a user-data table changes. DATA EFFECT: none at boot; the function is created, not called. The rollback drops it.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.rdr229_restamp(p_table text) RETURNS text
+LANGUAGE plpgsql SET search_path = pg_catalog, nexus AS $f$
+DECLARE
+    v_base   text := 'rdr229-stamp-' || p_table;
+    v_n      integer;
+    v_tail   text;
+    v_done   timestamptz;
+    v_orphan boolean;
+    r        record;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM nexus.data_moves m WHERE m.label = v_base) THEN
+        RETURN 'not registered: ' || v_base || ' is not a registered stamp move';
+    END IF;
+    SELECT count(*) INTO v_n FROM nexus.data_moves m WHERE starts_with(m.label, v_base || '-rerun-');
+    v_tail := CASE WHEN v_n = 0 THEN v_base ELSE v_base || '-rerun-' || v_n END;
+    SELECT m.completed_at INTO v_done FROM nexus.data_moves m WHERE m.label = v_tail;
+    IF v_done IS NULL THEN
+        RETURN 'not registered: ' || v_tail || ' has not completed (it is open, paused or failed); nx doctor says which';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+                    JOIN (VALUES
+        ('catalog_collections', 'superseded_by', 'superseded_by_id', 'catalog_collections_superseded_by_id_check', 'SUPERSEDED'),
+        ('chunks', 'collection', 'collection_id', 'chunks_collection_id_check', 'NAME_ID'),
+        ('chunks', '-', 'collection_id', 'chunks_collection_id_not_null', 'NOT_NULL'),
+        ('taxonomy_centroids', 'collection', 'collection_id', 'taxonomy_centroids_collection_id_check', 'NAME_ID'),
+        ('taxonomy_centroids', '-', 'collection_id', 'taxonomy_centroids_collection_id_not_null', 'NOT_NULL'),
+        ('catalog_document_chunks', 'collection', 'collection_id', 'catalog_document_chunks_collection_id_check', 'NAME_ID'),
+        ('chunk_orphaned_at', 'collection', 'collection_id', 'chunk_orphaned_at_collection_id_check', 'NAME_ID'),
+        ('topic_assignments', 'source_collection', 'source_collection_id', 'topic_assignments_source_collection_id_check', 'NAME_ID'),
+        ('document_aspects', 'collection', 'collection_id', 'document_aspects_collection_id_check', 'NAME_ID'),
+        ('topics', 'collection', 'collection_id', 'topics_collection_id_check', 'NAME_ID'),
+        ('taxonomy_meta', 'collection', 'collection_id', 'taxonomy_meta_collection_id_check', 'NAME_ID'),
+        ('document_highlights', 'collection', 'collection_id', 'document_highlights_collection_id_check', 'NAME_ID'),
+        ('canary_query_ring', 'collection', 'collection_id', 'canary_query_ring_collection_id_check', 'NAME_ID'),
+        ('aspect_extraction_queue', 'collection', 'collection_id', 'aspect_extraction_queue_collection_id_check', 'NAME_ID'),
+        ('catalog_documents', 'physical_collection', 'physical_collection_id', 'catalog_documents_physical_collection_id_check', 'NAME_ID'),
+        ('chash_remap', 'source_collection', 'source_collection_id', 'chash_remap_source_collection_id_check', 'NAME_ID'),
+        ('chash_remap', 'target_collection', 'target_collection_id', 'chash_remap_target_collection_id_check', 'NAME_ID'),
+        ('pdf_pipeline', 'collection', 'collection_id', 'pdf_pipeline_collection_id_check', 'NAME_ID'),
+        ('reembed_jobs', 'source_collection', 'source_collection_id', 'reembed_jobs_source_collection_id_check', 'NAME_ID'),
+        ('reembed_jobs', 'target_collection', 'target_collection_id', 'reembed_jobs_target_collection_id_check', 'NAME_ID')
+                    ) AS t(tbl, name_column, id_column, conname, kind) ON t.conname = k.conname
+                   WHERE t.tbl = p_table AND k.conrelid = to_regclass('nexus.' || quote_ident(p_table)) AND NOT k.convalidated) THEN
+        RETURN 'not registered: no CHECK of ' || p_table || ' is NOT VALID (or the table has none), so there is nothing to finish';
+    END IF;
+    FOR r IN SELECT DISTINCT t.name_column, t.id_column
+               FROM (VALUES
+        ('catalog_collections', 'superseded_by', 'superseded_by_id', 'catalog_collections_superseded_by_id_check', 'SUPERSEDED'),
+        ('chunks', 'collection', 'collection_id', 'chunks_collection_id_check', 'NAME_ID'),
+        ('chunks', '-', 'collection_id', 'chunks_collection_id_not_null', 'NOT_NULL'),
+        ('taxonomy_centroids', 'collection', 'collection_id', 'taxonomy_centroids_collection_id_check', 'NAME_ID'),
+        ('taxonomy_centroids', '-', 'collection_id', 'taxonomy_centroids_collection_id_not_null', 'NOT_NULL'),
+        ('catalog_document_chunks', 'collection', 'collection_id', 'catalog_document_chunks_collection_id_check', 'NAME_ID'),
+        ('chunk_orphaned_at', 'collection', 'collection_id', 'chunk_orphaned_at_collection_id_check', 'NAME_ID'),
+        ('topic_assignments', 'source_collection', 'source_collection_id', 'topic_assignments_source_collection_id_check', 'NAME_ID'),
+        ('document_aspects', 'collection', 'collection_id', 'document_aspects_collection_id_check', 'NAME_ID'),
+        ('topics', 'collection', 'collection_id', 'topics_collection_id_check', 'NAME_ID'),
+        ('taxonomy_meta', 'collection', 'collection_id', 'taxonomy_meta_collection_id_check', 'NAME_ID'),
+        ('document_highlights', 'collection', 'collection_id', 'document_highlights_collection_id_check', 'NAME_ID'),
+        ('canary_query_ring', 'collection', 'collection_id', 'canary_query_ring_collection_id_check', 'NAME_ID'),
+        ('aspect_extraction_queue', 'collection', 'collection_id', 'aspect_extraction_queue_collection_id_check', 'NAME_ID'),
+        ('catalog_documents', 'physical_collection', 'physical_collection_id', 'catalog_documents_physical_collection_id_check', 'NAME_ID'),
+        ('chash_remap', 'source_collection', 'source_collection_id', 'chash_remap_source_collection_id_check', 'NAME_ID'),
+        ('chash_remap', 'target_collection', 'target_collection_id', 'chash_remap_target_collection_id_check', 'NAME_ID'),
+        ('pdf_pipeline', 'collection', 'collection_id', 'pdf_pipeline_collection_id_check', 'NAME_ID'),
+        ('reembed_jobs', 'source_collection', 'source_collection_id', 'reembed_jobs_source_collection_id_check', 'NAME_ID'),
+        ('reembed_jobs', 'target_collection', 'target_collection_id', 'reembed_jobs_target_collection_id_check', 'NAME_ID')
+                    ) AS t(tbl, name_column, id_column, conname, kind)
+              WHERE t.tbl = p_table AND t.kind = 'NAME_ID'
+    LOOP
+        EXECUTE format('SELECT EXISTS (SELECT 1 FROM nexus.%1$I t WHERE NULLIF(t.%2$I, '''') IS NOT NULL AND t.%3$I IS NULL '
+                       'AND NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc WHERE cc.tenant_id = t.tenant_id AND cc.name = t.%2$I))',
+                       p_table, r.name_column, r.id_column) INTO v_orphan;
+        IF v_orphan THEN
+            RETURN 'not registered: ' || p_table || ' still has an orphan row (a ' || r.name_column || ' that names no registry row of its tenant); '
+                || 'register that collection or delete the row, then run this again';
+        END IF;
+    END LOOP;
+    INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms,
+                                  verification, on_complete, changeset_id, supersedes)
+    SELECT v_base || '-rerun-' || (v_n + 1), b.template, b.driving_schema, b.driving_table, b.chunk_size, b.sleep_ms,
+           b.statement_timeout_ms, b.verification, b.on_complete, b.changeset_id, v_tail
+      FROM nexus.data_moves b WHERE b.label = v_base;
+    RETURN 'registered: ' || v_base || '-rerun-' || (v_n + 1);
+END
+$f$;
+REVOKE ALL ON FUNCTION nexus.rdr229_restamp(text) FROM PUBLIC;
+        ]]></sql>
+        <rollback>
+            <sql>DROP FUNCTION IF EXISTS nexus.rdr229_restamp(text)</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
