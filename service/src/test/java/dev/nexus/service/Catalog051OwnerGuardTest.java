@@ -10,13 +10,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.assertj.core.api.SoftAssertions;
 
-import liquibase.Contexts;
-import liquibase.LabelExpression;
-import liquibase.Liquibase;
-import liquibase.database.Database;
-import liquibase.database.DatabaseFactory;
-import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.ExecuteContext;
 import org.jooq.ExecuteListener;
@@ -52,7 +45,6 @@ import java.util.concurrent.TimeUnit;
  */
 class Catalog051OwnerGuardTest {
 
-    private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     static final String TENANT = "catalog049-guard-tenant";
     private static final String OTHER_TENANT = "catalog049-guard-other";
     static final String DOCS_MODEL = "voyage-context-3";
@@ -65,9 +57,14 @@ class Catalog051OwnerGuardTest {
     private static final String SUPERSEDED_HOLDER = "code__gone-0badf00d__voyage-code-3__v1";
     private static final String SLUG_OVER_SUPERSEDED = "code__over-5ca1ab1e__voyage-code-3__v1";
 
-    private static final String UNIQUE_INDEX = "CREATE UNIQUE INDEX catalog_collections_live_tuple_uq "
-        + "ON nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model, model_version) "
-        + "WHERE lifecycle_state = 'live' AND superseded_by = ''";
+    /** The partial UNIQUE index RDR-229 plans for P3.8, on the live, unsuperseded rows of a tuple. */
+    static void createLiveTupleIndex(DSLContext ctx) {
+        ctx.createUniqueIndex("catalog_collections_live_tuple_uq")
+            .on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
+                CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+            .where(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live").and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            .execute();
+    }
 
     @FunctionalInterface
     interface Body {
@@ -115,9 +112,7 @@ class Catalog051OwnerGuardTest {
     void withTheIndex_theSameRegistrationKeepsTheSlugOwnerAndRaisesNo23505() throws Exception {
         withMigratedDatabase((su, ctx) -> {
             seed(ctx);
-            try (var st = su.createStatement()) {
-                st.execute(UNIQUE_INDEX);
-            }
+            createLiveTupleIndex(ctx);
             // non-vacuity: the index is live and does reject a duplicate tuple written directly
             assertThatThrownBy(() -> collection(ctx, "docs__dup-deadbeef__voyage-context-3__v1", "docs", "1-33",
                     DOCS_MODEL, "v1", "live", ""))
@@ -185,9 +180,7 @@ class Catalog051OwnerGuardTest {
     @Test
     void twoWritersOntoOneFreeTuple_theSecondWaitsThenKeepsItsSlug_underTheIndex() throws Exception {
         withMigratedDatabase((su, ctx) -> {
-            try (var st = su.createStatement()) {
-                st.execute(UNIQUE_INDEX);
-            }
+            createLiveTupleIndex(ctx);
             String s1 = "docs__race-aa000001__voyage-context-3__v1";
             String s2 = "docs__race-bb000002__voyage-context-3__v1";
             collection(ctx, s1, "docs", "race-aa000001", DOCS_MODEL, "v1", "live", "");
@@ -271,32 +264,13 @@ class Catalog051OwnerGuardTest {
 
     static PostgreSQLContainer<?> pgInUse;
 
+    /** A fresh clone of the migrated template per call (the subject is trigger behaviour, not the migration). */
     static void withMigratedDatabase(Body body) throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        PostgreSQLContainer<?> pg = PgContainerHelper.start();
         pgInUse = pg;
-        try {
-            final String role = "nexus_admin_catalog049g_test";
-            final String pass = "nexus_admin_catalog049g_test_pass";
-            Hygiene001NotNullMigrationRlsTest.bootstrapAdminRole(pg, role, pass);
-            var cfg = new com.zaxxer.hikari.HikariConfig();
-            cfg.setJdbcUrl(pg.getJdbcUrl());
-            cfg.setUsername(role);
-            cfg.setPassword(pass);
-            cfg.setMaximumPoolSize(2);
-            cfg.setPoolName("nexus-admin-catalog049g-test");
-            try (var adminDs = new com.zaxxer.hikari.HikariDataSource(cfg)) {
-                try (Connection conn = adminDs.getConnection()) {
-                    Database database = DatabaseFactory.getInstance()
-                        .findCorrectDatabaseImplementation(new JdbcConnection(conn));
-                    try (Liquibase liquibase = new Liquibase(MASTER_CHANGELOG, new ClassLoaderResourceAccessor(), database)) {
-                        liquibase.update(new Contexts(), new LabelExpression());
-                    }
-                }
-                try (Connection su = pg.createConnection("")) {
-                    su.setAutoCommit(true);
-                    body.run(su, DSL.using(su, SQLDialect.POSTGRES));
-                }
-            }
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            body.run(su, DSL.using(su, SQLDialect.POSTGRES));
         } finally {
             pg.stop();
         }
