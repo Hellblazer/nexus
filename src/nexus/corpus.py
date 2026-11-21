@@ -1272,10 +1272,11 @@ def t3_collection_name(
 
         try:
             # nexus-bc7ps: --corpus resolution is routing; live rows only.
+            # RDR-229 P3.8: a minted knowledge collection is labelled ``c<id>``, so a row's content_type also counts.
             matches = [
                 c["name"]
                 for c in live_collection_rows(t3, routing=True)
-                if c["name"].startswith(f"{user_arg}__")
+                if c["name"].startswith(f"{user_arg}__") or c.get("content_type") == user_arg
             ]
         except Exception:  # noqa: BLE001 — best-effort collection-listing probe; empty match list on any backend failure
             matches = []
@@ -2049,7 +2050,11 @@ def ensure_collection_registered(
 
     A 409 from the register call is treated as already-registered
     (idempotent-upsert semantics, RDR-204 Technical Design step 2) —
-    another process may have won the race to register the same name.
+    another process may have won the race to register the same name —
+    only when the name then reads back as a live row (RDR-229 P3.8: the
+    engine also answers 409 for a refusal, a new row on a live tuple
+    another collection holds, every minted label taken, a sequence behind
+    the data, which is raised).
     Any other failure propagates uncaught: a registration failure here
     means the write that follows would 422/4xx anyway, and failing at
     this boundary names the real cause instead of the write's more
@@ -2222,8 +2227,9 @@ def ensure_collection_registered(
                     # RDR-229 P3.8: a 409 is also a refusal (a new row on a live tuple another collection holds,
                     # every minted label taken, a sequence behind the data). It is a won race only when the name
                     # reads back registered; otherwise caching it would turn the refusal into a later 422.
-                    read_back = getattr(writer, "get_collection", None)
-                    if read_back is not None and read_back(name) is None:
+                    # The ambient writer is write-only, so the row is read the way _row_from_client reads it.
+                    won = _row_from_client(writer, name)
+                    if not isinstance(won, dict) or _superseded_successor(won):
                         raise
                     _log.debug(
                         "collection_already_registered_race",
