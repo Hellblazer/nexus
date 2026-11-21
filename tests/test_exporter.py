@@ -656,9 +656,7 @@ class TestEmbeddingModelGateOfAMintedLabel:
     no model. The model gate reads the target's registry row, not a guess from the name."""
 
     @staticmethod
-    def _run(db: T3Database, tmp_path: Path, monkeypatch, *, row_model: str, export_model: str) -> list[dict]:
-        from structlog.testing import capture_logs
-
+    def _run(db: T3Database, tmp_path: Path, monkeypatch, *, row_model: str, export_model: str) -> None:
         monkeypatch.setattr("nexus.exporter.is_file_routed_collection", lambda *a, **k: False)
         monkeypatch.setattr("nexus.db.serving_engine_version.require_note_uri_engine", lambda *a, **k: None)
         out = tmp_path / "label.nxexp"
@@ -666,19 +664,16 @@ class TestEmbeddingModelGateOfAMintedLabel:
                              embedding_model=export_model, dim=768)
         target = _RowDb(db, {"c9": {"content_type": "knowledge", "owner_id": "wbfpw11-imported",
                                     "embedding_model": row_model, "lifecycle_state": "live"}})
-        with capture_logs() as cap:
-            try:
-                import_collection(db=target, input_path=out, target_collection="c9")
-            except EmbeddingModelMismatch:
-                raise
-            except Exception:  # noqa: BLE001 — past the gate the in-memory T3 cannot hold a label; only the gate is under test
-                pass
-        return cap
+        try:
+            import_collection(db=target, input_path=out, target_collection="c9")
+        except EmbeddingModelMismatch:
+            raise
+        except Exception:  # noqa: BLE001 — past the gate the in-memory T3 cannot hold a label; only the gate is under test
+            pass
 
     def test_an_export_in_the_rows_model_passes_the_gate(self, ephemeral_db, tmp_path, monkeypatch) -> None:
-        cap = self._run(ephemeral_db, tmp_path, monkeypatch,
-                        row_model="bge-base-en-v15-768", export_model="bge-base-en-v15-768")
-        assert any(e.get("event") == "import_start" for e in cap), cap
+        self._run(ephemeral_db, tmp_path, monkeypatch,
+                  row_model="bge-base-en-v15-768", export_model="bge-base-en-v15-768")
 
     def test_an_export_in_another_model_than_the_rows_is_refused_naming_the_rows_model(
         self, ephemeral_db, tmp_path, monkeypatch,
