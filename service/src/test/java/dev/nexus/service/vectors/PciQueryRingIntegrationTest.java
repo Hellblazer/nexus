@@ -408,6 +408,43 @@ class PciQueryRingIntegrationTest {
             && l.contains("failed=0"));
     }
 
+    /**
+     * An entry that fails as unregistered is dropped after its one WARN, never requeued: the writer drains the queue before it
+     * writes and re-offers nothing, so a deleted collection's entry does not retry and log on every flush. Pinned with a
+     * multi-entry batch, which takes the entry-by-entry retry path inside one flush; the retry must not leave the entry behind.
+     */
+    @Test
+    void anUnregisteredEntryIsDroppedAfterOneWarning_theNextFlushLogsAndWritesNothingForIt_theOthersAreUnaffected() throws Exception {
+        String t = newTenant();
+        String unregistered = collectionOf(t, "gone-for-good");
+        String kept = collectionOf(t, "kept");
+        register(t, kept);
+        PciQueryRing ring = ring(scope);
+        admit(ring, t, kept, 1);
+        ring.admit(t, QueryVector.alone(modelOf(t, kept), vec(2), unregistered));   // no registry row for it
+        admit(ring, t, kept, 3);
+
+        assertThat(ring.flushNow()).as("the two entries that resolve").isEqualTo(2);
+        assertThat(rows(t, kept)).isEqualTo(2);
+        assertThat(rows(t, unregistered)).isZero();
+        assertThat(ring.queued()).as("nothing was put back on the queue").isZero();
+        long warnings = appender.list.stream().filter(ev -> ev.getLevel() == ch.qos.logback.classic.Level.WARN
+            && ev.getFormattedMessage().contains("event=pci_ring_entry_unregistered")
+            && ev.getFormattedMessage().contains("collection=" + unregistered)).count();
+        assertThat(warnings).as("exactly one warning for the entry").isEqualTo(1);
+
+        appender.list.clear();
+        admit(ring, t, kept, 4);                                                      // a later flush with only a good entry
+        assertThat(ring.flushNow()).isEqualTo(1);
+        assertThat(rows(t, kept)).isEqualTo(3);
+        assertThat(rows(t, unregistered)).as("still nothing written for it").isZero();
+        assertThat(logLines()).as("and nothing logged for it").noneMatch(l -> l.contains("pci_ring_entry_unregistered")
+            || l.contains(unregistered));
+        appender.list.clear();
+        assertThat(ring.flushNow()).as("an empty flush").isZero();
+        assertThat(logLines()).as("logs nothing about it either").noneMatch(l -> l.contains(unregistered));
+    }
+
     // -- bounds and failure -------------------------------------------------------------------------------------
 
     @Test
