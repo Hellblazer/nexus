@@ -198,6 +198,14 @@ class Rdr229RestampFunctionIntegrationTest {
         assertThat(move(BASE + "-rerun-2").get(text("supersedes"))).isEqualTo(BASE + "-rerun-1");
     }
 
+    private static final String PROBE_MS = "nexus.rdr229_restamp_probe_ms";
+    private static final String PROBE_BLOCKS = "nexus.rdr229_restamp_probe_blocks";
+
+    /** A session GUC, as {@code SET} would; the function reads it with current_setting. */
+    private void guc(String name, String value) {
+        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(name), DSL.val(value), DSL.val(false))).fetch();
+    }
+
     /**
      * Review N3. The orphan probe reads a table's rows with no index, so it carries its own time bound. (A SET statement_timeout INSIDE the
      * function would not bound it: PostgreSQL arms that timer when the top-level statement starts, and a plpgsql function is one statement.
@@ -207,12 +215,12 @@ class Rdr229RestampFunctionIntegrationTest {
     @Test
     void theOrphanProbeStopsAtItsBound_saysSo_andRegistersNothing() {
         register(BASE, "catalog_documents", true, null);
-        ctx.execute("SET nexus.rdr229_restamp_probe_ms = 0");
+        guc(PROBE_MS, "0");
         try {
             String answer = restamp("catalog_documents");
-            assertThat(answer).startsWith("not registered:").contains("did not finish").contains("nothing was registered").contains("nexus.rdr229_restamp_probe_ms");
+            assertThat(answer).startsWith("not registered:").contains("did not finish").contains("nothing was registered").contains(PROBE_MS);
         } finally {
-            ctx.execute("RESET nexus.rdr229_restamp_probe_ms");
+            guc(PROBE_MS, "60000");
         }
         assertThat(ctx.fetchCount(MOVES)).as("nothing was registered").isEqualTo(1);
         assertThat(restamp("catalog_documents")).as("the same call, within its default bound, registers").isEqualTo("registered: " + BASE + "-rerun-1");
@@ -224,19 +232,25 @@ class Rdr229RestampFunctionIntegrationTest {
         register(BASE, "catalog_documents", true, null);
         P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
         try {
-            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                + "SELECT ?, '2.' || g, repeat('x', 200), ? FROM generate_series(1, 400) g", TENANT, LIVE);
+            var insert = ctx.insertInto(DOCS, text("tenant_id"), text("tumbler"), text("title"), text("physical_collection"));
+            var rows = insert.values(TENANT, "2.0", "x".repeat(200), LIVE);
+            for (int n = 1; n < 400; n++) {
+                rows = rows.values(TENANT, "2." + n, "x".repeat(200), LIVE);
+            }
+            rows.execute();
         } finally {
             P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
         }
         orphanDoc();   // written after the 400: a later block
-        long blocks = ctx.fetchOne("SELECT pg_relation_size('nexus.catalog_documents') / current_setting('block_size')::bigint").get(0, Long.class);
-        assertThat(blocks).as("non-vacuity: the table spans several blocks, so one block a range is several ranges").isGreaterThan(3);
-        ctx.execute("SET nexus.rdr229_restamp_probe_blocks = 1");
+        var ctid = DSL.field(DSL.name("t", "ctid")).cast(String.class);
+        long lastBlock = ctx.select(ctid).from(DOCS.as("t")).fetch(ctid).stream()
+            .mapToLong(c -> Long.parseLong(c.substring(1, c.indexOf(',')))).max().orElseThrow();
+        assertThat(lastBlock).as("non-vacuity: the rows span several blocks, so one block a range is several ranges").isGreaterThan(3);
+        guc(PROBE_BLOCKS, "1");
         try {
             assertThat(restamp("catalog_documents")).startsWith("not registered:").contains("orphan").contains("physical_collection");
         } finally {
-            ctx.execute("RESET nexus.rdr229_restamp_probe_blocks");
+            guc(PROBE_BLOCKS, "8192");
         }
         ctx.deleteFrom(DOCS).where(text("tenant_id").eq(TENANT)).execute();
     }
@@ -244,18 +258,19 @@ class Rdr229RestampFunctionIntegrationTest {
     /** Review N3: the function is the migrating role's alone. REVOKE ... FROM PUBLIC is written into its ACL and the service role cannot call it. */
     @Test
     void executeIsRevokedFromPublic_andTheServiceRoleCannotCallIt() throws Exception {
-        assertThat(ctx.fetchOne("SELECT p.proacl IS NOT NULL FROM pg_proc p WHERE p.oid = 'nexus.rdr229_restamp(text)'::regprocedure").get(0, Boolean.class))
-            .as("non-vacuity: the REVOKE wrote an ACL (a function with the default ACL has none)").isTrue();
-        assertThat(ctx.fetchOne("SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = 'nexus.rdr229_restamp(text)'::regprocedure AND a.grantee = 0")
-            .get(0, Integer.class)).as("no EXECUTE for PUBLIC (grantee 0)").isZero();
-        assertThat(ctx.fetchOne("SELECT has_function_privilege('" + PgContainerHelper.SVC_USERNAME + "', 'nexus.rdr229_restamp(text)', 'EXECUTE')").get(0, Boolean.class))
+        var proc = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
+        var acl = ctx.select(DSL.field(DSL.name("p", "proacl")).cast(String.class)).from(proc)
+            .where(DSL.field(DSL.name("p", "proname"), String.class).eq("rdr229_restamp")).fetchOne(0, String.class);
+        assertThat(acl).as("non-vacuity: the REVOKE wrote an ACL (a function with the default ACL has none)").isNotNull();
+        assertThat(acl).as("no EXECUTE for PUBLIC (an aclitem with an empty grantee reads =X/owner)").doesNotStartWith("{=").doesNotContain(",=");
+        assertThat(ctx.select(DSL.function("has_function_privilege", SQLDataType.BOOLEAN, DSL.val(PgContainerHelper.SVC_USERNAME),
+                DSL.val("nexus.rdr229_restamp(text)"), DSL.val("EXECUTE"))).fetchOne(0, Boolean.class))
             .as("nexus_svc holds no EXECUTE").isFalse();
-        ctx.execute("SET ROLE " + PgContainerHelper.SVC_USERNAME);
-        try {
-            assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> restamp("catalog_documents")))
+        try (Connection svc = java.sql.DriverManager.getConnection(pg.getJdbcUrl(), PgContainerHelper.SVC_USERNAME, PgContainerHelper.SVC_PASSWORD)) {
+            var asSvc = DSL.using(svc, SQLDialect.POSTGRES);
+            assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> asSvc.select(DSL.function(DSL.name("nexus", "rdr229_restamp"),
+                    SQLDataType.VARCHAR, DSL.val("catalog_documents"))).fetchOne(0, String.class)))
                 .as("a call as nexus_svc is refused by the function's ACL").hasMessageContaining("permission denied for function rdr229_restamp");
-        } finally {
-            ctx.execute("RESET ROLE");
         }
     }
 

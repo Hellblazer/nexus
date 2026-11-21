@@ -8,7 +8,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.nexus.service.P31CheckReplay;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.VectorSeeds;
 import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.Table;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -40,6 +43,15 @@ import java.util.Set;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class StampMoveOnCompleteGuardIntegrationTest {
+
+    private static final Table<?> CENTROIDS = DSL.table(DSL.name("nexus", "taxonomy_centroids"));
+    private static final Field<String> TENANT_F = DSL.field(DSL.name("tenant_id"), String.class);
+    private static final Field<String> CENTROID_NAME = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<Long> CENTROID_ID = DSL.field(DSL.name("collection_id"), Long.class);
+    private static final Field<Long> TOPIC_ID = DSL.field(DSL.name("topic_id"), Long.class);
+    private static final Field<String> LABEL_F = DSL.field(DSL.name("label"), String.class);
+    private static final Field<String> MODEL_F = DSL.field(DSL.name("embedding_model"), String.class);
+    private static final String ORPHAN_NAME = "p31-no-such-collection";
 
     private PostgreSQLContainer<?> pg;
     private Connection su;
@@ -102,14 +114,19 @@ class StampMoveOnCompleteGuardIntegrationTest {
      * on which an orphan cannot exist. (A name-id table that is absent here has no such key, whatever a comment says.)
      */
     private Set<String> tablesWithRegistryForeignKey() {
-        var rel = DSL.field("c.conrelid::regclass::text", String.class);
+        Table<?> con = DSL.table(DSL.name("pg_catalog", "pg_constraint")).as("c");
+        Table<?> from = DSL.table(DSL.name("pg_catalog", "pg_class")).as("rel");
+        Table<?> to = DSL.table(DSL.name("pg_catalog", "pg_class")).as("ref");
+        Field<String> relname = DSL.field(DSL.name("rel", "relname"), String.class);
         var out = new java.util.TreeSet<String>();
-        for (String name : ctx.select(rel)
-                .from(DSL.table("pg_catalog.pg_constraint c"))
-                .where(DSL.condition("c.contype = 'f' AND c.confrelid = 'nexus.catalog_collections'::regclass AND c.conparentid = 0 AND c.convalidated"))
-                .fetch(rel)) {
-            out.add(name.replace("nexus.", "").replace("\"", ""));
-        }
+        out.addAll(ctx.selectDistinct(relname).from(con)
+            .join(from).on(DSL.field(DSL.name("rel", "oid")).eq(DSL.field(DSL.name("c", "conrelid"))))
+            .join(to).on(DSL.field(DSL.name("ref", "oid")).eq(DSL.field(DSL.name("c", "confrelid"))))
+            .where(DSL.field(DSL.name("c", "contype")).cast(String.class).eq("f"))
+            .and(DSL.field(DSL.name("ref", "relname"), String.class).eq("catalog_collections"))
+            .and(DSL.field(DSL.name("c", "conparentid"), Long.class).eq(0L))
+            .and(DSL.field(DSL.name("c", "convalidated"), Boolean.class))
+            .fetch(relname));
         return out;
     }
 
@@ -153,9 +170,11 @@ class StampMoveOnCompleteGuardIntegrationTest {
             StampMoveSeeds.seed(ctx, "taxonomy_centroids", tenant, new StampMoveSeeds.Plan(0, true, false, false));   // one whole (stamped) centroid
             P31CheckReplay.lift(ctx, changesetFor("taxonomy_centroids"));
             try {
-                ctx.execute("INSERT INTO nexus.taxonomy_centroids (tenant_id, collection, collection_id, topic_id, label, embedding_model, embedding_768) "
-                    + "SELECT tenant_id, 'p31-no-such-collection', NULL, topic_id, 'orphan', embedding_model, embedding_768 "
-                    + "FROM nexus.taxonomy_centroids WHERE tenant_id = ?", tenant);
+                ctx.insertInto(CENTROIDS, TENANT_F, CENTROID_NAME, CENTROID_ID, TOPIC_ID, LABEL_F, MODEL_F, VectorSeeds.centroidEmbedding(768))
+                    .select(ctx.select(TENANT_F, DSL.inline(ORPHAN_NAME), DSL.inline((Long) null), TOPIC_ID, DSL.inline("orphan"), MODEL_F,
+                            VectorSeeds.centroidEmbedding(768))
+                        .from(CENTROIDS).where(TENANT_F.eq(tenant)))
+                    .execute();
             } finally {
                 P31CheckReplay.restore(ctx, changesetFor("taxonomy_centroids"));
             }
@@ -163,12 +182,10 @@ class StampMoveOnCompleteGuardIntegrationTest {
             for (String constraint : constraints) {
                 assertThat(PgCatalogProbes.constraintValidated(ctx, constraint)).as("non-vacuity: %s is NOT VALID before", constraint).isFalse();
             }
-            assertThat(ctx.fetchCount(DSL.table("nexus.taxonomy_centroids"),
-                DSL.condition("tenant_id = ? AND collection_id IS NULL AND NULLIF(collection, '') IS NOT NULL", tenant)))
+            assertThat(ctx.fetchCount(CENTROIDS, TENANT_F.eq(tenant), CENTROID_ID.isNull(), CENTROID_NAME.ne("")))
                 .as("non-vacuity: the orphan row is there (name set, id NULL), and the registry has no row for it").isEqualTo(1);
-            assertThat(ctx.fetchCount(DSL.table("nexus.catalog_collections"), DSL.condition("tenant_id = ? AND name = 'p31-no-such-collection'", tenant))).isZero();
-            assertThatThrownBy(() -> su.createStatement().execute(
-                    "ALTER TABLE nexus.taxonomy_centroids VALIDATE CONSTRAINT " + constraints.get(0)))
+            assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections")), TENANT_F.eq(tenant), DSL.field(DSL.name("name"), String.class).eq(ORPHAN_NAME))).isZero();
+            assertThatThrownBy(() -> PgContainerHelper.validateConstraint(su, CENTROIDS, constraints.get(0)))
                 .as("non-vacuity: a bare VALIDATE refuses with the orphan there (what the dropped guard let the move run into)")
                 .hasMessageContaining("violated by some row");
 
