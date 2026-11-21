@@ -6,6 +6,7 @@
 # cluster-level fact has no kind here; it takes a clone (PgContainerHelper.start() or startMigratedByOwner()).
 Catalog044OwnerFromDocumentsRepairTest	startEmptyDatabase	WALK	migrates to just before catalog-044-1, seeds the pre-fix owner shape, applies the rest and reads the repair back
 Rdr229P31ExpandIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed rows and asserts the expand changesets rewrite none of them, then walks fully for the CHECK semantics, the queue guards, the rollback and the walk forward again
+Rdr229P31SqlDualWriteIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed unstamped rows, then to before vectors-069-1 to show each SQL function refused with 23514, then fully for the ids, the unchanged attributes and the rollback, and once more to scan the live function bodies
 ServiceTokenScopeBackfillTest	startEmptyDatabase	WALK	builds the pre-003 service_tokens shape by hand, then applies only service-tokens-003 and asserts the backfill
 VectorsUnifyChunksIntegrationTest	startEmptyDatabase	WALK	stages vectors-004 against a seeded per-dimension pre-state and asserts the unify
 VectorsRepointFunctionsIntegrationTest	startEmptyDatabase	WALK	chains vectors-004, taxonomy-007 and vectors-005 over a seeded pre-state and calls every repointed object
