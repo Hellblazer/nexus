@@ -3,7 +3,10 @@
     RDR-229 P3.8 (bead nexus-p2m1x.28): nexus.collection_id_seq_heal(p_floor bigint), the one way the engine role moves the
     shared collection_id sequence, and nexus.collection_id_taken(p_id bigint), the one way it asks whether ANY tenant holds an id.
 
-    AN ID IS UNIQUE ACROSS THE INSTALLATION (RDR item 6; linda's ruling on the review of P3.8). The table's own UNIQUE is
+    AN ID IS MEANT TO BE UNIQUE ACROSS THE INSTALLATION (RDR item 6; linda's ruling on the review of P3.8), AND IS ONLY WHERE
+    D2's OWNER-READ POLICY EXISTS: without it both functions below read no row of any tenant, the heal's floor and the taken
+    check are the caller's own tenant's, and an id another tenant holds is not seen (the per-tenant check the mint also makes
+    is all there is). The table's own UNIQUE is
     (tenant_id, collection_id) and nexus_svc, serving every tenant, sees only the rows of the tenant a request carries
     (nexus.catalog_collections is FORCE ROW LEVEL SECURITY). So both functions are SECURITY DEFINER, owned by the migration
     role, and read EVERY tenant's collection_id through D2's catalog_collections_owner_read policy (changeset vectors-065;

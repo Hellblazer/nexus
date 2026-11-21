@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code collection_id} is a client-supplied id like any other, so the load drops it and the sequence assigns every
  * restored row its own (the same doctrine as the other serial keys: "the engine role cannot setval, so ids are
  * always reassigned"); and a file holding two live rows on one tuple is refused, naming both collections, once the
- * partial UNIQUE index is present (it would refuse the load with a bare 23505) and when it is absent alike. P3.9 decides how a bundle carries the id.
+ * partial UNIQUE index is present (it would refuse the load with a bare 23505) and when it is absent alike. P3.11 decides how a bundle carries the id.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class CollectionMintRestoreTest {
