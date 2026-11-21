@@ -5677,7 +5677,7 @@ With no `TOPIC`, prints the topics and what each holds.
 | `caps` | notes on the nexus tools: search filters, the MCP tool prefix, pagination, enrich commands |
 | `map` | The Knowledge Map for this repo (the cache `nx context refresh` writes) |
 | `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
-| `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |
+| `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist; for a note that does not exist, a seat is told the `nx memory put --mine` command and an ephemeral or delegated identity is told that only a seat keeps identity notes (the write it would otherwise be offered is refused) |
 
 A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `event` of `brief_load`, `topic`, `ok`, `bytes`, `source`, `session_id`, `repo`) to `<config>/logs/brief.log`, and every SessionStart appends one `session_start` line (`ts`, `session_id`, `repo`, `source`) to the same file: the denominator. Past 1 MB the file moves to `brief.log.1` (replacing an older one) and a new file starts; two processes crossing the cap together can lose or duplicate a line, which a usage count tolerates.
 
