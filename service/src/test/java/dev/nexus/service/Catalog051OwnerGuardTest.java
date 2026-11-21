@@ -8,6 +8,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import dev.nexus.service.db.CollectionIds;
 import org.assertj.core.api.SoftAssertions;
 
 import org.jooq.DSLContext;
@@ -88,7 +89,7 @@ class Catalog051OwnerGuardTest {
             assertThat(liveTupleCount(ctx, "docs", "1-33", DOCS_MODEL, "v1")).as("no duplicate tuple").isEqualTo(1);
 
             // (2) BEFORE trigger on INSERT: the documents exist first, then the collection registers
-            insertDocument(su, "1.33.2", SLUG_LATE);
+            insertLegacyDocument(su, ctx, "1.33.2", SLUG_LATE);
             List<String> beforeNotices = registerCollectionOn(su, SLUG_LATE, "docs", "late-ef56ab78", DOCS_MODEL, "v1");
             assertThat(ownerOf(ctx, SLUG_LATE)).as("a registration over existing documents keeps the slug")
                 .isEqualTo("late-ef56ab78");
@@ -127,7 +128,7 @@ class Catalog051OwnerGuardTest {
                 .contains("1-33"));
             assertThat(liveTupleCount(ctx, "docs", "1-33", DOCS_MODEL, "v1")).isEqualTo(1);
 
-            insertDocument(su, "1.33.2", SLUG_LATE);
+            insertLegacyDocument(su, ctx, "1.33.2", SLUG_LATE);
             List<String> beforeNotices = registerCollectionOn(su, SLUG_LATE, "docs", "late-ef56ab78", DOCS_MODEL, "v1");
             assertThat(ownerOf(ctx, SLUG_LATE)).isEqualTo("late-ef56ab78");
             assertThat(beforeNotices).anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE)
@@ -249,7 +250,7 @@ class Catalog051OwnerGuardTest {
         String beforeOwner = "1-" + n + "1";
         holder.make(beforeOwner);
         String before = "docs__b" + n + "-cd34ef56__voyage-context-3__v1";
-        insertDocument(su, "1." + n + "1.1", before);
+        insertLegacyDocument(su, ctx, "1." + n + "1.1", before);
         collection(ctx, before, "docs", "b" + n + "-cd34ef56", DOCS_MODEL, "v1", lifecycle, supersededBy);
         soft.assertThat(ownerOf(ctx, before)).as("%s: rewritten=%s (BEFORE trigger)", what, rewritten)
             .isEqualTo(rewritten ? beforeOwner : "b" + n + "-cd34ef56");
@@ -307,10 +308,22 @@ class Catalog051OwnerGuardTest {
 
     private static void collection(DSLContext ctx, String tenant, String name, String contentType, String owner,
                                    String model, String version, String lifecycle, String supersededBy) {
-        ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
-            .values(tenant, name, contentType, owner, model, version, lifecycle, supersededBy).execute();
+        var insert = ctx.insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant).set(CATALOG_COLLECTIONS.NAME, name)
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType).set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model).set(CATALOG_COLLECTIONS.MODEL_VERSION, version)
+            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, lifecycle).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy);
+        if (!supersededBy.isEmpty()) {
+            // RDR-229 P3.1 (R7): a tombstone carries its successor's registry id, or its own when the successor is not registered. The row must
+            // go in already superseded (the BEFORE trigger under test reads it on insert), so the id is the successor's when there is one and
+            // else the next free id, which stands for the row's own: the owner trigger never reads it.
+            var succ = CATALOG_COLLECTIONS.as("succ");
+            var all = CATALOG_COLLECTIONS.as("all_rows");
+            insert.set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(
+                DSL.field(DSL.select(succ.COLLECTION_ID).from(succ).where(succ.TENANT_ID.eq(tenant)).and(succ.NAME.eq(supersededBy))),
+                DSL.field(DSL.select(DSL.coalesce(DSL.max(all.COLLECTION_ID), 0L).plus(1L)).from(all))));
+        }
+        insert.execute();
     }
 
     /** Inserts one live document and returns the server NOTICE messages the insert raised. */
@@ -318,10 +331,25 @@ class Catalog051OwnerGuardTest {
         return insertDocumentOn(su, tumbler, collection);
     }
 
+    /**
+     * RDR-229 P3.1: a document that exists before its collection registers is the legacy state, a name with no registry row and no id, which the
+     * NOT VALID CHECK refuses on a new row. The CHECK is lifted for the one insert and added back NOT VALID, as an upgrade leaves a store.
+     */
+    static void insertLegacyDocument(Connection su, DSLContext ctx, String tumbler, String collection) {
+        P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+        try {
+            insertDocument(su, tumbler, collection);
+        } finally {
+            P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+        }
+    }
+
     static List<String> insertDocumentOn(Connection conn, String tumbler, String collection) {
-        return withNotices(conn, d -> d.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
-                CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .values(TENANT, tumbler, "doc " + tumbler, collection).execute());
+        return withNotices(conn, d -> d.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))   // RDR-229 P3.1: the id beside the name
+            .execute());
     }
 
     /** Registers a live collection and returns the server NOTICE messages the insert raised. */

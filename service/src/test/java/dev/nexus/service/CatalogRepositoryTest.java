@@ -2151,11 +2151,14 @@ class CatalogRepositoryTest {
         putOwner(tenant, "1.22", "knowledge", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
         String name = "docs__mixed-6pbwx__voyage-context-3__v1";
+        // RDR-229 P3.1: a document names its collection by registry id, so putDoc registers the collection (slug owner) before the
+        // first document lands, and a curator document that lands first now settles the owner (catalog-051: a curator stands). The
+        // repo document therefore goes first; the three curator documents that outnumber it then leave the repo owner in place.
+        registerColl(tenant, name, "docs", "mixed-6pbwx");
+        putDoc(tenant, "1.23.1", "docs", name);
         putDoc(tenant, "1.22.1", "docs", name);
         putDoc(tenant, "1.22.2", "docs", name);
         putDoc(tenant, "1.22.3", "docs", name);
-        putDoc(tenant, "1.23.1", "docs", name);
-        registerColl(tenant, name, "docs", "mixed-6pbwx");
         assertThat(ownerOf(tenant, name)).isEqualTo("1-23");
     }
 

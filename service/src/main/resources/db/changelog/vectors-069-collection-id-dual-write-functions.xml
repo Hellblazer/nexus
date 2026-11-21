@@ -6091,7 +6091,7 @@ $fn$;
     </changeSet>
 
     <changeSet id="vectors-069-20" author="nexus-p2m1x.17">
-        <comment>RDR-229 P3.1 stage 2b: nexus.catalog_reconcile_commit sets the collection id beside the name on the six statements on catalog_documents: the update and repoint set physical_collection_id with the name, the insert carries it, and the three metadata-only updates (rename flag, miss count, miss reset) set it from the row's own id, else the registry's. Replaces the definition in catalog-048-reconcile.xml, changeset catalog-048-2 (line 151), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.1 stage 2b: nexus.catalog_reconcile_commit sets the collection id beside the name on the six statements on catalog_documents: the update and repoint set physical_collection_id with the name, the insert carries it, and the three metadata-only updates (rename flag, miss count, miss reset) set it from the row's own id, else the registry's. Replaces the definition in catalog-049-note-uri-residue.xml, changeset catalog-049-1 (RDR-229 P2.10, NoteUri.moveTo's rule for the three URI rewrites), the last definer (rebuilt on it after develop was merged in; the statements below the P2.10 rule are unchanged); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_reconcile_commit(p_owner text, p_run_id text)
 RETURNS jsonb
@@ -6374,16 +6374,21 @@ BEGIN
     EXECUTE v_nc || 'ANALYZE _rc_w';   -- selected and repoint are set now; the next statements join on them
 
     -- ── the RDR-231 collection-move rewrite of a note URI: refuse a collision before any write ──
+    -- RDR-229 P2.10: the rule is NoteUri.moveTo's. A moved document's URI is rewritten only when it is an nx-note://
+    -- URI of a note, that is, when the document's own (old) collection carries no rdr__, docs__ or code__ prefix.
+    -- chroma:// residue, the legacy spelling and an nx-note:// value with a file-routed segment keep their segment:
+    -- moving one onto a prefix-free label would turn residue into a note (NoteUri.isNote reads only the segment).
+    -- The same test sits in both UPDATEs below. The prefix list is NoteUri.FILE_ROUTED_PREFIXES, and starts_with is
+    -- used, never LIKE, because _ is a LIKE wildcard.
     EXECUTE v_nc || $s$
     CREATE TEMP TABLE _rc_mv ON COMMIT DROP AS
     SELECT x.file_path, x.canon, x.rewritten
       FROM (SELECT w.file_path, w.canon,
                    CASE WHEN starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')
+                             AND NOT (starts_with(d.physical_collection, 'rdr__') OR starts_with(d.physical_collection, 'docs__')
+                                 OR starts_with(d.physical_collection, 'code__'))
                         THEN 'nx-note://' || w.physical_collection || '/'
                              || substr(d.source_uri, length('nx-note://' || d.physical_collection || '/') + 1)
-                        WHEN starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')
-                        THEN 'chroma://' || w.physical_collection || '/'
-                             || substr(d.source_uri, length('chroma://' || d.physical_collection || '/') + 1)
                         ELSE d.source_uri END AS rewritten,
                    d.source_uri AS current_uri
               FROM _rc_w w
@@ -6473,12 +6478,10 @@ BEGIN
                   source_uri = CASE
                       WHEN u.physical_collection <> '' AND u.physical_collection <> d.physical_collection
                            AND starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')
+                           AND NOT (starts_with(d.physical_collection, 'rdr__') OR starts_with(d.physical_collection, 'docs__')
+                                OR starts_with(d.physical_collection, 'code__'))
                           THEN 'nx-note://' || u.physical_collection || '/'
                                || substr(d.source_uri, length('nx-note://' || d.physical_collection || '/') + 1)
-                      WHEN u.physical_collection <> '' AND u.physical_collection <> d.physical_collection
-                           AND starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')
-                          THEN 'chroma://' || u.physical_collection || '/'
-                               || substr(d.source_uri, length('chroma://' || d.physical_collection || '/') + 1)
                       ELSE d.source_uri END
              FROM (SELECT DISTINCT ON (w.canon) w.canon, w.head_hash, w.physical_collection, w.source_mtime, w.delta
                      FROM _rc_w w WHERE w.selected AND %s ORDER BY w.canon, w.seq DESC) u
@@ -6491,11 +6494,10 @@ BEGIN
                   chunk_count = CASE WHEN mc.n = 0 AND d.chunk_count > 0 THEN d.chunk_count ELSE mc.n END,
                   source_uri = CASE
                       WHEN starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')
+                           AND NOT (starts_with(d.physical_collection, 'rdr__') OR starts_with(d.physical_collection, 'docs__')
+                                OR starts_with(d.physical_collection, 'code__'))
                           THEN 'nx-note://' || u.physical_collection || '/'
                                || substr(d.source_uri, length('nx-note://' || d.physical_collection || '/') + 1)
-                      WHEN starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')
-                          THEN 'chroma://' || u.physical_collection || '/'
-                               || substr(d.source_uri, length('chroma://' || d.physical_collection || '/') + 1)
                       ELSE d.source_uri END
              FROM (SELECT DISTINCT ON (w.canon) w.canon, w.physical_collection
                      FROM _rc_w w WHERE w.repoint AND %s ORDER BY w.canon, w.seq DESC) u
@@ -6788,9 +6790,10 @@ EXCEPTION WHEN OTHERS THEN
         || CASE WHEN v_cur IS NOT NULL THEN ' Operator action: fix or remove that file, then re-run nx index repo.' ELSE '' END;
 END;
 $fn$;
+
 ]]></sql>
         <rollback>
-            <!-- Restores the body of catalog-048-reconcile.xml catalog-048-2 verbatim. -->
+            <!-- Restores the body of catalog-049-note-uri-residue.xml catalog-049-1 verbatim. -->
             <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_reconcile_commit(p_owner text, p_run_id text)
 RETURNS jsonb
@@ -7073,16 +7076,21 @@ BEGIN
     EXECUTE v_nc || 'ANALYZE _rc_w';   -- selected and repoint are set now; the next statements join on them
 
     -- ── the RDR-231 collection-move rewrite of a note URI: refuse a collision before any write ──
+    -- RDR-229 P2.10: the rule is NoteUri.moveTo's. A moved document's URI is rewritten only when it is an nx-note://
+    -- URI of a note, that is, when the document's own (old) collection carries no rdr__, docs__ or code__ prefix.
+    -- chroma:// residue, the legacy spelling and an nx-note:// value with a file-routed segment keep their segment:
+    -- moving one onto a prefix-free label would turn residue into a note (NoteUri.isNote reads only the segment).
+    -- The same test sits in both UPDATEs below. The prefix list is NoteUri.FILE_ROUTED_PREFIXES, and starts_with is
+    -- used, never LIKE, because _ is a LIKE wildcard.
     EXECUTE v_nc || $s$
     CREATE TEMP TABLE _rc_mv ON COMMIT DROP AS
     SELECT x.file_path, x.canon, x.rewritten
       FROM (SELECT w.file_path, w.canon,
                    CASE WHEN starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')
+                             AND NOT (starts_with(d.physical_collection, 'rdr__') OR starts_with(d.physical_collection, 'docs__')
+                                 OR starts_with(d.physical_collection, 'code__'))
                         THEN 'nx-note://' || w.physical_collection || '/'
                              || substr(d.source_uri, length('nx-note://' || d.physical_collection || '/') + 1)
-                        WHEN starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')
-                        THEN 'chroma://' || w.physical_collection || '/'
-                             || substr(d.source_uri, length('chroma://' || d.physical_collection || '/') + 1)
                         ELSE d.source_uri END AS rewritten,
                    d.source_uri AS current_uri
               FROM _rc_w w
@@ -7171,12 +7179,10 @@ BEGIN
                   source_uri = CASE
                       WHEN u.physical_collection <> '' AND u.physical_collection <> d.physical_collection
                            AND starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')
+                           AND NOT (starts_with(d.physical_collection, 'rdr__') OR starts_with(d.physical_collection, 'docs__')
+                                OR starts_with(d.physical_collection, 'code__'))
                           THEN 'nx-note://' || u.physical_collection || '/'
                                || substr(d.source_uri, length('nx-note://' || d.physical_collection || '/') + 1)
-                      WHEN u.physical_collection <> '' AND u.physical_collection <> d.physical_collection
-                           AND starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')
-                          THEN 'chroma://' || u.physical_collection || '/'
-                               || substr(d.source_uri, length('chroma://' || d.physical_collection || '/') + 1)
                       ELSE d.source_uri END
              FROM (SELECT DISTINCT ON (w.canon) w.canon, w.head_hash, w.physical_collection, w.source_mtime, w.delta
                      FROM _rc_w w WHERE w.selected AND %s ORDER BY w.canon, w.seq DESC) u
@@ -7188,11 +7194,10 @@ BEGIN
                   chunk_count = CASE WHEN mc.n = 0 AND d.chunk_count > 0 THEN d.chunk_count ELSE mc.n END,
                   source_uri = CASE
                       WHEN starts_with(d.source_uri, 'nx-note://' || d.physical_collection || '/')
+                           AND NOT (starts_with(d.physical_collection, 'rdr__') OR starts_with(d.physical_collection, 'docs__')
+                                OR starts_with(d.physical_collection, 'code__'))
                           THEN 'nx-note://' || u.physical_collection || '/'
                                || substr(d.source_uri, length('nx-note://' || d.physical_collection || '/') + 1)
-                      WHEN starts_with(d.source_uri, 'chroma://' || d.physical_collection || '/')
-                          THEN 'chroma://' || u.physical_collection || '/'
-                               || substr(d.source_uri, length('chroma://' || d.physical_collection || '/') + 1)
                       ELSE d.source_uri END
              FROM (SELECT DISTINCT ON (w.canon) w.canon, w.physical_collection
                      FROM _rc_w w WHERE w.repoint AND %s ORDER BY w.canon, w.seq DESC) u
@@ -7475,6 +7480,8 @@ EXCEPTION WHEN OTHERS THEN
         || CASE WHEN v_cur IS NOT NULL THEN ' Operator action: fix or remove that file, then re-run nx index repo.' ELSE '' END;
 END;
 $fn$;
+
+GRANT EXECUTE ON FUNCTION nexus.catalog_reconcile_commit(text, text) TO nexus_svc;
 ]]></sql>
         </rollback>
     </changeSet>
@@ -7558,7 +7565,7 @@ $$;
     </changeSet>
 
     <changeSet id="vectors-069-23" author="nexus-p2m1x.17">
-        <comment>RDR-229 P3.1 stage 2b: nexus.catalog_documents_owner_to_collection sets the collection id beside the name on the catalog_collections owner UPDATE (superseded_by_id: NULL while live; else the row's own, else the successor's, else, residual R7, its own collection_id). Replaces the definition in catalog-044-collection-owner-from-documents.xml, changeset catalog-044-2 (line 186), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.1 stage 2b: nexus.catalog_documents_owner_to_collection sets the collection id beside the name on the catalog_collections owner UPDATE (superseded_by_id: NULL while live; else the row's own, else the successor's, else, residual R7, its own collection_id). Replaces the definition in catalog-051-curator-owner-not-replaceable.xml, changeset catalog-051-2 (RDR-229, a curator owner is no longer replaceable, and a tuple another live row holds is not taken), the last definer (rebuilt on it after develop was merged in); the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
     RETURNS TRIGGER
@@ -7566,45 +7573,75 @@ CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
     SECURITY INVOKER
 AS $fn$
 DECLARE
-    v_seg text;
-    v_cur text;
-    v_new text;
+    v_seg    text;
+    v_cur    text;
+    v_ct     text;
+    v_em     text;
+    v_mv     text;
+    v_ls     text;
+    v_sb     text;
+    v_new    text;
+    v_holder text;
 BEGIN
     IF NEW.deleted_at IS NULL
        AND NEW.physical_collection <> ''
        AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
         v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
-        SELECT c.owner_id INTO v_cur
+        SELECT c.owner_id, c.content_type, c.embedding_model, c.model_version, c.lifecycle_state, c.superseded_by
+          INTO v_cur, v_ct, v_em, v_mv, v_ls, v_sb
           FROM nexus.catalog_collections c
          WHERE c.tenant_id = NEW.tenant_id
            AND c.name = NEW.physical_collection
            AND c.content_type IN ('code', 'docs', 'rdr');
-        -- Cheap probes first: a settled repo collection (a tumbler-shaped, non-curator
-        -- owner) or one already owned by this very document's owner costs a primary-key
-        -- read and an owner-row read, never the aggregate over the collection's documents.
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped owner) or one already
+        -- owned by this very document's owner costs a primary-key read, never the aggregate over
+        -- the collection's documents.
         IF FOUND
            AND v_cur IS DISTINCT FROM v_seg
            AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
             v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
             IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
-                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
-                    NEW.physical_collection, v_cur, v_new;
-                UPDATE nexus.catalog_collections c
-                   SET owner_id = v_new,
-                     superseded_by_id = CASE WHEN c.superseded_by = '' THEN NULL
-                         ELSE COALESCE(c.superseded_by_id,
-                                       (SELECT s.collection_id FROM nexus.catalog_collections s
-                                         WHERE s.tenant_id = c.tenant_id AND s.name = c.superseded_by),
-                                       c.collection_id) END
-                 WHERE c.tenant_id = NEW.tenant_id
-                   AND c.name = NEW.physical_collection
-                   AND c.content_type IN ('code', 'docs', 'rdr')
-                   AND c.owner_id IS DISTINCT FROM v_new
-                   -- Re-checked on the row being updated: under READ COMMITTED a concurrent
-                   -- transaction may have committed a repo owner since the SELECT above, and
-                   -- this predicate is re-evaluated against that new row version, so a curator
-                   -- (or slug) derivation cannot overwrite it.
-                   AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds; the
+                -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
+                IF v_ls <> 'quarantine' AND v_sb = '' THEN
+                    PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                        NEW.tenant_id, v_ct, v_new, v_em, v_mv));
+                END IF;
+                SELECT h.name INTO v_holder
+                  FROM nexus.catalog_collections h
+                 WHERE v_ls <> 'quarantine' AND v_sb = ''
+                   AND h.tenant_id = NEW.tenant_id
+                   AND h.content_type = v_ct
+                   AND h.owner_id = v_new
+                   AND h.embedding_model = v_em
+                   AND h.model_version = v_mv
+                   AND h.lifecycle_state <> 'quarantine' AND h.superseded_by = ''
+                   AND h.name <> NEW.physical_collection
+                 ORDER BY h.name
+                 LIMIT 1;
+                IF FOUND THEN
+                    RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                        NEW.physical_collection, v_cur, v_new, v_holder;
+                ELSE
+                    RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                        NEW.physical_collection, v_cur, v_new;
+                    UPDATE nexus.catalog_collections c
+                       SET owner_id = v_new,
+                         superseded_by_id = CASE WHEN c.superseded_by = '' THEN NULL
+                             ELSE COALESCE(c.superseded_by_id,
+                                           (SELECT s.collection_id FROM nexus.catalog_collections s
+                                             WHERE s.tenant_id = c.tenant_id AND s.name = c.superseded_by),
+                                           c.collection_id) END
+                     WHERE c.tenant_id = NEW.tenant_id
+                       AND c.name = NEW.physical_collection
+                       AND c.content_type IN ('code', 'docs', 'rdr')
+                       AND c.owner_id IS DISTINCT FROM v_new
+                       -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                       -- transaction may have committed a repo owner since the SELECT above, and
+                       -- this predicate is re-evaluated against that new row version, so a curator
+                       -- (or slug) derivation cannot overwrite it.
+                       AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                END IF;
             END IF;
         END IF;
     END IF;
@@ -7621,40 +7658,70 @@ CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
     SECURITY INVOKER
 AS $fn$
 DECLARE
-    v_seg text;
-    v_cur text;
-    v_new text;
+    v_seg    text;
+    v_cur    text;
+    v_ct     text;
+    v_em     text;
+    v_mv     text;
+    v_ls     text;
+    v_sb     text;
+    v_new    text;
+    v_holder text;
 BEGIN
     IF NEW.deleted_at IS NULL
        AND NEW.physical_collection <> ''
        AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
         v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
-        SELECT c.owner_id INTO v_cur
+        SELECT c.owner_id, c.content_type, c.embedding_model, c.model_version, c.lifecycle_state, c.superseded_by
+          INTO v_cur, v_ct, v_em, v_mv, v_ls, v_sb
           FROM nexus.catalog_collections c
          WHERE c.tenant_id = NEW.tenant_id
            AND c.name = NEW.physical_collection
            AND c.content_type IN ('code', 'docs', 'rdr');
-        -- Cheap probes first: a settled repo collection (a tumbler-shaped, non-curator
-        -- owner) or one already owned by this very document's owner costs a primary-key
-        -- read and an owner-row read, never the aggregate over the collection's documents.
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped owner) or one already
+        -- owned by this very document's owner costs a primary-key read, never the aggregate over
+        -- the collection's documents.
         IF FOUND
            AND v_cur IS DISTINCT FROM v_seg
            AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
             v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
             IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
-                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
-                    NEW.physical_collection, v_cur, v_new;
-                UPDATE nexus.catalog_collections c
-                   SET owner_id = v_new
-                 WHERE c.tenant_id = NEW.tenant_id
-                   AND c.name = NEW.physical_collection
-                   AND c.content_type IN ('code', 'docs', 'rdr')
-                   AND c.owner_id IS DISTINCT FROM v_new
-                   -- Re-checked on the row being updated: under READ COMMITTED a concurrent
-                   -- transaction may have committed a repo owner since the SELECT above, and
-                   -- this predicate is re-evaluated against that new row version, so a curator
-                   -- (or slug) derivation cannot overwrite it.
-                   AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                -- catalog-051-2: an unsuperseded, non-quarantine row must not land on a tuple another such row holds; the
+                -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
+                IF v_ls <> 'quarantine' AND v_sb = '' THEN
+                    PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                        NEW.tenant_id, v_ct, v_new, v_em, v_mv));
+                END IF;
+                SELECT h.name INTO v_holder
+                  FROM nexus.catalog_collections h
+                 WHERE v_ls <> 'quarantine' AND v_sb = ''
+                   AND h.tenant_id = NEW.tenant_id
+                   AND h.content_type = v_ct
+                   AND h.owner_id = v_new
+                   AND h.embedding_model = v_em
+                   AND h.model_version = v_mv
+                   AND h.lifecycle_state <> 'quarantine' AND h.superseded_by = ''
+                   AND h.name <> NEW.physical_collection
+                 ORDER BY h.name
+                 LIMIT 1;
+                IF FOUND THEN
+                    RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                        NEW.physical_collection, v_cur, v_new, v_holder;
+                ELSE
+                    RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                        NEW.physical_collection, v_cur, v_new;
+                    UPDATE nexus.catalog_collections c
+                       SET owner_id = v_new
+                     WHERE c.tenant_id = NEW.tenant_id
+                       AND c.name = NEW.physical_collection
+                       AND c.content_type IN ('code', 'docs', 'rdr')
+                       AND c.owner_id IS DISTINCT FROM v_new
+                       -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                       -- transaction may have committed a repo owner since the SELECT above, and
+                       -- this predicate is re-evaluated against that new row version, so a curator
+                       -- (or slug) derivation cannot overwrite it.
+                       AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                END IF;
             END IF;
         END IF;
     END IF;
