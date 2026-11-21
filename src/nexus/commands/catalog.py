@@ -1426,8 +1426,10 @@ def _backfill_repos(
 
         owner = cat.owner_for_repo(path_hash)
         if owner is None:
+            from nexus.catalog.engine_writes.repo_owner_name import repo_owner_name  # noqa: PLC0415 — deferred import; rare/branch-local path
             owner = w.register_owner(
-                repo_name, "repo", repo_hash=path_hash,
+                # RDR-254 Gap 4: a second live clone with this folder name registers under its own name
+                repo_owner_name(cat, name=repo_name, repo_hash=path_hash, repo_root=repo_path), "repo", repo_hash=path_hash,
                 repo_root=str(repo_path),
                 description=f"Git repository: {repo_name}",
             )

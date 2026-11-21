@@ -290,7 +290,7 @@ STUB_METADATA_TIMED_OUT = object()
 STUB_METADATA_TIMEOUT_S = 28.0
 from nexus.catalog.engine_reads.by_scheme import read_docs_by_scheme
 from nexus.catalog.engine_reads import by_author as _by_author, by_meta as _by_meta, sensitive_locators as _locators, uri_segments as _uri_segments
-from nexus.catalog.engine_writes import move as _move
+from nexus.catalog.engine_writes import move as _move, repo_owner_name as _owner_name
 # engine_writes/floors.py owns the hand-kept CATALOG_*_MIN_ENGINE_VERSION constants: a copy re-exported here would
 # be a second place to edit by mistake, so only the error and the require_* function are re-exported.
 from nexus.catalog.engine_writes.floors import (  # noqa: F401 — re-exported: callers import them here
@@ -873,13 +873,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         from nexus.repo_identity import _repo_identity_with_main  # noqa: PLC0415 — circular-dep avoidance (nexus.repo_identity)
 
         derived_name, repo_hash, main_repo = _repo_identity_with_main(Path(repo))
-        # repo_name (canonical param) takes precedence, then name (benign extra), then derived
-        effective_name = repo_name or name or derived_name
-        # Idempotent fast path: an owner already exists for this repo
-        # (owner_for_repo returns None on 404).
+        effective_name = repo_name or name or derived_name  # repo_name (canonical) first, then name, then derived
+        # Idempotent fast path: an owner already exists for this repo (owner_for_repo returns None on 404).
         if owner_type == "repo" and repo_hash and (row := self._owner_row_for_repo(repo_hash)) and row.get("tumbler_prefix"):
             backfill_owner_root(self, row, repo_hash, main_repo)  # RDR-229: an owner registered without a root gets this call's
             return Tumbler.parse(row["tumbler_prefix"])
+        if owner_type == "repo" and not tumbler_prefix:  # RDR-254 Gap 4: a second live clone of this folder name gets its own owner
+            effective_name = _owner_name.repo_owner_name(self, name=effective_name, repo_hash=repo_hash, repo_root=main_repo)
         payload: dict = {
             "name": effective_name,
             "owner_type": owner_type,
