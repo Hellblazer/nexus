@@ -672,8 +672,17 @@ class TestEmbeddingModelGateOfAMintedLabel:
             pass
 
     def test_an_export_in_the_rows_model_passes_the_gate(self, ephemeral_db, tmp_path, monkeypatch) -> None:
-        self._run(ephemeral_db, tmp_path, monkeypatch,
-                  row_model="bge-base-en-v15-768", export_model="bge-base-en-v15-768")
+        class _PastTheGate(BaseException):  # not an Exception: _run's catch-all past the gate must not swallow it
+            pass
+
+        def _reached(*_a, **_k):
+            raise _PastTheGate()
+
+        # the first call after the model gate: reaching it proves the gate passed the export
+        monkeypatch.setattr("nexus.exporter._owners_apply", _reached)
+        with pytest.raises(_PastTheGate):
+            self._run(ephemeral_db, tmp_path, monkeypatch,
+                      row_model="bge-base-en-v15-768", export_model="bge-base-en-v15-768")
 
     def test_an_export_in_another_model_than_the_rows_is_refused_naming_the_rows_model(
         self, ephemeral_db, tmp_path, monkeypatch,
