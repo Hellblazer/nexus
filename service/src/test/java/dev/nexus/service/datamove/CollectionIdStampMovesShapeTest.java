@@ -142,6 +142,24 @@ class CollectionIdStampMovesShapeTest {
         assertThat(expected.get(expected.size() - 1)).as("the 38-hour chunks stamp starts last, so the small moves finish first").isEqualTo("chunks");
     }
 
+    /** The two halves of stage 3 agree on every label: the one the changesets register and the ones the completion check reads. */
+    @Test
+    void theLabelsTheChangesetsRegisterAreTheLabelsTheCompletionCheckReads_exceptTheQueuesWhichNoChangesetRegistersYet() throws Exception {
+        var registered = new java.util.TreeSet<String>();
+        for (var e : moves().entrySet()) {
+            registered.add(e.getValue().values().get("label"));
+        }
+        assertThat(registered).as("non-vacuity").hasSize(StampMoveSpecs.SPECS.size());
+        assertThat(StampMoveSpecs.LABEL_PREFIX).as("one prefix in both halves").isEqualTo(StampLabels.PREFIX);
+        assertThat(StampLabels.all()).as("every label a changeset registers is one the check reads").containsAll(registered);
+        var readButNeverRegistered = new java.util.TreeSet<>(StampLabels.all());
+        readButNeverRegistered.removeAll(registered);
+        assertThat(readButNeverRegistered)
+            .as("the only label the check reads and no changeset registers is the retired queue's: R3 has P3.1 register it while the table and its "
+                + "collection_id column exist (the check treats it as not applicable while they do not), and no changeset does yet")
+            .containsExactly(StampLabels.labelFor("aspect_extraction_queue"));
+    }
+
     @Test
     void eachMoveIsOneInsertInAChangesetOfItsOwn_withNoGuard_andItsOwnIdAsTheChangesetId() throws Exception {
         var moves = moves();

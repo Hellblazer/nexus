@@ -177,16 +177,11 @@ class Rdr229P31DownStepIntegrationTest {
     @Test
     void theIdColumnsAndTheIdentityColumnStay_theRegistryOfMovesIsNotTouched_andASecondRunChangesNothing() throws Exception {
         Table<?> moves = DSL.table(DSL.name("nexus", "data_moves"));
-        ctx.insertInto(moves)
-            .set(DSL.field(DSL.name("label"), String.class), "rdr229-stamp-topics").set(DSL.field(DSL.name("template"), String.class), "t")
-            .set(DSL.field(DSL.name("driving_schema"), String.class), "nexus").set(DSL.field(DSL.name("driving_table"), String.class), "topics")
-            .set(DSL.field(DSL.name("chunk_size"), Integer.class), 1000).set(DSL.field(DSL.name("sleep_ms"), Integer.class), 4000)
-            .set(DSL.field(DSL.name("statement_timeout_ms"), Integer.class), 60_000)
-            .set(DSL.field(DSL.name("verification"), String.class), "v").set(DSL.field(DSL.name("changeset_id"), String.class), "test")
-            .execute();
+        // the walk itself registered the stamp moves (vectors-070): the registry the down-step must leave alone
         List<String> before = ctx.select(DSL.field(DSL.name("xmin")).cast(org.jooq.impl.SQLDataType.VARCHAR),
                 DSL.field(DSL.name("label"), String.class)).from(moves).fetch(r -> r.value1() + ":" + r.value2());
-        assertThat(before).hasSize(1);
+        assertThat(before).as("non-vacuity: the walk registered the 15 stamp moves, and nothing else").hasSize(15)
+            .allSatisfy(row -> assertThat(row).contains(":rdr229-stamp-"));
 
         runDownStep();
         assertThatCode(this::runDownStep).as("a second run: IF EXISTS everywhere").doesNotThrowAnyException();
@@ -194,7 +189,7 @@ class Rdr229P31DownStepIntegrationTest {
         assertThat(ctx.select(DSL.field(DSL.name("xmin")).cast(org.jooq.impl.SQLDataType.VARCHAR),
                 DSL.field(DSL.name("label"), String.class)).from(moves).fetch(r -> r.value1() + ":" + r.value2()))
             .as("the registry of moves is untouched: within the window no stamp has completed, nothing has to re-attach")
-            .isEqualTo(before);
+            .containsExactlyInAnyOrderElementsOf(before);
         for (Row r : checks()) {
             if (r.table().equals(QUEUE)) continue;
             assertThat(PgCatalogProbes.columnExists(ctx, "nexus", r.table(), r.idColumn()))

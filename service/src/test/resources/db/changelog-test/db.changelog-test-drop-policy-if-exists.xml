@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.1 (nexus-p2m1x.17): DROP POLICY IF EXISTS ${policy} ON ${table}, so a test that creates D2's vectors-065 policy itself before develop is
+    merged in does not collide with it afterwards. Run through P31TestSql#ensureOwnerReadPolicy; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="drop-policy-if-exists" author="nexus-p2m1x.17" runAlways="true">
+        <sql>DROP POLICY IF EXISTS ${policy} ON ${table}</sql>
+    </changeSet>
+</databaseChangeLog>

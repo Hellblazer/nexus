@@ -258,7 +258,9 @@ public final class CompletionCheck {
         if (table == null || !checksByTable.containsKey(table)) {
             return new LabelState(label, table, Status.COMPLETE, "");
         }
-        // The move is done: its table's CHECKs must be there and validated, or a VALIDATE is waiting on rows.
+        // The move is done: its table's CHECKs must be there and validated, or a VALIDATE is waiting on rows. Every NOT VALID CHECK
+        // of the table is counted, not the first: on a table with two name columns the orphan may sit behind the second.
+        List<Violators> waiting = new ArrayList<>();
         for (P31Checks.Row check : checksByTable.get(table)) {
             Boolean validated = checkValidated.get(check.constraint());
             if (validated == null) {
@@ -268,14 +270,19 @@ public final class CompletionCheck {
                 return new LabelState(label, table, Status.INCOMPLETE, "CHECK " + check.constraint() + " is missing");
             }
             if (!validated) {
-                Violators v = counter.count(ctx, check);
-                violators.add(v);
-                return new LabelState(label, table, Status.INCOMPLETE, "CHECK " + check.constraint()
-                    + " is NOT VALID: " + (v.counted() ? v.orphans() + " orphan row(s), " + v.unstamped() + " unstamped"
-                        : "the violating rows could not be counted"));
+                waiting.add(counter.count(ctx, check));
             }
         }
-        return new LabelState(label, table, Status.COMPLETE, "");
+        if (waiting.isEmpty()) {
+            return new LabelState(label, table, Status.COMPLETE, "");
+        }
+        violators.addAll(waiting);
+        boolean counted = waiting.stream().allMatch(Violators::counted);
+        return new LabelState(label, table, Status.INCOMPLETE, "CHECK "
+            + waiting.stream().map(Violators::constraint).collect(java.util.stream.Collectors.joining(", "))
+            + " is NOT VALID: " + (counted ? waiting.stream().mapToLong(Violators::orphans).sum() + " orphan row(s), "
+                + waiting.stream().mapToLong(Violators::unstamped).sum() + " unstamped"
+                : "the violating rows could not be counted"));
     }
 
     /** A move row, as far as the check reads it. */

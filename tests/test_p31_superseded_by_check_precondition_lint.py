@@ -35,7 +35,9 @@ CONSTRAINT = "catalog_collections_superseded_by_id_check"
 # What the sqlCheck must name: the table, the two columns of the CHECK, and the column D2's UPDATE is blind to.
 _REQUIRED_IN_CHECK = ("catalog_collections", "superseded_by", "superseded_by_id", "model_version")
 
-_ADDS = re.compile(r"(?:add\s+constraint\s+|\bconstraint\s+)" + CONSTRAINT + r"\b")
+# A VALIDATE CONSTRAINT names the constraint without adding it (vectors-068-19 validates its own add, the stamp move's on_complete
+# validates it again): the text is normalised to single spaces, so a fixed-width lookbehind drops it.
+_ADDS = re.compile(r"(?:add\s+constraint\s+|(?<!validate )\bconstraint\s+)" + CONSTRAINT + r"\b")
 
 
 def _normalise(text: str) -> str:
@@ -190,6 +192,18 @@ def test_a_comment_a_rollback_or_a_drop_is_not_an_add() -> None:
         f'<changeSet id="d" author="t"><sql>ALTER TABLE nexus.catalog_collections DROP CONSTRAINT IF EXISTS {CONSTRAINT}</sql></changeSet>'
     )
     assert not adds_the_constraint(drop)
+
+
+def test_a_validate_of_the_constraint_is_not_an_add() -> None:
+    """The stamp move's on_complete (vectors-070-1) and the DO block of vectors-068-19 name it after VALIDATE CONSTRAINT."""
+    on_complete = _cs(
+        '<changeSet id="v" author="t"><sql>INSERT INTO nexus.data_moves (label, on_complete) VALUES (\'x\', \'DO $v$ BEGIN '
+        f"ALTER TABLE nexus.catalog_collections VALIDATE CONSTRAINT {CONSTRAINT}; END $v$')</sql></changeSet>"
+    )
+    assert not adds_the_constraint(on_complete)
+    both = _adder(body=_ADD + f"<sql>ALTER TABLE nexus.catalog_collections VALIDATE   CONSTRAINT {CONSTRAINT}</sql>")
+    assert adds_the_constraint(both), "the add is still found beside a validate"
+    assert precondition_problems(both) == []
 
 
 def test_a_new_file_that_adds_the_constraint_without_the_precondition_is_found(tmp_path: Path) -> None:

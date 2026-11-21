@@ -3122,7 +3122,10 @@ class RawSqlGateTest {
         // (a plain file name only)
         "deadlock-trigger-install",
         // nexus-7fku2.1.1: TS2's template copy, behind PgContainerHelper.cloneDatabase (both names through requireTestIdentifier)
-        "database-clone");
+        "database-clone",
+        // nexus-p2m1x.17 (RDR-229 P3.1): behind PgContainerHelper.dropPolicyIfExists and validateConstraintStandalone (requireTestIdentifier
+        // on the policy and the constraint, the table rendered from a jOOQ Table)
+        "drop-policy-if-exists", "validate-constraint");
 
     /**
      * The parameterised test changelogs that are NOT on the validated list, each with the reason it is allowed. Every

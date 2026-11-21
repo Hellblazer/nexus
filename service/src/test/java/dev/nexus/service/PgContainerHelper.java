@@ -1601,6 +1601,28 @@ public final class PgContainerHelper {
             Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
     }
 
+    /**
+     * {@code DROP POLICY IF EXISTS policy ON table} (RDR-229 P3.1): the idempotent form, for a test that gives a role D2's policy itself
+     * and must still pass once the product changelog creates it. Not {@code nexus_test.*}: it runs in databases that carry no such schema.
+     */
+    public static void dropPolicyIfExists(Connection conn, Table<?> table, String policy) throws Exception {
+        requireTestIdentifier(policy);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-drop-policy-if-exists.xml",
+            "databasechangelog_test_drop_policy_if_exists",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "policy", policy));
+    }
+
+    /**
+     * {@code ALTER TABLE table VALIDATE CONSTRAINT constraint} (RDR-229 P3.1) on a superuser connection, in a database without
+     * {@code nexus_test.validate_constraint} (the data-move and empty-database containers).
+     */
+    public static void validateConstraintStandalone(Connection conn, Table<?> table, String constraintName) throws Exception {
+        requireTestIdentifier(constraintName);
+        runSuperuserTestChangelog(conn, "db/changelog-test/db.changelog-test-validate-constraint.xml",
+            "databasechangelog_test_validate_constraint",
+            Map.of("table", renderTableParam(DSL.using(conn, SQLDialect.POSTGRES), table), "constraint", constraintName));
+    }
+
     /** The four row-level-security switches of {@code ALTER TABLE}, for {@link #setRowSecurity}. */
     public enum RowSecurityMode {
         ENABLE("ENABLE"), DISABLE("DISABLE"), FORCE("FORCE"), NO_FORCE("NO FORCE");

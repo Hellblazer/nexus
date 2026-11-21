@@ -5,7 +5,7 @@ package dev.nexus.service.datamove;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgCatalogProbes;
-import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.P31TestSql;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -58,7 +58,9 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
     private final List<String> tenantsUsed = new ArrayList<>();
 
     @BeforeAll
-    void captureRegistrations() {
+    void captureRegistrations() throws Exception {
+        // D2's vectors-065 owns the registry's owner-read policy and this tree does not carry it yet: the test gives the migrating role the same one
+        P31TestSql.ensureRegistryOwnerReadPolicy(su, ADMIN);
         movesAtBoot = ctx().fetchCount(table("nexus", "data_moves"));
         for (var spec : StampMoveSpecs.SPECS) {
             Record row = ctx().selectFrom(table("nexus", "data_moves")).where(LABEL.eq(spec.label())).fetchOne();
@@ -311,7 +313,7 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
         String firstName = StampMoveSpecs.checks().stream().filter(c -> c.table().equals(table) && c.kind().equals("NAME_ID")).findFirst().orElseThrow().nameColumn();
         assertThat(ctx().deleteFrom(table("nexus", table)).where(TENANT.eq(tenant)).and(DSL.field(DSL.name(firstName), String.class).eq(seeded.orphan())).execute()).isEqualTo(1);
         for (String constraint : StampMoveSpecs.constraintsByTable().get(table)) {
-            ctx().connection(c -> PgContainerHelper.validateConstraint(c, table("nexus", table), constraint));
+            P31TestSql.validate(su, table("nexus", table), constraint);
         }
         var done = CompletionCheck.evaluate(ctx(), readSet, CompletionCheck.Gate3Source.NOT_INSTALLED, CompletionCheck.DIRECT);
         assertThat(done.labels().get(0).status()).as("%s: the label completes once validated", table).isEqualTo(CompletionCheck.Status.COMPLETE);

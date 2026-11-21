@@ -148,7 +148,7 @@ class Rdr229P31SupersededByCheckWaitTest {
                 assertThat(tables).as("non-vacuity: the walk registered the stamp moves").isNotEmpty();
                 for (var def : PgCatalogProbes.constraintDefinitionsIn(ctx, List.of("nexus"))) {
                     if (def.definition().endsWith("NOT VALID") && tables.contains(def.table())) {
-                        PgContainerHelper.validateConstraint(su, DSL.table(DSL.name("nexus", def.table())), def.conname());
+                        P31TestSql.validate(su, DSL.table(DSL.name("nexus", def.table())), def.conname());
                     }
                 }
                 ctx.update(moves).set(DSL.field(DSL.name("completed_at"), java.time.OffsetDateTime.class), java.time.OffsetDateTime.now())
