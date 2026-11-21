@@ -20,8 +20,8 @@ public final class P31CheckReplay {
 
     public static final String CHANGELOG = "db/changelog/vectors-068-collection-id-expand.xml";
 
-    /** {@code catalog_collections.superseded_by_id}'s CHECK. */
-    public static final String COLLECTIONS_SUPERSEDED = "vectors-068-2";
+    /** {@code catalog_collections.superseded_by_id}'s CHECK (its own changeset, which waits on the 068-2 data precondition; vectors-068-2 is the column). */
+    public static final String COLLECTIONS_SUPERSEDED = "vectors-068-19";
     /** {@code catalog_document_chunks.collection_id}'s CHECK (the manifest). */
     public static final String MANIFEST = "vectors-068-5";
     /** {@code document_aspects.collection_id}'s CHECK. */

@@ -65,6 +65,10 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # that does nothing when the table is absent; skipped while the migration role does not own a kept table. The
     # body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
     ("vectors-068-collection-id-expand.xml", "vectors-068-18"): "aspect queue id column",
+    # A NOT VALID CHECK on nexus.catalog_collections (AEL on that one table), skipped while a tombstone with a blank
+    # model_version and no superseded_by_id exists, so D2's repair UPDATE cannot meet it (RDR-229 P3.1, item e). The
+    # precondition is a read of catalog_collections; the body names no chunk table, leaf or builder object.
+    ("vectors-068-collection-id-expand.xml", "vectors-068-19"): "superseded_by CHECK waits on D2 data",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
