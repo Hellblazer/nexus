@@ -2974,7 +2974,7 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "revive", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        registerSuccessorAt("code__revive__voyage-code-3__v2", "revive", "v2");
+        registerSuccessorAt("code__revive__voyage-code-3__v2", "revive-successor", "v1"); // another tuple: v1 stays the only live row of its own
         assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
             .isEqualTo(1);
         // NON-VACUITY: the row really is tombstoned before the re-registration.
