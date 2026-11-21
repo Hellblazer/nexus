@@ -11,6 +11,7 @@ import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -82,6 +83,17 @@ class CollectionRenameTupleTest {
             CollectionMintSupport.dropIndex(ctx);
             return null;
         });
+    }
+
+    /**
+     * The accepted duplicate pair of {@code renamingOneMemberOfAnAcceptedDuplicatePairKeepsThePairAtTwoLiveRows} stays two
+     * live rows of one tuple by design, and the schema (and its index) is shared by the whole class: left behind, the pair
+     * makes a later test's {@code create unique index} fail. Each test removes it.
+     */
+    @AfterEach
+    void removeTheDuplicatePair() {
+        su(ctx -> ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
+            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("rn-pair-owner")).execute());
     }
 
     private <T> T su(Function<DSLContext, T> work) {

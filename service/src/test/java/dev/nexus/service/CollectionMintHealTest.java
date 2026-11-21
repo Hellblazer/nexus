@@ -62,6 +62,8 @@ class CollectionMintHealTest {
     private static final String MODEL = "bge-base-en-v15-768";
     /** The most draws one heal makes (collections-002). */
     static final int BOUND = 100_000;
+    /** The rows tenant B inserts in the race test: few, because each heal call scans the whole table. */
+    static final int B_ROWS = 2_000;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -353,7 +355,10 @@ class CollectionMintHealTest {
                 try (Connection c = pg.createConnection("")) {
                     var ctx = DSL.using(c, SQLDialect.POSTGRES);
                     start.await();
-                    for (int k = 0; k < 20_000 && !healed.get(); k++) {
+                    // the heal reads max(collection_id) over every tenant's rows at each call (the installation-wide floor), so
+                    // each of its 100000 calls scans the table: B's rows are capped so that scan stays small (20000 rows made the
+                    // run take minutes); tenant A's draws overlap every heal on their own
+                    for (int k = 0; k < B_ROWS && !healed.get(); k++) {
                         assigned.add(CollectionMintSupport.insertWithDefaultId(ctx, other, "race-b-" + k, "race-owner-" + k, MODEL));
                     }
                 }
