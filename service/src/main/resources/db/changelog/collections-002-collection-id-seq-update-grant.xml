@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.8 (bead nexus-p2m1x.28): grant UPDATE on the collection_id sequence to nexus_svc.
+
+    The engine mints a collection's id from nexus.catalog_collections.collection_id's own sequence (nextval) and, when a
+    restore wrote explicit ids and left the sequence behind them, heals it ONCE with setval (CollectionMint, MintedLabel;
+    lead ruling T2 nexus_rdr/229-lead-ruling-collection-id-by-default-2026-11-21). setval needs UPDATE on the sequence,
+    which the grants-nexus-svc-1 sequence grants (USAGE, SELECT) deliberately do not include: without this grant the heal
+    fails with "permission denied for sequence" in production, where the engine runs as nexus_svc. This grants UPDATE on
+    exactly that one sequence, as taxonomy-005 does for the topics id sequence. Placed after collections-001 and before
+    the grants-nexus-svc.xml runAlways block; it needs the identity column of vectors-068-1.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="collections-002-collection-id-seq-update-grant" author="nexus-p2m1x.28">
+        <comment>GRANT UPDATE on the sequence behind nexus.catalog_collections.collection_id to nexus_svc so the mint can setval it past explicit ids once (RDR-229 P3.8). DATA EFFECT: none; a privilege on one sequence, no row read or written.</comment>
+        <sql splitStatements="false">
+DO $$
+DECLARE
+    seq text;
+BEGIN
+    seq := pg_get_serial_sequence('nexus.catalog_collections', 'collection_id');
+    IF seq IS NULL THEN
+        RAISE EXCEPTION 'collections-002: nexus.catalog_collections.collection_id has no owned sequence — schema drift';
+    END IF;
+    EXECUTE format('GRANT UPDATE ON SEQUENCE %s TO nexus_svc', seq);
+END
+$$;
+        </sql>
+        <rollback>
+            <!-- Revoke is a DBA operation; not automated (grants-nexus-svc precedent). -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
