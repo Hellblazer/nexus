@@ -375,6 +375,28 @@ name.
    `doc_id` and collection; otherwise T's row is deleted. S's row's
    `source_uri` becomes `file://P`.
 
+**A late aspect write.** An aspect extraction queued for T before the move can
+finish after it. Its upsert matches S's row at P by (tenant, collection,
+`source_path`) and used to set the row's `doc_id` back to T, so the old tumbler
+S found no aspect row (the GH #1571 minimum viable validation caught it). The
+engine's aspect upsert now reads the catalog row of the `doc_id` it was given
+`FOR SHARE`, in its own transaction, so it either waits for a move that is
+trashing T or starts after the move commits. When that row is trashed or is an
+alias row, the existing aspect row keeps its `doc_id`, and the write still
+updates the row's aspect fields: T and S are the same file at the same path.
+A first write, with no conflicting row, inserts as before, and the answer is
+still `written: true` with the row's id, so there is no wire change. The
+`import*` verbs do not use this rule, because they restore rows as exported.
+The attribution lives in `AspectDocIdAttribution`: fix 41a4edd0ae, regression
+test d26ac3fcc2, move into its own class 348cef2712. The fix covers trashed
+and alias documents, not only trashed ones: an alias row is a live
+`mergeDocuments` duplicate and is never an aspect row's identity. What it does
+not cover: a late write for a trashed T with no row to conflict with inserts a
+row under T, and aspect fields are last writer wins, with no `extracted_at`
+guard. Both are recorded residuals, not fixed here. The same rule applies when
+an owner fold trashes B's documents (Owner move, step 1). The lock order and
+its deadlock edge are in Risks.
+
 S keeps its own chunks. If the file changed in the move, S's stored content
 hash no longer matches the file, and the next index run at P re-chunks S the
 way it re-chunks any edited file. The move never moves a chunk.
@@ -389,6 +411,10 @@ way it re-chunks any edited file. The move never moves a chunk.
    which the next aspect extraction refreshes if the file changed; B's
    highlights row moves to S only when S has none, as in the document move.
    B's documents with no counterpart in A (files added after the move) are trashed, and the next index run registers them under A.
+   An aspect extraction for one of B's documents that finishes after the fold
+   meets a trashed document, and the late-write rule of the document move
+   applies, residuals included (it can insert a row under the trashed
+   document).
    Then B is deactivated and its repo hash cleared, since the hash index allows
    one owner per hash; this runs before step 2 writes H to A.
 2. Set A's `repo_root` to R and its `repo_hash` to H. A keeps its name. When A
@@ -682,6 +708,27 @@ from a deleted file, so the same probe is used only to print a hint.
   holding row locks on two owners' documents for seconds. An index run on
   either owner at the same time waits for it or fails on a conflict and is run
   again. The move is never resumable work: it commits whole or not at all.
+- The aspect upsert's catalog read (A late aspect write, in Technical Design)
+  takes its locks in the order catalog row, then `document_aspects`, which is
+  the move's order and the reverse of a collection rename's and a collection
+  delete's. An aspect upsert that is not fenced by a worker's claim, such as
+  `nx enrich aspects`, running while another process renames or deletes the
+  same collection can therefore deadlock, and PostgreSQL aborts one of the two.
+  Sam accepted that edge on 2026-11-21 with a retry follow-up (T2
+  `nexus/sam-ruling-rdr254-deadlock-and-leftovers-2026-11-21`), and the retry
+  is built: the aspect upsert, fenced and unfenced, runs its whole transaction
+  under `DeadlockRetry` (97a0676f57; tests 53e1f30709; javadoc corrected in
+  44813b9c12), as the rename and the delete already did through
+  `manifestWriteTxn`. `DeadlockRetry` makes at most four attempts with jittered
+  backoff and logs `event=deadlock_retry`; after the fourth the SQLSTATE 40P01
+  propagates and the caller gets a 500. A worker-fenced upsert usually takes
+  the claim's tuples row lock first, which serializes it with the rename's task
+  rewrite, but that is the usual case and not a guarantee, since the claim
+  check reads only the `doc_id`; the retry wrapped around the fenced path has
+  no test of its own. The retry adds one window beside the existing
+  one: the engine's `CollectionRegistry` is evicted only after a rename or
+  delete commits, so an upsert, retried or not, that checks the collection name
+  before the eviction can write under the retired name and leave an orphan row.
 - The root probe that splits a second clone cannot tell an unmounted volume
   from a deleted folder. A first clone on an unmounted disk reads as gone, so
   the second clone takes the owner over, as it does today, and the run prints
@@ -701,13 +748,27 @@ from a deleted file, so the same probe is used only to print a hint.
 ### Prerequisites
 
 - [x] Critical Assumptions verified or settled by decision.
-- [ ] An engine release carrying the two move routes. Cutting it is Sam's.
+- [x] An engine release carrying the two move routes: engine-service-v0.1.199
+  (deployed 2026-11-20). The aspect-queue race fix and the deadlock retry
+  below ride engine-service-v0.1.200.
 
 ### Minimum Viable Validation
 
 GH #1571 end to end against a real engine: index a PDF, link it, move the file,
 index it again, run the printed hint, and check one live document at the new
 path, with the old tumbler, the link, and no second search hit.
+
+Run as `tests/integration/test_rdr254_mvv_gh1571.py` (8c70440a7b), every step
+through the CLI against a local engine built from the gate jar, in two
+variants: the old document's aspect extraction drained before the move, and
+held in flight across it. Both end with one live document at the new path
+holding the old tumbler, the link kept and one search hit. The in-flight
+variant first failed on the aspect race (A late aspect write), pinned as a
+strict xfail until the engine fix, and fed4c979f8 turned it into a plain
+assertion that the old tumbler keeps its aspect row. Not measured: an owner
+fold on a real owner of about 7,000 rows, which the 15,000 to 20,000 row-write
+estimate under Size and locking still rests on. Record: T2
+`nexus_rdr/254-mvv`.
 
 ### Phase 1: Engine move routes
 
@@ -753,8 +814,13 @@ naming the version it needs; print the route's counts and absorbed tumblers.
 Add the two `HttpCatalogClient` writer methods to `CATALOG_WRITE_OPS`
 (`catalog_protocol.py:348`), or the closed write proxy raises
 `AttributeError`. The version the refusal names is a hand-kept
-`CATALOG_MOVE_MIN_ENGINE_VERSION` constant, `None` until the engine tag
-carrying the routes is cut, like `CATALOG_SENSITIVITY_MIN_ENGINE_VERSION`.
+`CATALOG_MOVE_MIN_ENGINE_VERSION` constant (in
+`nexus/catalog/engine_writes/floors.py`), like
+`CATALOG_SENSITIVITY_MIN_ENGINE_VERSION`. It was `None` while the routes were
+unreleased (6b8c16ed15, whose refusal said "not yet released") and is
+`(0, 1, 199)` since 1274c4ea5f, because engine-service-v0.1.199 carries both
+routes and the `catalog_move_supported` flag, so an older engine's refusal
+names 0.1.199.
 `tests/test_moved_curator_doc_identity_characterization.py`'s moved-PDF and
 409 cases become tests of the command: one live row at the new path, the old
 tumbler kept.
@@ -922,3 +988,4 @@ else.
 - 2026-11-19: Fix check of round 1 fixes FAILED (1 BLOCKS-PLANNING, curator hint repeat claim); fixed once; verdict `nexus_rdr/254-fix-check-3c757064d55d`.
 - 2026-11-19: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); blob `c2ff1151086d`; critique `nexus_rdr/254-gate-critique-2026-11-19-r2`.
 - 2026-11-20: Move hints wording matched to the reviewed Phase 3 code (grant 3; reviews `nexus_rdr/254-p3-review-r1`, `nexus/confirm-afba69e8d-none-2026-11-20-r3`): alias rows excluded, per-run bounds and the closing note, fail-open and `ClickException` printing, the engine's outside-root rule, the two-hash minimum, the census move line for healthy owners only, and the `nx catalog search` lookup.
+- 2026-11-21: Wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-aspect-race-fix-review`, `nexus/review-2dcd8ae85-none-2026-11-21`, `nexus/review-d26105450-rdr254-aspect-deadlock-retry-2026-11-21-r1`): the move floor is engine 0.1.199 (1274c4ea5f), the aspect-queue race fix covers trashed and alias documents (41a4edd0ae, d26ac3fcc2, 348cef2712), the deadlock edge it opens is accepted by Sam with a retry follow-up that is built as `DeadlockRetry` around the aspect upsert (97a0676f57, 53e1f30709, 44813b9c12), and the minimum viable validation ran (8c70440a7b, fed4c979f8). No decision or criterion changed.
