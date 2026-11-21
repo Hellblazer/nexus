@@ -3,33 +3,25 @@
 package dev.nexus.service.datamove;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgCatalogProbes;
-import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CollectionTupleLock;
 import dev.nexus.service.db.DrivingTableIsolationCheck;
-import org.jooq.DSLContext;
 import org.jooq.Field;
-import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
  * RDR-229 (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): the registered data move
@@ -60,115 +52,12 @@ import java.util.stream.Collectors;
  * the {@code skipped} CTE's use in the UPDATE and the occupied-destination test moves the legacy row onto its native twin's
  * tuple; drop the {@code reported} CTE and the verification blocks the move.
  */
-class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
-
-    private static final String LABEL = "rdr229-reown-repo-stems-from-curator";
-    private static final String REGISTER = "db/changelog/vectors-067-reown-repo-stems-register.xml";
-
-    private static final String T = "rdr229-reown-a";
-    private static final String U = "rdr229-reown-b";
-
-    private static final String ARC_CODE = "code__arcaneum-2ad2825c__voyage-code-3__v1";
-    private static final String ARC_DOCS = "docs__arcaneum-2ad2825c__voyage-context-3__v1";
-    private static final String WOW_DOCS = "docs__wow-addon-dev__voyage-context-3__v1";
-
-    private int runs;
-
-    @BeforeEach
-    void freshCatalog() throws Exception {
-        ctx().deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.like("rdr229-reown-%")).execute();
-        ctx().deleteFrom(CATALOG_OWNERS).where(CATALOG_OWNERS.TENANT_ID.like("rdr229-reown-%")).execute();
-        ctx().deleteFrom(table("nexus", "gc_audit")).where(DSL.field(DSL.name("tenant_id"), String.class).like("rdr229-reown-%"))
-            .execute();
-    }
+class Rdr229ReownRepoStemsMoveIntegrationTest extends Rdr229ReownFixtures {
 
     @Test
     void theRealOwnerReadPolicyIsApplied() {
         assertThat(PgCatalogProbes.policyExists(ctx(), "nexus", "catalog_collections", "catalog_collections_owner_read"))
             .as("vectors-065's owner-read policy is applied by the product schema").isTrue();
-    }
-
-    // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────────
-
-    /** Registers the move by the shipped changeset, as the migrating role, exactly as a boot does. */
-    private void register() throws Exception {
-        // The dml_utils runs (<label>/<tenant>) outlive the data_moves row: a later test with the same label and tenant
-        // would resume a run that already completed, execute no chunk, and fail verification on its fresh rows. Archive
-        // them, as a tenant removal does, so every test starts with no run.
-        for (String label : new String[] {LABEL, "again"}) {
-            for (String run : DataMoveRuns.activeRunLabels(ctx(), label)) {
-                DataMoveRuns.archive(ctx(), run);
-            }
-        }
-        ctx().deleteFrom(table("nexus", "data_moves")).execute();
-        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
-            PgContainerHelper.runSuperuserTestChangelog(c, REGISTER, "databasechangelog_test_reown_register_" + (++runs),
-                Map.of());
-        }
-        assertThat(ctx().fetchCount(table("nexus", "data_moves"),
-            DSL.field(DSL.name("label"), String.class).eq(LABEL))).as("registered by the shipped changeset").isEqualTo(1);
-    }
-
-    /** One worker cycle, then the move must be complete: verified, with {@code completed_at} set. */
-    private void runToCompletion() {
-        for (int i = 0; i < 3 && completedAt(LABEL) == null; i++) {
-            worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher()).runCycle();
-        }
-        assertThat(completedAt(LABEL)).as("the move ran, verified and completed on the worker").isNotNull();
-    }
-
-    private void owner(String tenant, String prefix, String name, String type, String repoHash) {
-        ctx().insertInto(CATALOG_OWNERS, CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
-                CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.NEXT_SEQ)
-            .values(tenant, prefix, name, type, repoHash, "", 0L).execute();
-    }
-
-    private void collection(String tenant, String name, String owner) {
-        collection(tenant, name, owner, "live", "");
-    }
-
-    private void collection(String tenant, String name, String owner, String lifecycle, String supersededBy) {
-        String contentType = name.substring(0, name.indexOf("__"));
-        ctx().insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
-            .values(tenant, name, contentType, owner,
-                contentType.contains("code") ? "voyage-code-3" : "voyage-context-3", "v1", lifecycle, supersededBy)
-            .execute();
-    }
-
-    /** A live collection whose stored model_version is {@code version} ({@code ""}: not yet written by D2's repair). */
-    private void collectionWithVersion(String tenant, String name, String owner, String lifecycle, String version) {
-        String contentType = name.substring(0, name.indexOf("__"));
-        ctx().insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
-            .values(tenant, name, contentType, owner,
-                contentType.contains("code") ? "voyage-code-3" : "voyage-context-3", version, lifecycle, "")
-            .execute();
-    }
-
-    private String ownerOf(String tenant, String name) {
-        return ctx().select(CATALOG_COLLECTIONS.OWNER_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-            .fetchOne(CATALOG_COLLECTIONS.OWNER_ID);
-    }
-
-    /** The tenant's owners as {@code prefix=name/type/hash}, for an exact comparison. */
-    private List<String> ownersOf(String tenant) {
-        return ctx().select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME, CATALOG_OWNERS.OWNER_TYPE,
-                CATALOG_OWNERS.REPO_HASH, CATALOG_OWNERS.REPO_ROOT)
-            .from(CATALOG_OWNERS).where(CATALOG_OWNERS.TENANT_ID.eq(tenant)).orderBy(CATALOG_OWNERS.TUMBLER_PREFIX)
-            .fetch().stream().map(r -> r.value1() + "=" + r.value2() + "/" + r.value3() + "/"
-                + (r.value4() == null ? "" : r.value4()) + "/" + r.value5()).collect(Collectors.toList());
-    }
-
-    /** The gate-xr789 shape: a curator 1.40 owns a repo's code and docs and an unrelated doc corpus; no repo owner. */
-    private void gateXr789(String tenant) {
-        owner(tenant, "1.40", "knowledge", "curator", null);
-        collection(tenant, ARC_CODE, "1-40");
-        collection(tenant, ARC_DOCS, "1-40");
-        collection(tenant, WOW_DOCS, "1-40");
     }
 
     // ── the stop-point: a CTE template, run by the worker to completion ─────────────────────────────────────
@@ -377,27 +266,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         assertThat(ownersOf(T)).as("no owner inserted").hasSize(3);
     }
 
-    // ── an occupied destination tuple: skipped, reported, the move completes ────────────────────────────────
-
-    /** A native code__1-17 collection of the repo, its restored legacy twin under the curator, and one sibling of each. */
-    private void restoredLegacyBesideNative(String tenant) {
-        owner(tenant, "1.40", "knowledge", "curator", null);
-        owner(tenant, "1.17", "arcaneum", "repo", "2ad2825c");
-        collection(tenant, "code__1-17__voyage-code-3__v1", "1-17");                  // native: holds (code, 1-17, voyage-code-3, v1)
-        collection(tenant, ARC_CODE, "1-40");                                          // legacy: would land on that tuple
-        collection(tenant, ARC_DOCS, "1-40");                                          // legacy docs: its destination is free
-        collection(tenant, "quarantine-" + ARC_CODE, "1-40", "quarantine", "");
-        collection(tenant, "quarantine-" + ARC_DOCS, "1-40", "quarantine", "");
-    }
-
-    private List<String> skipReports(String tenant) {
-        var op = DSL.field(DSL.name("operation"), String.class);
-        return ctx().select(DSL.field(DSL.name("collection"), String.class), DSL.field(DSL.name("details"), String.class))
-            .from(table("nexus", "gc_audit"))
-            .where(DSL.field(DSL.name("tenant_id"), String.class).eq(tenant)).and(op.eq("rdr229_reown_skipped"))
-            .orderBy(DSL.field(DSL.name("id"))).fetch().stream().map(r -> r.value1() + " " + r.value2()).toList();
-    }
-
     @Test
     void aRestoredLegacyRowBesideItsNativeTwin_isSkippedAndReportedOnce_theOthersMove_andNoTupleHoldsTwoLiveRows()
             throws Exception {
@@ -431,19 +299,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
                 CATALOG_COLLECTIONS.MODEL_VERSION)
             .having(DSL.count().gt(1)).fetch();
         assertThat(twins).as("P3.8's partial UNIQUE shape: at most one live row per tuple").isEmpty();
-    }
-
-    /** Two curator-owned stems of one repo hash and different slugs, neither with an owner yet: one free tuple, two claimants. */
-    private void twoStemsRegistered(int chunkSize) throws Exception {
-        owner(T, "1.40", "knowledge", "curator", null);
-        collection(T, "code__a-c0ffee11__voyage-code-3__v1", "1-40");
-        collection(T, "code__b-c0ffee11__voyage-code-3__v1", "1-40");
-        collection(T, "code__c-deadbeef__voyage-code-3__v1", "1-40");   // another hash after the pair: pins a gap-free numbering
-        collection(T, "quarantine-code__b-c0ffee11__voyage-code-3__v1", "1-40", "quarantine", "");
-        register();
-        ctx().update(table("nexus", "data_moves"))
-            .set(DSL.field(DSL.name("chunk_size"), Integer.class), chunkSize)
-            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).execute();
     }
 
     private void twoStemsOfOneHash(int chunkSize) throws Exception {
@@ -488,215 +343,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
             .isGreaterThanOrEqualTo(3);
     }
 
-    // ── parity with the operator's read-only dry count ──────────────────────────────────────────────────────
-
-    /** The dry-count query bob runs on the cloud: loaded from the classpath, never copied, so the tested file is the run file. */
-    private static final String COUNT_SQL_RESOURCE = "/datamove/rdr229-reown-count.sql";
-
-    private record Pred(String action, String name, String ownerId, String dest, String reason) { }
-
-    private static String countSql() throws Exception {
-        try (var in = Rdr229ReownRepoStemsMoveIntegrationTest.class.getResourceAsStream(COUNT_SQL_RESOURCE)) {
-            assertThat(in).as("the dry-count file is on the test classpath").isNotNull();
-            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-        }
-    }
-
-    /** The query for one tenant, in a READ ONLY transaction with SET LOCAL nexus.tenant: a write would raise 25006. */
-    private List<Pred> predict(String tenant) throws Exception {
-        List<Pred> out = new ArrayList<>();
-        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
-            c.setAutoCommit(false);
-            c.setReadOnly(true);
-            try {
-                DSLContext d = DSL.using(c, SQLDialect.POSTGRES);
-                // set_config(.., true) is SET LOCAL: scoped to this transaction
-                d.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("nexus.tenant"), DSL.val(tenant),
-                    DSL.inline(true))).fetch();
-                d.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("statement_timeout"), DSL.val("60s"),
-                    DSL.inline(true))).fetch();
-                // The shipped dry-count file, passed by name (the established shape for a published statement, as
-                // PgVectorRepository's MANIFEST_LESS_CENSUS_SQL and ChashRepository.PROBE_SQL are).
-                for (Record r : d.resultQuery(countSql()).fetch()) {
-                    out.add(new Pred(r.get(0, String.class), r.get(1, String.class), r.get(2, String.class),
-                        r.get(3, String.class), r.get(4, String.class)));
-                }
-            } finally {
-                c.rollback();
-            }
-        }
-        return out;
-    }
-
-    private Map<String, String> ownersOfAll(String tenant) {
-        Map<String, String> m = new TreeMap<>();
-        ctx().select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.OWNER_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).forEach(r -> m.put(r.value1(), r.value2()));
-        return m;
-    }
-
-    private Map<String, String> ownerPrefixesWithHash(String tenant) {
-        Map<String, String> m = new TreeMap<>();
-        ctx().select(CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.REPO_HASH).from(CATALOG_OWNERS)
-            .where(CATALOG_OWNERS.TENANT_ID.eq(tenant)).forEach(r -> m.put(r.value1(), r.value2() == null ? "" : r.value2()));
-        return m;
-    }
-
-    private Map<String, String> skipReasons(String tenant) {
-        Map<String, String> m = new TreeMap<>();
-        ctx().select(DSL.field(DSL.name("collection"), String.class), DSL.jsonbGetAttributeAsText(DSL.field(DSL.name("details"), SQLDataType.JSONB), "reason"))
-            .from(table("nexus", "gc_audit"))
-            .where(DSL.field(DSL.name("tenant_id"), String.class).eq(tenant))
-            .and(DSL.field(DSL.name("operation"), String.class).eq("rdr229_reown_skipped"))
-            .forEach(r -> m.put(r.value1(), r.value2()));
-        return m;
-    }
-
-    /**
-     * The dry count must predict exactly what the move does. Per tenant, before the move: run the query read-only (and see
-     * that the data is unchanged). Then run the move to completion and compare: (a) the reown and reown_quarantine_sibling
-     * names are the rows whose owner_id changed, each to the predicted owner; (b) the skip rows are the gc_audit reports,
-     * name and reason; (c) the distinct {@code new:} owners are the catalog_owners rows the move inserted, and the rows moved
-     * to a new owner hold its tumbler. {@code expected} is the aggregate "reown=N skip=N sibling=N new=N" (non-vacuity).
-     */
-    private void assertParity(String expected, String... tenants) throws Exception {
-        Map<String, List<Pred>> predicted = new LinkedHashMap<>();
-        Map<String, Map<String, String>> collsBefore = new LinkedHashMap<>();
-        Map<String, Map<String, String>> ownersBefore = new LinkedHashMap<>();
-        for (String t : tenants) {
-            collsBefore.put(t, ownersOfAll(t));
-            ownersBefore.put(t, ownerPrefixesWithHash(t));
-            predicted.put(t, predict(t));
-            assertThat(ownersOfAll(t)).as("(d) the dry count wrote nothing: collections, " + t).isEqualTo(collsBefore.get(t));
-            assertThat(ownerPrefixesWithHash(t)).as("(d) the dry count wrote nothing: owners, " + t).isEqualTo(ownersBefore.get(t));
-            assertThat(skipReasons(t)).as("(d) the dry count wrote nothing: gc_audit, " + t).isEmpty();
-        }
-
-        runToCompletion();
-
-        int reown = 0, skip = 0, sibling = 0, minted = 0;
-        for (String t : tenants) {
-            List<Pred> preds = predicted.get(t);
-            Map<String, String> before = collsBefore.get(t);
-            Map<String, String> after = ownersOfAll(t);
-            Map<String, String> ownersAfter = ownerPrefixesWithHash(t);
-
-            var changed = new TreeSet<String>();
-            before.forEach((name, owner) -> {
-                if (!owner.equals(after.get(name))) {
-                    changed.add(name);
-                }
-            });
-            var moves = preds.stream().filter(p -> !p.action().equals("skip")).toList();
-            TreeSet<String> movedNames = new TreeSet<>();
-            moves.forEach(p -> movedNames.add(p.name()));
-            assertThat(movedNames)
-                .as("(a) reown + reown_quarantine_sibling names are the rows whose owner_id changed, " + t).isEqualTo(changed);
-
-            var newHashes = new TreeSet<String>();
-            for (Pred p : moves) {
-                if (p.dest().startsWith("new:")) {
-                    String hash = p.dest().substring(4);
-                    newHashes.add(hash);
-                    String tumbler = ownersAfter.entrySet().stream().filter(e -> e.getValue().equals(hash))
-                        .map(Map.Entry::getKey).findFirst().orElse(null);
-                    assertThat(tumbler).as("(c) the move minted the owner for hash " + hash + ", " + t).isNotNull();
-                    assertThat(after.get(p.name())).as("(c) " + p.name() + " moved to the minted owner's tumbler")
-                        .isEqualTo(tumbler.replace('.', '-'));
-                } else {
-                    assertThat(after.get(p.name())).as("(a) " + p.name() + " moved to the predicted owner").isEqualTo(p.dest());
-                }
-            }
-            var inserted = new TreeSet<>(ownersAfter.keySet());
-            inserted.removeAll(ownersBefore.get(t).keySet());
-            assertThat(inserted).as("(c) the number of distinct new: owners is the number of owners the move inserted, " + t)
-                .hasSize(newHashes.size());
-            TreeSet<String> insertedHashes = new TreeSet<>();
-            inserted.forEach(prefix -> insertedHashes.add(ownersAfter.get(prefix)));
-            assertThat(insertedHashes).as("(c) the inserted owners carry the predicted hashes, " + t).isEqualTo(newHashes);
-
-            Map<String, String> predictedSkips = new TreeMap<>();
-            preds.stream().filter(p -> p.action().equals("skip")).forEach(p -> predictedSkips.put(p.name(), p.reason()));
-            assertThat(skipReasons(t)).as("(b) skip names and reasons are the gc_audit reports, " + t).isEqualTo(predictedSkips);
-
-            reown += (int) moves.stream().filter(p -> p.action().equals("reown")).count();
-            sibling += (int) moves.stream().filter(p -> p.action().equals("reown_quarantine_sibling")).count();
-            skip += predictedSkips.size();
-            minted += newHashes.size();
-        }
-        assertThat("reown=" + reown + " skip=" + skip + " sibling=" + sibling + " new=" + minted)
-            .as("non-vacuity: the shape's prediction").isEqualTo(expected);
-    }
-
-    @Test
-    void dryCountParity_gateXr789Shape() throws Exception {
-        gateXr789(T);
-        collection(T, "knowledge__distributed-systems__voyage-context-3__v1", "1-40");
-        collection(T, "quarantine-code__arcaneum-2ad2825c__voyage-code-3__v1", "1-40", "quarantine", "");
-        collection(T, "code__arcaneum-2ad2825c__voyage-code-3__v0", "1-40", "live", "code__arcaneum-2ad2825c__voyage-code-3__v1");
-        register();
-        assertParity("reown=2 skip=0 sibling=1 new=1", T);
-    }
-
-    @Test
-    void dryCountParity_restoredLegacyBesideItsNativeTwin() throws Exception {
-        restoredLegacyBesideNative(T);
-        register();
-        assertParity("reown=1 skip=1 sibling=1 new=0", T);
-    }
-
-    @Test
-    void dryCountParity_twoStemsOfOneHash_oneChunk() throws Exception {
-        twoStemsRegistered(1000);
-        assertParity("reown=2 skip=1 sibling=0 new=2", T);
-    }
-
-    @Test
-    void dryCountParity_twoStemsOfOneHash_chunkSizeOne() throws Exception {
-        twoStemsRegistered(1);
-        assertParity("reown=2 skip=1 sibling=0 new=2", T);
-    }
-
-    @Test
-    void dryCountParity_aDocsOnlyStemWhoseHashHasARepoOwner() throws Exception {
-        owner(T, "1.40", "knowledge", "curator", null);
-        owner(T, "1.7", "arcaneum-checkout", "repo", "2ad2825c");
-        owner(T, "1.9", "some-repo", "repo", "11112222");
-        collection(T, ARC_DOCS, "1-40");
-        collection(T, "rdr__arcaneum-2ad2825c__voyage-context-3__v1", "1-9");
-        collection(T, "docs__notes-0badc0de__voyage-context-3__v1", "1-40");
-        register();
-        assertParity("reown=1 skip=0 sibling=0 new=0", T);
-    }
-
-    @Test
-    void dryCountParity_aStemWhoseRowsFallInDifferentChunks() throws Exception {
-        gateXr789(T);
-        collection(T, "rdr__arcaneum-2ad2825c__voyage-context-3__v1", "1-40");
-        register();
-        ctx().update(table("nexus", "data_moves"))
-            .set(DSL.field(DSL.name("chunk_size"), Integer.class), 1)
-            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).execute();
-        assertParity("reown=3 skip=0 sibling=0 new=1", T);
-    }
-
-    @Test
-    void dryCountParity_aFreshInstallWithNoRows() throws Exception {
-        register();
-        assertParity("reown=0 skip=0 sibling=0 new=0", T);
-    }
-
-    @Test
-    void dryCountParity_aTenantPair() throws Exception {
-        gateXr789(T);
-        owner(U, "1.3", "knowledge", "curator", null);
-        owner(U, "1.4", "older-repo", "repo", "cafe0001");
-        collection(U, ARC_CODE, "1-3");
-        collection(U, ARC_DOCS, "1-3");
-        register();
-        assertParity("reown=4 skip=0 sibling=0 new=2", T, U);
-    }
-
     /** Only the occupied legacy row: a move that does nothing leaves it curator-owned, so the verification alone decides. */
     private void occupiedLegacyOnlyWithAMoveThatDoesNothing(String tenant) throws Exception {
         owner(tenant, "1.40", "knowledge", "curator", null);
@@ -733,16 +379,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-40");
     }
 
-    // ── S1: the version in a tuple is the one D2 will write ─────────────────────────────────────────────────
-
-    /** A native v1 collection of the repo, and its legacy twin under the curator whose model_version D2 has not yet written. */
-    private void blankVersionLegacyBesideNative(String tenant) {
-        owner(tenant, "1.40", "knowledge", "curator", null);
-        owner(tenant, "1.17", "arcaneum", "repo", "2ad2825c");
-        collection(tenant, "code__1-17__voyage-code-3__v1", "1-17");
-        collectionWithVersion(tenant, ARC_CODE, "1-40", "live", "");
-    }
-
     @Test
     void aBlankVersionLegacyRowBesideItsV1Twin_isSkippedAsHeld_whenTheMoveRunsBeforeD2() throws Exception {
         blankVersionLegacyBesideNative(T);
@@ -757,13 +393,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         assertThat(ctx().select(CATALOG_COLLECTIONS.MODEL_VERSION).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(ARC_CODE))
             .fetchOne(CATALOG_COLLECTIONS.MODEL_VERSION)).as("non-vacuity: D2 has not run, the stored version is blank").isEmpty();
-    }
-
-    @Test
-    void dryCountParity_aBlankVersionRowBesideItsV1Twin() throws Exception {
-        blankVersionLegacyBesideNative(T);
-        register();
-        assertParity("reown=0 skip=1 sibling=0 new=0", T);
     }
 
     // ── S3: one definition of held: unsuperseded and not in quarantine ──────────────────────────────────────
@@ -807,16 +436,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
         assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-41");
         assertThat(ownerOf(T, ARC_DOCS)).as("a dormant row counts toward its tuple, so it moves with its repo").isEqualTo("1-41");
-    }
-
-    @Test
-    void dryCountParity_aDormantHolder() throws Exception {
-        owner(T, "1.40", "knowledge", "curator", null);
-        owner(T, "1.17", "arcaneum", "repo", "2ad2825c");
-        collection(T, "code__1-17__voyage-code-3__v1", "1-17", "dormant", "");
-        collection(T, ARC_CODE, "1-40");
-        register();
-        assertParity("reown=0 skip=1 sibling=0 new=0", T);
     }
 
     // ── S4: the tables the verification reads carry owner-read policies ─────────────────────────────────────

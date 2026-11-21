@@ -410,11 +410,9 @@ for _site in LEDGER:
 #:     ``http_taxonomy_store.py``, each a caller of ``default_projection_threshold``) read the catalog row now, and
 #:     the one NoRow name derivation they share is a single mint-class entry in ``projection_threshold.py``.
 #:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
-#:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
-#:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
-#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2.
-#:     Written as +3 (the parse still in ``nxexp_owner.py``, one a ``split``) until owner_stem moved into the floor; measured
-#:     217 on the integrated tree after the move.
+#:   owner-is-source (marlowe), +2: the two callers of ``legacy_names.owner_stem`` in ``nxexp_owner.py`` (a recovery
+#:     bundle's collection name, MIG_BUNDLE_STEM; the parse itself is in the floor): migration-source 20 -> 22,
+#:     primitive_call 181 -> 183, split 2; measured 217 on the integrated tree.
 PARSE_SITE_PIN: int = 217
 CLASS_PIN: dict[str, int] = {
     "mint": 135, "diagnostic": 43, "migration-source": 22,
