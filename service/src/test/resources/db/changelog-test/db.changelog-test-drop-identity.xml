@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.5a (nexus-p2m1x.23), nexus-zrcj7 (no SQL strings in Java, tests included): ALTER TABLE ${table} ALTER COLUMN ${column}
+    DROP IDENTITY. jOOQ 3.20.11 has no DROP IDENTITY (3.21 does). Run through PgContainerHelper#dropIdentity, which renders ${table}
+    from a jOOQ Table and validates ${column}; runAlways, bookkeeping in its own table.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="drop-identity" author="nexus-p2m1x.23" runAlways="true">
+        <sql>ALTER TABLE ${table} ALTER COLUMN ${column} DROP IDENTITY</sql>
+    </changeSet>
+</databaseChangeLog>

@@ -235,8 +235,9 @@ class CollectionSupersedeIdTest {
             .as("%s: catalog_collections rows that break the superseded_by invariant", when).isZero();
     }
 
+    /** An owner of its own per name: two live collections on one tuple are refused by a named upsert and an import (RDR-229 P3.8). */
     private Map<String, Object> reg(String name) {
-        return Map.of("name", name, "content_type", "knowledge", "owner_id", "ss", "embedding_model", "minilm-l6-v2-384",
+        return Map.of("name", name, "content_type", "knowledge", "owner_id", "ss-" + name, "embedding_model", "minilm-l6-v2-384",
             "model_version", "v1");
     }
 

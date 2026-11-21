@@ -10200,16 +10200,6 @@ public final class CatalogRepository {
         });
     }
 
-    /** {@link #listCollections(String, String, String)}'s rows, each also carrying {@code collection_id}. */
-    public List<Map<String, Object>> listCollectionsWithIds(String tenant, String contentType, String lifecycleState) {
-        Map<String, Long> ids = tenantScope.withTenant(tenant, ctx -> CollectionMint.idsByName(ctx, tenant));
-        return listCollections(tenant, contentType, lifecycleState).stream().map(m -> {
-            Map<String, Object> row = new LinkedHashMap<>(m);
-            row.put("collection_id", ids.get((String) m.get("name")));
-            return row;
-        }).toList();
-    }
-
     /**
      * Atomically delete a collection and ALL its derived in-Postgres state in ONE
      * tenant-scoped transaction (RDR-164 P2). Replaces the SQLite-era client-side
