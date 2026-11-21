@@ -43,7 +43,6 @@ class CollectionLabelRuleRouteTest {
     private static final String TENANT = TenantConstants.DEFAULT_TENANT;
     private static final String MODEL = "voyage-context-3";
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
-    private static final TypeReference<List<Map<String, Object>>> LIST_T = new TypeReference<>() {};
 
     /** The label of the Windows test: a space, '%', ':' and a non-ASCII character. */
     private static final String WINDOWS_LABEL = "notes 50%: café";
@@ -123,7 +122,9 @@ class CollectionLabelRuleRouteTest {
     private List<String> listedNames() throws Exception {
         var resp = get("/v1/catalog/collections/list");
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
-        return mapper.readValue(resp.body(), LIST_T).stream().map(r -> (String) r.get("name")).toList();
+        @SuppressWarnings("unchecked")
+        var rows = (List<Map<String, Object>>) mapper.readValue(resp.body(), MAP_T).get("collections");
+        return rows.stream().map(r -> (String) r.get("name")).toList();
     }
 
     private boolean isRegistered(String label) throws Exception {
@@ -183,6 +184,25 @@ class CollectionLabelRuleRouteTest {
         // its label, so a row the engine minted (P3.8) is never locked out of its own re-registration.
         assertThat(register("idempotent label").statusCode()).isEqualTo(200);
         assertThat(register("idempotent label").statusCode()).isEqualTo(200);
+    }
+
+    @Test
+    void anExistingMintedFormRowStillReRegisters_theRuleGatesTheCreationOfALabel() throws Exception {
+        // A row of the minted form the engine wrote itself (P3.8 will; seeded here), then the client's idempotent
+        // re-registration of it: 200, not the 400 a NEW c7 gets.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "c7");
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("name", "c7");
+        body.put("content_type", "unknown");
+        body.put("owner_id", TENANT);
+        body.put("embedding_model", "bge-base-en-v15-768");
+        body.put("model_version", "v1");
+        var resp = post("/v1/catalog/collections/upsert", body);
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        // while a NEW minted-form label is refused
+        assertThat(register("c8").statusCode()).isEqualTo(400);
     }
 
     // ── rename ──────────────────────────────────────────────────────────────────────────────────────────────
