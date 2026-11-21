@@ -6,7 +6,6 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.P31CheckReplay;
-import dev.nexus.service.P31TestSql;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.CollectionTombstones;
@@ -50,8 +49,6 @@ class CollectionIdTombstoneStampMoveIntegrationTest extends DataMoveIntegrationB
 
     @BeforeAll
     void captureRegistration() throws Exception {
-        // D2's vectors-065 owns the registry's owner-read policy and this tree does not carry it yet: the test gives the migrating role the same one
-        P31TestSql.ensureRegistryOwnerReadPolicy(su, ADMIN);
         Record row = ctx().selectFrom(table("nexus", "data_moves")).where(LABEL.eq(LABEL_TEXT)).fetchOne();
         registered = row == null ? null : new LinkedHashMap<>(row.intoMap());
     }

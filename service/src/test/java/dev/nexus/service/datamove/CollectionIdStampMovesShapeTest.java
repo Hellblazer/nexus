@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -285,6 +286,9 @@ class CollectionIdStampMovesShapeTest {
 
     // ── the policy the worker needs to read the driving table ───────────────────────────────────────────────
 
+    /** The driving tables whose owner-read policy is another changeset's (P2.10's catalog-050-1 to -3), so this file creates none. */
+    private static final Set<String> OWNED_ELSEWHERE = Set.of("catalog_documents", "document_aspects", "document_highlights");
+
     @Test
     void everyDrivingTableButChunksAndTheRegistryHasAnOwnerReadPolicyChangesetThatFollowsThePattern_afterItsMoveIsRegistered() throws Exception {
         List<Element> all = shippedChangesets();
@@ -295,6 +299,7 @@ class CollectionIdStampMovesShapeTest {
         for (var spec : StampMoveSpecs.SPECS) {
             if (spec.table().equals("chunks")) continue;   // vectors-029's chunks_gate_probe_owner_read, mirrored on the leaves
             if (spec.table().equals("catalog_collections")) continue;   // D2's vectors-065 owns catalog_collections_owner_read (linda 2026-11-21): see the last assertion
+            if (OWNED_ELSEWHERE.contains(spec.table())) continue;   // P2.10's catalog-050-1 to -3 own these three (linda 2026-11-21): see the last assertion
             String policy = spec.table() + "_owner_read";
             Element cs = all.stream().filter(e -> forwardSql(e).contains("POLICY " + policy + " ON nexus." + spec.table())).findFirst().orElse(null);
             assertThat(cs).as("%s: the migrating role needs a policy to read every tenant's rows", spec.table()).isNotNull();
@@ -310,10 +315,12 @@ class CollectionIdStampMovesShapeTest {
             assertThat(sql).as("%s: a post-condition RAISEs unless the policy names exactly the migrating role", spec.table()).contains("RAISE EXCEPTION");
             assertThat(ROW_DML.matcher(withoutLiterals(sql)).results().count()).as("%s: no row DML", spec.table()).isZero();
         }
-        assertThat(policies).as("non-vacuity: 13 policies, all but chunks' and the registry's").isEqualTo(StampMoveSpecs.SPECS.size() - 2);
-        assertThat(all.stream().filter(e -> forwardSql(e).contains("catalog_collections_owner_read")).map(e -> e.getAttribute("id")).toList())
-            .as("two changesets owning one policy break each other's rollback: this file creates none on the registry, vectors-065 owns it")
-            .isEmpty();
+        assertThat(policies).as("non-vacuity: 10 policies, all but chunks', the registry's and the three catalog-050 owns").isEqualTo(StampMoveSpecs.SPECS.size() - 2 - OWNED_ELSEWHERE.size());
+        for (String owned : List.of("catalog_collections", "catalog_documents", "document_aspects", "document_highlights")) {
+            assertThat(all.stream().filter(e -> forwardSql(e).contains(owned + "_owner_read")).map(e -> e.getAttribute("id")).toList())
+                .as("two changesets owning one policy break each other's rollback: this file creates none on %s, whose owner-read policy is vectors-065's or catalog-050's", owned)
+                .isEmpty();
+        }
     }
 
     private static Element patternChangeset() throws Exception {

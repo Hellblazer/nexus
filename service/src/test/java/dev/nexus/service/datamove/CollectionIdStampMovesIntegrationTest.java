@@ -59,8 +59,6 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
 
     @BeforeAll
     void captureRegistrations() throws Exception {
-        // D2's vectors-065 owns the registry's owner-read policy and this tree does not carry it yet: the test gives the migrating role the same one
-        P31TestSql.ensureRegistryOwnerReadPolicy(su, ADMIN);
         movesAtBoot = ctx().fetchCount(table("nexus", "data_moves"));
         for (var spec : StampMoveSpecs.SPECS) {
             Record row = ctx().selectFrom(table("nexus", "data_moves")).where(LABEL.eq(spec.label())).fetchOne();
@@ -168,7 +166,15 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
 
     @Test
     void theWalkRegistersExactlyOneOpenMovePerCheckGuardedTable_inTheOrderTheWorkerTakesThem() {
-        assertThat(movesAtBoot).as("the walk registers the stamp moves and no other").isEqualTo(StampMoveSpecs.SPECS.size());
+        // the other moves the product changelog registers at boot (RDR-229 D2's repair, the re-own, P2.10's residue move) are read from the master, not counted here
+        var shipped = ShippedMoveRegistrations.labels();
+        var otherShipped = shipped.stream().filter(l -> !l.startsWith(StampMoveSpecs.LABEL_PREFIX)).toList();
+        assertThat(otherShipped).as("non-vacuity: develop's registered moves are in the walk").isNotEmpty();
+        assertThat(shipped.stream().filter(l -> l.startsWith(StampMoveSpecs.LABEL_PREFIX)).toList())
+            .as("the stamp moves the changelog registers are the table list's, no more").containsExactlyInAnyOrderElementsOf(
+                StampMoveSpecs.SPECS.stream().map(StampMoveSpecs.Spec::label).toList());
+        assertThat(movesAtBoot).as("the walk registers the stamp moves and the other shipped moves, no more")
+            .isEqualTo(StampMoveSpecs.SPECS.size() + otherShipped.size());
         var oldestFirst = registered.values().stream()
             .sorted(java.util.Comparator.comparing((Map<String, Object> r) -> (java.time.OffsetDateTime) r.get("registered_at"))
                 .thenComparing(r -> r.get("label").toString()))

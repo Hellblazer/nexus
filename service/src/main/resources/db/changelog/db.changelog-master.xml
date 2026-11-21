@@ -2379,9 +2379,9 @@
         Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 3, the stamp moves): one registered data move per table that carries a NOT VALID collection_id CHECK
         (rdr229-stamp-<table>, with P3.2's chunk_size, sleep_ms and statement_timeout_ms), each filling the NULL id from nexus.catalog_collections by
         (tenant_id, name) after the engine serves and validating the table's CHECKs as its on_complete, plus the owner-read policy the worker needs on each
-        driving table that has none (13; catalog_collections' is vectors-065's). One INSERT per move and DDL only; no row of a user-data table is read or written at boot. DATA EFFECT: fifteen rows
+        driving table that has none and no other changeset's (10; catalog_collections' is vectors-065's, and catalog_documents', document_aspects' and document_highlights' are catalog-050's). One INSERT per move and DDL only; no row of a user-data table is read or written at boot. DATA EFFECT: fifteen rows
         added to nexus.data_moves. The number follows vectors-069 and is provisional until the final rebase. After vectors-069, before the
-        grants-nexus-svc.xml runAlways block. ORDER: the registry's own policy is D2's vectors-065 (this file creates none), and the registry stamp move reads the registry
+        grants-nexus-svc.xml runAlways block. ORDER: the registry's own policy is D2's vectors-065 and the three above it are catalog-050's (this file creates none of the four), and the registry stamp move reads the registry
         through it, so this include must come AFTER vectors-065 (the include above).
     -->
     <include file="db/changelog/vectors-070-collection-id-stamp-moves.xml"/>

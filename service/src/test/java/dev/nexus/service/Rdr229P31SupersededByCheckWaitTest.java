@@ -21,7 +21,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.util.List;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -32,9 +31,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Expand CHECK go ahead, because the dual write sets {@code superseded_by_id} whether or not the CHECK exists.
  *
  * <p>The precondition reads the registry through the migrating role's owner-read policy ({@code
- * catalog_collections_owner_read}, vectors-065 on D2's branch, not in this tree yet): the registry is FORCE row-secured, so
- * without it the migrating role counts no row. The test creates the same policy before the walk, as the final tree will have
- * it. The structural half (every changeset that adds the constraint carries the precondition) is
+ * catalog_collections_owner_read}, D2's vectors-065, which the walk to {@code vectors-068-1} applies): the registry is FORCE
+ * row-secured, so without it the migrating role counts no row. The structural half (every changeset that adds the constraint carries the precondition) is
  * {@code tests/test_p31_superseded_by_check_precondition_lint.py}.
  */
 class Rdr229P31SupersededByCheckWaitTest {
@@ -212,7 +210,7 @@ class Rdr229P31SupersededByCheckWaitTest {
     }
 
     /**
-     * Walks to just before the expand, adds the owner-read policy vectors-065 will add, and seeds one live row and one
+     * Walks to just before the expand (vectors-065's owner-read policy is in by then) and seeds one live row and one
      * tombstone with the given model_version, as a store from before 0.1.200 would hold them.
      */
     private static void seedBeforeWalk(PostgreSQLContainer<?> pg, HikariDataSource ds, String tombstone, String modelVersion)
@@ -220,8 +218,6 @@ class Rdr229P31SupersededByCheckWaitTest {
         migrateUpTo(ds, FIRST);
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.createPolicyUsingTrue(su, CATALOG_COLLECTIONS, "catalog_collections_owner_read",
-                PgContainerHelper.PolicyKind.PERMISSIVE, "SELECT", ADMIN_ROLE);
             PgContainerHelper.insertCollection(ctx, TENANT, "live-one");
             PgContainerHelper.insertCollection(ctx, TENANT, tombstone);
             var name = DSL.field(DSL.name("name"), String.class);
