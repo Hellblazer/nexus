@@ -18,8 +18,8 @@ import java.util.function.Predicate;
  * no route accepts a client-supplied {@code collection_id}) and
  * {@code labelTaken} as "a live row of this tenant already has this label". When the label of the drawn id is taken
  * (a pre-existing label of the minted form; P3.6 refuses new ones), the next id is drawn and tried, so
- * {@code label == "c" + collectionId} holds for every minted row and a skipped id is never used (design-gate
- * proposal, T2 {@code nexus_rdr/229-p3.8-design-gate-proposal-2026-11-21}, pending Sam).
+ * {@code label == "c" + collectionId} holds for every minted row and a skipped id is never used (design gate,
+ * accepted by Sam 2026-11-21, T2 {@code nexus/sam-ruling-rdr229-p38-design-gate-2026-11-21}).
  *
  * <p>The label is {@link CollectionLabel#mintedLabel} (P3.6, elsinore), the same class that holds the minted-form
  * predicate the label rule refuses a user label by, so the two cannot drift.
