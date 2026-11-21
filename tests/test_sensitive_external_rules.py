@@ -557,3 +557,24 @@ def test_the_sensitivity_doctor_reports_a_minted_label_with_no_readable_row_as_e
 
     monkeypatch.setattr(sw, "_registry_row", lambda name: None)
     assert sensitivity_doctor._external_embedder("c19") is not None
+
+
+def test_a_found_bge_sibling_is_noted_registered_so_the_later_gate_reads_it_as_local(
+    rows, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-229 P3.8: a registered bge sibling with no chunk yet is not in the listing, so the write path's later
+    ``is_external_embedder(label)`` checks would read it as unknown (external) and refuse. ``bge_sibling`` notes the
+    found label with its bge row (``collection_mint.note_registered``), which answers those reads."""
+    from nexus import collection_mint
+    from nexus.catalog.collection_name import CollectionAttributes
+
+    rows["c416"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    noted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(collection_mint, "note_registered", lambda label, row: noted.append((label, row)))
+    monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", lambda ct, owner, model: CollectionAttributes(
+        collection_id=417, label="c417", content_type=ct, owner_id=owner, embedding_model=model,
+        model_version=1, dimension=None, lifecycle_state="live"))
+
+    assert sw.bge_sibling("c416") == "c417"
+    assert [(label, row.get("embedding_model"), row.get("owner_id")) for label, row in noted] == [
+        ("c417", BGE, "rfvyy-ext")]
