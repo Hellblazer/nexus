@@ -2,8 +2,10 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.jooq.nexus.tables.records.CatalogCollectionsRecord;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.InsertSetMoreStep;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -40,7 +42,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *     (changeset {@code collections-001-2}) the insert is {@code ON CONFLICT (...) WHERE ... DO NOTHING}, and a
  *     lost race is a re-read of the winner's row: two concurrent first mints make one row with no lock. Before that
  *     changeset has applied, {@code ON CONFLICT} on that index would raise 42P10 (no matching unique index), so the
- *     mint takes a per-tuple {@code pg_advisory_xact_lock}, re-reads, and inserts plainly.</li>
+ *     mint takes a per-tuple {@code pg_advisory_xact_lock}, re-reads, and inserts plainly. The same fallback answers a
+ *     42P10 from an index of that name the {@code ON CONFLICT} target cannot be inferred onto (another predicate), and a
+ *     plain insert that meets the tuple index's own unique violation (the index built after the probe: a second engine's
+ *     boot, an operator) is a lost race: the re-read answers the winner's row, or a named, retryable 409 when no live row
+ *     of the tuple is visible. Each insert runs under a savepoint so the transaction survives either error.</li>
  * </ol>
  * The mint never parses a name ({@code CollectionParseGateTest}): the label is {@code "c" + id}.
  *
@@ -160,27 +166,64 @@ public final class CollectionMint {
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))),
             colliding -> healSequence(ctx, tenant, colliding));
 
-        var insert = ctx.insertInto(CATALOG_COLLECTIONS,
-                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID,
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
-                CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.CREATED_AT,
-                CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
-            .values(tenant, choice.label(), choice.collectionId(), contentType, owner, model.model(), version,
-                nne(CatalogRepository.s(coll, "display_name")), false, "",
-                java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC),
-                model.dimension(), state);
+        // built afresh for each attempt: a jOOQ insert is mutable, and the ON CONFLICT arm must not leak into the plain one
+        final String rowState = state;
+        final String displayName = nne(CatalogRepository.s(coll, "display_name"));
+        Supplier<InsertSetMoreStep<CatalogCollectionsRecord>> insert = () -> ctx.insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant)
+            .set(CATALOG_COLLECTIONS.NAME, choice.label())
+            .set(CATALOG_COLLECTIONS.COLLECTION_ID, choice.collectionId())
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType)
+            .set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model.model())
+            .set(CATALOG_COLLECTIONS.MODEL_VERSION, version)
+            .set(CATALOG_COLLECTIONS.DISPLAY_NAME, displayName)
+            .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, false)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+            .set(CATALOG_COLLECTIONS.CREATED_AT, java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC))
+            .set(CATALOG_COLLECTIONS.DIMENSION, model.dimension())
+            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, rowState);
         int inserted;
         try {
-            inserted = indexed
-                ? insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-                    // inlined, not bound: the inference predicate must be provably the index's own, and a bind parameter is
-                    // not a constant at parse time (42P10)
-                    .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline(""))
-                        .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
-                    .doNothing().execute()
-                : insert.execute();
+            Integer done = null;
+            if (indexed) {
+                try {
+                    done = inSavepoint(ctx, () -> insert.get().onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
+                            CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                        // inlined, not bound: the inference predicate must be provably the index's own, and a bind parameter
+                        // is not a constant at parse time (42P10)
+                        .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline(""))
+                            .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
+                        .doNothing().execute());
+                } catch (DataAccessException e) {
+                    if (!NO_MATCHING_INDEX.equals(sqlStateOf(e))) {
+                        throw e;
+                    }
+                    // an index of the live tuple's name that the ON CONFLICT target cannot be inferred onto (another predicate:
+                    // an operator's, an older build's): the same path as an absent index
+                    log.warn("event=collection_tuple_index_not_inferable index={}", CollectionTupleIndexProbe.INDEX);
+                    lockTuple(ctx, tenant, contentType, owner, requestedModel, version);
+                    live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
+                    if (live != null) {
+                        return withDisplayName(ctx, tenant, live, coll);
+                    }
+                }
+            }
+            if (done == null) {
+                try {
+                    done = inSavepoint(ctx, () -> insert.get().execute());
+                } catch (DataAccessException e) {
+                    // The index exists although this mint did not take the ON CONFLICT arm (built after the probe, by a second
+                    // engine's boot or an operator, or not inferable), and a row holds the tuple: this insert lost, as one
+                    // that does nothing on a conflict would. The re-read below answers the winner's row, or names the
+                    // retryable conflict when no live row of the tuple is visible.
+                    if (!violates(e, CollectionTupleIndexProbe.INDEX)) {
+                        throw e;
+                    }
+                    done = 0;
+                }
+            }
+            inserted = done;
         } catch (DataAccessException e) {
             // another row took the label between the draw and this insert: the transaction is gone, so refusingRace names
             // the holder from a new one (the driver's key detail is withheld from a role under row-level security)
@@ -226,14 +269,16 @@ public final class CollectionMint {
     }
 
     /**
-     * Heal the sequence once, forward only. The sequence is shared by every tenant and this tenant sees only its own rows,
-     * so the floor is the largest of this tenant's ids and the colliding id; the definer function
-     * {@code nexus.collection_id_seq_heal} (changeset {@code collections-002}) draws the sequence forward with
-     * {@code nextval} until it has drawn the floor. It never calls {@code setval}, so a draw by another session while it
-     * runs cannot be set back and no id is handed out twice; it leaves the sequence alone when it is already past the
-     * floor. A floor more than the function's bound (100000 draws) above the sequence is refused, with the gap and the
-     * operator remedy in the message: that refusal is a {@link MintedLabel.SequenceBehindDataException}, the mint's 409,
-     * message intact.
+     * Heal the sequence once, forward only. The sequence is shared by every tenant and this tenant sees only its own rows
+     * (FORCE row-level security), so this method's own floor is the largest of this tenant's ids and the colliding id. The
+     * definer function {@code nexus.collection_id_seq_heal} (changeset {@code collections-002}) then draws the sequence
+     * forward with {@code nextval} until it has drawn the larger of that floor and the largest {@code collection_id} of ANY
+     * tenant, which it reads through D2's owner-read policy ({@code catalog_collections_owner_read}); where that policy does
+     * not exist the function reads no row and the floor is this method's own, so an id another tenant holds is not
+     * seen there. It never calls {@code setval}, so a draw by another session while it runs cannot be set back and no id is
+     * handed out twice; it leaves the sequence alone when it is already past the floor. A floor more than the function's
+     * bound (100000 draws) above the sequence is refused, with the gap and the operator remedy in the message: that refusal
+     * is a {@link MintedLabel.SequenceBehindDataException}, the mint's 409, message intact.
      */
     private static void healSequence(DSLContext ctx, String tenant, long colliding) {
         Long visibleMax = ctx.select(DSL.max(CATALOG_COLLECTIONS.COLLECTION_ID)).from(CATALOG_COLLECTIONS)
@@ -267,11 +312,13 @@ public final class CollectionMint {
     }
 
     /**
-     * Whether any row of ANY tenant holds {@code id}. An id is unique across the installation (RDR-229 item 6), but a
-     * tenant-scoped session reads only its own rows (FORCE RLS), so the answer comes from the definer function
+     * Whether any row of ANY tenant holds {@code id}. An id is meant to be unique across the installation (RDR-229 item 6),
+     * but a tenant-scoped session reads only its own rows (FORCE RLS), so the answer comes from the definer function
      * {@code nexus.collection_id_taken} (changeset {@code collections-002}), which returns a boolean and no tenant's data.
-     * The session's own rows are asked too, so where the function cannot read (D2's owner-read policy not yet applied)
-     * the check is no weaker than the per-tenant one it replaces.
+     * The function sees every tenant only where D2's owner-read policy ({@code catalog_collections_owner_read}) exists.
+     * Where it does not, the function reads no row, the answer is the session's own tenant's, and an id another tenant
+     * holds is not refused: global uniqueness holds only where that policy does. The session's own rows are asked too, so
+     * the check is never weaker than the per-tenant one it replaces.
      */
     static boolean idTaken(DSLContext ctx, long id) {
         return ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)))
@@ -285,6 +332,39 @@ public final class CollectionMint {
     static long drawId(DSLContext ctx, String tenant) {
         return MintedLabel.choose(() -> ctx.fetchValue(DSL.function("nextval", Long.class, SEQUENCE)), id -> idTaken(ctx, id),
             label -> false, colliding -> healSequence(ctx, tenant, colliding)).collectionId();
+    }
+
+    /** The SQLSTATE of "there is no unique or exclusion constraint matching the ON CONFLICT specification". */
+    static final String NO_MATCHING_INDEX = "42P10";
+
+    /** The SQLSTATE of a driver error, from the first {@link SQLException} in its causes, or null. */
+    private static String sqlStateOf(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException se) {
+                return se.getSQLState();
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Run {@code work} under a savepoint of the caller's transaction: an error in it (a 42P10 at parse time, a unique
+     * violation) rolls back to the savepoint and rethrows, so the transaction stays usable for the fallback.
+     */
+    private static <T> T inSavepoint(DSLContext ctx, Supplier<T> work) {
+        java.sql.Savepoint sp = ctx.connectionResult(java.sql.Connection::setSavepoint);
+        T result;
+        try {
+            result = work.get();
+        } catch (RuntimeException e) {
+            ctx.connection(c -> c.rollback(sp));
+            throw e;
+        }
+        ctx.connection(c -> c.releaseSavepoint(sp));
+        return result;
     }
 
     // ── the race the pre-check cannot see ───────────────────────────────────────────────────────
@@ -316,10 +396,6 @@ public final class CollectionMint {
                 + (holder == null ? "a tuple that is no longer visible" : holder) + "; try again");
         }
     }
-
-    /** The key of a primary-key violation, where the driver reports it (it does not for a role under row-level security). */
-    private static final java.util.regex.Pattern PK_KEY =
-        java.util.regex.Pattern.compile("Key \\(tenant_id, name\\)=\\([^,]*, (.*?)\\) already exists");
 
     private static boolean violates(Throwable e, String constraint) {
         for (Throwable t = e; t != null; t = t.getCause()) {
@@ -353,11 +429,6 @@ public final class CollectionMint {
                     recheck.accept(ctx);
                     return null;
                 });
-            } else if (violates(e, "catalog_collections_pk")) {
-                var key = PK_KEY.matcher(String.valueOf(e.getMessage()));
-                throw new MintedLabel.LabelsTakenException("registering a collection: the label "
-                    + (key.find() ? "'" + key.group(1) + "' " : "") + "was taken by another registration while this one ran; "
-                    + "try again");
             }
             throw e;
         }
@@ -390,6 +461,15 @@ public final class CollectionMint {
      */
     static void lockTuple(DSLContext ctx, String tenant, String contentType, String owner, String model, String version) {
         lockKey(ctx, tupleKey(tenant, contentType, owner, model, version));
+    }
+
+    /**
+     * The advisory locks of several tuples, each once, in sorted key order: the ONE way a path that locks more than one tuple
+     * takes them (an import batch, a rename's source and new tuples), so two such paths cannot wait on each other's second
+     * lock.
+     */
+    static void lockTupleKeys(DSLContext ctx, java.util.stream.Stream<String> keys) {
+        keys.distinct().sorted().forEach(k -> lockKey(ctx, k));
     }
 
     static String tupleKey(String tenant, String contentType, String owner, String model, String version) {
@@ -476,7 +556,7 @@ public final class CollectionMint {
             return;
         }
         if (!tupleIndexExists(ctx)) {
-            live.stream().map(r -> tupleKey(tenant, r[1], r[2], r[3], r[4])).distinct().sorted().forEach(k -> lockKey(ctx, k));
+            lockTupleKeys(ctx, live.stream().map(r -> tupleKey(tenant, r[1], r[2], r[3], r[4])));
         }
         Map<List<String>, String> seen = new HashMap<>();
         for (String[] r : live) {
