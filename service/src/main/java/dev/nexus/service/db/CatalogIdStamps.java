@@ -46,6 +46,17 @@ final class CatalogIdStamps {
     }
 
     /**
+     * True when {@code tumbler} is a live (not tombstoned) document of {@code tenant}. An update resolves the target
+     * collection's id only after this answers true: an update of an unknown or tombstoned tumbler stays a no-op (0 rows)
+     * whatever collection it names, as it was before the dual write, never the typed 422 for an unregistered one.
+     */
+    static boolean liveDocumentExists(DSLContext ctx, String tenant, String tumbler) {
+        return ctx.fetchExists(ctx.selectOne().from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))
+            .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()));
+    }
+
+    /**
      * {@link CollectionIds#require} with a per-call memo, for a batch that names the same collections many times. The
      * memo lives in the caller's transaction, so no id outlives it.
      */
