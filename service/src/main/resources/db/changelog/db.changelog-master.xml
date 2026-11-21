@@ -2277,6 +2277,16 @@
     <include file="db/changelog/identity-005-work-kind-agent.xml"/>
 
     <!--
+        Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 1, the expand): catalog_collections.collection_id (identity, filled here) with its two UNIQUEs,
+        a nullable id column beside every collection name column, and a NOT VALID CHECK with a stable name on each (the constraint
+        names are one list, db/rdr229/p31-checks.tsv). One changeset per table so the lock footprints do not add up, and the retired
+        aspect_extraction_queue's own, guarded for the table's absence (R3). Writes no row of a user-data table: the stamp is a later
+        registered move; the registry's identity fill is the one rewrite, by ruling. The number follows vectors-064 to -067 on other
+        branches and is provisional until the final rebase. After identity-005, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-068-collection-id-expand.xml"/>
+
+    <!--
         RDR-229 P3.8 (nexus-p2m1x.28): the partial UNIQUE index on the live collection tuple, which waits (preCondition
         onFail="CONTINUE") for the re-own move to complete and for no duplicate tuple to remain; plus its FORCE-RLS-safe
         counter. No data effect. After identity-005, before the grants-nexus-svc.xml runAlways block. See the included
