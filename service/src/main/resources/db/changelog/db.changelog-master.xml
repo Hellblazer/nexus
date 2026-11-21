@@ -2411,12 +2411,12 @@
     <include file="db/changelog/collections-003-tuple-lock-stripes.xml"/>
 
     <!--
-        Bead nexus-p2m1x.26 (RDR-229 P3.6, item 7): catalog-052-1 adds idx_catalog_collections_live_label, a partial UNIQUE
+        Bead nexus-p2m1x.26 (RDR-229 P3.6, item 7): catalog-053-1 adds idx_catalog_collections_live_label, a partial UNIQUE
         index on nexus.catalog_collections (tenant_id, name) WHERE superseded_by = '' (a label names one live collection per
         tenant). One CREATE UNIQUE INDEX over rows the primary key already keeps unique: no row is touched and none can fail
         it. After collections-003, before the grants-nexus-svc.xml runAlways block.
     -->
-    <include file="db/changelog/catalog-052-live-label-unique.xml"/>
+    <include file="db/changelog/catalog-053-live-label-unique.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
