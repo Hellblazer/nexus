@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 
@@ -31,17 +32,36 @@ public final class MintedLabel {
     public record Choice(long collectionId, String label) {
     }
 
+    /**
+     * A drawn id is already a row: the sequence is behind the data (an explicit-id insert, as a restore does, with no
+     * {@code setval} after it). A 409 on the route; never skipped past, since skipping would hide the missing
+     * {@code setval} (baton's condition on BY DEFAULT, via linda 2026-11-21).
+     */
+    public static final class SequenceBehindDataException extends IllegalStateException {
+        public SequenceBehindDataException(long id) {
+            super("minting a collection: the drawn collection_id " + id + " is already a row, so the collection_id"
+                + " sequence is behind the data (an explicit-id insert with no setval after it); run the restore's"
+                + " setval on pg_get_serial_sequence('nexus.catalog_collections','collection_id')");
+        }
+    }
+
     private MintedLabel() {
     }
 
     /**
-     * Draw ids from {@code nextId} until one's label is free, at most {@link #MAX_DRAWS} times.
+     * Draw ids from {@code nextId} until one's label is free, at most {@link #MAX_DRAWS} times. {@code idTaken} says
+     * whether a row already has the id; the sequence never repeats a value, so that means the sequence is behind the
+     * data, and the mint refuses at once rather than skip.
      *
+     * @throws SequenceBehindDataException when a drawn id is already a row (a 409 on the route)
      * @throws IllegalStateException when every draw's label is taken (a 409 on the route)
      */
-    public static Choice choose(LongSupplier nextId, Predicate<String> labelTaken) {
+    public static Choice choose(LongSupplier nextId, LongPredicate idTaken, Predicate<String> labelTaken) {
         for (int draw = 0; draw < MAX_DRAWS; draw++) {
             long id = nextId.getAsLong();
+            if (idTaken.test(id)) {
+                throw new SequenceBehindDataException(id);
+            }
             String label = render(id);
             if (!labelTaken.test(label)) {
                 return new Choice(id, label);
