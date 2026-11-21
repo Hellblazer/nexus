@@ -67,8 +67,8 @@ def test_a_bundle_owner_names_the_repo_owner_existing_or_registered(t2_service_e
     )
     row = _owner_row(reader, got)
     assert (row["owner_type"], row["repo_hash"], row["repo_root"], row["name"]) == (
-        "repo", "b2b2b2b2", "/src/b", "r229-bundle-new")
-    assert seen == []                                       # a source was found: no fallback
+        "repo", "b2b2b2b2", "", "r229-bundle-new")          # empty root: the header's path is the source machine's;
+    assert seen == []                                       # `nx index repo` here backfills it. A source was found: no fallback
 
 
 # ── (2) the repo-synth stem ───────────────────────────────────────────────────
@@ -148,13 +148,30 @@ def test_a_repo_shaped_docs_stem_with_no_repo_stays_with_its_curator_and_hints_o
     assert (row["owner_type"], row["name"]) == ("curator", stem)
     assert seen == []                                       # not the knowledge curator: no fallback
     assert hints == [
-        f"{stem} looks like a repo's collection; import its code__ bundle first, and this collection "
-        "stays with its corpus curator otherwise"]
+        f"{stem} looks like a repo's collection; it was given its corpus curator as owner. To give it "
+        "the repo's owner, import that repo's code__ bundle, then remove this collection and import it again."]
     # a docs stem with no hash is plainly a corpus: no hint
     hints.clear()
     _resolve_import_owner_tumbler(
         _name("docs", "r229-plain-corpus"), reader, writer, content_type="docs", on_hint=on_hint)
     assert hints == []
+
+
+def test_a_tumbler_shaped_docs_stem_is_not_a_corpus_name_and_falls_to_the_knowledge_curator(t2_service_env):
+    """A ``docs__1-14__...`` name carries an owner tumbler, not a corpus name: registering a curator
+    literally named ``1-14`` is wrong, so the import takes the loud knowledge-curator fallback."""
+    reader, writer = make_catalog_reader(), make_catalog_writer()
+    curator = writer.register_owner("knowledge", "curator")
+    seen, hook = _fallbacks()
+    hints, on_hint = _fallbacks()
+
+    got = _resolve_import_owner_tumbler(
+        _name("docs", "1-14"), reader, writer, content_type="docs", on_fallback=hook, on_hint=on_hint)
+
+    assert got == curator
+    assert len(seen) == 1 and "docs" in seen[0]
+    assert hints == []
+    assert reader.curator_owner_tumbler_by_name("1-14") is None   # no curator was registered under the tumbler
 
 
 # ── (4) the knowledge curator, loudly ─────────────────────────────────────────
@@ -218,6 +235,20 @@ def test_the_import_summary_counts_a_fallback_and_the_cli_warns(t2_service_env, 
     assert doc is not None
     assert _owner_row(make_catalog_reader(), doc.tumbler.owner_address())["repo_hash"] == "1a2b3c4d"
 
+    # the CLI prints the warning for a fallback, and prints none for a source it found
+    lone = _name("code", "r229summarycli")
+    h = tmp_path / "nohash_cli.nxexp"
+    _write_bundle(h, lone, ["r229 summary cli chunk"])
+    out = CliRunner().invoke(import_cmd, [str(h), "--collection", lone])
+    assert out.exit_code == 0, out.output
+    assert "Warning:" in out.output and "knowledge curator" in out.output and "code" in out.output
+    found = _name("code", "r229summarycli-2b3c4d5e")
+    k = tmp_path / "stem_cli.nxexp"
+    _write_bundle(k, found, ["r229 summary cli stem chunk"])
+    out = CliRunner().invoke(import_cmd, [str(k), "--collection", found])
+    assert out.exit_code == 0, out.output
+    assert "knowledge curator" not in out.output
+
 
 def test_the_import_summary_and_cli_carry_the_repo_looking_docs_hint(t2_service_env, tmp_path):
     client = HttpVectorClient(tenant=t2_service_env)
@@ -227,8 +258,9 @@ def test_the_import_summary_and_cli_carry_the_repo_looking_docs_hint(t2_service_
     f = tmp_path / "hint.nxexp"
     _write_bundle(f, docs, ["r229 hint chunk"])
     result = import_collection(db=client, input_path=f, target_collection=docs)
-    hint = (f"r229hint-9a9a9a9a looks like a repo's collection; import its code__ bundle first, and this "
-            "collection stays with its corpus curator otherwise")
+    hint = ("r229hint-9a9a9a9a looks like a repo's collection; it was given its corpus curator as owner. "
+            "To give it the repo's owner, import that repo's code__ bundle, then remove this collection "
+            "and import it again.")
     assert result["owner_hint"] == hint and result["owner_fallback_count"] == 0
 
     again = _name("docs", "r229hint2-8b8b8b8b")
@@ -236,7 +268,8 @@ def test_the_import_summary_and_cli_carry_the_repo_looking_docs_hint(t2_service_
     _write_bundle(g, again, ["r229 hint chunk two"])
     out = CliRunner().invoke(import_cmd, [str(g), "--collection", again])
     assert out.exit_code == 0, out.output
-    assert "r229hint2-8b8b8b8b looks like a repo's collection; import its code__ bundle first" in out.output
+    assert ("r229hint2-8b8b8b8b looks like a repo's collection; it was given its corpus curator as owner. "
+            "To give it the repo's owner") in out.output
 
 
 def test_an_export_carries_the_repo_owner_and_an_import_reads_it(t2_service_env, tmp_path):
