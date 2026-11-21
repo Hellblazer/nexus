@@ -1359,6 +1359,9 @@ def t3_collection_name(
     if user_arg == promoted:
         return promoted
     try:
+        # RDR-229 P3.8: the subject's row is its collection (a minted label), so it is read first.
+        if found := knowledge_subject_label(getattr(t3, "find_collection", None), ct, owner_segment, promoted, for_write=for_write):
+            return found
         if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
             # nexus-9n485 observability: collection_exists() alone can't
             # tell "promoted never had any chunks" from "every chunk under
@@ -1381,9 +1384,6 @@ def t3_collection_name(
                         "queryable."
                     ),
                 )
-            # RDR-229 P2.8: the conformant name holds nothing, so the subject's row is read before the fallbacks.
-            if found := knowledge_subject_label(getattr(t3, "find_collection", None), ct, owner_segment, promoted, for_write=for_write):
-                return found
             if t3.collection_exists(user_arg):  # type: ignore[attr-defined]
                 return user_arg
             # Bare-prefix legacy fallback (#535 / nexus-6mr0): when the
