@@ -903,13 +903,24 @@ name-derived owner (a slug, `''` or a placeholder): a catalog amendment
 removes its curator clause, so a curator owner a registration set stands.
 Its second half (`catalog-051-2`) stops catalog-044's two triggers from
 rewriting a legacy owner onto a tuple (tenant, content type, owner, model,
-model version) that another live, unsuperseded `code`, `docs` or `rdr`
-collection already holds: the row keeps its old owner and the trigger
-raises a NOTICE naming both collections. Before that check each trigger
-takes a transaction advisory lock on the tuple's key,
+model version) that another `code`, `docs` or `rdr` collection already
+holds: the row keeps its old owner and the trigger raises a NOTICE naming
+both collections. A row holds its tuple when it is unsuperseded and not in
+quarantine (`superseded_by = '' AND lifecycle_state <> 'quarantine'`), the
+predicate of P3.8's partial UNIQUE index (T2
+`nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`, Q1), so a dormant
+or disputed holder holds like a live one. The guard compares the stored
+`model_version`; a row whose D2 repair is still pending (`''`) is left to
+the re-own move, which skips it. Before that check each trigger takes a
+transaction advisory lock on the tuple's key,
 `nexus.collection_tuple_lock_key` (`catalog-051-1a`), the SQL function that
 is the key's one derivation (the engine's `CollectionTupleLock` selects it
-and does not re-implement it).
+and does not re-implement it). A transaction deadlocked on that lock gets
+40P01, and only the paths through `CatalogRepository`'s `DeadlockRetry`
+re-run it (deletes, renames, re-homes, purges, manifest writes and chunk
+imports); a plain document registration, `upsertCollection` and
+`supersedeCollection` surface it to their caller, and the data-move worker
+retries the chunk.
 An import resolves the owner from the collection's existing row, then the
 bundle's optional `owner` header, then a `<slug>-<hash8>` stem, taken as
 the repo's when the collection is itself `code`, or is `docs` or `rdr` and
@@ -919,10 +930,16 @@ the corpus curator for a `docs` corpus, then the knowledge curator with a
 warning. A repo's collections that an old bulk import left under a curator
 are re-owned by the registered data move
 `rdr229-reown-repo-stems-from-curator` (`vectors-067`), which skips a row
-whose destination tuple another live collection already holds and records
-each skip in `nexus.gc_audit` (operation `rdr229_reown_skipped`; read it
+whose destination tuple another row holds (the same held predicate) and
+records each skip in `nexus.gc_audit` (operation `rdr229_reown_skipped`; read it
 with `SELECT collection, details FROM nexus.gc_audit WHERE operation =
-'rdr229_reown_skipped'` under the tenant). Two named residuals, both
+'rdr229_reown_skipped'` under the tenant). It compares tuples on the
+effective version, the stored `model_version` or else the name's trailing
+`__vN`, so a row D2 has not yet repaired is seen as its v1 twin's and
+skipped, not moved. It takes the same tuple lock as the triggers, computed
+from the stored version, for only the tuples its chunk moves rows onto, in
+ascending key order (the order `CollectionTupleLock` uses), so a chunk holds
+at most `chunk_size` locks. Two named residuals, both
 accepted by Sam:
 
 - An old export file (from before the `owner` header) of a repo's
@@ -1650,8 +1667,10 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   census shows no install holds a `taxonomy__` collection. With them
   reclassified and the other sites moved, P2.9 measures the routing class at
   zero (client census 240 -> 229 at develop 0d9e53391 with P2.8). On the
-  Phase 2 integration tree the client census is 218 (7817cd3251: P2.2 -11,
-  P2.4 -3, owner-is-source +3 migration-source).
+  Phase 2 integration tree the client census is 217 (7817cd3251, then
+  a92f88c6a0: P2.2 -11, P2.4 -3, owner-is-source +2 migration-source, which
+  was +3 until `owner_stem` moved into `legacy_names`; migration-source 22,
+  `split` 2).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -3046,3 +3065,4 @@ large, and moved under a ratchet.
 - 2026-11-21: item 1's holdover total and item 12's `taxonomy__` sites match the Phase 2 integration tree: holdover empty (P2.2 23 -> 4, P2.4 4 -> 0), the three taxonomy tests read through `legacy_names.is_taxonomy_collection_name`, client census 218, all measured at 7817cd3251 (grant 3; P2.R author read, nexus-p2m1x.16).
 - 2026-11-21: recorded late, P2.4's two amendments of 2026-11-20 and 2026-11-21. P2.4 owns a small engine half: the prune route's `match` field (`exact` or `prefix`), echoed in the answer, with `/version`'s `taxonomy_prune_exact_supported` flag, which the client checks before any exact prune; the P2.R step, Versioning, item 1 and Day 2 follow (b7e8f448e3, grant 3, nexus-p2m1x.9); and the verification sentinel is a name no collection has, and the guarantee is the name, not the threshold (20baca2d8f, nexus-p2m1x.9).
 - 2026-11-21: the 0.1.200 contents (P2.R step, Versioning), item 5's stem rule and `catalog-051-2` tuple guard with its lock key, the Prerequisites' first registered moves and their deploy-go gate (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`), and the MVV's numeric Phase 2 pins match the integration tree eb1e4cd42b (grant 3; P2.R critique T2 `nexus/critique-eb1e4cd42b-nexus-p2m1x.16-2026-11-21-r1`, nexus-p2m1x.16).
+- 2026-11-21: item 5's tuple guard and re-own move match a92f88c6a0: one held predicate (unsuperseded and not in quarantine, P3.8's index predicate), the guard on the stored version and the move on the effective one, the move taking the tuple lock for its chunk's tuples in key order, and which paths re-run a 40P01; item 12's client census is 217 with `owner_stem` in `legacy_names` (grant 3; P2.R critique S2, S3, S5, nexus-p2m1x.16).
