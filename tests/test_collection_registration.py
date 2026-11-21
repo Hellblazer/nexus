@@ -1164,6 +1164,12 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
         # wire call (EmbeddingProfileMismatchError), then seeds the seam's cache with the minted label so the
         # write path's own ensure_collection_registered(label) is a hit.
         "src/nexus/collection_mint.py",
+        # RDR-229 P3.9 (nexus-p2m1x.29): a recovery-bundle import registers the bundle's own label by NAME after its
+        # own resolver has read the row (it refuses a live row of another tuple rather than upserting over it). The
+        # model it sends is effective_embedding_model_for_writes(content_type), the profile's own, so the seam's
+        # mismatch guard has nothing to catch, and the engine's register-time 422 stands behind it. A minted-form
+        # label goes through collection_mint.register_by_attributes, the site above.
+        "src/nexus/catalog/recovery_bundle.py",
     })
 
     def test_non_seam_register_collection_call_sites_are_the_pinned_set(self) -> None:
