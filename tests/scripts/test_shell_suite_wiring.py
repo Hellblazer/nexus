@@ -204,8 +204,8 @@ SUITES = [
     _Suite("scripts/lib/release-props-lease_test.sh", 28),
     _Suite("tests/e2e/local_service_gate_guard_test.sh", 9),
     # nexus-p2m1x.16: the RDR-229 P2.R gate's own guard (absent dependencies exit 2 before any work, a skipped or
-    # unrecorded substrate run exits 2, no exit path but the report's, the report's exit codes): 18 measured.
-    _Suite("tests/e2e/rdr229_p2r_mvv_guard_test.sh", 18),
+    # unrecorded substrate run exits 2, no exit path but the report's, the report's exit codes): 21 measured.
+    _Suite("tests/e2e/rdr229_p2r_mvv_guard_test.sh", 21),
     _Suite("tests/e2e/dual_embedder_gate_guard_test.sh", 100),  # 100 pass: 49 (nexus-8x0tg) + the canned-engine checks (nexus-clvut) + the nearest-vector checks (nexus-lpu6e)
     # Round 2 (nexus-fcjt7): found by the substantive-critic pass on round 1
     # plus a re-check of round 1's own "already wired" claim about the two

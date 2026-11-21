@@ -14,7 +14,9 @@ Two subcommands, both stdlib plus the repo's own census module:
             and their results ride in as arguments of ``report``).
 
 ``report``  reads the checks' results file, the census record and the two gate results, prints the per-check table
-            and the Phase 2 step each FAIL waits on, and exits 0 only when every check passed.
+            (checks 1 to 6; 5 is the census) and the Phase 2 step each FAIL waits on. Exit 0 only when every check
+            passed, 1 when a check FAILed, 2 when a check recorded ERROR: the gate's own fixture or a dependency is
+            wrong (no pg_background, a seed that did not take), which says nothing about the code under test.
 """
 from __future__ import annotations
 
@@ -34,6 +36,8 @@ WAITS = {
     3: "P2.5 lifecycle from the row at registration and in the guards (nexus-p2m1x.10), "
        "P2.6 the SQL movers read columns (nexus-p2m1x.11)",
     4: "P2.1 non-stranding (nexus-p2m1x.6) and P2.2 legacy_names classifies the migration sources (nexus-p2m1x.7)",
+    6: "P2.10 URI moves leave chroma:// residue alone, the registered repair moves, the relaxed backfill verb "
+       "(nexus-p2m1x.15)",
 }
 STEP_BEAD = {"P2.2": "nexus-p2m1x.7", "P2.4": "nexus-p2m1x.9", "P2.9": "nexus-p2m1x.14", "P2.5": "nexus-p2m1x.10",
              "P2.6": "nexus-p2m1x.11", "P2.10": "nexus-p2m1x.15"}
@@ -106,26 +110,36 @@ def report(results: Path, census_json: Path, client_gate_rc: int, client_gate_n:
     fixture = rows.get(0)
     out: list[str] = ["", "RDR-229 P2.R MVV, Phase 2 half", "=" * 31]
     ok_all = True
+    gate_error = False
     if fixture:
         f = fixture["evidence"]
         out.append(f"fixture: {f['name']}  row owner/model: {f['row']['owner_id']} / {f['row']['embedding_model']}  "
                    f"name owner/model: {f['name_owner']} / {f['name_model']}")
     failures: list[tuple[str, str]] = []
-    for n in (1, 2, 3, 4):
+
+    def show(n: int) -> None:
+        nonlocal ok_all, gate_error
         rec = rows.get(n)
         if rec is None:
             out.append(f"check {n}  NOT RUN")
             failures.append((f"check {n}", WAITS[n]))
             ok_all = False
-            continue
+            return
         ev = rec["evidence"]
         out.append(f"check {n}  {rec['status']}  {rec['name']}  [examined={ev.get('examined', 0)}]")
         brief = {k: v for k, v in ev.items() if k not in ("cli_tail",)}
         out.append("          evidence: " + json.dumps(brief, sort_keys=True, default=str)[:900])
-        if rec["status"] != "PASS":
+        if rec["status"] == "ERROR":
             ok_all = False
-            out.append("          error: " + rec["error"].strip().splitlines()[0][:500])
+            gate_error = True
+            out.append("          GATE ERROR (not a finding about the code under test): " + rec["error"].strip()[:500])
+        elif rec["status"] != "PASS":
+            ok_all = False
+            out.append("          error: " + rec["error"].strip().splitlines()[0][:1200])
             failures.append((f"check {n}", WAITS[n]))
+
+    for n in (1, 2, 3, 4):
+        show(n)
     # check 5
     gate_ok = client_gate_rc == 0 and engine_gate_rc == 0 and client_gate_n > 0 and engine_gate_n > 0
     census_ok = not cen["problems"]
@@ -145,15 +159,15 @@ def report(results: Path, census_json: Path, client_gate_rc: int, client_gate_n:
         ok_all = False
         out.append("          " + p["what"])
         failures.append(("check 5: " + p["what"], p["waits_on"]))
+    show(6)
     out.append("")
     if failures:
         out.append("FAIL, and what each waits on:")
         for what, waits in failures:
             out.append(f"  - {what}: {waits}")
-        out.append("(P2.10, nexus-p2m1x.15, has no check in the MVV text; its bead tests are its evidence.)")
-    out.append("RESULT: " + ("PASS" if ok_all else "FAIL"))
+    out.append("RESULT: " + ("GATE ERROR" if gate_error else ("PASS" if ok_all else "FAIL")))
     sys.stdout.write("\n".join(out) + "\n")
-    return 0 if ok_all else 1
+    return 2 if gate_error else (0 if ok_all else 1)
 
 
 if __name__ == "__main__":

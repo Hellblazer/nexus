@@ -11,18 +11,23 @@ export NX_ALLOW_PROD_WRITE="rdr229-p2r-mvv: self-provisioned throwaway engine su
 # registers a sibling whose lifecycle_state is quarantine without the engine reading the prefix. In the same run, a
 # recovery bundle recorded under a legacy name restores. Both census gates are at their Phase 2 pins."
 #
-# Five checks, each reported PASS or FAIL with its evidence:
+# Six checks, each reported PASS or FAIL with its evidence:
 #   1. nx index md stamps the row's embedding_model          2. nx search calibrates with the row's model
 #   3. quarantine registers a lifecycle_state=quarantine sibling; the engine's guards read the column, probed on a
 #      plain name whose row says quarantine and a quarantine- name whose row says live (a prefix reader gets both wrong)
 #   4. a recovery bundle recorded under legacy names restores
 #   5. both census gates (client CLASS_PIN/PARSE_SITE_PIN, engine CollectionParseGateTest) sit at their Phase 2 pins
-# Checks 1-4 are tests/e2e/rdr229_p2r_mvv_checks.py on the engine substrate; check 5 and the report are
+#   6. P2.10 (nexus-p2m1x.15), beyond the MVV text: URI moves leave chroma:// residue alone, residue already moved
+#      is repaired by the registered data moves (the worker is waited on through the registry and /v1/status
+#      boot_work, never a sleep; it needs pg_background in the substrate PG, and its absence is a gate error), and
+#      the backfill verb re-derives moved and repaired residue to file://
+# Checks 1-4 and 6 are tests/e2e/rdr229_p2r_mvv_checks.py on the engine substrate; check 5 and the report are
 # tests/e2e/lib/rdr229_p2r_report.py plus the two gate tests. The final summary lists each FAIL with the Phase 2
-# step it waits on. A FAIL is the finding: no check is weakened to be green, and the exit is non-zero for any FAIL.
+# step it waits on. A FAIL is the finding: no check is weakened to be green, and the exit is 1 for any FAIL. A check that records ERROR
+# (its own fixture or a dependency, such as pg_background, is wrong) exits 2: that says nothing about the code.
 #
 # FAILS LOUDLY, NEVER SKIP-PASSES: an absent dependency (uv, java, git, the service jar build, the PG bundle) exits 2
-# naming it; the substrate test must report one test run, none skipped and none errored; every check must have
+# naming it; the substrate run must report its two tests, none skipped and none errored; every check must have
 # recorded a result and examined at least one item; each census gate must have run at least one test.
 #
 # Usage:   tests/e2e/rdr229-p2r-mvv.sh
@@ -56,6 +61,9 @@ export NX_NO_TELEMETRY=1
 unset NX_SERVICE_URL NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT NEXUS_SERVICE_BIN NEXUS_SERVICE_JAR
 unset VOYAGE_API_KEY NX_VOYAGE_API_KEY
 unset NX_TEST_EXTERNAL_ENGINE_URL NX_TEST_EXTERNAL_TENANT_TOKEN
+# Check 6 needs the engine's data-move worker: the substrate PG gets the product's own dml_utils bootstrap
+# (pg_background, the library roles) before the engine migrates. Opt-in, read by tests/_engine_substrate.py only.
+export NX_TEST_SUBSTRATE_DATA_MOVES=1
 
 LAB_ARGS=()
 [ -z "${NX_GATE_BUILD_LAB_CLASS:-}" ] || LAB_ARGS=(--lab-run "$NX_GATE_BUILD_LAB_CLASS")
@@ -70,7 +78,7 @@ tail -n 3 "$SCRATCH/build-jar.out"
 RESULTS="$SCRATCH/results.jsonl"
 JUNIT="$SCRATCH/mvv-junit.xml"
 : > "$RESULTS"
-echo "[p2r-mvv] checks 1-4 on the engine substrate"
+echo "[p2r-mvv] checks 1-4 and 6 on the engine substrate"
 set +e
 P2R_RESULTS="$RESULTS" uv run pytest tests/e2e/rdr229_p2r_mvv_checks.py -p no:cacheprovider -q -rs --color=no \
   --junitxml="$JUNIT" 2>&1 | tee "$SCRATCH/mvv-pytest.out"
@@ -89,9 +97,9 @@ except Exception as exc:  # noqa: BLE001
 suite = root if root.tag == "testsuite" else root.find("testsuite")
 tests, skipped, errors = (int(suite.get(k, 0)) for k in ("tests", "skipped", "errors"))
 seen = sorted({json.loads(l)["n"] for l in open(results) if l.strip()})
-if tests != 1 or skipped or errors or seen != [0, 1, 2, 3, 4]:
-    print(f"ERROR tests={tests} skipped={skipped} errors={errors} recorded={seen} (want 1 test, 0 skipped, 0 errors, "
-          "records for the fixture and checks 1-4)")
+if tests != 2 or skipped or errors or seen != [0, 1, 2, 3, 4, 6]:
+    print(f"ERROR tests={tests} skipped={skipped} errors={errors} recorded={seen} (want 2 tests, 0 skipped, 0 errors, "
+          "records for the fixture and checks 1-4 and 6)")
 else:
     print("OK")
 PY
