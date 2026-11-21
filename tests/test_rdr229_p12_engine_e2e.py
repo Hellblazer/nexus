@@ -30,6 +30,7 @@ DOCS_V2 = "docs__99-1__bge-base-en-v15-768__v2"
 KNOW = "knowledge__e2esub__bge-base-en-v15-768__v1"
 CODE_BAD = "code__99-2__bge-base-en-v15-768__v1"          # its row says content_type docs: a mismatch
 MINTED = "c123"
+MINTED_SEED = "e2e-minted-seed"                           # registered under this name, then renamed to MINTED in SQL
 TIE_LEGACY = "e2e-tie-label"                              # registered FIRST (older), name sorts after TIE_CONF
 TIE_CONF = "docs__99-6__bge-base-en-v15-768__v1"          # same tuple and version, registered after: NAME ASC picks it
 NOVER = "e2e-nover"                                       # a live row with an empty model_version
@@ -63,7 +64,10 @@ def _seed(tenant: str) -> None:
         # register their second member at v2 and the SQL below sets it to v1, the shape an install that predates the guard carries
         cat.register_collection(LABEL2, content_type="docs", owner_id="99-5", embedding_model=model, model_version="v2")
         cat.register_collection(CODE_BAD, content_type="docs", owner_id="99-2", embedding_model=model, model_version="v1")
-        cat.register_collection(MINTED, content_type="code", owner_id="99-3", embedding_model=model, model_version="v1")
+        # RDR-229 P3.6: the route refuses a NEW label of the minted form (c followed by digits), which only the engine
+        # may mint, so MINTED registers under a seed name and the SQL below renames it to the form, the shape an install
+        # that predates the rule carries.
+        cat.register_collection(MINTED_SEED, content_type="code", owner_id="99-3", embedding_model=model, model_version="v1")
         cat.register_collection(TIE_LEGACY, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v1")
         cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v2")
         # RDR-229 P2.5 (D1): the route refuses a NEW row with a blank model_version, so NOVER registers at v1
@@ -114,6 +118,8 @@ def _seed(tenant: str) -> None:
     for second in (LABEL2, TIE_CONF):
         sql.append(f"UPDATE nexus.catalog_collections SET model_version = 'v1' "
                    f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(second)};")
+    sql.append(f"UPDATE nexus.catalog_collections SET name = {_sql_str(MINTED)} "
+               f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(MINTED_SEED)};")
     for flagged in (LABEL, MINTED, NOVER):
         sql.append(f"UPDATE nexus.catalog_collections SET legacy_grandfathered = true "
                    f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(flagged)};")
