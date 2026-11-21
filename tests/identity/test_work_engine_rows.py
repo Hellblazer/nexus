@@ -207,7 +207,9 @@ def row_a_note_in_the_identity_project_is_still_found_after_a_rename(world: Worl
     store = HttpMemoryStore(base_url=world.base_url, tenant="default", _token=os.environ["NX_SERVICE_TOKEN"])
     project = identity_project(alpha)
     assert project == f"identity/{alpha}"
-    store.put(project, "plan", "the seat's own note")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _nobody(monkeypatch)    # a Claude-ancestored run must not reach the identity-notes guard with the dev's own token
+        store.put(project, "plan", "the seat's own note")
     world.client.rename(world.q("alpha"), world.q("omega"))
     assert world.identity(alpha)["name"] == world.q("omega")
     found = store.get(identity_project(alpha), "plan")
