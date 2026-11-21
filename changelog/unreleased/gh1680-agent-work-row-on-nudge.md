@@ -1,0 +1,4 @@
+### Fixed
+
+- **A dispatched agent's `agent:<id>` work row is removed at every stop, nudged or not (gh#1680).** The SubagentStop T1 nudge removed the row only when it returned no nudge, and expected a second stop after the nudge that a read-only agent ending with its hand-back often never makes, so the row stayed `running` for the life of the session and the restart ready check and the compaction checkpoint reported an agent that had finished. The stop now removes the row in every case; the removal is idempotent, so the re-stop after a nudge repeats it harmlessly.
+- **`nx brief me` no longer suggests a write the identity would refuse (gh#1680).** With no startup note, an ephemeral or delegated identity was told to run `nx memory put --mine`, which the client refuses for it. The line now carries the guard's own reason (only a seat keeps identity notes: write the note in project T2, or start the session with a seat); a seat still gets the `--mine` command.
