@@ -69,8 +69,8 @@ import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
  *       is skipped.</li>
  *   <li>Read {@code current_setting('nexus.tenant')} back. {@code catalog_collections} is FORCE ROW LEVEL SECURITY.
  *       Where the migrating role has no owner-read policy on it, a registry read under the wrong tenant is an EMPTY
- *       list, which the planner reads as "everything was deleted". Where {@code catalog-050-4} gave it one (RDR-229
- *       P2.10, two-role installs), the read's own {@code tenant_id} predicate selects the tenant's rows. Either way the
+ *       list, which the planner reads as "everything was deleted". Where {@code vectors-065} gave it one (RDR-229
+ *       D2, two-role installs), the read's own {@code tenant_id} predicate selects the tenant's rows. Either way the
  *       check stays: on a mismatch the leaf is skipped ({@code event=pci_count_tenant_mismatch})
  *       and nothing is dropped or built. This check does NOT protect the chunk counts: {@code vectors-029} gave the
  *       migrating role ({@code nexus_admin} in production, the builder's role) a permissive
