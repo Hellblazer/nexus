@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
@@ -216,8 +217,10 @@ class TopicsDocCountWritePathsTest {
             ctx.insertInto(TOPIC_ASSIGNMENTS,
                     TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                     TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
                .values(TENANT, Chash.fromHex(docIdHex).toBytes(), topicId, "manual", collection,
+                       CollectionIds.require(ctx, TENANT, collection),
                        PgContainerHelper.collectionModel(ctx, TENANT, collection))
                .execute();
             return null;
