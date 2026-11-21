@@ -155,15 +155,29 @@ def test_a_named_registration_makes_no_version_probe() -> None:
 
 
 # ── the engine floor ────────────────────────────────────────────────────────
+# An engine that predates the mint answers a nameless registration with an opaque 409, as an engine that mints and
+# refuses does. Only after a 409 does the client ask which engine answered.
+
+
+def _refusing(release: str | None, posts: list):
+    """``/version`` answers *release*; ``/collections/upsert`` answers 409."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/version"):
+            return httpx.Response(200, json={"release_version": release})
+        posts.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(409, json={"error": "refused"})
+
+    return handler
 
 
 def test_the_floor_is_the_engine_release_that_carries_the_mint() -> None:
     assert floors.COLLECTION_MINT_MIN_ENGINE_VERSION == (0, 1, 201)
 
 
-def test_an_older_engine_refuses_a_nameless_registration_naming_both_versions_and_writes_nothing() -> None:
+def test_an_older_engines_409_is_named_with_both_versions_and_chains_the_409() -> None:
     posts: list = []
-    cat = _client(_engine("0.1.199", _MINTED_ROW, posts))
+    cat = _client(_refusing("0.1.199", posts))
 
     with pytest.raises(CollectionMintUnsupportedError) as exc:
         cat.register_collection(**_ATTRS)
@@ -171,23 +185,42 @@ def test_an_older_engine_refuses_a_nameless_registration_naming_both_versions_an
     msg = str(exc.value)
     assert "0.1.199" in msg and "0.1.201" in msg
     assert "Nothing was written" in msg
-    assert posts == [], "the refusal comes before the upsert, not as its opaque 409"
+    assert isinstance(exc.value.__cause__, httpx.HTTPStatusError) and exc.value.__cause__.response.status_code == 409
 
 
-def test_a_dev_engine_with_no_release_stamp_is_not_refused() -> None:
-    """A build from a tree carries ``release_version: null``; it is newer than any release, so it is let through."""
-    posts: list = []
-    cat = _client(_engine(None, _MINTED_ROW, posts))
+def test_a_409_from_an_engine_that_mints_is_the_engines_own_answer() -> None:
+    """A collision past the bound, a sequence behind the data or a held live tuple is a 409 on a new engine too."""
+    cat = _client(_refusing("0.1.201", []))
 
-    assert cat.register_collection(**_ATTRS).label == "c4242"
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        cat.register_collection(**_ATTRS)
+    assert exc.value.response.status_code == 409
 
 
-def test_an_unreadable_version_probe_does_not_refuse_the_registration_itself_fails_loudly() -> None:
-    """The probe says nothing about the engine, so the write is attempted and its own error stands."""
+def test_a_dev_engine_with_no_release_stamp_keeps_its_409() -> None:
+    """A tree-built engine carries ``release_version: null``; it is newer than any release, so its 409 is its own."""
+    cat = _client(_refusing(None, []))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        cat.register_collection(**_ATTRS)
+
+
+def test_a_successful_registration_makes_no_version_probe() -> None:
+    seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json=_MINTED_ROW)
+
+    _client(handler).register_collection(**_ATTRS)
+
+    assert not any(p.endswith("/version") for p in seen)
+
+
+def test_an_unreadable_version_probe_leaves_the_409_as_it_was() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/version"):
-            return httpx.Response(500, json={"error": "boom"})
+            raise httpx.ConnectError("down")
         return httpx.Response(409, json={"error": "refused"})
 
     with pytest.raises(httpx.HTTPStatusError) as exc:

@@ -101,23 +101,26 @@ def require_catalog_move(cat: Any, *, what: str = "a catalog move") -> None:
 
 #: RDR-229 P3.8: the first engine release that registers a collection with no name, minting its ``collection_id``
 #: and its label ``c<id>`` and answering the registered row: engine-service-v0.1.201, the provisional Phase 3 cut.
-#: HAND-KEPT. Not a gate on every write: only a nameless registration asks (an older engine answers it with an
-#: opaque 409, which a mint refusal also is).
+#: HAND-KEPT. Not a gate: the engine lists no ``/version`` flag for it, so a nameless registration is sent and only
+#: a 409 asks :func:`explain_mint_refusal` which engine answered it.
 COLLECTION_MINT_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 201)
 
 
 class CollectionMintUnsupportedError(RuntimeError):
-    """A nameless collection registration was refused because the engine is older than the release that mints labels."""
+    """A nameless collection registration was refused by an engine older than the release that mints labels."""
 
 
-def require_collection_mint(cat: Any, *, what: str = "registering a collection by its attributes") -> None:
-    """Refuse *what* when *cat*'s engine reports a release below :data:`COLLECTION_MINT_MIN_ENGINE_VERSION`.
+def explain_mint_refusal(
+    cat: Any, exc: BaseException, *, what: str = "registering a collection by its attributes",
+) -> None:
+    """Raise :class:`CollectionMintUnsupportedError` (from *exc*) when *cat*'s engine is older than the mint, else return.
 
-    Reads ``release_version`` through *cat*'s cached ``GET /version`` probe (``engine_release_version``). Only a
-    release the probe PARSES and finds too old refuses. A tree-built engine carries ``release_version: null``, which
-    is newer than any release, and a probe that failed says nothing about the engine; both go on to the write, whose
-    own answer stands. (``catalog_move`` refuses an unknown answer because it asks a flag the engine either lists or
-    does not; this engine lists none for the mint.)
+    An engine that predates the mint answers a nameless registration with an opaque 409, and so does one that mints
+    and refuses (a minted label collision past its bound, a sequence behind the data, a live tuple held by another
+    row). The caller therefore asks only after a 409, and the answer is the engine's ``release_version`` through *cat*'s
+    cached ``GET /version`` probe (``engine_release_version``). Only a release the probe PARSES and finds below
+    :data:`COLLECTION_MINT_MIN_ENGINE_VERSION` raises. A tree-built engine carries ``release_version: null`` and is
+    newer than any release; a probe that failed says nothing; both return, and the caller re-raises the 409 as it was.
     """
     from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — stdlib-only leaf, deferred with the rest of this module's imports
 
@@ -126,14 +129,13 @@ def require_collection_mint(cat: Any, *, what: str = "registering a collection b
     if callable(probe):
         try:
             raw = probe()
-        except Exception as exc:  # noqa: BLE001 - an unreadable probe is an unknown answer, which does not refuse
-            _log.warning("engine_floors.mint_probe_failed", error=str(exc))
+        except Exception as probe_exc:  # noqa: BLE001 - an unreadable probe is an unknown answer, which leaves the 409 as it was
+            _log.warning("engine_floors.mint_probe_failed", error=str(probe_exc))
     parsed = parse_engine_version(raw)
     if parsed is None or parsed >= COLLECTION_MINT_MIN_ENGINE_VERSION:
         return
     floor = ".".join(map(str, COLLECTION_MINT_MIN_ENGINE_VERSION))
     raise CollectionMintUnsupportedError(
         f"{what} refused: engine {raw} does not mint collection labels; minimum engine version: {floor}. "
-        "Upgrade the engine (nx daemon service stop, then start after upgrading), or register under a name. "
-        "Nothing was written."
-    )
+        "Upgrade the engine to that release or newer. Nothing was written."
+    ) from exc
