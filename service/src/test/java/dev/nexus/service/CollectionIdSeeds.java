@@ -38,6 +38,23 @@ public final class CollectionIdSeeds {
 
     private CollectionIdSeeds() {}
 
+    /**
+     * Registers {@code collections} for {@code tenant} on a fresh superuser connection of {@code pg} (idempotent). Since P3.1
+     * the engine answers a write that names an unregistered collection with the typed 422 {@code unregistered_collection},
+     * so a route test registers the collections its documents name before it posts them.
+     */
+    public static void register(org.testcontainers.containers.PostgreSQLContainer<?> pg, String tenant, String... collections) {
+        try (java.sql.Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            for (String collection : collections) {
+                PgContainerHelper.insertCollection(ctx, tenant, collection);
+            }
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     /** True when the schema carries the P3.1 id columns ({@code nexus.chunks.collection_id}, vectors-068). */
     public static boolean hasIdColumns(DSLContext ctx) {
         return PgCatalogProbes.columnExists(ctx, "nexus", "chunks", "collection_id");

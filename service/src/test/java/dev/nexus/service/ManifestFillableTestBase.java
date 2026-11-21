@@ -108,6 +108,7 @@ abstract class ManifestFillableTestBase {
 
     protected String doc(String token, String tenant, String title, String filePath, String indexedAt, String meta) throws Exception {
         String owner = "f3yqd.fill" + (seq++);
+        registerCollection(tenant, COLL);
         var resp = post(token, tenant, "/v1/catalog/doc/register", mapper.writeValueAsString(Map.of(
             "owner_prefix", owner, "title", title, "content_type", "prose",
             "source_uri", "file:///f3yqd/" + owner + ".md", "physical_collection", COLL)));
@@ -124,6 +125,18 @@ abstract class ManifestFillableTestBase {
         }
         wantedStamp.put(tumbler, indexedAt);
         return tumbler;
+    }
+
+    /**
+     * Registers {@code collection} for {@code tenant} (idempotent). Since RDR-229 P3.1 the engine refuses a document that
+     * names an unregistered collection with a typed 422 {@code unregistered_collection}, so every route-registered document
+     * of these tests needs its collection first.
+     */
+    protected void registerCollection(String tenant, String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, collection);
+        }
     }
 
     protected String doc(String title) throws Exception {

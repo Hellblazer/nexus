@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantConstants;
 import org.jooq.SQLDialect;
@@ -115,11 +116,13 @@ class CatalogHandlerManifestEnvelopeTest {
         // nexus-7nrvr: real collection — ghost-ness was incidental (both
         // callers of this helper are about envelope count-reconciliation,
         // not about the ghost/no-collection path).
+        String collection = "knowledge__" + ownerPrefix.replace('.', '-') + "__v1";
+        CollectionIdSeeds.register(pg, TENANT, collection);
         var resp = post("/v1/catalog/doc/register",
             mapper.writeValueAsString(Map.of(
                 "owner_prefix", ownerPrefix, "title", title,
                 "content_type", "prose", "source_uri", sourceUri,
-                "physical_collection", "knowledge__" + ownerPrefix.replace('.', '-') + "__v1")));
+                "physical_collection", collection)));
         assertThat(resp.statusCode()).as("doc registration must succeed: " + resp.body()).isEqualTo(200);
         return (String) mapper.readValue(resp.body(), MAP_T).get("tumbler");
     }
@@ -143,6 +146,7 @@ class CatalogHandlerManifestEnvelopeTest {
                 .set(CHUNKS.COLLECTION, collection)
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
                 .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
                 .set(CHUNKS.CHUNK_TEXT, "stub")
                 .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
                 .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()
