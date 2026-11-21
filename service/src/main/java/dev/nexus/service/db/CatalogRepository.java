@@ -11605,6 +11605,16 @@ public final class CatalogRepository {
                    .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, DSL.currentOffsetDateTime())
                    .where(CATALOG_COLLECTIONS.NAME.eq(oldName))
                    .execute());
+            // catalog-049-2 (RDR-229): step 2 re-homed the documents while X was still live and held the
+            // (content_type, owner_id, embedding_model, model_version) tuple the documents' owner names, so its
+            // AFTER trigger's guard kept Y's slug owner. X is retired now; this no-op write names owner_id, which
+            // fires catalog-044's BEFORE trigger (UPDATE OF owner_id) again, and the guard now sees a free tuple
+            // unless a third live collection holds it. A tumbler-shaped or knowledge owner is untouched by the trigger.
+            ctx.update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.OWNER_ID)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+               .and(CATALOG_COLLECTIONS.NAME.eq(newName))
+               .execute();
             return counts;
         });
     }
