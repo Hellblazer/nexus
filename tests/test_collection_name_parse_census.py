@@ -395,6 +395,10 @@ for _site in LEDGER:
 #: P2.9 reland (nexus-p2m1x.14): 228 -> 229. The import's routing read falls back to the name when the row
 #: resolver fails (``exporter.import_collection``, P2.5's contract that a failed lookup never aborts the import):
 #: one more NoRow mint, empty at P3.8. mint 127 -> 128, primitive_call 191 -> 192.
+#: P2.4 (nexus-p2m1x.9): the four taxonomy-threshold holdovers (three calls in ``taxonomy_cmd.py``, one in
+#: ``http_taxonomy_store.py``, each a caller of ``default_projection_threshold``) read the catalog row now, and
+#: the one NoRow name derivation they share is a single mint-class entry in ``projection_threshold.py``. The pins
+#: below are re-derived, measured, on the stacked Phase 2 integration tree (linda), not hand-moved here.
 PARSE_SITE_PIN: int = 229
 CLASS_PIN: dict[str, int] = {
     "mint": 128, "holdover": 23, "diagnostic": 42,
@@ -822,7 +826,8 @@ def test_pin_matches_documented_total() -> None:
     265 -- 255 at P2.5, nexus-p2m1x.10, when twelve bypass-schema prefix tests
     became one helper; then 255 -- 245 at P2.3, nexus-p2m1x.8, when the repo
     indexer's target models became row reads; then 245 -- 240 at P2.7 part A,
-    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted) is derived
+    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted; then again
+    at P2.4, nexus-p2m1x.9, when the taxonomy threshold became a row read) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
