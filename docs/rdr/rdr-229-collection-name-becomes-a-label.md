@@ -901,9 +901,20 @@ re-derives it from the collection's documents. `catalog-044`'s rule that
 takes the owner from the documents now applies only to a legacy
 name-derived owner (a slug, `''` or a placeholder): a catalog amendment
 removes its curator clause, so a curator owner a registration set stands.
+Its second half (`catalog-051-2`) stops catalog-044's two triggers from
+rewriting a legacy owner onto a tuple (tenant, content type, owner, model,
+model version) that another live, unsuperseded `code`, `docs` or `rdr`
+collection already holds: the row keeps its old owner and the trigger
+raises a NOTICE naming both collections. Before that check each trigger
+takes a transaction advisory lock on the tuple's key,
+`nexus.collection_tuple_lock_key` (`catalog-051-1a`), the SQL function that
+is the key's one derivation (the engine's `CollectionTupleLock` selects it
+and does not re-implement it).
 An import resolves the owner from the collection's existing row, then the
-bundle's optional `owner` header, then a `<slug>-<hash8>` stem (a live
-`code__` of the stem or a repo owner with that hash on the target), then
+bundle's optional `owner` header, then a `<slug>-<hash8>` stem, taken as
+the repo's when the collection is itself `code`, or is `docs` or `rdr` and
+the target already holds a repo owner with that hash or a live `code`
+collection of that stem (`nxexp_owner.resolve_import_owner_tumbler`), then
 the corpus curator for a `docs` corpus, then the knowledge curator with a
 warning. A repo's collections that an old bulk import left under a curator
 are re-owned by the registered data move
@@ -1907,23 +1918,28 @@ every script and note URI that names one.
   2026-11-08).
 - [ ] Critical Assumptions 1 and 6 measured (P1.2; done 2026-11-20), and
   Critical Assumption 3's residue rows counted there on every install (open: it
-  needs the 0.1.200 route; read on both tenants after that deploy and before
-  Sam's go for the first cloud run of D2 and P2.10's moves).
+  needs the 0.1.200 route; read on both tenants after that deploy, as a
+  post-deploy confirmation and not a move gate: the deploy go is the go for
+  the moves' first cloud run, T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`).
 - [ ] Critical Assumption 5 measured (P3.2) before P3.1's changeset is
   final, and so before the Phase 3 switch changesets: it sets each move's
   `chunk_size`, `sleep_ms` and `statement_timeout_ms`.
-- [ ] RDR-246's data-move mechanism active on the cloud before P2.10's
-  repair moves and Phase 3 run there (the first registered move is D2's
+- [ ] RDR-246's data-move mechanism active on the cloud before the Phase 2
+  moves and Phase 3 run there (the first registered move is D2's
   `model_version` repair, which rides the Phase 2 engine cut: "the first
   registered data move (the unlock for RDR-246 Step 2)", T2
   `nexus/sam-ruling-rdr229-p12-row-decisions-2026-11-20`):
   nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
   boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
   on Sam's go: cloud pg_background install and the first registered move")
-  open (T2 `229-research-32`). It gates the first cloud run of P2.10's
-  repair moves and of P3.1's move, not their registration, so P2.10's can
-  be the first registered moves that .2.23 waits for (T2
-  `229-research-57`). A Phase 3 cut can still reach an install whose moves are
+  open (T2 `229-research-32`). It gates the first cloud run of the Phase 2
+  moves and of P3.1's move, not their registration (T2 `229-research-57`).
+  The first registered moves .2.23 waits for are D2's (`vectors-064`),
+  owner-is-source's re-own (`rdr229-reown-repo-stems-from-curator`,
+  `vectors-067`) and P2.10's three repair moves, all in 0.1.200; the 0.1.200
+  deploy go is the go for their first cloud runs, each named with its
+  measured count (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`,
+  `nexus/engine-cut-0.1.200`). A Phase 3 cut can still reach an install whose moves are
   blocked. There its readers stay on names (item 6, "A blocked move"). A
   BYO or `--no-pg-bundle` PostgreSQL "gets it from its DBA" (RDR-246 lines
   801-802); until then that install is such a case (Cross-Cutting, "BYO
@@ -1938,7 +1954,9 @@ row's model into chunk metadata, `nx search` calibrates with the row's
 model, and a quarantine of one of its chunks registers a sibling whose
 `lifecycle_state` is `quarantine` without the engine reading the prefix. In
 the same run, a recovery bundle recorded under a legacy name restores. Both
-census gates are at their Phase 2 pins. After Phase 3, the same fixture is
+census gates are at their Phase 2 pins: on the client, `holdover` 0, `routing`
+0 and `uri-classifier` 2; on the engine, the collection-split and
+quarantine-literal ceilings 0 (`CollectionParseGateTest`). After Phase 3, the same fixture is
 renamed and searched: the rename touches one registry row, its chunks and
 per-collection index are unchanged, and `store_put` to a new subject
 registers a collection with a minted label that `nx search --corpus
@@ -2167,7 +2185,11 @@ its acceptance is that test green plus the census pin it lowers.
   Blocks P3.6 and P3.8.
 - P2.R Review gate for Phase 2. Engine cut for P2.4 (prune `match`), P2.5, P2.6,
   P2.9 and P2.10 (and P2.8's filter drop, per its amendment); client
-  floor bumps in the release that ships P2.3 onward.
+  floor bumps in the release that ships P2.3 onward. The same cut, 0.1.200,
+  carries D2's move and owner-read policy (`vectors-064`, `vectors-065`),
+  owner-is-source's `catalog-051` and re-own move (`vectors-067`), the
+  re-embed 409 refusals on a shared or foreign-held tuple (`ReembedHandler`),
+  and the RDR-254 aspect upsert deadlock retry (`AspectRepository`).
 
 **Phase 3: the surrogate key and the label**
 
@@ -2841,7 +2863,9 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 ### Cross-Cutting Concerns
 
 - **Versioning**: P2.4 (the prune `match` field; engine first, and an older engine reads as
-  unsupported, so the client keeps its guard), P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts,
+  unsupported, so the client keeps its guard), P2.5, P2.6, P2.9, P2.10 (in 0.1.200 with D2's `vectors-064` and
+  `vectors-065`, `catalog-051`, `vectors-067`, the re-embed 409 refusals and the RDR-254 aspect fix), the Phase 3
+  engine beads and P4.0 ride engine cuts,
   P3.5 and P3.7 one cut together with the rename refusal and the name-key
   drop move's registration (P3.7);
   the client floor bumps in the release that first depends on each, engine
@@ -3020,3 +3044,5 @@ large, and moved under a ratchet.
 - 2026-11-21: Owner is the source (Sam, T2 `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`) written into item 5 and the `229-research-9` finding, with its two accepted residuals (T2 `nexus/sam-ruling-owner-is-source-old-bundle-residual-2026-11-21`, `nexus/sam-ruling-batch-2026-11-21-late`), matching the reviewed code on `feature/rdr229-owner-is-source` (grant 3).
 - 2026-11-21: the P2.7 step names the `resolve_corpus` stage-3 fallback that item 1 already records (one `label-pattern` site, `LABEL_TYPED`), so the step and item 1 agree (grant 3, nexus-p2m1x.12; P2.R cross-walk F1, nexus-p2m1x.16).
 - 2026-11-21: item 1's holdover total and item 12's `taxonomy__` sites match the Phase 2 integration tree: holdover empty (P2.2 23 -> 4, P2.4 4 -> 0), the three taxonomy tests read through `legacy_names.is_taxonomy_collection_name`, client census 218, all measured at 7817cd3251 (grant 3; P2.R author read, nexus-p2m1x.16).
+- 2026-11-21: recorded late, P2.4's two amendments of 2026-11-20 and 2026-11-21. P2.4 owns a small engine half: the prune route's `match` field (`exact` or `prefix`), echoed in the answer, with `/version`'s `taxonomy_prune_exact_supported` flag, which the client checks before any exact prune; the P2.R step, Versioning, item 1 and Day 2 follow (b7e8f448e3, grant 3, nexus-p2m1x.9); and the verification sentinel is a name no collection has, and the guarantee is the name, not the threshold (20baca2d8f, nexus-p2m1x.9).
+- 2026-11-21: the 0.1.200 contents (P2.R step, Versioning), item 5's stem rule and `catalog-051-2` tuple guard with its lock key, the Prerequisites' first registered moves and their deploy-go gate (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`), and the MVV's numeric Phase 2 pins match the integration tree eb1e4cd42b (grant 3; P2.R critique T2 `nexus/critique-eb1e4cd42b-nexus-p2m1x.16-2026-11-21-r1`, nexus-p2m1x.16).
