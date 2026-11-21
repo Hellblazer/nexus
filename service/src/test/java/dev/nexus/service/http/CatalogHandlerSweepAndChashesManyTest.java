@@ -95,7 +95,7 @@ class CatalogHandlerSweepAndChashesManyTest {
 
     private void registerCollection(String collection) {
         repo.upsertCollection(TENANT, Map.of(
-            "name", collection, "content_type", "code", "owner_id", "http-sweep-owner",
+            "name", collection, "content_type", "code", "owner_id", "http-sweep-" + collection.split("__")[1],
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
     }
 

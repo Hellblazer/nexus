@@ -146,7 +146,7 @@ class P225WritePathIntegrationTest {
 
     private void register(String collection, String model) {
         catalog.upsertCollection(TA, Map.of("name", collection, "content_type", collection.substring(0, collection.indexOf("__")),
-            "owner_id", "p225w", "embedding_model", model, "model_version", "v1"));
+            "owner_id", "p225w-" + collection.split("__")[1], "embedding_model", model, "model_version", "v1"));
     }
 
     private static org.jooq.Field<String> leafOf() {
