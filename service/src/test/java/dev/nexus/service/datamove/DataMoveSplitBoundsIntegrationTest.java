@@ -222,12 +222,14 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         Connection[] holder = new Connection[1];
         var finisher = new VerifyingFinisher();
         // after the first pass, before the completion transaction: another session takes ACCESS EXCLUSIVE on the driving table
-        // (a DDL would), so the re-check's SELECT waits behind it and meets the completion's lock_timeout (half of 4 s)
+        // (an uncommitted rename of it), so the re-check's SELECT waits behind it and meets the completion's lock_timeout (half of 4 s)
         finisher.beforeCompletionHook = () -> {
             try {
                 holder[0] = adminLogin("sb-recheck-lock-holder");
                 holder[0].setAutoCommit(false);
-                DSL.using(holder[0], org.jooq.SQLDialect.POSTGRES).execute("LOCK TABLE dm_test.tenant_plain IN ACCESS EXCLUSIVE MODE");
+                // an uncommitted rename: DDL in an open transaction holds ACCESS EXCLUSIVE until it ends (typed, as ChashValidateJobRouteTest does)
+                DSL.using(holder[0], org.jooq.SQLDialect.POSTGRES).alterTable(table("dm_test", "tenant_plain"))
+                    .renameTo(DSL.name("tenant_plain_held")).execute();
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
@@ -308,7 +310,8 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         registerForcedNoRead("sb-new-token");
         var finisher = new VerifyingFinisher();
         finisher.beforeCompletionHook = () -> {
-            ctx().execute("INSERT INTO nexus.service_tokens (token_hash, tenant_id) VALUES ('sb-newco-token', 'newco')");
+            ctx().insertInto(table("nexus", "service_tokens"))
+                .columns(DSL.field(DSL.name("token_hash"), String.class), TENANT_ID).values("sb-newco-token", "newco").execute();
             ctx().insertInto(table("dm_test", "forced_noread")).columns(TENANT_ID, ID, N).values("newco", 9_000L, 0).execute();
         };
 
