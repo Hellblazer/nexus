@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 (Sam 2026-11-21, "Owner is the source"): a collection's owner_id is its source, set once at
+    registration and never re-derived from its documents' owner. This amends catalog-044 (immutable) so that a
+    CURATOR owner is no longer rewritten from documents.
+
+    catalog-044-1 made nexus.catalog_collection_owner_replaceable(tenant, owner_id) true for an owner_id that is
+    not tumbler-shaped OR names a curator-type owner. Both triggers of catalog-044-2 gate on it, so a collection
+    registered under a curator (a doc corpus, the corpus's curator; a knowledge subject's curator) had its owner_id
+    replaced by the owner segment of whatever documents landed in it. That is the defect: a docs corpus whose
+    documents carry a repo owner's tumbler stopped being the corpus's collection.
+
+    THE RULE NOW. Only an owner_id that is NOT tumbler-shaped (^[0-9]+(-[0-9]+)*$: a slug, a dotted value, 'default',
+    the tenant-id placeholder) is replaceable. A curator's segment is tumbler-shaped and is a registration that
+    stands. The nexus-6pbwx legacy case (a slug frozen from the collection name by hygiene-002-1, re-derived from the
+    collection's documents) is unchanged, and catalog-044-3 already ran that repair.
+
+    WHAT CHANGES. Only the body of nexus.catalog_collection_owner_replaceable: catalog-044-1's body minus
+    "OR nexus.catalog_owner_is_curator(p_tenant, p_owner)". Same signature, owner, grants and SECURITY INVOKER
+    posture (CREATE OR REPLACE keeps them), so the two triggers need no change and the live-function count does not
+    move. nexus.catalog_owner_is_curator stays: nexus.catalog_collection_doc_owner ranks non-curator documents above
+    curator ones by it.
+
+    NO DATA EFFECT. A function body only; no row is read or written. Rows a curator owner already lost to
+    catalog-044-3 are re-owned by the registered data move vectors-067 (rdr229-reown-repo-stems-from-curator), not here.
+
+    ROLLBACK restores catalog-044-1's body.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-049-1" author="nexus-p2m1x.14">
+        <comment>nexus.catalog_collection_owner_replaceable(tenant, owner_id) no longer treats a curator owner as replaceable: only an owner_id that is not tumbler-shaped is (RDR-229, owner is the source). Same signature, grants and SECURITY INVOKER; no data effect.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_owner_replaceable(p_tenant text, p_owner text)
+    RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $fn$
+    SELECT COALESCE(p_owner !~ '^[0-9]+(-[0-9]+)*$', true)
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_owner_replaceable(p_tenant text, p_owner text)
+    RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $fn$
+    SELECT COALESCE(p_owner !~ '^[0-9]+(-[0-9]+)*$', true)
+        OR nexus.catalog_owner_is_curator(p_tenant, p_owner)
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
