@@ -182,11 +182,10 @@ public final class CollectionMint {
                     .doNothing().execute()
                 : insert.execute();
         } catch (DataAccessException e) {
-            // another row took the label between the draw and this insert. Name it here: the driver's detail line (the
-            // key) is withheld from a role under row-level security, so the registration's outer catch cannot read it.
+            // another row took the label between the draw and this insert: the transaction is gone, so refusingRace names
+            // the holder from a new one (the driver's key detail is withheld from a role under row-level security)
             if (violates(e, "catalog_collections_pk")) {
-                throw new MintedLabel.LabelsTakenException("registering a collection: the label '" + choice.label()
-                    + "' was taken by another registration while this one ran; try again");
+                throw new LabelLost(choice.label(), tupleText(contentType, owner, model.model(), version));
             }
             throw e;
         }
@@ -290,6 +289,34 @@ public final class CollectionMint {
 
     // ── the race the pre-check cannot see ───────────────────────────────────────────────────────
 
+    private static String tupleText(String contentType, String owner, String model, String version) {
+        return "(" + contentType + ", " + owner + ", " + model + ", " + version + ")";
+    }
+
+    /** A mint's drawn label was taken by another row between the draw and the insert; {@link #refusingRace} names the holder. */
+    private static final class LabelLost extends RuntimeException {
+        final String label;
+        final String own;
+
+        LabelLost(String label, String own) {
+            super("the label " + label + " was taken by another registration");
+            this.label = label;
+            this.own = own;
+        }
+
+        /** Both sides: this request's tuple and the tuple of the row that holds the label, read in a new transaction. */
+        MintedLabel.LabelsTakenException refusal(TenantScope scope, String tenant) {
+            String holder = scope.withTenant(tenant, ctx -> ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))
+                .fetchOne(r -> tupleText(r.value1(), r.value2(), r.value3(), r.value4())));
+            return new MintedLabel.LabelsTakenException("registering a collection: the label '" + label + "' for " + own
+                + " was taken by another registration while this one ran, which holds it for "
+                + (holder == null ? "a tuple that is no longer visible" : holder) + "; try again");
+        }
+    }
+
     /** The key of a primary-key violation, where the driver reports it (it does not for a role under row-level security). */
     private static final java.util.regex.Pattern PK_KEY =
         java.util.regex.Pattern.compile("Key \\(tenant_id, name\\)=\\([^,]*, (.*?)\\) already exists");
@@ -318,6 +345,9 @@ public final class CollectionMint {
         try {
             return work.get();
         } catch (RuntimeException e) {
+            if (e instanceof LabelLost lost) {
+                throw lost.refusal(scope, tenant);
+            }
             if (recheck != null && violates(e, CollectionTupleIndexProbe.INDEX)) {
                 scope.withTenant(tenant, ctx -> {
                     recheck.accept(ctx);
