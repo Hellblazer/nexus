@@ -276,10 +276,24 @@ def test_the_runbook_names_what_the_down_step_leaves_and_the_hazard_that_follows
     assert "drops the whole batch" in flat, "the previous engine's ring writer loses a batch on one bad entry"
 
 
-def test_the_orphan_section_is_a_marked_placeholder_until_the_re_run_text_is_known():
+def test_the_orphan_section_gives_the_restamp_step_and_no_placeholder_is_left():
+    """Registering a missing collection stamps nothing (the stamp move is complete and does not run again), so the way back is
+    ``nexus.rdr229_restamp``, which registers the move again once no orphan row remains."""
     text = RUNBOOK.read_text(encoding="utf-8")
     assert "## Orphan rows" in text
-    assert "PLACEHOLDER" in text, "the operator steps wait for developer A's re-run text and must say so"
+    assert "PLACEHOLDER" not in text
+    flat = " ".join(text[text.index("## Orphan rows"):].split())
+    assert "SELECT nexus.rdr229_restamp('<table>');" in flat
+    assert "nexus_admin" in flat
+    assert "-rerun-N" in flat and "supersedes" in flat
+    assert "registered:" in flat and "not registered:" in flat
+    assert "register each missing collection" in flat and "delete the rows" in flat
+
+
+def test_the_changelog_orphan_advice_names_the_restamp_step():
+    text = (ROOT / "changelog" / "unreleased" / "nexus-p2m1x.17.md").read_text(encoding="utf-8")
+    assert "rdr229_restamp" in text
+    assert "once the collection is registered or the rows are removed" not in text
 
 
 def test_the_restore_runbook_says_what_an_orphan_row_does_to_a_restore_and_how_to_resolve_it():
@@ -309,3 +323,19 @@ def test_the_client_lag_ledger_names_the_older_client_failure_against_the_p31_en
     assert "first put into a new collection" in low
     assert "register_collection_for_write" in note or "registers the collection first" in low, "names the client half"
     assert "ships" in low, "the entry says when it moves to Shipped: when the client release carrying the half ships"
+
+
+def test_the_client_lag_ledger_has_an_additive_entry_for_the_completion_status_field():
+    """``/v1/status`` gains a top-level ``rdr229_completion`` object: an old client ignores it, and a new client against an old
+    engine sees it absent and reports "not known"."""
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    wire = importlib.import_module("check_wire_contract_pairing")
+    ledger = wire.parse_ledger(ROOT / "docs" / "wire-contract-pending.md")
+    entries = [e for e in ledger.unshipped.values() if "rdr229_completion" in e.note]
+    assert entries, "no Unshipped entry names the rdr229_completion status field"
+    for e in entries:
+        assert e.additive is True, "an optional status field is additive"
+        low = " ".join(e.note.split()).lower()
+        assert "old client + new engine" in low and "new client + old engine" in low
+        assert "not known" in low

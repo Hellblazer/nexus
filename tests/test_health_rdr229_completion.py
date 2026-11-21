@@ -1,168 +1,211 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-229 P3.1 (nexus-p2m1x.17): ``nx doctor``'s rows for the engine's boot-time completion check, from canned
-``/v1/status`` bodies.
+"""RDR-229 P3.1 (nexus-p2m1x.17): ``nx doctor``'s rows for the engine's boot-time completion check, from ``/v1/status``.
 
-The engine reports three kinds of ``boot_work`` entry (``CompletionBootWork.java``): ``rdr229-completion`` (where the
-three gates stand), ``rdr229-check:<constraint>`` (a listed CHECK that is missing; the superseded_by one waits on D2's
-data and says how many registry rows hold it back) and ``rdr229-validate:<table>`` (a table whose stamp is done and whose
-CHECK is still NOT VALID because orphan rows violate it). The rows never turn ``nx doctor`` red: the gates wait by
-design across releases, and every waiting state clears by itself or by an operator step the row names.
+The engine reports the check in its own top-level field, ``rdr229_completion`` (``CompletionStatusJson.java``), not in
+``boot_work``: the three gates wait by design across releases, so a ``boot_work`` entry would read as work in progress to
+``nx upgrade`` and ``nx daemon status`` for as long as a release has no P3.4 index builder. The field is absent until the
+engine's first read, and a client reads that as "not known", never as "ok". It carries counts and table and constraint
+names only (``/v1/status`` is unauthenticated). The rows never turn ``nx doctor`` red: every waiting state clears by
+itself or by a step the row names.
+
+Fixtures: ``tests/fixtures/rdr229_completion_status/*.json`` are bodies the engine's own renderer produced (developer A's
+tests); the validate-wait body below is the shape of ``validate_waits`` with the engine's ``what`` text. The two queries
+the dangling and self-id rows carry are run against a real store in ``tests/test_rdr229_completion_queries.py``.
 """
 from __future__ import annotations
 
-import re
+import json
 from pathlib import Path
 
 import nexus.health as health
 from nexus.health import HealthResult
 from nexus.rdr229_completion_health import (
-    CHECK_PREFIX,
-    NOT_APPLICABLE_NOT_REPORTED,
-    SUMMARY_ID,
+    DANGLING_LABEL,
+    DANGLING_QUERY,
+    NOT_KNOWN,
+    SELF_ID_LABEL,
+    SELF_ID_QUERY,
     SUMMARY_LABEL,
-    VALIDATE_PREFIX,
     check_rdr229_completion,
 )
 
-JAVA = (
-    Path(__file__).resolve().parents[1]
-    / "service" / "src" / "main" / "java" / "dev" / "nexus" / "service" / "datamove" / "CompletionBootWork.java"
-)
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "rdr229_completion_status"
 
-SUMMARY_WHAT = (
-    "gate 1 waits (15 of 16 stamp moves incomplete); gate 2 waits on gate 1; gate 3 waits: gate 2 does not hold"
-)
+#: Every key the engine's field carries; the module reads each of them, and a key the engine adds that is not here fails the shape test.
+FIELD_KEYS = {
+    "gate1", "gate2", "gate3", "gates_holding", "gates_total", "summary", "gate3_why", "labels_total", "labels_incomplete",
+    "checks_missing", "superseded_by_waiting", "validate_waits", "dangling_tombstones",
+}
+
 SUPERSEDED = "catalog_collections_superseded_by_id_check"
-SUPERSEDED_WHAT = (
-    f"waits: {SUPERSEDED} is not on catalog_collections yet; 2 registry row(s) with a blank model_version and no "
-    "superseded_by_id hold its changeset back (D2's repair move or the superseded_by stamp clears them, then the next "
-    "boot adds it); the switch is refused until then"
-)
 VALIDATE_WHAT = (
     "waits: 3 orphan row(s) (a name with no registry row in its tenant) and 1 unstamped row(s) keep "
-    "catalog_documents_physical_collection_id_check on catalog_documents NOT VALID; its VALIDATE waits instead of failing a boot"
+    "catalog_documents_physical_collection_id_check on catalog_documents NOT VALID. To finish: register each missing "
+    "collection or delete the orphan rows, then run  SELECT nexus.rdr229_restamp('catalog_documents');  as the migrating "
+    "role. It re-registers this table's stamp move once no orphan remains; the move stamps the rows and validates the CHECK."
 )
 
 
-def _entry(entry_id: str, what: str, done: int | None = None, total: int | None = None) -> dict:
-    return {
-        "id": entry_id, "what": what, "started_at": "2026-11-21T01:00:00Z", "done": done, "total": total,
-        "unit": "gates", "safe_to_stop": True, "on_stop": "the check is read again on the next boot; nothing is lost",
-        "step": None,
-    }
+def _fixture(name: str) -> dict:
+    return json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
 
 
-def _summary(what: str = SUMMARY_WHAT, done: int = 0) -> dict:
-    return _entry(SUMMARY_ID, what, done, 3)
+def _by_label(rows: list[HealthResult]) -> dict[str, HealthResult]:
+    return {r.label: r for r in rows}
 
 
 def _never_red(rows: list[HealthResult]) -> None:
     assert [r.label for r in rows if not r.ok and not r.warn] == []
 
 
-def test_the_summary_entry_is_one_ok_row_with_the_gates_in_its_detail():
-    rows = check_rdr229_completion({"boot_work": [_summary()]})
+def test_the_fixtures_carry_exactly_the_keys_this_module_reads():
+    """The engine's field and the module cannot drift: the bodies are the engine's own output."""
+    names = sorted(p.stem for p in FIXTURES.glob("*.json"))
+    assert len(names) >= 3, "non-vacuity: the fixtures are present"
+    for name in names:
+        field = _fixture(name)["rdr229_completion"]
+        assert set(field) == FIELD_KEYS, name
+        assert set(field["dangling_tombstones"]) == {"read", "registry_rows", "total", "by_content_type", "self_id"}, name
+        assert set(field["dangling_tombstones"]["self_id"]) == {"total", "by_content_type"}, name
 
-    assert [r.label for r in rows] == [SUMMARY_LABEL]
-    assert rows[0].ok and not rows[0].warn
-    assert rows[0].detail.startswith("0 of 3 gates hold: gate 1 waits (15 of 16 stamp moves incomplete)")
-    assert "gate 3 waits" in rows[0].detail
+
+def test_gates_holding_and_the_summary_make_one_ok_row():
+    rows = check_rdr229_completion(_fixture("all_stamps_done_gate3_waiting"))
+
+    row = _by_label(rows)[SUMMARY_LABEL]
+    assert row.ok and not row.warn
+    assert row.detail.startswith("2 of 3 gates hold: gate 1 holds; gate 2 holds; gate 3 waits")
+    assert "P3.4" in row.detail
+    _never_red(rows)
 
 
-def test_the_summary_counts_the_gates_that_hold():
-    rows = check_rdr229_completion({"boot_work": [_summary("gate 1 holds; gate 2 holds; gate 3 waits: P3.4", done=2)]})
+def test_blocked_stamps_are_one_summary_row_and_no_warning():
+    """Incomplete stamp labels are the Data moves rows' business (a blocked move says why there); the gate row counts them."""
+    rows = check_rdr229_completion(_fixture("stamps_blocked"))
 
-    assert rows[0].detail.startswith("2 of 3 gates hold: gate 1 holds; gate 2 holds")
+    assert _by_label(rows)[SUMMARY_LABEL].detail.startswith("0 of 3 gates hold: gate 1 waits (15 of 16 stamp moves incomplete)")
+    assert [r.label for r in rows if r.warn] == []
+    _never_red(rows)
 
 
 def test_the_superseded_by_check_waiting_on_d2s_data_is_a_warning_that_says_what_clears_it():
-    status = {"boot_work": [_summary(), _entry(CHECK_PREFIX + SUPERSEDED, SUPERSEDED_WHAT)]}
+    rows = check_rdr229_completion(_fixture("superseded_by_check_missing"))
 
-    rows = check_rdr229_completion(status)
-
-    by_label = {r.label: r for r in rows}
-    row = by_label[f"RDR-229 CHECK {SUPERSEDED}"]
+    row = _by_label(rows)[f"RDR-229 CHECK {SUPERSEDED}"]
     assert row.warn and not row.ok
-    assert "2 registry row(s)" in row.detail
+    assert "1 registry row(s)" in row.detail
     text = " ".join(row.fix_suggestions)
-    assert "repair-catalog-collection-model-version" in text
-    assert "next boot" in text
+    assert "repair-catalog-collection-model-version" in text and "next boot" in text
     assert "nothing to run" in text.lower()
     _never_red(rows)
 
 
-def test_any_other_missing_check_is_a_warning_that_names_the_changeset_file():
-    status = {"boot_work": [_entry(CHECK_PREFIX + "chunks_collection_id_check", (
-        "missing: chunks_collection_id_check is not on chunks; the switch is refused until it is restored "
-        "(its changeset text is in vectors-068-collection-id-expand.xml)"))]}
+def test_any_other_missing_check_is_a_warning_that_names_the_changeset_file_and_the_re_add():
+    body = _fixture("superseded_by_check_missing")
+    body["rdr229_completion"]["checks_missing"] = [{
+        "table": "chunks", "constraint": "chunks_collection_id_check",
+        "what": "missing: chunks_collection_id_check is not on chunks; the switch is refused until it is restored "
+                "(its changeset text is in vectors-068-collection-id-expand.xml)"}]
 
-    rows = check_rdr229_completion(status)
+    rows = check_rdr229_completion(body)
 
-    row = next(r for r in rows if r.label == "RDR-229 CHECK chunks_collection_id_check")
+    row = _by_label(rows)["RDR-229 CHECK chunks_collection_id_check"]
     assert row.warn and not row.ok
-    assert "vectors-068-collection-id-expand.xml" in " ".join(row.fix_suggestions)
-    _never_red(rows)
-
-
-def test_a_validate_that_waits_on_orphans_names_the_table_the_counts_and_the_operator_step():
-    status = {"boot_work": [_summary(), _entry(VALIDATE_PREFIX + "catalog_documents", VALIDATE_WHAT)]}
-
-    rows = check_rdr229_completion(status)
-
-    row = next(r for r in rows if r.label == "RDR-229 VALIDATE catalog_documents")
-    assert row.warn and not row.ok
-    assert "3 orphan row(s)" in row.detail and "1 unstamped" in row.detail
     text = " ".join(row.fix_suggestions)
-    assert "Register that collection, or remove the rows" in text
-    assert (
-        "ALTER TABLE nexus.catalog_documents VALIDATE CONSTRAINT catalog_documents_physical_collection_id_check" in text
-    )
-    assert "nexus_admin" in text
+    assert "vectors-068-collection-id-expand.xml" in text
+    assert "rdr-229-p31-readd.sql" in text, "the generated re-add is the way back after the down-step"
     _never_red(rows)
 
 
-def test_no_row_names_a_collection_or_a_tenant_the_engine_never_sent_one():
-    status = {"boot_work": [_summary(), _entry(VALIDATE_PREFIX + "catalog_documents", VALIDATE_WHAT)]}
+def test_a_validate_that_waits_on_orphans_says_what_the_engine_says_and_names_the_restamp_step():
+    body = _fixture("all_stamps_done_gate3_waiting")
+    body["rdr229_completion"]["validate_waits"] = [{
+        "table": "catalog_documents", "constraints": ["catalog_documents_physical_collection_id_check"],
+        "orphans": 3, "unstamped": 1, "counted": True, "what": VALIDATE_WHAT}]
 
-    for row in check_rdr229_completion(status):
-        assert "ghost" not in row.detail
+    rows = check_rdr229_completion(body)
+
+    row = _by_label(rows)["RDR-229 VALIDATE catalog_documents"]
+    assert row.warn and not row.ok
+    assert row.detail == VALIDATE_WHAT, "the engine's text is shown as it sent it"
+    text = " ".join(row.fix_suggestions)
+    assert "SELECT nexus.rdr229_restamp('catalog_documents');" in text
+    assert "nexus_admin" in text
+    assert "registered:" in text and "not registered:" in text
+    assert "Register that collection, or remove the rows, then validate" not in text, "registering alone stamps nothing"
+    assert "VALIDATE CONSTRAINT" not in text, "the stamp move validates; the operator does not"
+    _never_red(rows)
 
 
-def test_entries_of_other_work_are_ignored():
-    status = {"boot_work": [
-        {"id": "data-move:rdr229-stamp-topics", "what": "blocked: x", "unit": "chunks"},
-        {"id": "pci-reconcile", "what": "building search indexes", "unit": "indexes"},
-    ]}
+def test_the_dangling_tombstone_preflight_and_the_self_id_rows_are_counts_by_content_type_with_a_query_that_lists_them():
+    body = _fixture("superseded_by_check_missing")
+    body["rdr229_completion"]["dangling_tombstones"] = {
+        "read": True, "registry_rows": 171, "total": 5, "by_content_type": {"docs": 3, "unknown": 2},
+        "self_id": {"total": 4, "by_content_type": {"docs": 3, "unknown": 1}}}
 
-    rows = check_rdr229_completion(status)
+    rows = _by_label(check_rdr229_completion(body))
 
-    assert [r.label for r in rows] == [SUMMARY_LABEL]
-    assert rows[0].ok and NOT_APPLICABLE_NOT_REPORTED in rows[0].detail
+    pre = rows[DANGLING_LABEL]
+    assert pre.ok and not pre.warn
+    assert "5 dangling tombstone(s) of 171 registry rows" in pre.detail
+    assert "docs: 3" in pre.detail and "unknown: 2" in pre.detail
+    assert any(DANGLING_QUERY in f and "nexus_admin" in f for f in pre.fix_suggestions)
+    own = rows[SELF_ID_LABEL]
+    assert own.ok and not own.warn
+    assert "4 tombstone(s)" in own.detail and "docs: 3" in own.detail and "unknown: 1" in own.detail
+    assert any(SELF_ID_QUERY in f and "nexus_admin" in f for f in own.fix_suggestions)
 
 
-def test_not_applicable_when_the_engine_cannot_be_read_or_predates_boot_work():
-    for status in (None, {}, {"boot_work": "nope"}):
+def test_a_clean_preflight_says_none_and_carries_no_query_and_an_unread_one_says_not_read():
+    clean = _by_label(check_rdr229_completion(_fixture("all_stamps_done_gate3_waiting")))
+    assert "no dangling tombstone" in clean[DANGLING_LABEL].detail and not clean[DANGLING_LABEL].fix_suggestions
+    assert "no self-id" in clean[SELF_ID_LABEL].detail and not clean[SELF_ID_LABEL].fix_suggestions
+
+    body = _fixture("all_stamps_done_gate3_waiting")
+    body["rdr229_completion"]["dangling_tombstones"] = {
+        "read": False, "registry_rows": 0, "total": 0, "by_content_type": {}, "self_id": {"total": 0, "by_content_type": {}}}
+    unread = _by_label(check_rdr229_completion(body))
+    assert "not read" in unread[DANGLING_LABEL].detail
+    assert unread[DANGLING_LABEL].ok and SELF_ID_LABEL not in unread
+
+
+def test_the_two_queries_are_read_only_and_name_no_other_table():
+    for query in (DANGLING_QUERY, SELF_ID_QUERY):
+        low = query.lower()
+        assert low.startswith("select ") and "nexus.catalog_collections" in low
+        for word in ("insert", "update", "delete", "drop", "alter", "truncate"):
+            assert word not in low.split(), word
+
+
+def test_an_absent_field_is_not_known_never_ok_and_old_boot_work_entries_are_ignored():
+    """Absent means the engine has not read yet, or predates the check: "not known", not "nothing waiting"."""
+    for status in ({"boot_work": []}, {}, {"rdr229_completion": None}, {"rdr229_completion": "nope"}):
         rows = check_rdr229_completion(status)
-        assert len(rows) == 1 and rows[0].ok and not rows[0].warn
-        assert rows[0].detail.startswith("not applicable")
+        assert len(rows) == 1 and rows[0].label == SUMMARY_LABEL and rows[0].ok and not rows[0].warn
+        assert rows[0].detail == NOT_KNOWN
+    old = {"boot_work": [{"id": "rdr229-completion", "what": "gate 1 waits", "unit": "gates"}]}
+    assert check_rdr229_completion(old)[0].detail == NOT_KNOWN
+
+
+def test_not_applicable_when_the_engine_cannot_be_read():
+    rows = check_rdr229_completion(None)
+    assert len(rows) == 1 and rows[0].ok and rows[0].detail.startswith("not applicable")
+
+
+def test_a_field_with_a_malformed_part_still_gives_the_rows_it_can():
+    body = _fixture("superseded_by_check_missing")
+    body["rdr229_completion"]["checks_missing"] = ["nope", {"table": "t"}]
+    body["rdr229_completion"]["validate_waits"] = [None]
+    body["rdr229_completion"]["dangling_tombstones"] = []
+
+    rows = check_rdr229_completion(body)
+
+    assert SUMMARY_LABEL in _by_label(rows)
+    _never_red(rows)
 
 
 def test_the_sweep_has_the_row_and_hands_it_the_status_it_already_fetched():
-    status = {"boot_work": [_summary()]}
+    rows = health._check_rdr229_completion(_fixture("all_stamps_done_gate3_waiting"))
 
-    assert [r.label for r in health._check_rdr229_completion(status)] == [SUMMARY_LABEL]
+    assert SUMMARY_LABEL in [r.label for r in rows]
     assert "_check_rdr229_completion" in Path(health.__file__).read_text(encoding="utf-8")
-
-
-def test_the_entry_ids_are_the_ones_the_engine_sends():
-    """The Java constants and this module's cannot drift: both are read from the source."""
-    text = JAVA.read_text(encoding="utf-8")
-
-    def constant(name: str) -> str:
-        m = re.search(rf'String {name} = "([^"]+)"', text)
-        assert m, f"{name} not found in CompletionBootWork.java"
-        return m.group(1)
-
-    assert constant("SUMMARY_ID") == SUMMARY_ID
-    assert constant("CHECK_PREFIX") == CHECK_PREFIX
-    assert constant("VALIDATE_PREFIX") == VALIDATE_PREFIX

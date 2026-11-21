@@ -1,0 +1,27 @@
+{
+  "boot_work" : [ ],
+  "rdr229_completion" : {
+    "gate1" : true,
+    "gate2" : true,
+    "gate3" : false,
+    "gates_holding" : 2,
+    "gates_total" : 3,
+    "summary" : "gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), so no collection has a valid one",
+    "gate3_why" : "this release builds no id-predicate index (P3.4), so no collection has a valid one",
+    "labels_total" : 16,
+    "labels_incomplete" : [ ],
+    "checks_missing" : [ ],
+    "superseded_by_waiting" : 0,
+    "validate_waits" : [ ],
+    "dangling_tombstones" : {
+      "read" : true,
+      "registry_rows" : 0,
+      "total" : 0,
+      "by_content_type" : { },
+      "self_id" : {
+        "total" : 0,
+        "by_content_type" : { }
+      }
+    }
+  }
+}
