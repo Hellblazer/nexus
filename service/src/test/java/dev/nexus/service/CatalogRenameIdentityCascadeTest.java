@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
@@ -156,15 +157,15 @@ class CatalogRenameIdentityCascadeTest {
         withDsl(dsl -> dsl.insertInto(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION, DOCUMENT_ASPECTS.SOURCE_PATH,
                 DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME,
-                DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID)
+                DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.COLLECTION_ID)
             .values(DSL.val(TENANT), DSL.val(a), DSL.val("Note One"), DSL.currentOffsetDateTime(),
-                DSL.val("m"), DSL.val("e"), DSL.val("nx-note://" + a + "/Note%20One"), DSL.val("uri-doc"))
+                DSL.val("m"), DSL.val("e"), DSL.val("nx-note://" + a + "/Note%20One"), DSL.val("uri-doc"), CollectionIds.idOf(TENANT, a))
             .execute());
         withDsl(dsl -> dsl.insertInto(DOCUMENT_HIGHLIGHTS,
                 DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
+                DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
             .values(DSL.val(TENANT), DSL.val("uri-doc"), DSL.val("nx-note://" + a + "/Note%20One"),
-                DSL.val(a), DSL.currentOffsetDateTime())
+                DSL.val(a), DSL.currentOffsetDateTime(), CollectionIds.idOf(TENANT, a))
             .execute());
 
         assertThat(rename(a, b, Map.of()).statusCode()).isEqualTo(200);
@@ -360,8 +361,8 @@ class CatalogRenameIdentityCascadeTest {
     private void seedDocument(String collection, String tumbler, String title) throws Exception {
         withDsl(dsl -> dsl.insertInto(CATALOG_DOCUMENTS,
                 CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-            .values(TENANT, tumbler, title, collection)
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+            .values(TENANT, tumbler, title, collection, CollectionIds.require(dsl, TENANT, collection))
             .execute());
     }
 
