@@ -236,6 +236,46 @@ class CollectionLabelRuleRouteTest {
         assertThat(resp.body()).doesNotContain("database");
     }
 
+    @Test
+    void registerWithNoNameOrANonStringOrBlankName_is400_nameRequired() throws Exception {
+        // Before r2 these reached the INSERT's NOT NULL. P3.8's mint branch (no label, the engine mints) goes ahead
+        // of this check when it exists.
+        List<Map<String, Object>> bodies = new java.util.ArrayList<>();
+        bodies.add(new LinkedHashMap<>(Map.of("content_type", "knowledge", "model_version", "v1")));
+        for (Object bad : new Object[] {5, true, "", "   ", List.of("a")}) {
+            Map<String, Object> b = new LinkedHashMap<>(Map.of("content_type", "knowledge", "model_version", "v1"));
+            b.put("name", bad);
+            bodies.add(b);
+        }
+        Map<String, Object> nullName = new LinkedHashMap<>(Map.of("content_type", "knowledge", "model_version", "v1"));
+        nullName.put("name", null);
+        bodies.add(nullName);
+        for (Map<String, Object> body : bodies) {
+            var resp = post("/v1/catalog/collections/upsert", body);
+            assertThat(resp.statusCode()).as(body + " -> " + resp.body()).isEqualTo(400);
+            assertThat(resp.body()).contains("name required");
+        }
+    }
+
+    @Test
+    void renamingBackOntoATombstoneWhoseLabelBreaksTheRule_isNotRefused() throws Exception {
+        // RDR-229 item 8: an existing row keeps its label. The undo of a rename names the tombstone the rename left;
+        // that label is an old install's ('/'), and the rule must not block the way back.
+        String legacy = "legacy/undo/label";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, legacy);
+        }
+        var forward = rename(legacy, "undo forward label");
+        assertThat(forward.statusCode()).as(forward.body()).isEqualTo(200);
+
+        var back = rename("undo forward label", legacy);
+
+        assertThat(back.statusCode()).as(back.body()).isEqualTo(200);
+        assertThat(isRegistered(legacy)).isTrue();
+        // while a NEW target that breaks the rule is still refused
+        assertThat(rename(legacy, "new/slash").statusCode()).isEqualTo(400);
+    }
+
     // ── import (ETL): a new row's shape, never its minted form, never an existing row ───────────────────────
 
     private Map<String, Object> importRow(String label) {

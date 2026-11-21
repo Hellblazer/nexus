@@ -213,6 +213,9 @@ class CatalogHandlerCollectionUpsertProfileSeedTest {
             + "\",\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\"}");
         handleWithTenant(ex, tenant);
         assertThat(ex.status).isEqualTo(200);
+        assertThat(profileRows(tenant).keySet())
+            .as("the re-registration of an existing row still seeds the content type's profile")
+            .containsExactly("code");
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
