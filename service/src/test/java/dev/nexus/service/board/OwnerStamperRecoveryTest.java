@@ -201,7 +201,7 @@ class OwnerStamperRecoveryTest {
         var faulty = faultyWithLiveness(down);
         faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
         stamperErrorRowOnY(faulty, f);
-        se.ack(f[0], StamperEnv.BASE, "Y", "sess-lead");   // the row's owner, the leader, acknowledges the row's own tip
+        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[1], "sess-lead");   // the row's owner, the leader, acknowledges the row's own tip: stamped from=<owner id>
         se.env.ids.clock.advance(Duration.ofMinutes(21));
         renewSeats(f);
 
@@ -229,7 +229,7 @@ class OwnerStamperRecoveryTest {
         stamperErrorRowOnY(faulty, f);
         Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
         assertThat(timer.armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
-        se.ack(f[0], StamperEnv.BASE, "Y", "sess-alpha");   // an ack row on the tip, but not the owner's: it cannot be matched while the read is down
+        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[1], "sess-alpha");   // from=<owner id> on a session that is alpha's: it may be the owner's while the read is down, and is not once the read recovers
         se.env.ids.clock.advance(Duration.ofMinutes(21));
         renewSeats(f);
 
@@ -247,6 +247,59 @@ class OwnerStamperRecoveryTest {
         var rows = se.ownerRows(f[0], StamperEnv.BASE);
         assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
         assertThat(rows.getLast().body()).containsEntry("owner", f[1]);
+    }
+
+    @Test
+    void aNonOwnersStampedAckDoesNotHoldOffTheFailSafeWhenTheLivenessReadIsDown() {
+        String[] f = redOnY();
+        var faulty = faultyWithLiveness(new java.util.concurrent.atomic.AtomicBoolean(true));
+        faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
+        stamperErrorRowOnY(faulty, f);   // owner: the leader
+        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[2], "sess-alpha");   // alpha's ack, stamped from=alpha's id: not the owner's
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        renewSeats(f);
+
+        faulty.onDeadline(f[0], StamperEnv.BASE);   // no retry: nobody who owns the red acknowledged it
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
+        assertThat(rows.getLast().get("owner")).as("the nobody-live row: every member is woken").isNull();
+    }
+
+    @Test
+    void anAckWithNoSenderSessionDoesNotHoldOffTheFailSafeEvenWithTheOwnersIdInFrom() {
+        String[] f = redOnY();
+        var faulty = faultyWithLiveness(new java.util.concurrent.atomic.AtomicBoolean(true));
+        faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
+        stamperErrorRowOnY(faulty, f);
+        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[1], null);   // from=<owner id> typed by hand, no session behind it
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        renewSeats(f);
+
+        faulty.onDeadline(f[0], StamperEnv.BASE);
+
+        var rows = se.ownerRows(f[0], StamperEnv.BASE);
+        assertThat(rows).extracting(r -> r.get("reason")).containsExactly("stamper_error", "escalated");
+        assertThat(rows.getLast().get("owner")).isNull();
+    }
+
+    @Test
+    void anOwnersAckPostedBeforeTheOwnerRowDoesNotHoldOffTheFailSafe() {
+        String[] f = redOnY();
+        var faulty = faultyWithLiveness(new java.util.concurrent.atomic.AtomicBoolean(true));
+        faulty.bind(new AckDeadlineTimer(new RecordingScheduler(), se.env.ids.clock, faulty::onDeadline));
+        se.env.ids.clock.advance(Duration.ofSeconds(1));
+        se.doneRowOnly(f[0], StamperEnv.BASE, "Y", "failure");
+        se.ackFrom(f[0], StamperEnv.BASE, "Y", f[1], "sess-lead");   // before the owner row exists
+        faulty.afterOut(f[0], "board/ci/nexus-develop--done",
+            Map.of("kind", "sha", "sha", "Y", "outcome", "failure", "from", "github"), "{}");
+        se.env.ids.clock.advance(Duration.ofMinutes(21));
+        renewSeats(f);
+
+        faulty.onDeadline(f[0], StamperEnv.BASE);
+
+        assertThat(se.ownerRows(f[0], StamperEnv.BASE)).extracting(r -> r.get("reason"))
+            .containsExactly("stamper_error", "escalated");
     }
 
     @Test

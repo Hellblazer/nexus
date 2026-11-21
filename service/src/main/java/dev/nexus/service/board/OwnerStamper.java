@@ -192,7 +192,7 @@ public final class OwnerStamper implements OwnerOutHook {
     /**
      * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. Who is live, and whose ack
      * an ack row is, come from the identity read, which is made only when an escalation is owed. If that read fails and
-     * an ack row sits on the row's own tip, the red may be acknowledged and cannot be matched without the read, so this
+     * the owner's stamped ack sits on the row's own tip ({@link OwnerDecision#ackOnTip}), the red may be acknowledged and cannot be matched without the read, so this
      * throws and the timer retries; escalating then would wake every member over an acknowledged red. If no such ack
      * row exists, nobody acknowledged, so the escalation is posted at once with no one named, the row the RDR gives
      * for nobody live.
