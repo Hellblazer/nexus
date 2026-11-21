@@ -1136,9 +1136,10 @@ def _register_or_lookup_doc_id(
         # write's registration, so it is logged here and the document write that follows meets the same engine.
         if physical_collection:
             from nexus.catalog.factory import writer_collection_registrar  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+            from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — the one seam every registration before a document shares
 
             try:
-                ensure_collection_registered(physical_collection, registrar=writer_collection_registrar(writer))
+                register_collection_for_write(physical_collection, writer_collection_registrar(writer))
             except Exception as exc:  # noqa: BLE001 — best effort: the document write that follows meets the same failure and reports it
                 _log.warning(
                     "preflight_collection_register_failed", collection=physical_collection,

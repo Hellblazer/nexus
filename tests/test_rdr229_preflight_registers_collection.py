@@ -52,7 +52,7 @@ def test_a_refused_registration_leaves_a_collection_that_already_has_its_row_usa
     def refuse(*_a: object, **_k: object) -> None:
         raise PreSendArgumentError("the client refused before it sent anything")
 
-    monkeypatch.setattr(doc_indexer, "ensure_collection_registered", refuse)
+    monkeypatch.setattr("nexus.registration_retry.register_collection_for_write", refuse)
     note = tmp_path / "second.md"
     note.write_text("# Second\n\nbody\n")
 

@@ -70,7 +70,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
 from nexus.catalog.rows.resolve import embedding_model_for
 from nexus.embed_window import NO_CATALOG, store_row_resolver
-from nexus.corpus import ensure_collection_registered, index_model_for_collection
+from nexus.corpus import index_model_for_collection
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
@@ -1274,9 +1274,9 @@ class _OwnerImport:
         self._ensure()
         if pre:
             from nexus.catalog.factory import writer_collection_registrar  # noqa: PLC0415 — deferred to avoid import cycle
+            from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — the one seam every registration before a document shares
 
-            ensure_collection_registered(
-                self.collection_name, registrar=writer_collection_registrar(self._writer))
+            register_collection_for_write(self.collection_name, writer_collection_registrar(self._writer))
         legacy_ids = [g["legacy_doc_id"] for g in pre.values() if g.get("legacy_doc_id")]
         if legacy_ids:
             self._live_legacy = {

@@ -104,8 +104,13 @@ def seed_row_when_profile_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
     seed_row_when_profile_refuses  # noqa: F401``); a module that does not import it is unaffected.
     """
     import nexus.doc_indexer as doc_indexer
+    import nexus.registration_retry as registration_retry
 
     monkeypatch.setattr(doc_indexer, "ensure_collection_registered", registered_or_seeded(doc_indexer.ensure_collection_registered))
+    # The pre-flight registers through the one seam every registration before a document shares.
+    monkeypatch.setattr(
+        registration_retry, "register_collection_for_write",
+        registered_or_seeded(registration_retry.register_collection_for_write))
 
 
 def registered_or_seeded(real: Any) -> Any:

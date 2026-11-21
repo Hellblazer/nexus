@@ -167,3 +167,175 @@ def test_the_runbook_pauses_the_open_stamp_moves_before_the_down_step_and_says_w
     assert "paused_by = 'rdr229 down-step'" in mod.generate_pause() + mod.generate_unpause()
     drifted = text.replace("paused_at IS NULL;", "paused_at IS NOT NULL;", 1)
     assert mod.runbook_problems(drifted, LIST.read_text(encoding="utf-8")), "a drifted pause statement is reported"
+
+
+# ── the re-add (fix round C, code review F3) ─────────────────────────────────────────────────────────────────────────
+
+READD_SQL = ROOT / "docs" / "runbooks" / "rdr-229-p31-readd.sql"
+CHANGELOG_068 = ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-068-collection-id-expand.xml"
+
+
+def _changeset_checks() -> dict[str, str]:
+    """constraint name -> the expression vectors-068 adds it with, read from the changeset text itself."""
+    text = CHANGELOG_068.read_text(encoding="utf-8")
+    found = re.findall(r"ADD CONSTRAINT (\w+)\s+CHECK \((.+?)\) NOT VALID;", text, re.S)
+    return {name: " ".join(expr.split()) for name, expr in found}
+
+
+def _readd_statements(sql: str) -> dict[str, str]:
+    """constraint name -> the expression one statement of the re-add adds it with."""
+    found = re.findall(r"ADD CONSTRAINT (\w+) CHECK \((.+?)\) NOT VALID", sql, re.S)
+    return {name: " ".join(expr.split()) for name, expr in found}
+
+
+def test_the_readd_recreates_every_listed_constraint_with_the_expression_the_changeset_added_it_with():
+    """The down-step dropped the CHECKs but DATABASECHANGELOG still records vectors-068-3..19 as run, so a redeploy does not
+    add them again: the re-add does, and it must say what the changesets said, so it is compared with the changeset text and
+    not with the generator's own table of expressions."""
+    mod = _load()
+    sql = mod.generate_readd(LIST.read_text(encoding="utf-8"))
+    readd = _readd_statements(sql)
+    assert list(readd) == _constraints(), "one statement per listed constraint, in list order"
+    changeset = _changeset_checks()
+    assert len(changeset) >= 20, "non-vacuity: the changeset text yields every CHECK it adds"
+    for name in _constraints():
+        assert readd[name] == changeset[name], f"{name}: the re-add differs from vectors-068's expression"
+
+
+def test_the_readd_is_not_valid_guarded_and_touches_no_row():
+    mod = _load()
+    sql = mod.generate_readd(LIST.read_text(encoding="utf-8"))
+    assert "SET LOCAL lock_timeout = '5s';" in sql
+    for forbidden in ("VALIDATE", "UPDATE ", "DELETE", "TRUNCATE", "DROP ", "data_moves"):
+        assert forbidden not in sql, f"the re-add only adds NOT VALID CHECKs: {forbidden}"
+    # Safe to run twice and on an install that lacks a table or a column: each statement is guarded.
+    assert sql.count("NOT VALID") >= 20
+    assert sql.count("to_regclass(") >= 20 and sql.count("pg_catalog.pg_constraint") >= 20
+    assert sql.count("pg_catalog.pg_attribute") >= 20, "the id column must exist before a CHECK names it"
+
+
+def test_the_readd_follows_the_list_not_a_copy_of_it():
+    mod = _load()
+    text = LIST.read_text(encoding="utf-8")
+    plus = text + "new_table\tcollection\tcollection_id\tnew_table_collection_id_check\tNAME_ID\n"
+    assert "new_table_collection_id_check" in mod.generate_readd(plus)
+    minus = "\n".join(line for line in text.splitlines() if "topics_collection_id_check" not in line) + "\n"
+    assert "topics_collection_id_check" not in mod.generate_readd(minus)
+    assert "ADD CONSTRAINT - " not in mod.generate_readd(text), "a history row never produces a statement"
+
+
+def test_the_committed_readd_equals_a_fresh_run_and_the_check_command_covers_it(tmp_path: Path):
+    mod = _load()
+    assert READD_SQL.exists(), f"{READD_SQL} is missing: run scripts/rdr229_p31_downstep.py --write"
+    assert READD_SQL.read_text(encoding="utf-8") == mod.generate_readd(LIST.read_text(encoding="utf-8"))
+    for rel in (LIST, SQL, RUNBOOK, READD_SQL):
+        target = tmp_path / rel.relative_to(ROOT)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(rel.read_text(encoding="utf-8"), encoding="utf-8")
+    doctored = tmp_path / READD_SQL.relative_to(ROOT)
+    doctored.write_text(doctored.read_text(encoding="utf-8").replace("chunks_collection_id_not_null", "chunks_collection_id_not_nul", 1), encoding="utf-8")
+    bad = subprocess.run([sys.executable, str(SCRIPT), "--root", str(tmp_path), "--check"], capture_output=True, text=True)
+    assert bad.returncode == 1, bad.stdout + bad.stderr
+    assert "p31-readd.sql" in bad.stdout + bad.stderr
+
+
+def test_the_runbook_embeds_the_readd_and_the_check_catches_drift():
+    mod = _load()
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert mod.runbook_problems(text, LIST.read_text(encoding="utf-8")) == []
+    drifted = text.replace("chunks_collection_id_not_null", "chunks_collection_id_not_nul")
+    assert mod.runbook_problems(drifted, LIST.read_text(encoding="utf-8")), "a runbook whose re-add SQL drifted must be reported"
+    no_block = text.replace("<!-- p31-readd:begin -->", "").replace("<!-- p31-readd:end -->", "")
+    assert any("re-add" in p for p in mod.runbook_problems(no_block, LIST.read_text(encoding="utf-8")))
+
+
+def test_the_runbook_re_adds_the_checks_after_the_redeploy_and_before_it_releases_the_pause():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    flip = text.index("Flip the tag")
+    readd = text.index("Re-add the CHECKs")
+    unpause = text.index("release the pause")
+    assert flip < readd < unpause, "tag flip, then the re-add, then the release of the pause"
+    flat = " ".join(text.split())
+    # why: the changelog records the CHECKs as run, so a redeploy does not add them, and a stamp's on_complete would fail
+    assert "DATABASECHANGELOG" in text and "42704" in text
+    assert "p31-readd.sql" in text
+
+
+def test_the_runbook_states_the_real_size_of_the_window():
+    flat = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+    # the registry stamp registers first and is one chunk per tenant, so the window closes about a minute after the first boot
+    assert "registry stamp" in flat and "about a minute" in flat
+    # on the cloud the window lasts as long as the moves stay blocked, which is a stated condition
+    assert "until pg_background is installed on the cloud's PostgreSQL (nexus-f3yqd.2.23)" in flat
+
+
+def test_the_runbook_names_what_the_down_step_leaves_and_the_hazard_that_follows():
+    flat = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+    assert "24 function bodies" in flat and "vectors-069" in flat
+    assert "canary_query_ring_upsert" in flat and "23503" in flat
+    assert "drops the whole batch" in flat, "the previous engine's ring writer loses a batch on one bad entry"
+
+
+def test_the_orphan_section_gives_the_restamp_step_and_no_placeholder_is_left():
+    """Registering a missing collection stamps nothing (the stamp move is complete and does not run again), so the way back is
+    ``nexus.rdr229_restamp``, which registers the move again once no orphan row remains."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "## Orphan rows" in text
+    assert "PLACEHOLDER" not in text
+    flat = " ".join(text[text.index("## Orphan rows"):].split())
+    assert "SELECT nexus.rdr229_restamp('<table>');" in flat
+    assert "nexus_admin" in flat
+    assert "-rerun-N" in flat and "supersedes" in flat
+    assert "registered:" in flat and "not registered:" in flat
+    assert "register each missing collection" in flat and "delete the rows" in flat
+
+
+def test_the_changelog_orphan_advice_names_the_restamp_step():
+    text = (ROOT / "changelog" / "unreleased" / "nexus-p2m1x.17.md").read_text(encoding="utf-8")
+    assert "rdr229_restamp" in text
+    assert "once the collection is registered or the rows are removed" not in text
+
+
+def test_the_restore_runbook_says_what_an_orphan_row_does_to_a_restore_and_how_to_resolve_it():
+    text = (ROOT / "docs" / "operations" / "backup-restore.md").read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    assert "restore_orphan_collection" in flat
+    assert "no registry row in the backup" in flat
+    assert "nothing is written" in flat.lower() or "nothing was written" in flat.lower()
+
+
+def test_the_client_lag_ledger_names_the_older_client_failure_against_the_p31_engine():
+    """A client from before P3.1 registers a document before its collection, and the P3.1 engine answers 422 for a document under
+    an unregistered collection: its first put into a new collection fails. The engine cut reads this ledger
+    (scripts/check_engine_release_floor.py check_client_lag_ledger), so the entry must lead with the direction-safety token and
+    say both directions."""
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    wire = importlib.import_module("check_wire_contract_pairing")
+    ledger = wire.parse_ledger(ROOT / "docs" / "wire-contract-pending.md")
+    entries = [e for e in ledger.unshipped.values() if e.bead == "nexus-p2m1x.17"]
+    assert entries, "no Unshipped entry for the P3.1 engine half: an older client's first put into a new collection is not named"
+    note = " ".join(" ".join(e.note for e in entries).split())
+    assert any(e.additive is False for e in entries), "old client + new engine is NOT safe: the entry must lead with [not-additive]"
+    low = note.lower()
+    assert "old client + new engine" in low and "new client + old engine" in low
+    assert "unregistered_collection" in note and "422" in note
+    assert "first put into a new collection" in low
+    assert "register_collection_for_write" in note or "registers the collection first" in low, "names the client half"
+    assert "ships" in low, "the entry says when it moves to Shipped: when the client release carrying the half ships"
+
+
+def test_the_client_lag_ledger_has_an_additive_entry_for_the_completion_status_field():
+    """``/v1/status`` gains a top-level ``rdr229_completion`` object: an old client ignores it, and a new client against an old
+    engine sees it absent and reports "not known"."""
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    wire = importlib.import_module("check_wire_contract_pairing")
+    ledger = wire.parse_ledger(ROOT / "docs" / "wire-contract-pending.md")
+    entries = [e for e in ledger.unshipped.values() if "rdr229_completion" in e.note]
+    assert entries, "no Unshipped entry names the rdr229_completion status field"
+    for e in entries:
+        assert e.additive is True, "an optional status field is additive"
+        low = " ".join(e.note.split()).lower()
+        assert "old client + new engine" in low and "new client + old engine" in low
+        assert "not known" in low

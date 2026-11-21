@@ -629,16 +629,20 @@ def _register_collection_first(collection: str) -> BaseException | None:
     report, which meets the same engine.
     """
     from nexus.catalog.factory import make_catalog_writer, writer_collection_registrar  # noqa: PLC0415 — deferred to avoid circular import at module load
-    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+    from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
 
     writer = None
     try:
         writer = make_catalog_writer()
-        ensure_collection_registered(collection, registrar=writer_collection_registrar(writer))
+        register_collection_for_write(collection, writer_collection_registrar(writer))
     except client_side_refusals() as exc:
         return exc
     except Exception as exc:  # noqa: BLE001 — best effort: the catalog hook that follows meets the same failure and reports it
-        _log.debug("collection_registered_first_failed", collection=collection, error=str(exc)[:200])
+        # Warning, not debug: the engine's later 422 names only the collection, so this is where the real cause is read.
+        _log.warning(
+            "collection_registered_first_failed", collection=collection,
+            error_type=type(exc).__name__, error=str(exc)[:300],
+        )
     finally:
         if writer is not None:
             try:
