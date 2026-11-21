@@ -774,8 +774,8 @@ def test_gate_xr789_shaped_import_owns_chunks_already_stored_ownerless_across_se
     cat = make_catalog_writer()
     owner = cat.register_owner("knowledge", "curator")
     dst = f"code__z0o2p19slug-2ad2825c__{_MODEL}__v1"
-    cat.register_collection(dst, content_type="code", owner_id="z0o2p19slug-2ad2825c", embedding_model=_MODEL)
-    live =str(cat.register(owner=owner, title="live legacy", content_type="code", physical_collection=dst,
+    cat.register_collection(dst, content_type="code", owner_id="z0o2p19slug-2ad2825c", embedding_model=_MODEL, model_version="v1")
+    live = str(cat.register(owner=owner, title="live legacy", content_type="code", physical_collection=dst,
                             source_uri=f"file:///z0o2p19/{dst}/live.py"))
     dead = str(cat.register(owner=owner, title="dead legacy", content_type="code", physical_collection=dst,
                             source_uri=f"file:///z0o2p19/{dst}/dead.py"))

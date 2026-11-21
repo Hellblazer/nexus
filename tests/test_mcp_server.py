@@ -426,8 +426,9 @@ class TestNexusHmxiRoundTripGrandfathering:
 
     @pytest.mark.t2_tenant
     def test_no_legacy_collection_promotes_to_conformant(self, t3, monkeypatch):
-        """No pre-existing collection; ``store_put`` auto-promotes to
-        conformant.
+        """No pre-existing collection; ``store_put`` registers the subject by
+        attributes and hands its sinks the label the engine minted (RDR-229 P3.8;
+        before it auto-promoted the subject to a conformant name).
 
         RDR-204 Phase 1 (nexus-f5wwx): this test is about CLIENT-SIDE
         name promotion under the module's cloud_mode belief, not about
@@ -468,9 +469,19 @@ class TestNexusHmxiRoundTripGrandfathering:
         # The catalog writer is faked so the fixture seed and the note double's manifest seed
         # write nowhere: this test pins names, not a landed document. The calls it receives are
         # NOT asserted: they are the fixture's (bge token) and the queue's, not the store path's.
-        monkeypatch.setattr(
-            "nexus.catalog.factory.make_catalog_writer", lambda **kw: MagicMock(),
-        )
+        # RDR-229 P3.8: a new subject is registered by attributes and the engine mints its label, so the
+        # faked writer answers the minted row for that one call.
+        from nexus.catalog.collection_name import CollectionAttributes
+
+        def _fake_writer(**kw):
+            writer = MagicMock()
+            writer.register_collection.side_effect = lambda *a, **k: CollectionAttributes(
+                collection_id=42, label="c42", content_type=k["content_type"], owner_id=k["owner_id"],
+                embedding_model=k["embedding_model"], model_version=1, dimension=None, lifecycle_state="live",
+            )
+            return writer
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", _fake_writer)
         monkeypatch.setattr(
             "tests._catalog_fixture_ops.seed_manifest_chunks", lambda *a, **kw: None,
         )
@@ -496,7 +507,7 @@ class TestNexusHmxiRoundTripGrandfathering:
 
         monkeypatch.setattr(note_write, "write_note", _recording_write_note)
 
-        promoted = "knowledge__greenfield__voyage-context-3__v1"
+        promoted = "c42"  # the label the engine minted; no conformant name is rendered for a new subject
         result = store_put(
             content="Greenfield content",
             collection="knowledge__greenfield",
@@ -508,9 +519,6 @@ class TestNexusHmxiRoundTripGrandfathering:
             "the store path registers the document under the promoted name"
         )
         assert note_writes == [promoted], "and writes the note under it"
-        # ``store_list`` resolves to the same conformant target.
-        listing = store_list(collection="knowledge__greenfield", limit=10)
-        assert promoted in listing  # the title is the catalog document's, which this test fakes
 
 
 @pytest.mark.t2_tenant
