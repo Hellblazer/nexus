@@ -1479,6 +1479,25 @@ that the widened census measures. P3.9 gives the recovery-bundle sites the
 bundle's row in place of the recorded name. After both, no site on this
 install routes a minted collection by a prefix it does not have (item 12).
 
+A live collection's tuple is unique (Sam, P3.8 design gate v2, T2
+`nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`, on "owner is the
+source", T2 `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`): a
+partial UNIQUE index on `(tenant_id, content_type, owner_id,
+embedding_model, model_version)` over `collectionForTuple`'s candidates
+(not superseded, not quarantine). It waits, through an `onFail="CONTINUE"`
+precondition, for the re-own move and for no duplicate to remain, and
+`nx doctor` names a duplicate it waits on. A mint is `INSERT ... ON
+CONFLICT DO NOTHING` and a re-read, or, before the index exists, a
+per-tuple advisory lock and a re-read; a conflicting import, restore,
+rename or named registration is a 409 naming both collections. A minted
+label that is already live takes the next id, bounded at 16 draws, then
+409, so `label == "c" + collection_id` holds for every minted row. The id
+comes only from the column's own sequence; a drawn id that is already a
+row draws forward once, never resetting the sequence backward, and an id
+is unique across the installation where D2's owner-read policy lets the
+checks read every tenant. No route accepts a client-supplied
+`collection_id`.
+
 **9. The non-stranding rule.** Phase 2 may repoint a reader only after every
 migration source it serves has a test that runs a row-less legacy name
 through it and passes. Those tests are written first (P2.1) and stay in the
@@ -2664,9 +2683,7 @@ To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
   give an id.
 
 Still open, for a design call: whether the label alphabet excludes `/`,
-which `NoteUri.collectionOf` treats as the end of the collection; what
-makes a live `(content_type, owner_id, embedding_model)` tuple unique once
-minting removes the name from that job; the safe engine downgrade
+which `NoteUri.collectionOf` treats as the end of the collection; the safe engine downgrade
 point after P3.3, which matters most from P3.7, when the name columns go
 dead (Approach, item 7; S-6 above); a repair for residue whose segment no
 longer names its collection and for residue `note-uri-001` rewrote to
@@ -2729,9 +2746,7 @@ S-2 to S-8, go to beads at accept (Contradiction Check).
 Still without one: P3.5b's plan measurement of each both-shapes reader
 has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
-stores, apart from its residue count, which runs on every install; no
-rule says what a mint does when a live label already has the
-minted form (P1.2 only counts such labels); no audit covers where a
+stores, apart from its residue count, which runs on every install; no audit covers where a
 label meets a file path beyond P3.6's Windows test; and no repair covers
 the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
@@ -2909,3 +2924,4 @@ large, and moved under a ratchet.
 - 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
 - 2026-11-19: Last residual of `nexus_rdr/229-gate-latest` (the gate-3 rename refusal had no owner before P3.7; accept fix check `3c7aa425d443`) fixed in the text (Sam, ask `baton/rdr229-refusal-owner`, option 1): P3.5 and P3.7 ship in one engine cut with the refusal and the name-key drop move's registration, and the refusal holds until every P3.5b changeset has applied, `9ea4521a4`. Contradiction Check regenerated. T2 `229-research-69` added.
 - 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
+- 2026-11-21: P3.8 amendment (grant 3, matching reviewed code, nexus-p2m1x.28): item 8 states the live-tuple UNIQUE and the minted-label collision rule; the two open questions on tuple uniqueness and minted-form collisions (Contradiction Check, Scope Verification) are closed by Sam's ruling T2 `nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`.
