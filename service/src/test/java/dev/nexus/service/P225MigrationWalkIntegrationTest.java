@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.test.Routines;
@@ -375,12 +376,14 @@ class P225MigrationWalkIntegrationTest {
             assertThat(PgCatalogProbes.tablesInSchema(ctx, "nexus")).doesNotContain("chunks_new", "taxonomy_centroids_new");
             // The outbound key refuses a chunk filed under a model other than its collection's.
             assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TA).set(CHUNKS.COLLECTION, A_CODE).set(CHUNKS.CHASH, Chash.ofText("wrong-model").toBytes())
+                .set(CHUNKS.TENANT_ID, TA).set(CHUNKS.COLLECTION, A_CODE)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TA, A_CODE)).set(CHUNKS.CHASH, Chash.ofText("wrong-model").toBytes())
                 .set(CHUNKS.CHUNK_TEXT, "x").set(CHUNKS.EMBEDDING_MODEL, CONTEXT_3).set(CHUNKS.EMBEDDING_1024, vec(1024)).execute())
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("23503"));
             // a chash that is not 32 bytes: the NOT VALID check exempts only rows that existed, so a new write is refused
             assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TA).set(CHUNKS.COLLECTION, A_CODE).set(CHUNKS.CHASH, new byte[31])
+                .set(CHUNKS.TENANT_ID, TA).set(CHUNKS.COLLECTION, A_CODE)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TA, A_CODE)).set(CHUNKS.CHASH, new byte[31])
                 .set(CHUNKS.CHUNK_TEXT, "x").set(CHUNKS.EMBEDDING_MODEL, CODE_3).set(CHUNKS.EMBEDDING_1024, vec(1024)).execute())
                 .satisfies(t -> {
                     assertThat(sqlState(t)).isEqualTo("23514");
@@ -388,7 +391,8 @@ class P225MigrationWalkIntegrationTest {
                 });
             // and a vector of the wrong width for its model
             assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TA).set(CHUNKS.COLLECTION, A_CODE).set(CHUNKS.CHASH, Chash.ofText("wrong-dim").toBytes())
+                .set(CHUNKS.TENANT_ID, TA).set(CHUNKS.COLLECTION, A_CODE)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TA, A_CODE)).set(CHUNKS.CHASH, Chash.ofText("wrong-dim").toBytes())
                 .set(CHUNKS.CHUNK_TEXT, "x").set(CHUNKS.EMBEDDING_MODEL, CODE_3).set(CHUNKS.EMBEDDING_768, vec(768)).execute())
                 .satisfies(t -> assertThat(sqlState(t)).isEqualTo("23514"));
         }
@@ -495,7 +499,7 @@ class P225MigrationWalkIntegrationTest {
             PgContainerHelper.seedServiceToken(su, "tok-p225-ts3a", tenant, "p225-ts3a");
             PgContainerHelper.insertCollection(su, tenant, coll);
             byte[] chash = Chash.ofText("ts3a-chunk").toBytes();
-            su.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, coll).set(CHUNKS.CHASH, chash)
+            su.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, coll).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, coll)).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.CHUNK_TEXT, "ts3a").set(CHUNKS.EMBEDDING_MODEL, CODE_3).set(CHUNKS.EMBEDDING_1024, vec(1024)).execute();
             // a document tombstoned long ago, with a manifest row that names the chunk
             su.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
@@ -503,11 +507,13 @@ class P225MigrationWalkIntegrationTest {
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER, doc)
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TITLE, "ts3a")
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, coll))
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(400)).execute();
             su.insertInto(CATALOG_DOCUMENT_CHUNKS)
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, coll).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CODE_3).execute();
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, coll)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, coll)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CODE_3).execute();
         }
         // The real purge_trash (it defers fk_catalog_chunks_chunk itself) as the owner under the tenant GUC.
         try (Connection a = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASS)) {
@@ -540,15 +546,17 @@ class P225MigrationWalkIntegrationTest {
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID, tenant)
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER, "ts3b-doc")
                 .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TITLE, "ts3b")
-                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll).execute();
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, coll)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, coll)).execute();
             int pos = 0;
             for (byte[] c : List.of(kept, orphaned)) {
-                su.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, coll).set(CHUNKS.CHASH, c)
+                su.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, coll).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, coll)).set(CHUNKS.CHASH, c)
                     .set(CHUNKS.CHUNK_TEXT, "ts3b").set(CHUNKS.EMBEDDING_MODEL, CODE_3).set(CHUNKS.EMBEDDING_1024, vec(1024)).execute();
                 su.insertInto(CATALOG_DOCUMENT_CHUNKS)
                     .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "ts3b-doc")
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, pos++).set(CATALOG_DOCUMENT_CHUNKS.CHASH, c)
-                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, coll).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CODE_3).execute();
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, coll)
+                    .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, coll)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CODE_3).execute();
             }
         }
         try (Connection a = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASS)) {
@@ -762,7 +770,7 @@ class P225MigrationWalkIntegrationTest {
                     try (Connection su = c2.createConnection("")) {
                         PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, "code__rs-owner__voyage-code-3__v1");
                     }
-                    assertThat(ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, "code__rs-owner__voyage-code-3__v1")
+                    assertThat(ctx.insertInto(CHUNKS).set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, "code__rs-owner__voyage-code-3__v1").set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, "code__rs-owner__voyage-code-3__v1"))
                         .set(CHUNKS.CHASH, Chash.ofText("restart").toBytes()).set(CHUNKS.CHUNK_TEXT, "r")
                         .set(CHUNKS.EMBEDDING_MODEL, CODE_3).set(CHUNKS.EMBEDDING_1024, vec(1024)).execute()).isEqualTo(1);
                 }
