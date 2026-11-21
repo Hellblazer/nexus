@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.ManifestCheck;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
@@ -927,9 +928,12 @@ public final class ChunkKeySweep {
         List<Query> updates = new ArrayList<>(rows.size());
         for (var r : rows) {
             JSONB kept = keepOnly(r.value4(), allowed);
-            // The statement assigns metadata and nothing else: last_written_at is the reaper's grace anchor.
+            // The statement assigns metadata and the collection's id, nothing else: last_written_at is the reaper's
+            // grace anchor. RDR-229 P3.1 stage 2b: the id is set because chunks carries a NOT VALID CHECK evaluated on
+            // every updated row, which refuses a chunk the stamp has not reached (collection set, id NULL).
             updates.add(ctx.update(CHUNKS)
                 .set(CHUNKS.METADATA, kept)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, r.value1()))
                 .where(CHUNKS.TENANT_ID.eq(tenant))
                 .and(CHUNKS.COLLECTION.eq(r.value1()))
                 .and(CHUNKS.CHASH.eq(r.value2()))
