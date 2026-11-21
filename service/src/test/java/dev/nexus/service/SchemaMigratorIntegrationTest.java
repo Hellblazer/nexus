@@ -2280,8 +2280,8 @@ class SchemaMigratorIntegrationTest {
                     .as("no precondition-skip changesets are exercised by this walk")
                     .isZero();
                 assertThat(outcome.newChangesets() + outcome.reexecutedChangesets()
-                        + outcome.markRanChangesets())
-                    .as("nexus-jl08t: the three outcome counts must partition "
+                        + outcome.markRanChangesets() + outcome.skippedRetryingChangesets())
+                    .as("nexus-jl08t: the outcome counts (with the waiting self-retrying changeset) must partition "
                         + "pending_at_start exactly, even with duplicate rows "
                         + "present")
                     .isEqualTo((long) outcome.pendingAtStart());
