@@ -261,12 +261,6 @@ def test_gh1571_moved_pdf_keeps_its_tumbler_its_link_and_one_search_hit(tmp_path
             assert db.document_aspects.get(physical, str(old)) is None, "no stale aspect row at the old path"
             assert db.document_aspects.get_by_doc_id(new_t) is None, "no aspect row names the absorbed tumbler"
 
-        if not in_flight:
-            aspect_row_is_the_old_tumblers()
-            return
-        try:
-            aspect_row_is_the_old_tumblers()
-        except AssertionError as exc:
-            pytest.xfail(f"RDR-254 P5 MVV finding, the aspect-queue race is real on this engine: {exc}")
-        pytest.fail("the in-flight extraction no longer flips the old tumbler's aspect row: drop this xfail branch and "
-                    "assert it for both variants")
+        # in flight, the absorbed document's late extraction completes after the move: the engine keeps the old
+        # tumbler on the row (AspectDocIdAttribution, the RDR-254 aspect-queue race fix)
+        aspect_row_is_the_old_tumblers()
