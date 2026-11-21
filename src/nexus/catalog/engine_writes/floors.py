@@ -97,3 +97,43 @@ def require_catalog_move(cat: Any, *, what: str = "a catalog move") -> None:
         f"{what} refused: engine {version} does not support catalog moves; minimum engine version: "
         f"{floor}. Nothing was written."
     )
+
+
+#: RDR-229 P3.8: the first engine release that registers a collection with no name, minting its ``collection_id``
+#: and its label ``c<id>`` and answering the registered row: engine-service-v0.1.201, the provisional Phase 3 cut.
+#: HAND-KEPT. Not a gate on every write: only a nameless registration asks (an older engine answers it with an
+#: opaque 409, which a mint refusal also is).
+COLLECTION_MINT_MIN_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 201)
+
+
+class CollectionMintUnsupportedError(RuntimeError):
+    """A nameless collection registration was refused because the engine is older than the release that mints labels."""
+
+
+def require_collection_mint(cat: Any, *, what: str = "registering a collection by its attributes") -> None:
+    """Refuse *what* when *cat*'s engine reports a release below :data:`COLLECTION_MINT_MIN_ENGINE_VERSION`.
+
+    Reads ``release_version`` through *cat*'s cached ``GET /version`` probe (``engine_release_version``). Only a
+    release the probe PARSES and finds too old refuses. A tree-built engine carries ``release_version: null``, which
+    is newer than any release, and a probe that failed says nothing about the engine; both go on to the write, whose
+    own answer stands. (``catalog_move`` refuses an unknown answer because it asks a flag the engine either lists or
+    does not; this engine lists none for the mint.)
+    """
+    from nexus.engine_version import parse_engine_version  # noqa: PLC0415 — stdlib-only leaf, deferred with the rest of this module's imports
+
+    probe = getattr(cat, "engine_release_version", None)
+    raw = ""
+    if callable(probe):
+        try:
+            raw = probe()
+        except Exception as exc:  # noqa: BLE001 - an unreadable probe is an unknown answer, which does not refuse
+            _log.warning("engine_floors.mint_probe_failed", error=str(exc))
+    parsed = parse_engine_version(raw)
+    if parsed is None or parsed >= COLLECTION_MINT_MIN_ENGINE_VERSION:
+        return
+    floor = ".".join(map(str, COLLECTION_MINT_MIN_ENGINE_VERSION))
+    raise CollectionMintUnsupportedError(
+        f"{what} refused: engine {raw} does not mint collection labels; minimum engine version: {floor}. "
+        "Upgrade the engine (nx daemon service stop, then start after upgrading), or register under a name. "
+        "Nothing was written."
+    )

@@ -277,7 +277,7 @@ class CatalogWriter(Protocol):
     def reactivate_owner(self, tumbler_prefix) -> object:  # canonical (nexus-cw262)
         ...
 
-    def register_collection(self, name, *, content_type=..., owner_id=..., embedding_model=..., model_version=..., display_name=...) -> object:  # canonical
+    def register_collection(self, name=..., *, content_type, owner_id, embedding_model, model_version, display_name=...) -> object:  # canonical (RDR-229 P3.8: label optional, four attributes required, answers the CollectionAttributes row)
         ...
 
     def delete_collection_projection(self, name, *, reason) -> object:  # canonical
