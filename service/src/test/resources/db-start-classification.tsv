@@ -6,6 +6,7 @@
 # cluster-level fact has no kind here; it takes a clone (PgContainerHelper.start() or startMigratedByOwner()).
 Catalog044OwnerFromDocumentsRepairTest	startEmptyDatabase	WALK	migrates to just before catalog-044-1, seeds the pre-fix owner shape, applies the rest and reads the repair back
 Rdr229P31ExpandIntegrationTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed rows and asserts the expand changesets rewrite none of them, then walks fully for the CHECK semantics, the queue guards, the rollback and the walk forward again
+Rdr229P31SupersededByCheckWaitTest	startEmptyDatabase	WALK	walks to before vectors-068-1 to seed a blank-model_version tombstone, then walks fully and asserts the superseded_by CHECK waits (CONTINUE) while the tombstone is unstamped and lands on the next boot once it is filled
 P31SqlDualWriteSupport	startEmptyDatabase	WALK	the shared walk of the Rdr229P31Sql*DualWriteIntegrationTest classes: seeds before vectors-068, refusals with 068 applied and 069 not, then fully for the ids (quarantine, trigger and taxonomy and catalog groups)
 Rdr229P31SqlCatalogDualWriteIntegrationTest	startEmptyDatabase	WALK	holds the catalog and ring group through the shared walk, then rolls back to a tag and walks forward again, and scans the live function bodies on a second full walk
 ServiceTokenScopeBackfillTest	startEmptyDatabase	WALK	builds the pre-003 service_tokens shape by hand, then applies only service-tokens-003 and asserts the backfill

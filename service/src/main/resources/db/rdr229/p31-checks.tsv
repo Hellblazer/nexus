@@ -7,7 +7,8 @@
 # The constraint names are stable on purpose: the R5 operator down-step (DROP CONSTRAINT IF EXISTS on every row) is
 # generated from this file, and vectors-068's <rollback> blocks are tested against it. aspect_extraction_queue is
 # absent on most installs: its changesets are guarded and skip when the table is missing (R3).
-# Row order is the order of the changesets in vectors-068-collection-id-expand.xml.
+# Row order is the order of the changesets in vectors-068-collection-id-expand.xml, except catalog_collections' CHECK, which is
+# vectors-068-19 (its own changeset, with the 068-2 data precondition; vectors-068-2 adds the column).
 table	name_column	id_column	constraint	kind
 catalog_collections	superseded_by	superseded_by_id	catalog_collections_superseded_by_id_check	SUPERSEDED
 chunks	collection	collection_id	chunks_collection_id_check	NAME_ID
