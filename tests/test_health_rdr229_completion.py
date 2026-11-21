@@ -113,7 +113,7 @@ def test_a_validate_that_waits_on_orphans_names_the_table_the_counts_and_the_ope
     assert row.warn and not row.ok
     assert "3 orphan row(s)" in row.detail and "1 unstamped" in row.detail
     text = " ".join(row.fix_suggestions)
-    assert "register" in text and "remove" in text
+    assert "Register that collection, or remove the rows" in text
     assert (
         "ALTER TABLE nexus.catalog_documents VALIDATE CONSTRAINT catalog_documents_physical_collection_id_check" in text
     )
