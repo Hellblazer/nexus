@@ -873,6 +873,21 @@ their arguments. CLI-level tests through `nx index repo`: two live clones give t
 owners and neither takes the other over; a symlinked path to the same clone is
 not split; a gone root falls through to the Gap 3 hint.
 
+Built. The rule is `repo_owner_name` in
+`nexus/catalog/engine_writes/repo_owner_name.py` (`nexus/catalog/` is at its
+module cap). It reads the same-name owners through `owner_tumblers_by_name`
+(`/owners/by_name`) and `get_owner_by_prefix` (`/owners/show`), the two reads
+the client already has, and looks only at owners of type `repo` whose hash is
+not this repository's. A recorded root counts as a live other clone when
+`<root>/.git` can be read and the root is not `os.path.samefile` with this
+repository; an owner with no root, a root that is gone, and a root that is no
+longer a work tree keep the plain name; a permission error splits. A call that
+passes an explicit `tumbler_prefix` (an ETL migration) is not renamed. The
+two-clone, symlink and gone-root cases run through `nx index repo` over a mock
+engine that imitates the engine's name-first matching
+(`tests/commands/test_index_repo_second_clone.py`) and against the real engine
+(`tests/integration/test_second_clone_real_engine.py`).
+
 ### Day 2 Operations
 
 The design creates no new persistent resource. The move writes existing rows.

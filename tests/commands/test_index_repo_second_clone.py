@@ -23,6 +23,8 @@ from click.testing import CliRunner
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
+from nexus.commands.catalog import _backfill_repos
+from nexus.indexer import _catalog_hook
 from nexus.repo_identity import _repo_identity_with_main
 
 
@@ -165,9 +167,6 @@ def test_direct_register_owner_sites_pass_their_explicit_hash(tmp_path, monkeypa
     """``_catalog_hook`` and ``nx catalog backfill`` register with a hash and name their callers hand them (tests pass a
     fixed hash; backfill hashes the registry path with no main-repository resolution). The rule gets those arguments
     and the register call carries the same hash, with the split name when another clone is live."""
-    from nexus.commands.catalog import _backfill_repos
-    from nexus.indexer import _catalog_hook
-
     first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
     engine = _OwnerEngine()
     engine.owners["1.1"] = {"tumbler_prefix": "1.1", "name": "proj", "owner_type": "repo", "repo_hash": "feedbeef",

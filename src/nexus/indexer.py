@@ -1428,8 +1428,10 @@ def _catalog_hook(
             # worktree path; ``resolve_path`` then produced broken
             # paths for every relative-path document under this owner
             # once the worktree was deleted.
+            # RDR-254 Gap 4: a second live clone with this folder name registers under its own name.
+            from nexus.catalog.engine_writes.repo_owner_name import repo_owner_name  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
             owner = writer.register_owner(
-                name=repo_name,
+                name=repo_owner_name(cat, name=repo_name, repo_hash=repo_hash, repo_root=main_repo),
                 owner_type="repo",
                 repo_hash=repo_hash,
                 repo_root=str(main_repo),

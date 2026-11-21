@@ -111,6 +111,8 @@ Per-file indexing runs with bounded concurrency (6.3.1, nexus-cfc72): by default
 
 Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/logs/index-<repo>-<hash8>.log` (6.3.3, nexus-mjc9l) — `tail -f` it to watch progress independent of terminal buffering, or check it after the fact if the terminal session is lost. Each run starts with a fresh file; the previous run's content survives as `.log.1`.
 
+**Two clones with one folder name (RDR-254, Gap 4):** a repository's owner is named after its folder. When you index a second clone whose folder name matches an existing repo owner, and that owner's recorded root is a different git work tree that is still on this machine (or one `nx` cannot read), the second clone gets its own owner, named `<folder>-<hash8>` (the hash is the one in the log file name above), and the first owner is left as it is. Nothing is refused. Anywhere an owner is named (`nx catalog owners`, `--owner` and `--repo` on the search and catalog commands), the first clone is `nexus` and the second `nexus-1a2b3c4d`; the tumbler works for either. A root that is gone keeps one owner, and so does the same clone reached through a symlink or a differently cased path. Owners that two clones already share are not split after the fact: their documents keep the mixed roots they have, and `nx index repo` prints the [move hint](#move-hints) for them.
+
 **Observability output** (stderr, all emitted automatically during `repo` runs):
 
 - **Per-file line** — `  [N/total] path — K chunks  (T.Ts)` printed as each file completes (or when `--monitor` / no-TTY).
