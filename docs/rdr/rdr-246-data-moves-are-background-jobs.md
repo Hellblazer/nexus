@@ -804,7 +804,12 @@ nexus_rdr/246-research-5):
    (`_backfill_provision_grants`, storage_service_daemon.py; it runs only when
    the credentials name the bundled cluster's data directory) and which
    already backfills the diag role; it is extended to create the extension,
-   roles, grants and schema when they are missing. A BYO or `--no-pg-bundle`
+   roles, grants and schema when they are missing. It can only do that with a
+   bundle that has the library, and a local install keeps the bundle it was
+   first set up with: one set up before engine-service-v0.1.190 (conexus
+   8.2.0 and earlier) has none, and nothing else replaced it. A plain `nx upgrade` now
+   replaces it (Activation Step 1b), after which the next service start runs this
+   step. A BYO or `--no-pg-bundle`
    PostgreSQL gets it from its DBA, as SQL in docs/configuration.md's
    prerequisites, and the cloud from Activation Step 1. In production the
    engine does not run as a superuser, so it cannot do this itself. Until the
@@ -1324,6 +1329,33 @@ the first job that uses it lands in an engine, or until PGDG ships 2.0.4. An
 engine without it serves and reports its moves blocked (Technical Design), so
 this step lands before the first registered move is expected to run in the
 cloud.
+
+#### Activation Step 1b: local installs, bundle refresh at convergence
+
+Step 1 is the cloud host. A local install has its own version of the same
+gap: the extracted PostgreSQL bundle (`<config>/pg-bundle`) is the one it was
+first set up with, `nx upgrade` installed the engine binary and never touched
+it, and pg_background first shipped in the bundle at engine-service-v0.1.190
+(conexus 8.2.1). An install first set up on 8.2.0 or earlier reached engine
+0.1.200 without the extension, and every registered move stayed `blocked:
+pg_background is not installed` (nexus-f3yqd.2.23; T2
+nexus/first-run-ux-triage). A plain `nx upgrade` now takes the pinned
+release's bundle and swaps it in, when the engine version changes and when the
+engine is already the pinned one but the extracted bundle has no
+`bundle/share/postgresql/extension/pg_background.control`. The swap is a
+binary replacement, not a data migration: nothing is rewritten, and PostgreSQL
+stays on 17.5, so the data directory starts under the new bundle; a swap that
+would change the major version (read from the data directory's `PG_VERSION`)
+or drop pg_background is refused before anything is stopped. The client's
+superuser bootstrap then creates the extension at the next service start
+(Install sequence, step 1). The leg that replaces a bundle under a converged
+engine restarts PostgreSQL, so it runs only in an attended `nx upgrade`, waits
+while the engine reports boot work or an index build, and is only reported by
+`nx upgrade --auto`, `nx upgrade --dry-run` and the MCP start; `nx doctor`
+warns on a `PostgreSQL bundle` row while it is pending. The release's
+upgrade rehearsal exercises it (scripts/upgrade_rehearsal.py, an old-bundle
+start from 8.2.0). A BYO or `--no-pg-bundle` PostgreSQL has no extracted
+bundle and is untouched.
 
 #### Activation Step 2: the first registered move
 
