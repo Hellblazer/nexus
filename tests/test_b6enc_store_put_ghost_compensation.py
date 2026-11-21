@@ -390,6 +390,9 @@ class TestMcpManifestFailLoud:
 
         monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _refused)
         content = "manifest fail content"
+        # RDR-229 P3.8: a new subject is minted a c<id> label; this test reads the conformant name, so it is registered first.
+        from tests._catalog_fixture_ops import register_seed_collections
+        register_seed_collections("knowledge__fixture-subject__bge-base-en-v15-768__v1")
         result = _mcp_store_put_with(
             local_t3, content, "b6enc-manifest-mcp",
         )
@@ -978,6 +981,9 @@ class TestWbfpw28ConcurrentIdenticalContentRace:
         chash = hashlib.sha256(content.encode()).hexdigest()
 
         # Store A: succeeds fully, real registration and the one real request.
+        # RDR-229 P3.8: a new subject is minted a c<id> label; this test reads the conformant name, so it is registered first.
+        from tests._catalog_fixture_ops import register_seed_collections
+        register_seed_collections("knowledge__fixture-subject__bge-base-en-v15-768__v1")
         result_a = _mcp_store_put_with(local_t3, content, "wbfpw28-race-a")
         assert result_a.startswith("Stored:"), result_a
         rows_a = _catalog_rows(catalog_env, "wbfpw28-race-a")
@@ -1285,6 +1291,9 @@ class TestZ0o2p12McpFailedReput:
         new_chash = hashlib.sha256(new.encode()).hexdigest()
         client = hvc.HttpVectorClient(tenant=t2_service_env)
 
+        # RDR-229 P3.8: a new subject is minted a c<id> label; this test reads the conformant name, so it is registered first.
+        from tests._catalog_fixture_ops import register_seed_collections
+        register_seed_collections("knowledge__fixture-subject__bge-base-en-v15-768__v1")
         assert _mcp_store_put_with(local_t3, old, title).startswith("Stored:")
         (tumbler, _count), = _catalog_rows(catalog_env, title)
         refused_write.arm()
@@ -1387,6 +1396,10 @@ class TestZ0o2p12McpFailedReput:
         request went out. Whatever reached T3 has an owner row."""
         import nexus.catalog.http_catalog_client as hcc
         import nexus.db.http_vector_client as hvc
+
+        # RDR-229 P3.8: a new subject is minted a c<id> label; this test reads the conformant name, so it is registered first.
+        from tests._catalog_fixture_ops import register_seed_collections
+        register_seed_collections("knowledge__fixture-subject__bge-base-en-v15-768__v1")
 
         class ClientDied(BaseException):
             pass
