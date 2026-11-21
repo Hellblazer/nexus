@@ -77,6 +77,8 @@ class DmlUtilsBootstrap:
     schema_created: bool = False
     #: An empty ``liquibase`` schema under another owner was handed to ``dml_utils_owner``.
     schema_reowned: bool = False
+    #: Data moves whose stale "pg_background is not installed" retry state this call cleared (F33).
+    stale_retries_reset: int = 0
 
     @property
     def applied(self) -> bool:
@@ -163,6 +165,38 @@ def _notices(result: object) -> set[tuple[str, str]]:
     return set(_NOTICE.findall(getattr(result, "stderr", "") or ""))
 
 
+#: The transient reason a move records while pg_background is missing, with the retry prefixes the engine may put on it.
+_MISSING_PREREQUISITE_REASON = r"^(retry \d+(, last \S+)?: )?pg_background is not installed\s*$"
+
+
+def _reset_stale_prerequisite_retries(bins: PgBinaries, port: int, os_user: str) -> int:
+    """Clear the retry state a data move recorded while pg_background was missing, now that it is installed (F33).
+
+    The engine stamps a block on a missing prerequisite as a transient retry, and its backoff (up to 15 min) runs from
+    ``last_transient_at`` across restarts, so after a bundle swap the moves would wait out a backoff for a cause that is
+    gone. This is the reset doctor's retry hint names, narrowed to that one reason; it runs before the engine boots,
+    so the worker's first pass takes the moves at once. Rows with any other reason are untouched. An install whose
+    registry table does not exist yet has nothing to reset. A failure is logged and reads as 0: it only delays moves
+    to their own retry, so it never fails the bootstrap."""
+    try:
+        # A data-modifying CTE must be top level, so the table check is its own round trip.
+        if _psql_tuples(bins, port, NEXUS_DB_NAME, os_user, "SELECT to_regclass('nexus.data_moves') IS NOT NULL").strip() != "t":
+            return 0
+        raw = _psql_tuples(
+            bins, port, NEXUS_DB_NAME, os_user,
+            "WITH reset AS (UPDATE nexus.data_moves SET transient_retries = 0, last_transient_at = NULL, "
+            f"last_transient = NULL WHERE last_transient ~ '{_MISSING_PREREQUISITE_REASON}' RETURNING 1) "
+            "SELECT count(*) FROM reset",
+        )
+    except subprocess.CalledProcessError as exc:
+        _log.warning("pg_dml_utils_retry_reset_failed", error=_bounded(exc), stderr=_bounded(exc.stderr))
+        return 0
+    count = int(raw.strip() or 0)
+    if count:
+        _log.info("pg_dml_utils_stale_retries_reset", moves=count, reason="pg_background is not installed")
+    return count
+
+
 def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBootstrap:
     """Create or converge the dml_utils prerequisites; see the module docstring.
 
@@ -196,6 +230,8 @@ def bootstrap_dml_utils(bins: PgBinaries, port: int, os_user: str) -> DmlUtilsBo
             out.extension_created = ("created", f"extension:{EXTENSION}") in _notices(res)
             if out.extension_created:
                 _log.info("pg_extension_created", extension=EXTENSION)
+
+    out.stale_retries_reset = _reset_stale_prerequisite_retries(bins, port, os_user)
 
     # name -> (login, bypassrls, superuser, createrole, createdb), each a bool; all must be False.
     have = {

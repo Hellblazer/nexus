@@ -1,0 +1,3 @@
+### Fixed
+
+- **After the PostgreSQL bundle swap, blocked data moves start at once.** A move blocked on a missing pg_background records each attempt as a retry, and its backoff (up to 15 minutes) is kept on the move's row across restarts. So after `nx upgrade` swapped in a bundle with pg_background, the moves still waited out that backoff while `nx doctor` showed them blocked. The service start that creates the extension now clears that retry state for the moves blocked on this reason only, before the engine boots, and the engine's first pass takes them. While the bundle already has pg_background, `nx doctor`'s hint for such a move no longer sends you to `nx upgrade` for the bundle.
