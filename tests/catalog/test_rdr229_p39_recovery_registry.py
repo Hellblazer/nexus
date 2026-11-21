@@ -18,9 +18,13 @@ import pytest
 
 from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader
+from nexus.catalog.chunk_quarantine import quarantine_collection_name
 from nexus.catalog.recovery_bundle import _resolve_link_endpoint, import_bundle
 from nexus.collection_mint import register_by_attributes
 from nexus.db.http_vector_client import HttpVectorClient
+from nexus.indexer import _prune_deleted_files
+from tests._catalog_fixture_ops import ActiveCatalog
+from tests.test_bc7ps_live_listing_engine import _seed_orphans
 from nexus.catalog.recovery_bundle import ImportSummary
 from tests.catalog.test_rdr229_p39_recovery_bundle_v3 import (
     _active_model, _coll, _doc, _invoke_cli_import, _label, _write_bundle,
@@ -212,3 +216,37 @@ def test_the_cli_names_a_collection_imported_under_this_installs_own_minted_labe
     result = _invoke_cli_import(tmp_path, monkeypatch, summary)
 
     assert result.exit_code == 0 and "'c15' -> 'c97'" in result.output, result.output
+
+
+@pytest.mark.integration
+def test_a_target_label_that_is_quarantined_or_superseded_refuses_that_collection_alone(t2_service_env, tmp_path):
+    """The single-row read carries no lifecycle_state, so the import reads the listing: a target row that is
+    quarantined (made as production makes it, by the orphan sweep) or superseded is refused, and the rest imports."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    model = _active_model(client)
+    cat = ActiveCatalog()
+    origin = "code__p39qorigin__bge-base-en-v15-768__v1"
+    _seed_orphans(cat, client, origin, cat.register_owner("p39qorigin", "curator"), n_live=6, n_orphan=6)
+    _prune_deleted_files(origin, "docs__p39unused", client, catalog=cat)
+    quarantined = quarantine_collection_name(origin)
+    reader = make_catalog_reader()
+    assert {r["name"]: r["lifecycle_state"] for r in reader.list_collections()}[quarantined] == "quarantine"   # non-vacuity
+    old, new, good = _label(client, "p39old"), _label(client, "p39new"), _label(client, "p39okay")
+    for label, owner in ((old, "p39old"), (new, "p39new")):
+        reader.register_collection(label, content_type="knowledge", owner_id=owner, embedding_model=model, model_version="v1")
+    reader.supersede_collection(old, new)
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(
+        bundle,
+        [_coll(quarantined, 7_600_001, content_type="code", owner_id="p39qorigin", model=model),
+         _coll(old, 7_600_002, owner_id="p39old", model=model),
+         _coll(good, 7_600_003, owner_id="p39okay", model=model)],
+        [_doc(quarantined, 7_600_001, "q1"), _doc(old, 7_600_002, "o1"), _doc(old, 7_600_002, "o2"), _doc(good, 7_600_003, "g1")])
+
+    summary = _run(client, bundle)
+
+    refused = {e["label"]: e for e in summary.collections_refused_label_clash}
+    assert set(refused) == {quarantined, old}, summary.collections_refused_label_clash
+    assert "quarantine" in refused[quarantined]["error"] and "superseded" in refused[old]["error"]
+    assert (refused[quarantined]["docs_skipped"], refused[old]["docs_skipped"]) == (1, 2)
+    assert (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
