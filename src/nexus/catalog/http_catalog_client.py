@@ -96,14 +96,8 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
-from nexus.catalog.collection_name import (
-    CollectionAttributes,
-    CollectionName,
-    collection_for_repo_row,
-    find_collection_row,
-    owner_segment_for_tumbler,
-    version_unreadable_message,
-)
+from nexus.catalog.collection_name import CollectionAttributes, CollectionName, collection_for_repo_row
+from nexus.catalog.collection_name import find_collection_row, owner_segment_for_tumbler, version_unreadable_message
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.catalog.reconcile_client import CatalogReconcileError, ReconcileClient, ResolveOutcome  # noqa: F401 - re-exported: the public names the callers import from here
