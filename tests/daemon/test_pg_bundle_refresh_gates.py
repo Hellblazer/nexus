@@ -83,6 +83,48 @@ def test_the_converged_leg_runs_while_a_move_is_blocked_on_the_bundle(world, mon
     assert world.has_background() and any("refreshed" in a for a in actions), actions
 
 
+def test_on_a_bundle_without_pg_background_no_move_is_work_but_an_index_build_is(tmp_path, monkeypatch):
+    """F33: no data move can run without pg_background, so a queued or working one waits for the swap itself."""
+    monkeypatch.setattr(pg_bundle_refresh, "_engine_status", lambda: status)
+    monkeypatch.setattr(pg_bundle_refresh, "_service_up", lambda _cfg: True)
+    monkeypatch.setattr(pg_bundle_refresh, "_progress_rows", lambda _cfg: 0)
+    status = _status(_move("q", "queued: q (the worker has not reached it yet)"), _move("w", "working: w"))
+    assert pg_bundle_refresh.engine_busy_reason(tmp_path, moves_can_run=False) is None
+    status = _status(_move("q", "queued: q"), {"id": "pci-build", "what": "building indexes"})
+    reason = pg_bundle_refresh.engine_busy_reason(tmp_path, moves_can_run=False)
+    assert "building indexes" in reason and "queued" not in reason
+
+
+def _real_busy_with_queued_moves(world, monkeypatch):
+    world.install_old(background=False)
+    world.ship(background=True)
+    monkeypatch.setattr(pg_bundle_refresh, "engine_busy_reason", _real_busy)
+    monkeypatch.setattr(pg_bundle_refresh, "_engine_status", lambda: _status(
+        _move("repair-catalog-collection-model-version", "queued: repair-catalog-collection-model-version (the worker has not reached it yet)"),
+        _move("rdr229-reown-repo-stems-from-curator", "queued: rdr229-reown-repo-stems-from-curator")))
+    monkeypatch.setattr(pg_bundle_refresh, "_service_up", lambda _cfg: True)
+    monkeypatch.setattr(pg_bundle_refresh, "_progress_rows", lambda _cfg: 0)
+
+
+def test_the_converged_leg_runs_while_moves_are_queued_on_a_bundle_without_pg_background(world, monkeypatch):
+    """F33, the 8.2.0 rehearsal leg: the finish pass installed the engine and held the bundle (unattended); the walking
+    nx upgrade then found the registered moves queued and deferred the swap they wait for. They must not defer it."""
+    _real_busy_with_queued_moves(world, monkeypatch)
+
+    actions, _i, _c = _converge(world, engine="converged")
+
+    assert world.has_background() and any("refreshed" in a for a in actions), actions
+
+
+def test_the_engine_change_path_swaps_while_moves_are_queued_on_a_bundle_without_pg_background(world, monkeypatch):
+    _real_busy_with_queued_moves(world, monkeypatch)
+
+    actions, install, _c = _converge(world, engine="older")
+
+    install.assert_called_once()
+    assert world.has_background() and not any("held back" in a for a in actions), actions
+
+
 def test_the_deferral_names_the_explicit_route_too(world):
     world.install_old(background=False)
     world.ship(background=True)

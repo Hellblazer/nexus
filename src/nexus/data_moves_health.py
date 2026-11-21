@@ -63,6 +63,19 @@ _RETRY_NOW = (
 _RESUME = "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label = '{label}'; (as nexus_admin)"
 
 
+def _old_bundle_pending() -> bool:
+    """This install's extracted PostgreSQL bundle lacks pg_background (the doctor's PostgreSQL bundle row shows). Only
+    then does the blocked-move hint send the user to ``nx upgrade`` for the bundle; with the bundle in place the
+    advice would point at a fix already made (F33). Unknown reads as pending, which keeps the advice."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 - deferred, CLI startup cost
+        from nexus.daemon.pg_bundle_refresh import bundle_lacks_pg_background  # noqa: PLC0415 - deferred, CLI startup cost
+
+        return bundle_lacks_pg_background(_config.nexus_config_dir())
+    except Exception:  # noqa: BLE001 - a hint's wording must never cost the doctor row
+        return True
+
+
 def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
     """The data-move entries (moves and the worker's) of ``status['boot_work']``; ``None`` when the engine predates it."""
     work = status.get("boot_work")
@@ -149,9 +162,14 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
                 fix_suggestions=[
                     "The move waits for the pg_background extension; nothing was changed and nothing is lost. The engine "
                     "looks for the extension only when it starts, so installing it is not enough: restart the engine "
-                    "after. A local install's bundled PostgreSQL carries pg_background, but an install first set up on "
-                    "conexus 8.2.0 or earlier keeps an older bundle without it: `nx upgrade` replaces that bundle and "
-                    "restarts the engine (`nx doctor` has a PostgreSQL bundle row while it is pending). A self-managed "
+                    "after. "
+                    + (
+                        "A local install's bundled PostgreSQL carries pg_background, but an install first set up on "
+                        "conexus 8.2.0 or earlier keeps an older bundle without it: `nx upgrade` replaces that bundle and "
+                        "restarts the engine (`nx doctor` has a PostgreSQL bundle row while it is pending). "
+                        if _old_bundle_pending() else ""
+                    )
+                    + "A self-managed "
                     "PostgreSQL needs pg_background installed, then the engine restarted. If the move is still blocked after about "
                     "four hours of retries the engine drops the class and this row turns red (the full reason is in the "
                     "engine log, event=data_move_blocked)",

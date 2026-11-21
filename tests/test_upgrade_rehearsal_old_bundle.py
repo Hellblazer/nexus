@@ -86,6 +86,29 @@ def test_bundle_has_pg_background_reads_the_install_s_extracted_tree(tmp_path):
     assert ur.bundle_has_pg_background(tmp_path) is True
 
 
+def test_the_state_before_tells_a_missing_tree_from_a_bundle_without_the_extension(tmp_path):
+    assert ur.bundle_state_before(tmp_path) is None  # nothing extracted to read
+    (tmp_path / CONTROL).parent.mkdir(parents=True)
+    assert ur.bundle_state_before(tmp_path) is False  # the 7.76.0 / 7.99.0 / 8.2.0 seeds' shape
+    (tmp_path / CONTROL).write_text("default_version = '1.0'\n", encoding="utf-8")
+    assert ur.bundle_state_before(tmp_path) is True
+
+
+def test_every_start_whose_own_bundle_lacks_pg_background_is_judged():
+    """Sam, 2026-11-21: the 7.x legs too. Decided from the start's bundle, not its version."""
+    assert ur.judges_bundle(scenario=False, before=False)  # a 7.x start on a bundle without pg_background
+    assert not ur.judges_bundle(scenario=False, before=None)  # no extracted bundle: nothing to refresh, logged
+    assert ur.judges_bundle(scenario=True, before=None)  # an old-bundle start with nothing to read is a finding
+    assert not ur.judges_bundle(scenario=False, before=True)  # 8.5.3: not an old-bundle start
+    assert ur.judges_bundle(scenario=True, before=True)  # an 8.2.0 start that turns out current: "not exercised"
+    assert ur.judges_bundle(scenario=True, before=False)
+
+
+def test_a_judged_start_with_no_bundle_to_read_is_a_finding_and_a_current_one_is_not_a_pass():
+    assert any("could not be read" in f for f in _judge(before=None))
+    assert any("nothing was exercised" in f for f in _judge(before=True))
+
+
 CLEAN_DOCTOR = "Engine convergence: installed engine v0.1.200\nData moves: 1 open or failed: 1 working\n"
 
 
@@ -127,6 +150,30 @@ def test_a_pending_bundle_row_in_doctor_is_a_finding():
     assert any("PostgreSQL bundle" in f for f in _judge(doctor_text=text))
 
 
+def test_a_fix_line_that_names_the_bundle_row_is_not_the_row():
+    """F33, rerun 2: a blocked move's Fix line mentions the bundle row; only the row's own label is the row."""
+    fix = "    Fix: The move waits for the pg_background extension ... `nx doctor` has a PostgreSQL bundle row while it is pending)\n"
+    assert not any("PostgreSQL bundle" in f for f in _judge(doctor_text=CLEAN_DOCTOR + fix))
+    row = "  \u26a0 PostgreSQL bundle: the extracted PostgreSQL bundle has no pg_background\n"
+    assert any("PostgreSQL bundle" in f for f in _judge(doctor_text=CLEAN_DOCTOR + row))
+
+
+def test_the_seed_stamps_moves_blocked_on_pg_background_at_the_backoff_cap():
+    seen: list[str] = []
+
+    def sql(q: str):
+        seen.append(q)
+        return [["t"]] if "to_regclass" in q else [["3"]]
+
+    assert ur.seed_long_blocked_moves(sql) == 3
+    assert ur.SEED_TRANSIENT_RETRIES >= 6  # MoveRetryPolicy's 15-minute cap
+    assert "transient_retries = 7" in seen[1] and "pg_background is not installed" in seen[1] and "now()" in seen[1]
+
+
+def test_no_registry_table_seeds_nothing():
+    assert ur.seed_long_blocked_moves(lambda q: [["f"]]) == 0
+
+
 def test_the_idle_wait_needs_consecutive_quiet_reads_and_gives_up_at_its_bound():
     reads = iter(["work", None, "work", None, None, None])
     now = {"t": 0.0}
@@ -142,12 +189,20 @@ def test_the_busy_rule_is_the_products_own(tmp_path):
     """busy_per_product runs the candidate's engine_busy_reason with its interpreter: here a stand-in interpreter whose
     one-liner answer is the rule's, to pin the contract (empty is idle, text is busy, a failure is busy)."""
     fake = tmp_path / "python"
-    fake.write_text("#!/bin/sh\n" + 'case "$FAKE" in idle) echo "";; busy) echo "the engine reports background work (x)";; *) echo oops >&2; exit 3;; esac\n', encoding="utf-8")
+    fake.write_text("#!/bin/sh\n" + 'case "$FAKE" in idle) echo "log line"; echo "NX_BUSY=";; busy) echo "NX_BUSY=the engine reports background work (x)";; mute) echo "log line";; *) echo oops >&2; exit 3;; esac\n', encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     assert ur.busy_per_product(fake, tmp_path, {"FAKE": "idle"}) is None
     assert "background work" in ur.busy_per_product(fake, tmp_path, {"FAKE": "busy"})
     assert "exited 3" in ur.busy_per_product(fake, tmp_path, {"FAKE": "boom"})
+    assert "no answer" in ur.busy_per_product(fake, tmp_path, {"FAKE": "mute"})  # a log line alone is not an answer
     assert "could not run" in ur.busy_per_product(tmp_path / "missing", tmp_path, {})
+
+
+def test_the_busy_rule_one_liner_runs_against_the_real_module(tmp_path):
+    """F33: the one-liner calls the real engine_busy_reason with moves_can_run (a signature drift would exit 1 here,
+    and the leg would read busy for its whole bound). No service in this config dir, so the answer is idle."""
+    env = {"HOME": str(tmp_path), "NEXUS_CONFIG_DIR": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    assert ur.busy_per_product(Path(sys.executable), tmp_path, env) is None
 
 
 def test_the_installed_engine_version_is_read_from_the_receipt(tmp_path):
