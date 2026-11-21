@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import java.util.function.LongConsumer;
 import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
@@ -33,14 +34,13 @@ public final class MintedLabel {
     }
 
     /**
-     * A drawn id is already a row: the sequence is behind the data (an explicit-id insert, as a restore does, with no
-     * {@code setval} after it). A 409 on the route; never skipped past, since skipping would hide the missing
-     * {@code setval} (baton's condition on BY DEFAULT, via linda 2026-11-21).
+     * A drawn id was already a row even after the sequence was healed once: something is writing explicit ids
+     * concurrently. A 409 on the route.
      */
     public static final class SequenceBehindDataException extends IllegalStateException {
         public SequenceBehindDataException(long id) {
-            super("minting a collection: the drawn collection_id " + id + " is already a row, so the collection_id"
-                + " sequence is behind the data (an explicit-id insert with no setval after it); run the restore's"
+            super("minting a collection: the drawn collection_id " + id + " is already a row after the collection_id"
+                + " sequence was set to max(collection_id); something is inserting explicit ids concurrently. Check the"
                 + " setval on pg_get_serial_sequence('nexus.catalog_collections','collection_id')");
         }
     }
@@ -49,19 +49,34 @@ public final class MintedLabel {
     }
 
     /**
-     * Draw ids from {@code nextId} until one's label is free, at most {@link #MAX_DRAWS} times. {@code idTaken} says
-     * whether a row already has the id; the sequence never repeats a value, so that means the sequence is behind the
-     * data, and the mint refuses at once rather than skip.
+     * Draw ids from {@code nextId} until one's label is free, at most {@link #MAX_DRAWS} times.
      *
-     * @throws SequenceBehindDataException when a drawn id is already a row (a 409 on the route)
+     * <p>{@code idTaken} says whether a row already has the id. The sequence never repeats a value, so a taken id
+     * means the sequence is behind the data (an explicit-id insert, as a restore does, with no {@code setval} after
+     * it). Then {@code healSequence} runs ONCE with the colliding id: the caller sets the sequence to
+     * {@code max(collection_id)} under the mint's advisory lock and logs a WARN
+     * ({@code event=collection_id_sequence_behind_data}, old and new values), and the mint draws again. A second
+     * taken id refuses (linda's ruling on baton's BY DEFAULT condition, 2026-11-21): never a silent skip, never a raw
+     * unique violation, and an install whose restore missed its setval can still create collections.
+     *
+     * @throws SequenceBehindDataException when a drawn id is a row after the heal (a 409 on the route)
      * @throws IllegalStateException when every draw's label is taken (a 409 on the route)
      */
-    public static Choice choose(LongSupplier nextId, LongPredicate idTaken, Predicate<String> labelTaken) {
-        for (int draw = 0; draw < MAX_DRAWS; draw++) {
+    public static Choice choose(LongSupplier nextId, LongPredicate idTaken, Predicate<String> labelTaken,
+                                LongConsumer healSequence) {
+        boolean healed = false;
+        int draws = 0;
+        while (draws < MAX_DRAWS) {
             long id = nextId.getAsLong();
             if (idTaken.test(id)) {
-                throw new SequenceBehindDataException(id);
+                if (healed) {
+                    throw new SequenceBehindDataException(id);
+                }
+                healSequence.accept(id);
+                healed = true;
+                continue;
             }
+            draws++;
             String label = CollectionLabel.mintedLabel(id);
             if (!labelTaken.test(label)) {
                 return new Choice(id, label);
