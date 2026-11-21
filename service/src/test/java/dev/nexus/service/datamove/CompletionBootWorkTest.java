@@ -159,7 +159,7 @@ class CompletionBootWorkTest {
     // ---- a missing CHECK and the VALIDATE that waits ---------------------------------------------------------------------
 
     @Test
-    void aMissingSupersededByCheckIsARowThatSaysHowManyRowsHoldItBack() throws Exception {
+    void aMissingSupersededByCheckIsARowThatSaysWhatHoldsItBack_withNoCount() throws Exception {
         PgContainerHelper.insertCollection(ctx, TENANT, "tomb-p31-cbw");
         Table<?> registryTable = DSL.table(DSL.name("nexus", "catalog_collections"));
         P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
@@ -174,10 +174,10 @@ class CompletionBootWorkTest {
             assertThat(f.get("checks_missing")).singleElement().satisfies(c -> {
                 assertThat(c.get("constraint").asText()).isEqualTo(CompletionCheck.SUPERSEDED_BY_CHECK);
                 assertThat(c.get("what").asText()).startsWith("waits: " + CompletionCheck.SUPERSEDED_BY_CHECK)
-                    .contains("1 registry row(s) with a blank model_version and no superseded_by_id")
-                    .contains("the switch is refused until then");
+                    .contains("registry rows with a blank model_version and no superseded_by_id hold its changeset back")
+                    .contains("the switch is refused until then").doesNotContain("1 registry");
             });
-            assertThat(f.get("superseded_by_waiting").asInt()).isEqualTo(1);
+            assertThat(f.has("superseded_by_waiting")).as("a registry row count is tenant data: /v1/status is unauthenticated").isFalse();
             assertThat(f.get("summary").asText()).contains("the superseded_by CHECK is missing");
 
             ctx.update(registryTable).set(DSL.field(DSL.name("superseded_by_id"), Long.class), DSL.field(DSL.name("collection_id"), Long.class))
@@ -189,7 +189,7 @@ class CompletionBootWorkTest {
     }
 
     @Test
-    void anOrphanThatKeepsACheckNotValidIsARowWithTheCount_neverTheNameOrTheTenant_andLeavesOnceValidated() throws Exception {
+    void anOrphanThatKeepsACheckNotValidIsARowWithNoCount_neverTheNameOrTheTenant_andLeavesOnceValidated() throws Exception {
         Table<?> docs = DSL.table(DSL.name("nexus", "catalog_documents"));
         P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
         try {
@@ -214,10 +214,15 @@ class CompletionBootWorkTest {
             var f = field(work);
             assertThat(f.get("validate_waits")).singleElement().satisfies(w -> {
                 assertThat(w.get("table").asText()).isEqualTo("catalog_documents");
-                assertThat(w.get("what").asText()).isEqualTo("waits: 1 orphan row(s) (a name with no registry row in its tenant) and 0 unstamped row(s) keep "
-                    + "catalog_documents_physical_collection_id_check on catalog_documents NOT VALID. To finish: register each missing collection or "
-                    + "delete the orphan rows, then run  SELECT nexus.rdr229_restamp('catalog_documents');  as the migrating role. It re-registers "
-                    + "this table's stamp move once no orphan remains; the move stamps the rows and validates the CHECK.");
+                assertThat(w.has("orphans") || w.has("unstamped") || w.has("counted")).as("counts are tenant data").isFalse();
+                String what = w.get("what").asText();
+                // item 5 (confirmation review S1 residual): an orphan row is write-frozen, and a table with no orphan row is finished by the restamp alone
+                assertThat(what).startsWith("waits: catalog_documents_physical_collection_id_check on catalog_documents is NOT VALID")
+                    .contains("An orphan row is write-frozen: any UPDATE of it fails with SQLSTATE 23514 until its collection is registered or the row is deleted")
+                    .contains("register each missing collection or delete the orphan rows, if there are any")
+                    .contains("SELECT nexus.rdr229_restamp('catalog_documents');  as the migrating role")
+                    .contains("With no orphan row, that restamp step alone finishes it")
+                    .doesNotMatch("(?s).*\\d+\\s+(orphan|unstamped).*");
             });
             assertThat(f.toString()).doesNotContain(GHOST).doesNotContain(TENANT);
 

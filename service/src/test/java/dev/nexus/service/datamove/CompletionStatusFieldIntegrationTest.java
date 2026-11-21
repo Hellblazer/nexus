@@ -176,6 +176,12 @@ class CompletionStatusFieldIntegrationTest {
         assertThat(MAPPER.readTree(Files.readString(file))).as("fixture " + name + " is the engine's body").isEqualTo(body);
     }
 
+    private static List<String> keys(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        node.fieldNames().forEachRemaining(out::add);
+        return out;
+    }
+
     private static List<String> bootWorkIds(JsonNode body) {
         List<String> ids = new ArrayList<>();
         body.get("boot_work").forEach(e -> ids.add(e.get("id").asText()));
@@ -226,7 +232,7 @@ class CompletionStatusFieldIntegrationTest {
 
     @Test
     @Order(2)
-    void supersededByCheckMissing_theCheckAddsNoBootWorkEntry_andTheFieldSaysHowManyRowsHoldItBack() throws Exception {
+    void supersededByCheckMissing_theCheckAddsNoBootWorkEntry_andTheFieldSaysWhatHoldsItBack_withNoCount() throws Exception {
         PgContainerHelper.insertCollection(ctx, TENANT, "tomb-p31-csf");
         P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
         try {
@@ -238,12 +244,13 @@ class CompletionStatusFieldIntegrationTest {
             JsonNode body = status(registry);
             assertThat(bootWorkIds(body)).as("no rdr229 entry of any kind").isEmpty();
             JsonNode f = body.get("rdr229_completion");
-            assertThat(f.get("superseded_by_waiting").asInt()).isEqualTo(1);
+            assertThat(f.has("superseded_by_waiting")).as("a registry row count is tenant data: /v1/status is unauthenticated").isFalse();
             assertThat(f.get("checks_missing")).singleElement().satisfies(c -> {
                 assertThat(c.get("table").asText()).isEqualTo("catalog_collections");
                 assertThat(c.get("constraint").asText()).isEqualTo(CompletionCheck.SUPERSEDED_BY_CHECK);
                 assertThat(c.get("what").asText()).startsWith("waits: " + CompletionCheck.SUPERSEDED_BY_CHECK)
-                    .contains("1 registry row(s) with a blank model_version and no superseded_by_id");
+                    .contains("registry rows with a blank model_version and no superseded_by_id hold its changeset back")
+                    .doesNotContain("1 registry");
             });
             assertThat(f.get("summary").asText()).contains("the superseded_by CHECK is missing");
             assertFixture("superseded_by_check_missing", body);
@@ -297,7 +304,7 @@ class CompletionStatusFieldIntegrationTest {
 
     @Test
     @Order(4)
-    void aTableWithTwoNameColumns_listsEveryNotValidConstraint_withTheSummedCounts_andNoCollectionOrTenant() throws Exception {
+    void aTableWithTwoNameColumns_listsEveryNotValidConstraint_withNoCount_andNoCollectionOrTenant() throws Exception {
         // chash_remap carries a CHECK per name column. A move that is done and an orphan on the TARGET column leaves BOTH
         // CHECKs NOT VALID (the stamp leaves any row with an orphan name alone); the field names both constraints.
         PgContainerHelper.insertCollection(ctx, TENANT, "code__p31csf__bge-base-en-v15-768__v1");
@@ -323,9 +330,7 @@ class CompletionStatusFieldIntegrationTest {
                 w.get("constraints").forEach(c -> constraints.add(c.asText()));
                 assertThat(constraints).containsExactlyInAnyOrder("chash_remap_source_collection_id_check",
                     "chash_remap_target_collection_id_check");
-                assertThat(w.get("orphans").asLong()).isEqualTo(1);
-                assertThat(w.get("unstamped").asLong()).isEqualTo(1);
-                assertThat(w.get("counted").asBoolean()).isTrue();
+                assertThat(keys(w)).as("table, constraints and the operator text: the orphan and unstamped counts are tenant data").containsExactly("table", "constraints", "what");
                 assertThat(w.get("what").asText()).contains("chash_remap_source_collection_id_check, chash_remap_target_collection_id_check");
             });
             assertThat(body.toString()).doesNotContain("ghost-target-p31-csf").doesNotContain(TENANT);
@@ -347,54 +352,26 @@ class CompletionStatusFieldIntegrationTest {
 
     @Test
     @Order(5)
-    void danglingTombstones_areCountedPerContentType_andTheSelfIdRowsApart_neverNamed() throws Exception {
-        // one unstamped dangling tombstone per content type (the CHECK is lifted: an upgraded install has rows the stamp has
-        // not reached), one the stamp already resolved to its fallback (superseded_by_id = its own collection_id), and one
-        // tombstone whose successor exists, which is not dangling
+    void danglingTombstonesAreNotInTheUnauthenticatedStatus_theyAreServedPerTenantByTheCountsRoute() throws Exception {
+        // the R7 pre-flight counts moved to GET /v1/catalog/rdr229_completion_counts (Rdr229CompletionTenantCountsRouteTest): tenant data.
+        // Unstamped dangling tombstones of every content type, one the stamp resolved to its own id, and one with a live successor.
         P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
         try {
             tombstone("code__p31csfd__bge-base-en-v15-768__v1", "gone-code-p31-csf", false);
             tombstone("docs__p31csfd__bge-base-en-v15-768__v1", "gone-docs-p31-csf", false);
-            tombstone("rdr__p31csfd__bge-base-en-v15-768__v1", "gone-rdr-p31-csf", false);
             tombstone("docs__p31csfe__bge-base-en-v15-768__v1", "gone-docs-self-p31-csf", true);
-            PgContainerHelper.insertCollection(ctx, TENANT, "knowledge__p31csfd__bge-base-en-v15-768__v1");
-            tombstone("knowledge__p31csfs__bge-base-en-v15-768__v1", "knowledge__p31csfd__bge-base-en-v15-768__v1", false);
 
             var registry = new BootWorkRegistry(Clock.fixed(T0, ZoneOffset.UTC));
             newWork(registry).publish();
             JsonNode body = status(registry);
-            JsonNode d = body.get("rdr229_completion").get("dangling_tombstones");
-            assertThat(d.get("total").asLong()).as("code, docs, rdr, and the docs one the stamp resolved").isEqualTo(4);
-            assertThat(d.get("by_content_type").get("code").asLong()).isEqualTo(1);
-            assertThat(d.get("by_content_type").get("docs").asLong()).isEqualTo(2);
-            assertThat(d.get("by_content_type").get("rdr").asLong()).isEqualTo(1);
-            assertThat(d.get("by_content_type").has("knowledge")).as("a tombstone with a live successor is not dangling").isFalse();
-            assertThat(d.get("self_id").get("total").asLong()).isEqualTo(1);
-            assertThat(d.get("self_id").get("by_content_type").get("docs").asLong()).isEqualTo(1);
-            assertThat(d.get("self_id").get("by_content_type").has("code")).isFalse();
-            assertThat(d.get("registry_rows").asLong()).as("the registry was read").isGreaterThanOrEqualTo(6);
-            assertThat(body.toString()).as("/v1/status is unauthenticated: counts only").doesNotContain("gone-").doesNotContain(TENANT)
-                .doesNotContain("p31csf");
+            JsonNode f = body.get("rdr229_completion");
+            assertThat(f.has("dangling_tombstones")).as("no tombstone count in an unauthenticated body").isFalse();
+            assertThat(f.has("registry_rows")).isFalse();
+            assertThat(body.toString()).doesNotContain("registry_rows").doesNotContain("self_id").doesNotContain("by_content_type")
+                .doesNotContain("gone-").doesNotContain(TENANT).doesNotContain("p31csf");
         } finally {
             ctx.deleteFrom(REGISTRY).where(text("tenant_id").eq(TENANT)).execute();
             P31CheckReplay.restore(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
-        }
-    }
-
-    @Test
-    @Order(6)
-    void anInstallWithNoDanglingTombstone_reportsZero_afterReadingTheRegistry() throws Exception {
-        PgContainerHelper.insertCollection(ctx, TENANT, "code__p31csfz__bge-base-en-v15-768__v1");
-        try {
-            var registry = new BootWorkRegistry(Clock.fixed(T0, ZoneOffset.UTC));
-            newWork(registry).publish();
-            JsonNode d = status(registry).get("rdr229_completion").get("dangling_tombstones");
-            assertThat(d.get("total").asLong()).isZero();
-            assertThat(d.get("by_content_type")).isEmpty();
-            assertThat(d.get("self_id").get("total").asLong()).isZero();
-            assertThat(d.get("registry_rows").asLong()).as("non-vacuity: it read a registry that has a row").isGreaterThanOrEqualTo(1);
-        } finally {
-            ctx.deleteFrom(REGISTRY).where(text("tenant_id").eq(TENANT)).execute();
         }
     }
 }

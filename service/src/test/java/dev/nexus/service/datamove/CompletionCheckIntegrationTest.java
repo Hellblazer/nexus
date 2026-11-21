@@ -277,7 +277,7 @@ class CompletionCheckIntegrationTest {
             assertThat(waiting.gate1()).isFalse();
             CompletionCheck.LabelState label = state(waiting, DOCS_LABEL);
             assertThat(label.status()).as("the move is done, the CHECK is NOT VALID").isEqualTo(CompletionCheck.Status.INCOMPLETE);
-            assertThat(label.why()).contains(DOCS_CHECK + " is NOT VALID").contains("1 orphan row(s), 1 unstamped");
+            assertThat(label.why()).as("the why carries no count: it goes out on the unauthenticated /v1/status").isEqualTo("CHECK " + DOCS_CHECK + " is NOT VALID");
             assertThat(waiting.violators()).singleElement().satisfies(v -> {
                 assertThat(v.table()).isEqualTo("catalog_documents");
                 assertThat(v.constraint()).isEqualTo(DOCS_CHECK);
@@ -304,7 +304,7 @@ class CompletionCheckIntegrationTest {
             // The rows go away: the CHECK is still NOT VALID until someone validates it, which is the VALIDATE that waited.
             ctx.deleteFrom(docs).where(tumbler.in("1.7.1", "1.7.2")).execute();
             CompletionCheck.Result drained = run(gate1(DOCS_LABEL));
-            assertThat(state(drained, DOCS_LABEL).why()).contains("0 orphan row(s), 0 unstamped");
+            assertThat(state(drained, DOCS_LABEL).why()).isEqualTo("CHECK " + DOCS_CHECK + " is NOT VALID");
             validate("catalog_documents", DOCS_CHECK);   // passes with the '' row still there
             assertThat(state(run(gate1(DOCS_LABEL)), DOCS_LABEL).status()).isEqualTo(CompletionCheck.Status.COMPLETE);
             assertThat(run(gate1(DOCS_LABEL)).gate1()).isTrue();
@@ -394,7 +394,7 @@ class CompletionCheckIntegrationTest {
         assertThat(r.gate2()).isTrue();
         assertThat(r.gate3()).isFalse();
         assertThat(r.gate3Uncovered()).containsExactly("invalid", "missing");
-        assertThat(r.gate3Why()).contains("2 collection(s)").contains("1 INVALID");
+        assertThat(r.gate3Why()).contains("collections the planner would index have no VALID id-predicate index").doesNotMatch("(?s).*\\d.*");
 
         // the vacuous pass the planner's drop-before-build would give: a collection whose NAME index is gone and whose id
         // index is not built is still planned, and still uncovered
@@ -424,7 +424,7 @@ class CompletionCheckIntegrationTest {
             CompletionCheck.Result r = withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(), Set.of(), Set.of())));
             assertThat(r.gate2()).as("non-vacuity: gate 3 was asked").isTrue();
             assertThat(r.gate3()).isFalse();
-            assertThat(r.gate3Why()).contains("plans no collection").contains("1 live collection");
+            assertThat(r.gate3Why()).contains("plans no collection").contains("live collections are registered").doesNotMatch("(?s).*\\d+ live.*");
             // a planned set that is covered still holds: the registry only vetoes the EMPTY plan
             assertThat(withGate3(c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of(COLLECTION), Set.of(COLLECTION), Set.of()))).gate3())
                 .isTrue();
