@@ -397,7 +397,7 @@ for _site in LEDGER:
 #: one more NoRow mint, empty at P3.8. mint 127 -> 128, primitive_call 191 -> 192.
 #:
 #: PHASE 2 INTEGRATION (2026-11-21), measured on the stacked integration/rdr229-phase2 tree (develop 0701d16d9c
-#: plus D2, P2.4 with gh1680 and gh1679, P2.10, the shared-tuple guards, owner-is-source and P2.2): 229 -> 218,
+#: plus D2, P2.4 with gh1680 and gh1679, P2.10, the shared-tuple guards, owner-is-source and P2.2): 229 -> 217,
 #: the moves below being each step's own, taken on its own tree (D2, P2.10, gh1680, gh1679 and the shared-tuple
 #: guards moved nothing); the pins are the one measurement of the sum.
 #:   P2.2 (nexus-p2m1x.7), -11: the parsers moved into ``legacy_names`` (the floor: calls inside it are not
@@ -410,17 +410,19 @@ for _site in LEDGER:
 #:     ``http_taxonomy_store.py``, each a caller of ``default_projection_threshold``) read the catalog row now, and
 #:     the one NoRow name derivation they share is a single mint-class entry in ``projection_threshold.py``.
 #:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
-#:   owner-is-source (marlowe), +3: three migration-source sites in ``nxexp_owner.py`` (``owner_stem`` reads
-#:     the name of a recovery bundle's collection, MIG_BUNDLE_STEM), one a ``split``: migration-source 20 -> 23,
-#:     primitive_call 181 -> 183, split 2 -> 3. On its own tree that step measured 232 against 229.
-PARSE_SITE_PIN: int = 218
+#:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
+#:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
+#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2.
+#:     Written as +3 (the parse still in ``nxexp_owner.py``, one a ``split``) until owner_stem moved into the floor; measured
+#:     217 on the integrated tree after the move.
+PARSE_SITE_PIN: int = 217
 CLASS_PIN: dict[str, int] = {
-    "mint": 135, "diagnostic": 43, "migration-source": 23,
+    "mint": 135, "diagnostic": 43, "migration-source": 22,
     "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
     "primitive_call": 183, "const_prefix": 5, "fnmatch": 14,
-    "strip_prefix": 4, "startswith": 2, "split": 3,
+    "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }
@@ -847,7 +849,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 218
+    assert PARSE_SITE_PIN == 217
 
 
 # ---------------------------------------------------------------------------

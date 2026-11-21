@@ -10409,13 +10409,13 @@ public final class CatalogRepository {
             // Java step here could reach.
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
-            //    catalog-051-2 (RDR-229): a live, unsuperseded code/docs/rdr row holds a tuple that may have kept a slug
+            //    catalog-051-2 (RDR-229): an unsuperseded, non-quarantine code/docs/rdr row holds a tuple that may have kept a slug
             //    collection's owner off it; read the row before it goes and re-derive those slug rows after.
             var freed = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
                 .from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
-                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live")).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
                 .fetchOne();
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
             if (freed != null) {
@@ -10484,7 +10484,7 @@ public final class CatalogRepository {
 
     /**
      * catalog-051-2 (RDR-229): a collection holding the tuple {@code (contentType, ownerId, model, version)} has just
-     * gone (deleted). The rows its tuple may have held back are the live, unsuperseded slug-owned ones of the same
+     * gone (deleted). The rows its tuple may have held back are the unsuperseded, non-quarantine slug-owned ones of the same
      * content type, model and version that have a live document under {@code ownerId}'s tumbler prefix; re-derive each.
      * Bounded by the slug-owned rows of one (content type, model, version), which are the legacy rows only.
      */
@@ -10499,7 +10499,7 @@ public final class CatalogRepository {
                 .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
                 .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
                 .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq(version))
-                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))
+                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine"))
                 .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
                 .and(CATALOG_COLLECTIONS.OWNER_ID.notLikeRegex(TUMBLER_SHAPED_OWNER))
                 .and(org.jooq.impl.DSL.exists(org.jooq.impl.DSL.selectOne().from(CATALOG_DOCUMENTS)

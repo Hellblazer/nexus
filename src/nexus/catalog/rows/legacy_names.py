@@ -303,6 +303,25 @@ def is_taxonomy_collection_name(name: str) -> bool:
     return split_candidate_collection_name(name)[0] == "taxonomy"
 
 
+#: A repo-synth owner stem: ``<name>-<hash8>`` (``nexus.repo_identity._safe_collection``), the hash being
+#: the first 8 hex characters of the main repo path's sha256, which is the repo owner's ``repo_hash``.
+_REPO_STEM = re.compile(r"^(?P<slug>.+)-(?P<hash>[0-9a-f]{8})$")
+
+
+def owner_stem(collection_name: str) -> tuple[str, tuple[str, str] | None]:
+    """``(stem, repo)`` of *collection_name*: its owner segment (``<type>__<stem>__...``, ``""`` when there
+    is none) and, when that segment is ``<slug>-<hash8>``, ``(slug, hash8)``, else ``None``.
+
+    Migration source (RDR-229 item 1; moved here from ``nxexp_owner`` so the parsers sit in one module that
+    P4.3 keeps as the floor): the name is read because it comes from another install's ``.nxexp`` bundle
+    and no row of this catalog backs it. ``nexus.nxexp_owner.resolve_import_owner_tumbler`` is the caller.
+    """
+    parts = collection_name.split("__")
+    stem = parts[1] if len(parts) > 1 else ""
+    m = _REPO_STEM.match(stem)
+    return stem, ((m["slug"], m["hash"]) if m else None)
+
+
 def version_of_blank_row_label(label: str | None, *, models: Collection[str]) -> int | None:
     """The model version a registry row with a BLANK ``model_version`` takes from its label.
 

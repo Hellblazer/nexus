@@ -2,6 +2,9 @@
 -- It uses the move template's stemrows/cand/stems/occ/ranked logic, with nothing written: no advisory lock, no INSERT,
 -- no UPDATE. An owner the move would mint is given a placeholder 'new:<hash8>' and holds no rows yet, as on the
 -- move's first chunk.
+-- Held means unsuperseded and not in quarantine (superseded_by = '' AND lifecycle_state <> 'quarantine', Sam's P3.8 ruling),
+-- for the rows that would move and for the rows that hold a destination tuple. A row's version is the stored model_version, else
+-- the one D2's repair will write from the name (substring(name from '__(v[0-9]+)$')), else '': the move may run before D2.
 -- Run once per tenant, as a role that can read the tenant's catalog_collections and catalog_owners:
 --   BEGIN READ ONLY;
 --   SET LOCAL nexus.tenant = '<tenant>';
@@ -17,11 +20,12 @@
 -- The summary is: SELECT action, count(*) FROM (<this query>) q GROUP BY action; and owners to mint =
 -- count(DISTINCT dest_owner) FILTER (WHERE dest_owner LIKE 'new:%').
 WITH stemrows AS (
-    SELECT c.name, c.content_type, c.embedding_model, c.model_version, c.owner_id,
-           split_part(c.name, '__', 2) AS stem
+    SELECT c.name, c.content_type, c.embedding_model,
+           COALESCE(NULLIF(c.model_version, ''), substring(c.name from '__(v[0-9]+)$'), '') AS model_version,
+           c.owner_id, split_part(c.name, '__', 2) AS stem
       FROM nexus.catalog_collections c
      WHERE c.tenant_id = current_setting('nexus.tenant', true)
-       AND c.content_type IN ('code', 'docs', 'rdr') AND c.lifecycle_state = 'live' AND c.superseded_by = ''
+       AND c.content_type IN ('code', 'docs', 'rdr') AND c.lifecycle_state <> 'quarantine' AND c.superseded_by = ''
        AND split_part(c.name, '__', 1) = c.content_type
        AND split_part(c.name, '__', 2) ~ '^.+-[0-9a-f]{8}$'
 ), cand AS (
@@ -54,8 +58,8 @@ WITH stemrows AS (
         ON h.tenant_id = current_setting('nexus.tenant', true)
        AND h.owner_id = w.dest
        AND h.content_type = r.content_type AND h.embedding_model = r.embedding_model
-       AND h.model_version = r.model_version
-       AND h.lifecycle_state = 'live' AND h.superseded_by = '' AND h.name <> r.name
+       AND COALESCE(NULLIF(h.model_version, ''), substring(h.name from '__(v[0-9]+)$'), '') = r.model_version
+       AND h.lifecycle_state <> 'quarantine' AND h.superseded_by = '' AND h.name <> r.name
      WHERE nexus.catalog_owner_is_curator(current_setting('nexus.tenant', true), r.owner_id)
      GROUP BY r.name, r.owner_id, w.dest
 ), ranked AS (

@@ -75,7 +75,7 @@ class Catalog051RenameGuardTest {
     @Test @Order(2)
     void renameOfASlugCollectionWhoseDestinationTupleAThirdCollectionHolds_keepsTheSlug_withTheIndex() throws Exception {
         try (Connection su = pg.createConnection("")) {
-            Catalog051OwnerGuardTest.createLiveTupleIndex(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES));
+            Catalog051OwnerGuardTest.createHeldTupleIndex(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES));
         }
         renameKeepsTheSlug("cat049r-index", "1.42.1", "1-42", "42");
     }
