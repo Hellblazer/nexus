@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -48,8 +49,8 @@ class ChangelogBulkGrantConformanceTest {
      * tags that merely share the "sql" prefix: {@code <sqlCheck>} (used by
      * {@code <preConditions>} in grants-nexus-diag.xml and the
      * fk-00[23]-validate.xml / catalog-013 changesets) and {@code <sqlFile
-     * .../>} (zero uses today — see
-     * {@link #noSqlFileIncludesPresent_untilScannerReadsThem()}). Neither has
+     * .../>} (its target is read and scanned separately — see
+     * {@link #everySqlFileTargetIsReadAndScanned()}). Neither has
      * a whitespace-or-{@code >} character immediately after "sql" ("C" / "F"
      * respectively), so this pattern never opens an SQL-body region for
      * them. Without this boundary a precondition's {@code <sqlCheck>} would
@@ -61,8 +62,19 @@ class ChangelogBulkGrantConformanceTest {
      */
     private static final Pattern OPEN_SQL_TAG = Pattern.compile("<sql[\\s>]");
 
-    /** Matches a {@code <sqlFile>} include tag, self-closing or not. */
-    private static final Pattern SQL_FILE_TAG = Pattern.compile("<sqlFile[\\s>/]");
+    /** Matches a whole {@code <sqlFile ...>} include tag (attributes may span lines), self-closing or not. */
+    private static final Pattern SQL_FILE_TAG = Pattern.compile("<sqlFile[\\s/>][^>]*>");
+
+    private static final Pattern PATH_ATTR = Pattern.compile("\\bpath\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)')");
+
+    private static final Pattern RELATIVE_ATTR =
+        Pattern.compile("\\brelativeToChangelogFile\\s*=\\s*(?:\"true\"|'true')", Pattern.CASE_INSENSITIVE);
+
+    /** Where a {@code <sqlFile>} target is read from: the text, or empty when it cannot be found. */
+    @FunctionalInterface
+    interface SqlFileResolver {
+        Optional<String> read(String path, boolean relativeToChangelogFile);
+    }
 
     /**
      * (filename, changeset id) pairs allowed to keep a bulk
@@ -126,35 +138,83 @@ class ChangelogBulkGrantConformanceTest {
     }
 
     /**
-     * Cheapest sound posture for {@code <sqlFile>} includes (review finding,
-     * GH #1402 follow-up): this scanner reads .xml source text directly and
-     * has no mechanism to resolve or read a {@code <sqlFile path="..."/>}
-     * target, so any SQL hidden behind such an include is invisible to it.
-     * Rather than silently under-scanning, the MERE PRESENCE of a {@code
-     * <sqlFile>} tag anywhere under {@code db/changelog/} fails this test
-     * until the scanner is extended to read sqlFile targets. There are zero
-     * uses today; this assertion keeps it that way (or forces a scanner
-     * upgrade the day a real use appears).
+     * The scanner reads the target of every {@code <sqlFile>} include and applies the {@code <sql>} body rules to it (it used
+     * to fail on the mere presence of one, because it was blind behind the include: RDR-229 P3.1's test changelog
+     * {@code db.changelog-test-p31-downstep.xml} is the first use). A target that cannot be found is a violation, never a
+     * skip: a scan that cannot read what it is told to read has examined nothing.
+     *
+     * <p>Non-vacuity: the include the scan is known to meet must be seen and read, so a walk that finds no
+     * {@code <sqlFile>}, or reads an empty target, fails here instead of passing over nothing.
      */
     @Test
-    void noSqlFileIncludesPresent_untilScannerReadsThem() throws IOException, URISyntaxException {
-        List<String> offenders = new ArrayList<>();
-
+    void everySqlFileTargetIsReadAndScanned() throws IOException, URISyntaxException {
+        List<String> violations = new ArrayList<>();
+        int includes = 0;
         for (Path root : changelogScanRoots()) {
             try (var walk = Files.walk(root)) {
                 for (Path file : walk.filter(p -> p.toString().endsWith(".xml")).toList()) {
-                    offenders.addAll(
-                        scanForSqlFileIncludes(file.getFileName().toString(),
-                            Files.readAllLines(file)));
+                    String xml = Files.readString(file);
+                    includes += scanForSqlFileIncludes(file.getFileName().toString(),
+                        Files.readAllLines(file)).size();
+                    violations.addAll(scanSqlFileTargets(file.getFileName().toString(), xml,
+                        (path, relative) -> readFromDisk(file.getParent(), path, relative)));
                 }
             }
         }
+        assertThat(includes).as("non-vacuity: the walk met the P3.1 down-step's <sqlFile> include").isGreaterThanOrEqualTo(1);
+        assertThat(readFromDisk(changelogTestResourceDir(), "db/rdr229/p31-downstep.sql", false))
+            .as("non-vacuity: the classpath resolver reads the down-step's SQL, not an empty string")
+            .hasValueSatisfying(sql -> assertThat(sql).contains("DROP CONSTRAINT IF EXISTS"));
+        assertThat(violations).as("unguarded bulk GRANT/REVOKE statements, or unreadable targets, behind <sqlFile>").isEmpty();
+    }
 
-        assertThat(offenders)
-            .as("a <sqlFile> include appeared under db/changelog/ or db/changelog-test/ — "
-                + "extend ChangelogBulkGrantConformanceTest to read sqlFile targets before "
-                + "using them; it is currently blind to SQL hidden behind sqlFile includes")
+    /** Mutation: a {@code <sqlFile>} target that holds a bulk grant must be flagged, whatever its spelling. */
+    @Test
+    void sqlFileTarget_withUnguardedBulkGrant_flags() {
+        List<String> xml = List.of(
+            "<changeSet id=\"synthetic-6\" author=\"test\">",
+            "    <sqlFile path=\"db/some-grant.sql\" relativeToChangelogFile=\"false\"/>",
+            "</changeSet>");
+        SqlFileResolver resolver = (path, relative) -> path.equals("db/some-grant.sql")
+            ? Optional.of("-- a comment\nGRANT SELECT ON ALL\n  TABLES IN SCHEMA nexus TO nexus_svc;\n") : Optional.empty();
+
+        assertThat(scanSqlFileTargets("synthetic.xml", String.join("\n", xml), resolver))
+            .as("a bulk grant behind a <sqlFile> include (reflowed across lines) must be flagged")
+            .hasSize(1);
+        assertThat(scanSqlFileTargets("synthetic.xml", String.join("\n", xml),
+                (path, relative) -> Optional.of("grant select on all sequences in schema nexus to nexus_svc;")))
+            .as("lowercase, and the last statement without a terminating semicolon")
+            .hasSize(1);
+        assertThat(scanSqlFileTargets("grants-nexus-diag.xml", String.join("\n", xml), resolver))
+            .as("the allowlist is by the including changelog's file name, as for a <sql> body")
             .isEmpty();
+    }
+
+    @Test
+    void sqlFileTarget_withNoBulkGrant_doesNotFlag_andTheAttributesMayBeSplitAcrossLines() {
+        String xml = "<changeSet id=\"synthetic-7\" author=\"test\">\n"
+            + "    <sqlFile\n        splitStatements=\"true\"\n        path='down.sql'\n"
+            + "        relativeToChangelogFile=\"true\"/>\n</changeSet>";
+        List<String> asked = new ArrayList<>();
+        SqlFileResolver resolver = (path, relative) -> {
+            asked.add(path + ":" + relative);
+            return Optional.of("ALTER TABLE nexus.t DROP CONSTRAINT IF EXISTS c;\n"
+                + "ALTER DEFAULT PRIVILEGES IN SCHEMA nexus GRANT SELECT ON TABLES TO nexus_svc;");
+        };
+
+        assertThat(scanSqlFileTargets("synthetic.xml", xml, resolver)).isEmpty();
+        assertThat(asked).as("the target is resolved by the tag's own path and relativeToChangelogFile")
+            .containsExactly("down.sql:true");
+    }
+
+    /** A target the scan cannot read is a violation: the scan would otherwise pass over SQL it never saw. */
+    @Test
+    void sqlFileTarget_thatCannotBeRead_flags() {
+        String xml = "<sqlFile path=\"db/missing.sql\"/>\n<sqlFile relativeToChangelogFile=\"true\"/>";
+
+        assertThat(scanSqlFileTargets("synthetic.xml", xml, (path, relative) -> Optional.empty()))
+            .as("an unresolvable target, and a tag with no path at all")
+            .hasSize(2);
     }
 
     /**
@@ -245,9 +305,9 @@ class ChangelogBulkGrantConformanceTest {
     }
 
     /**
-     * Companion to {@link #noSqlFileIncludesPresent_untilScannerReadsThem()}:
-     * confirms the detector itself catches a synthetic {@code <sqlFile>} tag
-     * regardless of attribute order or self-closing form.
+     * Companion to {@link #everySqlFileTargetIsReadAndScanned()}: confirms the
+     * detector itself counts a synthetic {@code <sqlFile>} tag regardless of
+     * attribute order or self-closing form.
      */
     @Test
     void sqlFilePresence_synthetic_isDetected() {
@@ -422,11 +482,60 @@ class ChangelogBulkGrantConformanceTest {
 
     private static List<String> scanForSqlFileIncludes(String filename, List<String> lines) {
         List<String> offenders = new ArrayList<>();
-        for (int i = 0; i < lines.size(); i++) {
-            if (SQL_FILE_TAG.matcher(lines.get(i)).find()) {
-                offenders.add(filename + ":" + (i + 1));
-            }
+        String text = String.join("\n", lines);
+        var tags = SQL_FILE_TAG.matcher(text);
+        while (tags.find()) {   // a tag whose attributes span lines is one include
+            offenders.add(filename + ":" + (1 + (int) text.substring(0, tags.start()).chars().filter(c -> c == '\n').count()));
         }
         return offenders;
+    }
+
+    /**
+     * Reads the SQL behind each {@code <sqlFile>} tag of {@code xml} and scans it as a {@code <sql>} body is scanned: per
+     * statement, whitespace-collapsed, {@code ALTER DEFAULT PRIVILEGES} exempt, the allowlist keyed by the including
+     * changelog's name. SQL comments are not stripped (as in a {@code <sql>} body), so the scan can only be stricter than
+     * the database. A tag with no {@code path}, and a target the resolver cannot read, are violations.
+     */
+    private static List<String> scanSqlFileTargets(String filename, String xml, SqlFileResolver resolver) {
+        List<String> violations = new ArrayList<>();
+        var tags = SQL_FILE_TAG.matcher(xml);
+        while (tags.find()) {
+            String tag = tags.group();
+            int line = 1 + (int) xml.substring(0, tags.start()).chars().filter(c -> c == '\n').count();
+            var path = PATH_ATTR.matcher(tag);
+            if (!path.find()) {
+                violations.add(filename + ":" + line + ": a <sqlFile> tag with no path attribute; its SQL cannot be scanned");
+                continue;
+            }
+            String target = path.group(1) != null ? path.group(1) : path.group(2);
+            Optional<String> sql = resolver.read(target, RELATIVE_ATTR.matcher(tag).find());
+            if (sql.isEmpty()) {
+                violations.add(filename + ":" + line + ": the <sqlFile> target " + target
+                    + " cannot be read, so the scan cannot see its SQL; fix the path or the resolver");
+                continue;
+            }
+            violations.addAll(scanSqlBody(filename + " -> " + target, 1, sql.get()).stream()
+                .filter(v -> !ALLOWLISTED_FILES.contains(filename)).toList());
+        }
+        return violations;
+    }
+
+    /** A target relative to the changelog's directory, or a classpath path (main resources first, then test resources). */
+    private static Optional<String> readFromDisk(Path changelogDir, String path, boolean relativeToChangelogFile) {
+        try {
+            if (relativeToChangelogFile) {
+                Path p = changelogDir.resolve(path);
+                return Files.isRegularFile(p) ? Optional.of(Files.readString(p)) : Optional.empty();
+            }
+            for (String root : List.of("src/main/resources/", "src/test/resources/")) {
+                Path p = Path.of(root + path);
+                if (Files.isRegularFile(p)) {
+                    return Optional.of(Files.readString(p));
+                }
+            }
+            return Optional.empty();
+        } catch (IOException e) {
+            return Optional.empty();
+        }
     }
 }
