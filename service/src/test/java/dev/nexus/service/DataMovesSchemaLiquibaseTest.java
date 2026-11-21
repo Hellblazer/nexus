@@ -340,8 +340,7 @@ class DataMovesSchemaLiquibaseTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             OffsetDateTime now = OffsetDateTime.now();
             assertThatThrownBy(() -> insert(ctx, "paused-by-only", m -> m.set(DATA_MOVES.PAUSED_BY, "sam")))
-                .hasMessageContaining("data_moves_paused_by_check",
-        "data_moves_verify_statement_timeout_ms_check");
+                .hasMessageContaining("data_moves_paused_by_check");
             insert(ctx, "paused-at-only", m -> m.set(DATA_MOVES.PAUSED_AT, now));
             insert(ctx, "paused-both", m -> m.set(DATA_MOVES.PAUSED_AT, now).set(DATA_MOVES.PAUSED_BY, "sam"));
 
@@ -351,8 +350,7 @@ class DataMovesSchemaLiquibaseTest {
                 .where(DATA_MOVES.LABEL.eq("paused-later")).execute()).isEqualTo(1);
             assertThatThrownBy(() -> ctx.update(DATA_MOVES).setNull(DATA_MOVES.PAUSED_AT)
                     .where(DATA_MOVES.LABEL.eq("paused-later")).execute())
-                .as("lifting the pause clears paused_by too").hasMessageContaining("data_moves_paused_by_check",
-        "data_moves_verify_statement_timeout_ms_check");
+                .as("lifting the pause clears paused_by too").hasMessageContaining("data_moves_paused_by_check");
             assertThat(ctx.update(DATA_MOVES).setNull(DATA_MOVES.PAUSED_AT).setNull(DATA_MOVES.PAUSED_BY)
                 .where(DATA_MOVES.LABEL.eq("paused-later")).execute()).isEqualTo(1);
         }

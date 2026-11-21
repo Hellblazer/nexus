@@ -52,6 +52,15 @@ public interface FailureHandler {
          */
         VERIFICATION_NONEMPTY,
         /**
+         * The verification the completion transaction repeats before {@code on_complete} could not be completed: the query raised
+         * ({@link Failure#raised}: 57014 for the re-check's share of {@code statement_timeout_ms}, 55P03 for the completion's
+         * {@code lock_timeout} behind a lock holder, 40P01 or 40001), or the session carried a tenant it should not
+         * ({@code raised} null). Classified as {@link #ON_COMPLETE} is, not as {@link #VERIFICATION}: it runs under the same
+         * {@code lock_timeout} and in the transaction that rolls back whole, so the lock and conflict states are transient.
+         * Rows found by the re-check are {@link #VERIFICATION_NONEMPTY}, as for the first pass.
+         */
+        RECHECK,
+        /**
          * {@code on_complete} and the {@code completed_at} UPDATE ran in one transaction and it failed (nexus-f3yqd.2.14):
          * {@link Failure#raised} is what raised (57014 for {@code statement_timeout_ms}, 55P03 for its {@code lock_timeout}),
          * and neither took effect.

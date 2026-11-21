@@ -91,7 +91,7 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
 
         assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
-        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat(result.failure().stage().name()).isEqualTo("RECHECK");
         assertThat(result.failure().raised().getSQLState()).as("query_canceled: statement_timeout").isEqualTo("57014");
         assertThat(result.failure().detail()).contains("completion transaction");
         assertThat(elapsedMs).as("the first pass's 2 s, then the re-check cut at 1 s").isBetween(2_800L, 6_000L);
@@ -212,6 +212,99 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         assertThat(finish("sb-tenant-control", "forced_noread", List.of()).outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
     }
 
+    // ── (b2) the re-check under the completion's lock_timeout ──────────────────────────────────────────
+
+    @Test
+    void aLockWaitInTheRecheck_isTransient_notAPermanentVerificationFailure_andTheMoveCompletesAfterTheRelease() throws Exception {
+        DataMoveTestFixtures.register(ctx(), "sb-recheck-lock", "tenant_plain", 50, 0, null, "stamp-template.sql",
+            "verification-tenant-plain.sql", 4_000, null);
+        runsOnly("sb-recheck-lock");
+        Connection[] holder = new Connection[1];
+        var finisher = new VerifyingFinisher();
+        // after the first pass, before the completion transaction: another session takes ACCESS EXCLUSIVE on the driving table
+        // (a DDL would), so the re-check's SELECT waits behind it and meets the completion's lock_timeout (half of 4 s)
+        finisher.beforeCompletionHook = () -> {
+            try {
+                holder[0] = adminLogin("sb-recheck-lock-holder");
+                holder[0].setAutoCommit(false);
+                DSL.using(holder[0], org.jooq.SQLDialect.POSTGRES).execute("LOCK TABLE dm_test.tenant_plain IN ACCESS EXCLUSIVE MODE");
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        try {
+            long started = System.nanoTime();
+            var result = finish(finisher, "sb-recheck-lock", "tenant_plain", List.of());
+            long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+
+            assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+            assertThat(result.failure().raised().getSQLState()).as("lock_not_available, not the statement timeout").isEqualTo("55P03");
+            assertThat(DataMoveFailureClassifier.classify(result.failure().stage(), result.failure().raised(), List.of(),
+                result.failure().detail()).permanent()).as("a lock wait is the host's: retried, never failed for good").isFalse();
+            assertThat(result.failure().stage().name()).isEqualTo("RECHECK");
+            assertThat(elapsedMs).as("lock_timeout is half of statement_timeout_ms: 2 s").isBetween(1_500L, 3_900L);
+            assertThat(completedAt("sb-recheck-lock")).isNull();
+            assertThat(DataMoveRegistry.reload(ctx(), "sb-recheck-lock")).as("the move is still open").isPresent();
+        } finally {
+            if (holder[0] != null) {
+                holder[0].rollback();
+                holder[0].close();
+            }
+        }
+
+        assertThat(finish("sb-recheck-lock", "tenant_plain", List.of()).outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+        assertThat(completedAt("sb-recheck-lock")).isNotNull();
+    }
+
+    // ── (c1) the tenant list is read again for the re-check ─────────────────────────────────────────────
+
+    @Test
+    void aTenantWithATokenSinceTheFirstPass_isRunByTheRecheck() {
+        registerForcedNoRead("sb-new-token");
+        var finisher = new VerifyingFinisher();
+        finisher.beforeCompletionHook = () -> {
+            ctx().execute("INSERT INTO nexus.service_tokens (token_hash, tenant_id) VALUES ('sb-newco-token', 'newco')");
+            ctx().insertInto(table("dm_test", "forced_noread")).columns(TENANT_ID, ID, N).values("newco", 9_000L, 0).execute();
+        };
+
+        var result = finish(finisher, "sb-new-token", "forced_noread", List.of("default", "acme", "globex"));
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION_NONEMPTY);
+        assertThat(result.reason()).as("a tenant the first pass did not list, found in the completion transaction")
+            .contains("completion transaction").contains("tenant newco=1");
+        assertThat(completedAt("sb-new-token")).isNull();
+    }
+
+    @Test
+    void aTenantWithNeitherATokenNorALeaf_isTheRemainingLimit_theRecheckDoesNotFindIt() {
+        // the limit recheck's Javadoc states: only the probe's scan finds a tenant by its rows, and the probe ran at the start
+        registerForcedNoRead("sb-ghost");
+        var finisher = new VerifyingFinisher();
+        finisher.beforeCompletionHook = () ->
+            ctx().insertInto(table("dm_test", "forced_noread")).columns(TENANT_ID, ID, N).values("ghost", 9_000L, 0).execute();
+
+        var result = finish(finisher, "sb-ghost", "forced_noread", List.of("default", "acme", "globex"));
+
+        assertThat(result.outcome()).as("documents the limit, not a wish").isEqualTo(MoveFinisher.Outcome.COMPLETED);
+    }
+
+    // ── (f) the tenant setting during on_complete ───────────────────────────────────────────────────────
+
+    @Test
+    void duringOnComplete_nexusTenantIsEmpty_afterTheRechecksPerTenantRuns() {
+        DataMoveTestFixtures.register(ctx(), "sb-tenant-oc", "forced_noread", 50, 0, null, "stamp-template.sql",
+            "verification-forced-noread.sql", 60_000, "on-complete-record-tenant.sql");
+        ctx().update(table("dm_test", "forced_noread")).set(N, 1).execute();
+
+        var result = finish("sb-tenant-oc", "forced_noread", List.of("default", "acme", "globex"));
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+        assertThat(ctx().select(DSL.field(DSL.name("setting"), String.class)).from(table("dm_test", "on_complete_seen"))
+            .fetch(DSL.field(DSL.name("setting"), String.class)))
+            .as("on_complete ran once, with no tenant carried over from the last re-check run").containsExactly("");
+    }
+
     // ── (c3) the re-check's runs share statement_timeout_ms ─────────────────────────────────────────────
 
     /**
@@ -246,7 +339,7 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
 
         assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
-        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat(result.failure().stage().name()).isEqualTo("RECHECK");
         assertThat(result.failure().raised().getSQLState()).as("the shared budget ran out: query_canceled").isEqualTo("57014");
         assertThat(result.failure().detail()).contains("completion transaction");
         assertThat(DataMoveFailureClassifier.classify(result.failure().stage(), result.failure().raised(), List.of(),
