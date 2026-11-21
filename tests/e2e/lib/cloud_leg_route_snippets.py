@@ -46,11 +46,60 @@ from nexus.commands.catalog import _get_catalog
 from nexus.corpus import t3_collection_name
 from nexus.db import make_t3
 # RDR-229 P2.5 D1: re-register the probe collection the store-put step writes to (the same name store put
-# resolves, for_write=True). It is an existing row, or the row store-put would create, with the client's
-# default model_version, so the upsert route is driven and nothing new is left behind.
+# resolves, for_write=True), so the upsert route is driven and nothing new is left behind. RDR-229 P3.8: a
+# registration states its four attributes and derives nothing from the name, so they are the row's own.
+cat = _get_catalog()
 name = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
-_get_catalog().register_collection(name)
+row = cat.get_collection(name)
+if row is None:
+    raise SystemExit(f"{name} is not registered: the store-put step has not run")
+cat.register_collection(name, content_type=row["content_type"], owner_id=row["owner_id"],
+                        embedding_model=row["embedding_model"], model_version=row["model_version"])
 print(name)
+"""
+COLLECTIONS_LIST = r"""
+from nexus.commands.catalog import _get_catalog
+# RDR-229 P3.5a: list and get rows carry collection_id (an int, or None from an older engine).
+rows = _get_catalog().list_collections()
+print(len(rows), sorted({type(r.get("collection_id")).__name__ for r in rows}))
+"""
+COLLECTIONS_GET = r"""
+from nexus.commands.catalog import _get_catalog
+from nexus.corpus import t3_collection_name
+from nexus.db import make_t3
+# RDR-229 P3.5a: the probe collection's own row, with its collection_id.
+name = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
+row = _get_catalog().get_collection(name)
+print(name, None if row is None else row.get("collection_id"))
+"""
+ENGINE_STATUS = r"""
+from nexus.db.http_engine_status import fetch_engine_status
+# RDR-229 P3.8: /v1/status names collection_tuple_index_present (absent on an older engine; the doctor reads it).
+status = fetch_engine_status() or {}
+print("collection_tuple_index_present", status.get("collection_tuple_index_present", "absent"))
+"""
+IMPORT_COLLECTION_REFUSES_AN_ID = r"""
+import httpx
+from nexus.commands.catalog import _get_catalog
+from nexus.corpus import t3_collection_name
+from nexus.db import make_t3
+# RDR-229 P3.8: no client calls this route (the engine's own import path does), so the probe drives the one change the
+# client side can see, and it cannot write: the probe collection's own complete row (an import never overwrites, so an
+# engine without the refusal skips it) plus a collection_id, which this engine refuses 400 naming the field.
+cat = _get_catalog()
+name = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
+row = cat.get_collection(name)
+if row is None:
+    raise SystemExit(f"{name} is not registered: the store-put step has not run")
+body = {k: row[k] for k in ("name", "content_type", "owner_id", "embedding_model", "model_version")}
+try:
+    cat._post("/import/collection", {**body, "collection_id": 1})
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 400, f"a collection_id body answered {exc.response.status_code}, not 400"
+    assert "collection_id" in exc.response.text, f"the 400 does not name collection_id: {exc.response.text[:200]}"
+    print("collection_id refused 400")
+else:
+    raise SystemExit("a collection_id body was accepted: the engine does not refuse a client-supplied id")
 """
 PRUNE_PROJECTION = r"""
 import httpx
