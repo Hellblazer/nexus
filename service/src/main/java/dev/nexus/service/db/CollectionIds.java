@@ -51,7 +51,7 @@ public final class CollectionIds {
     public static Field<Long> idOf(String tenant, String name) {
         Objects.requireNonNull(tenant, "tenant");
         if (name == null || name.isEmpty()) {
-            return DSL.inline((Long) null);
+            return DSL.castNull(Long.class);
         }
         return idOf(DSL.val(tenant), DSL.val(name));
     }
@@ -63,7 +63,7 @@ public final class CollectionIds {
      */
     public static Field<Long> idOf(Field<String> tenant, Field<String> name) {
         var c = CATALOG_COLLECTIONS.as("cid");
-        return DSL.when(name.isNull().or(name.eq("")), DSL.inline((Long) null))
+        return DSL.when(name.isNull().or(name.eq("")), DSL.castNull(Long.class))
             .otherwise(DSL.field(DSL.select(c.COLLECTION_ID).from(c)
                 .where(c.TENANT_ID.eq(tenant)).and(c.NAME.eq(name))));
     }
