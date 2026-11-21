@@ -1284,6 +1284,12 @@ def import_cmd(
             "could not be swept. The documents are complete; those chunks stay stored, owned by "
             "no document, until `nx t3 gc` removes them."
         )
+    if result.get("owner_fallback_count"):
+        click.echo(
+            f"  Warning: {result['collection_name']} was registered under the knowledge curator because "
+            f"its source could not be found ({result.get('owner_fallback_reason') or 'no reason given'}). "
+            "The knowledge curator is not its source."
+        )
     _echo_left_out(result)
     if result.get("rehashed_count"):
         click.echo(
