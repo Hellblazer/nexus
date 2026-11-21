@@ -102,15 +102,36 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
         walk(ADMIN_ROLE, su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS), scenarios, 5, (pg, ds, w) -> {
             var before = w.before();
             var after = w.after();
-            assertThat(after.keySet()).as("no function appeared or went").isEqualTo(before.keySet());
+            // "after" is the whole migration, so it also holds what the changesets AFTER vectors-069 add (collections-001/-002); each
+            // such function is named in ADDED_AFTER_DUAL_WRITE with the reason it writes no guarded table. Anything else that
+            // appeared or went still fails here.
+            Set<String> addedAfter = new TreeSet<>();
+            for (String key : after.keySet()) {
+                if (!before.containsKey(key)) addedAfter.add(key.substring(0, key.indexOf('(')));
+            }
+            assertThat(addedAfter).as("the functions that appeared after vectors-069 are exactly the named ones").isEqualTo(ADDED_AFTER_DUAL_WRITE);
+            assertThat(before.keySet().stream().filter(k -> !after.containsKey(k)).toList()).as("no function went").isEmpty();
             Set<String> redefined = redefinedFunctions();
             int same = 0;
             int changed = 0;
+            int laterChanged = 0;
             for (var entry : before.entrySet()) {
                 var b = entry.getValue();
                 var a = after.get(entry.getKey());
                 String fn = entry.getKey().substring(0, entry.getKey().indexOf('('));
-                if (redefined.contains(fn)) {
+                if (REDEFINED_AFTER_DUAL_WRITE.contains(fn)) {
+                    // a later changeset replaces the body (collections-003); the definition around it is untouched
+                    laterChanged++;
+                    assertThat(a.body()).as("%s has a new body from its later changeset", entry.getKey()).isNotEqualTo(b.body());
+                    assertThat(a.arguments()).as("%s arguments", fn).isEqualTo(b.arguments());
+                    assertThat(a.result()).as("%s result", fn).isEqualTo(b.result());
+                    assertThat(a.volatility()).as("%s volatility", fn).isEqualTo(b.volatility());
+                    assertThat(a.language()).as("%s language", fn).isEqualTo(b.language());
+                    assertThat(a.securityDefiner()).as("%s SECURITY mode", fn).isEqualTo(b.securityDefiner());
+                    assertThat(a.config()).as("%s SET clauses (search_path and friends)", fn).isEqualTo(b.config());
+                    assertThat(a.owner()).as("%s owner", fn).isEqualTo(b.owner());
+                    assertThat(a.acl()).as("%s grants", fn).isEqualTo(b.acl());
+                } else if (redefined.contains(fn)) {
                     changed++;
                     assertThat(a.body()).as("%s has a new body", entry.getKey()).isNotEqualTo(b.body());
                     // attributes: everything the definition says other than the body
@@ -129,6 +150,7 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
                 }
             }
             assertThat(changed).as("non-vacuity: functions redefined").isEqualTo(24);
+            assertThat(laterChanged).as("non-vacuity: functions a later changeset redefines").isEqualTo(REDEFINED_AFTER_DUAL_WRITE.size());
             assertThat(same).as("non-vacuity: functions compared and unchanged").isGreaterThan(100);
 
             // the rollback restores every previous body verbatim
@@ -215,6 +237,22 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
      * check it against the scan: an addition here is a decision, not a default.
      */
     private static final Set<String> KNOWN_OTHER_WRITERS = new TreeSet<>(Set.of());
+
+    /**
+     * Functions that exist only after vectors-069, added by RDR-229 P3.8's changesets (collections-001 and -002). None writes a
+     * guarded table (the live scan below would flag one that did, and does not): the first is a read-only SECURITY INVOKER count
+     * over nexus.catalog_collections (collections-001-1); the other two are SECURITY DEFINER and only read
+     * nexus.catalog_collections, one for max(collection_id) and the sequence's last value and a nextval loop on the sequence (a
+     * sequence is not a guarded table), the other an EXISTS on collection_id (collections-002).
+     */
+    private static final Set<String> ADDED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of(
+        "catalog_collection_tuple_duplicates_unscoped", "collection_id_seq_heal", "collection_id_taken"));
+
+    /**
+     * Functions vectors-069 does not touch whose body a later changeset replaces: collections-003-1 narrows
+     * nexus.collection_tuple_lock_key to 256 stripes. Pure (IMMUTABLE, SQL, reads no table), so it writes nothing.
+     */
+    private static final Set<String> REDEFINED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of("collection_tuple_lock_key"));
 
     /** catalog_reconcile_commit, one complete walk that reaches all six of its guarded statements, plus the trash of the renamed row. */
     private static Scenario reconcile() {
