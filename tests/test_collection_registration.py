@@ -1236,9 +1236,10 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
         "src/nexus/collection_mint.py",
         # RDR-229 P3.9 (nexus-p2m1x.29): a recovery-bundle import registers the bundle's own label by NAME after its
         # own resolver has read the row (it refuses a live row of another tuple rather than upserting over it). The
-        # model it sends is effective_embedding_model_for_writes(content_type), the profile's own, so the seam's
-        # mismatch guard has nothing to catch, and the engine's register-time 422 stands behind it. A minted-form
-        # label goes through collection_mint.register_by_attributes, the site above.
+        # model it sends is effective_embedding_model_for_writes(content_type), which reads local.embed_model, not
+        # the engine's embedding profile, so the seam's client-side profile check is NOT made here: the engine's
+        # register-time profile refusal (422) is the only guard for this site. A minted-form label goes through
+        # collection_mint.register_by_attributes, the site above.
         "src/nexus/catalog/recovery_bundle.py",
     })
 
