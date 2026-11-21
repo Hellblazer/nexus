@@ -41,7 +41,7 @@ class CatalogHandlerCollectionUpsertModelVersionTest extends AtomicWriteTestBase
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("name", name);
         m.put("content_type", "knowledge");
-        m.put("owner_id", "o");
+        m.put("owner_id", "o-" + name);   // each its own owner: a tuple has one live collection (RDR-229 P3.8)
         m.put("embedding_model", "minilm-l6-v2-384");
         if (version != null) m.put("model_version", version);
         return m;

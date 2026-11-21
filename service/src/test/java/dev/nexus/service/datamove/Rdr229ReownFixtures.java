@@ -7,6 +7,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgContainerHelper;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.BeforeEach;
@@ -43,6 +44,12 @@ abstract class Rdr229ReownFixtures extends DataMoveIntegrationBase {
 
     @BeforeEach
     void freshCatalog() throws Exception {
+        // RDR-229 P3.8: collections-001-2 builds the live-tuple index on the first boot after this move completes, and the
+        // class shares one database, so a later test would meet it. The move runs over duplicated tuples, which only exist
+        // before the index does: every test starts without it (on a single-use connection, see CollectionMintSupport).
+        try (Connection c = pg.createConnection("")) {
+            dev.nexus.service.CollectionMintSupport.dropIndex(DSL.using(c, SQLDialect.POSTGRES));
+        }
         ctx().deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.like("rdr229-reown-%")).execute();
         ctx().deleteFrom(CATALOG_OWNERS).where(CATALOG_OWNERS.TENANT_ID.like("rdr229-reown-%")).execute();
         ctx().deleteFrom(table("nexus", "gc_audit")).where(DSL.field(DSL.name("tenant_id"), String.class).like("rdr229-reown-%"))
