@@ -100,6 +100,25 @@ class CollectionTupleLockStripeTest {
             .and(DSL.field(DSL.name("pid"), Integer.class).eq(DSL.function("pg_backend_pid", Integer.class))));
     }
 
+    /** The distinct stripes of {@link #freshRows}'s tuples, read from the SQL function one tuple a statement (no lock taken). */
+    private long distinctStripes(String prefix, int n) {
+        return su(ctx -> {
+            java.util.Set<Long> keys = new java.util.HashSet<>();
+            for (int i = 0; i < n; i++) {
+                keys.add(ctx.select(key(T, "knowledge", prefix + i, MODEL, "v1")).fetchOne(0, Long.class));
+            }
+            return (long) keys.size();
+        });
+    }
+
+    private static List<CollectionTupleLock.Tuple> tuples(String prefix, int n) {
+        List<CollectionTupleLock.Tuple> out = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            out.add(new CollectionTupleLock.Tuple(T, "knowledge", prefix + i, MODEL, "v1"));
+        }
+        return out;
+    }
+
     private static List<Map<String, Object>> freshRows(String prefix, int n) {
         List<Map<String, Object>> rows = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {
@@ -180,7 +199,23 @@ class CollectionTupleLockStripeTest {
             CollectionMint.refuseLiveTupleConflicts(ctx, T, freshRows("bulk-", 5000));
             return advisoryLocksHeld(ctx);
         });
-        assertThat(held).as("5000 tuples, at most one lock a stripe").isPositive().isLessThanOrEqualTo(STRIPES);
+        assertThat(held).as("5000 tuples: exactly one lock for each stripe they fall in, no more and none dropped")
+            .isEqualTo((int) distinctStripes("bulk-", 5000)).isLessThanOrEqualTo(STRIPES);
+    }
+
+    @Test
+    void theSharedPrimitiveLocksEachStripeOfItsTuplesOnceInAscendingOrder_acrossKeyChunks() {
+        // CollectionTupleLock.lock is what every batch caller takes its locks through (an import, a rename, a restore's
+        // TenantImportLoad); 2500 tuples read their keys over three statements of KEYS_PER_STATEMENT.
+        List<CollectionTupleLock.Tuple> in = tuples("prim-", 2500);
+        List<Object> result = scope.withTenant(T, ctx -> {
+            List<Long> locked = CollectionTupleLock.lock(ctx, in);
+            return List.of(locked, advisoryLocksHeld(ctx));
+        });
+        @SuppressWarnings("unchecked") List<Long> locked = (List<Long>) result.get(0);
+        long expected = distinctStripes("prim-", 2500);
+        assertThat(locked).as("one key a stripe, ascending").hasSize((int) expected).isSorted().doesNotHaveDuplicates();
+        assertThat((Integer) result.get(1)).as("held, as reported").isEqualTo((int) expected);
     }
 
     @Test
@@ -201,9 +236,10 @@ class CollectionTupleLockStripeTest {
             }));
         }
         go.countDown();
-        for (CompletableFuture<Integer> b : batches) {
-            assertThat(b.get(60, TimeUnit.SECONDS)).as("each batch completes, holding its stripes").isPositive();
-        }
+        assertThat(batches.get(0).get(60, TimeUnit.SECONDS)).as("the left batch completes, holding each of its stripes")
+            .isEqualTo((int) distinctStripes("left-", 1500));
+        assertThat(batches.get(1).get(60, TimeUnit.SECONDS)).as("the right batch completes, holding each of its stripes")
+            .isEqualTo((int) distinctStripes("right-", 1500));
     }
 
     @Test
