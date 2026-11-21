@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -167,6 +168,7 @@ class PgVectorManifestTitleContentTypeTest {
             .set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
             .set(CATALOG_DOCUMENTS.FILE_PATH, filePath)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLLECTION)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
             .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///" + tumbler)
             .execute();
     }
@@ -178,6 +180,7 @@ class PgVectorManifestTitleContentTypeTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLLECTION))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
             .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, false)
             .execute();

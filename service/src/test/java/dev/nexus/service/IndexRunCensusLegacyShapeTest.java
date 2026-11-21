@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.JSONB;
 import org.jooq.Query;
 import org.jooq.SQLDialect;
@@ -52,7 +53,8 @@ class IndexRunCensusLegacyShapeTest extends IndexRunCensusTestBase {
                     .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
                     .set(CATALOG_DOCUMENTS.TITLE, "d" + i).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "code")
                     .set(CATALOG_DOCUMENTS.SOURCE_URI, "file:///legacy/" + i).set(CATALOG_DOCUMENTS.INDEX_STATE, state)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, C1).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, C1)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, C1)).set(CATALOG_DOCUMENTS.CHUNK_COUNT, 3)
                     .set(CATALOG_DOCUMENTS.INDEXED_AT, start.plusMinutes(i));
                 if (state != null && state.equals("complete")) q = q.set(CATALOG_DOCUMENTS.INDEX_RUN_ID, "run" + i / 50);
                 if (i < 120) q = q.set(CATALOG_DOCUMENTS.INDEX_STARTED_AT, old);
@@ -68,6 +70,7 @@ class IndexRunCensusLegacyShapeTest extends IndexRunCensusTestBase {
                         .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
                         .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
                         .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(id)).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, C1)
+                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, C1))
                         .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model));
                 }
                 docs.add(q);
@@ -111,7 +114,8 @@ class IndexRunCensusLegacyShapeTest extends IndexRunCensusTestBase {
 
     private static Query chunkRow(org.jooq.DSLContext dsl, String model, long id, String meta) {
         return dsl.insertInto(CHUNKS)
-            .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, C1).set(CHUNKS.CHASH, chash(id))
+            .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, C1)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, C1)).set(CHUNKS.CHASH, chash(id))
             .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "t")
             .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f)).set(CHUNKS.METADATA, JSONB.valueOf(meta));
     }
