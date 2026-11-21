@@ -541,6 +541,9 @@ def row_a_process_bound_before_the_host_key_keeps_its_identity_across_a_clear(wo
     assert world.identity(first.identity)["holder"]["host"] == legacy
     assert world.events(first.identity) == ["start", "clear"]
     assert read_token_file(token_path(world.identity_dir, 100, 100_000)).host == legacy
+    forked = world.hook(100, "fork", "sid-c")                 # /branch: the same rule for a fork
+    assert (forked.action, forked.row, forked.identity, forked.generation) == ("bound", "fork_in_process", first.identity, 1)
+    assert world.events(first.identity) == ["start", "clear", "fork"] and world.identity(first.identity)["holder"]["host"] == legacy
 
 
 # ── the table ───────────────────────────────────────────────────────────────

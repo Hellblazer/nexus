@@ -430,7 +430,8 @@ def judge(env: IdentityEnv, view: Mapping[str, Any]) -> Verdict | None:
     if not isinstance(holder, Mapping):
         return None
     if view.get("kind") == "delegated":
-        return check_dispatcher(holder, procs=env.procs, host=env.host)
+        return check_dispatcher(holder, procs=env.procs, host=env.host, identity_dir=env.identity_dir,
+                                identity=str(view.get("id")))
     return check_holder(holder, procs=env.procs, host=env.host, identity_dir=env.identity_dir)
 
 
@@ -466,7 +467,7 @@ def alive_lines(env: IdentityEnv, ref: str | None) -> list[str]:
     if ref.isdigit():
         views = _call(bindings_here, env.client, env.host, int(ref), env.identity_dir)
         if not views:
-            raise IdentityCommandError(f"no binding for pid {ref} on {env.host}")
+            raise IdentityCommandError(f"no binding for pid {ref} on {describe_host(env.host)}")
     else:
         views = [find(env, ref)]
     lines: list[str] = []
@@ -635,7 +636,8 @@ def _close_previous(env: IdentityEnv, previous: Mapping[str, Any], evidence: Map
     event = "end" if previous.get("kind") == "ephemeral" else "release"
     body = dict(evidence)
     prev_holder = previous.get("holder") or {}
-    if holder_is_local(prev_holder, host=env.host, identity_dir=env.identity_dir):
+    if holder_is_local(prev_holder, host=env.host, identity_dir=env.identity_dir,
+                       process=(evidence.get("pid"), evidence.get("started_at"))):
         body["host"] = prev_holder["host"]   # a self-release names the holder row's own host, which may predate the stable host key
     try:
         env.client.bind(previous["id"], event, int(previous["generation"]), body if event == "release" else None)
