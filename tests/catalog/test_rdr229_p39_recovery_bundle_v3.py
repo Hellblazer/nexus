@@ -355,6 +355,59 @@ def test_the_cli_prints_a_new_count_only_when_it_is_nonzero_and_names_each_entry
     assert str(detail) in out, out
 
 
+# Exit status (linda's ruling). Precedent: ``import_cmd`` exits 1 once any NOTE did not land (docs_failed,
+# docs_uncertain, docs_stamp_refused: src/nexus/commands/catalog_cmds/recovery.py:186-192, "Exits non-zero when
+# any note did not verify", :134) and prints the whole summary before it does; the export exits 1 for a bundle
+# that does not hold every note (:105-115). LINK outcomes (unresolvable_links, links_refused_span) do not change
+# the status (tests/test_catalog_export_import_cli.py::test_unresolvable_links_alone_do_not_change_the_exit_status).
+# ``nx store import`` has no partial-failure precedent: it imports one collection, leaves records out and exits 0
+# (store.py:1295, ``_echo_left_out``), and every failure is a ClickException (exit 1, store.py:1259).
+# A refused collection leaves its notes unrestored, the note-level class, so it exits 1; skipped-not-live and
+# changed-model are expected outcomes and exit 0.
+
+
+def test_a_refused_collection_exits_1_and_the_full_summary_still_prints(tmp_path, monkeypatch):
+    from nexus.catalog.recovery_bundle import ImportSummary
+
+    summary = ImportSummary(
+        docs_imported=3, links_created=1, **_NEW_FIELDS,
+        unresolvable_links=[{"from_source_uri": "nx-note://k/a", "to_source_uri": "nx-note://k/b",
+                             "link_type": "cites", "missing": "to"}],
+    )
+
+    result = _invoke_cli_import(tmp_path, monkeypatch, summary)
+
+    assert result.exit_code == 1, result.output
+    out = result.output
+    assert "docs imported: 3" in out and "links created: 1" in out
+    for entries in _NEW_FIELDS.values():                     # all three classes, not just the refusal
+        assert entries[0]["label"] in out, out
+    assert _NEW_FIELDS["collections_refused_label_clash"][0]["error"] in out, out
+    assert "UNRESOLVABLE LINKS: 1" in out and "nx-note://k/a -[cites]-> nx-note://k/b" in out
+
+
+def test_a_refused_collection_alone_exits_1(tmp_path, monkeypatch):
+    from nexus.catalog.recovery_bundle import ImportSummary
+
+    summary = ImportSummary(
+        docs_imported=3, collections_refused_label_clash=_NEW_FIELDS["collections_refused_label_clash"])
+
+    assert _invoke_cli_import(tmp_path, monkeypatch, summary).exit_code == 1
+
+
+def test_skipped_not_live_and_changed_model_alone_exit_0_and_print(tmp_path, monkeypatch):
+    from nexus.catalog.recovery_bundle import ImportSummary
+
+    summary = ImportSummary(
+        docs_imported=3, collections_skipped_not_live=_NEW_FIELDS["collections_skipped_not_live"],
+        collections_changed_model=_NEW_FIELDS["collections_changed_model"])
+
+    result = _invoke_cli_import(tmp_path, monkeypatch, summary)
+
+    assert result.exit_code == 0, result.output
+    assert "cli-dead-label" in result.output and "cli-model-label" in result.output
+
+
 # ── (6) the version gate ─────────────────────────────────────────────────────────────────────────────────────
 
 
