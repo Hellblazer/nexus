@@ -238,4 +238,47 @@ class CollectionRenameTupleTest {
         assertRetiredBy("cas-x-on", "cas-y-on");
         assertLive("cas-y-on", "rn-subject-cas-on");
     }
+
+    // ── Y's tuple is another collection's, or X is one of D4's accepted pair ────────────────────
+
+    private void assertRenameOntoAHeldTupleIsRefusedNamingBoth(String suffix) {
+        String heldOwner = "rn-held-owner-" + suffix;
+        register("held-holder-" + suffix, heldOwner);
+        register("mover-" + suffix, "rn-mover-owner-" + suffix);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> repo.renameCollection(TENANT, "mover-" + suffix, "moved-" + suffix, null, "knowledge", heldOwner))
+            .as("a rename whose new owner puts Y on a tuple another collection holds").isInstanceOf(dev.nexus.service.db.CollectionMint.LiveTupleConflict.class)
+            .hasMessageContaining("held-holder-" + suffix).hasMessageContaining("moved-" + suffix);
+
+        assertLive("mover-" + suffix, "rn-mover-owner-" + suffix);
+        assertThat(row("moved-" + suffix)).as("nothing was written").isNull();
+    }
+
+    @Test
+    void aRenameOntoATupleAnotherCollectionHoldsIsRefusedNamingBoth_withTheIndexAbsent() {
+        indexState(false);
+        assertRenameOntoAHeldTupleIsRefusedNamingBoth("off");
+    }
+
+    @Test
+    void aRenameOntoATupleAnotherCollectionHoldsIsRefusedNamingBoth_withTheIndexPresent() {
+        indexState(true);
+        assertRenameOntoAHeldTupleIsRefusedNamingBoth("on");
+    }
+
+    @Test
+    void renamingOneMemberOfAnAcceptedDuplicatePairKeepsThePairAtTwoLiveRows_withTheIndexAbsent() {
+        indexState(false);
+        su(ctx -> {
+            CollectionMintSupport.insertLiveRow(ctx, TENANT, "pair-a", "rn-pair-owner", MODEL, null);
+            CollectionMintSupport.insertLiveRow(ctx, TENANT, "pair-b", "rn-pair-owner", MODEL, null);
+            return null;
+        });
+
+        repo.renameCollection(TENANT, "pair-a", "pair-c");
+
+        assertThat(liveRowsOfTuple("rn-pair-owner")).as("Y replaced X on the tuple: the pair is as it was").isEqualTo(2);
+        assertRetiredBy("pair-a", "pair-c");
+    }
 }
