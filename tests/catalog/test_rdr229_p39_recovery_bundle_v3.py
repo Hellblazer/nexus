@@ -343,6 +343,42 @@ def test_a_conformant_label_whose_token_is_the_source_model_imports_and_writes_t
     assert len(_by_label(summary.collections_changed_model, label)) == 1
 
 
+@pytest.mark.integration
+def test_a_profile_that_names_another_model_refuses_the_collection_before_it_is_registered(
+        t2_service_env, tmp_path, monkeypatch):
+    """This site registers outside ensure_collection_registered, so its resolver makes the seam's profile check:
+    effective_embedding_model_for_writes reads local.embed_model, and an engine profile that names another model for
+    the content_type refuses that collection (a named label and a minted one alike) with the seam's restart message,
+    before any register call. A content_type the profile has no row for imports as before."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    active = _active_model(client)
+    stale = "p39-stale-profile-model-768"
+    monkeypatch.setattr("nexus.corpus._profile_model_for_content_type",
+                        lambda ct: stale if ct == "knowledge" else None)
+    named, minted, ok = "knowledge__p39prof", "c9399001", "r229-p39-profile-ok"
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(
+        bundle,
+        [_coll(named, _SRC + 9, owner_id="p39profnamed", model=active),
+         _coll(minted, _SRC + 10, owner_id="p39profmint", model=active),
+         _coll(ok, _SRC + 11, content_type="docs", owner_id="p39profok", model=active)],
+        [_doc(named, _SRC + 9, "n1"), _doc(minted, _SRC + 10, "c1"), _doc(ok, _SRC + 11, "o1")],
+    )
+
+    summary = _import(client, bundle)
+
+    for label in (named, minted):
+        refused = _by_label(summary.collections_refused_label_clash, label)
+        assert len(refused) == 1, summary.collections_refused_label_clash
+        assert "embedding_profile" in refused[0]["error"] and stale in refused[0]["error"], refused[0]
+        assert refused[0]["docs_skipped"] == 1
+    assert _row(named) is None                                   # never registered
+    assert summary.collections_relabelled == []                  # the minted label was never minted here
+    assert len(summary.collections_refused_label_clash) == 2
+    assert (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
+    assert _row(ok) is not None                                  # the profile has no docs row: registered as before
+
+
 # ── CLI: each new count prints only when nonzero ─────────────────────────────────────────────────────────────
 
 _NEW_FIELDS = {
