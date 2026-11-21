@@ -3591,6 +3591,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         version = flags.get("release_version") or flags.get("app_version") or ""
         return flags.get("catalog_move_supported") is True, str(version) if flags else ""
 
+    def engine_release_version(self) -> str:
+        """The engine's ``release_version`` from ONE cached ``GET /version`` read, or ``""`` when it names none
+        (a tree-built engine carries ``null``) or the probe failed."""
+        value = self._version_flags().get("release_version")
+        return value if isinstance(value, str) else ""
+
     def _traverse(self, payload: dict) -> dict:
         """POST /v1/catalog/traverse and convert wire dicts to typed objects.
 
@@ -3716,75 +3722,47 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def register_collection(
         self,
-        name: str,
+        name: str | None = None,
         *,
-        content_type: str = "",
-        owner_id: str = "",
-        embedding_model: str = "",
-        model_version: str = "v1",
+        content_type: str,
+        owner_id: str,
+        embedding_model: str,
+        model_version: str,
         display_name: str = "",
-        legacy_grandfathered: bool | None = None,
-    ) -> None:
-        """Register (upsert) a collection row.
+    ) -> "CollectionAttributes":
+        """Register (upsert) a collection row by its attributes and answer the row (RDR-229 P3.8).
 
-        ``legacy_grandfathered`` DEFAULTS TO DERIVED, not to False (nexus-cecqy,
-        scope-corrected 2026-07-29). The retired local catalog derived the flag
-        by regex; the engine infers nothing (``upsertCollection`` binds the
-        caller's value verbatim) and this client used to default the kwarg
-        ``False`` — so every *bare* ``register_collection(name)`` call site left
-        non-conformant names UN-flagged. Those bare calls are BY CONSTRUCTION
-        the non-conformant branch of an ``if is_conformant_collection_name(...)``
-        fork, which is exactly where the flag has to be True:
+        ``content_type``, ``owner_id``, ``embedding_model`` and ``model_version`` are required and never derived
+        from a name; a blank one raises ``ValueError`` before anything is sent. ``legacy_grandfathered`` is no
+        longer sent (RDR-229 item 11).
 
-            src/nexus/indexer.py:784                         (post-rename registration)
-            src/nexus/commands/catalog_cmds/collections.py:138 (backfill loop)
-            src/nexus/commands/catalog_cmds/collections.py:349 (rename --allow-legacy)
+        With no *name* (``None`` or blank) the engine mints the collection's id and its label ``c<id>`` and answers
+        the registered row, or the live row the tuple already has: the answer carries ``collection_id`` and the
+        label, and a writer uses that label (the engine's listing omits a collection with no chunk yet). An engine
+        older than :data:`~nexus.catalog.engine_writes.floors.COLLECTION_MINT_MIN_ENGINE_VERSION` is refused with
+        :class:`~nexus.catalog.engine_writes.floors.CollectionMintUnsupportedError` before the write.
 
-        The defect was invisible on the conformant branch because a conformant
-        name wants False and the old default WAS False — correct by accident,
-        which is what made this read as an ``--allow-legacy``-only bug when it
-        reached the ordinary ``nx index`` and backfill paths too.
-
-        Deriving here rather than at the call sites puts the inference on the
-        same side of the boundary as the implementation it replaced, and covers
-        callers that do not yet exist. Pass the kwarg explicitly to force it.
-
-        RDR-204 Phase 1 follow-up (nexus-f5wwx): ``content_type``/``owner_id``/
-        ``embedding_model`` get the SAME same-side-of-the-boundary derivation,
-        for the same reason. The engine now refuses a registration with an
-        empty ``content_type`` outright (bead nexus-ft04v.7's stub-insert
-        retirement widened the constraint from NOT-NULL-with-empty-string-
-        allowed to actually-non-empty), so every *bare* ``register_collection
-        (name)`` call site — production (the same three listed above) and
-        test-fixture (``tests._catalog_fixture_ops.ActiveCatalog``'s pass-
-        through) alike — started 422ing on a two-plus-segment name it used to
-        register fine with a blank content_type. Deriving the three fields
-        here via :func:`nexus.corpus.collection_registration_kwargs` — the
-        SAME derivation :func:`nexus.corpus.ensure_collection_registered`
-        already uses for the RDR-204 write-time registration paths — covers
-        every existing bare caller plus any that do not yet exist, instead of
-        hand-fixing each call site. An explicitly-passed non-empty value is
-        never overridden.
+        With a *name* (a re-registration of an existing label, the migration and rename callers) the engine
+        answers ``{"ok": true}`` and no row, so the answer is what was asked: the label and attributes sent, with
+        no ``collection_id`` and no ``lifecycle_state``, since the engine keeps an existing row's own values.
         """
-        from nexus.corpus import collection_registration_kwargs  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
-        from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+        from nexus.catalog.collection_name import CollectionAttributes  # noqa: PLC0415 — deferred: module-load cycle
 
-        if legacy_grandfathered is None:
-            legacy_grandfathered = not is_conformant_collection_name(name)
-        if not content_type or not owner_id or not embedding_model:
-            derived = collection_registration_kwargs(name)
-            content_type = content_type or derived["content_type"]
-            owner_id = owner_id or derived["owner_id"]
-            embedding_model = embedding_model or derived["embedding_model"]
-        self._post("/collections/upsert", {
-            "name": name,
-            "content_type": content_type,
-            "owner_id": owner_id,
-            "embedding_model": embedding_model,
-            "model_version": model_version,
-            "display_name": display_name,
-            "legacy_grandfathered": legacy_grandfathered,
-        })
+        attrs = {
+            "content_type": content_type, "owner_id": owner_id,
+            "embedding_model": embedding_model, "model_version": model_version,
+        }
+        if blank := [k for k, v in attrs.items() if not v]:
+            raise ValueError(f"register_collection: {', '.join(blank)} required, never derived from a name")
+        body: dict = {**attrs, "display_name": display_name}
+        tuple_of = {k: attrs[k] for k in ("content_type", "owner_id", "embedding_model")}
+        if not name:
+            from nexus.catalog.engine_writes.floors import require_collection_mint  # noqa: PLC0415 — deferred: engine_writes imports back into catalog
+
+            require_collection_mint(self)
+            return CollectionAttributes.from_for_tuple(self._post("/collections/upsert", body) or {}, **tuple_of)
+        self._post("/collections/upsert", {"name": name, **body})
+        return CollectionAttributes.from_for_tuple({"name": name, **attrs}, **tuple_of)
 
     def delete_collection_projection(self, name: str, *, reason: str = "") -> bool:
         # No hard-delete route in initial service; guard+track for bead nexus-gmiaf.24
