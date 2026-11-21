@@ -331,6 +331,9 @@ ROUTE_MAP: dict[str, Step] = {
                                 identity=True, needs=["identity"], expect_route="/v1/tuples/out"),
     "POST /v1/tuples/ack": Step("route-tuples-ack", "py", ["-c", _routes.TUPLE_ACK], identity=True, needs=["identity"],
                                 expect_route="/v1/tuples/ack"),
+    # RDR-252 (nexus-igea9.4): the registry listing names a template's retention_by_suffix (board-ci's --owner, 35 days).
+    "GET /v1/tuples/registry": Step("route-tuples-registry", "nx", ["tuple", "templates"],
+                                    expect_route="/v1/tuples/registry"),
     "GET /v1/catalog/uri_segment_census": Step("route-uri-segment-census", "py", ["-c", _routes.URI_SEGMENTS],
                                                expect_route="/v1/catalog/uri_segment_census"),
 }
