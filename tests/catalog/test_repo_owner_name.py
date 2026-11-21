@@ -10,11 +10,15 @@ Real directories under ``tmp_path`` (the rule reads the filesystem); the catalog
 makes, so a test names exactly what the engine answered. No substrate."""
 from __future__ import annotations
 
+import errno
+import hashlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import structlog
 
 from nexus.catalog.engine_writes.repo_owner_name import repo_owner_name
 from nexus.catalog.tumbler import Tumbler
@@ -77,7 +81,10 @@ def test_a_gone_root_keeps_the_name(tmp_path):
     assert _name(_Cat(_owner(tmp_path / "work" / "nexus")), second) == "nexus"
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every directory")
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="chmod 0 does not make a directory unreadable on Windows, or to root",
+)
 def test_an_unreadable_root_splits(tmp_path):
     first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
     locked = first.parent
@@ -122,3 +129,59 @@ def test_the_rule_names_a_main_repository_whose_dot_git_is_a_file(tmp_path):
 def test_an_engine_error_from_the_lookup_propagates(tmp_path):
     with pytest.raises(RuntimeError, match="engine down"):
         _name(_Cat(error=RuntimeError("engine down")), _clone(tmp_path, "scratch"))
+
+
+def test_a_foreign_machine_path_that_raises_einval_is_not_live_and_keeps_the_name(tmp_path, monkeypatch):
+    """A root another machine recorded can hold characters this OS rejects (a Mac path with ':' read on Windows):
+    ``os.stat`` raises ``EINVAL`` there, which is not a permission error and not a live clone."""
+    second = _clone(tmp_path, "scratch")
+    foreign = "/Users/other:machine/work/nexus"
+    real_stat = os.stat
+
+    def stat(path, *args, **kwargs):
+        if str(path).startswith(foreign):
+            raise OSError(errno.EINVAL, "Invalid argument")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr("nexus.catalog.engine_writes.repo_owner_name.os.stat", stat)
+    assert _name(_Cat(_owner(foreign)), second) == "nexus"
+
+
+def test_a_repo_root_that_does_not_exist_is_not_read_as_the_recorded_root_being_gone(tmp_path):
+    """The recorded root is a live work tree and this run's root cannot be reached: ``samefile`` raises
+    ``FileNotFoundError`` for the missing side, which must not read as "the recorded root is gone" (a takeover)."""
+    first = _clone(tmp_path, "work")
+    assert _name(_Cat(_owner(first)), tmp_path / "scratch" / "nexus") == f"nexus-{_HASH}"
+
+
+def test_a_split_name_held_by_another_hash_extends_the_suffix(tmp_path):
+    """An owner move keeps the name and changes the hash, so ``nexus-<hash8>`` can already name an owner of another
+    clone: the second live clone's name takes the full repo hash instead, and stays deterministic."""
+    first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
+    full = hashlib.sha256(str(second).encode()).hexdigest()
+    held = {**_owner(tmp_path / "gone" / "nexus", name=f"nexus-{full[:8]}", prefix="1.2"), "repo_hash": "cccc3333"}
+    cat = _Cat(_owner(first), held)
+    assert repo_owner_name(cat, name="nexus", repo_hash=full[:8], repo_root=second) == f"nexus-{full}"
+    assert repo_owner_name(cat, name="nexus", repo_hash=full[:8], repo_root=second) == f"nexus-{full}"
+
+
+def test_a_split_name_held_by_an_owner_of_this_hash_is_not_extended(tmp_path):
+    """The candidate name held by an owner that already carries this repo's hash is this repo's own owner."""
+    first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
+    own = {**_owner(second, name=f"nexus-{_HASH}", prefix="1.2"), "repo_hash": _HASH}
+    assert _name(_Cat(_owner(first), own), second) == f"nexus-{_HASH}"
+
+
+def test_a_split_is_logged_with_the_name_the_candidate_and_the_other_root(tmp_path):
+    first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
+    with structlog.testing.capture_logs() as logs:
+        _name(_Cat(_owner(first)), second)
+    (event,) = [e for e in logs if e["event"] == "repo_owner_split"]
+    assert (event["log_level"], event["name"], event["candidate"], event["other_root"]) == (
+        "info", "nexus", f"nexus-{_HASH}", str(first))
+
+
+def test_no_split_is_not_logged(tmp_path):
+    with structlog.testing.capture_logs() as logs:
+        _name(_Cat(), _clone(tmp_path, "scratch"))
+    assert [e for e in logs if e["event"] == "repo_owner_split"] == []

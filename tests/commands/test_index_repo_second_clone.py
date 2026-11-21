@@ -88,7 +88,8 @@ def _identity(repo: Path) -> tuple[str, str]:
 
 def _index(engine: _OwnerEngine, repo: Path):
     """``nx index repo <repo>`` with the registry fresh (so the command registers the owner) and the run's own work
-    stubbed."""
+    stubbed. The taxonomy-deferral probe the command makes after registering would reach the engine's ``/version``
+    through the vector client, which a tenant-free test has none of, so its two reads are stubbed too."""
     added: set[str] = set()
     reg = MagicMock()
     reg.get.side_effect = lambda p: {"collection": "code__proj"} if str(p) in added else None
@@ -96,6 +97,8 @@ def _index(engine: _OwnerEngine, repo: Path):
     cat = engine.client()
     with patch("nexus.commands.index._registry", return_value=reg), \
             patch("nexus.indexer.index_repository", return_value={}), \
+            patch("nexus.mcp_infra.taxonomy_failure_marker_path", return_value=repo.parent.parent / "taxonomy-failed"), \
+            patch("nexus.mcp_infra.engine_process_uptime_seconds", return_value=None), \
             patch("nexus.catalog.factory.make_catalog_reader", return_value=cat):
         return CliRunner().invoke(main, ["index", "repo", str(repo)], env={"NX_NO_TELEMETRY": "1"})
 
@@ -176,6 +179,9 @@ def test_direct_register_owner_sites_pass_their_explicit_hash(tmp_path, monkeypa
     cat = engine.client()
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda **kw: cat)
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda **kw: cat)
+    # the mock engine has no reconcile route, so the hook fails after the owner and audits the failure into T2; a
+    # tenant-free test has no T2
+    monkeypatch.setattr("nexus.indexer.record_catalog_hook_failure", lambda **kw: None)
     try:
         _catalog_hook(repo=second, repo_name="proj", repo_hash="cafe0001", head_hash="abc", indexed_files=[])
     except Exception:  # noqa: BLE001 — the hook's work after the owner is not under test; the owner row is
@@ -196,16 +202,53 @@ def test_direct_register_owner_sites_pass_their_explicit_hash(tmp_path, monkeypa
     assert by_hash["feedbeef"]["name"] == "proj"
 
 
-def test_a_failed_lookup_does_not_stop_the_command(tmp_path):
-    """The command's pre-registration is best effort (the indexer registers the owner regardless); the rule adds no
-    handling of its own, so an engine error from its lookup is the same outcome an ``owner_for_repo`` error is."""
-    second = _clone(tmp_path, "scratch")
+def test_an_owner_already_shared_by_two_clones_gives_the_clone_it_no_longer_carries_its_own_owner(tmp_path):
+    """An owner two clones registered before this rule holds ONE hash and root (the later write won). The clone whose
+    hash it no longer carries misses ``owner_for_repo``, sees the other clone live under the plain name, and registers
+    ``proj-<its hash>``: a new owner, so a new collection and one full re-registration. The shared owner is untouched."""
+    clone_a, clone_b = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
+    hash_a, root_a = _identity(clone_a)
+    hash_b, root_b = _identity(clone_b)
+    engine = _OwnerEngine()
+    engine.owners["1.1"] = {"tumbler_prefix": "1.1", "name": "proj", "owner_type": "repo", "repo_hash": hash_b,
+                            "repo_root": root_b}
 
-    class _Down(_OwnerEngine):
-        def handle(self, request):
-            if request.url.path == "/v1/catalog/owners/by_name":
-                return httpx.Response(500, json={"error": "boom"})
-            return super().handle(request)
-
-    result = _index(_Down(), second)
+    result = _index(engine, clone_a)
     assert result.exit_code == 0, result.output
+    assert engine.snapshot() == {"1.1": ("proj", hash_b, root_b), "1.2": (f"proj-{hash_a}", hash_a, root_a)}
+
+
+class _FailingRoute(_OwnerEngine):
+    """The engine answers 500 on one owner route."""
+
+    def __init__(self, route: str) -> None:
+        super().__init__()
+        self.route = route
+
+    def handle(self, request):
+        if request.url.path == self.route:
+            return httpx.Response(500, json={"error": "boom"})
+        return super().handle(request)
+
+
+def test_a_failed_by_name_lookup_registers_nothing(tmp_path):
+    """The command's pre-registration is best effort (the indexer registers the owner regardless), so the exit code
+    says nothing about the rule. What the rule owes is that an engine error from its lookup is not read as "no owner
+    of that name": no upsert goes out. A rule that swallowed the error and returned the plain name would upsert it."""
+    engine = _FailingRoute("/v1/catalog/owners/by_name")
+    result = _index(engine, _clone(tmp_path, "scratch"))
+    assert result.exit_code == 0, result.output
+    assert engine.upserts == [] and engine.owners == {}
+
+
+def test_a_failed_owner_show_registers_nothing(tmp_path):
+    """``get_owner_by_prefix`` maps only a 404 to "no such owner"; a 500 from ``/owners/show`` raises through the
+    rule, so a same-name owner whose row cannot be read is not read as absent (a plain-name upsert would take it)."""
+    first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
+    hash_a, root_a = _identity(first)
+    engine = _FailingRoute("/v1/catalog/owners/show")
+    engine.owners["1.1"] = {"tumbler_prefix": "1.1", "name": "proj", "owner_type": "repo", "repo_hash": hash_a,
+                            "repo_root": root_a}
+    result = _index(engine, second)
+    assert result.exit_code == 0, result.output
+    assert engine.upserts == [] and engine.snapshot() == {"1.1": ("proj", hash_a, root_a)}
