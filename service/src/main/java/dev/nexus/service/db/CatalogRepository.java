@@ -9828,7 +9828,13 @@ public final class CatalogRepository {
      */
     public void upsertCollection(String tenant, Map<String, Object> coll, boolean clientRoute) {
         tenantScope.withTenant(tenant, ctx -> {
+            CollectionMint.refuseSuppliedId(coll);
             String name           = s(coll, "name");
+            if (name == null || name.isBlank()) {
+                // RDR-229 P3.8: no name, the engine mints it (CollectionMint).
+                CollectionMint.mint(ctx, tenant, coll, clientRoute);
+                return null;
+            }
             // Raw, nullable/blank — used to key the profile lookup; nne() below still fills the written
             // CONTENT_TYPE column with "" as before when absent.
             String contentType    = s(coll, "content_type");
@@ -9905,51 +9911,10 @@ public final class CatalogRepository {
                 }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 CollectionRegistration.requireNameAgreesWithState(name, requestedState != null ? requestedState : "live");
-                String  profileModel     = null;
-                Integer profileDimension = null;
-                // contentType is already proven non-null/non-blank by the guard above
-                // (line ~6317) that throws before this branch can ever run -- no need
-                // to re-check it here (nexus-ft04v.8 review Minor 1: this guard was
-                // dead, always true).
-                var profileRow = ctx.select(EMBEDDING_PROFILE.EMBEDDING_MODEL, EMBEDDING_PROFILE.DIMENSION)
-                        .from(EMBEDDING_PROFILE)
-                        .where(EMBEDDING_PROFILE.TENANT_ID.eq(tenant))
-                        .and(EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))
-                        .fetchOne();
-                if (profileRow != null) {
-                    profileModel     = profileRow.value1();
-                    profileDimension = profileRow.value2();
-                }
-                if (profileModel != null) {
-                    if (requestedModel != null && !requestedModel.isBlank()
-                            && !requestedModel.equals(profileModel)) {
-                        throw new EmbeddingProfileConflictException(
-                            "the embedding profile for content_type '" + contentType + "' is '"
-                            + profileModel + "'; refusing to register '" + name
-                            + "' with embedding_model '" + requestedModel + "'");
-                    }
-                    effectiveModel     = profileModel;
-                    effectiveDimension = profileDimension;
-                } else {
-                    effectiveModel = nne(requestedModel);
-                    // nexus-ft04v.8 review Significant 3: no embedding profile exists
-                    // for this content_type and the caller supplied no model either --
-                    // refuse loud here, naming the missing field, rather than binding
-                    // "" into the INSERT's VALUES tuple and letting hygiene-002-1's
-                    // catalog_collections_embedding_model_chk surface as an opaque
-                    // 23514 (500-shaped) instead of this method's uniform 422 contract
-                    // (mirrors the content_type guard above).
-                    if (effectiveModel.isBlank()) {
-                        throw new EmbeddingProfileConflictException(
-                            "registering collection '" + name + "' requires embedding_model; "
-                            + "no embedding profile exists for content_type '" + contentType
-                            + "' and none was supplied");
-                    }
-                    effectiveDimension = ctx.select(EMBEDDING_MODELS.DIMENSION)
-                            .from(EMBEDDING_MODELS)
-                            .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(effectiveModel))
-                            .fetchOne(EMBEDDING_MODELS.DIMENSION);
-                }
+                // The profile/model/dimension rule is shared with the minting registration (CollectionRegistration).
+                var newModel = CollectionRegistration.resolveNewRowModel(ctx, tenant, contentType, requestedModel, name);
+                effectiveModel     = newModel.model();
+                effectiveDimension = newModel.dimension();
                 lifecycleState = requestedState != null ? requestedState : "live";
             }
 
@@ -10063,11 +10028,12 @@ public final class CatalogRepository {
     }
 
     /**
-     * RDR-229 P3.8 (nexus-p2m1x.28): register a collection that has no name; the engine mints it. STUB until the
-     * implementation commit: the failing tests of the mint compile against this.
+     * RDR-229 P3.8 (nexus-p2m1x.28): register a collection by its attributes alone; the engine mints its
+     * {@code collection_id} and its label {@code "c" + id}, or answers the live row the tuple already has. The rules
+     * are {@link CollectionMint#mint}'s.
      */
     public Map<String, Object> mintCollection(String tenant, Map<String, Object> coll, boolean clientRoute) {
-        throw new UnsupportedOperationException("RDR-229 P3.8: the mint is not built yet");
+        return tenantScope.withTenant(tenant, ctx -> CollectionMint.mint(ctx, tenant, coll, clientRoute));
     }
 
     /**
@@ -13758,7 +13724,10 @@ public final class CatalogRepository {
         if (rows == null || rows.isEmpty()) return new ImportCollectionsResult(0, List.of());
         return tenantScope.withTenant(tenant, ctx -> {
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
-            for (var coll : rows) unique.put(s(coll, "name"), coll);
+            for (var coll : rows) {
+                CollectionMint.refuseSuppliedId(coll);
+                unique.put(s(coll, "name"), coll);
+            }
             List<Map<String, Object>> deduped = List.copyOf(unique.values());
 
             // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
@@ -13782,6 +13751,7 @@ public final class CatalogRepository {
                 deduped.stream().map(c -> s(c, "name")).toList());
             List<Map<String, Object>> fresh = deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList();
             CollectionRegistration.requireStatesAgreeWithNames(fresh);
+            CollectionMint.refuseLiveTupleConflicts(ctx, tenant, fresh);
             List<String> corrected = fresh.stream().filter(CollectionRegistration::stateCorrectedOnImport)
                 .map(c -> s(c, "name")).toList();
 
@@ -13851,6 +13821,7 @@ public final class CatalogRepository {
     }
 
     private void doImportCollection(DSLContext ctx, String tenant, Map<String, Object> coll) {
+        CollectionMint.refuseSuppliedId(coll);
         // ON CONFLICT DO NOTHING: an import never overwrites an existing row (see this
         // method's caller's javadoc for why the old conditional stub-upgrade DO UPDATE
         // was retired). nexus-xtmtf: single-row delegate of the importCollectionsBatch
@@ -13873,6 +13844,7 @@ public final class CatalogRepository {
             return;
         }
         CollectionRegistration.requireStatesAgreeWithNames(List.of(coll));
+        CollectionMint.refuseLiveTupleConflicts(ctx, tenant, List.of(coll));
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                 CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
