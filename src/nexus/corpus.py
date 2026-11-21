@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+import unicodedata
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -19,84 +20,71 @@ from nexus.owner_segment_guard import TumblerShapedCorpusError, require_corpus_n
 
 _log = structlog.get_logger(__name__)
 
-# ChromaDB collection name constraints:
-# - 3–63 characters
-# - Must start and end with an alphanumeric character
-# - May contain alphanumeric characters, hyphens, or underscores in the middle
-_COLLECTION_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{1,61}[a-zA-Z0-9]$")
-
-# Canonical content_type prefixes.  Defined here (before validate_collection_name)
-# so the overflow hint can include a concrete ``--content-type`` flag when the
-# name's prefix is recognisable.  The public alias ``CONTENT_TYPES`` is re-exported
-# below for backward-compat.
+# Canonical content_type prefixes.  The public alias ``CONTENT_TYPES`` is
+# re-exported below for backward-compat.
 _CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
 
 
+#: RDR-229 item 7, the label rule's one pending clause: a label holding ``/`` is refused. PENDING Sam's ruling
+#: (board ask ``rdr229-label-slash``): ``NoteUri.collectionOf`` ends a collection at the first ``/``, so such a label
+#: would mis-parse ``nx-note://<label>/...``, and no audit yet covers where a label meets a file path
+#: (``checkpoint.checkpoint_path`` and ``orphan_backfill`` build paths from one). If he allows ``/``, set this
+#: ``False`` here and ``CollectionLabel.REFUSE_SLASH`` in the engine, and change ``test_rdr229_label_rule.py``'s one
+#: slash test.
+LABEL_REFUSES_SLASH: bool = True
+
+#: The engine's own label form, ``c`` + ASCII digits (RDR-229 item 8). The client never mints one; the engine's
+#: minter does (P3.8). Twin of ``CollectionLabel.isMintedForm``: ``[0-9]``, not ``\d``, so no other script's digit counts.
+_MINTED_LABEL_RE = re.compile(r"c[0-9]+")
+
+#: UTF-8 bytes in a label (RDR-229 item 7).
+_LABEL_MAX_BYTES = 255
+
+#: Characters a label may not hold, by Unicode category: Cc (the C0 and C1 controls, NUL and DEL among them), Zl
+#: and Zp (U+2028 and U+2029, which break a line in a terminal, a log or a note URI). Cf is allowed on purpose: the
+#: zero-width joiner and non-joiner spell words in Persian and the Indic scripts and join emoji sequences, and a
+#: label is not a security principal (uniqueness is on the exact string), so a bidi override can no more spoof it
+#: than a homoglyph can, which no rule catches either.
+_LABEL_REFUSED_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
+
+
 def validate_collection_name(name: str) -> None:
-    """Raise ValueError if *name* violates ChromaDB collection name constraints.
+    """Raise ValueError if *name* is not an acceptable collection LABEL (RDR-229 item 7, P3.6).
 
-    Enforces two sets of rules:
-    1. Structural (open-source ChromaDB): 3–63 characters, alphanumeric + hyphens/underscores,
-       must start and end with alphanumeric.
-    2. Cloud byte-length limit: name must not exceed 128 bytes when UTF-8 encoded.
-       Relevant if names ever contain multi-byte characters; all current ASCII names
-       are well within this limit since they cap at 63 chars = 63 bytes.
+    The label is what a person types and reads; it is no longer a ChromaDB identifier. The rule: non-empty,
+    valid UTF-8, no control character (Cc, plus the line and paragraph separators), at most 255 UTF-8 bytes,
+    not of the minted form ``c`` followed by ASCII digits (the engine's, so a user cannot claim a label a later
+    mint would produce), and no ``/`` while :data:`LABEL_REFUSES_SLASH` holds. The 63-character cap, the
+    3-character minimum, the start/end-alphanumeric rule and the 128-byte cloud limit are gone; so is the
+    overflow hint that went with the cap.
 
-    This is CHARSET legality of the WHOLE name string (start/end
-    alphanumeric, alphanumeric+hyphen+underscore in between) -- it has no
-    concept of segments and is deliberately NOT the owner-segment
-    ambiguity rule (RDR-204 Phase 3 item 7, coordinator grammar decision
-    2026-09-08): that structural check -- an owner admits single
-    underscores only, never a run of two, because "__" is always the
-    segment separator -- lives in :func:`nexus.catalog.rows.legacy_names.is_conformant_collection_name` /
-    :data:`nexus.catalog.rows.legacy_names._OWNER_SEGMENT_RE`. Do not re-derive it here: this function
-    validates names that legitimately contain three literal "__"
-    separators (a full 4-segment conformant name), so a segment-aware
-    rule cannot live in this flat charset check without rejecting every
-    conformant name at creation time.
+    This is the label rule and nothing else. It is deliberately NOT the owner-segment ambiguity rule (RDR-204
+    Phase 3 item 7, coordinator grammar decision 2026-09-08): that structural check lives in
+    :func:`nexus.catalog.rows.legacy_names.is_conformant_collection_name` /
+    :data:`nexus.catalog.rows.legacy_names._OWNER_SEGMENT_RE`, still gates the creation of a NEW collection in
+    ``T3Database.get_or_create_collection``, and is not re-derived here.
+
+    The engine enforces the same rule on a registration and a rename target (``CollectionLabel.validateUserLabel``).
     """
-    # Length check fires first for <3 chars; regex rejects other invalid patterns.
-    # Both gates are needed: length for clear error messages, regex for charset/boundary validation.
-    if len(name) > 63:
-        # Overflow: derive an actionable hint.  The canonical remedy is to
-        # rename to the repo-id-conformant name (e.g. ``code__1-36__bge-base-en-v15-768__v1``,
-        # 35 chars) which fits under the cap and preserves vectors (no reindex).
-        # Derive content_type from the name prefix (before the first ``__``) when
-        # present so the hint can be concrete; fall back to a generic flag otherwise.
-        # RDR-204 Phase 3 repoint (nexus-ft04v.26): an oversized *name* is
-        # necessarily NOT a real (registered) collection -- collection_content_type
-        # now reads the catalog row and would raise CollectionNotRegisteredError
-        # here every time. This is a best-effort HINT about a candidate string,
-        # so it uses the string-shape primitive directly, same as
-        # t3_collection_name's own candidate-parsing sites below.
-        # split_candidate_collection_name returns "" for a name with no "__" at
-        # all, which fails the membership test below exactly like the old
-        # "__" in name guard did.
-        _ct_hint = ""
-        _prefix, _ = _legacy.split_candidate_collection_name(name)
-        if _prefix in _CONTENT_TYPES:
-            _ct_hint = f" --content-type {_prefix}"
+    if not name:
+        raise ValueError("a collection label must not be empty")
+    try:
+        encoded = name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"collection label {name!r} is not valid UTF-8: {exc.reason}") from exc
+    if len(encoded) > _LABEL_MAX_BYTES:
         raise ValueError(
-            f"Collection name {name!r} must be 3–63 characters (got {len(name)}). "
-            f"The name is too long for ChromaDB's 63-character cap. "
-            f"To get a conformant name that fits and preserves vectors (no reindex), run:\n"
-            f"  nx catalog collection-name{_ct_hint} --repo <repo-path>"
+            f"collection label {name[:40]!r}... is {len(encoded)} bytes in UTF-8; the limit is {_LABEL_MAX_BYTES}"
         )
-    if len(name) < 3:
+    for ch in name:
+        if unicodedata.category(ch) in _LABEL_REFUSED_CATEGORIES:
+            raise ValueError(f"collection label {name!r} holds a control character (U+{ord(ch):04X})")
+    if LABEL_REFUSES_SLASH and "/" in name:
+        raise ValueError(f"collection label {name!r} holds '/', which a label may not hold")
+    if _MINTED_LABEL_RE.fullmatch(name):
         raise ValueError(
-            f"Collection name {name!r} must be 3–63 characters (got {len(name)})"
-        )
-    if not _COLLECTION_NAME_RE.match(name):
-        raise ValueError(
-            f"Collection name {name!r} must start and end with an alphanumeric character "
-            "and contain only alphanumeric characters, hyphens, or underscores"
-        )
-    # ChromaDB Cloud additional constraint: 128-byte limit (byte length, not char length).
-    name_bytes = len(name.encode())
-    if name_bytes > 128:
-        raise ValueError(
-            f"Collection name {name!r} exceeds ChromaDB Cloud 128-byte limit "
-            f"(encoded as {name_bytes} bytes)"
+            f"collection label {name!r} is of the minted form (c followed by digits), which the engine "
+            "reserves for the labels it mints"
         )
 
 
