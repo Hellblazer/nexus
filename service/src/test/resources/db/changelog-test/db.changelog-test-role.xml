@@ -92,6 +92,20 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${svcRole};
 -- safe to widen here once instead of per-class.
 GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
 
+-- RDR-229 P3.8: the collection mint heals a collection_id sequence behind the data with setval, which needs UPDATE on that
+-- one sequence; production grants it to nexus_svc by collections-002. Guarded: this changelog also runs against schemas
+-- migrated before P3.1 gave the registry its identity column.
+DO $$
+DECLARE
+    seq text;
+BEGIN
+    seq := pg_get_serial_sequence('nexus.catalog_collections', 'collection_id');
+    IF seq IS NOT NULL THEN
+        EXECUTE format('GRANT UPDATE ON SEQUENCE %s TO ${svcRole}', seq);
+    END IF;
+END
+$$;
+
 -- nexus-cbo4a batch 13 (fts_matches): the Plans/Memory schema tests probe a
 -- table's fts_vector THROUGH TenantScope.withTenant, i.e. as ${svcRole}, and
 -- the probe is the test-lifecycle function nexus_test.fts_matches (the jOOQ
