@@ -24,6 +24,7 @@ import java.sql.Connection;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.db.ReembedJobRepository.ABORTED;
 import static dev.nexus.service.db.ReembedJobRepository.CUTOVER;
 import static dev.nexus.service.db.ReembedJobRepository.FAILED;
@@ -149,9 +150,9 @@ class ReembedRenameRefusalTest {
         "/v1/aspects/highlights/rename_collection");
 
     private void assert409Naming(HttpResponse<String> resp, Job job) throws Exception {
-        assertThat(resp.statusCode()).isEqualTo(409);
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
         Map<String, Object> body = mapper.readValue(resp.body(), MAP_T);
-        assertThat(body.get("job_id")).isEqualTo(job.jobId().toString());
+        assertThat(body.get("job_id")).as(resp.body()).isEqualTo(job.jobId().toString());
         assertThat(String.valueOf(body.get("error"))).contains("re-embed job").contains(job.jobId().toString())
             .contains(job.sourceCollection()).contains(job.targetCollection());
     }
@@ -186,6 +187,14 @@ class ReembedRenameRefusalTest {
         String free = name("free");
         register(free);
         Job job = startJob(src, tgt);
+        // A job row carries both ends' registry ids, so start registered both names (RDR-229 P3.1). What this test is about
+        // is a name the job holds that the registry does NOT: the two registry rows go away after the start, as a source the
+        // job's own cutover deleted does, and the job still holds both names.
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.in(src, tgt)).execute();
+        }
 
         assert409Naming(rename(free, tgt), job);
         assert409Naming(rename(free, src), job);

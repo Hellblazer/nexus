@@ -11,7 +11,8 @@ import java.util.Map;
  * RDR-229 P3.1 stage 2b (nexus-p2m1x.17), residual R7: {@code supersedeCollection} resolves the successor's registry id
  * in its own statement and refuses a successor with no registry row ({@code UnregisteredCollectionException}). A test
  * that retires a name to a successor it never registered registers the successor first, through the repository's own
- * registration path, with the retired collection's content type, owner and model.
+ * registration path, with the retired collection's content type, owner and model (the tenant's profile model when the
+ * profile names another).
  */
 public final class SupersedeSeeds {
 
@@ -31,7 +32,14 @@ public final class SupersedeSeeds {
             reg.put("owner_id", orElse(source, "owner_id", "seed"));
             reg.put("embedding_model", orElse(source, "embedding_model", "minilm-l6-v2-384"));
             reg.put("model_version", orElse(source, "model_version", "v1"));
-            repo.upsertCollection(tenant, reg);
+            try {
+                repo.upsertCollection(tenant, reg);
+            } catch (CatalogRepository.EmbeddingProfileConflictException profileNamesAnotherModel) {
+                // the tenant's embedding profile for this content type names another model than the retired source's
+                // (a re-embed source is the old model by design): a registration that names none takes the profile's
+                reg.remove("embedding_model");
+                repo.upsertCollection(tenant, reg);
+            }
         }
         return repo.supersedeCollection(tenant, name, successor, at);
     }
