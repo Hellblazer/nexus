@@ -393,6 +393,7 @@ class AspectTaskRefsRenameTest {
         String b = coll("b");
         String jobTarget = coll("jobtarget");
         register(tenant, a);
+        register(tenant, jobTarget);   // RDR-229 P3.1: a job row carries both ends' registry ids, so its target is registered first
         Seeded s = seedThree(tenant, a, "1.13");
         new ReembedJobRepository(scope).start(tenant, a, jobTarget, null, false, false);
 
