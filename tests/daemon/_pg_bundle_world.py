@@ -128,7 +128,7 @@ class _World:
         monkeypatch.setattr(b, "_fetch_verified", self._fetch)
         monkeypatch.setattr(pg_bundle_refresh, "_REFRESH_FAILURES", {})
         self.busy: str | None = None  # why the engine is busy, for the converged leg's idle gate
-        monkeypatch.setattr(pg_bundle_refresh, "engine_busy_reason", lambda _cfg: self.busy)
+        monkeypatch.setattr(pg_bundle_refresh, "engine_busy_reason", lambda _cfg, **_kw: self.busy)
 
     def _fetch(self, tag, name, tmp, checker):
         self.downloads.append(name)

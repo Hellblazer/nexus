@@ -332,11 +332,13 @@ def busy_per_product(python: Path, config: Path, env: dict[str, str]) -> str | N
     """Why the candidate's own idle rule (``nexus.daemon.pg_bundle_refresh.engine_busy_reason``: ``boot_work`` empty
     but for a data move that is only blocked, failed or paused, and no index build or vacuum) says the engine is
     busy, or ``None`` when it is idle. Run with the installed candidate's python, so the rehearsal judges by the rule
-    the bundle leg itself uses. A run that fails to answer is busy: unknown is not idle."""
+    the bundle leg itself uses, including its ``moves_can_run`` (on a bundle without pg_background no move can run,
+    so a queued one is not work; F33). A run that fails to answer is busy: unknown is not idle."""
     code = (
         "import sys; from pathlib import Path; "
-        "from nexus.daemon.pg_bundle_refresh import engine_busy_reason; "
-        "print(engine_busy_reason(Path(sys.argv[1])) or '')"
+        "from nexus.daemon.pg_bundle_refresh import bundle_lacks_pg_background, engine_busy_reason; "
+        "cfg = Path(sys.argv[1]); "
+        "print('NX_BUSY=' + (engine_busy_reason(cfg, moves_can_run=not bundle_lacks_pg_background(cfg)) or ''))"
     )
     try:
         done = subprocess.run(  # noqa: S603 - the installed candidate's interpreter, fixed argv
@@ -347,7 +349,11 @@ def busy_per_product(python: Path, config: Path, env: dict[str, str]) -> str | N
         return f"the idle rule could not run: {exc}"
     if done.returncode != 0:
         return f"the idle rule exited {done.returncode}: {done.stderr.strip()[-200:]}"
-    return done.stdout.strip() or None
+    # The answer is the marked line: the candidate's logging can write lines of its own to stdout.
+    answers = [ln[len("NX_BUSY="):].strip() for ln in done.stdout.splitlines() if ln.startswith("NX_BUSY=")]
+    if not answers:
+        return f"the idle rule gave no answer: {done.stdout.strip()[-200:]}"
+    return answers[-1] or None
 
 
 def wait_until_idle(
@@ -2720,7 +2726,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 )
             ):
                 findings.append(
-                    f"the engine was still building indexes {IDLE_WAIT_BOUND_S:g}s after {ENGINE_FIRST_STEP}: "
+                    f"the engine was still busy {IDLE_WAIT_BOUND_S:g}s after {ENGINE_FIRST_STEP}: "
                     "the bundle leg defers while it works, so the leg cannot be judged"
                 )
                 stop = True

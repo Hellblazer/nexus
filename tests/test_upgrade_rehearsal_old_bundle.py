@@ -142,12 +142,20 @@ def test_the_busy_rule_is_the_products_own(tmp_path):
     """busy_per_product runs the candidate's engine_busy_reason with its interpreter: here a stand-in interpreter whose
     one-liner answer is the rule's, to pin the contract (empty is idle, text is busy, a failure is busy)."""
     fake = tmp_path / "python"
-    fake.write_text("#!/bin/sh\n" + 'case "$FAKE" in idle) echo "";; busy) echo "the engine reports background work (x)";; *) echo oops >&2; exit 3;; esac\n', encoding="utf-8")
+    fake.write_text("#!/bin/sh\n" + 'case "$FAKE" in idle) echo "log line"; echo "NX_BUSY=";; busy) echo "NX_BUSY=the engine reports background work (x)";; mute) echo "log line";; *) echo oops >&2; exit 3;; esac\n', encoding="utf-8")
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     assert ur.busy_per_product(fake, tmp_path, {"FAKE": "idle"}) is None
     assert "background work" in ur.busy_per_product(fake, tmp_path, {"FAKE": "busy"})
     assert "exited 3" in ur.busy_per_product(fake, tmp_path, {"FAKE": "boom"})
+    assert "no answer" in ur.busy_per_product(fake, tmp_path, {"FAKE": "mute"})  # a log line alone is not an answer
     assert "could not run" in ur.busy_per_product(tmp_path / "missing", tmp_path, {})
+
+
+def test_the_busy_rule_one_liner_runs_against_the_real_module(tmp_path):
+    """F33: the one-liner calls the real engine_busy_reason with moves_can_run (a signature drift would exit 1 here,
+    and the leg would read busy for its whole bound). No service in this config dir, so the answer is idle."""
+    env = {"HOME": str(tmp_path), "NEXUS_CONFIG_DIR": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    assert ur.busy_per_product(Path(sys.executable), tmp_path, env) is None
 
 
 def test_the_installed_engine_version_is_read_from_the_receipt(tmp_path):
