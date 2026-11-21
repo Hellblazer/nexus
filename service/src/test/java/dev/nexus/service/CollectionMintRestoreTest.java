@@ -100,7 +100,26 @@ class CollectionMintRestoreTest {
         assertTwinFileIsRefused(false, "t-mint-restore-twin-off-src", "t-mint-restore-twin-off-dst");
     }
 
+    /**
+     * A file written by an older engine may lack some of the columns the check reads. The check reads the row values it has and
+     * the column defaults for the rest, and still refuses the pair (it used to skip the check, so the load would then either
+     * land a second live row on the tuple or fail on the index with a bare unique violation).
+     */
+    @Test
+    void aFileWithoutTheModelVersionColumnStillRefusesItsTwinRows_withTheIndexAbsent() throws Exception {
+        assertTwinFileIsRefused(false, "t-mint-restore-twin-nover-off-src", "t-mint-restore-twin-nover-off-dst", "model_version");
+    }
+
+    @Test
+    void aFileWithoutTheModelVersionColumnStillRefusesItsTwinRows_withTheIndexPresent() throws Exception {
+        assertTwinFileIsRefused(true, "t-mint-restore-twin-nover-on-src", "t-mint-restore-twin-nover-on-dst", "model_version");
+    }
+
     private void assertTwinFileIsRefused(boolean indexed, String src, String dst) throws Exception {
+        assertTwinFileIsRefused(indexed, src, dst, null);
+    }
+
+    private void assertTwinFileIsRefused(boolean indexed, String src, String dst, String columnTheFileLacks) throws Exception {
         String srcToken = env.newTenant(src);
         seedCollections(src);
         // the second live row of one tuple, as an install that predates the index can hold (D4's accepted duplicate)
@@ -117,7 +136,8 @@ class CollectionMintRestoreTest {
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(BGE))
             .and(CATALOG_COLLECTIONS.NAME.ne("twin-of-bge-p38")).orderBy(CATALOG_COLLECTIONS.NAME).limit(1)
             .fetchOne(CATALOG_COLLECTIONS.NAME));
-        var file = env.export(srcToken);
+        var exported = env.export(srcToken);
+        var file = columnTheFileLacks == null ? exported : exported.withoutColumn("catalog_collections", columnTheFileLacks);
         // the duplicate leaves the source, then the index can be built (a duplicate anywhere refuses its build)
         env.su(ctx -> {
             CollectionMintSupport.deleteRow(ctx, src, "twin-of-bge-p38");
@@ -133,7 +153,9 @@ class CollectionMintRestoreTest {
         JsonNode end = env.restore(dstToken, file);
 
         assertThat(end.get("status").asText()).as(end.toString()).startsWith("failed: ")
-            .contains("twin-of-bge-p38").contains(original);
+            .contains("twin-of-bge-p38").contains(original)
+            .as("the restore's remedy is the operator's: the file is not edited for them").contains("re-own one of them first, or edit the backup")
+            .doesNotContain("Rename, supersede or drop one of them");
         assertThat(env.count("catalog_collections", dst)).as("the load is one transaction: nothing landed").isZero();
     }
 }

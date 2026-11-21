@@ -128,8 +128,48 @@ final class CollectionMintSupport {
 
     /** The heal function's own definition text: its SECURITY DEFINER and its pinned search_path are read from it. */
     static String healFunctionDefinition(DSLContext ctx) {
+        return functionDefinition(ctx, HEAL_FUNCTION);
+    }
+
+    /** The signature of the definer function that answers whether any tenant holds a collection_id (collections-002). */
+    static final String TAKEN_FUNCTION = "nexus.collection_id_taken(bigint)";
+
+    static String functionDefinition(DSLContext ctx, String signature) {
         return ctx.select(DSL.function("pg_get_functiondef", String.class,
-            DSL.function("to_regprocedure", Object.class, DSL.val(HEAL_FUNCTION)))).fetchOne(0, String.class);
+            DSL.function("to_regprocedure", Object.class, DSL.val(signature)))).fetchOne(0, String.class);
+    }
+
+    /** Whether {@code role} (or {@code public}, the pseudo-role) may EXECUTE the function (an error when it does not exist). */
+    static boolean holdsExecute(DSLContext ctx, String role, String signature) {
+        return Boolean.TRUE.equals(ctx.select(DSL.function("has_function_privilege", Boolean.class,
+            DSL.val(role), DSL.val(signature), DSL.val("EXECUTE"))).fetchOne(0, Boolean.class));
+    }
+
+    /** {@code nexus.collection_id_taken(id)} as the connection's own role. */
+    static boolean callTaken(DSLContext ctx, long id) {
+        return Boolean.TRUE.equals(ctx.select(DSL.function(DSL.name("nexus", "collection_id_taken"), Boolean.class,
+            DSL.val(id, org.jooq.impl.SQLDataType.BIGINT))).fetchOne(0, Boolean.class));
+    }
+
+    /** Whether some session is blocked waiting for a lock: a statement that is held by another open transaction. */
+    static boolean someSessionWaitsOnALock(DSLContext ctx) {
+        return ctx.fetchExists(ctx.selectOne().from(DSL.table(DSL.name("pg_stat_activity")))
+            .where(DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")));
+    }
+
+    /**
+     * A superseded row, as a superuser writes it: {@code superseded_by} names its successor and P3.1's
+     * {@code catalog_collections_superseded_by_id_check} wants a {@code superseded_by_id} beside it (any value: these
+     * tests judge the tuple, not the successor's id).
+     */
+    static void insertTombstone(DSLContext ctx, String tenant, String name, String owner, String model, String supersededBy) {
+        ctx.insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant).set(CATALOG_COLLECTIONS.NAME, name)
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, "knowledge").set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model).set(CATALOG_COLLECTIONS.MODEL_VERSION, "v1")
+            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live")
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, 1L)
+            .execute();
     }
 
     /** Call the heal function as the connection's own role: the sequence's last value afterwards (or null). */
