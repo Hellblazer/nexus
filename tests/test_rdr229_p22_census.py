@@ -118,8 +118,13 @@ def test_the_pin_fell_from_the_p29_count() -> None:
     ``T3Database`` reads to mint, ``doctor_search``'s drift probe to diagnostic), 229 -> 218 on P2.2's own tree. On
     the Phase 2 integration tree P2.4 (-3) and owner-is-source (+2: the two callers of ``legacy_names.owner_stem`` in
     ``nxexp_owner.py``; the parse itself sits in the floor and is not a site) leave 217, measured by the scan
-    (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks it)."""
-    assert PARSE_SITE_PIN == 217
+    (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks it).
+
+    P3.6 (nexus-p2m1x.26, 2026-11-21) lowers it to 215: ``validate_collection_name`` is the label rule and reads no part
+    of a name (the ChromaDB-shape regex and the overflow hint's ``split_candidate_collection_name`` are gone), so it is no
+    longer a derived helper and its two ``T3Database`` callers (create and the rename target) left the ledger. mint
+    135 -> 133, primitive_call 183 -> 181."""
+    assert PARSE_SITE_PIN == 215
 
 
 def test_collection_attributes_is_one_type() -> None:
