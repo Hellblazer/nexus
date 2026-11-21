@@ -13682,19 +13682,6 @@ public final class CatalogRepository {
             List<Map<String, Object>> deduped = List.copyOf(
                 refusals.keepStorable(List.copyOf(unique.values()), c -> s(c, "name")));
 
-            // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
-            // executes, mirroring doImportCollection's single-row guard -- a batch with
-            // a bad row anywhere in it refuses atomically (nothing lands) rather than
-            // letting rows preceding the bad one land in an earlier chunk before a later
-            // chunk's CheckViolation aborts the call.
-            for (var coll : deduped) {
-                String batchContentType = s(coll, "content_type");
-                if (batchContentType == null || batchContentType.isBlank()) {
-                    throw new EmbeddingProfileConflictException(
-                        "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
-                }
-            }
-
             // RDR-229 P2.5 (review S-import): the model_version and lifecycle_state checks judge a row that will be
             // INSERTed. A name already registered is a no-op (ON CONFLICT DO NOTHING), so it is left out here and
             // never reaches them: re-importing an existing legacy row with a blank version is not a 400. One SELECT
@@ -13706,6 +13693,20 @@ public final class CatalogRepository {
             // an existing row (skipped here). A row refused for its label is judged by no later check.
             List<Map<String, Object>> fresh = refusals.keepShaped(
                 deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList(), c -> s(c, "name"));
+            // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
+            // executes, mirroring doImportCollection's single-row guard -- a row with no
+            // content_type refuses the batch atomically (nothing lands) rather than
+            // letting rows preceding it land in an earlier chunk before a later chunk's
+            // CheckViolation aborts the call. A row refused for its label is not judged.
+            for (var coll : deduped) {
+                if (refusals.refuses(s(coll, "name"))) continue;  // refused for its label: judged by no other check
+                String batchContentType = s(coll, "content_type");
+                if (batchContentType == null || batchContentType.isBlank()) {
+                    throw new EmbeddingProfileConflictException(
+                        "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
+                }
+            }
+
             CollectionRegistration.requireStatesAgreeWithNames(fresh);
             freshRows.set(fresh);
             CollectionMint.refuseLiveTupleConflicts(ctx, tenant, fresh);

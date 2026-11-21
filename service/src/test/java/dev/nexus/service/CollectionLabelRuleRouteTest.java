@@ -333,9 +333,36 @@ class CollectionLabelRuleRouteTest {
         var resp = http.send(request("/v1/catalog/import/collection").header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(json)).build(), HttpResponse.BodyHandlers.ofString());
         var rules = refusedRules(resp);
-        assertThat(rules.values()).containsExactly("no_control_character", "valid_utf8");
+        // the NUL is a legal JSON escape and comes back as sent; a lone surrogate cannot be written, so it is named by
+        // its escape (it would encode as '?', and two different labels would read alike)
+        assertThat(rules).containsExactly(Map.entry("nul\u0000row", "no_control_character"),
+            Map.entry("surrogate\\uD800row", "valid_utf8"));
         assertThat(resp.body()).doesNotContain("database").contains("\"imported\":1");
         assertThat(isRegistered("import fine nul-batch")).isTrue();
+    }
+
+    @Test
+    void aRowRefusedForItsLabelIsJudgedByNoOtherCheck() throws Exception {
+        // a second defect on a row the label rule refuses (no content_type, a state that disagrees with the name, a
+        // missing name key) must not sink the batch: the row is refused for its label, the rest land
+        Map<String, Object> noType = importRow("second/defect-type");
+        noType.put("content_type", "");
+        Map<String, Object> badState = importRow("second/defect-state");
+        badState.put("lifecycle_state", "quarantine");
+        Map<String, Object> nameless = importRow("x");
+        nameless.remove("name");
+        var resp = post("/v1/catalog/import/collection",
+            Map.of("rows", List.of(importRow("second good"), noType, badState, nameless)));
+        assertThat(refusedRules(resp)).containsExactly(Map.entry("second/defect-type", "no_slash"),
+            Map.entry("second/defect-state", "no_slash"), Map.entry("", "non_empty"));
+        assertThat(resp.body()).contains("\"imported\":1");
+        assertThat(isRegistered("second good")).isTrue();
+        // while a row with a good label and no content_type still refuses the whole batch
+        Map<String, Object> goodNoType = importRow("second fine label");
+        goodNoType.put("content_type", "");
+        assertThat(post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow("second good 2"), goodNoType)))
+            .statusCode()).isEqualTo(422);
+        assertThat(isRegistered("second good 2")).isFalse();
     }
 
     private static String rawRow(String escapedLabel, String owner) {
