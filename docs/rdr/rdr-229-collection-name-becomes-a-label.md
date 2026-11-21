@@ -443,7 +443,9 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
 - **✅ Verified** (source search) — For repo collections the row's
   `owner_id` is set from the documents' tumbler and differs from the name's
   owner segment by design (`catalog-044`, nexus-6pbwx). *T2
-  `229-research-9`.*
+  `229-research-9`.* Superseded 2026-11-21 by owner is the source (item 5):
+  an owner set at registration is never re-derived from the documents, and
+  catalog-044's rule now applies only to a legacy name-derived owner.
 - **✅ Verified** (source search) — RDR-225 writes each chunk's
   `embedding_model` from the registry row and keys the chunk foreign key on
   `(tenant_id, name, embedding_model)`; a rename stays inside its partition
@@ -889,6 +891,39 @@ two upserts read the id). The
 name-rendering branch of
 `t3_collection_name` stays only as a migration source for a legacy
 two-segment knowledge name that has no row.
+
+Owner is the source (Sam, 2026-11-21, T2
+`nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`). A collection's
+`owner_id` names its source and is set once, at registration; nothing
+re-derives it from the collection's documents. `catalog-044`'s rule that
+takes the owner from the documents now applies only to a legacy
+name-derived owner (a slug, `''` or a placeholder): a catalog amendment
+removes its curator clause, so a curator owner a registration set stands.
+An import resolves the owner from the collection's existing row, then the
+bundle's optional `owner` header, then a `<slug>-<hash8>` stem (a live
+`code__` of the stem or a repo owner with that hash on the target), then
+the corpus curator for a `docs` corpus, then the knowledge curator with a
+warning. A repo's collections that an old bulk import left under a curator
+are re-owned by the registered data move
+`rdr229-reown-repo-stems-from-curator` (`vectors-067`), which skips a row
+whose destination tuple another live collection already holds and records
+each skip in `nexus.gc_audit` (operation `rdr229_reown_skipped`; read it
+with `SELECT collection, details FROM nexus.gc_audit WHERE operation =
+'rdr229_reown_skipped'` under the tenant). Two named residuals, both
+accepted by Sam:
+
+- An old export file (from before the `owner` header) of a repo's
+  `docs__` collection, imported before its `code__` sibling onto a target
+  with no repo owner for that hash, takes its corpus curator and keeps it,
+  because an existing owner wins on re-import. The import prints a hint
+  naming the remedy: import the repo's `code__` bundle, then remove the
+  collection and import it again. No new route closes it (T2
+  `nexus/sam-ruling-owner-is-source-old-bundle-residual-2026-11-21`).
+- An install that has not yet applied `catalog-044-3` runs that one-off
+  repair on upgrade before the amendment, under the old rule, so a
+  docs-only curator corpus whose documents carry a repo tumbler is re-owned
+  to that repo. Only installs from before `catalog-044-3` are affected; no
+  heuristic repair (T2 `nexus/sam-ruling-batch-2026-11-21-late`, item 2).
 
 **6. The surrogate key (D3).** `catalog_collections` gains `collection_id
 bigint GENERATED ALWAYS AS IDENTITY`, unique across the installation, with a
@@ -2936,3 +2971,4 @@ large, and moved under a ratchet.
 - 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
 - 2026-11-19: Last residual of `nexus_rdr/229-gate-latest` (the gate-3 rename refusal had no owner before P3.7; accept fix check `3c7aa425d443`) fixed in the text (Sam, ask `baton/rdr229-refusal-owner`, option 1): P3.5 and P3.7 ship in one engine cut with the refusal and the name-key drop move's registration, and the refusal holds until every P3.5b changeset has applied, `9ea4521a4`. Contradiction Check regenerated. T2 `229-research-69` added.
 - 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
+- 2026-11-21: Owner is the source (Sam, T2 `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`) written into item 5 and the `229-research-9` finding, with its two accepted residuals (T2 `nexus/sam-ruling-owner-is-source-old-bundle-residual-2026-11-21`, `nexus/sam-ruling-batch-2026-11-21-late`), matching the reviewed code on `feature/rdr229-owner-is-source` (grant 3).
