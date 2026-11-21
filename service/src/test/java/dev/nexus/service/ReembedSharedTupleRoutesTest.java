@@ -363,7 +363,8 @@ class ReembedSharedTupleRoutesTest {
             assertThat(jobs.listAll(t.tenant())).as("rowGone=" + rowGone + ": no job from the refused start")
                 .hasSize(1);
             assertThat(catalog.getCollection(t.tenant(), t.tgt())).as("the target is as it was")
-                .containsEntry("superseded_by", "").containsEntry("lifecycle_state", "live");
+                .containsEntry("superseded_by", "").containsEntry("owner_id", t.owner())
+                .containsEntry("embedding_model", MINI);
         }
     }
 
