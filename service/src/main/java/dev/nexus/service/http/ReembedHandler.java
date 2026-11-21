@@ -765,7 +765,7 @@ public final class ReembedHandler implements HttpHandler {
     }
 
     private List<CollectionRow> rows(String tenant, String contentType) {
-        return catalog.listCollections(tenant, contentType, null).stream().map(CollectionRow::fromMap).toList();
+        return catalog.listCollectionsWithIds(tenant, contentType, null).stream().map(CollectionRow::fromMap).toList();
     }
 
     private String profileModel(String tenant, String contentType) {
