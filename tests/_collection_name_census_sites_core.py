@@ -304,7 +304,7 @@ SITES: tuple[S, ...] = (
       ('name = f"{content_type}__{owner.replace(\'.\', \'-\')}__{target_model}__v1"', 'if not is_conformant_collection_name(name):'),
       'primitive_call', 'mint', MINT_A),
     S('src/nexus/registration_retry.py',
-      ('corpus._registration_cache_discard(scope, name)', 'corpus.ensure_collection_registered(name, registrar=registrar)'),
+      ('collection_mint.forget(name)  # RDR-229 P3.8: the minted-row cache must not outlive the engine\'s refusal', 'corpus.ensure_collection_registered(name, registrar=registrar)'),
       'primitive_call', 'mint', MINT_REG),
     S('src/nexus/scoring.py',
       ('if model is None:', 'model = embedding_model_for_collection_calibrated(collection)'),

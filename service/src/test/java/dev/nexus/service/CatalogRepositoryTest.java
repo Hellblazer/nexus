@@ -127,10 +127,7 @@ class CatalogRepositoryTest {
     /** RDR-229 P3.1: a document names its collection by registry id, so the engine refuses one under an unregistered collection; a seed registers it first, as a client does (idempotent). */
     private Map<String, Object> reg(String tenant, Map<String, Object> doc) {
         if (doc.get("physical_collection") instanceof String c && !c.isEmpty()) {
-            tenantScope.withTenant(tenant, ctx -> {
-                PgContainerHelper.insertCollection(ctx, tenant, c);
-                return null;
-            });
+            tenantScope.withTenant(tenant, ctx -> { PgContainerHelper.insertCollection(ctx, tenant, c); return null; });
         }
         return doc;
     }
@@ -1933,12 +1930,8 @@ class CatalogRepositoryTest {
             "source_uri", "file:///own6pbwx/" + tenant + "/" + tumbler)));
     }
 
-    /**
-     * RDR-229 P3.1: a document can no longer precede its collection's registration, so the "documents first, then
-     * register" tests register the collection, put the documents and then put the registered owner back, which
-     * rebuilds the state they start from: a registered collection whose documents already exist and whose owner is
-     * still the slug the client registered it under.
-     */
+    /** RDR-229 P3.1: a document can no longer precede its collection's registration, so the "documents first, then
+     *  register" tests register, put the documents, then put the slug owner back: the state they start from. */
     private void resetOwnerToSlug(String tenant, String name, String slug) {
         try (Connection su = pg.createConnection("")) {
             DSL.using(su, SQLDialect.POSTGRES).update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
