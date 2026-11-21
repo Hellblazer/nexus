@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from nexus.identity import token_contract
+from nexus.identity.hostname import describe_host
 from nexus.identity.token_file import TokenFile, ancestor_token_path, identity_dir, read_token_file
 
 NX_IDENTITY_TOKEN_ENV = "NX_IDENTITY_TOKEN"
@@ -55,7 +56,7 @@ class GenerationSupersededError(RuntimeError):
         self.token_generation = token_generation
         self.current_generation = current_generation
         self.holder = dict(holder) if holder else None
-        where = f" (pid {holder.get('pid')} on {holder.get('host')})" if holder else ""
+        where = f" (pid {holder.get('pid')} on {describe_host(holder.get('host'))})" if holder else ""
         super().__init__(
             f"this process no longer holds identity {identity}: generation {current_generation} is held by another "
             f"process{where}, and this process's token is for generation {token_generation}. It must stop writing "
@@ -71,7 +72,7 @@ class IdentityNotHeldError(RuntimeError):
         self.identity = identity
         self.state = state
         self.holder = dict(holder) if holder else None
-        where = f" Its last holder was pid {holder.get('pid')} on {holder.get('host')}." if holder else ""
+        where = f" Its last holder was pid {holder.get('pid')} on {describe_host(holder.get('host'))}." if holder else ""
         super().__init__(f"identity {identity} is {state or 'not held'}: no process holds it, so this write is refused.{where} "
                          f"Bind it again by restarting or /resume-ing the session.")
 

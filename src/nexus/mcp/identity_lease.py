@@ -45,6 +45,7 @@ from nexus.identity import token_contract
 from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError, evidence_body
 from nexus.identity.binder import LaunchFacts, SessionBinder
 from nexus.identity.holder import Processes, epoch_seconds, normalise_instant, read_registry_entry
+from nexus.identity.hostname import holder_is_local
 from nexus.identity.pending import delete_pending, take_pending
 from nexus.identity.token_file import (
     TokenFile, ancestor_token_path, delete_token_file, identity_dir, read_token_file, update_token_file,
@@ -193,9 +194,15 @@ class IdentityLease:
         entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
         record = read_token_file(self.token_path()) if self.token_path() is not None else None
         start = (record.proc_start if record else None) or normalise_instant(self._procs.os_start(self._claude_pid))
-        # the host the binding's own row records: a token file written under the pre-key hostname keeps speaking under it
-        host = record.host if record is not None and record.host else self._procs.host
-        return {"host": host, "pid": self._claude_pid, "started_at": entry.started_at if entry else None,
+        started_at = entry.started_at if entry else None
+        # the host the binding's own row records: a token file written under the pre-key hostname keeps speaking under it,
+        # judged as the binder judges it (hostname.holder_is_local), so the lease and the hook agree
+        host = self._procs.host
+        if record is not None and record.host and holder_is_local(
+                {"host": record.host, "pid": self._claude_pid, "started_at": started_at}, host=host,
+                identity_dir=self._idir, process=(self._claude_pid, started_at)):
+            host = record.host
+        return {"host": host, "pid": self._claude_pid, "started_at": started_at,
                 "proc_start": start}
 
     # ── one heartbeat ───────────────────────────────────────────────────────
