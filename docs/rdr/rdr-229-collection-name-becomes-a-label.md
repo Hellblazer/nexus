@@ -705,8 +705,9 @@ Any other site is a defect the census refuses, except the interim `holdover`
 the census carries until Phase 2 moves it: a site no final class fits yet,
 whose ledger note names the P2.n step that moves it (45 at the P1.R re-pin: P2.2
 19, P2.3 11, P2.7 11, P2.4 4; `tests/_collection_name_census_ledger.py`; P2.3
-and P2.7 have since landed and no holdover names either, so the live total is
-23: P2.2 19, P2.4 4).
+and P2.7 have since landed and no holdover names either, so the live total was
+23: P2.2 19, P2.4 4; at the Phase 2 integration re-pin, 7817cd3251, P2.2 takes
+it 23 -> 4 and P2.4 4 -> 0, so the class is empty).
 Two non-parse labels cover `fnmatch` sites, `label-pattern` and `file-path`
 (5), with one exception. `label-pattern` is 10 since P2.7: nine `fnmatch` sites and one that is not, the
 `resolve_corpus` stage-3 fallback, a prefix match on the label the user typed
@@ -1630,13 +1631,16 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   `229-research-39`), and no row attribute says "taxonomy": a legacy name has
   no row, and hygiene-002 would give it `content_type='unknown'`. So P2.9 does
   not move it to the row. That helper's `taxonomy__` test,
-  `catalog/manifest_backfill.py`'s `_TAXONOMY_PREFIX` and
-  `commands/taxonomy_cmd.py:95` are migration-source (a name from an older era
-  with no row), read through `legacy_names` once P2.2 lands; the engine's
+  `catalog/manifest_backfill.py`'s carve-out (`:865`) and
+  `commands/taxonomy_cmd.py:109` are migration-source (a name from an older era
+  with no row), and since P2.2 all three read it through
+  `legacy_names.is_taxonomy_collection_name`; the engine's
   `ChunkKeyPlan.TAXONOMY_PREFIX` is the same class. P4.3 retires them once a
   census shows no install holds a `taxonomy__` collection. With them
   reclassified and the other sites moved, P2.9 measures the routing class at
-  zero (client census 240 -> 229 at develop 0d9e53391 with P2.8).
+  zero (client census 240 -> 229 at develop 0d9e53391 with P2.8). On the
+  Phase 2 integration tree the client census is 218 (7817cd3251: P2.2 -11,
+  P2.4 -3, owner-is-source +3 migration-source).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -3015,3 +3019,4 @@ large, and moved under a ratchet.
 - 2026-11-21: P2.9's engine half landed on develop (c7ace16dd onward): `isFileRoutedCollection` is deleted, and the stale-note repair reads `content_type` in its transaction, admits only `knowledge` rows, and share-locks the collection row under the rewrite (item 12, engine paragraph). This supersedes the 2026-11-19 line that kept `isFileRoutedCollection`. The client half's text follows its reland (grant 3, nexus-p2m1x.14).
 - 2026-11-21: Owner is the source (Sam, T2 `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`) written into item 5 and the `229-research-9` finding, with its two accepted residuals (T2 `nexus/sam-ruling-owner-is-source-old-bundle-residual-2026-11-21`, `nexus/sam-ruling-batch-2026-11-21-late`), matching the reviewed code on `feature/rdr229-owner-is-source` (grant 3).
 - 2026-11-21: the P2.7 step names the `resolve_corpus` stage-3 fallback that item 1 already records (one `label-pattern` site, `LABEL_TYPED`), so the step and item 1 agree (grant 3, nexus-p2m1x.12; P2.R cross-walk F1, nexus-p2m1x.16).
+- 2026-11-21: item 1's holdover total and item 12's `taxonomy__` sites match the Phase 2 integration tree: holdover empty (P2.2 23 -> 4, P2.4 4 -> 0), the three taxonomy tests read through `legacy_names.is_taxonomy_collection_name`, client census 218, all measured at 7817cd3251 (grant 3; P2.R author read, nexus-p2m1x.16).
