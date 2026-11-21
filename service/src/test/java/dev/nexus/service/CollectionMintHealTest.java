@@ -99,7 +99,7 @@ class CollectionMintHealTest {
 
     private long nextSequenceValue() {
         return su(ctx -> {
-            String seq = ctx.fetchValue("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')", String.class);
+            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
             var r = ctx.fetchOne("SELECT last_value, is_called FROM " + seq);
             return r.get(1, Boolean.class) ? r.get(0, Long.class) + 1 : r.get(0, Long.class);
         });
@@ -111,6 +111,13 @@ class CollectionMintHealTest {
                 CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                 CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
             .values(TENANT, name, collectionId, "knowledge", "restored-" + name, MODEL, "v1", "live").execute());
+    }
+
+    @Test @Order(0)
+    void theProductionEngineRoleHoldsUpdateOnTheSequence_setvalNeedsIt() {
+        Boolean held = su(ctx -> ctx.resultQuery("SELECT has_sequence_privilege('nexus_svc', "
+            + "pg_get_serial_sequence('nexus.catalog_collections', 'collection_id'), 'UPDATE')").fetchOne(0, Boolean.class));
+        assertThat(held).as("collections-002 grants UPDATE on the one sequence to nexus_svc").isTrue();
     }
 
     @Test @Order(1)
@@ -141,13 +148,13 @@ class CollectionMintHealTest {
     void aSecondTakenIdAfterTheHealIsRefusedAsSequenceBehindData() {
         // The sequence cycles over [1, max]: after the heal (setval to max) the next draw wraps to 1, which is a row too.
         su(ctx -> {
-            String seq = ctx.fetchValue("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')", String.class);
+            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
             ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT + "' AND collection_id = 1");
             ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                     CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                 .values(TENANT, "cycle-anchor", 1L, "knowledge", "cycle-anchor", MODEL, "v1", "live").execute();
-            long max = ctx.fetchValue("SELECT max(collection_id) FROM nexus.catalog_collections", Long.class);
+            long max = ctx.resultQuery("SELECT max(collection_id) FROM nexus.catalog_collections").fetchOne(0, Long.class);
             ctx.execute("SELECT setval('" + seq + "', " + max + ")");
             ctx.execute("ALTER SEQUENCE " + seq + " MAXVALUE " + max + " CYCLE");
             return null;
@@ -155,7 +162,8 @@ class CollectionMintHealTest {
 
         assertThatThrownBy(() -> repo.mintCollection(TENANT, attrs("subject-heal-2"), true))
             .isInstanceOf(MintedLabel.SequenceBehindDataException.class);
-        assertThat(su(ctx -> ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
-            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("subject-heal-2"))))).as("nothing was written").isZero();
+        long written = su(ctx -> (long) ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("subject-heal-2"))));
+        assertThat(written).as("nothing was written").isZero();
     }
 }

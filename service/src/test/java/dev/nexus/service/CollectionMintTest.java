@@ -95,7 +95,7 @@ class CollectionMintTest {
     }
 
     private boolean indexPresent() {
-        return su(ctx -> ctx.fetchValue("SELECT to_regclass('nexus." + INDEX + "') IS NOT NULL", Boolean.class));
+        return su(ctx -> ctx.resultQuery("SELECT to_regclass('nexus." + INDEX + "') IS NOT NULL").fetchOne(0, Boolean.class));
     }
 
     private void createIndex() {
@@ -129,7 +129,7 @@ class CollectionMintTest {
     /** The value the sequence hands out next. */
     private long nextSequenceValue() {
         return su(ctx -> {
-            String seq = ctx.fetchValue("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')", String.class);
+            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
             var r = ctx.fetchOne("SELECT last_value, is_called FROM " + seq);
             return r.get(1, Boolean.class) ? r.get(0, Long.class) + 1 : r.get(0, Long.class);
         });
