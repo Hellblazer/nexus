@@ -48,7 +48,7 @@ def rows(monkeypatch: pytest.MonkeyPatch) -> _Rows:
     r = _Rows()
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", r.get)
     monkeypatch.setattr("nexus.mcp_infra.invalidate_collections_cache", r.invalidate)
-    monkeypatch.setattr("nexus.corpus._NOROW_RECHECK_INTERVAL_S", 0.0, raising=False)
+    monkeypatch.setattr("nexus.collection_route._NOROW_RECHECK_INTERVAL_S", 0.0, raising=False)
     return r
 
 
@@ -95,7 +95,7 @@ class TestTheSharedHelper:
     def test_the_re_read_is_not_repeated_inside_the_interval(self, rows, monkeypatch):
         from nexus.corpus import routing_content_type
 
-        monkeypatch.setattr("nexus.corpus._NOROW_RECHECK_INTERVAL_S", 3600.0, raising=False)
+        monkeypatch.setattr("nexus.collection_route._NOROW_RECHECK_INTERVAL_S", 3600.0, raising=False)
         routing_content_type("docs__throttled")
         routing_content_type("docs__throttled")
         assert rows.invalidated == 1
@@ -354,14 +354,14 @@ class TestTopicRouteProseAtNoRow:
     def test_a_conformant_prose_name_with_no_row_is_prose(self, rows):
         from nexus.topic_route import is_prose
 
-        assert is_prose("knowledge__1-1__voyage-context-3__v1") is True
-        assert is_prose("docs__1-1__voyage-context-3__v1") is True
-        assert is_prose("rdr__1-1__voyage-context-3__v1") is True
+        assert is_prose("knowledge__1-1__voyage-3__v1") is True
+        assert is_prose("docs__1-1__voyage-3__v1") is True
+        assert is_prose("rdr__1-1__voyage-3__v1") is True
 
     def test_a_conformant_code_name_with_no_row_is_not_prose(self, rows):
         from nexus.topic_route import is_prose
 
-        assert is_prose("code__1-1__voyage-code-3__v1") is False
+        assert is_prose("code__1-1__voyage-3__v1") is False
 
     def test_a_prefix_free_label_with_no_row_is_not_prose(self, rows):
         from nexus.topic_route import is_prose
@@ -371,9 +371,9 @@ class TestTopicRouteProseAtNoRow:
     def test_a_row_decides_over_the_name(self, rows):
         from nexus.topic_route import is_prose
 
-        rows.table.update({"knowledge__1-1__voyage-context-3__v1": "code", "code__1-1__voyage-code-3__v1": "docs"})
-        assert is_prose("knowledge__1-1__voyage-context-3__v1") is False
-        assert is_prose("code__1-1__voyage-code-3__v1") is True
+        rows.table.update({"knowledge__1-1__voyage-3__v1": "code", "code__1-1__voyage-3__v1": "docs"})
+        assert is_prose("knowledge__1-1__voyage-3__v1") is False
+        assert is_prose("code__1-1__voyage-3__v1") is True
 
 
 def _no_listing(*a, **k):
@@ -538,16 +538,16 @@ class TestTheReReadIsBoundedAcrossNames:
     @pytest.fixture
     def listing(self, monkeypatch):
         """A real collections cache over a counting listing that holds no collection; the default interval."""
-        import nexus.corpus as corpus
+        import nexus.collection_route as route
         import nexus.mcp_infra as infra
 
         calls: list[int] = []
         monkeypatch.setattr(infra, "_collections_cache", ([], {}, {}, 0.0))
         monkeypatch.setattr(infra, "get_t3", lambda: object())
         monkeypatch.setattr(infra, "_list_collections_remembering_failure", lambda t3, **k: calls.append(1) or [])
-        monkeypatch.setattr(corpus, "_norow_rechecked", {})
-        monkeypatch.setattr(corpus, "_unreadable_warned", {}, raising=False)
-        monkeypatch.setattr(corpus, "_NOROW_RECHECK_INTERVAL_S", 10.0)
+        monkeypatch.setattr(route, "_norow_rechecked", {})
+        monkeypatch.setattr(route, "_unreadable_warned", {})
+        monkeypatch.setattr(route, "_NOROW_RECHECK_INTERVAL_S", 10.0)
         return calls
 
     def test_fifty_distinct_rowless_names_cost_at_most_two_listings_and_a_second_pass_none(self, listing):
@@ -575,11 +575,11 @@ class TestTheReReadIsBoundedAcrossNames:
 
 class TestTheUnreadableWarningIsNotRepeated:
     def test_one_warning_per_name_inside_the_interval(self, rows, monkeypatch):
-        import nexus.corpus as corpus
+        import nexus.collection_route as route
         from nexus.corpus import routing_content_type
 
-        monkeypatch.setattr(corpus, "_unreadable_warned", {}, raising=False)
-        monkeypatch.setattr(corpus, "_NOROW_RECHECK_INTERVAL_S", 3600.0)
+        monkeypatch.setattr(route, "_unreadable_warned", {})
+        monkeypatch.setattr(route, "_NOROW_RECHECK_INTERVAL_S", 3600.0)
         rows.unreadable = True
         with capture_logs() as logs:
             for _ in range(5):
