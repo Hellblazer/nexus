@@ -10,7 +10,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
@@ -28,6 +27,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class CollectionMintRestoreTest {
 
     private static final String BGE = "bge-base-en-v15-768";
+    private static final String MINILM = "minilm-l6-v2-384";
+    private static final String VOYAGE = "voyage-context-3";
     private static final String INDEX = "catalog_collections_live_tuple_uq";
 
     private ImportTestEnv env;
@@ -48,14 +49,17 @@ class CollectionMintRestoreTest {
         env.su(ctx -> ctx.execute("DROP INDEX IF EXISTS nexus." + INDEX));
     }
 
-    private ImportTestEnv.BackupFile seededExport(String tenant, String token, List<String> failures) throws Exception {
+    /**
+     * Three collections of {@code tenant} (one per vector width), and nothing else: the writers of the other tables do not
+     * set the id columns on this tree (the dual write is a later stage of P3.1), so a full seed cannot be written.
+     */
+    private void seedCollections(String tenant) {
         env.su(ctx -> {
-            TenantExportBatteryTest.Seed.rows(ctx, tenant, 1, failures);
-            TenantExportBatteryTest.Seed.fillNulls(ctx, tenant, failures);
+            PgContainerHelper.insertCollection(ctx, tenant, "restore-bge-" + tenant, BGE);
+            PgContainerHelper.insertCollection(ctx, tenant, "restore-minilm-" + tenant, MINILM);
+            PgContainerHelper.insertCollection(ctx, tenant, "restore-voyage-" + tenant, VOYAGE);
             return null;
         });
-        assertThat(failures).as("the seed").isEmpty();
-        return env.export(token);
     }
 
     private Set<Long> collectionIds(String tenant) {
@@ -68,9 +72,10 @@ class CollectionMintRestoreTest {
         String src = "t-mint-restore-src";
         String dst = "t-mint-restore-dst";
         String srcToken = env.newTenant(src);
-        var file = seededExport(src, srcToken, new ArrayList<>());
+        seedCollections(src);
+        var file = env.export(srcToken);
         Set<Long> fileIds = collectionIds(src);
-        assertThat(fileIds).as("guard: the file carries ids").hasSizeGreaterThanOrEqualTo(3);
+        assertThat(fileIds).as("guard: the file carries ids").hasSize(3);
         assertThat(file.table("catalog_collections").toString()).as("guard: the file names the column").contains("collection_id");
         String dstToken = env.newTenant(dst);
 
@@ -88,11 +93,8 @@ class CollectionMintRestoreTest {
         String src = "t-mint-restore-twin-src";
         String dst = "t-mint-restore-twin-dst";
         String srcToken = env.newTenant(src);
+        seedCollections(src);
         env.su(ctx -> {
-            var failures = new ArrayList<String>();
-            TenantExportBatteryTest.Seed.rows(ctx, src, 1, failures);
-            TenantExportBatteryTest.Seed.fillNulls(ctx, src, failures);
-            assertThat(failures).as("the seed").isEmpty();
             // the second live row of one tuple, as an install that predates the index can hold (D4's accepted duplicate)
             ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, "
                 + "model_version, lifecycle_state) SELECT tenant_id, 'twin-of-bge-p38', content_type, owner_id, embedding_model, "
