@@ -204,11 +204,13 @@ public final class TargetSelection {
      * The job that makes a live target another source's: a job whose target is {@code target}, whose source is not
      * {@code source}, that <b>moved at least one document</b> ({@code documents_moved}, the job row's count of
      * documents copied; a job that was aborted or failed before copying one put nothing in the target), and whose
-     * source shares this source's lookup tuple. The foreign source's tuple is read from its registry row (superseded
-     * rows are listed): same content type, owner and model. A source whose row is gone (a default cutover deletes it)
-     * is read by the model token of its conformant name, since a model never changes on a collection and the target
-     * already fixed its owner and content type; a name that is not conformant reads as an unknown model, which counts
-     * (a refusal, never a merge). The newest such job wins ({@code jobs} is newest first). The name read is a
+     * source has this source's embedding MODEL. Only the model is compared: the target itself fixed the content type
+     * and owner the foreign source had when its job ran, and a later re-own of that source does not take its
+     * documents out of the target, so its current owner is never read. The model is the row's {@code embedding_model}
+     * while the row exists (superseded rows are listed), else the model token of the conformant name (a default
+     * cutover deletes the row; a model never changes on a collection); a name that is not conformant reads as an
+     * unknown model, which counts (a refusal, never a merge). The newest such job wins ({@code jobs} is newest
+     * first). The name read is a
      * migration-source site, declared in {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS}: a re-embed source
      * row deleted by cutover; retires at RDR-229 P4. When it retires, a job whose source row is gone reads as an
      * unknown model and refuses, so the sibling narrowing reverts to conservative for a deleted source (a sibling on
@@ -222,11 +224,12 @@ public final class TargetSelection {
      *
      * <p>A v2 of an already-moved source has the same model and a different name, so it is refused too: a deliberate
      * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin. The
-     * log persists (a job row is never deleted), so superseding a collection does not clear it; the exit is to
-     * re-own this source, or the other source if its row still exists.
+     * log persists (a job row is never deleted), and re-owning or superseding the other source does not remove its
+     * documents from the target, so the only exit is to re-own this source: a different owner gives it a different
+     * target tuple.
      */
     public static Job foreignOrigin(List<Job> jobs, List<CollectionRow> rows, String target, String source,
-                                    String contentType, String ownerId, String embeddingModel) {
+                                    String embeddingModel) {
         for (Job j : jobs) {
             if (!target.equals(j.targetCollection()) || source.equals(j.sourceCollection())
                 || j.documentsMoved() <= 0) {
@@ -234,15 +237,9 @@ public final class TargetSelection {
             }
             CollectionRow row = rows.stream().filter(r -> r.name().equals(j.sourceCollection())).findFirst()
                 .orElse(null);
-            boolean twin;
-            if (row != null) {
-                twin = contentType.equals(row.contentType()) && ownerId.equals(row.ownerId())
-                    && embeddingModel.equals(row.embeddingModel());
-            } else {
-                String model = CollectionRegistration.modelOfConformantName(j.sourceCollection());
-                twin = model == null || model.equals(embeddingModel);
-            }
-            if (twin) {
+            String model = row != null ? row.embeddingModel()
+                : CollectionRegistration.modelOfConformantName(j.sourceCollection());
+            if (model == null || model.equals(embeddingModel)) {
                 return j;
             }
         }
@@ -253,11 +250,11 @@ public final class TargetSelection {
     public static String foreignOriginReason(String source, String target, Job origin) {
         return "the job log shows another source collection, " + origin.sourceCollection() + ", was re-embedded into "
             + "target " + target + " (job " + origin.jobId() + ", " + origin.state() + ", "
-            + origin.documentsMoved() + " document(s) moved) and it shares this source's lookup tuple, so "
+            + origin.documentsMoved() + " document(s) moved) from a source with this source's embedding model, so "
             + source + " would be moved into a target that " + origin.sourceCollection() + " already filled. "
-            + ownerExit(source + " is re-owned, or " + origin.sourceCollection() + " is if its row still exists. If "
-                + origin.sourceCollection() + " is an earlier version of " + source + ", only re-owning " + source
-                + " clears it");
+            + ownerExit(source + " is re-owned, which gives it a different target tuple (re-owning "
+                + origin.sourceCollection() + " does not take its documents out of the target, and "
+                + origin.sourceCollection() + " may be an earlier version of " + source + ")");
     }
 
     /** A job in a lock state whose source is the candidate target: its id and state, to name in a refusal. */

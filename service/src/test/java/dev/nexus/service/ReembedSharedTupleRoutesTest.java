@@ -385,7 +385,8 @@ class ReembedSharedTupleRoutesTest {
                 assertThat(body.get("error").toString()).contains(twin).contains(t.tgt()).contains(t.src())
                     .contains("the job log shows").contains(first.toString()).contains("3 document(s) moved")
                     .contains("engine data move").contains("rename that re-homes the collection")
-                    .contains(twin + " is re-owned, or " + t.src() + " is if its row still exists")
+                    .contains(twin + " is re-owned, which gives it a different target tuple")
+                    .contains("re-owning " + t.src() + " does not take its documents out of the target")
                     .contains("earlier version of " + twin).doesNotContain("holds documents");
                 assertThat(body).containsEntry("origin_source", t.src()).containsEntry("collection", t.tgt());
             }
@@ -395,6 +396,25 @@ class ReembedSharedTupleRoutesTest {
                 .containsEntry("superseded_by", "").containsEntry("owner_id", t.owner())
                 .containsEntry("embedding_model", MINI);
         }
+    }
+
+    @Test
+    void aTwinOfAMovedSourceIsStillRefusedWhenTheMovedSourceWasReOwnedSince_planAndStart() throws Exception {
+        Tn t = tenant("reowned");
+        leg(t, "aborted", 3);
+        supersedeSrc(t);
+        // The first source is re-owned after its job ran: its documents are still in the target.
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.OWNER_ID, "somewhere-else")
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant())).and(CATALOG_COLLECTIONS.NAME.eq(t.src())).execute());
+        String twin = twin(t);
+
+        for (String path : List.of("/plan", "/jobs")) {
+            var r = post(t, path, startBody(twin));
+            assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(409);
+            assertThat(json(r).get("error").toString()).contains(twin).contains(t.tgt()).contains(t.src())
+                .contains("the job log shows");
+        }
+        assertThat(jobs.listAll(t.tenant())).as("the refused starts wrote no job").hasSize(1);
     }
 
     @Test

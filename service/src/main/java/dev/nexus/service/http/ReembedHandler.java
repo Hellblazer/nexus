@@ -102,9 +102,9 @@ import java.util.function.Supplier;
  * sources share a curator owner. The first runs before the target is looked at: a source with another live
  * collection on its own tuple is 409. The second runs after the decision and only when the target is live
  * ({@code UseLive}; a revive names this source as the successor): a live target that the job log shows another
- * source with the same tuple was moved into is 409 ({@link TargetSelection#foreignOrigin}: only a job that moved a
- * document counts, by {@code documents_moved}; the other source's model is read from its row, or from its name when
- * the row is gone). A v2 of an already-moved source is refused too, deliberately: the log is keyed by name. Both
+ * source with this source's embedding model was moved into is 409 ({@link TargetSelection#foreignOrigin}: only a job
+ * that moved a document counts, by {@code documents_moved}; the other source's model is read from its row, or from
+ * its name when the row is gone; its current owner is never read). A v2 of an already-moved source is refused too, deliberately: the log is keyed by name. Both
  * name the collections involved and say that a client cannot change an owner in place, and that an owner changes
  * through an engine data move or a rename that re-homes the collection. These guards close same-model twins only.
  * The refusals that need no write all run before the first write. The source lock is taken by the start itself; a
@@ -422,7 +422,7 @@ public final class ReembedHandler implements HttpHandler {
             // sharing this source's tuple was moved into is not this source's to join. A Revive names this source as
             // the successor, so it is exempt.
             Job foreign = TargetSelection.foreignOrigin(jobs.listAll(tenant), tenantRows, u.name(), source,
-                contentType, owner, sourceModel);
+                sourceModel);
             if (foreign != null) {
                 throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
                     "error", TargetSelection.foreignOriginReason(source, u.name(), foreign),
