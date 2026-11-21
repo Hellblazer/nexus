@@ -31,6 +31,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.DATA_MOVES;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -109,7 +111,9 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                 assertWaiting(pg);
 
                 try (Connection su = pg.createConnection("")) {
-                    DSL.using(su, SQLDialect.POSTGRES).execute("UPDATE nexus.data_moves SET failed_at = now(), failure = 'boom' WHERE label = ?", MOVE);
+                    DSL.using(su, SQLDialect.POSTGRES).update(DATA_MOVES)
+                        .set(DATA_MOVES.FAILED_AT, java.time.OffsetDateTime.now()).set(DATA_MOVES.FAILURE, "boom")
+                        .where(DATA_MOVES.LABEL.eq(MOVE)).execute();
                 }
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
                 assertWaiting(pg);
@@ -168,7 +172,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
 
                 // The operator (or the re-own move) resolves the duplicate; the next boot applies the index.
                 try (Connection su = pg.createConnection("")) {
-                    DSL.using(su, SQLDialect.POSTGRES).execute("DELETE FROM nexus.catalog_collections WHERE name = 'docs__b'");
+                    DSL.using(su, SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq("docs__b")).execute();
                 }
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
                 assertApplied(pg);
@@ -255,7 +259,8 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                 }
                 try (Connection holder = pg.createConnection("")) {
                     holder.setAutoCommit(false);
-                    DSL.using(holder, SQLDialect.POSTGRES).execute("LOCK TABLE nexus.catalog_collections IN ACCESS SHARE MODE");
+                    // any read of the registry holds ACCESS SHARE on it until this open transaction ends
+                    DSL.using(holder, SQLDialect.POSTGRES).selectOne().from(CATALOG_COLLECTIONS).fetch();
                     Future<?> walk = walker.submit(() -> {
                         SchemaMigrator.migrate(adminDs);
                         return null;
@@ -265,9 +270,17 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                     } catch (TimeoutException e) {
                         String waiting;
                         try (Connection su = pg.createConnection("")) {
-                            waiting = DSL.using(su, SQLDialect.POSTGRES).fetch(
-                                "SELECT l.mode, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) "
-                                    + "WHERE NOT l.granted AND l.relation = 'nexus.catalog_collections'::regclass").toString();
+                            waiting = DSL.using(su, SQLDialect.POSTGRES)
+                                .select(DSL.field(DSL.name("l", "mode"), String.class), DSL.field(DSL.name("a", "query"), String.class))
+                                .from(DSL.table(DSL.name("pg_locks")).as("l"))
+                                .join(DSL.table(DSL.name("pg_stat_activity")).as("a"))
+                                .on(DSL.field(DSL.name("l", "pid"), Integer.class).eq(DSL.field(DSL.name("a", "pid"), Integer.class)))
+                                .where(DSL.field(DSL.name("l", "granted"), Boolean.class).isFalse())
+                                .and(DSL.field(DSL.name("l", "relation"), Long.class).eq(DSL.field(
+                                    DSL.select(DSL.field(DSL.name("c", "oid"), Long.class))
+                                        .from(DSL.table(DSL.name("pg_class")).as("c"))
+                                        .where(DSL.field(DSL.name("c", "relname"), String.class).eq("catalog_collections")))))
+                                .fetch().toString();
                         }
                         holder.rollback();
                         walk.get(60, TimeUnit.SECONDS);
@@ -307,9 +320,17 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
                 try (Connection admin = adminDs.getConnection()) {
-                    var row = DSL.using(admin, SQLDialect.POSTGRES).fetchOne(
-                        "SELECT p.prosecdef, l.lanname FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang "
-                            + "WHERE p.pronamespace = 'nexus'::regnamespace AND p.proname = ?", HELPER);
+                    var row = DSL.using(admin, SQLDialect.POSTGRES)
+                        .select(DSL.field(DSL.name("p", "prosecdef"), Boolean.class), DSL.field(DSL.name("l", "lanname"), String.class))
+                        .from(DSL.table(DSL.name("pg_proc")).as("p"))
+                        .join(DSL.table(DSL.name("pg_language")).as("l"))
+                        .on(DSL.field(DSL.name("l", "oid"), Long.class).eq(DSL.field(DSL.name("p", "prolang"), Long.class)))
+                        .where(DSL.field(DSL.name("p", "pronamespace"), Long.class).eq(DSL.field(
+                            DSL.select(DSL.field(DSL.name("n", "oid"), Long.class))
+                                .from(DSL.table(DSL.name("pg_namespace")).as("n"))
+                                .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus")))))
+                        .and(DSL.field(DSL.name("p", "proname"), String.class).eq(HELPER))
+                        .fetchOne();
                     assertThat(row).isNotNull();
                     assertThat(row.get(0, Boolean.class)).as("SECURITY INVOKER: it runs as the migration role").isFalse();
                     assertThat(row.get(1, String.class)).as("a plain SQL function, no plpgsql ALTER").isEqualTo("sql");
@@ -386,8 +407,9 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                     }).as("rows the predicate excludes, and a different tenant or version").doesNotThrowAnyException();
 
                     // A live row can be superseded, and then the tuple is free again.
-                    DSL.using(su, SQLDialect.POSTGRES).execute(
-                        "UPDATE nexus.catalog_collections SET superseded_by = 'docs__v3', superseded_by_id = 1 WHERE tenant_id = 't1' AND name = 'docs__a'");
+                    DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                        .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "docs__v3").set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, 1L)
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq("t1")).and(CATALOG_COLLECTIONS.NAME.eq("docs__a")).execute();
                     assertThatCode(() -> seed(su, "t1", "docs__fresh", "docs", "owner-1", MODEL, "", "live", ""))
                         .doesNotThrowAnyException();
                 }
@@ -530,22 +552,26 @@ class CollectionTupleUniqueIndexLiquibaseTest {
     }
 
     private static void registerMove(Connection su, String label, boolean completed) {
-        DSL.using(su, SQLDialect.POSTGRES).execute(
-            "INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms, "
-                + "statement_timeout_ms, verification, changeset_id, completed_at) "
-                + "VALUES (?, 'SELECT 1', 'nexus', 'catalog_collections', 100, 0, 60000, 'SELECT 1 WHERE false', "
-                + "'test-fixture', " + (completed ? "now()" : "NULL") + ")",
-            label);
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(DATA_MOVES)
+            .set(DATA_MOVES.LABEL, label).set(DATA_MOVES.TEMPLATE, "SELECT 1")
+            .set(DATA_MOVES.DRIVING_SCHEMA, "nexus").set(DATA_MOVES.DRIVING_TABLE, "catalog_collections")
+            .set(DATA_MOVES.CHUNK_SIZE, 100).set(DATA_MOVES.SLEEP_MS, 0).set(DATA_MOVES.STATEMENT_TIMEOUT_MS, 60000)
+            .set(DATA_MOVES.VERIFICATION, "SELECT 1 WHERE false").set(DATA_MOVES.CHANGESET_ID, "test-fixture")
+            .set(DATA_MOVES.COMPLETED_AT, completed ? java.time.OffsetDateTime.now() : null)
+            .execute();
     }
 
     private static void seed(Connection su, String tenant, String name, String contentType, String owner, String model,
                              String modelVersion, String lifecycle, String supersededBy) {
         // P3.1's catalog_collections_superseded_by_id_check: a tombstone (superseded_by <> '') carries a superseded_by_id too
         // (any value: this test judges the live-tuple index, not the successor's id)
-        DSL.using(su, SQLDialect.POSTGRES).execute(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, model_version, "
-                + "lifecycle_state, superseded_by, superseded_by_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            tenant, name, contentType, owner, model, modelVersion, lifecycle, supersededBy, supersededBy.isEmpty() ? null : 1L);
+        DSL.using(su, SQLDialect.POSTGRES).insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant).set(CATALOG_COLLECTIONS.NAME, name)
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, contentType).set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model).set(CATALOG_COLLECTIONS.MODEL_VERSION, modelVersion)
+            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, lifecycle).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, supersededBy.isEmpty() ? null : 1L)
+            .execute();
     }
 
     private static Long duplicates(Connection conn) {

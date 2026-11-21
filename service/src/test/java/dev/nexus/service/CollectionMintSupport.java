@@ -38,7 +38,10 @@ final class CollectionMintSupport {
     }
 
     static void dropIndex(DSLContext ctx) {
-        var drop = ctx.dropIndexIfExists(DSL.name("nexus", INDEX));
+        // jOOQ renders DROP INDEX with the unqualified index name even when it is given a qualified one, so the name must
+        // resolve against this (single-use) connection's schema, or "if exists" quietly drops nothing
+        ctx.setSchema("nexus").execute();
+        var drop = ctx.dropIndexIfExists(DSL.name(INDEX));
         drop.execute();
         if (indexPresent(ctx)) {
             throw new IllegalStateException("the index is still there after: " + drop.getSQL() + " (autocommit "
