@@ -182,9 +182,9 @@ public final class CollectionRegistration {
      * row: such a row behaves as quarantine everywhere. It is a named residual of RDR-229 item 2. The client route,
      * {@link #requireNameAgreesWithState} and the re-embed check keep the name-only pairing.
      *
-     * <p>Loud and whole: the import's response is a bare count with no per-row report, so the batch is refused with one
-     * {@link IllegalArgumentException} (a 400) that counts and names the rows, and nothing is stored, as the
-     * content_type guard already refuses a batch.
+     * <p>Loud and whole: a state clash refuses the batch with one {@link IllegalArgumentException} (a 400) that counts
+     * and names the rows, and nothing is stored, as the content_type guard already refuses a batch. Only a label the
+     * shape rule refuses is reported per row, in the response's {@code refused} list (nexus-3ptnh).
      */
     static void requireStatesAgreeWithNames(List<Map<String, Object>> newRows) {
         List<String> bad = new java.util.ArrayList<>();
