@@ -97,7 +97,7 @@ class CollectionTupleLockStripeTest {
         var locks = DSL.table(DSL.name("pg_catalog", "pg_locks"));
         return ctx.fetchCount(ctx.selectOne().from(locks)
             .where(DSL.field(DSL.name("locktype"), String.class).eq("advisory"))
-            .and(DSL.field(DSL.name("pid"), Integer.class).eq(DSL.field("pg_backend_pid()", Integer.class))));
+            .and(DSL.field(DSL.name("pid"), Integer.class).eq(DSL.function("pg_backend_pid", Integer.class))));
     }
 
     private static List<Map<String, Object>> freshRows(String prefix, int n) {

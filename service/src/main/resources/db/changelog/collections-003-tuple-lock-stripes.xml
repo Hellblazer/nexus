@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.8 (bead nexus-p2m1x.28; linda's ruling (a), 2026-11-21): the collection-tuple advisory lock is STRIPED.
+
+    nexus.collection_tuple_lock_key(tenant, content_type, owner_id, embedding_model, model_version) is the one key
+    derivation every tuple locker uses: the catalog-051-2 owner triggers call it, and the engine's Java lockers
+    (CollectionTupleLock: the mint, a named registration, a rename, an import batch, a restore) SELECT it. Until now it
+    answered one key per tuple (catalog-051-1a, shipped in 0.1.200 and never edited). A path that locks many tuples in one
+    transaction while the live-tuple index (collections-001-2) is still absent, an import or a restore of thousands of
+    collections, then took one pg_advisory_xact_lock per tuple and ran the shared lock table out ("out of shared memory";
+    the table holds about max_locks_per_transaction x max_connections locks).
+
+    This changeset replaces the function, with the same signature, volatility, PARALLEL SAFE and SECURITY INVOKER, so the
+    triggers pick it up without being re-created: the tuple's 64-bit hash is the same, and its low 8 bits choose one of
+    256 stripes inside one fixed namespace (the high 56 bits of md5('16:catalog_tuple_lock')). The stripe count is this one
+    constant, 256, and is not configurable. A batch therefore takes at most 256 locks, and a path that locks more than one
+    tuple maps them to keys, dedupes, sorts ascending and only then locks (CollectionTupleLock.lock), so two such paths can
+    never wait on each other's second lock.
+
+    FALSE SHARING IS ACCEPTED BY DESIGN (linda's ruling, within RDR-229): two unrelated tuples in one stripe serialize
+    their registrations for the length of the shorter transaction. Registrations are rare and short, and the lock only
+    matters in the window before the live-tuple index exists; once it exists the UNIQUE is the arbiter and the engine takes
+    no tuple lock at all (CollectionMint checks the index first).
+
+    DATA EFFECT: none. Function definition only. Rollback restores catalog-051-1a's per-tuple body.
+-->
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="collections-003-1" author="nexus-p2m1x.28">
+        <comment>nexus.collection_tuple_lock_key answers one of 256 striped keys in one namespace instead of one key per tuple: the same md5 of the length-prefixed five parts, its low 8 bits the stripe, its high 56 bits fixed. Same signature, IMMUTABLE, PARALLEL SAFE, SECURITY INVOKER, grants unchanged; the catalog-051-2 triggers pick it up as they are. No data effect.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.collection_tuple_lock_key(p_tenant text, p_content_type text, p_owner_id text,
+                                                           p_embedding_model text, p_model_version text)
+    RETURNS bigint
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+    SECURITY INVOKER
+AS $fn$
+    SELECT (('x' || left(md5('16:catalog_tuple_lock'), 16))::bit(64)::bigint &amp; (-256)::bigint)
+         | (('x' || left(md5(
+               '13:catalog_tuple'
+            || length(coalesce(p_tenant, ''))::text          || ':' || coalesce(p_tenant, '')
+            || length(coalesce(p_content_type, ''))::text    || ':' || coalesce(p_content_type, '')
+            || length(coalesce(p_owner_id, ''))::text        || ':' || coalesce(p_owner_id, '')
+            || length(coalesce(p_embedding_model, ''))::text || ':' || coalesce(p_embedding_model, '')
+            || length(coalesce(p_model_version, ''))::text   || ':' || coalesce(p_model_version, '')
+           ), 16))::bit(64)::bigint &amp; 255::bigint)
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.collection_tuple_lock_key(p_tenant text, p_content_type text, p_owner_id text,
+                                                           p_embedding_model text, p_model_version text)
+    RETURNS bigint
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+    SECURITY INVOKER
+AS $fn$
+    SELECT ('x' || left(md5(
+               '13:catalog_tuple'
+            || length(coalesce(p_tenant, ''))::text          || ':' || coalesce(p_tenant, '')
+            || length(coalesce(p_content_type, ''))::text    || ':' || coalesce(p_content_type, '')
+            || length(coalesce(p_owner_id, ''))::text        || ':' || coalesce(p_owner_id, '')
+            || length(coalesce(p_embedding_model, ''))::text || ':' || coalesce(p_embedding_model, '')
+            || length(coalesce(p_model_version, ''))::text   || ':' || coalesce(p_model_version, '')
+           ), 16))::bit(64)::bigint
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

@@ -16,7 +16,9 @@ import java.util.TreeSet;
  * The per-tuple advisory lock of RDR-229: a collection's identity tuple is
  * {@code (tenant_id, content_type, owner_id, embedding_model, model_version)}, and a writer that must not race another
  * writer onto the same tuple (the catalog-051-2 owner triggers, and the P3.8 mint when no unique index backs the tuple)
- * takes {@code pg_advisory_xact_lock} on that tuple's key, held to the end of its transaction.
+ * takes {@code pg_advisory_xact_lock} on that tuple's key, held to the end of its transaction. The key is STRIPED
+ * (collections-003-1, RDR-229 P3.8): one of 256 keys in one namespace, so a batch takes at most 256 locks, and two unrelated
+ * tuples in one stripe serialize briefly, accepted by design.
  *
  * <p><b>One key derivation.</b> The key is {@code nexus.collection_tuple_lock_key(...)}, the SQL function of changelog
  * catalog-051-1a, and nothing else computes it. The two triggers call the function; this class SELECTs it, so Java never
@@ -68,23 +70,32 @@ public final class CollectionTupleLock {
         return locked;
     }
 
-    /** The key of each tuple, in argument order, in one statement (a VALUES list joined to the SQL function). */
+    /**
+     * Tuples per key statement: five binds each, so a statement stays well under PostgreSQL's 32767-bind limit and a
+     * restore of thousands of collections reads its keys in a handful of round trips (RDR-229 P3.8).
+     */
+    static final int KEYS_PER_STATEMENT = 1000;
+
+    /** The key of each tuple, in argument order: the SQL function, {@link #KEYS_PER_STATEMENT} tuples a statement. */
     private static List<Long> keys(DSLContext ctx, Collection<Tuple> tuples) {
         List<Tuple> in = List.copyOf(tuples);
-        List<Field<?>> keyColumns = new ArrayList<>(in.size());
-        for (Tuple t : in) {
-            keyColumns.add(DSL.function(DSL.name("nexus", "collection_tuple_lock_key"), SQLDataType.BIGINT,
-                DSL.val(t.tenantId()), DSL.val(t.contentType()), DSL.val(t.ownerId()),
-                DSL.val(t.embeddingModel()), DSL.val(t.modelVersion())));
-        }
-        org.jooq.Record row = ctx.select(keyColumns).fetchOne();
         List<Long> keys = new ArrayList<>(in.size());
-        for (int i = 0; i < in.size(); i++) {
-            Long k = row.get(i, Long.class);
-            if (k == null) {
-                throw new IllegalStateException("nexus.collection_tuple_lock_key returned NULL for " + in.get(i));
+        for (int from = 0; from < in.size(); from += KEYS_PER_STATEMENT) {
+            List<Tuple> chunk = in.subList(from, Math.min(in.size(), from + KEYS_PER_STATEMENT));
+            List<Field<?>> keyColumns = new ArrayList<>(chunk.size());
+            for (Tuple t : chunk) {
+                keyColumns.add(DSL.function(DSL.name("nexus", "collection_tuple_lock_key"), SQLDataType.BIGINT,
+                    DSL.val(t.tenantId()), DSL.val(t.contentType()), DSL.val(t.ownerId()),
+                    DSL.val(t.embeddingModel()), DSL.val(t.modelVersion())));
             }
-            keys.add(k);
+            org.jooq.Record row = ctx.select(keyColumns).fetchOne();
+            for (int i = 0; i < chunk.size(); i++) {
+                Long k = row.get(i, Long.class);
+                if (k == null) {
+                    throw new IllegalStateException("nexus.collection_tuple_lock_key returned NULL for " + chunk.get(i));
+                }
+                keys.add(k);
+            }
         }
         return keys;
     }
