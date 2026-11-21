@@ -832,7 +832,7 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
-                       nne(s(d,"physical_collection")), CollectionIds.idOf(tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
+                       nne(s(d,"physical_collection")), CollectionIds.require(ctx, tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
                        nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
@@ -1220,7 +1220,7 @@ public final class CatalogRepository {
                        nne(s(fields,"file_path", "")),
                        nne(s(fields,"corpus", "")),
                        nne(s(fields,"physical_collection", "")),
-                       CollectionIds.idOf(tenant, s(fields,"physical_collection", "")),
+                       CollectionIds.require(ctx, tenant, s(fields,"physical_collection", "")),
                        ni(i(fields,"chunk_count"), 0),
                        nne(s(fields,"head_hash", "")),
                        tsOrNull(s(fields,"indexed_at", "")),
@@ -1481,6 +1481,8 @@ public final class CatalogRepository {
                     ctx, tenant, newIdx.stream().map(ix -> uriOf[ix]).filter(u -> !u.isEmpty()).distinct().toList());
                 java.util.Map<Integer, Predecessor> inheritedBy = new java.util.HashMap<>();
 
+                // RDR-229 P3.1: a collection with no registry row is refused (typed, 422) before the INSERT is built.
+                final Map<String, Long> collectionIds = new HashMap<>();
                 var insert = ctx.insertInto(CATALOG_DOCUMENTS,
                         CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
                         CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.CHUNK_COUNT,
@@ -1511,7 +1513,7 @@ public final class CatalogRepository {
                             nne(s(fields, "file_path", "")),
                             nne(s(fields, "corpus", "")),
                             nne(s(fields, "physical_collection", "")),
-                            CollectionIds.idOf(tenant, s(fields, "physical_collection", "")),
+                            CatalogIdStamps.requireMemo(ctx, tenant, s(fields, "physical_collection", ""), collectionIds),
                             ni(i(fields, "chunk_count"), 0),
                             nne(s(fields, "head_hash", "")),
                             tsOrNull(s(fields, "indexed_at", "")),
@@ -2387,7 +2389,7 @@ public final class CatalogRepository {
         // wrote the name); every other update keeps the row's id, stamping a row the move has not reached.
         Object movedColl = fields.get("physical_collection");
         more = more.set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, movedColl != null
-            ? CollectionIds.idOf(tenant, String.valueOf(movedColl)) : CatalogIdStamps.keepDocumentId());
+            ? DSL.val(CollectionIds.require(ctx, tenant, String.valueOf(movedColl)), Long.class) : CatalogIdStamps.keepDocumentId());
         // AND deleted_at IS NULL: refuse to update tombstoned documents
         return more.where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)
                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(target))
@@ -10047,8 +10049,13 @@ public final class CatalogRepository {
             // A fresh row that the request named as a tombstone (an ETL or migration registration); an existing row
             // was revived by the arm above, as before.
             String requestedSupersededBy = nne(s(coll, "superseded_by"));
-            if (!requestedSupersededBy.isEmpty() && Boolean.TRUE.equals(inserted.get(0).value1())) {
+            boolean fresh = Boolean.TRUE.equals(inserted.get(0).value1());
+            if (!requestedSupersededBy.isEmpty() && fresh) {
                 CollectionTombstones.stampTombstone(ctx, tenant, name, requestedSupersededBy);
+            }
+            // RDR-229 P3.1: a new row is the successor the tombstones that name it were waiting for.
+            if (fresh) {
+                CollectionTombstones.repointTombstonesNaming(ctx, tenant, List.of(name));
             }
             return null;
         });
@@ -11574,6 +11581,8 @@ public final class CatalogRepository {
                     .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.castNull(Long.class))
                     .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
                     .execute());
+            // RDR-229 P3.1: the new row is the successor that tombstones naming newName were waiting for.
+            CollectionTombstones.repointTombstonesNaming(ctx, tenant, List.of(newName));
 
             // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
             //    Driven by COLLECTION_SCOPED_TABLES so this loop and collectionIsEmpty can
@@ -13249,7 +13258,11 @@ public final class CatalogRepository {
                 deduped.add(d);
             }
 
-            final int cols = 28; // 25 columns plus the physical_collection_id subselect's tenant and name binds (RDR-229 P3.1)
+            final int cols = 26; // 25 columns plus the physical_collection_id bind (RDR-229 P3.1)
+            // RDR-229 P3.1: every row's collection is resolved, and an unregistered one refused (typed, 422), before the
+            // first INSERT of the batch.
+            final Map<String, Long> collectionIds = new HashMap<>();
+            for (var d : deduped) CatalogIdStamps.requireMemo(ctx, tenant, s(d, "physical_collection"), collectionIds);
             final int chunkSize = Math.max(1, MAX_BATCH_PARAMS / cols);
             for (int start = 0; start < deduped.size(); start += chunkSize) {
                 var batch = deduped.subList(start, Math.min(start + chunkSize, deduped.size()));
@@ -13265,7 +13278,7 @@ public final class CatalogRepository {
                     guardDocumentIdentity(ctx, tenant, s(d, "tumbler"), sourceUriOf(d));
                     insert = insert.values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                             nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
-                            nne(s(d,"physical_collection")), CollectionIds.idOf(tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
+                            nne(s(d,"physical_collection")), CatalogIdStamps.requireMemo(ctx, tenant, s(d,"physical_collection"), collectionIds), ni(i(d,"chunk_count"), 0),
                             nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                             jsonbVal(metaJson),
                             nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
@@ -13339,7 +13352,7 @@ public final class CatalogRepository {
                     CATALOG_DOCUMENTS.BIB_SEMANTIC_SCHOLAR_ID, CATALOG_DOCUMENTS.BIB_OPENALEX_ID, CATALOG_DOCUMENTS.BIB_DOI, CATALOG_DOCUMENTS.BIB_ENRICHED_AT, CATALOG_DOCUMENTS.SENSITIVE)
                .values(tenant, s(d,"tumbler"), s(d,"title"), s(d,"author"), i(d,"year"),
                        nne(s(d,"content_type")), nne(s(d,"file_path")), nne(s(d,"corpus")),
-                       nne(s(d,"physical_collection")), CollectionIds.idOf(tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
+                       nne(s(d,"physical_collection")), CollectionIds.require(ctx, tenant, s(d,"physical_collection")), ni(i(d,"chunk_count"), 0),
                        nne(s(d,"head_hash")), tsOrNull(s(d,"indexed_at")),
                        jsonbVal(metaJson),
                        nd(dbl(d,"source_mtime")), nne(s(d,"alias_of")), sourceUriOf(d),
@@ -13792,6 +13805,8 @@ public final class CatalogRepository {
                         CollectionTombstones.stampTombstone(ctx, tenant, s(coll, "name"), nne(s(coll, "superseded_by")));
                     }
                 }
+                // and the tombstones of the tenant that already name one of the rows that landed point at them now
+                CollectionTombstones.repointTombstonesNaming(ctx, tenant, landed);
             }
             corrected.forEach(name -> logStateCorrected(tenant, name));
             return new ImportCollectionsResult(rows.size(), corrected);
@@ -13868,6 +13883,7 @@ public final class CatalogRepository {
               .fetch(CATALOG_COLLECTIONS.NAME);
         if (!landed.isEmpty()) {
             CollectionTombstones.stampTombstone(ctx, tenant, s(coll, "name"), nne(s(coll, "superseded_by")));
+            CollectionTombstones.repointTombstonesNaming(ctx, tenant, landed);
         }
         // Logged once the row is stored, as the batch path does: importModelVersion above can still refuse.
         if (CollectionRegistration.stateCorrectedOnImport(coll)) {
