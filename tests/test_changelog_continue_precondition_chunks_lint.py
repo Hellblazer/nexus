@@ -78,6 +78,11 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # table is absent; the rest is reads of pg_roles, pg_policy and pg_class. The body names no chunk table, leaf or
     # builder object (RDR-229 P3.1, residual R3).
     ("vectors-070-collection-id-stamp-moves.xml", "vectors-070-31"): "aspect queue owner-read policy",
+    # CREATE UNIQUE INDEX on nexus.catalog_collections (SHARE on it for one build of a registry of hundreds of rows) and,
+    # in its guard, the counter's ALTER TABLE on that table (ACCESS EXCLUSIVE for one count) plus a read of
+    # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
+    # no lock on the registry, so the build cannot be what either statement waits behind.
+    ("collections-001-tuple-unique-index.xml", "collections-001-2"): "gated live-tuple unique index (RDR-229 P3.8)",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
