@@ -149,8 +149,9 @@ class ListCollectionsRegistryReadIntegrationTest {
             PgContainerHelper.insertCollection(dsl, T2, OTHER_TENANT_ONLY);
             bulk(dsl, T2, OTHER_TENANT_ONLY, "minilm-l6-v2-384", 384, 10);
             // A rename tombstone: still 'live', superseded by the new name.
-            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, LIVE_384)
-                .where(CATALOG_COLLECTIONS.NAME.eq(TOMBSTONE)).execute();
+            for (String t : List.of(T1, T2)) {
+                dev.nexus.service.CollectionIdSeeds.supersede(dsl, t, TOMBSTONE, LIVE_384);
+            }
             // Own the first 20 chunks of each live collection so the stats view has live counts.
             for (String t : List.of(T1, T2)) {
                 for (String[] c : new String[][] {{LIVE_384, "minilm-l6-v2-384"}, {LIVE_1024, "voyage-code-3"}}) {

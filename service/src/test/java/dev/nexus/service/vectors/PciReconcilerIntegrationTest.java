@@ -678,8 +678,7 @@ class PciReconcilerIntegrationTest {
         });
         // Canonical rename of "sup": the rows are re-homed under the new name and the old one is superseded.
         collection(tenant, name("sup-new"), 300);
-        asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("sup-new"))
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name("sup"))).execute());
+        asSuperuser(su -> { dev.nexus.service.CollectionIdSeeds.supersede(su, tenant, name("sup"), name("sup-new")); return null; });
         // COPY rename of "copy-src": the old collection stays live with its rows, the copy has its own.
         collection(tenant, name("copy-dst"), 300);
 
@@ -1604,9 +1603,7 @@ class PciReconcilerIntegrationTest {
     void aFailureEntry_isClearedWhenTheCollectionIsSuperseded() throws Exception {
         assertThatAFailureEntryClearsWhen("super", (tenant, collection) -> {
             collection(tenant, name("elsewhere"), 0);
-            asSuperuser(su -> su.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, name("elsewhere"))
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection))
-                .execute());
+            asSuperuser(su -> { dev.nexus.service.CollectionIdSeeds.supersede(su, tenant, collection, name("elsewhere")); return null; });
         });
     }
 

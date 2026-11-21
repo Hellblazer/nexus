@@ -99,10 +99,7 @@ class CollectionListLifecycleFilterRouteTest {
         seedChunk(TOMBSTONE, "c3");
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
-               .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, LIVE)
-               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(TOMBSTONE)))
-               .execute();
+            CollectionIdSeeds.supersede(DSL.using(su, SQLDialect.POSTGRES), TENANT, TOMBSTONE, LIVE);
         }
     }
 

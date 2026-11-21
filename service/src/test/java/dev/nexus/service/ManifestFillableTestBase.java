@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
@@ -156,6 +157,7 @@ abstract class ManifestFillableTestBase {
                 .set(CHUNKS.COLLECTION, collection)
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
                 .set(CHUNKS.EMBEDDING_MODEL, model)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHUNK_TEXT, "stub")
                 .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
                 .onConflict(CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL).doNothing()

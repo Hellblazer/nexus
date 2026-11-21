@@ -457,8 +457,7 @@ class P225WritePathIntegrationTest {
         // with x's model.
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
-            dsl(su).update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "somewhere-else")
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TA)).and(CATALOG_COLLECTIONS.NAME.eq(y)).execute();
+            CollectionIdSeeds.supersede(dsl(su), TA, y, "somewhere-else");
         }
         chunk(repo(1024), x, 81, "to move");
         assertThat(CollectionRegistry.lookup(scope, TA, y).embeddingModel()).as("cached with the old model").isEqualTo(CONTEXT_3);

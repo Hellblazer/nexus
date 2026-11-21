@@ -213,8 +213,7 @@ class VectorHandlerQuarantineRestoreRouteTest {
         String o = col();
         String successor = o.replace("__v1", "__v2");
         List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "sup");
-        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_A)).and(CATALOG_COLLECTIONS.NAME.eq(o)).execute());
+        su(ctx -> CollectionIdSeeds.supersede(ctx, TENANT_A, o, successor));
 
         var r = post(TOKEN_A, req(o, "chashes", hs, "actor", "route-test"));
 
