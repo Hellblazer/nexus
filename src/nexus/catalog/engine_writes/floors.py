@@ -57,10 +57,10 @@ def require_catalog_sensitivity(cat: Any, *, what: str = "a sensitive write") ->
 
 
 #: RDR-254: the first engine release that carries ``POST /v1/catalog/documents/move`` and ``/owners/move`` and
-#: advertises ``catalog_move_supported`` on ``GET /version``. HAND-KEPT: ``None`` until the engine tag that carries
-#: the routes is cut (254-P5-S1 fills it in); the refusal text says "not yet released" while it is ``None``.
+#: advertises ``catalog_move_supported`` on ``GET /version``: engine-service-v0.1.199 (254-P5-S1; it carries P1's
+#: 5476be38d..60f7d84da). HAND-KEPT; the refusal text says "not yet released" if it is ever ``None`` again.
 #: Not a gate: the probe is the gate.
-CATALOG_MOVE_MIN_ENGINE_VERSION: tuple[int, int, int] | None = None
+CATALOG_MOVE_MIN_ENGINE_VERSION: tuple[int, int, int] | None = (0, 1, 199)
 
 
 class CatalogMoveUnsupportedError(RuntimeError):

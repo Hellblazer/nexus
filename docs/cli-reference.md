@@ -1707,7 +1707,7 @@ A dry run by default, double-gated like the other `owners` mutation arms: it wri
 
 The new path must exist: `--new-path` is a file, `--new-root` a directory inside a git work tree. The document's new identity is spelled the way `nx index pdf` and `nx index md` spell it (the resolved absolute path and the raw `file://<abspath>`), so a later index of the file finds the moved row. The owner's new root is the main repository's path and its hash, as `nx index repo` registers them, so a worktree of the repository names the repository. A refusal from the engine (a document that does not exist or is trashed, another live row already holding a target path, a curator owner, a deactivated owner) leaves nothing written.
 
-The engine must carry the move routes (`catalog_move_supported` on `GET /version`); an engine that does not, or whose answer cannot be read, is refused before any move route is called. Until the engine release that carries them the refusal says so ("not yet released").
+The engine must carry the move routes (`catalog_move_supported` on `GET /version`); an engine that does not, or whose answer cannot be read, is refused before any move route is called; the refusal names the minimum engine, engine-service-v0.1.199.
 
 A sensitive document keeps its flag through a move. A deny rule you wrote against its old path (a client permission rule or a hook that names the file) does not follow it: update the rule for the new path. The deny decisions the client derives from the catalog (the sensitive-file checks that read the flagged documents) follow the catalog, so they name the new path after the move.
 
