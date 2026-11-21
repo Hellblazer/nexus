@@ -3739,8 +3739,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         With no *name* (``None`` or blank) the engine mints the collection's id and its label ``c<id>`` and answers
         the registered row, or the live row the tuple already has: the answer carries ``collection_id`` and the
         label, and a writer uses that label (the engine's listing omits a collection with no chunk yet). An engine
-        older than :data:`~nexus.catalog.engine_writes.floors.COLLECTION_MINT_MIN_ENGINE_VERSION` is refused with
-        :class:`~nexus.catalog.engine_writes.floors.CollectionMintUnsupportedError` before the write.
+        older than :data:`~nexus.catalog.engine_writes.floors.COLLECTION_MINT_MIN_ENGINE_VERSION` answers 409, which
+        raises :class:`~nexus.catalog.engine_writes.floors.CollectionMintUnsupportedError` naming both versions.
 
         With a *name* (a re-registration of an existing label, the migration and rename callers) the engine
         answers ``{"ok": true}`` and no row, so the answer is what was asked: the label and attributes sent, with
@@ -3757,10 +3757,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         body: dict = {**attrs, "display_name": display_name}
         tuple_of = {k: attrs[k] for k in ("content_type", "owner_id", "embedding_model")}
         if not name:
-            from nexus.catalog.engine_writes.floors import require_collection_mint  # noqa: PLC0415 — deferred: engine_writes imports back into catalog
+            try:
+                answer = self._post("/collections/upsert", body)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 409:
+                    from nexus.catalog.engine_writes.floors import explain_mint_refusal  # noqa: PLC0415 — deferred: engine_writes imports back into catalog
 
-            require_collection_mint(self)
-            return CollectionAttributes.from_for_tuple(self._post("/collections/upsert", body) or {}, **tuple_of)
+                    explain_mint_refusal(self, exc)  # an engine older than the mint names itself; any other 409 stands
+                raise
+            return CollectionAttributes.from_for_tuple(answer or {}, **tuple_of)
         self._post("/collections/upsert", {"name": name, **body})
         return CollectionAttributes.from_for_tuple({"name": name, **attrs}, **tuple_of)
 
