@@ -27,7 +27,9 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
 from contextlib import AbstractContextManager
@@ -56,6 +58,14 @@ _BUILD_PREFIX_MARKER = ".build_prefix"
 
 #: Sub-directory of the config dir the bundle is extracted into.
 _CACHE_SUBDIR = "pg-bundle"
+
+
+class PgBundleMajorChangeError(RuntimeError):
+    """A bundle swap would change the PostgreSQL major version.
+
+    A data directory made by PostgreSQL N cannot be started by N+1 binaries, and a bundle
+    swap moves no data, so the swap is refused before anything is stopped or replaced. A
+    real major bump needs pg_upgrade or a dump and restore."""
 
 
 def current_platform_tag(*, system: str | None = None, machine: str | None = None) -> str:
@@ -113,6 +123,53 @@ def is_bundle_extracted(extract_root: Path) -> bool:
     return (
         marker.is_file()
         and PgBinaries.from_dir(bundle_bin_dir(extract_root)).all_present()
+    )
+
+
+_PG_VERSION_RE = re.compile(r"\)\s*(\d+)")
+_PG_TOOL_VERSION_TIMEOUT_S = 15.0
+
+
+def bundle_major(bin_dir: Path, *, platform: str | None = None) -> int | None:
+    """The PostgreSQL major version the bundle at *bin_dir* reports
+    (``pg_ctl --version``: ``pg_ctl (PostgreSQL) 17.5`` is 17), or ``None`` when it cannot
+    be run or says nothing a version can be read from."""
+    pg_ctl = PgBinaries.from_dir(bin_dir, platform=platform).pg_ctl
+    try:
+        done = subprocess.run(  # noqa: S603 - a binary of our own bundle, no shell, no user text
+            [str(pg_ctl), "--version"], capture_output=True, text=True,
+            timeout=_PG_TOOL_VERSION_TIMEOUT_S, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    match = _PG_VERSION_RE.search(done.stdout or "")
+    return int(match.group(1)) if match else None
+
+
+def _refuse_major_change(old_root: Path, new_root: Path) -> None:
+    """Raise :class:`PgBundleMajorChangeError` when the staged tree is another major than the
+    one in service.
+
+    A major that cannot be read from the tree in service (it does not run) does not block:
+    the swap is then the repair. A staged tree whose major cannot be read, while the one in
+    service reports one, is refused: it is not provably the same major."""
+    old = bundle_major(bundle_bin_dir(old_root))
+    if old is None:
+        return
+    new = bundle_major(bundle_bin_dir(new_root))
+    if new == old:
+        return
+    _log.warning(
+        "pg_bundle_major_change_refused", extract_root=str(old_root), in_service=old, incoming=new,
+    )
+    raise PgBundleMajorChangeError(
+        f"the PostgreSQL bundle in service is PostgreSQL {old} and the incoming one "
+        f"{'reports no version' if new is None else 'is PostgreSQL ' + str(new)}: not swapped. "
+        "The data directory belongs to the major version that made it, and a bundle swap moves "
+        "no data, so a major change needs pg_upgrade or a dump and restore first "
+        "(docs/migration-runbook.md)."
     )
 
 
@@ -234,7 +291,9 @@ def extract_bundle(
     cannot be started by PG N+1 binaries. Swapping the binaries under an
     existing cluster surfaces as a loud PostgreSQL startup refusal, not
     silent corruption, but a real major bump additionally needs pg_upgrade or
-    dump/restore. That is RDR-scale and deliberately out of scope here.
+    dump/restore. That is RDR-scale and deliberately out of scope here, so a swap
+    across a major version is refused before anything is stopped
+    (:class:`PgBundleMajorChangeError`, nexus-f3yqd.2.23).
 
     Every platform (RDR-224, nexus-f9bgu.20 for Windows, where a running
     ``postgres.exe`` keeps its bundle directory from being renamed; macOS and
@@ -296,6 +355,11 @@ def extract_bundle(
         staging = extract_root.parent / (extract_root.name + ".incoming")
         shutil.rmtree(staging, ignore_errors=True)
         _extract_and_validate(archive, staging)
+        try:
+            _refuse_major_change(extract_root, staging)  # before anything is stopped
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
 
         # Swap: move the old tree aside (fast rename), move the proven tree
         # into place, then drop the old one. If the second rename fails the
