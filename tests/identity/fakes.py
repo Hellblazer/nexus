@@ -29,6 +29,8 @@ class FakeProcesses:
     def __init__(self, sessions_dir: Path, *, host: str = HOST, platform: str = "darwin") -> None:
         self.sessions_dir = sessions_dir
         self.host = host
+        #: every name this machine answers to when it is not just *host* (a binding written under an older hostname)
+        self.names: tuple[str, ...] | None = None
         self.platform = platform
         self.procs: dict[int, str] = {}
         self.sessions_dir.mkdir(parents=True, exist_ok=True)

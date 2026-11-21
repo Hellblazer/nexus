@@ -193,7 +193,9 @@ class IdentityLease:
         entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
         record = read_token_file(self.token_path()) if self.token_path() is not None else None
         start = (record.proc_start if record else None) or normalise_instant(self._procs.os_start(self._claude_pid))
-        return {"host": self._procs.host, "pid": self._claude_pid, "started_at": entry.started_at if entry else None,
+        # the host the binding's own row records: a token file written under the pre-key hostname keeps speaking under it
+        host = record.host if record is not None and record.host else self._procs.host
+        return {"host": host, "pid": self._claude_pid, "started_at": entry.started_at if entry else None,
                 "proc_start": start}
 
     # ── one heartbeat ───────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ from typing import Any
 import structlog
 
 from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError
+from nexus.identity.hostname import is_local, local_names
 from nexus.identity.holder import (
     GONE, OTHER_HOST, RUNNING, UNKNOWN, Processes, Verdict, holder_process, normalise_instant,
 )
@@ -57,7 +58,7 @@ def check_dispatcher(holder: Mapping[str, Any], *, procs: Processes | Any, host:
     ``proc_start`` (a reused pid is gone). Another host's dispatcher is judged by its lease alone (``other_host``);
     a pid that runs but whose start time cannot be read, or a binding that recorded none, is running, never gone."""
     here = host if host is not None else procs.host
-    if holder.get("host") != here:
+    if not is_local(holder.get("host"), local_names(procs, here)):
         return Verdict(OTHER_HOST, f"dispatched from {holder.get('host')}, not from {here}")
     pid = holder.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
