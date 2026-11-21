@@ -2079,11 +2079,11 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx, amended by catalog-049 (RDR-229, Sam 2026-11-21 "Owner is the source"): the wbfpw.33 import fallback
+     * nexus-6pbwx, amended by catalog-051 (RDR-229, Sam 2026-11-21 "Owner is the source"): the wbfpw.33 import fallback
      * mints an import's documents under the knowledge CURATOR, so a curator document can be the first to land in a
      * slug-owned repo collection. A slug owner is still derived from the documents, so that first curator document names
      * the owner (docs__default, curator 1.14, still takes 1-14). But 1-22 is then a tumbler-shaped owner, and since
-     * catalog-049 a curator's segment is no longer replaceable: a repo document that lands afterwards does not take the
+     * catalog-051 a curator's segment is no longer replaceable: a repo document that lands afterwards does not take the
      * collection from the curator, and neither do more curator documents or a re-registration.
      */
     @Test @Order(60)
@@ -2098,7 +2098,7 @@ class CatalogRepositoryTest {
         assertThat(ownerOf(tenant, name)).as("a slug owner is derived: curator documents alone still name an owner")
             .isEqualTo("1-22");
         putDoc(tenant, "1.23.1", "code", name);
-        assertThat(ownerOf(tenant, name)).as("a repo document does not replace a curator's segment (catalog-049)")
+        assertThat(ownerOf(tenant, name)).as("a repo document does not replace a curator's segment (catalog-051)")
             .isEqualTo("1-22");
         putDoc(tenant, "1.22.2", "code", name);
         putDoc(tenant, "1.23.2", "code", name);
@@ -2123,9 +2123,9 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx, amended by catalog-049 (RDR-229): a curator-only collection settles on the curator's segment
+     * nexus-6pbwx, amended by catalog-051 (RDR-229): a curator-only collection settles on the curator's segment
      * (docs__default under 1.14, derived from the slug "default") and stays there while more curator documents arrive,
-     * and a collection REGISTERED with a curator's segment keeps it when a repo document lands (catalog-049 removed the
+     * and a collection REGISTERED with a curator's segment keeps it when a repo document lands (catalog-051 removed the
      * curator-replaceable rule: a curator owner a registration set stands).
      */
     @Test @Order(60)
@@ -2146,7 +2146,7 @@ class CatalogRepositoryTest {
         registerColl(tenant, other, "code", "1-14");
         assertThat(ownerOf(tenant, other)).as("guard: registered with the curator segment").isEqualTo("1-14");
         putDoc(tenant, "1.23.7", "code", other);
-        assertThat(ownerOf(tenant, other)).as("a repo document does not re-own a registered curator (catalog-049)")
+        assertThat(ownerOf(tenant, other)).as("a repo document does not re-own a registered curator (catalog-051)")
             .isEqualTo("1-14");
 
         // A slug owner (not tumbler-shaped) is still replaceable by a repo document: the legacy case is unchanged.
@@ -2206,7 +2206,7 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * catalog-049-2 (RDR-229), amending nexus-6pbwx: a legacy slug collection whose documents name an owner a live
+     * catalog-051-2 (RDR-229), amending nexus-6pbwx: a legacy slug collection whose documents name an owner a live
      * conformant collection already holds keeps its slug, so it never shares that (content_type, owner_id, model, version)
      * tuple and is never a {@code collectionForTuple} candidate for it. A slug row on a free tuple (here the next model
      * version) is still given the documents' owner and, as the higher version, wins the tuple. The equal-version tie between
@@ -2221,7 +2221,7 @@ class CatalogRepositoryTest {
         registerColl(tenant, conformant, "code", "1-27");
         registerColl(tenant, slug, "code", "zslug-6pbwx");
         putDoc(tenant, "1.27.1", "code", slug);
-        assertThat(ownerOf(tenant, slug)).as("catalog-049-2: the conformant row holds the tuple, so the slug row keeps its owner")
+        assertThat(ownerOf(tenant, slug)).as("catalog-051-2: the conformant row holds the tuple, so the slug row keeps its owner")
             .isEqualTo("zslug-6pbwx");
 
         String slugV2 = "code__zslug-6pbwx__voyage-code-3__v2";

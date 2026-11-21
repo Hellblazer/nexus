@@ -23,15 +23,15 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 
 /**
- * RDR-229 (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): catalog-049-1 amends catalog-044. A collection
+ * RDR-229 (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): catalog-051-1 amends catalog-044. A collection
  * registered under a CURATOR owner keeps it: neither catalog-044's AFTER trigger on {@code catalog_documents} (a document
  * lands) nor its BEFORE trigger on {@code catalog_collections} (the owner_id is written) re-derives it from the documents. An
  * owner_id that is not tumbler-shaped (the nexus-6pbwx legacy slug) is still derived from the documents.
  *
- * <p>Falsifier, by hand: remove the catalog-049 include from db.changelog-master.xml and the curator cases below read the
+ * <p>Falsifier, by hand: remove the catalog-051 include from db.changelog-master.xml and the curator cases below read the
  * repo owner of the documents (1-33), which is catalog-044's behaviour; the slug case reads the same either way.
  */
-class Catalog049CuratorOwnerNotReplaceableTest {
+class Catalog051CuratorOwnerNotReplaceableTest {
 
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT = "catalog049-tenant";

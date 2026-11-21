@@ -24,9 +24,9 @@
     NO DATA EFFECT. A function body only; no row is read or written. Rows a curator owner already lost to
     catalog-044-3 are re-owned by the registered data move vectors-067 (rdr229-reown-repo-stems-from-curator), not here.
 
-    ROLLBACK of catalog-049-1 restores catalog-044-1's body.
+    ROLLBACK of catalog-051-1 restores catalog-044-1's body.
 
-    SECOND AMENDMENT, catalog-049-2 (the tuple guard). The rule above leaves slug, dotted and '' owners replaceable,
+    SECOND AMENDMENT, catalog-051-2 (the tuple guard). The rule above leaves slug, dotted and '' owners replaceable,
     so catalog-044's triggers can still rewrite such a legacy owner onto a tuple another collection already holds.
     The tuple is (tenant_id, content_type, owner_id, embedding_model, model_version), counted over rows that are
     live (lifecycle_state = 'live'), unsuperseded (superseded_by = '') and of a code, docs or rdr content type (a
@@ -49,7 +49,7 @@
     lock and waits for one of those rows, which the engine's 40P01 retry covers.
     A collection that keeps its slug owner because of the guard stays replaceable, so each later document insert
     into it runs the owner aggregate again and repeats the NOTICE until the tuple frees or the owner is set by hand.
-    NO DATA EFFECT: function bodies only. ROLLBACK of catalog-049-2 restores catalog-044-2's two bodies verbatim.
+    NO DATA EFFECT: function bodies only. ROLLBACK of catalog-051-2 restores catalog-044-2's two bodies verbatim.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -57,7 +57,7 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <changeSet id="catalog-049-1" author="nexus-p2m1x.14">
+    <changeSet id="catalog-051-1" author="nexus-p2m1x.14">
         <comment>nexus.catalog_collection_owner_replaceable(tenant, owner_id) no longer treats a curator owner as replaceable: only an owner_id that is not tumbler-shaped is (RDR-229, owner is the source). Same signature, grants and SECURITY INVOKER; no data effect.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.catalog_collection_owner_replaceable(p_tenant text, p_owner text)
@@ -84,7 +84,7 @@ $fn$;
         </rollback>
     </changeSet>
 
-    <changeSet id="catalog-049-2" author="nexus-p2m1x.14">
+    <changeSet id="catalog-051-2" author="nexus-p2m1x.14">
         <comment>catalog-044's two owner-from-documents trigger functions skip the rewrite when the new owner would land a live, unsuperseded code/docs/rdr collection on a (tenant_id, content_type, owner_id, embedding_model, model_version) tuple another live, unsuperseded collection already holds: the old owner stays and a NOTICE names both collections and the owner not taken. Same signatures and SECURITY INVOKER; no data effect.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
@@ -100,7 +100,7 @@ BEGIN
        AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
         v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
         IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
-            -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds. The
+            -- catalog-051-2: a live, unsuperseded row must not land on a tuple another such row holds. The
             -- transaction-scoped advisory lock on the tuple makes two writers onto one free tuple take turns, so the
             -- second one's SELECT sees the first one's committed row instead of racing it into the unique index.
             IF NEW.lifecycle_state = 'live' AND NEW.superseded_by = '' THEN
@@ -120,7 +120,7 @@ BEGIN
              ORDER BY h.name
              LIMIT 1;
             IF FOUND THEN
-                RAISE NOTICE 'catalog-049: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
                     NEW.name, NEW.owner_id, v_owner, v_holder;
             ELSE
                 RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
@@ -167,7 +167,7 @@ BEGIN
            AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
             v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
             IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
-                -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds; the
+                -- catalog-051-2: a live, unsuperseded row must not land on a tuple another such row holds; the
                 -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
                 IF v_ls = 'live' AND v_sb = '' THEN
                     PERFORM pg_advisory_xact_lock(hashtext('catalog_tuple/' || NEW.tenant_id || '/' || v_ct
@@ -186,7 +186,7 @@ BEGIN
                  ORDER BY h.name
                  LIMIT 1;
                 IF FOUND THEN
-                    RAISE NOTICE 'catalog-049: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                    RAISE NOTICE 'catalog-051: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
                         NEW.physical_collection, v_cur, v_new, v_holder;
                 ELSE
                     RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
