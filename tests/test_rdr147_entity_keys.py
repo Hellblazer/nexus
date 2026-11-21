@@ -37,6 +37,19 @@ from nexus.mcp.core import store_put
 
 pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
 
+from nexus import mcp_infra as _mcp_infra  # noqa: E402 — read before any fixture replaces the row read
+
+_REAL_GET_COLLECTION_ROW = _mcp_infra.get_collection_row
+
+
+@pytest.fixture
+def real_collection_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's own registry rows, where ``named_collection_rows`` would derive one from the name.
+
+    RDR-229 P3.8: a new subject's collection is a label the engine minted (``c19``), which carries nothing to
+    derive a row from; a test that stamps a key through an entity glob needs the row the engine holds for it."""
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _REAL_GET_COLLECTION_ROW)
+
 _PATTERN = r"CUST-\d{4}|eid_[0-9a-f]{8}"
 _GLOB = "knowledge__herb-*"
 _HERB = "knowledge__herb-core__bge-base-en-v15-768__v1"
@@ -97,6 +110,7 @@ def test_a_minted_label_is_matched_by_the_conformant_name_its_row_attributes_ren
         raise ConnectionError("registry unreachable")
 
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", down)
+    monkeypatch.setattr("nexus.entity_keys.is_code_collection", lambda name: False)  # its own row read is not under test
     assert pattern_for_collection("c19") is None, "an unreadable row leaves the label unmatched"
 
 
@@ -347,7 +361,7 @@ def test_store_put_entity_key_lands_in_catalog_meta_and_in_no_chunk(t2_service_e
 
 
 @pytest.mark.t2_tenant
-def test_a_configured_collection_stamps_a_full_title_match_and_not_a_partial_one(t2_service_env, repo_cfg):
+def test_a_configured_collection_stamps_a_full_title_match_and_not_a_partial_one(t2_service_env, repo_cfg, real_collection_rows):
     repo_cfg({_GLOB: _PATTERN})
     client = HttpVectorClient(tenant=t2_service_env)
     subject = "herb-auto"
@@ -356,7 +370,11 @@ def test_a_configured_collection_stamps_a_full_title_match_and_not_a_partial_one
         store_put(content="rdr147 auto body two", collection=subject, title="Customer CUST-0018")
 
     collection = t3_collection_name(subject, subject_finder=catalog_subject_finder())
-    assert collection.startswith("knowledge__herb-"), collection
+    # RDR-229 P3.8: the subject's collection is a minted label; its row says it is the herb subject the glob names.
+    from nexus.mcp_infra import get_collection_row
+
+    row = get_collection_row(collection)
+    assert row is not None and (row["content_type"], row["owner_id"]) == ("knowledge", subject), (collection, row)
     assert _entry_meta(collection, "CUST-0018")["entity_key"] == "CUST-0018"
     assert "entity_key" not in _entry_meta(collection, "Customer CUST-0018")
     assert all("entity_key" not in m for m in _chunk_metadatas(client, collection, "rdr147 auto body one"))
@@ -388,7 +406,7 @@ def test_a_reput_replaces_the_key_as_it_does_the_other_note_keys(t2_service_env)
 
 
 @pytest.mark.t2_tenant
-def test_the_cli_and_mcp_puts_write_the_same_catalog_meta(t2_service_env, tmp_path, repo_cfg):
+def test_the_cli_and_mcp_puts_write_the_same_catalog_meta(t2_service_env, tmp_path, repo_cfg, real_collection_rows):
     repo_cfg({_GLOB: _PATTERN})
     client = HttpVectorClient(tenant=t2_service_env)
     subject = "herb-parity"

@@ -134,8 +134,9 @@ def has_entity_patterns(config: Mapping[str, Any]) -> bool:
 
 def pattern_for_collection(collection: str, config: Mapping[str, Any] | None = None) -> re.Pattern[str] | None:
     """The entity-key regex configured for *collection* (the first glob that matches its full
-    name), or ``None``: no glob matches, nothing is configured, or *collection* is a ``code__``
-    collection even when a glob matches it. *config* defaults to ``load_config()``."""
+    name; for a minted label such as ``c19``, the conformant name its registry row renders), or ``None``: no
+    glob matches, nothing is configured, or *collection* is a ``code__`` collection even when a glob matches
+    it. *config* defaults to ``load_config()``."""
     if not collection or is_code_collection(collection):
         return None
     if config is None:
@@ -146,10 +147,36 @@ def pattern_for_collection(collection: str, config: Mapping[str, Any] | None = N
     items = _items(entity.get("collections") if isinstance(entity, Mapping) else None)
     if not items:
         return None
-    for glob, pattern in _compiled(items):
+    compiled = _compiled(items)
+    for glob, pattern in compiled:
         if fnmatch.fnmatchcase(collection, glob):
             return pattern
+    if rendered := _rendered_name_of_label(collection):
+        for glob, pattern in compiled:
+            if fnmatch.fnmatchcase(rendered, glob):
+                return pattern
     return None
+
+
+def _rendered_name_of_label(collection: str) -> str:
+    """The conformant name the registry row of *collection* renders, or ``""`` for a name that already has the
+    ``<content_type>__<owner>__...`` shape, a label with no row, and a row that cannot be read.
+
+    RDR-229 P3.8: a new knowledge subject's collection is a label the engine minted (``c19``), which a glob over
+    ``knowledge__herb-*`` cannot match, so the label is matched by the name its attributes render. The row cache
+    carries no ``model_version``, so the name is rendered at ``v1``; a glob that pins another version does not
+    match a label. Imports lazily: only a label with no glob match of its own reads the registry."""
+    if not collection or "__" in collection:
+        return ""
+    from nexus import mcp_infra  # noqa: PLC0415 — deferred: mcp_infra is heavy and only a label needs it
+
+    try:
+        row = mcp_infra.get_collection_row(collection)
+    except Exception:  # noqa: BLE001 — an unreadable registry leaves the label unmatched, as no row does
+        return ""
+    if not row or not (row.get("content_type") and row.get("owner_id") and row.get("embedding_model")):
+        return ""
+    return f"{row['content_type']}__{row['owner_id']}__{row['embedding_model']}__v1"
 
 
 def _field(doc: Any, name: str) -> Any:
