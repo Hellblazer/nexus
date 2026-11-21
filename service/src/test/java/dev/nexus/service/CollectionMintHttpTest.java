@@ -47,7 +47,6 @@ class CollectionMintHttpTest {
     private static final String SVC_PASS = "svc_mint_http_pass";
     private static final String TENANT = TenantConstants.DEFAULT_TENANT;
     private static final String MODEL = "voyage-context-3";
-    private static final String INDEX = "catalog_collections_live_tuple_uq";
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
 
     PostgreSQLContainer<?> pg;
@@ -91,7 +90,10 @@ class CollectionMintHttpTest {
 
     @BeforeEach
     void indexAbsent() {
-        su(ctx -> ctx.execute("DROP INDEX IF EXISTS nexus." + INDEX));
+        su(ctx -> {
+            CollectionMintSupport.dropIndex(ctx);
+            return null;
+        });
     }
 
     private <T> T su(Function<DSLContext, T> work) {
@@ -103,9 +105,10 @@ class CollectionMintHttpTest {
     }
 
     private void createIndex() {
-        su(ctx -> ctx.execute("CREATE UNIQUE INDEX IF NOT EXISTS " + INDEX + " ON nexus.catalog_collections "
-            + "(tenant_id, content_type, owner_id, embedding_model, model_version) "
-            + "WHERE superseded_by = '' AND lifecycle_state <> 'quarantine'"));
+        su(ctx -> {
+            CollectionMintSupport.createIndex(ctx);
+            return null;
+        });
     }
 
     private static String attrsJson(String owner, String extra) {
@@ -119,11 +122,7 @@ class CollectionMintHttpTest {
     }
 
     private long nextSequenceValue() {
-        return su(ctx -> {
-            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
-            var r = ctx.fetchOne("SELECT last_value, is_called FROM " + seq);
-            return r.get(1, Boolean.class) ? r.get(0, Long.class) + 1 : r.get(0, Long.class);
-        });
+        return su(CollectionMintSupport::nextSequenceValue);
     }
 
     // ── mint through the route ──────────────────────────────────────────────────────────────────
@@ -225,8 +224,10 @@ class CollectionMintHttpTest {
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
         assertThat(rowsOwnedBy("http-held-2")).isEqualTo(2);
         // the duplicate is the test's own: later tests build the index, which a duplicate would refuse
-        su(ctx -> ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT
-            + "' AND name = 'intruder-2-p38'"));
+        su(ctx -> {
+            CollectionMintSupport.deleteRow(ctx, TENANT, "intruder-2-p38");
+            return null;
+        });
     }
 
     @Test @Order(8)
@@ -251,10 +252,10 @@ class CollectionMintHttpTest {
         for (int k = 0; k < draws; k++) {
             String name = "c" + (next + draws + k);
             String owner = "http-labels-" + k;
-            su(ctx -> ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                    CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                    CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
-                .values(TENANT, name, "knowledge", owner, MODEL, "v1", "live").execute());
+            su(ctx -> {
+                CollectionMintSupport.insertLiveRow(ctx, TENANT, name, owner, MODEL, null);
+                return null;
+            });
         }
 
         var resp = post("/v1/catalog/collections/upsert", "{" + attrsJson("http-labels-mint", "") + "}");
@@ -267,15 +268,7 @@ class CollectionMintHttpTest {
     @Test @Order(10)
     void aTakenIdAfterTheHealIs409() throws Exception {
         su(ctx -> {
-            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
-            ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT + "' AND collection_id = 1");
-            ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                    CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
-                .values(TENANT, "cycle-anchor-p38", 1L, "knowledge", "http-cycle-anchor", MODEL, "v1", "live").execute();
-            long max = ctx.resultQuery("SELECT max(collection_id) FROM nexus.catalog_collections").fetchOne(0, Long.class);
-            ctx.execute("SELECT setval('" + seq + "', " + max + ")");
-            ctx.execute("ALTER SEQUENCE " + seq + " MAXVALUE " + max + " CYCLE");
+            CollectionMintSupport.cycleOverTheRows(ctx, TENANT, "cycle-anchor-p38", MODEL);
             return null;
         });
 
