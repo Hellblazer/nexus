@@ -894,9 +894,15 @@ jobs:
           # tests/db/_service_fixture.py::_self_provision_pg_bundle downloads
           # OUR pinned, sigstore-verified PG bundle into this per-tag dir. Cache
           # it so the engine substrate does not re-download it on every run;
-          # keyed on the file that PINS the tag, so a floor bump re-fetches.
+          # keyed on the file that PINS the tag, so a floor bump re-fetches, and on
+          # the script that BUILDS the bundle (it carries the PG, pgvector and
+          # pg_background version pins and has no sourced file), so a bundle-build
+          # change refreshes the cache instead of serving a stale bundle (nexus-f3yqd.2.23).
+          # The three other substrate-cache steps below carry the same key.
+          # pg-bundle-cache-seed.yml seeds a different cache (the built bundle, keyed
+          # on the same script hash), not this one.
           path: ~/.cache/nexus-test-substrate
-          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py', 'scripts/build_pg_bundle.sh') }}
 
       - name: Install ripgrep
         # The pool runners have no sudo and carry ripgrep preinstalled.
@@ -1282,7 +1288,7 @@ jobs:
           # classifier), never a collection abort, but the cache is what makes
           # the leg genuinely network-quiet on the common path.
           path: ~/.cache/nexus-test-substrate
-          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py', 'scripts/build_pg_bundle.sh') }}
 
       - name: Install project + dev deps
         run: uv sync --group dev
@@ -1405,7 +1411,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/nexus-test-substrate
-          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py', 'scripts/build_pg_bundle.sh') }}
 
       - name: Install ripgrep
         run: scripts/ci_install_ripgrep.sh
@@ -1709,7 +1715,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: ~/.cache/nexus-test-substrate
-          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py') }}
+          key: pg-bundle-${{ runner.os }}-${{ hashFiles('src/nexus/engine_version.py', 'scripts/build_pg_bundle.sh') }}
 
       - name: Install ripgrep
         run: scripts/ci_install_ripgrep.sh
