@@ -83,12 +83,14 @@ def _doc(label: str, src_id: int, title: str) -> dict:
             "entity_key": "", "sensitive": False, "content": f"p39 body of {title} in {label}"}
 
 
-def _write_bundle(path, collections: list[dict], docs: list[dict], *, version: int = 3) -> None:
+def _write_bundle(path, collections: list[dict], docs: list[dict], *, version: int = 3,
+                  docs_first: bool = False) -> None:
     header = {"format": "nexus-recovery-bundle", "format_version": version, "exported_at": "2026-11-21T00:00:00Z",
               "collections": len(collections), "knowledge_docs": len(docs), "links": 0,
               "ghosts_skipped": 0, "notes_incomplete": 0}
+    body = [*docs, *collections] if docs_first else [*collections, *docs]
     with path.open("w", encoding="utf-8") as f:
-        for rec in [header, *collections, *docs]:
+        for rec in [header, *body]:
             f.write(json.dumps(rec) + "\n")
 
 
@@ -168,6 +170,39 @@ def test_the_target_never_adopts_the_source_id_even_where_another_collection_hol
     reader = make_catalog_reader()
     assert reader.by_source_uri(uri_for(y, "y1")).physical_collection == y   # not filed under the id's other holder
     assert client.count(held) == 0 and client.count(y) > 0 and client.count(z) > 0
+
+
+@pytest.mark.integration
+def test_docs_that_come_before_their_collection_records_still_import_under_the_registered_collection(
+    t2_service_env, tmp_path,
+):
+    """After P3.1 a document whose collection has no registry row is refused (422, UnregisteredCollectionException,
+    from the NULLIF CHECK's guard). So the importer reads EVERY collection record and registers them first,
+    whatever their position in the file; a doc never reaches the engine ahead of its collection's row."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    model = _active_model(client)
+    p, q = _label(client, "p39first-p"), _label(client, "p39first-q")
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(
+        bundle,
+        [_coll(p, _SRC + 11, owner_id="p39first-p", model=model), _coll(q, _SRC + 12, owner_id="p39first-q", model=model)],
+        [_doc(p, _SRC + 11, "p1"), _doc(q, _SRC + 12, "q1"), _doc(p, _SRC + 11, "p2")],
+        docs_first=True,
+    )
+    _header, records = read_bundle(bundle)
+    assert [r["record"] for r in records] == ["knowledge_doc"] * 3 + ["collection"] * 2   # the premise: docs first
+
+    summary = _import(client, bundle)
+
+    assert (summary.docs_imported, summary.docs_failed, summary.docs_uncertain) == (3, 0, 0), summary.doc_failures
+    assert summary.collections_refused_label_clash == []
+    reader = make_catalog_reader()
+    for label, src_id, titles in ((p, _SRC + 11, ("p1", "p2")), (q, _SRC + 12, ("q1",))):
+        assert _id(label) != src_id                          # registered under the target's own id
+        for title in titles:
+            entry = reader.by_source_uri(uri_for(label, title))
+            assert entry is not None and entry.physical_collection == label
+        assert client.count(label) > 0
 
 
 # ── (3) a re-import onto the bundle's own source maps every collection and creates nothing ───────────────────
