@@ -3734,10 +3734,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         hand-fixing each call site. An explicitly-passed non-empty value is
         never overridden.
         """
-        from nexus.corpus import (  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
-            collection_registration_kwargs,
-            is_conformant_collection_name,
-        )
+        from nexus.corpus import collection_registration_kwargs  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
 
         if legacy_grandfathered is None:
             legacy_grandfathered = not is_conformant_collection_name(name)
@@ -4098,7 +4096,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except ValueError:
             pass
         if check_model_token:
-            from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             token = embedding_model_for_collection_name(new)
             if token is not None:

@@ -14,7 +14,7 @@ reads it, so the twelve sites share one rule instead of twelve copies:
   always had (a sibling the engine minted before registration carried the state, or one
   the stats listing could not join to a catalog row).
 
-The ``taxonomy__`` half stays a name test until P2.9 moves it, here and nowhere else.
+The ``taxonomy__`` half is a name test (a migration source: no row attribute identifies it), here and nowhere else.
 """
 from __future__ import annotations
 
@@ -23,12 +23,15 @@ from typing import Any
 
 import structlog
 
+from nexus.catalog.rows.legacy_names import is_taxonomy_collection_name
+
 _log = structlog.get_logger(__name__)
 
 #: The label prefix the engine mints on a quarantine sibling. Read only for a name with no row.
 QUARANTINE_NAME_PREFIX: str = "quarantine-"
 
-#: The ``taxonomy__`` half of the old bypass tuple; P2.9 (routing by content type) moves it to the row.
+#: The ``taxonomy__`` half of the old bypass tuple. :func:`bypasses_canonical_schema` tests it through
+#: ``legacy_names.is_taxonomy_collection_name`` (RDR-229 P2.2); no row attribute identifies a taxonomy collection.
 TAXONOMY_BYPASS_PREFIXES: tuple[str, ...] = ("taxonomy__",)
 
 
@@ -48,7 +51,7 @@ def is_quarantine_collection(name: str, row: Mapping[str, Any] | str | None = No
 def bypasses_canonical_schema(name: str, row: Mapping[str, Any] | str | None = None) -> bool:
     """Whether *name* is a collection the canonical chunk schema and the drift checks skip:
     a ``taxonomy__`` collection (by name until P2.9) or a quarantine sibling (by row)."""
-    return name.startswith(TAXONOMY_BYPASS_PREFIXES) or is_quarantine_collection(name, row)
+    return is_taxonomy_collection_name(name) or is_quarantine_collection(name, row)
 
 
 def registry_rows_by_name(cat: Any) -> dict[str, dict]:

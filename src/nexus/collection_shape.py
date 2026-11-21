@@ -14,7 +14,7 @@ never calls a model.
 
 Two seams are deliberate:
 
-* :func:`collection_attributes` is the ONLY place that derives a
+* :func:`shape_of` is the ONLY place that derives a
   collection's content type, owner, model and version. Today it prefers the
   catalog row's columns and falls back to parsing the name (158 of 223 rows
   on the tenant measured were blank stubs, 12 of them live collections, T2
@@ -51,11 +51,11 @@ __all__ = [
     "TEST_RESIDUE_TOKENS",
     "THIN_CHUNK_FLOOR",
     "AuditReport",
-    "CollectionAttributes",
+    "CollectionShape",
     "CollectionFacts",
     "Finding",
     "audit",
-    "collection_attributes",
+    "shape_of",
     "gather_facts",
     "run_checks",
 ]
@@ -157,7 +157,7 @@ _RULE_OF_CHECK: dict[str, int] = {c: r for r, cs in CHECKS_BY_RULE.items() for c
 
 
 @dataclass(frozen=True, slots=True)
-class CollectionAttributes:
+class CollectionShape:
     """What the name or the row says a collection is. See module docstring
     for why this is the RDR-204 seam."""
 
@@ -170,7 +170,7 @@ class CollectionAttributes:
     source: str
 
 
-def collection_attributes(row: dict[str, Any]) -> CollectionAttributes:
+def shape_of(row: dict[str, Any]) -> CollectionShape:
     """Derive a collection's attributes, preferring the catalog row's columns.
 
     The name is parsed only when the row is blank (the stub-insert class) or
@@ -189,17 +189,17 @@ def collection_attributes(row: dict[str, Any]) -> CollectionAttributes:
     if ct and owner:
         if ct.startswith("quarantine-"):
             ct, quarantine = ct[len("quarantine-"):], True
-        return CollectionAttributes(ct, owner, model, ver, quarantine, "row")
+        return CollectionShape(ct, owner, model, ver, quarantine, "row")
     parts = name.split("__")
     if len(parts) < 2 or not parts[0]:
-        return CollectionAttributes("", "", "", "", False, "unknown")
+        return CollectionShape("", "", "", "", False, "unknown")
     p_ct = parts[0]
     if p_ct.startswith("quarantine-"):
         p_ct, quarantine = p_ct[len("quarantine-"):], True
     p_owner = parts[1]
     p_model = parts[2] if len(parts) >= 3 else ""
     p_ver = parts[3] if len(parts) >= 4 else ""
-    return CollectionAttributes(p_ct, p_owner, p_model, p_ver, quarantine, "name")
+    return CollectionShape(p_ct, p_owner, p_model, p_ver, quarantine, "name")
 
 
 @dataclass(slots=True)
@@ -215,7 +215,7 @@ class CollectionFacts:
     """
 
     name: str
-    attrs: CollectionAttributes
+    attrs: CollectionShape
     catalog_row: bool
     legacy_grandfathered: bool
     superseded_by: str
@@ -249,7 +249,7 @@ def gather_facts(
         st = stats.get(name)
         facts.append(CollectionFacts(
             name=name,
-            attrs=collection_attributes(row),
+            attrs=shape_of(row),
             catalog_row=name in rows,
             legacy_grandfathered=bool(row.get("legacy_grandfathered")),
             superseded_by=str(row.get("superseded_by") or ""),
@@ -322,10 +322,10 @@ def _has_residue_token(subject: str) -> bool:
 
 def _name_owner_segment(name: str) -> str:
     """The owner segment *name* spells, or ``""``. Goes through
-    :func:`collection_attributes` with a blank row, the one place this module
+    :func:`shape_of` with a blank row, the one place this module
     parses a name (RDR-204 census), so the audit reports a placeholder by name
     without adding a second parse site. Never a routing decision."""
-    return collection_attributes({"name": name}).owner_id
+    return shape_of({"name": name}).owner_id
 
 
 def run_checks(

@@ -33,15 +33,13 @@ from nexus.corpus import (
     collection_content_type,
     collection_model,
     collection_owner,
-    embedding_model_for_collection,
-    index_model_for_collection,
-    is_conformant_collection_name,
     resolve_corpus,
     store_read_scope,
-    split_candidate_collection_name,
     t3_collection_name,
     t3_collection_names_for_read,
 )
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name, split_candidate_collection_name
+from nexus.catalog.rows.resolve import embedding_model_for
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
@@ -8647,7 +8645,8 @@ def collection_list() -> str:
             return "No collections found."
         lines: list[str] = []
         for c in sorted(cols, key=lambda x: x["name"]):
-            model = embedding_model_for_collection(c["name"])
+            # The listing row is the registry row: its own model first, the name only when it carries none.
+            model = embedding_model_for(c["name"], row_resolver=lambda _n, row=c: row)
             lines.append(f"{c['name']}  {c['count']:>6} docs  ({model})")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -9997,8 +9996,7 @@ def collection_info(name: str) -> str:
             info = db.collection_info(name)
         except KeyError:
             return f"Collection not found: {name!r}"
-        qry_model = embedding_model_for_collection(name)
-        idx_model = index_model_for_collection(name)
+        qry_model = idx_model = embedding_model_for(name)
         count = info.get("count", 0)
         lines: list[str] = [
             f"Collection:  {name}",

@@ -40,7 +40,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from nexus.corpus import parse_conformant_collection_name
+from nexus.catalog.rows.legacy_names import parse_conformant_collection_name
 
 CENSUS_ID = "rdr229-p1.2"
 

@@ -1270,7 +1270,8 @@ def _collection_is_bge(
     row-preferred shape as :func:`_is_cce_collection`, and *row_resolver* is
     forwarded the same way so the read never crosses tenants.
     """
-    from nexus.corpus import embedding_model_for_collection_name, resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
     model = resolve_row_preferred(
         collection, "embedding_model", embedding_model_for_collection_name,
@@ -1316,7 +1317,8 @@ def _is_cce_collection(
     so this row read never goes through a DIFFERENT tenant than the one
     doing the write.
     """
-    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
     def _name_fallback(n: str) -> str | None:
         content_type_probe, owner_probe = split_candidate_collection_name(n)
@@ -1358,7 +1360,7 @@ def _write_model_for_collection(collection: str) -> str | None:
     does, it inherits the same cross-tenant risk nexus-fryrd fixed for
     the cap/byte-budget path.
     """
-    from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
     row = get_collection_row(collection)
     if row is not None:
@@ -6204,6 +6206,8 @@ class HttpVectorClient:
     #: (not present as a key) when no catalog row backs that collection.
     _STATS_CATALOG_ATTR_KEYS = (
         "content_type", "owner_id", "embedding_model", "lifecycle_state", "superseded_by",
+        # RDR-229 P2.2: kept when the listing sends them (collection_id is P3.1's).
+        "collection_id", "model_version", "dimension",
     )
 
     def list_collections(
@@ -7560,11 +7564,12 @@ class HttpVectorClient:
         nexus-h8rf6.8: was missing — doctor's model-drift probe
         (``doctor_search._collection_metadata``) degraded to
         ``ProbeResult(outcome='error')`` for every collection in service
-        mode. Full T3Database parity is achievable client-side: T3 derives
-        ``embedding_model`` / ``index_model`` from the collection NAME
-        (conformant names embed the model; ``index_model_for_collection``
-        is an alias of ``embedding_model_for_collection``) — only ``count``
-        needs the server.
+        mode. Only ``count`` needs the server. ``embedding_model`` / ``index_model``
+        are the collection's catalog ROW's model, read through this client's own
+        row reader (RDR-229 P2.2, :func:`nexus.catalog.rows.resolve.embedding_model_for`);
+        a name no row backs answers the name's own derivation (conformant names
+        embed the model; ``index_model_for_collection`` is an alias of
+        ``embedding_model_for_collection``).
 
         Keys returned: ``name``, ``count``, ``embedding_model`` (query-time
         model), ``index_model`` (index-time model, may differ for CCE
@@ -7572,19 +7577,15 @@ class HttpVectorClient:
         — on pgvector, zero stored rows is indistinguishable from absent
         (:meth:`collection_info` semantics, RDR-156 Decision 6).
         """
-        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)
-            embedding_model_for_collection,
-            embedding_model_for_collection_name,
-            index_model_for_collection,
-        )
+        from nexus.catalog.rows.resolve import embedding_model_for  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)
 
         n = self._count_or_key_error(collection_name)
-        parsed = embedding_model_for_collection_name(collection_name)
+        model = embedding_model_for(collection_name, row_resolver=self._resolve_collection_row)
         return {
             "name": collection_name,
             "count": n,
-            "embedding_model": parsed or embedding_model_for_collection(collection_name),
-            "index_model": parsed or index_model_for_collection(collection_name),
+            "embedding_model": model,
+            "index_model": model,
         }
 
 # ── Module-level routing helper ───────────────────────────────────────────────

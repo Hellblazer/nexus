@@ -125,7 +125,7 @@ class _CatalogBackedRegistry:
         if "docs_collection" in fields and self._writer is not None:
             new_name = fields["docs_collection"]
             if new_name:
-                from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+                from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
                 owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
@@ -1198,7 +1198,7 @@ def index_repo_cmd(
             # registered") are candidate strings that may have no catalog
             # row -- split_candidate_collection_name, not the row-based
             # collection_content_type.
-            from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             info = reg.get(path) or {}
             existing_docs = info.get("docs_collection", "")
@@ -2449,7 +2449,7 @@ def _discover_subset(
     # indexed THIS run, whose row may not have propagated to the
     # stats-backed row cache yet. split_candidate_collection_name, not
     # the row-based collection_content_type.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if not isinstance(files_changed_by_kind, dict):
         return list(collections)
@@ -3253,7 +3253,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     _log = structlog.get_logger(__name__)
 
     from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
-    from nexus.corpus import candidate_knowledge_subject, catalog_subject_finder, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        catalog_subject_finder,
+        t3_collection_name,
+    )
+    from nexus.catalog.rows.legacy_names import candidate_knowledge_subject  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,

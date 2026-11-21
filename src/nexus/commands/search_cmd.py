@@ -9,7 +9,8 @@ import structlog
 
 from nexus.config import get_telemetry_config, get_tuning_config, load_config
 from nexus.context_annotations import DISPLAY_SOURCE_PATH_KEY, SENSITIVE_READER_CLAUSE
-from nexus.corpus import is_conformant_collection_name, resolve_corpus
+from nexus.corpus import resolve_corpus
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 from nexus.commands.store import _t3
 from nexus.formatters import (
     _format_with_bat,

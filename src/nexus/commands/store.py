@@ -1038,7 +1038,7 @@ def _resolve_bare_subject(collection: str, *, t3: object | None = None, for_writ
     a restore, the case ``allow_placeholder`` exists for, and a raw legacy
     import such as ``knowledge__knowledge`` worked before this resolved.
     """
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     restore = bool(
         for_write and t3 is not None

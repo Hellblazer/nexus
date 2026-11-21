@@ -15,7 +15,9 @@ tokenizer is loaded.
 from __future__ import annotations
 
 import functools
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import structlog
 from tokenizers import Tokenizer
@@ -142,20 +144,69 @@ def window_for_model(model: str) -> TokenWindow | None:
     return TokenWindow(max_tokens, path)
 
 
-def window_for_collection(collection: str, model: str) -> TokenWindow | None:
+def store_row_resolver(db: object) -> Callable[..., dict | None] | None:
+    """The catalog-row reader of the store *db*, or ``None`` when it has none.
+
+    An in-memory double or a dry run's throwaway store has no catalog, so it answers ``None``
+    and the name decides, as it always did there. Looked up on the class: a mock store answers
+    any attribute. The reader is the store's own, so it never crosses tenants (nexus-dxifx).
+    """
+    # ``__class__``, not ``type``: a ``MagicMock(spec=HttpVectorClient)`` reports the class it stands for
+    # and has the reader; a bare ``MagicMock()`` has none (its attribute is made up on access).
+    if getattr(db.__class__, "_resolve_collection_row", None) is None:
+        return None
+    return db._resolve_collection_row  # type: ignore[attr-defined,no-any-return]
+
+
+def _no_catalog(collection: str, **_kwargs: Any) -> None:
+    return None
+
+
+#: The row reader of a store that has no catalog: every collection is "no row". A caller that reads
+#: a model for such a store passes this instead of ``None``, which would read the process-wide cache
+#: (another store's, or none reachable).
+NO_CATALOG: Callable[..., dict | None] = _no_catalog
+
+
+def row_model_of(collection: str, row_resolver: Callable[..., dict | None] | None) -> str | None:
+    """The ``embedding_model`` of *collection*'s registry row through *row_resolver*, else ``None``.
+
+    ``None`` when there is no resolver, no row, an unreadable listing or a row with no model.
+    The non-strict read: a chunker that sizes a window from it falls back to the name.
+    """
+    if row_resolver is None or not collection:
+        return None
+    from nexus.catalog.rows.resolve import Row, resolve_collection  # noqa: PLC0415 — deferred; resolve pulls the catalog stack
+
+    out = resolve_collection(collection, row_resolver=row_resolver, need_version=False, strict=False)
+    return out.attributes.embedding_model or None if isinstance(out, Row) else None
+
+
+def window_for_collection(
+    collection: str, model: str, *, row_model: str | None = None,
+    row_resolver: Callable[..., dict | None] | None = None,
+) -> TokenWindow | None:
     """The window for chunks bound for *collection*.
 
-    A conformant collection name carries the model token the engine embeds
-    its chunks with, so that token decides the window. *model* is the
-    caller's own idea of the model, used only when the name carries none (a
-    legacy two-segment name, an empty name). The two disagree on a
-    service-backed local install: the engine embeds bge-768 while the Python
-    embedding function, with no fastembed extra, reports MiniLM, and asking
-    for MiniLM's window made every index run warn about a tokenizer the
-    install has no use for (RDR-224 guest walk).
+    The engine embeds a collection by its registry row, so the row's ``embedding_model``
+    decides the window (RDR-229 P2.2; a rename keeps the source row's model under the new
+    name, so the name's token can disagree). A caller that has already read the row passes its
+    model as *row_model* (``doc_indexer._target_model``'s answer, ``nx index repo``'s per-collection
+    target model), and no second read is made; otherwise *row_resolver* is the caller's
+    own store's reader (:func:`store_row_resolver`), and without either no catalog is consulted.
+    With no row, a conformant collection name carries the model token the engine embeds its
+    chunks with, and that token decides. *model* is the caller's own idea of the model, used
+    only when neither says (a legacy two-segment name with no row, an empty name). The two
+    disagree on a service-backed local install: the engine embeds bge-768 while the Python
+    embedding function, with no fastembed extra, reports MiniLM, and asking for MiniLM's window
+    made every index run warn about a tokenizer the install has no use for (RDR-224 guest walk).
     """
-    from nexus.corpus import index_model_for_collection, is_conformant_collection_name  # noqa: PLC0415 — deferred; corpus pulls the catalog stack
+    from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — deferred; keeps this module's import light
 
-    if collection and is_conformant_collection_name(collection):
-        return window_for_model(index_model_for_collection(collection))
-    return window_for_model(model)
+    if not collection:
+        return window_for_model(model)
+    from_row = row_model or row_model_of(collection, row_resolver)
+    if from_row:
+        return window_for_model(from_row)
+    token = embedding_model_for_collection_name(collection)
+    return window_for_model(token if token else model)

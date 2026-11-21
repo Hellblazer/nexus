@@ -28,7 +28,7 @@ _CORPUS_PREFIXES: frozenset[str] = frozenset({"knowledge", "code", "docs", "rdr"
 
 def _is_corpus_scope(text: str) -> bool:
     """A bare corpus prefix, a ``prefix__`` form, or a full collection name."""
-    from nexus.corpus import (  # noqa: PLC0415 — deferred: heavy import, branch-local
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred: heavy import, branch-local
         is_conformant_collection_name,
         split_candidate_collection_name,
     )

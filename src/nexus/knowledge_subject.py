@@ -57,27 +57,17 @@ def catalog_subject_finder() -> SubjectFinder:
     (RDR-229 P2.8, item 5).
 
     For the writers that hold no T3 handle (``nx index md``, ``nx index pdf``,
-    ``nx dt index``). It reads
-    ``make_catalog_reader().find_collection(...)`` for the process-default tenant
-    and closes the reader as ``HttpVectorClient.find_collection`` does. It never
+    ``nx dt index``). It is :func:`nexus.catalog.rows.resolve.find_collection`: a read of
+    ``make_catalog_reader().find_collection(...)`` for the process-default tenant that
+    closes the reader as ``HttpVectorClient.find_collection`` does. It never
     probes T3 names, so the nexus-hmxi rule (indexers do not grandfather onto
     legacy names) is untouched. The reader is built per call, never at
     construction. A failed read raises; :func:`t3_collection_name` turns it into
     :class:`CollectionRegistryUnreadableError` on a write.
     """
+    from nexus.catalog.rows.resolve import find_collection  # noqa: PLC0415 — deferred to avoid import cycle
 
-    def find(content_type: str, owner_id: str, embedding_model: str) -> "CollectionAttributes | None":
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
-
-        reader = make_catalog_reader()
-        try:
-            return reader.find_collection(content_type, owner_id, embedding_model)  # type: ignore[union-attr]
-        finally:
-            close = getattr(reader, "close", None)
-            if close is not None:
-                close()
-
-    return find
+    return find_collection
 
 
 def knowledge_subject_label(
