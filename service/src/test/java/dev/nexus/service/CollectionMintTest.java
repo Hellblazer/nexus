@@ -49,7 +49,6 @@ class CollectionMintTest {
     private static final String SVC_ROLE = "svc_mint_test";
     private static final String SVC_PASS = "svc_mint_test_pass";
     private static final String MODEL = "bge-base-en-v15-768";
-    private static final String INDEX = "catalog_collections_live_tuple_uq";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -83,7 +82,10 @@ class CollectionMintTest {
     /** Every test starts with the index absent, which is the state of a fresh install until the re-own move completes. */
     @BeforeEach
     void indexAbsent() {
-        su(ctx -> ctx.execute("DROP INDEX IF EXISTS nexus." + INDEX));
+        su(ctx -> {
+            CollectionMintSupport.dropIndex(ctx);
+            return null;
+        });
     }
 
     private <T> T su(Function<DSLContext, T> work) {
@@ -95,13 +97,14 @@ class CollectionMintTest {
     }
 
     private boolean indexPresent() {
-        return su(ctx -> ctx.resultQuery("SELECT to_regclass('nexus." + INDEX + "') IS NOT NULL").fetchOne(0, Boolean.class));
+        return su(CollectionMintSupport::indexPresent);
     }
 
     private void createIndex() {
-        su(ctx -> ctx.execute("CREATE UNIQUE INDEX IF NOT EXISTS " + INDEX + " ON nexus.catalog_collections "
-            + "(tenant_id, content_type, owner_id, embedding_model, model_version) "
-            + "WHERE superseded_by = '' AND lifecycle_state <> 'quarantine'"));
+        su(ctx -> {
+            CollectionMintSupport.createIndex(ctx);
+            return null;
+        });
     }
 
     private static Map<String, Object> attrs(String owner) {
@@ -128,19 +131,15 @@ class CollectionMintTest {
 
     /** The value the sequence hands out next. */
     private long nextSequenceValue() {
-        return su(ctx -> {
-            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
-            var r = ctx.fetchOne("SELECT last_value, is_called FROM " + seq);
-            return r.get(1, Boolean.class) ? r.get(0, Long.class) + 1 : r.get(0, Long.class);
-        });
+        return su(CollectionMintSupport::nextSequenceValue);
     }
 
     /** A live row of {@code TENANT} with this name, as a superuser writes it (the sequence assigns its id). */
     private void seedLiveRow(String name, String owner) {
-        su(ctx -> ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
-                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
-            .values(TENANT, name, "knowledge", owner, MODEL, "v1", "live").execute());
+        su(ctx -> {
+            CollectionMintSupport.insertLiveRow(ctx, TENANT, name, owner, MODEL, null);
+            return null;
+        });
     }
 
     // ── the mint ────────────────────────────────────────────────────────────────────────────────
