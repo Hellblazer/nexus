@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.UnregisteredCollectionException;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
@@ -185,10 +186,44 @@ class CatalogDualWriteIdTest {
         assertThat(docId("dw.n1")).isNull();
     }
 
+    private static final String GHOST = "knowledge__never-registered__minilm-l6-v2-384__v1";
+
+    private int docsNaming(String collection) {
+        return su(ctx -> ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(T)
+            .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(collection))));
+    }
+
     @Test
-    void aDocumentNamingAnUnregisteredCollection_isRefusedByTheCheck() {
-        assertThatThrownBy(() -> repo.upsertDocument(T, doc("dw.x1", "knowledge__never-registered__minilm-l6-v2-384__v1")))
-            .hasMessageContaining(DOC_CHECK);
+    void everyRegisterPath_refusesAnUnregisteredCollectionWithTheTypedError_andWritesNothing() {
+        Map<String, Object> fields = Map.of("title", "ghost", "content_type", "paper", "corpus", "knowledge",
+            "file_path", "/dw/ghost.md", "physical_collection", GHOST);
+        assertThatThrownBy(() -> repo.upsertDocument(T, doc("dw.x1", GHOST)))
+            .as("upsertDocument").isInstanceOf(UnregisteredCollectionException.class);
+        assertThatThrownBy(() -> repo.registerDocument(T, "dw-ghost", fields))
+            .as("registerDocument").isInstanceOf(UnregisteredCollectionException.class);
+        assertThatThrownBy(() -> repo.registerDocumentMany(T, "dw-ghost", List.of(fields)))
+            .as("registerDocumentMany").isInstanceOf(UnregisteredCollectionException.class);
+        assertThatThrownBy(() -> repo.importDocument(T, doc("dw.x2", GHOST)))
+            .as("importDocument").isInstanceOf(UnregisteredCollectionException.class);
+        assertThatThrownBy(() -> repo.importDocumentsBatch(T, List.of(doc("dw.x3", C1), doc("dw.x4", GHOST))))
+            .as("importDocumentsBatch refuses the whole batch").isInstanceOf(UnregisteredCollectionException.class);
+        assertThat(docsNaming(GHOST)).isZero();
+        assertThat(docId("dw.x3")).as("the registered row of the refused batch was not written either").isNull();
+    }
+
+    @Test
+    void everyUpdatePath_refusesAMoveToAnUnregisteredCollectionWithTheTypedError_andWritesNothing() {
+        repo.upsertDocument(T, doc("dw.x5", C1));
+        assertThatThrownBy(() -> repo.updateDocument(T, "dw.x5", Map.of("physical_collection", GHOST)))
+            .as("updateDocument").isInstanceOf(UnregisteredCollectionException.class);
+        assertThatThrownBy(() -> repo.updateDocumentsMany(T, List.of(
+                Map.of("tumbler", "dw.x5", "title", "fine"), Map.of("tumbler", "dw.x5", "physical_collection", GHOST))))
+            .as("updateDocumentsMany refuses the whole request").isInstanceOf(UnregisteredCollectionException.class);
+        assertThat(docsNaming(GHOST)).isZero();
+        assertThat(docId("dw.x5")).isEqualTo(regId(C1));
+        String title = su(ctx -> ctx.select(CATALOG_DOCUMENTS.TITLE).from(CATALOG_DOCUMENTS)
+            .where(CATALOG_DOCUMENTS.TUMBLER.eq("dw.x5")).fetchOne(CATALOG_DOCUMENTS.TITLE));
+        assertThat(title).as("the title update of the refused batch did not land").isEqualTo("Doc dw.x5");
     }
 
     @Test

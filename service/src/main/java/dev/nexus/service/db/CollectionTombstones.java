@@ -19,7 +19,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * <p>Moved out of {@code CatalogRepository} (over its size cap) as the area this bead rewrites: the repository's
  * {@code supersedeCollection} is a delegate of {@link #supersede}.
  */
-final class CollectionTombstones {
+public final class CollectionTombstones {
 
     private CollectionTombstones() {}
 
@@ -72,6 +72,23 @@ final class CollectionTombstones {
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID))
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
             .execute();
+    }
+
+    /**
+     * The parity check of the superseded_by invariant, for one tenant: the number of {@code catalog_collections} rows
+     * that break it. The invariant: a live row has no {@code superseded_by_id}; a tombstone's {@code superseded_by_id}
+     * is the id of the row its {@code superseded_by} names whenever such a row exists in the tenant, and its own
+     * {@code collection_id} (retired, no successor) only when none does. Run in the tenant's scope. The stamp move's
+     * verification reuses it; zero is the answer a stamped tenant gives.
+     */
+    public static int invariantViolations(DSLContext ctx, String tenant) {
+        var s = CATALOG_COLLECTIONS.as("inv");
+        Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
+            .where(s.TENANT_ID.eq(CATALOG_COLLECTIONS.TENANT_ID)).and(s.NAME.eq(CATALOG_COLLECTIONS.SUPERSEDED_BY)));
+        return ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(
+            CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isNotNull())
+            .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.ne("").and(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.isDistinctFrom(
+                DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID))))));
     }
 
     /**
