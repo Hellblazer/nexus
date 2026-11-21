@@ -28,6 +28,7 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.corpus import _write_intent_embedding_model
 from tests._catalog_fixture_ops import ActiveCatalog
+from tests._upgrade_state import seed_pre_p31_document
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -122,7 +123,15 @@ def test_backfill_reports_an_unregistered_quarantine_sibling_and_does_not_count_
     sibling reaches backfill only through a document's physical_collection;
     it is reported and left out of the count."""
     fake_t3 = _FakeT3(names=[f"code__1-41__{_CODE_MODEL}__v1"])
-    _seed_document(catalog, tumbler="1.1.1", collection=f"quarantine-code__1-41__{_CODE_MODEL}__v1")
+    # RDR-229 P3.1 (nexus-p2m1x.17): the engine refuses a document under a collection with no registry row, so
+    # this state is no longer writable. An install upgraded from before the cut still holds it (the NOT VALID
+    # CHECKs leave old rows alone), so the document is seeded as that install has it: the name set, the id NULL,
+    # no registry row; seed_pre_p31_document asserts exactly that before it returns.
+    owner = catalog.register_owner("backfill-seed", "curator", repo_hash="")
+    seed_pre_p31_document(
+        owner, title="doc-1.1.1", file_path="/tmp/1.1.1.md",
+        physical_collection=f"quarantine-code__1-41__{_CODE_MODEL}__v1",
+    )
 
     with patch("nexus.db.make_t3", return_value=fake_t3):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
