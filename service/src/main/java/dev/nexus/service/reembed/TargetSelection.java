@@ -56,14 +56,14 @@ public final class TargetSelection {
     /** A catalog collection row: the fields of {@code CatalogRepository}'s list-route row that selection reads. */
     public record CollectionRow(String name, String contentType, String ownerId, String embeddingModel,
                                 String modelVersion, boolean legacyGrandfathered, String supersededBy,
-                                String lifecycleState, String createdAt) {
+                                String lifecycleState, String createdAt, Long collectionId) {
 
-        /** A row with no registration stamp: it ties on age with every other, so the name decides. */
+        /** A row with no registration stamp and no id: it ties on age with every other, so the name decides. */
         public CollectionRow(String name, String contentType, String ownerId, String embeddingModel,
                              String modelVersion, boolean legacyGrandfathered, String supersededBy,
                              String lifecycleState) {
             this(name, contentType, ownerId, embeddingModel, modelVersion, legacyGrandfathered, supersededBy,
-                lifecycleState, "");
+                lifecycleState, "", null);
         }
 
         /** The row as {@code CatalogRepository#listCollections} returns it (the keys of its map shape). */
@@ -72,7 +72,7 @@ public final class TargetSelection {
                 str(m.get("name")), str(m.get("content_type")), str(m.get("owner_id")),
                 str(m.get("embedding_model")), str(m.get("model_version")),
                 Boolean.TRUE.equals(m.get("legacy_grandfathered")),
-                str(m.get("superseded_by")), str(m.get("lifecycle_state")), str(m.get("created_at")));
+                str(m.get("superseded_by")), str(m.get("lifecycle_state")), str(m.get("created_at")), null);
         }
 
         boolean superseded() {

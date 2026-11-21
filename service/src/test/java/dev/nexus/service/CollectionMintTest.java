@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionMint;
 import dev.nexus.service.db.MintedLabel;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
@@ -307,5 +308,126 @@ class CollectionMintTest {
         List<String> names = new ArrayList<>();
         names.add((String) found.get("name"));
         assertThat(names).allMatch(n -> n.matches("c[0-9]+"));
+    }
+
+    // ── a named upsert onto a live tuple another collection holds ───────────────────────────────
+
+    private static Map<String, Object> named(String name, String owner) {
+        Map<String, Object> m = attrs(owner);
+        m.put("name", name);
+        return m;
+    }
+
+    private void assertNamedUpsertOntoAHeldTupleRefusesNamingBoth(String suffix) {
+        String owner = "subject-named-" + suffix;
+        repo.upsertCollection(TENANT, named("held-named-" + suffix, owner), true);
+
+        assertThatThrownBy(() -> repo.upsertCollection(TENANT, named("intruder-named-" + suffix, owner), true))
+            .as("a named registration onto a held live tuple is a refusal naming both collections, not a bare unique violation")
+            .isInstanceOf(CollectionMint.LiveTupleConflict.class)
+            .hasMessageContaining("held-named-" + suffix).hasMessageContaining("intruder-named-" + suffix);
+
+        assertThat(rowsOfTuple(owner)).as("the held row only").isEqualTo(1);
+        repo.upsertCollection(TENANT, named("held-named-" + suffix, owner), true);
+        assertThat(rowsOfTuple(owner)).as("re-registering the holder's own name is not a conflict").isEqualTo(1);
+    }
+
+    @Test
+    void aNamedUpsertOntoAHeldLiveTupleIsRefusedNamingBoth_withTheIndexAbsent() {
+        assertThat(indexPresent()).isFalse();
+        assertNamedUpsertOntoAHeldTupleRefusesNamingBoth("off");
+    }
+
+    @Test
+    void aNamedUpsertOntoAHeldLiveTupleIsRefusedNamingBoth_withTheIndexPresent() {
+        createIndex();
+        assertThat(indexPresent()).isTrue();
+        assertNamedUpsertOntoAHeldTupleRefusesNamingBoth("on");
+    }
+
+    @Test
+    void aNamedUpsertOnAFreeTupleOrAnotherVersionStillLands() {
+        repo.upsertCollection(TENANT, named("held-free-1", "subject-free"), true);
+        var otherVersion = named("held-free-2", "subject-free");
+        otherVersion.put("model_version", "v2");
+        repo.upsertCollection(TENANT, otherVersion, true);
+        assertThat(rowsOfTuple("subject-free")).isEqualTo(2);
+    }
+
+    // ── import rows on a held live tuple, in both index states ──────────────────────────────────
+
+    private List<Map<String, Object>> importRows(String owner, String... names) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (String name : names) {
+            rows.add(named(name, owner));
+        }
+        return rows;
+    }
+
+    private void assertBatchImportRefusals(String suffix) {
+        String owner = "subject-import-" + suffix;
+        repo.upsertCollection(TENANT, named("held-import-" + suffix, owner), true);
+
+        assertThatThrownBy(() -> repo.importCollectionsBatchReport(TENANT, importRows(owner, "imp-a-" + suffix)))
+            .as("an import row on a held live tuple").isInstanceOf(CollectionMint.LiveTupleConflict.class)
+            .hasMessageContaining("held-import-" + suffix).hasMessageContaining("imp-a-" + suffix);
+        String twinOwner = "subject-import-twin-" + suffix;
+        assertThatThrownBy(() -> repo.importCollectionsBatchReport(TENANT,
+                importRows(twinOwner, "imp-twin-a-" + suffix, "imp-twin-b-" + suffix)))
+            .as("two new rows of one batch on one tuple").isInstanceOf(CollectionMint.LiveTupleConflict.class)
+            .hasMessageContaining("imp-twin-a-" + suffix).hasMessageContaining("imp-twin-b-" + suffix);
+
+        assertThat(rowsOfTuple(owner)).as("the held row only").isEqualTo(1);
+        assertThat(rowsOfTuple(twinOwner)).as("the batch is refused whole").isZero();
+        var free = repo.importCollectionsBatchReport(TENANT, importRows("subject-import-free-" + suffix, "imp-free-" + suffix));
+        assertThat(free.imported()).as("a free tuple still imports").isEqualTo(1);
+    }
+
+    @Test
+    void aBatchImportOnAHeldLiveTupleOrTwoRowsOfOneTupleIsRefusedNamingBoth_withTheIndexAbsent() {
+        assertThat(indexPresent()).isFalse();
+        assertBatchImportRefusals("off");
+    }
+
+    @Test
+    void aBatchImportOnAHeldLiveTupleOrTwoRowsOfOneTupleIsRefusedNamingBoth_withTheIndexPresent() {
+        createIndex();
+        assertBatchImportRefusals("on");
+    }
+
+    @Test
+    void anImportRacingAMintOfOneTupleNeverLeavesTwoLiveRows_withTheIndexAbsent() throws Exception {
+        assertThat(indexPresent()).as("guard: the advisory-lock path is the one that serializes").isFalse();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            int refusedImports = 0;
+            for (int i = 0; i < 12; i++) {
+                final int n = i;
+                String owner = "subject-import-race-" + n;
+                var gate = new CyclicBarrier(2);
+                var mint = pool.submit(() -> {
+                    gate.await(30, TimeUnit.SECONDS);
+                    return repo.mintCollection(TENANT, attrs(owner), true);
+                });
+                var imported = pool.submit(() -> {
+                    gate.await(30, TimeUnit.SECONDS);
+                    try {
+                        repo.importCollectionsBatchReport(TENANT, importRows(owner, "imp-race-" + n));
+                        return true;
+                    } catch (CollectionMint.LiveTupleConflict refused) {
+                        return false;
+                    }
+                });
+                mint.get(90, TimeUnit.SECONDS);
+                if (!imported.get(90, TimeUnit.SECONDS)) {
+                    refusedImports++;
+                }
+                assertThat(su(ctx -> (long) ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                        .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))))
+                    .as("one live row for tuple %s (the import was %s)", owner, refusedImports).isEqualTo(1L);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }
