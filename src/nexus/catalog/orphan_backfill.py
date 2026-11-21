@@ -39,7 +39,7 @@ import structlog
 
 from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.link_generator import _pdf_content_hash
-from nexus.corpus import split_candidate_collection_name
+from nexus.catalog.rows.legacy_names import split_candidate_collection_name
 from nexus.db.limits import QUOTAS
 
 if TYPE_CHECKING:

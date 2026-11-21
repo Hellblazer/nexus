@@ -21,12 +21,8 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import structlog
 
-from nexus.corpus import (
-    CANONICAL_EMBEDDING_MODELS,
-    CONTENT_TYPES,
-    LOCAL_EMBEDDING_MODELS,
-    parse_conformant_collection_name,
-)
+from nexus.catalog.rows.legacy_names import candidate_attributes, version_of_blank_row_label
+from nexus.corpus import CANONICAL_EMBEDDING_MODELS, CONTENT_TYPES, LOCAL_EMBEDDING_MODELS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,6 +30,11 @@ if TYPE_CHECKING:
     from nexus.catalog.tumbler import Tumbler
 
 _log = structlog.get_logger(__name__)
+
+#: The embedding-model tokens a conformant collection name may carry, cloud and local: the
+#: closed set ``CollectionName.parse`` validates against, and the one the blank-version
+#: fallback keeps validating (``legacy_names`` cannot import it from ``nexus.corpus``).
+KNOWN_EMBEDDING_MODELS: frozenset[str] = CANONICAL_EMBEDDING_MODELS | LOCAL_EMBEDDING_MODELS
 
 #: The ``lifecycle_state`` values a ``for_tuple`` row may carry and still be written to (RDR-229
 #: P2.5). The engine's CHECK allows these and ``quarantine`` (hygiene-002); its tuple filter is
@@ -113,24 +114,30 @@ class CollectionName:
         non-canonical embedding models, or any other shape that does not
         match the RDR-103 schema. Generic callers receiving arbitrary
         physical-collection strings must gate with
-        ``nexus.corpus.is_conformant_collection_name`` before calling
+        ``nexus.catalog.rows.legacy_names.is_conformant_collection_name`` before calling
         this constructor.
 
         The conformance regex (``_CONFORMANT_COLLECTION_RE`` in
-        ``nexus.corpus``) is derived from ``CONTENT_TYPES``, so the
+        ``nexus.catalog.rows.legacy_names``, the one name parser left, read
+        through ``candidate_attributes``) is derived from the same content types, so the
         content_type group already enforces the closed set. The redundant
         check below catches a future divergence (e.g. someone widens the
         regex without updating ``CONTENT_TYPES``) without weakening today's
         guarantees.
         """
-        parsed = parse_conformant_collection_name(name)
-        content_type = parsed["content_type"]
+        parsed = candidate_attributes(name)
+        if parsed is None or not parsed.conformant:
+            raise ValueError(
+                f"Collection name {name!r} is not conformant: "
+                f"expected <content_type>__<owner_id>__<embedding_model>__v<n>"
+            )
+        content_type = parsed.content_type
         if content_type not in CONTENT_TYPES:
             raise ValueError(
                 f"Collection name {name!r} has unknown content_type "
                 f"{content_type!r}; expected one of {CONTENT_TYPES}"
             )
-        embedding_model = parsed["embedding_model"]
+        embedding_model = parsed.embedding_model
         # RDR-109 Phase 2 widens the closed set to include local-mode
         # tokens. Both cloud (CANONICAL) and local (LOCAL) names are
         # truthful identities under the four-segment schema.
@@ -147,10 +154,20 @@ class CollectionName:
             )
         return cls(
             content_type=content_type,
-            owner_id=parsed["owner_id"],
+            owner_id=parsed.owner_id,
             embedding_model=embedding_model,
-            model_version=int(parsed["model_version"][1:]),
+            model_version=parsed.model_version,
         )
+
+
+def row_version_number(raw: object) -> int | None:
+    """The version number of a registry row's ``model_version`` text (``"v<N>"``, N >= 1), else ``None``.
+
+    The one parser of that text: :func:`version_from_for_tuple_row` raises on ``None`` and
+    :func:`nexus.catalog.rows.resolve.resolve_collection` reads it as an unreadable version.
+    """
+    digits = raw[1:] if isinstance(raw, str) and raw.startswith("v") else ""
+    return int(digits) if digits.isascii() and digits.isdigit() and int(digits) >= 1 else None
 
 
 def version_from_for_tuple_row(
@@ -180,9 +197,12 @@ def version_from_for_tuple_row(
     the caller answers the row as it is and refuses only a bump. A name that
     parses to version 0 raises.
 
-    The fallback is temporary: P1.2's production census (nexus-p2m1x.2) counts
-    rows with an empty ``model_version``, and the fallback comes out once that
-    count reads zero.
+    The fallback is temporary and lives in
+    :func:`nexus.catalog.rows.legacy_names.version_of_blank_row_label` (a migration
+    source, RDR-229 P2.2): P1.2's production census (nexus-p2m1x.2) counts rows with an
+    empty ``model_version``, and it comes out once D2's cloud run completes (no bead owns
+    the removal). It refuses a model token outside :data:`KNOWN_EMBEDDING_MODELS`, as
+    ``CollectionName.parse`` did.
     """
     got = (row.get("content_type"), row.get("owner_id"), row.get("embedding_model"))
     want = (content_type, owner_id, embedding_model)
@@ -199,23 +219,14 @@ def version_from_for_tuple_row(
         )
     raw = row.get("model_version")
     if raw == "":
-        name = row.get("name")
-        try:
-            version = CollectionName.parse(name).model_version  # type: ignore[arg-type]
-        except (ValueError, TypeError, AttributeError):
-            _log.warning("collection_for_row_model_version_unreadable", collection=name)
-            return None
-        if version < 1:
-            raise ValueError(f"collection row {name!r} has an empty model_version and name version v0")
-        _log.warning("collection_for_row_model_version_empty", collection=name)
-        return version
-    digits = raw[1:] if isinstance(raw, str) and raw.startswith("v") else ""
-    if not (digits.isascii() and digits.isdigit()) or int(digits) < 1:
+        return version_of_blank_row_label(row.get("name"), models=KNOWN_EMBEDDING_MODELS)
+    version = row_version_number(raw)
+    if version is None:
         raise ValueError(
             f"collection row {row.get('name')!r} has a malformed model_version {raw!r}; "
             "expected 'v<N>' with N >= 1"
         )
-    return int(digits)
+    return version
 
 
 @dataclass(frozen=True)

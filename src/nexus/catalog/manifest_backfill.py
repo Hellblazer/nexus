@@ -205,6 +205,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
+from nexus.catalog.rows.legacy_names import is_taxonomy_collection_name
 from nexus.catalog.types import manifest_span
 from nexus.errors import collection_not_found_errors
 from nexus.indexer_utils import is_note_shaped
@@ -218,7 +219,6 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-_TAXONOMY_PREFIX = "taxonomy__"
 _PAGE_SIZE = QUOTAS.MAX_RECORDS_PER_WRITE  # 300
 
 
@@ -862,7 +862,7 @@ def backfill_manifest_for_collection(
     result = BackfillResult(collection=collection_name, dry_run=dry_run)
 
     # taxonomy__* carve-out: centroids use centroid_hash, not chunk_text_hash.
-    if collection_name.startswith(_TAXONOMY_PREFIX):
+    if is_taxonomy_collection_name(collection_name):
         _log.info(
             "manifest_backfill_skipped_taxonomy",
             collection=collection_name,

@@ -15,6 +15,7 @@ import click
 import numpy as np
 import structlog
 
+from nexus.catalog.rows.legacy_names import is_taxonomy_collection_name
 from nexus.commands._help_links import PROJECTION_TUNING_EPILOG
 from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY as _T2_SHARED_CLIENT_CTX_KEY
 from nexus.commands._helpers import default_db_path as _default_db_path
@@ -105,7 +106,7 @@ def _enumerate_discoverable_collections(
         name for name, count, content_type in names
         if count >= MIN_DISCOVER_CHUNKS
         and name
-        and not name.startswith("taxonomy__")
+        and not is_taxonomy_collection_name(name)
         and not any(fnmatch(name, pat) for pat in exclude)
         and not content_type_excluded(name, exclude_content_types, content_type=content_type)
     ]

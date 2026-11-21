@@ -31,12 +31,8 @@ _InvalidArgumentErrors = vector_argument_errors()
 # guarded by cloud mode) was retired with the client-side credential
 # (Hal determination 2026-07-28: "we do no embedding on the client").
 
-from nexus.corpus import (
-    LOCAL_EMBEDDING_MODELS,
-    embedding_model_for_collection,
-    embedding_model_for_collection_name,
-    index_model_for_collection,
-)
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
+from nexus.corpus import LOCAL_EMBEDDING_MODELS, embedding_model_for_collection, index_model_for_collection
 from nexus.db.rows.lifecycle import (
     QUARANTINE_NAME_PREFIX,
     TAXONOMY_BYPASS_PREFIXES,
@@ -664,7 +660,7 @@ class T3Database:
 
         RDR-101 Phase 6 strict mode (nexus-o6aa.14) + RDR-103 Phase 5
         (nexus-yqnr.7): NEW collection names must satisfy
-        :func:`nexus.corpus.is_conformant_collection_name`. Existing
+        :func:`nexus.catalog.rows.legacy_names.is_conformant_collection_name`. Existing
         collections (any name) are always allowed; the validator only
         gates first-time creation. The default (``strict=None``) is
         unconditional strict. The post-Phase-5 flip removed the
@@ -674,9 +670,8 @@ class T3Database:
         legacy collections opt out via an explicit ``strict=False``
         keyword argument.
         """
-        from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-            is_conformant_collection_name, validate_collection_name,
-        )
+        from nexus.corpus import validate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         validate_collection_name(name)
 
         if strict is None:
@@ -1331,7 +1326,7 @@ class T3Database:
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed  # noqa: PLC0415 — stdlib import kept branch-local
 
-        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
+        from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — circular-dep avoidance (corpus)
             is_conformant_collection_name,
             parse_conformant_collection_name,
             split_candidate_collection_name,

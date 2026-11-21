@@ -1745,7 +1745,7 @@ def enrich_aspects(
     extractor names.
     """
     from nexus.aspect_extractor import eligible_extractor_names, select_config  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     # RDR-189 P1: the two validation files never share a path. Refuse before any
     # catalog read or extraction spend.

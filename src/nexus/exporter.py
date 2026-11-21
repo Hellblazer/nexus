@@ -67,10 +67,10 @@ import structlog
 
 from nexus.aspect_readers import canonical_note_uri, is_file_routed_collection, is_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
-from nexus.corpus import (
-    embedding_model_for_collection_name,
-    index_model_for_collection,
-)
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
+from nexus.catalog.rows.resolve import embedding_model_for
+from nexus.embed_window import NO_CATALOG, store_row_resolver
+from nexus.corpus import index_model_for_collection
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
@@ -501,7 +501,9 @@ def export_collection(
     col = db.get_collection(collection_name)
     total_count = _vector_with_retry(col.count)
 
-    embedding_model = index_model_for_collection(collection_name)
+    embedding_model = embedding_model_for(
+        collection_name, row_resolver=store_row_resolver(db) or NO_CATALOG,
+    )
 
     _log.info(
         "export_start",
@@ -1077,8 +1079,8 @@ def _wire_embedding_model(
     checks every vector's dimension against the collection's."""
     if name_carries_model:
         return effective_model
-    resolver = getattr(db, "_resolve_collection_row", None)
-    row = resolver(collection_name) if callable(resolver) else None
+    resolver = store_row_resolver(db)
+    row = resolver(collection_name) if resolver is not None else None
     model = (row or {}).get("embedding_model")
     if model:
         return str(model)

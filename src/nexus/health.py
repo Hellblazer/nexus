@@ -11218,7 +11218,10 @@ def _check_chash_conformance_report() -> list[HealthResult]:
     # never crash this check or hide the primary (non_)conformant result.
     unroutable_collections: list[str] = []
     try:
-        from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid import cycle
+            embedding_model_for_collection_name,
+            is_conformant_collection_name,
+        )
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
         from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
 

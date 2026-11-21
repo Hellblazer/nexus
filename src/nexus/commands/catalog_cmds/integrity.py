@@ -655,7 +655,8 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     # the treatment db/http_vector_client.py's _is_cce_collection already got
     # (db/reconcile.py's _model_for_collection, the other, was deleted by
     # RDR-223 P3.3).
-    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     content_type = resolve_row_preferred(
         e.physical_collection, "content_type",

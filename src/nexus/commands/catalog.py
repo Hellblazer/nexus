@@ -1484,7 +1484,7 @@ def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writ
     # CollectionNotRegisteredError for exactly the unregistered
     # collections it exists to discover. Candidate-string derivation
     # instead.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
@@ -1519,7 +1519,7 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
     """Register rdr__* collections in catalog with per-document titles from T3 metadata."""
     # RDR-204 Phase 3 (nexus-ft04v.26), class (d): see _backfill_knowledge's
     # comment -- same reason, same fix.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
@@ -1721,7 +1721,7 @@ def _backfill_papers(
     """Register docs__* paper collections, excluding repo-owned collections."""
     # RDR-204 Phase 3 (nexus-ft04v.26), class (d): see _backfill_knowledge's
     # comment -- same reason, same fix.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
@@ -1911,7 +1911,7 @@ def _backfill_per_file_from_t3(
     writes and returns the count that *would* register (subject to the
     same dedup logic against existing rows).
     """
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     w = writer if writer is not None else cat
     # Parse the trailing -<8hex> as the repo hash. ``rsplit`` keeps
@@ -2173,7 +2173,7 @@ def backfill_cmd(
         # collection_owner would raise CollectionNotRegisteredError for
         # exactly the unregistered ones this scan exists to find.
         # Candidate-string derivation instead.
-        from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         t3 = _make_t3()
         if from_t3_collection:

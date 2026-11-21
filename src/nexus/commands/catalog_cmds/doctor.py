@@ -1102,7 +1102,7 @@ def _run_name_vs_embed_dim() -> dict:
     # segment, not the (should-already-agree) catalog row.
     # embedding_model_for_collection_name (regex, unaffected by the
     # repoint) reads it directly.
-    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         embedding_model_for_collection_name,
         is_conformant_collection_name,
     )

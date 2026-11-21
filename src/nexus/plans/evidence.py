@@ -668,7 +668,7 @@ class ScopeConstraint:
             return cls("none", "")
         if scope_subtree(text) is not None:
             return cls("subtree", text)
-        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred: keeps this module stdlib-only at import time
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415 — deferred: keeps this module stdlib-only at import time
 
         if is_conformant_collection_name(text):
             return cls("collection", text)

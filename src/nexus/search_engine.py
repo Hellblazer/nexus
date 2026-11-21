@@ -35,10 +35,10 @@ from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exp
     entry_facts,
     owner_titles,
 )
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
     candidate_content_type,
-    embedding_model_for_collection_name,
     resolve_row_preferred,
 )
 from nexus.db.http_vector_client import (
