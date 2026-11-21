@@ -373,15 +373,20 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
             e -> register(e, tenant, own),
             e -> {
                 Integer written = Routines.canaryQueryRingUpsert(e.ctx().configuration(), tenant,
-                    new String[] {own, "docs__p31sql-never-registered__" + M768 + "__v1"}, new String[] {M768, M768},
-                    new String[] {vec, vec}, new byte[][] {Chash.ofText("digest one").toBytes(), Chash.ofText("digest two").toBytes()});
-                assertThat(written).as("one entry written, the unregistered collection's skipped").isEqualTo(1);
+                    new String[] {own}, new String[] {M768}, new String[] {vec}, new byte[][] {Chash.ofText("digest one").toBytes()});
+                assertThat(written).as("the registered entry is written").isEqualTo(1);
             },
             e -> {
                 List<Long> ids = e.ctx().select(CANARY_QUERY_RING.COLLECTION_ID).from(CANARY_QUERY_RING)
                     .where(CANARY_QUERY_RING.TENANT_ID.eq(tenant)).fetch(CANARY_QUERY_RING.COLLECTION_ID);
                 assertThat(ids).as("one ring row").hasSize(1);
                 assertThat(ids.get(0)).isEqualTo(e.id(tenant, own));
+                // linda's ruling: a name that does not resolve raises SQLSTATE 23503 (the code assign_from_chashes uses), it is not skipped
+                String state = refusal(() -> Routines.canaryQueryRingUpsert(e.ctx().configuration(), tenant,
+                    new String[] {"docs__p31sql-never-registered__" + M768 + "__v1"}, new String[] {M768}, new String[] {vec},
+                    new byte[][] {Chash.ofText("digest two").toBytes()}));
+                assertThat(state).as("an unregistered name raises").startsWith("23503").contains("is not registered for tenant");
+                assertThat(e.ctx().fetchCount(CANARY_QUERY_RING, CANARY_QUERY_RING.TENANT_ID.eq(tenant))).as("and writes nothing").isEqualTo(1);
             });
     }
 }

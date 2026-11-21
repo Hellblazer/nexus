@@ -375,6 +375,37 @@ class PciQueryRingIntegrationTest {
         assertThat(rows(t, gone)).isZero();
         assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_flush") && l.contains("skipped=1")
             && l.contains("failed=0"));
+        assertThat(appender.list).as("a structured warning names the tenant and the collection that did not resolve")
+            .anyMatch(ev -> ev.getLevel() == ch.qos.logback.classic.Level.WARN
+                && ev.getFormattedMessage().contains("event=pci_ring_entry_unregistered")
+                && ev.getFormattedMessage().contains("tenant=" + t) && ev.getFormattedMessage().contains("collection=" + gone));
+    }
+
+    /**
+     * RDR-229 P3.1: the function raises for a name that does not resolve (SQLSTATE 23503), and the writer, which is the only
+     * caller (a search only enqueues; it never reaches the function), logs it and carries on: nothing throws out of the flush,
+     * the other tenant's entries in the same flush are written, and the ring's own failure counter stays at zero.
+     */
+    @Test
+    void anEntryWhoseCollectionNeverResolves_isLoggedAndNeverFailsTheFlush_orAnotherTenantsEntries() throws Exception {
+        String t = newTenant();
+        String other = newTenant();
+        String unregistered = collectionOf(t, "never");
+        String ok = collectionOf(other, "ok");
+        register(other, ok);
+        PciQueryRing ring = ring(scope);
+        ring.admit(t, QueryVector.alone(modelOf(other, ok), vec(1), unregistered));   // no registry row for it in tenant t
+        admit(ring, other, ok, 2);
+
+        int written = ring.flushNow();
+
+        assertThat(written).as("the other tenant's entry").isEqualTo(1);
+        assertThat(rows(other, ok)).isEqualTo(1);
+        assertThat(rows(t, unregistered)).isZero();
+        assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_entry_unregistered")
+            && l.contains("tenant=" + t) && l.contains("collection=" + unregistered));
+        assertThat(logLines()).anyMatch(l -> l.contains("event=pci_ring_flush") && l.contains("written=1")
+            && l.contains("failed=0"));
     }
 
     // -- bounds and failure -------------------------------------------------------------------------------------
