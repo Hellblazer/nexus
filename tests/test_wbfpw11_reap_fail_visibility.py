@@ -195,11 +195,14 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     writer.write_manifest(src_doc, [{"chash": chash, "position": 0}], collection=src)
     export = tmp_path / "wbfpw11.nxexp"
     export_collection(db=client, collection_name=src, output_path=export)
-    target_subject = "wbfpw11-imported"
+    # RDR-229 P3.8: a new subject is minted a c<id> label, which a client built for an explicit tenant cannot read
+    # the row of before it holds a chunk (its import gate then guesses the model from the label). This test imports
+    # into a collection it names, so the target's conformant name is registered first, as an existing one is.
+    target = f"knowledge__wbfpw11-imported__{model_token}__v1"
+    register_seed_collections(target)
     with patch("nexus.commands.store._t3", return_value=client):
-        imported = runner.invoke(main, ["store", "import", str(export), "-c", target_subject])
+        imported = runner.invoke(main, ["store", "import", str(export), "-c", target])
     assert imported.exit_code == 0, imported.output
-    target = t3_collection_name(target_subject, subject_finder=catalog_subject_finder())
     reader = make_catalog_reader()
     assert reader is not None
     imported_docs = [

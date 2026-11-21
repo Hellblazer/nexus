@@ -1901,9 +1901,9 @@ def import_collection(
     # RDR-229 P3.8: a target the engine minted (``c9``) carries no model in its name, and the name guess answers a
     # Voyage model for it; the target's registry row (read above) holds the model its vectors are in.
     if target_row and target_row.get("embedding_model"):
-        from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — deferred: only a name with no model token needs the row
+        from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name as _model_token_of_name  # noqa: PLC0415 — deferred: only a name with no model token needs the row
 
-        if embedding_model_for_collection_name(collection_name) is None:
+        if _model_token_of_name(collection_name) is None:
             expected_model = target_row["embedding_model"]
 
     # GH #1370 D2: --assume-model overrides the header's (possibly wrong)
