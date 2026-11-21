@@ -2387,6 +2387,14 @@
     <include file="db/changelog/vectors-070-collection-id-stamp-moves.xml"/>
 
     <!--
+        RDR-229 P3.8 (nexus-p2m1x.28): the partial UNIQUE index on the live collection tuple, which waits (preCondition
+        onFail="CONTINUE") for the re-own move to complete and for no duplicate tuple to remain; plus its FORCE-RLS-safe
+        counter. No data effect. After identity-005, before the grants-nexus-svc.xml runAlways block. See the included
+        file's header.
+    -->
+    <include file="db/changelog/collections-001-tuple-unique-index.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

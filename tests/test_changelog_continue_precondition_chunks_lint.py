@@ -69,6 +69,11 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # model_version and no superseded_by_id exists, so D2's repair UPDATE cannot meet it (RDR-229 P3.1, item e). The
     # precondition is a read of catalog_collections; the body names no chunk table, leaf or builder object.
     ("vectors-068-collection-id-expand.xml", "vectors-068-19"): "superseded_by CHECK waits on D2 data",
+    # CREATE UNIQUE INDEX on nexus.catalog_collections (SHARE on it for one build of a registry of hundreds of rows) and,
+    # in its guard, the counter's ALTER TABLE on that table (ACCESS EXCLUSIVE for one count) plus a read of
+    # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
+    # no lock on the registry, so the build cannot be what either statement waits behind.
+    ("collections-001-tuple-unique-index.xml", "collections-001-2"): "gated live-tuple unique index (RDR-229 P3.8)",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
