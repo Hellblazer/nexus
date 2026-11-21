@@ -7,10 +7,12 @@ import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DefaultDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -181,17 +183,42 @@ public final class CollectionMint {
     /**
      * Heal the sequence once, forward only. The sequence is shared by every tenant and this tenant sees only its own rows,
      * so the floor is the largest of this tenant's ids and the colliding id; the definer function
-     * {@code nexus.collection_id_seq_heal} (changeset {@code collections-002}, the only way the engine role moves the
-     * sequence: it holds no UPDATE on it) raises the sequence to that floor and leaves it alone when it is already past it.
+     * {@code nexus.collection_id_seq_heal} (changeset {@code collections-002}) draws the sequence forward with
+     * {@code nextval} until it has drawn the floor. It never calls {@code setval}, so a draw by another session while it
+     * runs cannot be set back and no id is handed out twice; it leaves the sequence alone when it is already past the
+     * floor. A floor more than the function's bound (100000 draws) above the sequence is refused, with the gap and the
+     * operator remedy in the message: that refusal is a {@link MintedLabel.SequenceBehindDataException}, the mint's 409,
+     * message intact.
      */
     private static void healSequence(DSLContext ctx, String tenant, long colliding) {
         Long visibleMax = ctx.select(DSL.max(CATALOG_COLLECTIONS.COLLECTION_ID)).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).fetchOne(0, Long.class);
         Long was = ctx.fetchValue(DSL.function("pg_sequence_last_value", Long.class, SEQUENCE));
         long floor = Math.max(colliding, visibleMax == null ? 0L : visibleMax);
-        Long now = ctx.fetchValue(DSL.function(DSL.name("nexus", "collection_id_seq_heal"), Long.class, DSL.val(floor)));
+        Long now;
+        try {
+            now = ctx.fetchValue(DSL.function(DSL.name("nexus", "collection_id_seq_heal"), Long.class, DSL.val(floor)));
+        } catch (DataAccessException e) {
+            if (e.getCause() instanceof SQLException se && HEAL_REFUSED.equals(se.getSQLState())) {
+                throw new MintedLabel.SequenceBehindDataException(refusalText(se));
+            }
+            throw e;
+        }
         log.warn("event=collection_id_sequence_behind_data tenant={} colliding_id={} sequence_was={} sequence_now={}",
             tenant, colliding, was, now);
+    }
+
+    /** The SQLSTATE the heal function raises for a refusal (collections-002). */
+    static final String HEAL_REFUSED = "NX229";
+
+    /** The refusal's own text, without the driver's {@code ERROR:} prefix or the {@code Where:} trace lines. */
+    private static String refusalText(SQLException se) {
+        String text = se.getMessage() == null ? "" : se.getMessage();
+        int where = text.indexOf("\n  Where:");
+        if (where >= 0) {
+            text = text.substring(0, where);
+        }
+        return text.startsWith("ERROR: ") ? text.substring("ERROR: ".length()) : text;
     }
 
     /**
