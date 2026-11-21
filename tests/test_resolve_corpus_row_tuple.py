@@ -6,8 +6,9 @@ candidate's catalog row (``content_type`` and ``owner_id`` equal, ``embedding_mo
 equal when the value names one, ``lifecycle_state == "live"``). Only when no row matches
 does the old label-prefix match run, because a repo collection's row ``owner_id`` is the
 tumbler segment (``1-15``, nexus-6pbwx), so the slug a user types in
-``code__<slug>-<hash8>`` is a label, not an owner. The fallback never resurrects a
-collection the tuple stage rejected by lifecycle.
+``code__<slug>-<hash8>`` is a label, not an owner. Neither stage returns a collection whose
+row says it is not live (``is_live_collection_row``: lifecycle other than live, or
+``superseded_by`` set); a name with no row is kept by the fallback.
 
 ``get_collection_row`` is stubbed the way the stage-2 tests in ``test_corpus.py`` do.
 """
@@ -41,13 +42,16 @@ def _stub_rows(monkeypatch, rows: dict[str, dict]) -> list[str]:
 
 
 def test_a_knowledge_short_form_finds_its_four_segment_row(monkeypatch) -> None:
+    """The row's owner differs from the name's owner segment, so only the tuple stage can
+    find it: the label prefix ``knowledge__foo__`` matches no name here."""
+    found = "knowledge__old-label__voyage-context-3__v1"
     rows = {
-        "knowledge__foo__voyage-context-3__v1": _row("knowledge", "foo", "voyage-context-3"),
+        found: _row("knowledge", "foo", "voyage-context-3"),
         "knowledge__bar__voyage-context-3__v1": _row("knowledge", "bar", "voyage-context-3"),
         "code__foo__voyage-code-3__v1": _row("code", "foo", "voyage-code-3"),
     }
     _stub_rows(monkeypatch, rows)
-    assert resolve_corpus("knowledge__foo", list(rows)) == ["knowledge__foo__voyage-context-3__v1"]
+    assert resolve_corpus("knowledge__foo", list(rows)) == [found]
 
 
 def test_the_row_decides_not_the_name(monkeypatch) -> None:
@@ -116,14 +120,84 @@ def test_the_fallback_does_not_resurrect_a_collection_the_tuple_rejected(monkeyp
     assert resolve_corpus("knowledge__foo", [name]) == []
 
 
-def test_a_bare_non_content_type_word_is_a_label_prefix_and_reads_no_row(monkeypatch) -> None:
+def test_a_bare_non_content_type_word_is_a_label_prefix(monkeypatch) -> None:
     rows = {
         "myrepo__x": _row("code", "myrepo", "voyage-code-3"),
         "other__y": _row("code", "other", "voyage-code-3"),
     }
     asked = _stub_rows(monkeypatch, rows)
     assert resolve_corpus("myrepo", list(rows)) == ["myrepo__x"]
-    assert asked == []
+    # only the label-prefix match is checked for lifecycle; no tuple stage runs for a bare word
+    assert asked == ["myrepo__x"]
+
+
+@pytest.mark.parametrize("state", ["quarantine", "dormant", "disputed"])
+def test_a_bare_word_whose_row_is_not_live_is_not_returned(monkeypatch, state: str) -> None:
+    rows = {"myrepo__x": _row("code", "myrepo", "voyage-code-3", state)}
+    _stub_rows(monkeypatch, rows)
+    assert resolve_corpus("myrepo", list(rows)) == []
+
+
+@pytest.mark.parametrize("state", ["quarantine", "dormant", "disputed"])
+def test_a_repo_slug_whose_row_is_not_live_is_not_returned(monkeypatch, state: str) -> None:
+    """The repo row's owner_id is the tumbler segment, so the tuple stage never sees it and the
+    label fallback is the only stage that can return it; it must still honour the row."""
+    dead = "code__arcaneum-2ad2825c__bge-base-en-v15-768__v1"
+    live = "code__arcaneum-2ad2825c__voyage-code-3__v1"
+    rows = {
+        dead: _row("code", "1-15", "bge-base-en-v15-768", state),
+        live: _row("code", "1-15", "voyage-code-3"),
+    }
+    _stub_rows(monkeypatch, rows)
+    assert resolve_corpus("code__arcaneum-2ad2825c", list(rows)) == [live]
+    del rows[live]
+    assert resolve_corpus("code__arcaneum-2ad2825c", list(rows)) == []
+
+
+def test_a_superseded_row_is_not_returned_by_either_stage(monkeypatch) -> None:
+    """A rename's old name keeps lifecycle live with ``superseded_by`` set (nexus-4w07i)."""
+    old = "knowledge__foo__voyage-context-3__v1"
+    repo = "code__arcaneum-2ad2825c__bge-base-en-v15-768__v1"
+    rows = {
+        old: {**_row("knowledge", "foo", "voyage-context-3"), "superseded_by": "knowledge__foo2__voyage-context-3__v1"},
+        repo: {**_row("code", "1-15", "bge-base-en-v15-768"), "superseded_by": "code__x__bge-base-en-v15-768__v1"},
+    }
+    _stub_rows(monkeypatch, rows)
+    assert resolve_corpus("knowledge__foo", list(rows)) == []
+    assert resolve_corpus("code__arcaneum-2ad2825c", list(rows)) == []
+
+
+def test_a_typed_quarantine_name_does_not_return_the_quarantine_row(monkeypatch) -> None:
+    sibling = "quarantine-knowledge__foo__voyage-context-3__v1"
+    _stub_rows(monkeypatch, {sibling: _row("knowledge", "foo", "voyage-context-3", "quarantine")})
+    assert resolve_corpus("quarantine-knowledge__foo", [sibling]) == []
+
+
+def test_a_partial_cached_row_does_not_raise(monkeypatch) -> None:
+    """A cached row can lack ``owner_id``; the tuple stage must read it with ``.get``."""
+    name = "knowledge__foo__voyage-context-3__v1"
+    _stub_rows(monkeypatch, {name: {"content_type": "knowledge", "lifecycle_state": "live"}})
+    assert resolve_corpus("knowledge__foo", [name]) == [name]  # no tuple match; the label finds it
+
+
+def test_a_failing_row_read_degrades_to_the_label_prefix(monkeypatch) -> None:
+    """``get_collection_row`` (a cache refresh, ``get_t3``) can raise anything; stage 3 was a pure
+    string match before and must not start raising."""
+    name = "knowledge__foo__voyage-context-3__v1"
+    calls: list[str] = []
+
+    def boom(n: str, **_kw) -> dict:
+        calls.append(n)
+        raise RuntimeError("t3 unreachable")
+
+    monkeypatch.setattr(mi, "get_collection_row", boom)
+    assert resolve_corpus("knowledge__foo", [name]) == [name]
+    assert resolve_corpus("myrepo", ["myrepo__x"]) == ["myrepo__x"]
+    # one failure ends the row reads for that call: it is not retried per candidate
+    calls.clear()
+    names = [f"knowledge__foo__m{i}__v1" for i in range(5)]
+    assert resolve_corpus("knowledge__foo", names) == names
+    assert len(calls) == 1
 
 
 def test_a_value_that_names_a_row_but_no_tuple_matches_returns_empty(monkeypatch) -> None:
