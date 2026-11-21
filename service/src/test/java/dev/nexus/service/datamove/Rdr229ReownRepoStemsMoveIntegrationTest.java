@@ -292,12 +292,16 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).orderBy(CATALOG_COLLECTIONS.NAME).fetch().formatCSV();
 
         // the same template under a new label: a fresh dml_utils run executes it again over the moved rows
-        DataMove first = DataMoveRegistry.reload(ctx(), LABEL).orElseThrow();
-        DataMoveTestFixtures.registerOn(ctx(), "again", "nexus", "catalog_collections", first.chunkSize(), 0, null,
+        // Read the shipped row directly: DataMoveRegistry.reload answers only an open move, and this one completed.
+        var first = ctx().select(DSL.field(DSL.name("template"), String.class),
+                DSL.field(DSL.name("verification"), String.class), DSL.field(DSL.name("chunk_size"), Integer.class))
+            .from(table("nexus", "data_moves")).where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).fetchOne();
+        assertThat(first).as("the shipped move row").isNotNull();
+        DataMoveTestFixtures.registerOn(ctx(), "again", "nexus", "catalog_collections", first.value3(), 0, null,
             "stamp-template.sql");
         ctx().update(table("nexus", "data_moves"))
-            .set(DSL.field(DSL.name("template"), String.class), first.template())
-            .set(DSL.field(DSL.name("verification"), String.class), first.verification())
+            .set(DSL.field(DSL.name("template"), String.class), first.value1())
+            .set(DSL.field(DSL.name("verification"), String.class), first.value2())
             .where(DSL.field(DSL.name("label"), String.class).eq("again")).execute();
         for (int i = 0; i < 3 && completedAt("again") == null; i++) {
             worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher()).runCycle();
