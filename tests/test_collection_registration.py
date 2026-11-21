@@ -290,6 +290,31 @@ def test_409_is_treated_as_already_registered(
 
 
 @pytest.mark.t2_tenant
+def test_a_409_whose_name_did_not_register_is_raised_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDR-229 P3.8: the engine also answers 409 for a REFUSAL (a new row on a live tuple another collection holds,
+    every minted label taken, a sequence behind the data). That is not a won race: the name was never registered, so
+    caching it would turn the refusal into a later 422 "not registered". A 409 is a race only when the row reads back."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr(
+        "nexus.db.http_vector_client.is_vector_service_mode", lambda: True,
+    )
+    writer = _fake_writer()
+    response = MagicMock(status_code=409)
+    writer.register_collection.side_effect = httpx.HTTPStatusError(
+        "collections 'a' and 'b' are both live for the tuple", request=MagicMock(), response=response,
+    )
+    writer.get_collection.return_value = None
+    name = "knowledge__ensure-409-refused-test"
+
+    with pytest.raises(httpx.HTTPStatusError):
+        ensure_collection_registered(name, registrar=lambda: writer)
+
+    assert name not in corpus._REGISTERED_COLLECTIONS
+
+
+@pytest.mark.t2_tenant
 def test_non_409_http_error_propagates_and_is_not_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
