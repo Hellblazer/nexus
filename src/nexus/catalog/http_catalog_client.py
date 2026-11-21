@@ -4253,8 +4253,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if chunk_payload is None:
             result = self._post("/manifest/append", body)
         else:
-            from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
-            ensure_collection_registered(collection, registrar=self._catalog_registrar)
+            from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
+            register_collection_for_write(collection, self._catalog_registrar)
             body["chunks"] = chunk_payload
             if force_re_embed:
                 body["force_re_embed"] = True
@@ -4389,8 +4389,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             if chunks is None:
                 result = self._post("/manifest/append_many", body)
             else:
-                from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
-                ensure_collection_registered(collection, registrar=self._catalog_registrar)
+                from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
+                register_collection_for_write(collection, self._catalog_registrar)
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True
@@ -5093,11 +5093,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # the whole write_fn, and here that would re-send an
         # already-uploaded page's chunks on a stale-registration retry —
         # a correctness risk, not just a wasted call.
-        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+        from nexus.registration_retry import register_collection_for_write  # noqa: PLC0415 — deferred: the one seam every registration before a document shares
         # This client's own endpoint, never the ambient catalog writer
         # (nexus-dvgsf): a client pinned to a second engine must register
         # the collection where it is about to write it.
-        ensure_collection_registered(collection, registrar=self._catalog_registrar)
+        register_collection_for_write(collection, self._catalog_registrar)
         _check_supplied_vectors("write_manifest_many", chunks, embedding_model)
         merge_fields = _metadata_mode_fields(
             "write_manifest_many", metadata_merge, metadata_delete_keys)

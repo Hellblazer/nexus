@@ -70,6 +70,25 @@ def registration_cached_anywhere(name: str, registrar: "Callable[[], object] | N
             e[1] == name for e in corpus._REGISTERED_COLLECTIONS_SCOPED)
 
 
+def register_collection_for_write(name: str, registrar: "Callable[[], object] | None" = None) -> None:
+    """Register *name* in the catalog's collection registry before a write that needs its row.
+
+    The ONE call every registration that precedes a catalog document goes through (RDR-229 P3.1,
+    nexus-p2m1x.17): since P3.1 the engine refuses a document under a collection with no registry row
+    (422 ``unregistered_collection``), so ``put_note``, the ``.nxexp`` import pre-pass, the ``doc_indexer``
+    pre-flight, the 422 retry below and the ``HttpCatalogClient`` manifest writes each register first. They
+    share this body so the collection-name census holds one site for the seam, and P3.8's ``collection_mint``
+    replaces one function. It adds no behaviour of its own: ``corpus.ensure_collection_registered`` decides
+    (per-process cache, the client's profile, retired-name and credential checks).
+
+    A caller that needs a collection the user typed to be REFUSED when unregistered (an MCP tool, a CLI
+    argument) does not call this: the typed 422 is the right answer there.
+    """
+    from nexus import corpus  # noqa: PLC0415 — circular-dep avoidance (corpus)
+
+    corpus.ensure_collection_registered(name, registrar=registrar)
+
+
 def reregister_after_unregistered(
     name: str, exc: BaseException, registrar: "Callable[[], object] | None" = None,
 ) -> None:
@@ -113,7 +132,7 @@ def reregister_after_unregistered(
         # the engine refused it. A sibling cache hooks here: P3.8's collection_mint forget(name) goes beside
         # this line (colophon adds it); no other site discards on a refusal.
         corpus._registration_cache_discard(scope, name)
-    corpus.ensure_collection_registered(name, registrar=registrar)
+    register_collection_for_write(name, registrar)
 
 
 def retry_write_once_on_unregistered(
