@@ -86,6 +86,29 @@ def test_bundle_has_pg_background_reads_the_install_s_extracted_tree(tmp_path):
     assert ur.bundle_has_pg_background(tmp_path) is True
 
 
+def test_the_state_before_tells_a_missing_tree_from_a_bundle_without_the_extension(tmp_path):
+    assert ur.bundle_state_before(tmp_path) is None  # nothing extracted to read
+    (tmp_path / CONTROL).parent.mkdir(parents=True)
+    assert ur.bundle_state_before(tmp_path) is False  # the 7.76.0 / 7.99.0 / 8.2.0 seeds' shape
+    (tmp_path / CONTROL).write_text("default_version = '1.0'\n", encoding="utf-8")
+    assert ur.bundle_state_before(tmp_path) is True
+
+
+def test_every_start_whose_own_bundle_lacks_pg_background_is_judged():
+    """Sam, 2026-11-21: the 7.x legs too. Decided from the start's bundle, not its version."""
+    assert ur.judges_bundle(scenario=False, before=False)  # a 7.x start on a bundle without pg_background
+    assert not ur.judges_bundle(scenario=False, before=None)  # no extracted bundle: nothing to refresh, logged
+    assert ur.judges_bundle(scenario=True, before=None)  # an old-bundle start with nothing to read is a finding
+    assert not ur.judges_bundle(scenario=False, before=True)  # 8.5.3: not an old-bundle start
+    assert ur.judges_bundle(scenario=True, before=True)  # an 8.2.0 start that turns out current: "not exercised"
+    assert ur.judges_bundle(scenario=True, before=False)
+
+
+def test_a_judged_start_with_no_bundle_to_read_is_a_finding_and_a_current_one_is_not_a_pass():
+    assert any("could not be read" in f for f in _judge(before=None))
+    assert any("nothing was exercised" in f for f in _judge(before=True))
+
+
 CLEAN_DOCTOR = "Engine convergence: installed engine v0.1.200\nData moves: 1 open or failed: 1 working\n"
 
 
@@ -125,6 +148,30 @@ def test_a_blocked_move_in_doctor_is_a_finding():
 def test_a_pending_bundle_row_in_doctor_is_a_finding():
     text = CLEAN_DOCTOR + "PostgreSQL bundle: the extracted PostgreSQL bundle has no pg_background\n"
     assert any("PostgreSQL bundle" in f for f in _judge(doctor_text=text))
+
+
+def test_a_fix_line_that_names_the_bundle_row_is_not_the_row():
+    """F33, rerun 2: a blocked move's Fix line mentions the bundle row; only the row's own label is the row."""
+    fix = "    Fix: The move waits for the pg_background extension ... `nx doctor` has a PostgreSQL bundle row while it is pending)\n"
+    assert not any("PostgreSQL bundle" in f for f in _judge(doctor_text=CLEAN_DOCTOR + fix))
+    row = "  \u26a0 PostgreSQL bundle: the extracted PostgreSQL bundle has no pg_background\n"
+    assert any("PostgreSQL bundle" in f for f in _judge(doctor_text=CLEAN_DOCTOR + row))
+
+
+def test_the_seed_stamps_moves_blocked_on_pg_background_at_the_backoff_cap():
+    seen: list[str] = []
+
+    def sql(q: str):
+        seen.append(q)
+        return [["t"]] if "to_regclass" in q else [["3"]]
+
+    assert ur.seed_long_blocked_moves(sql) == 3
+    assert ur.SEED_TRANSIENT_RETRIES >= 6  # MoveRetryPolicy's 15-minute cap
+    assert "transient_retries = 7" in seen[1] and "pg_background is not installed" in seen[1] and "now()" in seen[1]
+
+
+def test_no_registry_table_seeds_nothing():
+    assert ur.seed_long_blocked_moves(lambda q: [["f"]]) == 0
 
 
 def test_the_idle_wait_needs_consecutive_quiet_reads_and_gives_up_at_its_bound():

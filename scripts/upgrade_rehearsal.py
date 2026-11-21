@@ -50,7 +50,8 @@ FAILURE (vacuous), not a pass. The fix ships in an engine newer than the wheel's
 ``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against a jar built from the fix; the
 override applies from ``start-old`` on, never to the old client's stack.
 
-Old-bundle starts (nexus-f3yqd.2.23). conexus 8.2.0 is the last release whose PostgreSQL bundle has no pg_background
+Old-bundle starts (nexus-f3yqd.2.23). Every start whose own extracted bundle lacks pg_background before ``nx upgrade``
+(the 7.x starts too, Sam 2026-11-21) is judged the same way (``judges_bundle``). conexus 8.2.0 is the last release whose PostgreSQL bundle has no pg_background
 (engine 0.1.189's); an install first set up on it keeps that bundle. ``both`` therefore adds two starts from it. After
 ``nx upgrade`` each must show ``pg_background.control`` in the extracted bundle, ``pg_background`` in ``pg_extension``,
 no blocked data move and no ``PostgreSQL bundle`` warning in ``nx doctor``; a start whose bundle already had it is a
@@ -300,6 +301,26 @@ def bundle_has_pg_background(config: Path) -> bool:
     return any((config / rel).is_file() for rel in _PG_BACKGROUND_CONTROLS)
 
 
+def bundle_state_before(config: Path) -> bool | None:
+    """What a start's own extracted bundle holds before ``nx upgrade``: True with pg_background's control file, False
+    with an extension directory that lacks it, ``None`` with no extension directory at all (nothing to read). Measured
+    on chas, 2026-11-21: the 7.76.0, 7.99.0 and 8.2.0 seeds extract under ``pg-bundle/bundle/share/postgresql/extension``
+    without pg_background."""
+    if not any((config / rel.parent).is_dir() for rel in _PG_BACKGROUND_CONTROLS):
+        return None
+    return bundle_has_pg_background(config)
+
+
+def judges_bundle(*, scenario: bool, before: bool | None) -> bool:
+    """Whether a start's bundle refresh is judged: every old-bundle start (8.2.0 and its variant, judged even when its
+    bundle turns out to have pg_background, which is then "not exercised", or has none to read, which is a finding),
+    and every other start whose own bundle lacks pg_background. Decided from the start's bundle, never a version
+    list (Sam, 2026-11-21: the 7.x legs too). Any other start is not judged and says so in the run log: one whose bundle
+    has pg_background is not an old-bundle start, and one with no extracted bundle has nothing the product refreshes
+    (``pg_bundle_refresh.refresh_applicable`` is false there too)."""
+    return scenario or before is False
+
+
 def bundle_refresh_findings(
     *, before: bool | None, after: bool | None, extension: bool | None, doctor_text: str, variant: str,
 ) -> list[str]:
@@ -323,7 +344,7 @@ def bundle_refresh_findings(
     blocked = [ln.strip() for ln in text.splitlines() if re.search(r"Data move\b.*\bblocked", ln)]
     if blocked:
         out.append(f"old-bundle{leg}: a registered move is blocked: " + "; ".join(blocked)[:300])
-    if re.search(r"PostgreSQL bundle", text):
+    if re.search(r"^\s*(?:\S+\s+)?PostgreSQL bundle:", text, re.MULTILINE):  # the row's label, not a fix line naming it
         out.append(f"old-bundle{leg}: nx doctor still has a PostgreSQL bundle row")
     return out
 
@@ -354,6 +375,26 @@ def busy_per_product(python: Path, config: Path, env: dict[str, str]) -> str | N
     if not answers:
         return f"the idle rule gave no answer: {done.stdout.strip()[-200:]}"
     return answers[-1] or None
+
+
+#: The retry count an old-bundle leg stamps on its blocked moves before ``nx upgrade``: 6 and up is the 15-minute
+#: backoff cap of the engine's ``MoveRetryPolicy`` (F33).
+SEED_TRANSIENT_RETRIES: int = 7
+
+
+def seed_long_blocked_moves(sql: Callable[[str], list[list[str]] | None]) -> int:
+    """Make every move blocked on a missing pg_background look as if it had been blocked for days: retries at the
+    15-minute backoff, its last attempt just now. The leg then judges ``nx doctor`` right after ``nx upgrade`` as
+    declared, so it proves the client's post-swap reset clears that worst case, not only a first retry (F33, Sam's
+    ruling). Returns the rows stamped; 0 when the registry table does not exist yet or no move is blocked so."""
+    exists = sql("select to_regclass('nexus.data_moves') is not null")
+    if not exists or exists[0][0] != "t":
+        return 0
+    rows = sql(
+        f"with s as (update nexus.data_moves set transient_retries = {SEED_TRANSIENT_RETRIES}, last_transient_at = now() "
+        "where last_transient ~ 'pg_background is not installed' returning 1) select count(*) from s"
+    )
+    return int(rows[0][0]) if rows else 0
 
 
 def wait_until_idle(
@@ -2339,6 +2380,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
     version, variant = split_start(from_version)
     bundle_scenario = version == OLD_BUNDLE_VERSION or bool(variant)
     bundle_before: bool | None = None
+    bundle_judged = bundle_scenario
     bundle_after: bool | None = None
     extension_present: bool | None = None
     run_dir = cfg.work / f"from-{from_version}"
@@ -2599,9 +2641,14 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             stop = not r.ok
             if stop:
                 why_not_run = f"setup step start-old {r.status}: {r.reason}"
-        if bundle_scenario and not stop:
-            bundle_before = bundle_has_pg_background(config)  # what the old install's bundle holds, before anything moves
-            say(f"[{from_version}] old-bundle: pg_background.control present before: {bundle_before}")
+        if not stop:
+            bundle_before = bundle_state_before(config)  # what the old install's bundle holds, before anything moves
+            bundle_judged = judges_bundle(scenario=bundle_scenario, before=bundle_before)
+            say(
+                f"[{from_version}] bundle before nx upgrade: "
+                + {True: "has pg_background", False: "lacks pg_background", None: "no extracted bundle (nothing the product refreshes)"}[bundle_before]
+                + ("; the refresh is judged" if bundle_judged else "; not an old-bundle start, the refresh is not judged")
+            )
         # From here the NEW client runs: a jar override applies to it, never to the old stack above.
         cur["env"] = engine_env(
             env,
@@ -2668,6 +2715,15 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     )
                 )
             before: PgCounters | None = None
+            if name == "upgrade" and bundle_judged:
+                try:
+                    seeded = seed_long_blocked_moves(probe.sql)
+                except ProbeError as exc:
+                    findings.append(f"old-bundle: seeding the blocked moves' retry state failed: {exc}")
+                else:
+                    if variant == ENGINE_FIRST and not seeded:
+                        # The engine-first leg runs the pinned engine on the old bundle, so its moves are blocked.
+                        findings.append("old-bundle (engine-first leg): no move was blocked on pg_background to seed")
             if name == "upgrade":
                 try:
                     before = take_counters(probe.sql)
@@ -2732,7 +2788,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 stop = True
                 why_not_run = "the engine did not go idle after the pinned engine started"
             if name == "upgrade":
-                if bundle_scenario:
+                if bundle_judged:
                     bundle_after = bundle_has_pg_background(config)
                     try:
                         rows = probe.sql("select count(*) from pg_extension where extname = 'pg_background'")
@@ -2891,7 +2947,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 required_steps=JUDGED_STEPS + ((PCI_STEP,) if pci_on else ()),
             )
         )
-    if bundle_scenario and any(s.name == "upgrade" and s.ok for s in steps):
+    if bundle_judged and any(s.name == "upgrade" and s.ok for s in steps):
         findings.extend(
             bundle_refresh_findings(
                 before=bundle_before, after=bundle_after, extension=extension_present,
