@@ -300,7 +300,7 @@ def test_indexer_seam_b_index_search_round_trip(
     with HttpCatalogClient(base_url=base_url, tenant="default", _token=token) as _cat:
         _cat.register_collection(
             collection, content_type="knowledge", owner_id="seam-b-test",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
     _REGISTERED_COLLECTIONS.add(collection)
 
