@@ -13,6 +13,12 @@ belong. The row is a warning while a duplicate exists and is absent otherwise: a
 (it is what holds it back), no duplicate means the index exists or waits only for the move, and the data-move rows
 already show a move that is open, blocked or failed.
 
+A second warning covers an index that waits for a reason nothing else names. ``GET /v1/status`` carries
+``collection_tuple_index_present`` (an ``[additive]`` boolean); when it is ``false``, no duplicate is held by the catalog
+listing, and ``boot_work`` has no open or failed entry for the re-own move, the engine's guard is waiting for something
+unnamed, for example its duplicate counter erroring under ``onError="CONTINUE"``. The row points at the engine's boot log.
+An absent key is an engine that predates the field: no row. The status body carries one boolean and no tenant text.
+
 Kept out of :mod:`nexus.health` (a file near its size cap). The candidate set is ``CatalogRepository.collectionForTuple``'s:
 a row with no supersession and a lifecycle other than ``quarantine``; a dormant or disputed row still holds its tuple.
 """
@@ -28,8 +34,11 @@ from nexus.health import HealthResult
 _log = structlog.get_logger(__name__)
 
 LABEL = "Collection tuples"
+INDEX_WAIT_LABEL = "Collection tuple index"
 #: The re-own move the index waits for (nexus.data_moves.label), named in the hint.
 REOWN_MOVE_LABEL = "rdr229-reown-repo-stems-from-curator"
+#: The ``boot_work`` entry id of the re-own move (``data-move:<label>``): open, blocked, stalled or failed while it is listed.
+REOWN_MOVE_ID = "data-move:" + REOWN_MOVE_LABEL
 #: Tuples named in the row; the rest are counted.
 _NAMED = 5
 _UNSET: Any = object()
@@ -70,12 +79,33 @@ def _describe(d: DuplicateTuple) -> str:
     )
 
 
-def check_collection_tuples(rows: object = _UNSET) -> list[HealthResult]:
-    """One warning row naming every duplicated live tuple (the first few in full, the rest counted), or no row.
+def _index_waits_unexplained(rows: list[dict[str, Any]], dups: list[DuplicateTuple], engine_status: object) -> bool:
+    """True when the engine says the index is absent and nothing the doctor can see explains it.
 
-    *rows* is the registry listing (``reader.list_collections()``); left unset, this reads it. A registry that cannot be
-    read gives no row: an unreachable engine is the storage-service check's red, and a clean row this did not check would
-    be worse than none.
+    Needs all three of: ``collection_tuple_index_present`` is the boolean ``False`` (an absent or non-boolean value is an
+    older engine or an unread answer, never false); *rows* was read and holds no duplicate (an unread registry cannot rule
+    one out, and the caller passes only a list here); and ``boot_work`` is a list with no entry for the re-own move (a
+    move that is working, blocked, stalled, paused or failed is the data-move rows' to report, and the index waits for it).
+    """
+    if not isinstance(engine_status, dict) or dups:
+        return False
+    if engine_status.get("collection_tuple_index_present") is not False:
+        return False
+    work = engine_status.get("boot_work")
+    if not isinstance(work, list):
+        return False
+    return not any(isinstance(e, dict) and e.get("id") == REOWN_MOVE_ID for e in work)
+
+
+def check_collection_tuples(rows: object = _UNSET, engine_status: object = None) -> list[HealthResult]:
+    """The duplicate warning, and the unexplained-wait warning; no row for either when neither applies.
+
+    The duplicate row names every duplicated live tuple (the first few in full, the rest counted). *rows* is the registry
+    listing (``reader.list_collections()``); left unset, this reads it. A registry that cannot be read gives no row: an
+    unreachable engine is the storage-service check's red, and a clean row this did not check would be worse than none.
+
+    *engine_status* is the ``GET /v1/status`` body the doctor already fetched (``None``: none, so no wait row). The wait
+    row needs the registry listing too, to rule a duplicate out.
     """
     if rows is _UNSET:
         try:
@@ -90,6 +120,8 @@ def check_collection_tuples(rows: object = _UNSET) -> list[HealthResult]:
         return []
     dups = duplicate_tuples(rows)
     if not dups:
+        if _index_waits_unexplained(rows, dups, engine_status):
+            return [_index_wait_row()]
         return []
     shown = "; ".join(_describe(d) for d in dups[:_NAMED])
     more = f"; and {len(dups) - _NAMED} more" if len(dups) > _NAMED else ""
@@ -104,3 +136,19 @@ def check_collection_tuples(rows: object = _UNSET) -> list[HealthResult]:
             "engine; no other step applies the index",
         ],
     )]
+
+
+def _index_wait_row() -> HealthResult:
+    return HealthResult(
+        label=INDEX_WAIT_LABEL, ok=False, warn=True,
+        detail=(
+            "the engine's live-tuple unique index is absent, no live tuple is shared and the re-own move "
+            f"({REOWN_MOVE_LABEL}) is neither open nor failed: it waits for a reason nothing here names"
+        ),
+        fix_suggestions=[
+            "Read the engine's boot log for the Liquibase output of changeset collections-001-2 (a precondition that "
+            "errored, for example its duplicate counter, is skipped and retried at every boot, never halted), and for "
+            "an index build that was refused. Nothing is lost and nothing fails while it waits: a second collection can "
+            "still register on one tuple. Fix what the log names and restart the engine; no other step applies the index",
+        ],
+    )
