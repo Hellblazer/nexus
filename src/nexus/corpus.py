@@ -12,6 +12,7 @@ import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
 from nexus.knowledge_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
+from nexus.owner_segment_guard import TumblerShapedCorpusError, require_corpus_name  # noqa: F401 — re-exported (nexus-p2m1x.28)
 
 _log = structlog.get_logger(__name__)
 
@@ -714,36 +715,6 @@ def resolve_write_embedding_model(
     return effective_embedding_model_for_writes(content_type)
 
 
-_OWNER_SEGMENT_SHAPE = re.compile(r"[0-9]+-[0-9]+")
-"""The collection-name owner segment of a repo owner tumbler: ``catalog.collection_name.owner_segment_for_tumbler``
-joins the tumbler's first two dot-segments with a hyphen (``1.20`` -> ``1-20``), so a segment is two digit runs
-and one hyphen. A tumbler the grammar joins from more segments is cut to these two."""
-
-
-class TumblerShapedCorpusError(click.UsageError):
-    """A corpus name that is the owner segment of a repo owner (nexus-p2m1x.28)."""
-
-
-def require_corpus_name(corpus: str) -> str:
-    """Return *corpus* unchanged, or raise :class:`TumblerShapedCorpusError` when it would name a repo's collection.
-
-    ``docs__{corpus}`` becomes ``docs__<corpus with _ as ->__<model>__v1``, and a repo whose owner tumbler is
-    ``1.20`` has the same name for its docs collection (owner segment ``1-20``). A corpus named ``1-20`` (or
-    ``1_20``, which folds to it) builds that name, so the corpus and the repo write into one collection by name.
-    This is the one check every corpus-to-collection entry point calls: :func:`docs_leaf_fallback_collection_name`
-    (the three ``doc_indexer`` fallbacks, the dry-run preview), the ``--corpus`` options of ``nx index md|pdf``, and
-    ``nx dt index|capture`` with ``_resolve_dt_collection``.
-    """
-    if _OWNER_SEGMENT_SHAPE.fullmatch(corpus.replace("_", "-")):
-        raise TumblerShapedCorpusError(
-            f"corpus name {corpus!r} has the shape of a repo owner segment (<digits>-<digits>, such as 1-20). "
-            f"docs__{corpus.replace('_', '-')}__<model>__v1 is also the docs collection of the repo whose owner "
-            f"tumbler is {corpus.replace('_', '-').replace('-', '.', 1)}, so the corpus and that repo would merge by "
-            "name. Choose a corpus name with a letter in it."
-        )
-    return corpus
-
-
 def docs_leaf_fallback_collection_name(
     corpus: str, *, collection_exists: Callable[[str], bool] | None = None,
 ) -> str:
@@ -768,8 +739,7 @@ def docs_leaf_fallback_collection_name(
     unnoticed. ``content_type`` is hardcoded to ``'docs'``: this fallback
     only ever fires from docs/PDF/markdown indexing paths.
 
-    The owner segment is the corpus tag with underscores rewritten to
-    hyphens (``_`` is the conformant grammar's segment separator).
+    The owner segment is the corpus tag with ``_`` as ``-`` (``_`` separates segments); a tag shaped ``1-20`` is refused.
 
     ``collection_exists`` (nexus-o5x2c, nexus-35ok4 round 4
     SHIP-BLOCKER): optional grandfather probe forwarded to
