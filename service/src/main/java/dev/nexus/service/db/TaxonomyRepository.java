@@ -1491,10 +1491,22 @@ public final class TaxonomyRepository {
      * no assignments left is still a discovered topic).
      */
     public int pruneProjectionBelow(String tenant, String sourceCollectionPrefix, double minSimilarity) {
+        return pruneProjectionBelow(tenant, sourceCollectionPrefix, minSimilarity, false);
+    }
+
+    /**
+     * nexus-p2m1x.9 (RDR-229 P2.4): {@link #pruneProjectionBelow(String, String, double)} with a match mode.
+     * {@code exact} deletes only rows whose {@code source_collection} IS {@code sourceCollection}; the prefix mode
+     * also reaches every longer name that starts with it ({@code ..__v1} reaches {@code ..__v10},
+     * {@code docs__art} reaches {@code docs__art-x}), which is wrong when each collection has its own threshold.
+     */
+    public int pruneProjectionBelow(String tenant, String sourceCollection, double minSimilarity, boolean exact) {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.deleteFrom(TOPIC_ASSIGNMENTS)
                .where(TOPIC_ASSIGNMENTS.ASSIGNED_BY.eq("projection")
-                   .and(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollectionPrefix))
+                   .and(exact
+                       ? TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.eq(sourceCollection)
+                       : TOPIC_ASSIGNMENTS.SOURCE_COLLECTION.startsWith(sourceCollection))
                    .and(TOPIC_ASSIGNMENTS.SIMILARITY.lt(minSimilarity)))
                .execute());
     }

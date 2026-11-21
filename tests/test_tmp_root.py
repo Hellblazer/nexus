@@ -682,7 +682,7 @@ class TestPlugin:
     def test_the_original_tempdir_is_recorded_for_the_boot_slots_and_the_sweep(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv(sub._TMP_ORIG_ENV, "/orig/tmp")
         assert sub._original_tempdir() == Path("/orig/tmp")
-        assert sub.substrate_pg_roots(env={}, system="Darwin") == [Path("/orig/tmp")]
+        assert sub.substrate_pg_roots(env={}, system="Darwin", short_dir=tmp_path / "s") == [Path("/orig/tmp")]
         monkeypatch.delenv(sub._TMP_ORIG_ENV)
         assert sub._original_tempdir() == Path(tempfile.gettempdir())
 

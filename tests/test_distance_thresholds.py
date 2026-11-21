@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from nexus.search_engine import _threshold_for_collection, search_cross_corpus
 from nexus.types import SearchResult
+import pytest
+
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
 
 
 class TestThresholdForCollection:
@@ -52,6 +55,12 @@ class TestSearchCrossCorpusThresholdFiltering:
 
         def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
             return self._results.get(collection_names[0], [])
+
+        def _resolve_collection_rows(self, names):
+            """The handle's own catalog rows (RDR-229 P2.9: the content type is the row's): content type only."""
+            from tests.conftest import catalog_row_for_collection_name
+
+            return {n: {"content_type": catalog_row_for_collection_name(n)["content_type"]} for n in names}
 
     def test_code_result_above_threshold_filtered(self) -> None:
         """code__nexus result with distance=0.50 is filtered (>0.45)."""

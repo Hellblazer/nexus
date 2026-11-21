@@ -697,13 +697,16 @@ def _collections_in_args(args: dict[str, Any]) -> list[str]:
 def _embedding_model_for(collection: str) -> str:
     """Resolve the embedding model used by *collection*.
 
-    Lazy-imported from :mod:`nexus.corpus` so the runner module stays
-    cheap to import. Raises ``ValueError`` if the collection name is
-    unrecognised — the caller's responsibility to plumb a real name.
+    Reads the collection's registry row through
+    :func:`nexus.catalog.rows.resolve.embedding_model_for` (a TTL'd cache read of the
+    collections listing, once per domain-scoped step), and falls to the name when no row
+    backs it. Lazy-imported so the runner module stays light to import. Raises
+    ``ValueError`` if neither the row nor the name gives a model: the caller's
+    responsibility to plumb a real name.
     """
-    from nexus.corpus import index_model_for_collection  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+    from nexus.catalog.rows.resolve import embedding_model_for  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
-    return index_model_for_collection(collection)
+    return embedding_model_for(collection)
 
 
 # ── Substitution ────────────────────────────────────────────────────────────

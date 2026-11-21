@@ -34,13 +34,4 @@ class NoteUriRetargetTest {
         assertThat(NoteUri.collectionOf("https://example.org/a")).isNull();
         assertThat(NoteUri.collectionOf(null)).isNull();
     }
-
-    @Test
-    void isFileRoutedCollection_matchesTheSharedPrefixList() {
-        for (String p : NoteUri.FILE_ROUTED_PREFIXES) {
-            assertThat(NoteUri.isFileRoutedCollection(p + "x__m__v1")).as(p).isTrue();
-        }
-        assertThat(NoteUri.isFileRoutedCollection("knowledge__docs__m__v1")).isFalse();
-        assertThat(NoteUri.isFileRoutedCollection(null)).isFalse();
-    }
 }

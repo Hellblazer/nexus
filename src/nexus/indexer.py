@@ -35,7 +35,7 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
 from nexus.catalog.reconcile_run import DELIBERATE_SKIP_CAUSES as _DELIBERATE_SKIP
 from nexus.config import DEFAULT_EXTRACTOR
-from nexus.corpus import index_model_for_collection, is_conformant_collection_name
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
@@ -471,11 +471,40 @@ def _same_file(fd: int, lock_path: Path) -> bool:
     return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
 
 
+def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | None) -> tuple[str, bool]:
+    """The model a repo run stamps *collection_name*'s chunks with and compares the
+    unchanged-content skip against, and whether the catalog row was read to decide it.
+
+    RDR-229 P2.3 (nexus-p2m1x.8). The rule is ``doc_indexer._target_model``'s, the one
+    ``nx index md`` / ``pdf`` follow, read through *db*'s own row resolver: the row's
+    model, else the name's, and a failed read answers the name flagged ``False``.
+    *legacy_model* is what a name that carries no model token (a legacy name) answers
+    when no row does: the model the local embedder reports, or the docs collection's
+    for the rdr one; ``None`` leaves such a name to the calibrated derivation.
+
+    A collection that is registered but holds no chunk yet is not in the listing the row
+    comes from, so it reads as no row and answers the name (``embedding_model_row_preferred``
+    has the same limit): a collection renamed with its data is visible, an empty one is not.
+
+    The pre-index registration loop registers whatever this answers. When the read failed
+    and the row's model differs from the name's guess (a rename left them apart), the engine
+    can refuse that registration (``EmbeddingProfileMismatchError``) and the run stops
+    loudly; registration is not skipped, because a skip would write into a collection the
+    run never confirmed. A row that agrees with the guess, the usual case, is unaffected.
+    """
+    from nexus.doc_indexer import _target_model  # noqa: PLC0415 — circular-dep avoidance (nexus.doc_indexer imports this module)
+
+    name_model = legacy_model if legacy_model and not is_conformant_collection_name(collection_name) else None
+    return _target_model(db, collection_name, name_model=name_model)
+
+
 def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
-    """Return the conformant collection name for ``(repo, content_type)``.
+    """Return the collection name for ``(repo, content_type)``.
 
     Catalog-aware path: when the catalog is initialized and the repo
-    owner is registered, returns the catalog-minted conformant name.
+    owner is registered, returns the label the collection is registered
+    under, whatever its shape, or a newly rendered conformant name when no
+    row exists yet (RDR-229 P2.8).
 
     Unregistered-owner path: synthesizes a conformant name from the
     path-derived ``<basename>-<hash8>`` identity so the ad-hoc workflow
@@ -506,7 +535,7 @@ def _repo_collection_or_legacy(repo: Path, content_type: str) -> str:
     if cat is None:
         return _conformant_name_for_repo(repo, content_type)
     try:
-        return cat.collection_for_repo(repo, content_type).render()
+        return cat.collection_for_repo(repo, content_type).label
     except LookupError:
         # Owner not yet registered; fall through to the path-derived
         # synthesis below. This happens for callers that bypass the
@@ -919,14 +948,23 @@ def _migrate_legacy_collections(
                 result[ct] = legacy
                 continue
 
+            # The shared collections cache the run's row read goes through was
+            # filled before the rename and has no row for the new name (RDR-229
+            # P2.3): drop it where a rename happened, so a steady-state run pays
+            # no extra listing. Outside the data-plane try, so it can never turn a
+            # completed rename into the legacy fallback above.
+            from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415  — circular-dep avoidance (nexus.mcp_infra)
+
+            invalidate_collections_cache()
+
             # Data plane succeeded; data now lives at conformant. From
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
                 from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                     ensure_collection_registered,
-                    is_conformant_collection_name,
                 )
+                from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                 # nexus-aotql: routed through the registration seam
                 # (ensure_collection_registered) instead of a direct
                 # writer.register_collection call -- gets the seam's early
@@ -941,34 +979,30 @@ def _migrate_legacy_collections(
                 #
                 # nexus-ft04v.27 / nexus-aotql fix round: reuse the
                 # CollectionName the render above already built instead of
-                # parsing the very name it just rendered back apart --
-                # BOTH branches below, never only the conformant one.
+                # parsing the very name it just rendered back apart.
                 # EXPLICIT kwargs, never bare name-derivation: the generic
                 # seam derivation would recompute embedding_model via the
                 # CURRENT write-intent, which can disagree with the model
                 # this SAME migration just resolved via resolve_write_
-                # embedding_model above. is_conformant_collection_name
-                # decides nothing about WHICH kwargs to pass (both
-                # branches pass the identical explicit set); it exists
-                # only to name the shape distinction, since a pathological
-                # owner_id CollectionName.__post_init__ does not validate
-                # could in principle render a string the regex rejects
-                # even though conformant_name itself is a valid,
-                # fully-derived object -- the code review round 2 fix
-                # (nexus-aotql) closed the actual defect, a bare
-                # register_collection(conformant) in this else branch that
-                # dropped back to name-parsing.
-                register_kwargs = {
-                    "content_type": conformant_name.content_type,
-                    "owner_id": conformant_name.owner_id,
-                    "embedding_model": conformant_name.embedding_model,
-                    "model_version": f"v{conformant_name.model_version}",
-                }
-                if is_conformant_collection_name(conformant):
-                    ensure_collection_registered(
-                        conformant, registrar=lambda: w, kwargs=register_kwargs,
-                    )
+                # embedding_model above. One call for every rendered name:
+                # a conformance check here used to pick between two arms
+                # that passed the identical explicit set, so it decided
+                # nothing and the second arm was unreachable by any guard
+                # (removed at RDR-229 P2.3, nexus-p2m1x.8; the arm's old
+                # defect, a bare register_collection(conformant) that fell
+                # back to name-parsing, was closed by nexus-aotql).
+                if conformant_name.model_version is None:
+                    # A registered row with no readable version (engine 0.1.200, RDR-229
+                    # P2.8): the row exists, so there is nothing to register, and a blank
+                    # model_version is refused for a new row (P2.5, D1).
+                    _log.debug("phase4_register_skipped_row_has_no_version", new=conformant)
                 else:
+                    register_kwargs = {
+                        "content_type": conformant_name.content_type,
+                        "owner_id": conformant_name.owner_id,
+                        "embedding_model": conformant_name.embedding_model,
+                        "model_version": f"v{conformant_name.model_version}",
+                    }
                     ensure_collection_registered(
                         conformant, registrar=lambda: w, kwargs=register_kwargs,
                     )
@@ -3021,6 +3055,7 @@ def _index_pdf_file(
         prepared = _pdf_chunks(
             file, content_hash_hex, target_model, now_iso, collection_name,
             chunk_chars=chunk_chars, collection_name=collection_name,
+            row_model=target_model,
             extraction_stats=_extraction_stats, extractor=extractor,
             **({"sensitive": True} if _sensitive_pdf else {}),
         )
@@ -4873,7 +4908,7 @@ def _run_index(
     # non-conformant value through the path-derived conformant synth, which
     # builds ``code__<owner>__<model>__v1`` without needing a registered
     # owner (model segment self-adjusts to local/cloud mode).
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     if not is_conformant_collection_name(code_collection):
         code_collection = _repo_collection_or_legacy(repo, "code")
     if not is_conformant_collection_name(docs_collection):
@@ -5359,6 +5394,9 @@ def _run_index(
     _local_mode = _is_local()
     _embed_fn = None
     _service_mode: bool = False  # resolved in the cloud/service branch below; False in local mode
+    # The model the local embedder reports; None outside local mode. The target models are
+    # resolved from the collections' catalog rows once the names are final (below).
+    local_model: str | None = None
 
     if _local_mode:
         from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -5384,8 +5422,6 @@ def _run_index(
         # service mode (the in-memory test substrate).
         _embed_fn = select_local_mode_embed_fn(_local_ef)  # shape #1 for code / prose / PDF / RDR
 
-        code_model = local_model
-        docs_model = local_model
         voyage_key = ""
         voyage_client = None
         # First-run tier notice
@@ -5405,8 +5441,6 @@ def _run_index(
             # (nexus-sghyo); the else branch below raises loud.
             voyage_key = ""
             voyage_client = None
-            code_model = index_model_for_collection(code_collection)
-            docs_model = index_model_for_collection(docs_collection)
             # Service-mode embed_fn (code / prose / PDF / RDR path):
             # returns empty embeddings as a no-op.  HttpVectorClient.
             # upsert_chunks_with_embeddings ignores them and embeds
@@ -5480,23 +5514,6 @@ def _run_index(
         if _migrate_writer is not None:
             _migrate_writer.close()
 
-    if _local_mode:
-        # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk
-        # is the model that EMBEDDED it. In local mode that is the model the
-        # engine embeds with, which it routes by the registry row's
-        # embedding_model (EmbedderRouter.resolveEmbedderStrict) -- not the
-        # Python EF's: without the ``[local]`` extra the EF falls back to
-        # MiniLM while a bge-768 collection is written. This indexer registers
-        # the row with the name's own token (the registration loop below), so
-        # the token is what the engine uses. Resolved here, after the
-        # legacy-name migration, so it follows the final names. A
-        # non-conformant (legacy) name carries no token, so it keeps the
-        # Python EF's name.
-        if is_conformant_collection_name(code_collection):
-            code_model = index_model_for_collection(code_collection)
-        if is_conformant_collection_name(docs_collection):
-            docs_model = index_model_for_collection(docs_collection)
-
     # nexus-27u7: defer T3 collection creation to the per-content-type
     # branches that actually have files. Pre-fix the indexer
     # unconditionally created both ``code__`` and ``docs__`` collections
@@ -5519,6 +5536,36 @@ def _run_index(
         (_migrated_names.get("rdr") or _repo_collection_or_legacy(repo, "rdr"))
         if have_rdr_files else None
     )
+    # nexus-s80u9 (7.77.0 shakeout N6): the label stamped into every chunk is the
+    # model that EMBEDDED it, and the engine embeds by the collection's registry
+    # row (EmbedderRouter.resolveEmbedderStrict), not by the name and not by the
+    # Python EF (without the ``[local]`` extra the EF falls back to MiniLM while a
+    # bge-768 collection is written). RDR-229 P2.3 (nexus-p2m1x.8): so the target
+    # model is the row's, with the three outcomes ``nx index md`` / ``pdf`` have
+    # (``_repo_target_model``): the row's model; no row (a new collection), or a
+    # row with no model, the name's own token (the registration loop below gives
+    # such a collection a row holding it); a row read that failed, the name's model
+    # flagged as a guess, so the unchanged-content skip lets the hash decide. A
+    # rename keeps the source row's model under the new name, so a conformant
+    # name's token and its row can disagree: the row wins. Resolved here, after
+    # the legacy-name migration, so it follows the final names, and only for a
+    # collection this run has files for: a collection with none reads no row, so
+    # an unreachable listing adds no failed read and no warning for it. A
+    # non-conformant (legacy) name carries no token, so in local mode it keeps the
+    # Python EF's name unless the row answers; the rdr collection's keeps the docs
+    # one's.
+    if have_code_files:
+        code_model, code_model_known = _repo_target_model(db, code_collection, legacy_model=local_model)
+    else:
+        code_model, code_model_known = local_model or "", True
+    if have_docs_files:
+        docs_model, docs_model_known = _repo_target_model(db, docs_collection, legacy_model=local_model)
+    else:
+        docs_model, docs_model_known = local_model or "", True
+    if rdr_col_name is not None:
+        rdr_model, rdr_model_known = _repo_target_model(db, rdr_col_name, legacy_model=docs_model)
+    else:
+        rdr_model, rdr_model_known = docs_model, docs_model_known
     _log.debug(
         "creating collections",
         code=code_collection if have_code_files else "(deferred; no files)",
@@ -5594,13 +5641,15 @@ def _run_index(
     # 721d1ff1__bge-base-en-v15-768__v1 registered with embedding_model
     # 'minilm-l6-v2-384'). The engine 422s on ANY kwargs/profile
     # disagreement regardless of which side is "right", so re-deriving
-    # independently is itself the hazard. code_collection/docs_collection/
-    # rdr_col_name are ALREADY confirmed conformant by this point (Phase-4
-    # migration + the is_conformant_collection_name re-checks above), so
-    # index_model_for_collection(_name) -- the SAME name-token read
-    # index_model_for_collection above already uses for the service-mode
-    # embed-fn selection -- makes the registration kwargs agree with the
-    # name BY CONSTRUCTION, never a second independent guess.
+    # independently is itself the hazard. The model resolved for this run's
+    # target (code_model / docs_model / rdr_model, above) is the one this
+    # loop registers: the row's when a row backs the name, the name's own
+    # token when none does, so the registration kwargs agree with what the
+    # run stamps BY CONSTRUCTION, never a second independent guess. RDR-229
+    # P2.3 (nexus-p2m1x.8): it used to register the name's token, which a row
+    # whose model differs from it (a rename keeps the source row's model)
+    # made the engine's profile refuse (EmbeddingProfileMismatchError: the
+    # row held the row's model, not the token).
     #
     # Release-battery finding (7.39.0 local-service gate, 35 reds): this
     # loop runs only when the vector backend is the engine. The write path
@@ -5621,9 +5670,11 @@ def _run_index(
     from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
 
     if _reg_service_mode():
-        for _name in (code_collection if have_code_files else None,
-                      docs_collection if have_docs_files else None,
-                      rdr_col_name):
+        for _name, _registered_model in (
+            (code_collection if have_code_files else None, code_model),
+            (docs_collection if have_docs_files else None, docs_model),
+            (rdr_col_name, rdr_model),
+        ):
             if _name is not None:
                 # nexus-wwuzp: this registration passes explicit kwargs, so its
                 # upsert clears ``superseded_by``. After a failed Phase-4
@@ -5647,7 +5698,7 @@ def _run_index(
                     ),
                 )
                 _reg_kwargs = collection_registration_kwargs(_name)
-                _reg_kwargs["embedding_model"] = index_model_for_collection(_name)
+                _reg_kwargs["embedding_model"] = _registered_model
                 ensure_collection_registered(_name, kwargs=_reg_kwargs)
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
@@ -5902,6 +5953,12 @@ def _run_index(
         # separate physical collection from docs__, so a shared object would
         # cross-contaminate staleness lookups between the two.
         rdr_staleness = _build_with_marker("rdr", rdr_col)
+    # RDR-229 P2.3: a collection whose row could not be read is compared against the
+    # name's guess, so its cache lets the content hash alone decide (the cache is
+    # per collection, as the target model is).
+    code_staleness.model_known = code_model_known
+    docs_staleness.model_known = docs_model_known
+    rdr_staleness.model_known = rdr_model_known
     if _stale_fence_doc_ids:
         # nexus-cp46b: a doc_id only ever belongs to one collection's cache,
         # so sharing the same frozenset across all three is harmless — each
@@ -6792,15 +6849,6 @@ def _run_index(
     if on_phase is not None:
         on_phase("Discovering and indexing RDR markdown files…")
     _rdr_t0 = time.monotonic()
-
-    # nexus-s80u9: the rdr collection's own model token labels its chunks, as
-    # the docs collection's does its own; a name that carries no token (legacy)
-    # keeps the docs label it always had.
-    rdr_model = (
-        index_model_for_collection(rdr_col_name)
-        if rdr_col_name is not None and is_conformant_collection_name(rdr_col_name)
-        else docs_model
-    )
 
     def _index_one_rdr(file: Path, score: float, timers: object | None) -> int:
         _log.debug("indexing", file=str(file))

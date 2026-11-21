@@ -143,9 +143,13 @@ def _print_census(report: dict) -> None:
         f"  merge candidates: {report['merge']} ({report['merge_twin']} with a live twin, "
         f"{report['merge_sibling']} rewriting onto one URI with another stale row)"
     )
+    # The last two counts are newer than the engine's first report; an older engine omits them, and they are
+    # not in _COUNT_KEYS so that a report without them still passes _check_report.
     echo(
         f"  refused: {report['refused']} ({report['refused_file_routed_collection']} in a file-routed collection, "
-        f"{report['refused_malformed']} with no title part)"
+        f"{report['refused_malformed']} with no title part, "
+        f"{report.get('refused_unregistered_collection', 0)} in a collection with no registry row, "
+        f"{report.get('refused_unproven_content_type', 0)} in a collection whose content type is not proven a note)"
     )
     echo(f"tombstoned stale rows (left as they are): {report['tombstoned']}")
     echo(
@@ -745,7 +749,8 @@ def repair_note_uris_cmd(
       rewrite candidates  no live note holds nx-note://<its collection>/<title>: the URI is rewritten, in the
                           catalog row, its aspect row and its highlight row, in one transaction
       merge candidates    a live twin holds the target (or two stale rows share it): listed; merged only by --merge
-      refused             blank or file-routed collection, or no title part: listed, never rewritten
+      refused             no title part, or a collection whose registry content type is not knowledge (docs, rdr,
+                          code, unknown, no registry row): listed, never rewritten
       tombstoned          counted, never rewritten (a restored one shows up in the next census)
       nxexp:// copies     census only: their target segment goes stale with every rename or re-home, and a
                           re-import into the new collection then mints another copy; not repaired here

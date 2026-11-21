@@ -109,19 +109,44 @@ separate, whole-string ChromaDB shape check with no owner-segment
 concept; it is not the parser these two functions use.
 
 The `owner_id` column is not the name's owner segment for a repo
-collection (nexus-6pbwx). For `code`, `docs` and `rdr` collections the
-engine sets it to the owner segment of the tumbler prefix of the catalog
-documents that live in the collection, hyphenated (`1-15`, what
-`owner_segment_for_tumbler` gives), replacing a name-derived slug
-(`arcaneum-2ad2825c`) when the first document lands. A collection with no
-documents keeps the value it was registered with, and an owner that is
-already tumbler-shaped is a first registration that stands, unless it is the
-segment of a curator-type owner (an import into an empty collection files its
-documents under the knowledge curator; a repo document that arrives later
-replaces that provisional owner). A `knowledge`
-collection is different: its owner is its subject, whatever tumbler its
-documents live under. `catalog-044-collection-owner-from-documents.xml`
-carries the rule (two triggers) and a one-off repair of existing rows.
+collection (nexus-6pbwx). A collection's owner is its source, set once at
+registration: the repo owner for a repo's `code`, `docs` and `rdr`
+collections, the corpus curator for a docs corpus, the knowledge curator
+for knowledge. An owner that a registration set stands: a collection
+registered under a curator keeps it, and documents that arrive later do not
+replace it (`catalog-051` amends `catalog-044`). Only a non-tumbler owner (a
+slug such as `arcaneum-2ad2825c`, an empty value or a placeholder) is still
+derived from the collection's documents, hyphenated (`1-15`, what
+`owner_segment_for_tumbler` gives), when the first document lands, unless
+another live collection already holds that owner for the same content
+type, embedding model and version: then the collection keeps its slug and
+the engine logs a notice naming both (`catalog-051`). It takes the
+documents' owner once that place frees, as when a rename or a supersede
+retires the other collection. A collection with no documents keeps the
+value it was registered with. A
+`knowledge` collection is different: its owner is its subject, whatever
+tumbler its documents live under.
+`catalog-044-collection-owner-from-documents.xml` carries the rule and a
+one-off repair of existing rows.
+
+An `.nxexp` import resolves the owner of a collection it registers in this
+order: the owner on the collection's existing row; then the export file's
+owner header (the repo owner with that `repo_hash`, registered with an empty
+root that the first `nx index repo` on this machine fills in); then a
+`<slug>-<hash8>` stem in the name (always for a `code__` collection; for a
+`docs__` or `rdr__` one when the target has a `code__` collection of the stem
+or a repo owner with that hash); then the corpus curator for a
+`docs` corpus; then the knowledge curator, with a warning in the log and in
+the import summary. A name whose owner segment is a tumbler, not a corpus
+name, has no corpus curator and takes the knowledge curator. A repo's
+collections that an old bulk import left under a curator are re-owned to the
+repo owner by the registered data move `rdr229-reown-repo-stems-from-curator`,
+not by later documents. The move leaves a collection with its curator when
+another live collection of the same type, repo owner, embedding model and
+version already exists, and records each such collection in `nexus.gc_audit`
+(operation `rdr229_reown_skipped`, the reason in `details`). A name whose stem
+is all digits, such as `docs__2024__...`, is read as a tumbler too, so it
+takes the knowledge curator rather than a corpus curator.
 
 ## Rule 4: a collection holds many documents
 

@@ -23,7 +23,7 @@ _ROWS = {
 
 @pytest.fixture(autouse=True)
 def _catalog_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: _ROWS.get(name))
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: _ROWS.get(name))
 
 
 def _err(*cols: str, mode: str | None = "dual") -> str:

@@ -101,6 +101,67 @@ def test_a_stalled_call_is_a_warning_not_red():
     assert "pg_cancel_backend(4242)" in stalled.detail
 
 
+def _classed(label: str, what: str, reason_class: str | None) -> dict:
+    entry = _entry(label, what)
+    if reason_class is not None:
+        entry["reason_class"] = reason_class
+    return entry
+
+
+def test_a_move_blocked_on_a_missing_prerequisite_is_a_warning_not_red():
+    status = {"boot_work": [_classed("m1", "blocked: m1: pg_background is not installed (blocked since 2026-11-17T01:00:00Z)",
+                                     "missing_prerequisite")]}
+
+    rows = check_data_moves(status)
+
+    assert _red(rows) == []
+    row = _by_label(rows)["Data move m1"]
+    assert row.ok is False and row.warn is True
+    assert row.detail.startswith("blocked: m1: pg_background is not installed")
+    hint = " ".join(row.fix_suggestions)
+    assert "`nx upgrade` replaces that bundle" in hint and "install-binary" not in hint
+    assert "self-managed" in hint and "nothing was changed" in hint
+    assert "restart the engine" in hint and "retries by itself" not in hint
+    assert _by_label(rows)[SUMMARY_LABEL].ok
+
+
+def test_a_move_blocked_for_another_reason_stays_red_even_beside_a_prerequisite_one():
+    status = {"boot_work": [
+        _classed("a", "blocked: a: pg_background is not installed", "missing_prerequisite"),
+        _classed("b", "blocked: b: library role dml_utils_owner is missing", None),
+        _classed("c", "blocked: c: waiting for a background worker slot", "some_other_class"),
+    ]}
+
+    rows = check_data_moves(status)
+
+    assert sorted(r.label for r in _red(rows)) == ["Data move b", "Data move c"]
+    assert _by_label(rows)["Data move a"].warn is True
+
+
+def test_a_failed_move_stays_red_whatever_class_it_carries():
+    status = {"boot_work": [_classed("f", "failed: f: pg_background is not installed", "missing_prerequisite")]}
+
+    red = _red(check_data_moves(status))
+
+    assert [r.label for r in red] == ["Data move f"]
+
+
+def test_a_dml_utils_entry_point_miss_without_the_class_stays_red():
+    status = {"boot_work": [_entry("d", "blocked: d: dml_utils.run_migration_chunks_committing is not installed")]}
+
+    red = _red(check_data_moves(status))
+
+    assert [r.label for r in red] == ["Data move d"]
+
+
+def test_an_older_engine_entry_without_the_class_stays_red_as_before():
+    status = {"boot_work": [_entry("old", "blocked: old: pg_background is not installed")]}
+
+    red = _red(check_data_moves(status))
+
+    assert [r.label for r in red] == ["Data move old"]
+
+
 def test_a_checksum_drift_reason_reaches_the_row_with_its_recovery_hint():
     reason = (
         "blocked: m: a library changelog failed: Validation Failed: 1 changesets check sum "

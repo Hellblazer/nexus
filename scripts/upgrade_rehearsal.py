@@ -50,6 +50,18 @@ FAILURE (vacuous), not a pass. The fix ships in an engine newer than the wheel's
 ``--engine-jar`` (or ``NEXUS_SERVICE_JAR``) to run the check against a jar built from the fix; the
 override applies from ``start-old`` on, never to the old client's stack.
 
+Old-bundle starts (nexus-f3yqd.2.23). conexus 8.2.0 is the last release whose PostgreSQL bundle has no pg_background
+(engine 0.1.189's); an install first set up on it keeps that bundle. ``both`` therefore adds two starts from it. After
+``nx upgrade`` each must show ``pg_background.control`` in the extracted bundle, ``pg_background`` in ``pg_extension``,
+no blocked data move and no ``PostgreSQL bundle`` warning in ``nx doctor``; a start whose bundle already had it is a
+finding (nothing was exercised). ``8.2.0`` is the ordinary hop, where the engine changes and the refresh comes with it.
+``8.2.0+engine-first`` is the constructed leg: ``nx daemon service install-binary <pin> --no-pg-bundle`` puts the
+candidate's pinned engine on the box first, so the engine is already current and only the bundle leg of a plain
+``nx upgrade`` can fix it. The first ``nx`` call after a version change runs a finish pass that would install the
+engine and the bundle, so the driver sets the version stamp first; it waits for the engine to idle by the product's own
+rule (``engine_busy_reason``, boot work included) because the bundle leg defers while it works; and right before
+``nx upgrade`` it checks that the engine is the pin and the bundle still lacks pg_background (else the leg is vacuous).
+
 The ceilings are per start and come from the first real-store runs (chas lab-m, 2026-11-10, the develop
 wheel, conexus 8.1.0 with engine 0.1.186; the f3yqd.1 seeder's 86,000 rows, 2.4 GB, and for 7.76.0 140,000
 rows in five collections, 2.6 GB). ``nx upgrade`` is 120 s from the newest release below the candidate
@@ -253,6 +265,137 @@ PCI_END_STATE_BOUND_S: float = (
 )
 PCI_RESTART_CEILING_S: float = 300.0
 PROBE_SNAPSHOT_BOUND_S: float = 30.0
+
+#: nexus-f3yqd.2.23. The last release whose PostgreSQL bundle has no pg_background (engine-service-v0.1.189's;
+#: 8.2.1 pinned 0.1.190, the first bundle with it). An install first set up on it keeps that bundle, so two
+#: more starts run from it: ``8.2.0`` (the engine changes, and the refresh comes with it) and
+#: ``8.2.0+engine-first`` (``install-binary <pin> --no-pg-bundle`` first, so the engine is already the pinned
+#: one and only the bundle leg of a plain ``nx upgrade`` can fix it). A start is ``<version>[+<variant>]``.
+OLD_BUNDLE_VERSION: str = "8.2.0"
+ENGINE_FIRST: str = "engine-first"
+ENGINE_FIRST_STEP: str = "install-pinned-engine"
+ENGINE_FIRST_CEILING_S: float = 900.0  # a ~190 MB download and a restart; judged on exit, never on silence
+IDLE_WAIT_BOUND_S: float = 900.0
+IDLE_POLLS: int = 3
+IDLE_POLL_S: float = 5.0
+_PG_BACKGROUND_CONTROLS = (
+    Path("pg-bundle/bundle/share/postgresql/extension/pg_background.control"),
+    Path("pg-bundle/bundle/share/extension/pg_background.control"),
+)
+
+
+def split_start(spec: str) -> tuple[str, str]:
+    """``8.2.0+engine-first`` is ``("8.2.0", "engine-first")``; a plain version has no variant."""
+    version, _, variant = spec.partition("+")
+    return version, variant
+
+
+def engine_first_argv(nx: str, pin: str) -> list[str]:
+    """The constructed converged-engine leg: the candidate's pinned engine, and not its bundle."""
+    return [nx, "daemon", "service", "install-binary", f"engine-service-v{pin}", "--no-pg-bundle"]
+
+
+def bundle_has_pg_background(config: Path) -> bool:
+    """The install's extracted PostgreSQL bundle carries pg_background's control file."""
+    return any((config / rel).is_file() for rel in _PG_BACKGROUND_CONTROLS)
+
+
+def bundle_refresh_findings(
+    *, before: bool | None, after: bool | None, extension: bool | None, doctor_text: str, variant: str,
+) -> list[str]:
+    """What an old-bundle start must show after ``nx upgrade``: the control file is in the extracted bundle, the
+    extension is in the database, and nothing is blocked or pending in ``nx doctor``. A start whose bundle already
+    had pg_background exercised nothing, which is a finding, not a pass."""
+    leg = f" ({variant} leg)" if variant else ""
+    if before is None:
+        return [f"old-bundle{leg}: the bundle before nx upgrade could not be read"]
+    if before:
+        return [f"old-bundle{leg}: the start's bundle already had pg_background, so nothing was exercised"]
+    out: list[str] = []
+    if not after:
+        out.append(f"old-bundle{leg}: pg_background.control is still missing from the extracted bundle after nx upgrade")
+    if not extension:
+        out.append(
+            f"old-bundle{leg}: pg_extension has no pg_background after nx upgrade"
+            + (" (the query could not run)" if extension is None else "")
+        )
+    text = strip_ansi(doctor_text)
+    blocked = [ln.strip() for ln in text.splitlines() if re.search(r"Data move\b.*\bblocked", ln)]
+    if blocked:
+        out.append(f"old-bundle{leg}: a registered move is blocked: " + "; ".join(blocked)[:300])
+    if re.search(r"PostgreSQL bundle", text):
+        out.append(f"old-bundle{leg}: nx doctor still has a PostgreSQL bundle row")
+    return out
+
+
+def busy_per_product(python: Path, config: Path, env: dict[str, str]) -> str | None:
+    """Why the candidate's own idle rule (``nexus.daemon.pg_bundle_refresh.engine_busy_reason``: ``boot_work`` empty
+    but for a data move that is only blocked, failed or paused, and no index build or vacuum) says the engine is
+    busy, or ``None`` when it is idle. Run with the installed candidate's python, so the rehearsal judges by the rule
+    the bundle leg itself uses, including its ``moves_can_run`` (on a bundle without pg_background no move can run,
+    so a queued one is not work; F33). A run that fails to answer is busy: unknown is not idle."""
+    code = (
+        "import sys; from pathlib import Path; "
+        "from nexus.daemon.pg_bundle_refresh import bundle_lacks_pg_background, engine_busy_reason; "
+        "cfg = Path(sys.argv[1]); "
+        "print('NX_BUSY=' + (engine_busy_reason(cfg, moves_can_run=not bundle_lacks_pg_background(cfg)) or ''))"
+    )
+    try:
+        done = subprocess.run(  # noqa: S603 - the installed candidate's interpreter, fixed argv
+            [str(python), "-I", "-c", code, str(config)], env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"the idle rule could not run: {exc}"
+    if done.returncode != 0:
+        return f"the idle rule exited {done.returncode}: {done.stderr.strip()[-200:]}"
+    # The answer is the marked line: the candidate's logging can write lines of its own to stdout.
+    answers = [ln[len("NX_BUSY="):].strip() for ln in done.stdout.splitlines() if ln.startswith("NX_BUSY=")]
+    if not answers:
+        return f"the idle rule gave no answer: {done.stdout.strip()[-200:]}"
+    return answers[-1] or None
+
+
+def wait_until_idle(
+    busy: Callable[[], str | None], *, bound_s: float = IDLE_WAIT_BOUND_S, polls: int = IDLE_POLLS,
+    poll_s: float = IDLE_POLL_S, clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """True once *busy* has said "idle" (``None``) for *polls* reads in a row. The converged-engine leg waits for the
+    engine to idle after ``install-binary`` boots a new engine, because the bundle leg defers while one is working."""
+    deadline, quiet = clock() + bound_s, 0
+    while clock() < deadline:
+        quiet = quiet + 1 if busy() is None else 0
+        if quiet >= polls:
+            return True
+        sleep(poll_s)
+    return False
+
+
+def installed_engine_version(config: Path) -> str | None:
+    """The engine version the install's receipt names (``service/nexus-service.meta.json``), or ``None``."""
+    try:
+        data = json.loads((config / "service" / "nexus-service.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version.lstrip("v") if isinstance(version, str) else None
+
+
+def engine_first_findings(*, bundle_present: bool | None, engine: str | None, pin: str | None) -> list[str]:
+    """What the constructed converged-engine leg must hold right before ``nx upgrade``: the engine is already the
+    candidate's pin and the bundle still lacks pg_background. Otherwise the finish pass of an earlier ``nx`` call did
+    the work, and ``nx upgrade`` would judge nothing."""
+    out: list[str] = []
+    if bundle_present is None or bundle_present:
+        out.append(
+            f"engine-first: the bundle {'could not be read' if bundle_present is None else 'already has pg_background'} "
+            f"before nx upgrade, so the converged-engine leg did not run"
+        )
+    if pin is None or engine != pin:
+        out.append(f"engine-first: the engine is {engine!r} before nx upgrade, not the candidate's pin {pin!r}")
+    return out
+
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
@@ -641,9 +784,12 @@ def resolve_from_versions(
     finals = {v: _vkey(v) for v in published}
     finals = {v: k for v, k in finals.items() if k is not None}
     if spec != "both":
-        if spec not in published:
+        base, variant = split_start(spec)
+        old = _vkey(OLD_BUNDLE_VERSION)
+        if base not in published or (variant and (variant != ENGINE_FIRST or _vkey(base) is None or _vkey(base) > old)):
             raise RehearsalError(
                 f"--from-version {spec} is not a published conexus version"
+                + (f" (a +{ENGINE_FIRST} start needs one up to {OLD_BUNDLE_VERSION}, whose bundle lacks pg_background)" if variant else "")
             )
         return [spec]
     ckey = _vkey(candidate)
@@ -667,6 +813,13 @@ def resolve_from_versions(
                 f"{PRE_PCI_VERSION}, the pre-PCI start of the keep check, is not a published conexus version"
             )
         out.append(PRE_PCI_VERSION)
+    old = _vkey(OLD_BUNDLE_VERSION)
+    if old is not None and old < ckey and OLD_BUNDLE_VERSION in published:
+        # nexus-f3yqd.2.23: an install first set up before pg_background shipped in the bundle (see
+        # OLD_BUNDLE_VERSION). PyPI lists it; a published list that does not (a test's) has no such start.
+        for start in (OLD_BUNDLE_VERSION, f"{OLD_BUNDLE_VERSION}+{ENGINE_FIRST}"):
+            if start not in out:
+                out.append(start)
     return out
 
 
@@ -916,6 +1069,7 @@ def write_rate(
 
 
 def is_pre_pci(version: str) -> bool:
+    version = split_start(version)[0]
     key, first = _vkey(version), _vkey(PCI_FIRST_VERSION)
     return key is not None and first is not None and key < first
 
@@ -923,6 +1077,7 @@ def is_pre_pci(version: str) -> bool:
 def start_kind(version: str) -> str:
     """Which ``UPGRADE_CEILINGS_S`` entry a start uses: the pre-PCI release, the 7.x line, or any
     newer start (the newest published version below the candidate)."""
+    version = split_start(version)[0]
     if is_pre_pci(version):
         return "pre-pci"
     key = _vkey(version)
@@ -953,7 +1108,7 @@ def pci_check_enabled(flag: bool | None, version: str, *, standin: bool) -> bool
 def prepare_template_for(version: str, prepare_cmd: str, *, standin: bool) -> str:
     """The default real prepare, for a pre-PCI start, asks for N large collections and does not wait
     for per-collection indexes its engine cannot build. An explicit --prepare-cmd is left alone."""
-    if not standin and prepare_cmd == REAL_PREPARE_CMD and is_pre_pci(version):
+    if not standin and prepare_cmd == REAL_PREPARE_CMD and is_pre_pci(split_start(version)[0]):
         return PRE_PCI_PREPARE_CMD
     return prepare_cmd
 
@@ -2181,6 +2336,11 @@ def seed_plan(cfg: Config, from_version: str, home: Path, log: Callable[[str], N
 
 
 def rehearse(from_version: str, cfg: Config) -> dict:
+    version, variant = split_start(from_version)
+    bundle_scenario = version == OLD_BUNDLE_VERSION or bool(variant)
+    bundle_before: bool | None = None
+    bundle_after: bool | None = None
+    extension_present: bool | None = None
     run_dir = cfg.work / f"from-{from_version}"
     home, config, logs, cwd = (
         run_dir / "home",
@@ -2301,7 +2461,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 "install",
                 "--python",
                 cfg.python,
-                f"conexus=={from_version}",
+                f"conexus=={version}",
             ],
             silence=None,
             ceiling=INSTALL_PREV_CEILING_S,
@@ -2319,7 +2479,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             json_path = run_dir / "prepare.json"
             prepare_t0 = time.monotonic()
             plan = seed_plan(
-                cfg, from_version, home, lambda m: say(f"[{from_version}] {m}")
+                cfg, version, home, lambda m: say(f"[{from_version}] {m}")
             )
             rejected: str | None = None
             if not isinstance(plan, str):
@@ -2359,7 +2519,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                         uv="uv",
                         python=sys.executable,
                         work=str(run_dir),
-                        prev=from_version,
+                        prev=version,
                         json=str(json_path),
                         nx=nx,
                         collections=cfg.pci_collections,
@@ -2439,6 +2599,9 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             stop = not r.ok
             if stop:
                 why_not_run = f"setup step start-old {r.status}: {r.reason}"
+        if bundle_scenario and not stop:
+            bundle_before = bundle_has_pg_background(config)  # what the old install's bundle holds, before anything moves
+            say(f"[{from_version}] old-bundle: pg_background.control present before: {bundle_before}")
         # From here the NEW client runs: a jar override applies to it, never to the old stack above.
         cur["env"] = engine_env(
             env,
@@ -2463,6 +2626,9 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     cfg.target_spec,
                 ],
             ),
+            *(
+                [(ENGINE_FIRST_STEP, None)] if variant == ENGINE_FIRST else []
+            ),  # argv is resolved once the candidate is installed: its engine pin
             (
                 "upgrade",
                 profiled(logs, [nx, "upgrade"])
@@ -2479,6 +2645,28 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     StepResult(name=name, status="not-run", reason=why_not_run)
                 )
                 continue
+            if argv is None:  # the converged-engine leg: the candidate's own pinned engine, without its bundle
+                pin = installed_engine_pin(home)
+                if pin is None:
+                    findings.append("the candidate's engine pin cannot be read, so the engine-first leg cannot run")
+                    why_not_run = "the engine-first leg needs the candidate's engine pin"
+                    stop = True
+                    steps.append(StepResult(name=name, status="not-run", reason=why_not_run))
+                    continue
+                argv = engine_first_argv(nx, pin)
+                # The first nx call after a version change runs the finish pass, which installs the engine AND now
+                # the bundle: consume the stamp first, so install-pinned-engine is the only thing that moves.
+                (config / "last_seen_version").write_text(cfg.candidate + "\n", encoding="utf-8")
+                say(f"[{from_version}] engine-first: version stamp set to {cfg.candidate} (no finish pass)")
+            if name == "upgrade" and variant == ENGINE_FIRST:
+                # immediately before nx upgrade: the engine is the pin and the old bundle is still the old bundle
+                findings.extend(
+                    engine_first_findings(
+                        bundle_present=bundle_has_pg_background(config),
+                        engine=installed_engine_version(config),
+                        pin=installed_engine_pin(home),
+                    )
+                )
             before: PgCounters | None = None
             if name == "upgrade":
                 try:
@@ -2502,14 +2690,18 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     trigger.start()
             upgrade_t0 = time.monotonic()
             pending = name == "upgrade" and upgrade_ceiling is None
-            if name != "upgrade":
+            if name == ENGINE_FIRST_STEP:
+                ceiling = ENGINE_FIRST_CEILING_S
+            elif name != "upgrade":
                 ceiling = cfg.ceilings[name]
             elif upgrade_ceiling is None:
                 ceiling = UPGRADE_PENDING_HANG_GUARD_S  # never "no limit": see the pending note
             else:
                 ceiling = upgrade_ceiling
             try:
-                r = go(name, argv, silence=sil, ceiling=ceiling)
+                r = go(
+                    name, argv, silence=None if name == ENGINE_FIRST_STEP else sil, ceiling=ceiling,
+                )
             finally:
                 if name == "upgrade":
                     upgrade_done.set()
@@ -2528,7 +2720,25 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             stop = not r.ok
             if stop:
                 why_not_run = f"{name} {r.status}: {r.reason}"
+            elif name == ENGINE_FIRST_STEP and not wait_until_idle(
+                lambda: busy_per_product(
+                    home / ".local" / "share" / "uv" / "tools" / "conexus" / "bin" / "python", config, cur["env"],
+                )
+            ):
+                findings.append(
+                    f"the engine was still busy {IDLE_WAIT_BOUND_S:g}s after {ENGINE_FIRST_STEP}: "
+                    "the bundle leg defers while it works, so the leg cannot be judged"
+                )
+                stop = True
+                why_not_run = "the engine did not go idle after the pinned engine started"
             if name == "upgrade":
+                if bundle_scenario:
+                    bundle_after = bundle_has_pg_background(config)
+                    try:
+                        rows = probe.sql("select count(*) from pg_extension where extname = 'pg_background'")
+                        extension_present = bool(rows and int(rows[0][0]) > 0)
+                    except (ProbeError, ValueError, IndexError):
+                        extension_present = None
                 # The "after" readings come right after nx upgrade returns, not after the trigger's join.
                 if before is not None:
                     try:
@@ -2681,6 +2891,13 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 required_steps=JUDGED_STEPS + ((PCI_STEP,) if pci_on else ()),
             )
         )
+    if bundle_scenario and any(s.name == "upgrade" and s.ok for s in steps):
+        findings.extend(
+            bundle_refresh_findings(
+                before=bundle_before, after=bundle_after, extension=extension_present,
+                doctor_text=texts.get("doctor", ""), variant=variant,
+            )
+        )
     doctor_step = next((s for s in steps if s.name == "doctor"), None)
     findings.extend(
         engine_identity_findings(
@@ -2742,11 +2959,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--from-version",
         default="both",
-        metavar="X.Y.Z|both",
-        help="previous release to start from. 'both' (the release-gate default) runs three starts: "
-        f"the newest published version below the candidate, the last published 7.x and "
-        f"{PRE_PCI_VERSION} (the PCI keep check), each in its own work dir with its own table "
-        "and verdict",
+        metavar="X.Y.Z[+engine-first]|both",
+        help="previous release to start from. 'both' (the release-gate default) runs the newest published "
+        f"version below the candidate, the last published 7.x, {PRE_PCI_VERSION} (the PCI keep check) and, for "
+        f"a candidate above {OLD_BUNDLE_VERSION}, the two old-bundle starts ({OLD_BUNDLE_VERSION}, then "
+        f"{OLD_BUNDLE_VERSION}+{ENGINE_FIRST}: install-binary of the candidate's pinned engine without its "
+        "bundle, then nx upgrade), each in its own work dir with its own table and verdict",
     )
     ap.add_argument(
         "--expect-engine",

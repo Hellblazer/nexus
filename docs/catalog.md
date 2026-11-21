@@ -265,13 +265,13 @@ Topic taxonomy improves search through three mechanisms:
 
 `nx taxonomy project` maps chunks from one collection against topic centroids in other collections, creating `assigned_by='projection'` rows that surface cross-domain connections (e.g., RDR docs matching the code that implements them). Each projection row stores the raw cosine similarity plus `source_collection` and `assigned_at`.
 
-Default thresholds when `--threshold` is omitted:
+Default thresholds when `--threshold` is omitted, by the source collection's catalog content type (its name's prefix only when no catalog row backs it or the row read fails):
 
-| Source prefix | Default |
+| Content type | Default |
 |---|---|
-| `code__*` | 0.70 |
-| `knowledge__*` | 0.50 |
-| `docs__*`, `rdr__*` | 0.55 |
+| `code` | 0.70 |
+| `knowledge` | 0.50 |
+| `docs`, `rdr` | 0.55 |
 
 `--use-icf` computes Inverse Collection Frequency per target topic and suppresses hubs (topics appearing in nearly every source) before threshold filtering. For the operator guide, calibration loop, and troubleshooting, see [taxonomy-projection-tuning](exploration/taxonomy-projection-tuning.md).
 
@@ -282,13 +282,15 @@ In `.nexus.yml`:
 ```yaml
 taxonomy:
   auto_label: true                       # Label with Claude haiku (default)
-  local_exclude_collections: ["code__*"] # Skip code in local mode (general-purpose local embeddings cluster code poorly)
+  local_exclude_content_types: [code]    # Skip code collections in local mode (general-purpose local embeddings cluster code poorly)
+  local_exclude_collections: []          # Glob patterns on collection labels to skip in local mode
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `auto_label` | `true` | Auto-label topics with Claude haiku after discover. Requires the `claude` CLI. |
-| `local_exclude_collections` | `["code__*"]` | Glob patterns to skip in local mode. Cloud mode ignores this setting. |
+| `local_exclude_content_types` | `["code"]` | Content types to skip in local mode, matched against each collection's catalog row, never its name. Cloud mode ignores this setting. |
+| `local_exclude_collections` | `[]` | Glob patterns on collection labels to skip in local mode. Cloud mode ignores this setting. Setting it (even to `[]`) without `local_exclude_content_types` makes your config own the exclusion, so `[]` enables code taxonomy locally. |
 
 ### Local vs cloud quality
 

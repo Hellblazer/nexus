@@ -19,6 +19,8 @@ from nexus.hook_registry import HookRegistry
 from tests.conftest import make_vector_test_client
 from typing import Any
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 @pytest.fixture()
 def chroma_client() -> Any:

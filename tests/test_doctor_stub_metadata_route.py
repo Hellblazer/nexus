@@ -14,13 +14,16 @@ import pytest
 
 import nexus.health as h
 from nexus.catalog.http_catalog_client import STUB_METADATA_TIMED_OUT
+from tests.conftest import catalog_row_for_collection_name
 
 _NAMES = ["docs__b__bge-768__v1", "knowledge__a__voyage-context-3__v1", "knowledge__new__voyage-context-3__v1"]
 
 
 class _T3:
     def list_collections(self) -> list[dict]:
-        return [{"name": n} for n in _NAMES] + [{"name": "code__x__voyage-code-3__v1"}]
+        return [{"name": n, **catalog_row_for_collection_name(n)} for n in _NAMES] + [
+            {"name": "code__x__voyage-code-3__v1", **catalog_row_for_collection_name("code__x__voyage-code-3__v1")}
+        ]
 
 
 def _setup(monkeypatch: pytest.MonkeyPatch, answer: Any) -> list[str]:

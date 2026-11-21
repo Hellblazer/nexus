@@ -21,11 +21,10 @@ from nexus.corpus import (
     LocalVoyageCredentialMissingError,
     canonical_embedding_model,
     effective_embedding_model_for_writes,
-    embedding_model_for_collection_name,
-    model_version_for_collection_name,
     t3_collection_name,
     t3_collection_names_for_read,
 )
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name, model_version_for_collection_name
 from nexus.db.local_ef import LOCAL_EMBEDDING_TOKENS, local_model_token
 from tests.conftest import make_vector_test_client
 
@@ -568,7 +567,7 @@ def test_dispatch_cloud_mode_legacy_name(t3_cloud, monkeypatch) -> None:
 
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",
-        lambda name: {
+        lambda name, *, refresh=True, strict=False: {
             "content_type": "knowledge", "owner_id": "papers", "embedding_model": "voyage-context-3",
             "lifecycle_state": "live",
         } if name == "knowledge__papers" else None,

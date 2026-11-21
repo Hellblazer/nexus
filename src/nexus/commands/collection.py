@@ -16,7 +16,6 @@ from nexus.corpus import (
     CANONICAL_EMBEDDING_MODELS,
     LOCAL_EMBEDDING_MODELS,
     embedding_model_for_collection,
-    index_model_for_collection,
 )
 
 _log = structlog.get_logger(__name__)
@@ -286,17 +285,22 @@ def info_cmd(name: str) -> None:
     # every collection, whatever it was indexed with.
     idx_model = query_model = match.get("embedding_model") or ""
     if not idx_model:
-        query_model = embedding_model_for_collection(name)
-        idx_model = index_model_for_collection(name)
+        # No row model on the listing: resolve_collection's NoRow answer (RDR-229 item 1).
+        from nexus.catalog.rows.resolve import embedding_model_for  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        idx_model = query_model = embedding_model_for(name, row_resolver=lambda _n: match)
     else:
         # The row and the name can disagree (a disputed row, RDR-204); say so
         # rather than print one of them as the whole truth. Only a name that
         # encodes a model can disagree: for a subject name
         # (knowledge__distributed-systems) the name-derived model is a
         # prefix-table guess, not something the name says.
-        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            embedding_model_for_collection_name,
+            is_conformant_collection_name,
+        )
 
-        named = index_model_for_collection(name) if is_conformant_collection_name(name) else ""
+        named = (embedding_model_for_collection_name(name) or "") if is_conformant_collection_name(name) else ""
         if named and named != idx_model:
             idx_model = query_model = f"{idx_model} (catalog row; the name says {named})"
 
@@ -768,8 +772,11 @@ def _find_dimension_mismatched_collections(
     # scan vacuous if repointed to the row. embedding_model_for_collection_name
     # (regex, unaffected by the repoint) reads the name's own segment
     # directly, exactly as this function's docstring describes.
-    from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        embedding_model_for_collection_name,
+        is_conformant_collection_name,
+    )
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     engine_models, active_label = _served_embedding_models(t3)
     mismatches: list[dict] = []
@@ -780,7 +787,7 @@ def _find_dimension_mismatched_collections(
 
     for c in t3.list_collections():
         name = c["name"]
-        if name.startswith(_BYPASS_SCHEMA_PREFIXES):
+        if bypasses_canonical_schema(name, c):
             continue
         if not is_conformant_collection_name(name):
             skipped += 1
@@ -965,7 +972,7 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     # never-registered collection this very rename is meant to fix.
     # Candidate-string derivation for both sides keeps the prefix-mismatch
     # guard symmetric, never a row-based lookup that could raise on either.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     old_prefix = split_candidate_collection_name(old)[0]
     new_prefix = split_candidate_collection_name(new)[0]
@@ -990,7 +997,8 @@ def rename_cmd(old: str, new: str, force_prefix_change: bool) -> None:
     # NAME -- a legacy bge-row collection reads as voyage by name, so the
     # name-vs-name guard passed the wrong rename and refused the right one.
     # A non-conformant target keeps the name-vs-name comparison.
-    from nexus.corpus import is_conformant_collection_name, rename_model_conflict  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import rename_model_conflict  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if is_conformant_collection_name(new):
         # A `disputed` source (hygiene-002: its bytes disagree with its row)
@@ -1084,7 +1092,7 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
     # window, uses the candidate-string primitive so none of them can
     # raise CollectionNotRegisteredError depending on where in the
     # function they happen to run.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.db.t3 import verify_collection_deep  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.doc_indexer import batch_index_markdowns, index_markdown, index_pdf  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.pdf_stack import PdfStackError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
@@ -1391,9 +1399,8 @@ def reindex_cmd(name: str, force: bool, ack_external_embedder: bool = False) -> 
         # whose local.embed_model changed since the original write).
         # parse_conformant_collection_name(name) preserves the name's
         # own segments exactly like the code this replaces did.
-        from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle
-            discard_cached_registration,
-            ensure_collection_registered,
+        from nexus.corpus import discard_cached_registration, ensure_collection_registered  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid import cycle
             is_conformant_collection_name,
             parse_conformant_collection_name,
         )
@@ -1945,13 +1952,10 @@ def _reembed_source_model(db: object, name: str) -> str:
     the engine routes by the row, never by a name segment), else the model the
     name encodes. The row read goes through the client's own resolver, so it
     never crosses tenants (nexus-dxifx)."""
-    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.resolve import embedding_model_for  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.embed_window import NO_CATALOG, store_row_resolver  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    model = resolve_row_preferred(
-        name, "embedding_model", embedding_model_for_collection,
-        row_resolver=getattr(db, "_resolve_collection_row", None),
-    )
-    return model if model else embedding_model_for_collection(name)
+    return embedding_model_for(name, row_resolver=store_row_resolver(db) or NO_CATALOG)
 
 
 #: The model the on-device engine embeds with (the bge profile). ``--to`` takes it since RDR-210 Phase 6.

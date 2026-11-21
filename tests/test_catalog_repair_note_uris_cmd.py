@@ -193,6 +193,51 @@ class TestDryRunDefault:
         )
         assert "Dry run" in out and "--apply" in out
 
+    def test_the_refused_breakdown_names_every_reason_and_adds_up_to_refused(self, monkeypatch):
+        census = _census(
+            refused=6,
+            refused_file_routed_collection=1,
+            refused_malformed=1,
+            refused_unregistered_collection=3,
+            refused_unproven_content_type=1,
+        )
+        _patch(monkeypatch, _FakeWriter([census]))
+
+        out = _run().output
+
+        assert (
+            "refused: 6 (1 in a file-routed collection, 1 with no title part, "
+            "3 in a collection with no registry row, "
+            "1 in a collection whose content type is not proven a note)"
+        ) in out
+
+    def test_a_report_from_an_older_engine_without_the_newer_refused_keys_still_prints(self, monkeypatch):
+        census = _census()  # no refused_unregistered_collection, no refused_unproven_content_type
+        assert "refused_unregistered_collection" not in census
+        _patch(monkeypatch, _FakeWriter([census]))
+
+        result = _run()
+
+        assert result.exit_code == 0, result.output
+        assert (
+            "refused: 1 (1 in a file-routed collection, 0 with no title part, "
+            "0 in a collection with no registry row, "
+            "0 in a collection whose content type is not proven a note)"
+        ) in result.output
+
+    def test_a_report_with_only_one_of_the_newer_refused_keys_prints_that_one_and_zero_for_the_other(self, monkeypatch):
+        census = _census(refused=2, refused_unproven_content_type=1)
+        assert "refused_unregistered_collection" not in census
+        _patch(monkeypatch, _FakeWriter([census]))
+
+        out = _run().output
+
+        assert (
+            "refused: 2 (1 in a file-routed collection, 0 with no title part, "
+            "0 in a collection with no registry row, "
+            "1 in a collection whose content type is not proven a note)"
+        ) in out
+
     def test_merge_candidates_are_listed_but_named_unmerged(self, monkeypatch):
         _patch(monkeypatch, _FakeWriter([_census()]))
 

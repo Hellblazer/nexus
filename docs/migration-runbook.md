@@ -1130,7 +1130,10 @@ leaves the PostgreSQL you have in place. The second call, for the new tag, takes
 the default.
 
 Do not run `nx daemon restart-stale` or any upgrade step between the two
-`install-binary` calls: they would put the pinned engine back before the merge.
+`install-binary` calls: they would put the pinned engine back before the merge. A plain
+`nx upgrade` also replaces the extracted PostgreSQL bundle when it lacks pg_background,
+but never across a PostgreSQL major version: that swap is refused before anything stops,
+so the first call's `--no-pg-bundle` is still what keeps the PostgreSQL in place.
 
 ## Restoring a `pg_dump` into a scratch cluster
 

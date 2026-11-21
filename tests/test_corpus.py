@@ -39,7 +39,7 @@ def _fake_collection_rows(monkeypatch):
     """
     import nexus.mcp_infra as mi
 
-    def _fake_get_collection_row(name: str) -> dict | None:
+    def _fake_get_collection_row(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
         content_type = name.partition("__")[0] if "__" in name else ""
         return {
             "content_type": content_type,
@@ -248,7 +248,7 @@ def test_collection_content_type_row_based_repoint(monkeypatch) -> None:
         collection_owner,
     )
 
-    def _row(name: str) -> dict | None:
+    def _row(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
         if name == "code__nexus__voyage-code-3__v1":
             # The NAME says "code"; the ROW disagrees (the exact drift
             # class GH #667 came from). The row must win.
@@ -294,7 +294,7 @@ def test_resolve_corpus_excludes_non_live_lifecycle_states(
             "lifecycle_state": lifecycle_state,
         },
     }
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: rows.get(name))
 
     result = resolve_corpus("code", list(rows))
     assert result == ["code__nexus__voyage-code-3__v1"], (
@@ -310,7 +310,7 @@ def test_resolve_corpus_drops_unregistered_name_from_fanout(monkeypatch) -> None
     read is a hard 422)."""
     import nexus.mcp_infra as mi
 
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
 
     assert resolve_corpus("code", ["code__ghost__voyage-code-3__v1"]) == []
 
@@ -335,7 +335,7 @@ def test_resolve_corpus_bounded_refresh_finds_a_collection_registered_by_another
             "embedding_model": "voyage-code-3", "lifecycle_state": "live",
         },
     }
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: rows.get(name))
 
     invalidate_calls: list[int] = []
     monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: invalidate_calls.append(1))
@@ -365,7 +365,7 @@ def test_resolve_corpus_bounded_refresh_still_returns_empty_when_genuinely_nothi
     refresh fires exactly once, never a retry loop."""
     import nexus.mcp_infra as mi
 
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
     invalidate_calls: list[int] = []
     monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: invalidate_calls.append(1))
     get_names_calls: list[int] = []
@@ -388,7 +388,7 @@ def test_resolve_corpus_bounded_refresh_failure_falls_back_to_empty(monkeypatch)
     failure."""
     import nexus.mcp_infra as mi
 
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
     monkeypatch.setattr(mi, "invalidate_collections_cache", lambda: None)
 
     def _unreachable() -> list[str]:
@@ -420,7 +420,7 @@ def test_resolve_corpus_refresh_never_fires_when_the_first_pass_already_matched(
             "embedding_model": "voyage-code-3", "lifecycle_state": "live",
         },
     }
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: rows.get(name))
 
     def _boom() -> None:
         raise AssertionError("invalidate_collections_cache must not be called on a hit")
@@ -448,10 +448,10 @@ class TestResolveRowPreferred:
 
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {"content_type": "docs", "owner_id": "x", "embedding_model": "m"},
+            lambda name, *, refresh=True, strict=False: {"content_type": "docs", "owner_id": "x", "embedding_model": "m"},
         )
 
-        def _boom(n: str) -> str:
+        def _boom(n: str, *, refresh: bool = True, strict: bool = False) -> str:
             raise AssertionError("name_fallback must not run when a row exists")
 
         assert resolve_row_preferred("anything", "content_type", _boom) == "docs"
@@ -460,7 +460,7 @@ class TestResolveRowPreferred:
         import nexus.mcp_infra as mi
         from nexus.corpus import resolve_row_preferred
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
 
         assert resolve_row_preferred(
             "knowledge__x", "content_type", lambda n: n.split("__")[0],
@@ -476,9 +476,9 @@ class TestResolveRowPreferred:
         import nexus.mcp_infra as mi
         from nexus.corpus import resolve_row_preferred
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda name: {"owner_id": "x"})
+        monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: {"owner_id": "x"})
 
-        def _boom(n: str) -> str:
+        def _boom(n: str, *, refresh: bool = True, strict: bool = False) -> str:
             raise AssertionError("name_fallback must not run when a row exists, even incomplete")
 
         assert resolve_row_preferred("anything", "content_type", _boom) is None
@@ -499,7 +499,7 @@ def test_is_conformant_collection_name_admits_underscored_owner() -> None:
     is_conformant_collection_name rejects it and CollectionName.parse
     raises on the malformed shape it produces."""
     from nexus.catalog.collection_name import CollectionName
-    from nexus.corpus import is_conformant_collection_name, parse_conformant_collection_name
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name, parse_conformant_collection_name
 
     name = CollectionName(
         content_type="code", owner_id="my_repo", embedding_model="voyage-code-3", model_version=1,
@@ -935,7 +935,7 @@ def test_resolve_row_preferred_falls_to_the_name_when_the_row_fetch_fails(monkey
 
     from nexus.corpus import resolve_row_preferred
 
-    def _boom(name: str):
+    def _boom(name: str, *, refresh: bool = True, strict: bool = False):
         raise ConnectionError("simulated unreachable service")
 
     monkeypatch.setattr(mi, "get_collection_row", _boom)

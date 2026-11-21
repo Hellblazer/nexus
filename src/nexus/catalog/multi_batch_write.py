@@ -380,6 +380,11 @@ def stamp_registered_content_hash(cat: Any, doc_id: str, content_hash: str) -> b
     except Exception:  # noqa: BLE001 — boundary catch: advisory evidence write, must never fail the index run it precedes
         _log.warning("registered_content_hash_stamp_failed", doc_id=doc_id, exc_info=True)
         return False
+    # RDR-254 Gap 1: a moved curator file is registered again as a new row; the hint names the old row. Detect only,
+    # fail-open, and nothing at all unless a command opened a hint run scope. The staleness skip never gets here.
+    from nexus.catalog.engine_writes.hints import record_curator_hint  # noqa: PLC0415 — deferred: leaf module, kept out of this module's load path
+
+    record_curator_hint(doc_id, content_hash)
     return True
 
 

@@ -572,10 +572,10 @@ def target_collection_for(recorded: str, t3: Any) -> str:
     grandfathers an existing legacy collection or promotes to the TARGET's
     active model. A non-conformant recorded name passes through to the
     resolver unchanged, exactly as an operator-typed --collection would."""
-    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deferred to avoid circular import
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid circular import
         is_conformant_collection_name,
         parse_conformant_collection_name,
-        t3_collection_name,
     )
 
     base = recorded

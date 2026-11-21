@@ -149,7 +149,7 @@ def test_collection_for_repo_grandfathers_onto_registered_bge(
     result = client.collection_for_repo(tmp_path, "code")
 
     assert result.embedding_model == "bge-base-en-v15-768"
-    assert result.render() == "code__1-1__bge-base-en-v15-768__v1"
+    assert result.label == "code__1-1__bge-base-en-v15-768__v1"
 
 
 def test_collection_for_repo_raises_when_nothing_registered(

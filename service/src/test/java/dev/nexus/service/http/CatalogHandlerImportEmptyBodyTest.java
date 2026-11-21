@@ -117,6 +117,32 @@ class CatalogHandlerImportEmptyBodyTest {
         assertThat(ex.bodyString()).contains("\"imported\":1");
     }
 
+    @Test
+    void importCollection_namesTheRowsWhoseStateItCorrected() throws Exception {
+        // RDR-229 P2.5 (linda 2026-11-20): a revived quarantine sibling (quarantine- name, state live) imports as
+        // quarantine, and the response names it so the change is visible. A clean row is not named.
+        String revived = "quarantine-code__sc-owner__voyage-code-3__v1";
+        String clean = "code__sc-owner2__voyage-code-3__v1";
+        CapturingExchange ex = post("/v1/catalog/import/collection",
+            "{\"rows\":[{\"name\":\"" + revived + "\",\"content_type\":\"code\",\"owner_id\":\"sc-owner\","
+            + "\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\",\"lifecycle_state\":\"live\"},"
+            + "{\"name\":\"" + clean + "\",\"content_type\":\"code\",\"owner_id\":\"sc-owner2\","
+            + "\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\",\"lifecycle_state\":\"live\"}]}");
+        handleWithTenant(ex);
+        assertThat(ex.status).as("the batch imports").isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"imported\":2").contains("\"state_corrected\":[\"" + revived + "\"]");
+    }
+
+    @Test
+    void importCollection_aCleanBatchReportsNoCorrections() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/import/collection",
+            "{\"name\":\"code__sc-owner3__voyage-code-3__v1\",\"content_type\":\"code\",\"owner_id\":\"sc-owner3\","
+            + "\"embedding_model\":\"voyage-code-3\",\"model_version\":\"v1\"}");
+        handleWithTenant(ex);
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"imported\":1").contains("\"state_corrected\":[]");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private void assertEmptyBody400(String path) throws Exception {

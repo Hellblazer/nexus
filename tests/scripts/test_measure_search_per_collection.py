@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
@@ -596,7 +598,7 @@ def test_concurrency_resolves_the_k_cap_once_outside_the_workers(monkeypatch):
 
 
 def test_boosted_page_applies_the_boosts_and_the_file_diversity_cap_in_the_tools_order(monkeypatch):
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)
     monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: {})
     monkeypatch.setattr("nexus.config.get_tuning_config", lambda *a, **k: TuningConfig())
     # Four nearest rows are chunks of ONE document; the cap (2 per file) pushes the rest behind
@@ -613,7 +615,7 @@ def test_boosted_page_applies_the_boosts_and_the_file_diversity_cap_in_the_tools
 
 
 def test_boosted_page_cuts_to_the_limit_and_does_not_mutate_the_input_order(monkeypatch):
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)
     monkeypatch.setattr("nexus.config.load_config", lambda *a, **k: {})
     monkeypatch.setattr("nexus.config.get_tuning_config", lambda *a, **k: TuningConfig())
     pool = [SearchResult(id=f"r{i}", content="", distance=0.1 + i * 0.01, collection="docs__x") for i in range(40)]

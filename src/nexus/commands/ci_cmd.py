@@ -5,14 +5,19 @@ from __future__ import annotations
 import math
 import re
 import time
-from typing import NoReturn
+import uuid
+from typing import Any, NoReturn
 
 import click
 
-from nexus import ci_wait
+from nexus import ci_ack, ci_reds, ci_wait
 
 _SHA = re.compile(r"[0-9a-fA-F]{7,40}")
 _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
+#: A board topic's owner post: the base topic, ``--``, ``owner`` (RDR-252).
+_OWNER_TOPIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*--owner")
+#: Rows of the owner subspace one ``nx ci ack`` reads, newest first: far more than one red writes.
+_ACK_READ_ROWS = 300
 #: The clock the unknown-subspace fallback measures the board wait with (a seam for tests).
 _now = time.monotonic
 #: The sleep between GitHub reads under --latest-attempt (a seam for tests).
@@ -229,3 +234,68 @@ def _at_deadline(sha: str, gh_repo: str, branch: str, subspace: str, timeout_min
         ci_wait.DoneRow("", sha, tuple(runs), f"https://github.com/{gh_repo}/commit/{sha}"),
     )
     return f"{line} (no board row: the wake was dropped; read from GitHub)", code
+
+
+def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | None:
+    """The red open on *subspace*: the last red the rows split into (:func:`nexus.ci_reds.split`, the split
+    ``nx group ack-times`` uses), unless a clear row ended it. A red the newest owner row's ``episode_at`` replaced is
+    not open even with no clear row between."""
+    rows = store.rd(subspace, {"topic": topic}, n=_ACK_READ_ROWS, order="desc")
+    reds, _ = ci_reds.split(list(rows))
+    return reds[-1] if reds and reds[-1].cleared is None else None
+
+
+@ci_group.command(name="ack")
+@click.argument("sha")
+@click.option("--topic", default="nexus-develop--owner", show_default=True,
+              help="The owner post to acknowledge on: board/ci/<TOPIC>. A base topic, a double dash and `owner`.")
+def ci_ack_cmd(sha: str, topic: str) -> None:
+    """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
+
+    SHA is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on
+    board/ci/<TOPIC>: the shas its owner rows carry, since its first row (a red that a newer one replaced, or a clear row
+    ended, is not open). The command refuses a sha that is no such tip, an ambiguous prefix, and a caller who is not the
+    red's current owner (an ack from anyone else counts for nobody, so posting one would only look like an ack). The row
+    is `kind=ack`, `from=<your identity id>` (never a name), the full sha and a fresh nonce. The engine counts an ack by
+    the sender-session stamp the board gives the row, which is this session's. With no identity the command refuses;
+    `nx identity show` says whether this session holds one.
+    """
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
+        raise click.ClickException(f"{sha!r} is not a commit sha: give 7 to 40 hex digits")
+    if not _OWNER_TOPIC.fullmatch(topic):
+        raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in nexus-develop--owner")
+    try:
+        identity = ci_ack.counted_identity()
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not identity:
+        raise click.ClickException(ci_ack.NO_IDENTITY_MESSAGE)
+    subspace = f"board/ci/{topic}"
+    try:
+        store = _store()
+        red = _current_red(store, subspace, topic)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
+        raise click.ClickException(f"could not read {subspace}: {type(exc).__name__}: {exc}") from exc
+    if red is None:
+        raise click.ClickException(f"no open red on {subspace}: nothing to acknowledge")
+    latest = red.rows[-1][2]
+    owner = latest.get("owner")
+    if not owner:
+        raise click.ClickException(f"the red on {subspace} has no owner; an ack from {identity} counts for nobody")
+    if owner != identity:
+        named = f"{owner} ({latest['owner_alias']})" if latest.get("owner_alias") else str(owner)
+        raise click.ClickException(f"the red is owned by {named}; an ack from {identity} counts for nobody")
+    tips = {str((row.dims or {}).get("sha") or "").lower() for _, row, _ in red.rows}
+    tips = {t for t in tips if re.fullmatch(r"[0-9a-f]{7,64}", t)}
+    found = sorted(t for t in tips if t.startswith(sha.lower()))
+    if len(found) != 1:
+        named = ", ".join(sorted(t[:7] for t in tips))
+        raise click.ClickException(
+            f"{sha} is {'ambiguous among' if found else 'not one of'} the red tips on {subspace} ({named})")
+    full = found[0]
+    try:
+        row_id = store.out(subspace, {"topic": topic}, {"kind": "ack", "from": identity, "sha": full},
+                           nonce=uuid.uuid4().hex)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
+        raise click.ClickException(f"could not post the ack: {type(exc).__name__}: {exc}") from exc
+    click.echo(f"acked {full[:7]} on {subspace} as {identity} ({row_id[:12]})")

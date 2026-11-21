@@ -26,6 +26,7 @@ a bare second number ends a range; a comparison is not a range.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 from pathlib import Path
@@ -393,29 +394,65 @@ def test_the_answer_returns_when_the_named_source_stage_itself_raises(tmp_path: 
 # ── I5 and F9: the two stages share one budget ─────────────────────────────────────────────────────────
 
 
+class _FakeClock:
+    """A deterministic stand-in for the ``time`` module as ``core`` reads it: ``monotonic()`` advances by one
+    exact binary tick a call (``tick=0`` holds it still), every reading is recorded, and every other
+    attribute is the real module's. No wall clock enters the assertions (nexus-jypmj.2.4: develop CI run
+    44808341544 failed a wall-clock margin on a loaded runner)."""
+
+    def __init__(self, tick: float = 0.0, t0: float = 1000.0) -> None:
+        self._tick, self._now, self.readings = tick, t0, []
+        self._lock = threading.Lock()
+
+    def monotonic(self) -> float:
+        with self._lock:
+            self._now += self._tick
+            self.readings.append(self._now)
+            return self._now
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+
 def test_the_stage_deadline_is_one_ceiling_from_now_or_the_answers_own_if_sooner() -> None:
-    now = time.monotonic()
-    ceiling = DEFAULT_CAPS.max_seconds
-    assert now + ceiling - 1 <= core._nx_answer_source_stage_deadline(None) <= time.monotonic() + ceiling
-    assert core._nx_answer_source_stage_deadline(now + 3) == now + 3
-    assert core._nx_answer_source_stage_deadline(now + 1000) <= time.monotonic() + ceiling
+    clock = _FakeClock()
+    now, ceiling = clock.monotonic(), DEFAULT_CAPS.max_seconds
+    assert ceiling > 3, "the cases below need the ceiling beyond the answer's own 3 s deadline"
+    with patch.object(core, "time", clock):
+        assert core._nx_answer_source_stage_deadline(None) == now + ceiling
+        assert core._nx_answer_source_stage_deadline(now + 3) == now + 3
+        assert core._nx_answer_source_stage_deadline(now + 1000) == now + ceiling
 
 
 @pytest.mark.parametrize("budget", [None, 4.0])
 def test_both_stages_get_the_same_deadline_so_they_cannot_each_take_a_full_ceiling(
     tmp_path: Path, budget: float | None,
 ) -> None:
+    """The deadline is anchored where the code says: at the answer's own start when a budget is given (so the
+    stage inherits the answer's deadline exactly), at the stage's own start when none is. The clock advances a
+    tick per reading, so an anchor taken at the stage instead of the answer would land later and fail."""
+    clock = _FakeClock(tick=2.0**-10)
     active = AsyncMock(wraps=core._nx_answer_active_project)
     named = AsyncMock(wraps=core._nx_answer_named_sources)
-    start = time.monotonic()
-    with patch.object(core, "_nx_answer_active_project", active), patch.object(core, "_nx_answer_named_sources", named):
+    coverage = AsyncMock(wraps=core._nx_answer_request_coverage)  # takes nx_answer's own, unclamped deadline
+    with (
+        patch.object(core, "time", clock),
+        patch.dict(sys.modules, {"time": clock}),  # nx_answer reads its start through a call-local `import time`
+        patch.object(core, "_nx_answer_active_project", active),
+        patch.object(core, "_nx_answer_named_sources", named),
+        patch.object(core, "_nx_answer_request_coverage", coverage),
+    ):
         _run(tmp_path, budget_seconds=budget)
     first, second = active.await_args.kwargs["deadline"], named.await_args.kwargs["deadline"]
     assert first is not None and first == second, (first, second)
-    cap = DEFAULT_CAPS.max_seconds if budget is None else budget
-    assert first <= time.monotonic() + cap and first > start, "never past one ceiling (or the answer's own budget)"
-    if budget is not None:
-        assert first <= start + budget + 0.5
+    if budget is None:
+        assert coverage.await_args.kwargs["deadline"] is None
+        assert first - DEFAULT_CAPS.max_seconds in clock.readings, "one ceiling from a reading the stage itself took"
+    else:
+        answer_deadline = coverage.await_args.kwargs["deadline"]
+        assert answer_deadline - budget in clock.readings, "the answer's deadline is its own start plus the budget"
+        assert first == answer_deadline, "the stages inherit the answer's deadline as it is (it is sooner than the ceiling)"
+        assert clock.readings.index(answer_deadline - budget) < len(clock.readings) - 1, "the clock moved on after the answer started"
 
 
 # ── S1: off the loop, and the deadline branch ──────────────────────────────────────────────────────────

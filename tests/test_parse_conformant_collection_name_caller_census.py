@@ -40,8 +40,12 @@ nexus-ft04v.26 repoints them at the catalog row), ``collection_
 registration_kwargs`` (the write-time registration derivation used by
 ``HttpCatalogClient.register_collection``'s own bare-call fallback and
 ``ensure_collection_registered``, never one of the ten retired sites),
-and ``CollectionName.parse`` (the render path's parse counterpart, one
-pre-existing caller, unaffected by this bead). This is EXACTLY the
+and ``CollectionName.parse`` (the render path's parse counterpart; its own
+call here is the one this file counts, and its CALLERS are counted by the
+collection-name parse census, ``tests/test_collection_name_parse_census.py``,
+since the RDR-229 P1.R fix round: ``version_from_for_tuple_row``'s temporary
+fallback, ``sensitivity_doctor._external_embedder`` and
+``sensitive_write._parse_collection``). This is EXACTLY the
 allowlist named: "the helpers (render path) and the gate" -- this file
 IS the gate. Every entry below is real (verified independently by
 ``test_allowlisted_sites_are_real_calls_not_stale_entries``); the pin is
@@ -98,8 +102,8 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/corpus.py",
         (
-            "if is_conformant_collection_name(name):",
-            "segments = parse_conformant_collection_name(name)",
+            "if _legacy.is_conformant_collection_name(name):",
+            "segments = _legacy.parse_conformant_collection_name(name)",
         ),
     ): (
         "collection_type_and_owner (split out of collection_registration_kwargs "
@@ -112,16 +116,6 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         "model_version explicitly (registration) or read via the funnel "
         "helpers (diagnostics), so this fallback path never fires for them; "
         "out of nexus-ft04v.27's scope."
-    ),
-    (
-        "src/nexus/catalog/collection_name.py",
-        ('"""', "parsed = parse_conformant_collection_name(name)"),
-    ): (
-        "CollectionName.parse: the render path's own parse counterpart. "
-        "Its one caller is version_from_for_tuple_row's temporary fallback "
-        "for a row with an empty model_version (RDR-229 P1.4, nexus-p2m1x.4; "
-        "http_catalog_client.py's collection_for reads the row, no longer the "
-        "name). Unaffected by nexus-ft04v.27."
     ),
     (
         "src/nexus/commands/collection.py",
@@ -192,6 +186,17 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         "seen."
     ),
     (
+        "src/nexus/catalog/rdr229/collection_row_census.py",
+        (
+            "try:",
+            "return parse_conformant_collection_name(origin), m is not None",
+        ),
+    ): (
+        "RDR-229 P1.2 (nexus-p2m1x.2): the one-off collections-census. It measures how many registry rows disagree "
+        "with their names, so it must parse the name to compare; a row read would make the measurement vacuous. A "
+        "measurement tool, deleted before Phase 4 removes the parser (P1.R / Phase 4)."
+    ),
+    (
         "src/nexus/db/t3.py",
         (
             "if is_conformant_collection_name(name):",
@@ -226,7 +231,8 @@ RETIRED_SITES: tuple[str, ...] = (
     "src/nexus/commands/index.py (already fixed pre-nexus-ft04v.27, "
     "by nexus-ft04v.34)",
     "src/nexus/health.py (chash-conformance unroutable-collection probe)",
-    "src/nexus/repo_identity.py (list_sibling_collections)",
+    "src/nexus/repo_identity.py (list_sibling_collections, DELETED by RDR-229 P2.7, "
+    "nexus-p2m1x.12: the function is gone, not just retired as a parse caller)",
     "src/nexus/commands/collection.py (_find_dimension_mismatched_collections)",
     "src/nexus/commands/catalog_cmds/doctor.py (_run_name_vs_embed_dim)",
 )

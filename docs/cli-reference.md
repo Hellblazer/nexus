@@ -1688,6 +1688,8 @@ Immediately before EACH write, the execute loop RE-VERIFIES that specific owner'
 
 `--include-deactivated` (nexus-cw262 round 3) surfaces owners that were deactivated — a past `--execute deactivate` is not a silent permanent exclusion; it is auditable state. Works on both `nx catalog owners` (plain listing) and `--census`.
 
+`--census` also reports, for each owner with a root, `docs_outside_root` (RDR-254, [Move hints](#move-hints)): `true` when the owner's first page of documents (200, one request per owner, never a second page) holds a document the owner move would rewrite (a root-derived `source_uri` that differs from the one a fresh registration at the owner's root gives), `false` when not, `null` (unknown) when the page could not be read or every entry on it was malformed. It sits beside the root class and is not one: it is not a census class, and it never makes an owner deactivate-eligible. A flagged `healthy` owner's row carries `move_command`, the owner move (a dry run) with its own root; a flagged owner of another class (`not_a_repository`, `path_exists_empty`, `unreadable`) keeps the flag and gets no command, since `--execute move --owner` accepts only a root inside a git work tree. The human report lists the flagged owners under "Documents outside their root". Each `path_vanished` row carries `move_command` with a `<new root>` placeholder, beside the deactivate arm it already has. The move lines appear only when the engine reports the move routes; the flag is reported either way, so on an engine without the routes the census still makes one `/list` request per owner with a root, which costs time on a tenant with many owners and buys no command there.
+
 The mutation arm's availability depends on which engine build the tenant is connected to. `nx catalog owners --census`'s `--json` output reports `mutation_status` as `"available"`, `"unavailable"` (the connected engine confirmed NOT to carry the nexus-cw262 owner-deactivate route — e.g. the live cloud engine before its next tag deploys), or `"unknown"` (no owners to read the signal from either way). The human report and `nx doctor`'s git-hooks fix_suggestion word themselves accordingly — neither ever claims `--execute deactivate` works against an engine confirmed not to support it.
 
 `nx doctor`'s git-hooks check (a `path_vanished`/`path_exists_empty` owner used to render there as a signal-free `ok=True` "could not check") points a dead CATALOG owner, and a catalog owner whose root is not a git repository, at this verb's `--execute deactivate` arm, capability-qualified as above — but a dead owner registered only in the legacy `repos.json` file is invisible to this census (catalog owners only); doctor's suggestion for that case is to edit `repos.json` directly instead.
@@ -1705,17 +1707,47 @@ A dry run by default, double-gated like the other `owners` mutation arms: it wri
 
 The new path must exist: `--new-path` is a file, `--new-root` a directory inside a git work tree. The document's new identity is spelled the way `nx index pdf` and `nx index md` spell it (the resolved absolute path and the raw `file://<abspath>`), so a later index of the file finds the moved row. The owner's new root is the main repository's path and its hash, as `nx index repo` registers them, so a worktree of the repository names the repository. A refusal from the engine (a document that does not exist or is trashed, another live row already holding a target path, a curator owner, a deactivated owner) leaves nothing written.
 
-The engine must carry the move routes (`catalog_move_supported` on `GET /version`); an engine that does not, or whose answer cannot be read, is refused before any move route is called. Until the engine release that carries them the refusal says so ("not yet released").
+The engine must carry the move routes (`catalog_move_supported` on `GET /version`); an engine that does not, or whose answer cannot be read, is refused before any move route is called; the refusal names the minimum engine, engine-service-v0.1.199.
 
 A sensitive document keeps its flag through a move. A deny rule you wrote against its old path (a client permission rule or a hook that names the file) does not follow it: update the rule for the new path. The deny decisions the client derives from the catalog (the sensitive-file checks that read the flagged documents) follow the catalog, so they name the new path after the move.
 
 A failed write says what is known. A 400 or 409 from the engine means nothing was written. Any other failure (a 5xx, a gateway or edge answer, a timeout or lost connection after the request went out) leaves the outcome unknown: the command says so and tells you to re-run it as a dry run, which is safe, to see what is left to move. The write is never resent automatically.
+
+#### Move hints
+
+Index runs print one line naming the move command when the catalog shows the signs of a move (RDR-254 Phase 3). A hint detects and never acts: it writes nothing, it is always the command's dry-run form (never `--no-dry-run --confirm`), its paths are shell-quoted, and it is printed only when the engine reports the move routes, so a client never prints a command its engine refuses. Every catalog read a hint makes is advisory: a refused or failed read, a timeout or an engine without the metadata route drops the hint, logs it, and leaves the exit code as it was. The reads are bounded: the curator hint asks about at most 50 files per run (a `--dir` batch included), spends at most 30 seconds in its own catalog queries, summed over the run, reads each owner's kind once, and after its first failed read asks about no more files for the rest of the run. The 30 seconds count only the time inside those queries: extraction, chunking and embedding before the first file is written, and the time between the files of a `--dir` batch, do not spend them. When a run's hint did not check every file (the cap, the budget, or a failed read), its hints end with one note, `move hints checked for N of M files; run nx index pdf --force on a moved file to check it again`; the note is not a command. The renamed-repository hint has its own 30 seconds, counted from when it starts.
+
+**A moved curator file (`nx index pdf`, `nx index md`).** The run that registers the file at its new path asks the metadata route for live documents with the same `meta.content_hash` under the same curator owner, and prints `nx catalog owners --execute move --document <old tumbler> --new-path <new path>` for each one whose file is absent on this machine (a copy whose original is still on disk is two documents, not a move; an alias row and an in-repo markdown file get none). The line is the last line of the run's output; a run that ends with an error message (a `--dir` batch that reports `N of M failed`) prints the hints of the files it did write before that message, because the hint is not repeated on a later run. It prints on a run that writes the document, which includes the one that creates the duplicate; an unchanged file re-indexed later returns at the staleness check before any writer and prints nothing and asks nothing (the hint is not repeated on every run). The documented command repairs the duplicate at any time.
+
+"Absent on this machine" is read as "moved": a row whose file lives on another machine that shares the catalog, or on a volume that is not mounted, can be named too. The line is a dry run only, so the report shows what it would do before anything is written.
+
+A document indexed by a client older than v7.95.0 (before 2026-11-03) and not indexed since carries no `meta.content_hash`, so the hint cannot see it. Before a planned move of such a file, run `nx index pdf --force` (or `md`) on it once; the hint then works. For a file that already moved, the old row can no longer be stamped: find its tumbler with `nx catalog search '<file name>'` (`nx search` prints paths, not tumblers) and run the document move by hand. Every single-file writer stamps the hash, including a document large enough for the batched writer; only the repository indexers' oversize writer does not, and it never writes a curator document.
+
+**A moved repository (`nx index repo`).** Two hints read the catalog's durable state at the end of every `nx index repo`, just before `Done.`, so each repeats on every run until the move is made or the old owner is deactivated, and neither depends on catching the moment of registration.
+
+- *Documents outside their root.* The run reads the first page (200) of the repository owner's documents and counts the ones the owner move would rewrite: a root-derived `source_uri` (a `file://` URI that ends in its relative `file_path`) that differs from the one a fresh registration at the repository root gives (the same rule as the engine's, pinned by a parity test; a Windows-shaped root derives nothing, as on the engine, so such a repository is never flagged). When any do, it prints `nx catalog owners --execute move --owner <prefix> --new-root <repo root>`. This is the same-name move after registration re-rooted the owner row and left its documents naming the old root.
+- *Renamed repository.* When another repo owner's recorded root is gone on this machine (`path_vanished`, active owners only), the run takes the repository's first 20 documents (in tumbler order, from that same first page) that carry `meta.content_hash`, asks the metadata route once per hash, and counts, per vanished owner, the hashes that also sit on a live row under it. An owner that matches at least half of the hashes asked, and at least two of them, prints `nx catalog owners --execute move --owner <old prefix> --new-root <repo root>`; when several qualify each prints, the highest match count first and ties in tumbler order (`1.9` before `1.10`). If the 30-second budget runs out part way, the hashes not yet asked are dropped and the owners are judged on those asked. A document with no `meta.content_hash` is not counted, and a repository with fewer than two such documents prints nothing. The 20, the half and the two are starting values, tuned on a real renamed repository.
+
+Each repository hint is read independently: one that cannot be read is dropped alone.
 
 ### nx catalog backfill-owner-id (removed)
 
 Removed in 7.0.0 (nexus-i711w). The one-time RDR-137 P1.5a migration wrote
 through a raw SQLite handle on the local catalog, which no longer exists;
 it already refused in service mode, now the only mode.
+
+### nx catalog collections-census
+
+```
+nx catalog collections-census [--tenant-label TEXT] [--json]
+```
+
+Read-only census of this tenant's `catalog_collections` rows against their names (RDR-229 P1.2, nexus-p2m1x.2). One read of the registry (every lifecycle state), no write, no catalog walk. Counts: row versus name for `content_type`, `embedding_model` and `model_version` on each live row whose name parses (a `quarantine-` row against the name it quarantines), with `owner_id` differences in a separate bucket and `lifecycle_state` checked against the `quarantine-` prefix on every live row; live names held by more than one live row (what a partial UNIQUE on live `(tenant_id, name)` would refuse); live `(content_type, owner_id, embedding_model)` tuples with more than one candidate row, counted with and without the `legacy_grandfathered` filter `collectionForTuple` applies today; live names matching `^c[0-9]+$`; and tombstones whose `superseded_by` names no row. Run it once per tenant and store the `--json` report.
+
+| Flag | Description |
+|------|-------------|
+| `--tenant-label TEXT` | Name the tenant in the report (not sent anywhere) |
+| `--json` | Print the whole report as JSON instead of counts and the first rows of each list |
 
 ### nx catalog backfill-source-uri
 
@@ -1744,7 +1776,7 @@ Classes of live note row whose URI collection differs from `physical_collection`
 
 - **rewrite candidates**: no other live row holds `nx-note://<physical collection>/<title>`, and no other stale row rewrites onto it. `--apply` rewrites the catalog row, its `document_aspects` row and its `document_highlights` row in ONE transaction, each by its own value (a legacy `chroma://` spelling comes out as `nx-note://`). A twin that appears while it runs is a 409 naming the holder, with nothing written for that batch.
 - **merge candidates**: a live twin holds the target in either spelling (`twin`), or two stale rows would rewrite onto one URI (`sibling`). Listed by the plain verb and merged only by `--merge` (below): `POST /v1/catalog/merge` moves neither chunks, aspects nor highlights, so the row that holds the chunks survives. Each entry carries what a choosing rule reads: `chunk_count`, `indexed_at`, `has_aspects`, `has_highlights`, and the twin's under a `twin_` prefix.
-- **refused**: a row whose physical collection is blank or file-routed (`rdr__`, `docs__`, `code__`), or whose URI has no title part. Reported, never rewritten.
+- **refused**: a row not proven to be a note in a note collection. The proof is the collection's registry `content_type`, read from its row and never from its name: only `knowledge` qualifies. Reasons: `malformed` (blank physical collection, or a URI with no title part), `unregistered_collection` (no registry row), `file_routed_collection` (content type docs, rdr or code, where a note URI reads as residue) and `unproven_content_type` (any other type, such as `unknown` or a quarantine type). Reported, never rewritten.
 - **tombstoned**: stale rows with `deleted_at` set. Counted, never rewritten: only live rows can mint a duplicate. A restore makes one live again, so a restored stale tombstone appears in the next census as a rewrite or merge candidate.
 - **`nxexp://` export copies**: census only, by scope. The inner collection of `nxexp://<target>/<note uri>` names the export's source by design, so it is not stale; the census counts the copies whose `<target>` is no longer the collection they live in. That count grows with every rename and re-home, because the move paths skip `nxexp://` values (`NoteUri.moveTo`); a re-import into the new collection then misses the copy and mints another. Repairing it needs its own rule and is a follow-on.
 
@@ -1911,7 +1943,8 @@ nx catalog doctor [--collections-drift] [--chunk-size-distribution] [--chunk-tex
                   [--t3-vs-catalog] [--name-vs-embed-dim] [--store-put-integrity]
                   [--link-coverage] [--visible-outside-manifest]
                   [--sensitive-in-aspect-eligible] [--sensitive-with-aspects]
-                  [--sensitive-in-external-embedder] [--sensitivity-mcp-output] [--json]
+                  [--sensitive-in-external-embedder] [--sensitivity-mcp-output]
+                  [--uri-residue] [--json]
 ```
 
 RDR-101 catalog doctor surface; pass at least one check flag.
@@ -1930,6 +1963,7 @@ RDR-101 catalog doctor surface; pass at least one check flag.
 - `--sensitive-with-aspects` (RDR-243, nexus-rfvyy.6.17): FAIL (exit 1) for each sensitive document that already has an aspect row or a queued aspect task in either side of the queue, with `nx enrich delete --tumbler <t>` printed per document. Same not-applicable and not-checked rules; the row reads the same bounded list, never the catalog's documents. A row that reads **not checked** exits **3**, "could not check", so a gate that could not run is not a pass; a fail still exits 1 and wins over 3. Over 10,000 sensitive documents this gate exits 3 until the list can be paged (RDR-241 Phase 2). See [Sensitivity, Doctor rows](sensitivity.md#doctor-rows).
 - `--sensitive-in-external-embedder` (RDR-243, nexus-rfvyy.8.7): WARN for each sensitive document in a collection embedded by an external service: a Voyage model token, or a legacy name that carries none. A collection whose name carries a local model token (`bge-base-en-v15-768`, `minilm-l6-v2-384`) is not flagged. Does not change the exit status. Same not-applicable and not-checked rules as the two rows above.
 - `--sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7): prints the posture the MCP tools apply for `sensitivity.mcp_output` (`withhold`, the default, or `flag`), read through the tools' own reader: the global `config.yml` only, never a repo's `.nexus.yml`. WARN when it is `flag` (sensitive content reaches the session model with a badge), when the value is not one of the two (the tools withhold, and the row says so), or when the file cannot be read (the tools withhold). A config row, so it never reads not applicable. Does not change the exit status.
+- `--uri-residue` (RDR-229 P1.2, nexus-p2m1x.2): counts the `chroma://` source-URI rows whose collection segment has no `rdr__`/`docs__`/`code__` prefix on `catalog_documents`, `document_aspects` and `document_highlights`, split by whether the row's collection has content type `code`, `docs` or `rdr` and by whether the segment is the row's own collection, and the `nx-note://` rows of such a collection with a prefix-free segment. It also reports the `chroma://` rows whose segment is file-routed, the residue [`nx catalog backfill-source-uri`](#nx-catalog-backfill-source-uri) repairs. One engine read (`GET /v1/catalog/uri_segment_census`, engine-service 0.1.200) groups the rows; the client classifies them with `aspect_readers.FILE_ROUTED_PREFIXES` and never walks the catalog. WARN on any such row; never changes the exit status: it is a pre-flight whose repair is RDR-229 P2.10's data move, and a FAIL would exit `nx doctor` non-zero on installs that cannot yet clear it. Reads `not checked`, never a pass, on an engine without the route, on a timeout, or on an answer above 10,000 groups; N/A on a catalog with no `chroma://` or `nx-note://` row.
 
 Returns 1 on any check failure, and 3 when `--sensitive-with-aspects` could not check (a failure wins over 3). `--json` emits the per-check result for CI consumption.
 
@@ -2633,9 +2667,9 @@ taxonomy:
 | `split LABEL --k N` | Split into N sub-topics via KMeans. `-c NAME` scopes label lookup |
 | `links` | Inter-topic link counts from catalog graph. `-c NAME` filters by collection; `--refresh` recomputes catalog-derived links first (requires catalog) |
 | `rebuild` | Full re-cluster (alias for `discover --force`). `-c NAME` required |
-| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses per-corpus defaults: `code__*` 0.70, `knowledge__*` 0.50, `docs__*`/`rdr__*` 0.55 — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077); the corpus threshold always applies to the raw cosine and the ICF weight is clamped to 1, so it can only rank and suppress, never admit (GH #1528). `--persist` to write assignments. `--backfill` to project all collections against each other. `--prune-below-threshold` (recovery, GH #1528) deletes projection assignments whose stored raw cosine is below the corpus threshold: for the source collection given at its (or the explicit) threshold, or with `--backfill` for every corpus prefix at its default |
+| `project SOURCE` | Cross-collection projection: match chunks against other collections' centroids. `--against TARGETS` for explicit targets (default: sibling collections). `--threshold N` (optional; when omitted uses the default of the collection's catalog content type: `code` 0.70, `knowledge` 0.50, `docs`/`rdr` 0.55, read from its catalog row and falling back to its name's prefix only when no row backs it or the row read fails — see [taxonomy-projection-tuning.md](exploration/taxonomy-projection-tuning.md)). `--top-k N` caps centroids considered per chunk (default: 3). `--use-icf` suppresses hub topics via Inverse Collection Frequency weighting (RDR-077); the corpus threshold always applies to the raw cosine and the ICF weight is clamped to 1, so it can only rank and suppress, never admit (GH #1528). `--persist` to write assignments. `--backfill` to project all collections against each other. `--prune-below-threshold` (recovery, GH #1528) deletes projection assignments whose stored raw cosine is below the corpus threshold: for the source collection given at its (or the explicit) threshold, or with `--backfill` for every collection (the live catalog listing plus the collections that hold topics) at its own row's default, one prune per full collection name. It never deletes on a guess: a collection whose catalog row cannot be read is refused with a line saying so, and so is a collection whose name prefixes one with an unreadable row; any refusal ends the command with a non-zero exit, since the recovery is incomplete (pass `--threshold` to prune anyway). The engine matches a prune by name prefix, so a collection whose name prefixes a lower-threshold collection is pruned only down to that lower threshold, and the command ends with an `N skipped` line (an engine whose `/version` advertises `taxonomy_prune_exact_supported` gets `match: "exact"` and needs no such guard) |
 | `hubs` | List generic-pattern hub topics (RDR-077 Phase 5). `--min-collections N` (default 2), `--max-icf F` filter, `--warn-stale` flags hubs whose evidence predates the last rebuild (a contributing source collection's `last_discover_at` post-dates the hub's latest assignment, or a source was never discovered), `--explain` shows DF / ICF / matched stopword tokens per row. |
-| `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the per-corpus default; `--top-n N` caps the receiving-topic list. |
+| `audit --collection NAME` | Per-collection projection-quality report (RDR-077 Phase 6): total assignments, p10/p50/p90 of raw cosine, count below threshold (re-projection candidates), top receiving topics with ICF, pattern-pollution flags. `--threshold F` overrides the collection's default (its catalog content type's); `--top-n N` caps the receiving-topic list. |
 | `backfill-source-collection` | **RETIRED.** Backfilled `topic_assignments.source_collection` for legacy hdbscan/centroid rows (RDR-087 Phase 4.1) via raw SQL over the LOCAL SQLite store, which was deleted in the RDR-158 P4 retirement; the engine exposes no equivalent read-then-update API. Raises `click.UsageError` unconditionally, with or without `--apply`. If a pre-migration install still holds legacy NULL `source_collection` rows, run the backfill on the last migration-capable 6.x release before migrating |
 
 **Configuration** (in `.nexus.yml`):
@@ -2643,7 +2677,8 @@ taxonomy:
 ```yaml
 taxonomy:
   auto_label: true                    # label with Claude haiku after discover (default: true)
-  local_exclude_collections: []       # default: ["code__*"] — local embeddings cluster poorly on code
+  local_exclude_content_types: [code] # default: [code], matched against the collection's row — local embeddings cluster poorly on code
+  local_exclude_collections: []       # default: [] — glob patterns on collection labels; setting it (even []) without local_exclude_content_types turns the code default off
 ```
 
 **Upgrade path**: Run `nx upgrade` — it converges every pending rung, including the cross-collection projection backfill. Run `nx taxonomy discover --all` to populate topics for new collections.
@@ -3084,6 +3119,14 @@ Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as fo
 | 3 | check-runs were cancelled or stale and none failed |
 | 4 | a conclusion is missing or one this table does not know |
 | 5 | GitHub could not be read: at once for `gh` missing, HTTP 401, 404 or 422 or a login prompt; after 3 consecutive failed reads with the same error; or at the deadline when no read worked. The line names the last error. Also a `--gh-repo` that is not `OWNER/NAME` |
+
+### nx ci ack
+
+```
+nx ci ack <sha> [--topic nexus-develop--owner]
+```
+
+Acknowledges a red develop: posts the owner's `kind=ack` row on `board/ci/<topic>` with `from=<your identity id>`, the full sha and a fresh nonce, and prints `acked <sha7> on <subspace> as <identity>`. `<sha>` is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on the owner post (the `sha` of each of its owner rows; a red that a newer one replaced or a `clear` row ended is not open, and a `suspects` entry is not a tip), and refused when it is no tip of it, when it is ambiguous, when no red is open, or when it is not 7 to 40 hex digits. It also refuses a caller who is not the red's current owner (`the red is owned by iN (alias); an ack from iM counts for nobody`), because the engine counts an ack only from the owner. With no identity the command refuses (`nx identity show` says whether the session holds one). The engine counts the row's sender-session stamp, never `from`; `from` is a label people read (`nx group ack-times` does not read it), and this verb writes the identity id there, never a name. A delegated child (a `claude -p` process with an identity of its own) is checked and signed as its parent, the identity the engine counts its session for; one whose parent cannot be read is refused. A `kind=owner` or `kind=clear` row that a session wrote, not the engine (`from` other than `engine`, or a sender-session stamp), is ignored when finding the open red, as the engine ignores it. The `ci_develop_red` aura's state line ends `Ack: nx ci ack <sha7>`. `--topic` names the owner post and must end `--owner`.
 
 ## nx collection
 
@@ -3832,7 +3875,7 @@ own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
 `ghost-sweep`, `harness-grant`, `docs-aspects-config`, `sensitive-in-aspect-eligible`, `sensitive-with-aspects`,
-`sensitive-in-external-embedder`, `sensitivity-mcp-output`
+`sensitive-in-external-embedder`, `sensitivity-mcp-output`, `uri-residue`
 (the last six have no `--check-ghost-sweep` / `--check-harness-grant` /
 `--check-docs-aspects-config` flag; they only run as part of this
 supplementary set).
@@ -3857,6 +3900,7 @@ fail is the one supplementary finding that gates: `nx doctor` (text mode) exits 
 `nx doctor` does not. See [Sensitivity, Doctor rows](sensitivity.md#doctor-rows).
 `sensitive-in-external-embedder` and `sensitivity-mcp-output` (RDR-243, nexus-rfvyy.8.7) are the rows `nx catalog
 doctor --sensitive-in-external-embedder` and `--sensitivity-mcp-output` print; both warn and neither gates.
+`uri-residue` (RDR-229 P1.2, nexus-p2m1x.2) is the row `nx catalog doctor --uri-residue` prints (see that flag above); it warns and never gates.
 `ghost-sweep` (nexus-29drn) reports the
 current RDR-204 ghost-collection count via a dry-run call to the same engine
 route [`nx catalog sweep-ghosts`](#nx-catalog-sweep-ghosts) uses, and names
@@ -4197,7 +4241,7 @@ engine's view has `expired`, and when its reads have failed since it started and
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
 
-**Data moves (RDR-246, nexus-f3yqd.2.17).** The engine's move worker reports each open or failed data move (a row move registered in `nexus.data_moves`) as a `data-move:<label>` entry of the `boot_work` list in the same `GET /v1/status` body, and `nx doctor` turns the entries into rows. `Data move <label>` is red for a `blocked:` move (the engine retries it by itself) and for a `failed:` one (not retried; the failure text is in `nexus.data_moves.failure` and the engine log). It is a warning for a `stalled:` move, a CALL with no chunk done for `NX_DATA_MOVE_STALL_MINUTES` (default 15; a slow chunk looks the same), and a note, never red, for a `paused:` one (the fix line gives the `UPDATE` that resumes it). A move that is working, queued or complete has no row of its own. `Data move worker` is red when the engine reports that its move worker is not running (every registered move then waits), and `Data move reporting` is red when the worker runs but nothing reports its moves (a green summary would hide a blocked or failed one). `Data moves` is the summary row, always green: it counts the open or failed moves by state, or says "no data move is open or failed". The status carries only the move's label, a class and an SQLSTATE, so each row's hint says where the full text is. Not applicable (green) when the engine cannot be reached or predates `boot_work`. The state table, with what each state means and what to do, is in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
+**Data moves (RDR-246, nexus-f3yqd.2.17).** The engine's move worker reports each open or failed data move (a row move registered in `nexus.data_moves`) as a `data-move:<label>` entry of the `boot_work` list in the same `GET /v1/status` body, and `nx doctor` turns the entries into rows. `Data move <label>` is red for a `blocked:` move (the engine retries it by itself) and for a `failed:` one (not retried; the failure text is in `nexus.data_moves.failure` and the engine log). One `blocked:` case is a warning: a move blocked on `pg_background is not installed` (the engine marks the entry `reason_class: missing_prerequisite`) waits for the extension and shows a warning until the engine's retry cap (about four hours), then red. The engine looks for the extension only at boot, so install it and restart the engine (`nx upgrade` does both for a local install whose extracted bundle lacks it; a self-managed PostgreSQL needs pg_background installed, then the engine restarted). It is a warning for a `stalled:` move, a CALL with no chunk done for `NX_DATA_MOVE_STALL_MINUTES` (default 15; a slow chunk looks the same), and a note, never red, for a `paused:` one (the fix line gives the `UPDATE` that resumes it). A move that is working, queued or complete has no row of its own. `Data move worker` is red when the engine reports that its move worker is not running (every registered move then waits), and `Data move reporting` is red when the worker runs but nothing reports its moves (a green summary would hide a blocked or failed one). `Data moves` is the summary row, always green: it counts the open or failed moves by state, or says "no data move is open or failed". The status carries only the move's label, a class and an SQLSTATE, so each row's hint says where the full text is. Not applicable (green) when the engine cannot be reached or predates `boot_work`. The state table, with what each state means and what to do, is in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
 
 **Recall canary (nexus-4lnn1.1.10, RDR-230 Technical Design 7).** `nx doctor`'s "Recall canary" row reads `per_collection_indexes.this_engine.maintenance.canary` from the same `GET /v1/status` body: the counts of this engine's per-collection (`pci_`) indexes whose recall canary reads green, red or unmeasured, and when the canary last ran. The route is unauthenticated, so it carries counts only. The row warns when any index reads red and points to the operator-only `GET /v1/admin/chunks-leaves`, whose `canary_indexes` entry names each red index with its `min_recall`, `trigger` and `red_after_reindex`; the engine log's `event=pci_canary` lines name them too. This row never calls that route. With no red it shows the counts. The counts are this engine's own history: a standby keeps the counts from when it held the builder lock, and the row says so. An engine without the `maintenance` or `canary` key reads not applicable, and a value the row cannot read says "could not read" rather than passing.
 
@@ -4575,7 +4619,11 @@ This runs automatically on the first `nx` invocation after a version change
 "Process freshness" check surfaces the same skew, and its
 "Engine convergence" check reports a pending engine convergence
 (long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
-`nx doctor` or this verb is the path there).
+`nx doctor` or this verb is the path there). On a local install with an extracted
+PostgreSQL bundle the pass also takes the pinned release's bundle, when the engine changes or the bundle has no
+pg_background, but only in an attended run and with the engine idle: the swap restarts PostgreSQL, so the unattended
+first-`nx`-after-upgrade pass installs the engine and leaves the bundle, and `nx upgrade` replaces it (`nx doctor`'s
+`PostgreSQL bundle` row names it). See [nx upgrade](#nx-upgrade).
 
 ### nx daemon t2 — RETIRED
 
@@ -4910,8 +4958,12 @@ but has not answered within 60 seconds (the new engine may be migrating the
 database), the run prints a warning naming `nx daemon service status`, `nx doctor`
 and the engine log, and exits 0; a supervisor that exited, an autostart unit whose
 supervisor reported an error during the start (a crash loop or a halted migration),
-or a start that failed otherwise, exits 2. The bundle is downloaded after the engine is placed, so on a
-run that replaces the engine the service is down during that download. Before this
+or a start that failed otherwise, exits 2. Here the bundle is downloaded after the engine is placed, so on a
+run that replaces the engine the service is down during that download; `nx upgrade`'s engine convergence downloads
+and stages the bundle first, through the same install-and-extract function, and stops the stack once for both
+(a bundle that lacks pg_background on an engine already at the pin is replaced by a plain `nx upgrade`, which is the
+usual way: this verb is the explicit one). A swap that would change the PostgreSQL major version or drop
+pg_background is refused with exit 2 and no stop. Before this
 change the stop applied to Windows only; on macOS and Linux the old engine kept
 serving until a manual `stop` and `start` (nexus-86aaz).
 
@@ -5303,7 +5355,8 @@ Silent and exit 0 on a box with no generation layout.
 The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md)).
 
 Upgrading nexus is: update the code ([`nx self install`](#nx-self-install)), then run `nx upgrade`. That single trigger
-converges everything else — it brings the package, engine, and process
+converges everything else — it brings the package, engine (and, on a local
+install, the extracted PostgreSQL bundle, when it predates pg_background), and process
 preconditions current, then walks one ordered ladder that auto-applies whichever
 data migrations your install actually needs (the ladder holds five rungs:
 `rdr192-manifest-backfill`, `note-tags-array`, `manifest-section-labels`,
@@ -5329,10 +5382,28 @@ nx upgrade --yes                  # Unattended: pre-approve a billed re-embed (=
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
-| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)). On a local engine it can write unattended: the `retire-keys-sweep` rung runs at every session start until the install is swept, and defers, writing nothing, when a precondition stands in its way |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install and the PostgreSQL bundle replacement are skipped (hook timeout budget; a bundle without pg_background is only reported); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)). On a local engine it can write unattended: the `retire-keys-sweep` rung runs at every session start until the install is swept, and defers, writing nothing, when a precondition stands in its way |
 | `--skip-t3` | Skips the precondition stage's engine install and process cycle (verdicts are still reported), the storage-service restart, the PDF stack carry-forward, the installer rebuild and the collection-name check. The old service keeps running until you run a plain `nx upgrade`. The data steps still run |
 | `--yes` | Pre-approve a billed re-embedding of your collections, for an unattended run (same as `NX_ASSUME_YES=1`). Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic. Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
+
+**The PostgreSQL bundle (nexus-f3yqd.2.23).** A local install keeps the bundle it was first set up with, and
+pg_background first shipped in the bundle at engine-service-v0.1.190 (conexus 8.2.1), so an install first set up
+on 8.2.0 or earlier has none and every registered data move stays blocked. A plain `nx upgrade` now takes the
+pinned release's bundle and swaps it in when the engine version changes, and when the engine is already the
+pinned one but `~/.config/nexus/pg-bundle` has no `pg_background.control`. The bundle is downloaded and staged
+with the service running; the engine and the bundle are then replaced under one stop and one start of PostgreSQL
+and the storage service. The swap moves no data and keeps the PostgreSQL major version: one that would change it
+(read from the data directory's `PG_VERSION`) or drop pg_background is refused before anything stops. The
+swap restarts PostgreSQL, which an engine replacement alone does not and which stops an index build in flight, so
+it runs only in an attended `nx upgrade` and only while the engine is idle (no boot work except a data move that is
+only blocked, failed or paused, and no index build or vacuum). On an engine change an unattended run or a busy
+engine still installs the engine and leaves the bundle for the next attended run; on a converged engine it waits and
+says so, naming `nx daemon service install-binary <tag>` as the explicit route. `--auto`, an unattended lockstep run
+and an MCP start only report it, `--dry-run` lists it as pending, and `nx doctor` warns on a `PostgreSQL bundle` row
+while it holds. A download or extraction failure leaves the old bundle and the running
+stack, and the next `nx upgrade` tries again. An install on its own PostgreSQL has no extracted bundle and cloud
+mode has no local one; neither is touched.
 
 **The storage-service restart.** An upgrade restarts a running storage service on the new version. An interactive run prints a line before the restart and one after it. If the new service is still starting (its first start after an upgrade can migrate the database for several minutes), it says so, points at `nx daemon service status`, and the upgrade still succeeds. If the restart fails, the upgrade ends with what failed, the command to run and what `nx daemon service start` said, and exits 1. `--auto` and the lockstep hook's unattended run (`NX_UPGRADE_UNATTENDED=1`) print nothing for it, log it, and exit 0.
 
@@ -5606,7 +5677,7 @@ With no `TOPIC`, prints the topics and what each holds.
 | `caps` | notes on the nexus tools: search filters, the MCP tool prefix, pagination, enrich commands |
 | `map` | The Knowledge Map for this repo (the cache `nx context refresh` writes) |
 | `rdr` | RDR counts by status and whether `docs/rdr` is indexed, with the remedy when it is not |
-| `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist |
+| `me` | This seat's startup note: the entry titled `startup` in the identity's own project (`identity/<id>`), printed as data for you to read and decide on. Nothing executes it. Says so in one line when the session has no identity or the note does not exist; for a note that does not exist, a seat is told the `nx memory put --mine` command, and any other caller is given the identity guard's own reason for refusing it that write (an ephemeral and a delegated identity get different wording, and a lookup the engine did not answer prints a "could not confirm" line); if the lookup itself fails the line carries a neutral hint |
 
 A topic that cannot be produced prints one line saying why on stderr and exits 1; the other topics are unaffected. Every call appends one JSON line (`ts`, `event` of `brief_load`, `topic`, `ok`, `bytes`, `source`, `session_id`, `repo`) to `<config>/logs/brief.log`, and every SessionStart appends one `session_start` line (`ts`, `session_id`, `repo`, `source`) to the same file: the denominator. Past 1 MB the file moves to `brief.log.1` (replacing an older one) and a new file starts; two processes crossing the cap together can lose or duplicate a line, which a usage count tolerates.
 
@@ -5763,6 +5834,8 @@ The tuple space is a coordination and metadata store, not a value store: `--body
 | `--body TEXT` | Tuple payload — a short message or signal, at most 4096 bytes UTF-8 (see above) |
 | `--nonce TEXT` | Caller-minted nonce, for templates whose `id_from` includes it |
 | `--ttl-seconds N` | Explicit TTL, capped at the template's retention ceiling (`TtlTooLong` if it isn't) |
+
+An ack of a develop red is the one write whose `from` is not the caller's to choose: a `kind=ack` row on a `board/ci/<topic>--owner` subspace is stamped with the caller's own identity id (the token record's, as `nx group` reads it) whatever `--dim from=` said (one info line logs the replaced value), and refused when the process holds no identity (`nx identity show` says whether it does). The MCP `tuple_out` tool does the same, and so does an `ack` whose reply is such a row. The stamp is a hint: the engine counts the row's sender-session stamp, and from engine 0.1.200 stamps `from` itself as the identity that session maps to. `nx ci ack` is the verb that posts one.
 
 ### nx tuple rd
 
@@ -6168,7 +6241,7 @@ The record of `NAME` (serves, deadlines, `ends`, whether it is live or disbanded
 nx group ack-times NAME [--json]
 ```
 
-The calibration read for `NAME`'s acknowledgement deadline: per red on the topics the group serves, the sha, when its first owner row's episode began (`episode_at`), the time of the counting acknowledgement and the minutes between, with the number of hand-ons (a hand-off or an escalation). A hand-off or an escalation row carries a new `episode_at` from the engine, but it continues the open red: it is one red, and the minutes run from the first row's `episode_at`. It reads `board/ci/<topic>--owner` and counts an ack the way the engine does, with one difference: it matches the `kind=ack` row's `from` dimension (the identity id the engine records from the token on a board or CI post) against the owner at that time, where the engine matches the row's sender-session stamp. For an honest owner they agree; the read is a calibration aid, not the engine's count. A red with no counting ack prints `no ack`. The read pages until the board has no more rows and stops at 10,000 rows per topic, saying so on standard error. The text form prints one summary line (reds, acknowledged reds, median and longest minutes) and then one line per red, naming the acknowledging owner by the alias the engine stamped on its owner row (engine 0.1.198 on), else by its id.
+The calibration read for `NAME`'s acknowledgement deadline: per red on the topics the group serves, the sha, when its first owner row's episode began (`episode_at`), the time of the counting acknowledgement and the minutes between, with the number of hand-ons (a hand-off or an escalation). A hand-off or an escalation row carries a new `episode_at` from the engine, but it continues the open red: it is one red, and the minutes run from the first row's `episode_at`. It reads `board/ci/<topic>--owner` and counts an ack the way the engine does: the `kind=ack` row's sender-session stamp is mapped through the identity service's session index (`GET /v1/identity/sessions/<id>`, a delegated child's session to its parent, read from the answer or the child's identity record) and must name the owner at that time, for a red tip (the `sha` of an owner row, not a `suspects` entry). Only owner and clear rows the engine wrote (`from=engine`, no sender stamp, a readable body for an owner row) make or end a red. `from` is a label (the caller's identity id from this client on, anything typed before) and is never read: an ack with no sender-session stamp (a tenant credential holds no session), or whose stamp maps to no identity, counts for nobody, as it does in the engine, whatever `from` says. Such an ack on a red tip inside the red is counted as ignored: `ignored_acks` per red in `--json` (up to the counting ack), and one note on standard error (`N acks on red tips carried no session stamp the engine maps; they did not count`), never in the minutes. It tells an owner who was too slow from an owner whose ack the engine could not see. The cheap checks (an owner, a red tip) come before any lookup, and each key is asked once. A lookup the service answers with its own "unknown session" (404 `unknown_session`) is final. Anything else is counted per ack and noted once on standard error (`N acks could not be resolved; counts may be low`) and not remembered, so a transient error cannot turn an ack into no ack for the rest of the run: a failed or refused call, a 404 from an engine with no such route, a stamp that is not a session id, an engine or host with no session route to ask, and a delegated child whose parent the credential cannot read (the engine-side fix is `parent` in the session route's answer). A red with no counting ack prints `no ack`. The read pages until the board has no more rows and stops at 10,000 rows per topic, saying so on standard error. The text form prints one summary line (reds, acknowledged reds, median and longest minutes) and then one line per red, naming the acknowledging owner by the alias the engine stamped on its owner row (engine 0.1.198 on), else by its id.
 
 | Flag | Description |
 |------|-------------|

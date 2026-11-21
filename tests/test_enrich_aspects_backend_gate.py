@@ -17,6 +17,8 @@ from click.testing import CliRunner
 from nexus.commands.enrich import _ASPECT_CONFIDENCE_FLOOR, enrich
 from nexus.operators.llm_backend import NO_BACKEND_MESSAGE, NoBackendAvailableError
 
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes item 1's NoRow outcome without a listing
+
 
 @pytest.fixture(autouse=True)
 def _llm_backend_is_the_cli(monkeypatch):

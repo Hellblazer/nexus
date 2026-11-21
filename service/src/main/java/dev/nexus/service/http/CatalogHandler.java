@@ -12,7 +12,6 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.GraphScopeFilter;
-import dev.nexus.service.db.QuarantineOrigin;
 import dev.nexus.service.vectors.ChunkKeyAllowlistCheck;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,6 +64,7 @@ import java.util.*;
  *   POST  /v1/catalog/manifest/fill      fill exactly those rows as a background job: 202 {job_id, created} (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/fill/{job_id}  the fill job: state, stage, done_rows, total_rows, filled, cursor, counts (nexus-f3yqd, R2)
  *   GET   /v1/catalog/manifest/foreign_collection?limit=N  live documents whose manifest names chunks outside their physical_collection (GH #1611)
+ *   GET   /v1/catalog/uri_segment_census?limit=N  chroma:// and nx-note:// source-URI rows grouped by table, scheme, segment and collection, with the collection's content type (RDR-229 P1.2)
  *   GET   /v1/catalog/sensitive?limit=N  the tenant's live sensitive documents, listed up to N, with the total (nexus-f3yqd)
  *   GET   /v1/catalog/sensitive/locators?limit=N  the live sensitive documents and the live aliases of them, with the six locator fields, sensitive included (nexus-uwggq.2.5)
  *   GET   /v1/catalog/docs/by-scheme?scheme=S&limit=&offset=  live documents whose urlparse(source_uri).scheme is S lowercased, a page of at most 1000 with the exact count (nexus-uwggq.1.5)
@@ -360,6 +360,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/docs/by-meta"          -> handleDocsByMeta(exchange, tenant, method);
                 case "/stub-metadata"         -> handleStubMetadata(exchange, tenant, method);
                 case "/manifest/foreign_collection" -> handleManifestForeignCollection(exchange, tenant, method);
+                case "/uri_segment_census"    -> handleUriSegmentCensus(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
                 // nexus-ysrwi: the third sibling. /docs/orphaned already
                 // existed; links had no equivalent, which is why the client
@@ -2473,7 +2474,7 @@ public final class CatalogHandler implements HttpHandler {
                 combinedWriteService.seedEmbeddingProfileForContentType(tenant, s);
             }
         }
-        repo.upsertCollection(tenant, body);
+        repo.upsertCollection(tenant, body, true);
         HttpUtil.send(exchange, 200, "{\"ok\":true}");
     }
 
@@ -2728,8 +2729,9 @@ public final class CatalogHandler implements HttpHandler {
         // small collection, never the contract.
         // nexus-wbfpw.71: refused on a quarantine collection (CatalogRepository.rehomeCollection holds the
         // same guard; here it answers 400 ahead of the rehome verb's own 409s).
-        QuarantineOrigin.requireNotQuarantine("rehome", source);
-        QuarantineOrigin.requireNotQuarantine("rehome", target);
+        // RDR-229 P2.5: each end by its row; a row-less target by its prefix.
+        repo.requireNotQuarantine(tenant, "rehome", source);
+        repo.requireNotQuarantine(tenant, "rehome", target);
         var r = repo.rehomeCollection(tenant, source, target);
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("moved_chunks", r.movedChunks());
@@ -2805,8 +2807,8 @@ public final class CatalogHandler implements HttpHandler {
         }
         // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
         // answer with a different status. CatalogRepository.renameCollection carries the same guard.
-        QuarantineOrigin.requireNotQuarantine("rename", oldName);
-        QuarantineOrigin.requireNotQuarantine("rename", newName);
+        repo.requireNotQuarantine(tenant, "rename", oldName);
+        repo.requireNotQuarantine(tenant, "rename", newName);
         // nexus-sis0m.3: optional attributes for the new row, derived by the client from the
         // new name (the engine does not parse names, RDR-204). Absent keeps the source's;
         // present must be a non-blank string.
@@ -3104,8 +3106,13 @@ public final class CatalogHandler implements HttpHandler {
         List<Map<String, Object>> rows = body.containsKey("rows")
             ? castRows(body.get("rows"))
             : List.of(body);
-        repo.importCollectionsBatch(tenant, rows);
-        HttpUtil.send(exchange, 200, "{\"imported\":" + rows.size() + "}");
+        var result = repo.importCollectionsBatchReport(tenant, rows);
+        // RDR-229 P2.5: state_corrected (additive) names the new rows imported as quarantine although they carried
+        // live (CollectionRegistration#stateCorrectedOnImport); an older engine omits it, which reads as none.
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("imported", result.imported());
+        out.put("state_corrected", result.stateCorrected());
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 
     /**
@@ -3692,6 +3699,9 @@ public final class CatalogHandler implements HttpHandler {
 
     /** GET /v1/catalog/manifest/foreign_collection?limit=N (GH #1611): the body is {@link CatalogBoundedReadRoutes#foreignCollection}. */
     private void handleManifestForeignCollection(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.foreignCollection(exchange, tenant, method); }
+
+    /** GET /v1/catalog/uri_segment_census?limit=N (RDR-229 P1.2): the body is {@link CatalogBoundedReadRoutes#uriSegmentCensus}. */
+    private void handleUriSegmentCensus(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.uriSegmentCensus(exchange, tenant, method); }
 
     /** GET /v1/catalog/sensitive?limit=N (nexus-f3yqd): the body is {@link CatalogBoundedReadRoutes#sensitive}. */
     private void handleSensitiveList(HttpExchange exchange, String tenant, String method) throws IOException { boundedReads.sensitive(exchange, tenant, method); }

@@ -26,6 +26,8 @@ import pytest
 from tests.conftest import make_vector_test_client
 from tests._module_seam import setattr_in
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1515,7 +1517,7 @@ class TestDocumentShapeClassifier:
             _resolve_config_for_document,
             _REGISTRY,
         )
-        rdr_cfg = _REGISTRY["rdr__"]
+        rdr_cfg = _REGISTRY["rdr"]
         # rdr base stays rdr even for prose-shaped content.
         assert _resolve_config_for_document("rdr__x", "prose blob", rdr_cfg) is rdr_cfg
         # scholarly base -> prose content routes to general-prose.
@@ -1600,13 +1602,13 @@ class TestEligibleExtractorNamesMatchesTheRealRoutingTable:
         }
         assert set(eligible_extractor_names(collection)) == actual_names
 
-    def test_registered_prefixes_are_exactly_what_this_pins(self):
-        """A future third prefix must extend the parametrize list above, not
-        silently go unpinned. Fails loudly if registered_prefixes() ever
+    def test_registered_content_types_are_exactly_what_this_pins(self):
+        """A future third content type must extend the parametrize list above, not
+        silently go unpinned. Fails loudly if registered_content_types() ever
         drifts from the two names this test drives."""
-        from nexus.aspect_extractor import registered_prefixes
+        from nexus.aspect_extractor import registered_content_types
 
-        assert set(registered_prefixes()) == {"knowledge__", "rdr__"}
+        assert set(registered_content_types()) == {"knowledge", "rdr"}
 
     @pytest.mark.t2_tenant
     def test_unregistered_prefix_returns_none_and_empty(self):

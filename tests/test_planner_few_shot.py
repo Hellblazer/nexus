@@ -298,7 +298,7 @@ def test_collection_hint_samples_every_prefix_family(cloud_mode, monkeypatch) ->
 
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {
+        lambda name, *, refresh=True, strict=False: {
             "content_type": name.partition("__")[0], "owner_id": "x",
             "embedding_model": "x", "lifecycle_state": "live",
         },

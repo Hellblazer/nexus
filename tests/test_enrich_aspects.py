@@ -32,6 +32,8 @@ from nexus.commands.enrich import _PER_PAPER_COST_USD, enrich
 from nexus.db.t2 import T2Database
 from tests._catalog_fixture_ops import ActiveCatalog, register_real_doc_id
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id now
 # carries a REAL FK to catalog_documents(tenant_id, tumbler) -- see the
 # identical cache in tests/test_document_aspects_store.py for the full
@@ -581,8 +583,8 @@ class TestSourceUriResolutionForChromaLookup:
         # production _REGISTRY, so this test must seed a stub
         # explicitly to exercise the LLM path.
         from nexus.aspect_extractor import ExtractorConfig, _REGISTRY
-        if "docs__" not in _REGISTRY:
-            monkeypatch.setitem(_REGISTRY, "docs__", ExtractorConfig(
+        if "docs" not in _REGISTRY:
+            monkeypatch.setitem(_REGISTRY, "docs", ExtractorConfig(
                 extractor_name="test-stub",
                 model_version="test",
                 prompt_template="",

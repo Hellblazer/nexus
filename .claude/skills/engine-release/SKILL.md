@@ -213,38 +213,49 @@ at the exact commit you will tag (`TAG_TREE`, frozen in Step 1b), all three legs
 started together (Step 2b). Each leg builds the
 gate jar in that tree and the harness boots it (`--new-jar` left at its default,
 the service jar the same tree just built), so the jar under test is
-the tag commit's. Run on chas, whose disk is real (the harness's work dir is
-under the copy, not tmpfs).
+the tag commit's. Run each leg on a Linux pool host, chas or qwent, named
+explicitly: the harness reads `/proc/<pid>/stat` and `/proc/<pid>/cmdline`, which
+macOS lacks, so `lab-remote --host auto` (which can place lab-m on hellmini) is not
+a route for it. Both Linux hosts have a real disk under the run (not tmpfs). The legs
+build the gate jar, so they go over ssh in the host's own clone, as engine builds do
+(`build-gate-jar.sh --lab-run` takes the build lease before the grant), never through
+`lab-remote`: inside a lab-run grant `build-gate-jar.sh` refuses at once with 75 when
+another build holds the lease (nexus-dfg0q), which on a busy host fails the leg before
+it starts. Recipe: T2 `nexus/chas-test-host-howto` (qwent: the same with `qwent-test`).
 
 ```bash
 cd "$TAG_TREE"   # clean, at the commit you will tag
 PREV=8.1.1       # the newest released conexus client (it pins the published engine); re-check at cut time
 TAG=$(git rev-parse HEAD)
+H=chas           # the laptop remote; its ssh host is $H-test (chas-test, or qwent and qwent-test); legs may split across both
+git push -q "$H" "$TAG:refs/heads/engine-cut-$TAG"
+ssh "$H-test" "cd ~/src/nexus && for L in A B C; do git worktree add -q --detach ../nexus-wt/engine-cut-$TAG-\$L $TAG; done"
 # Leg A: the normal upgrade, then a plain reboot
-lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
-  uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-A && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+  lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client '"$PREV"' --new-jar-commit '"$TAG"' \
   --ceiling 67108864 --ceiling-boot 67108864 --ceiling-reboot 67108864 --json output/gate/A.json'
 # Leg B: from before per-collection indexes, queued aspect rows, graceful restart mid-queue
-lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
-  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-B && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+  lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
   --restart-mid-queue 3 --restart-mode graceful --ceiling-boot 67108864 --json output/gate/B.json'
 # Leg C: as Leg B, with a forced kill of the supervisor and engine (PostgreSQL stays up)
-lab-remote --host chas -c lab-m --fetch output/gate -- bash -c 'mkdir -p output/gate && scripts/build-gate-jar.sh && \
-  uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
+ssh "$H-test" 'cd ~/src/nexus-wt/engine-cut-'"$TAG"'-C && uv sync -q && NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m && mkdir -p output/gate && \
+  lab-run -c lab-m -- uv run python scripts/upgrade_boot_writes.py --prev-client 7.76.0 --new-jar-commit '"$TAG"' --no-pci-wait \
   --collections 7 --rows 30000 --rot pending_aspect_queue \
   --restart-mid-queue 3 --restart-mode kill --ceiling-boot 67108864 --json output/gate/C.json'
 ```
 
 Start each leg as a background command (`run_in_background`) with its output
-redirected to a file, as every `lab-remote` run is. To run the three legs together
-(Step 2b), give each its own worktree at `TAG_SHA` (`git worktree add --detach
-../nexus-wt/engine-cut-<sha>-A "$TAG_SHA"`, and `-B`, `-C`) and start each leg from
-its own: a second `lab-remote` from the same worktree exits 98 while the first holds
-that worktree's copy. The three legs then share chas's build lease for
-`scripts/build-gate-jar.sh`, so their jar builds take turns; the legs themselves run
-together. `output/` is git-ignored, so
-the fetched reports leave the tag tree clean. The jar must come from
+redirected to a file: the ssh session holds until the leg exits, so the session is woken
+on exit with no polling. Then fetch its report: `scp "$H-test:src/nexus-wt/engine-cut-$TAG-A/output/gate/A.json" output/gate/`
+(and `-B`, `-C`). To run the three legs together (Step 2b), each has its own worktree
+on the host, so their work dirs do not collide. Legs on one host share
+that host's build lease for `scripts/build-gate-jar.sh` (the wait setting keeps them
+queued, not refused), so their jar builds take turns; the legs themselves run
+together. `output/` is git-ignored, so the fetched reports leave the tag tree clean.
+Remove the host worktrees and the pushed ref after the cut (`git worktree remove`
+and `git branch -D` on the host). The jar must come from
 `scripts/build-gate-jar.sh`, which stamps the build commit the engine serves on
 `/version`. The script reuses a cached jar while `service/` is unchanged, so the
 stamp can name an older commit with the same engine tree: `--new-jar-commit`

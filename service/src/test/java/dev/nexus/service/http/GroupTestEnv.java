@@ -46,6 +46,8 @@ public final class GroupTestEnv implements AutoCloseable {
     private final AtomicInteger pids = new AtomicInteger(1000);
     /** The evidence each seat was last bound with, by identity id: what an {@code end} or a {@code gone} names. */
     private final Map<String, Map<String, Object>> holders = new ConcurrentHashMap<>();
+    /** The identity token each seat's last bind returned, by identity id: what its MCP server sends as {@code X-Nexus-Identity-Token}. */
+    private final Map<String, String> tokens = new ConcurrentHashMap<>();
 
     private GroupTestEnv(IdentityTestEnv ids) throws IOException {
         this.ids = ids;
@@ -107,7 +109,15 @@ public final class GroupTestEnv implements AutoCloseable {
             throw new IllegalStateException("bind " + name + ": " + r);
         }
         holders.put(id, evidence);
+        if (r.body().get("identity_token") instanceof String tok) {
+            tokens.put(id, tok);
+        }
         return id;
+    }
+
+    /** The identity token the seat's bind returned, or null when it returned none. */
+    public String tokenOf(String id) {
+        return tokens.get(id);
     }
 
     /** An ephemeral identity (a launch that named no seat), bound: live and leased, and not a seat. */
@@ -131,6 +141,9 @@ public final class GroupTestEnv implements AutoCloseable {
             throw new IllegalStateException("delegated " + name + ": " + r);
         }
         holders.put(r.str("id"), evidence);
+        if (r.body().get("identity_token") instanceof String tok) {
+            tokens.put(r.str("id"), tok);
+        }
         return r.str("id");
     }
 

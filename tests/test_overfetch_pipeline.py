@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from nexus.search_engine import _overfetch_multiplier, search_cross_corpus
 
+import pytest
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── _overfetch_multiplier unit tests ─────────────────────────────────────────
 
@@ -43,6 +46,12 @@ class _RecordingT3:
         col = collection_names[0]
         self.calls[col] = n_results
         return self._results
+
+    def _resolve_collection_rows(self, names):
+        """The handle's own catalog rows (RDR-229 P2.9: the over-fetch follows the row's content type)."""
+        from tests.conftest import catalog_row_for_collection_name
+
+        return {n: {"content_type": catalog_row_for_collection_name(n)["content_type"]} for n in names}
 
 
 # ── Per-collection fetch-size tests ──────────────────────────────────────────

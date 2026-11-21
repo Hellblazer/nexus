@@ -46,6 +46,7 @@ import sys as _sys  # noqa: E402
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
     "tests._shard_collection_plugin", "tests._signal_fence", "tests._malloc_trim",
+    "tests._named_rows",  # RDR-229 P2.9: the named_collection_rows fixture (prefix-named fixtures get a catalog row)
 ]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")
@@ -2938,6 +2939,18 @@ def _check_mandatory_pin_non_vacuity(session) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _cli_not_started_by_claude_code(monkeypatch):
+    """Clear the markers that say the CLI was started by Claude Code. The CLI withholds a flagged or
+    unverifiable hit's text under Claude Code (``sensitive_output.cli_output_posture``), so a test run from an
+    agent's shell got the stub where CI, which has no markers, got the text: the same test failed on the laptop and
+    passed in CI. A test of that posture sets a marker itself (``monkeypatch.setenv``)."""
+    from nexus.session import _CLAUDE_CODE_ENV_MARKERS  # noqa: PLC0415 — the markers the posture reads
+
+    for name in _CLAUDE_CODE_ENV_MARKERS:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _restore_cwd():
     """Put the working directory back after every test. Production code moves
     the process cwd (the aspect-worker daemon's prologue chdirs to its config
@@ -3043,6 +3056,36 @@ def _identity_work_reaches_no_real_engine(monkeypatch):
     work.reset_for_tests()
     assert not reached, ("this test reached nexus.identity.work._new_client: a registrar with no client= would write to the "
                          "real engine. Pass client=<fake engine>, or patch register_own/forget_own.")
+
+
+@pytest.fixture(autouse=True)
+def _identity_kind_lookup_reaches_no_real_engine(monkeypatch):
+    """gh#1680: ``nexus.identity.notes._kind_of`` asks the identity engine for the caller's ``kind`` (``check_write``, and
+    ``nx brief me`` through ``write_refusal``). A test that holds an identity token file and reaches it without its own
+    ``IdentityClient.from_config`` patch would query a real engine; it answers "unknown" here and FAILS at teardown, naming
+    the seam. A test that wants the lookup patches ``IdentityClient.from_config`` (a fake client) or ``notes.write_refusal`` /
+    ``notes._kind_of``; a later patch of any of them replaces this one."""
+    from nexus.identity import bind_client, notes  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    original_kind_of = notes._kind_of
+    original_from_config = bind_client.IdentityClient.__dict__["from_config"]
+    reached: list[str] = []
+
+    def guarded(identity: str) -> str:
+        with notes._LOCK:
+            cached = notes._KINDS.get(identity)
+        if cached:                                  # a remembered kind asks no engine, so it is not a reach
+            return cached
+        if bind_client.IdentityClient.__dict__["from_config"] is original_from_config:
+            reached.append(identity)
+            return ""
+        return original_kind_of(identity)
+
+    monkeypatch.setattr(notes, "_kind_of", guarded)
+    yield
+    assert not reached, ("this test reached nexus.identity.notes._kind_of with the real IdentityClient.from_config: the "
+                         f"identity lookup for {reached} would hit a real engine. Patch IdentityClient.from_config "
+                         "(a fake client) or notes.write_refusal.")
 
 
 @pytest.fixture(autouse=True)

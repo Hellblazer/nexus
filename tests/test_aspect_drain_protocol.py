@@ -38,6 +38,8 @@ from tests._catalog_fixture_ops import register_real_doc_id
 from tests._module_seam import patch_time
 from tests._settle import settle
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # hygiene-001-1 (nexus-tk070.p6a follow-on): aspect_extraction_queue.doc_id
 # now carries a REAL FK to catalog_documents(tenant_id, tumbler) via the

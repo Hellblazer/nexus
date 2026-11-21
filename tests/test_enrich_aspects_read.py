@@ -31,7 +31,7 @@ from nexus.aspect_extractor import AspectRecord
 from nexus.commands.enrich import enrich
 from nexus.db.t2 import T2Database
 
-pytestmark = pytest.mark.t2_tenant
+pytestmark = [pytest.mark.t2_tenant, pytest.mark.usefixtures("named_collection_rows")]  # RDR-229 P2.9: prefix-named fixtures get a catalog row
 
 
 @pytest.fixture(autouse=True)
@@ -127,8 +127,8 @@ class TestAspectsShow:
         )
         assert "code__myrepo" in result.output
         assert "not extracted" in result.output
-        assert "knowledge__*" in result.output
-        assert "rdr__*" in result.output
+        # RDR-229 P2.9: the registry is keyed by content type, so the supported list names content types
+        assert "Supported content types: knowledge, rdr" in result.output
 
     def test_supported_prefix_with_no_record_still_names_the_extract_command(
         self, env,

@@ -108,6 +108,7 @@ from typing import TYPE_CHECKING
 import click
 import structlog
 
+from nexus.catalog.engine_writes.hints import annotate_census
 from nexus.repos import owner_deactivate_capability
 
 if TYPE_CHECKING:
@@ -358,6 +359,8 @@ def _run_census(
             continue
         buckets[_classify_owner_root(root)].append(row)
 
+    annotate_census(cat, buckets)  # RDR-254: a flag and a move line beside the root class, never a class or an eligibility input
+
     dead_count = len(buckets["path_vanished"]) + len(buckets["path_exists_empty"])
 
     # nexus-cw262: corroborate + split ONLY the mutation-eligible buckets
@@ -402,8 +405,12 @@ def _run_census(
             click.echo(f"\n{cls} ({len(rows)}):")
             for row in rows[:_CENSUS_ROW_CAP]:
                 click.echo(f"    {row['tumbler'] or '':<10} {row['repo_root']}")
+                if cls == "path_vanished" and row.get("move_command"):
+                    click.echo(f"        if it moved: {row['move_command']}")
             if len(rows) > _CENSUS_ROW_CAP:
                 click.echo(f"    ... and {len(rows) - _CENSUS_ROW_CAP} more")
+
+        _echo_docs_outside_root(buckets)
 
         click.echo(
             f"\n{dead_count} dead owner(s) (path_vanished + path_exists_empty) "
@@ -439,6 +446,22 @@ def _run_census(
             "--execute reactivate does not use --census -- pass --owner "
             "<tumbler_prefix> instead (see the module help)."
         )
+
+
+def _echo_docs_outside_root(buckets: dict[str, list[dict]]) -> None:
+    """RDR-254: the owners whose root exists but whose documents' ``source_uri`` name another root (the same-name move
+    after a re-registration re-rooted the owner), each with the owner move command (a dry run). A ``path_vanished`` owner
+    is listed with its class above, with the placeholder form of the command."""
+    flagged = [r for cls in _CENSUS_CLASSES if cls != "path_vanished" for r in buckets[cls] if r.get("docs_outside_root")]
+    if not flagged:
+        return
+    click.echo(f"\nDocuments outside their root ({len(flagged)}):")
+    for row in flagged[:_CENSUS_ROW_CAP]:
+        click.echo(f"    {row['tumbler'] or '':<10} {row['repo_root']}")
+        if row.get("move_command"):
+            click.echo(f"        {row['move_command']}")
+    if len(flagged) > _CENSUS_ROW_CAP:
+        click.echo(f"    ... and {len(flagged) - _CENSUS_ROW_CAP} more")
 
 
 def _echo_mutation_report(eligible: list[dict], excluded: list[dict], capability: str) -> None:

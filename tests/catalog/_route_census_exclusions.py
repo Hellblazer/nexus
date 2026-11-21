@@ -31,6 +31,14 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "the census checks both directions, so a stale exclusion here fails "
         "just as loudly as a missing one"
     ),
+    "/uri_segment_census": (
+        "RDR-229 P1.2 (nexus-p2m1x.2): engine route for the residue doctor row; the "
+        "client method (HttpCatalogClient.uri_segment_census, engine_reads.uri_segments) is "
+        "tested against a stubbed client, as sensitive_locators is, so the fake serves no "
+        "branch for it. Its wire shape (count, limit, capped, groups of {table, scheme, "
+        "segment, collection, content_type, rows}, the 400 on a limit outside 1..10000 and "
+        "the 503 on a statement timeout) is validated Java-side by UriSegmentCensusRouteTest"
+    ),
     "/manifest/foreign_collection": (
         "GH #1611: engine route for the doctor's foreign-collection row; the "
         "client method (HttpCatalogClient.manifest_foreign_collection) is "

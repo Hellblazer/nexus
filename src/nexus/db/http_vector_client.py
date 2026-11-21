@@ -1270,7 +1270,8 @@ def _collection_is_bge(
     row-preferred shape as :func:`_is_cce_collection`, and *row_resolver* is
     forwarded the same way so the read never crosses tenants.
     """
-    from nexus.corpus import embedding_model_for_collection_name, resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
     model = resolve_row_preferred(
         collection, "embedding_model", embedding_model_for_collection_name,
@@ -1316,7 +1317,8 @@ def _is_cce_collection(
     so this row read never goes through a DIFFERENT tenant than the one
     doing the write.
     """
-    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
     def _name_fallback(n: str) -> str | None:
         content_type_probe, owner_probe = split_candidate_collection_name(n)
@@ -1358,7 +1360,7 @@ def _write_model_for_collection(collection: str) -> str | None:
     does, it inherits the same cross-tenant risk nexus-fryrd fixed for
     the cap/byte-budget path.
     """
-    from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+    from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
     from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
     row = get_collection_row(collection)
     if row is not None:
@@ -3698,6 +3700,11 @@ class HttpVectorClient:
             }
         if self._row_resolver is None:
             from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+            # No refresh here, deliberately: a name missing from the cache (cold, as after an explicit-name
+            # ``nx search`` that skipped the listing, or warm with no chunk-holding row) is answered by the
+            # search resolvers from the candidate name's own segment (RDR-229 P2.9, item 1's NoRow outcome),
+            # which for a conformant name is the row's content type by construction.
             return {n: get_collection_row(n, refresh=False) for n in names}
         rows: dict[str, dict | None] = {}
         for n in names:
@@ -6199,6 +6206,8 @@ class HttpVectorClient:
     #: (not present as a key) when no catalog row backs that collection.
     _STATS_CATALOG_ATTR_KEYS = (
         "content_type", "owner_id", "embedding_model", "lifecycle_state", "superseded_by",
+        # RDR-229 P2.2: kept when the listing sends them (collection_id is P3.1's).
+        "collection_id", "model_version", "dimension",
     )
 
     def list_collections(
@@ -6901,11 +6910,11 @@ class HttpVectorClient:
             # nexus-enej7: only on a miss, so a title that its chunks carry
             # costs no catalog round trip (store_get probes every collection
             # in its scope).
-            ids = self._catalog_chashes_for_title(collection, title)
+            ids = self._catalog_chashes_for_title(collection, title, db=self)
         return ids
 
     @staticmethod
-    def _catalog_chashes_for_title(collection: str, title: str) -> list[str]:
+    def _catalog_chashes_for_title(collection: str, title: str, *, db: object = None) -> list[str]:
         """Manifest chashes of the live document the catalog registers under
         (*collection*, *title*) (nexus-enej7).
 
@@ -6921,7 +6930,7 @@ class HttpVectorClient:
         from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred: catalog-side helper
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
 
-        uri = uri_for(collection, title) if title else None
+        uri = uri_for(collection, title, db=db) if title else None
         if not uri:
             return []
         reader = None
@@ -6937,6 +6946,29 @@ class HttpVectorClient:
         except Exception:  # noqa: BLE001 — catalog is a second source here; the T3 answer stands without it
             _log.warning("find_ids_by_title_catalog_lookup_failed", collection=collection, exc_info=True)
             return []
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
+
+    def find_collection(self, content_type: str, owner_id: str, embedding_model: str) -> Any:
+        """The catalog row registered for ``(content_type, owner_id, embedding_model)``
+        in THIS client's tenant, as
+        :class:`~nexus.catalog.collection_name.CollectionAttributes`, or
+        ``None`` when no row backs the tuple (RDR-229 P2.8).
+
+        The read goes through the process's catalog reader, whose tenant is
+        :func:`_process_default_tenant`, so a client built for another tenant
+        answers ``None`` (no lookup) rather than another tenant's row: the same
+        rule as :meth:`_resolve_collection_row` (nexus-fryrd). A failed read raises.
+        """
+        if self._tenant != _process_default_tenant():
+            return None
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+        reader = make_catalog_reader()
+        try:
+            return reader.find_collection(content_type, owner_id, embedding_model)  # type: ignore[union-attr]
         finally:
             close = getattr(reader, "close", None)
             if close is not None:
@@ -7532,11 +7564,12 @@ class HttpVectorClient:
         nexus-h8rf6.8: was missing — doctor's model-drift probe
         (``doctor_search._collection_metadata``) degraded to
         ``ProbeResult(outcome='error')`` for every collection in service
-        mode. Full T3Database parity is achievable client-side: T3 derives
-        ``embedding_model`` / ``index_model`` from the collection NAME
-        (conformant names embed the model; ``index_model_for_collection``
-        is an alias of ``embedding_model_for_collection``) — only ``count``
-        needs the server.
+        mode. Only ``count`` needs the server. ``embedding_model`` / ``index_model``
+        are the collection's catalog ROW's model, read through this client's own
+        row reader (RDR-229 P2.2, :func:`nexus.catalog.rows.resolve.embedding_model_for`);
+        a name no row backs answers the name's own derivation (conformant names
+        embed the model; ``index_model_for_collection`` is an alias of
+        ``embedding_model_for_collection``).
 
         Keys returned: ``name``, ``count``, ``embedding_model`` (query-time
         model), ``index_model`` (index-time model, may differ for CCE
@@ -7544,19 +7577,15 @@ class HttpVectorClient:
         — on pgvector, zero stored rows is indistinguishable from absent
         (:meth:`collection_info` semantics, RDR-156 Decision 6).
         """
-        from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)
-            embedding_model_for_collection,
-            embedding_model_for_collection_name,
-            index_model_for_collection,
-        )
+        from nexus.catalog.rows.resolve import embedding_model_for  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)
 
         n = self._count_or_key_error(collection_name)
-        parsed = embedding_model_for_collection_name(collection_name)
+        model = embedding_model_for(collection_name, row_resolver=self._resolve_collection_row)
         return {
             "name": collection_name,
             "count": n,
-            "embedding_model": parsed or embedding_model_for_collection(collection_name),
-            "index_model": parsed or index_model_for_collection(collection_name),
+            "embedding_model": model,
+            "index_model": model,
         }
 
 # ── Module-level routing helper ───────────────────────────────────────────────

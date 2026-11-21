@@ -443,12 +443,12 @@ _FLOOR_VARIANT_ENV = "NX_ABDP2_FLOOR_VARIANT"
 _DEEP_PATH_ENV = "NX_ABDP2_DEEP_PATH"
 
 
-def _old_desired(cols: list[str], n: int, *, deep: bool = False) -> int:
+def _old_desired(cols: list[str], n: int, *, deep: bool = False, content_type_of=None) -> int:
     """The pre-abdp2 ``_desired_candidate_count``: every collection's floor
     is its full ``n * mult``."""
     import nexus.search_engine as _se  # noqa: PLC0415
 
-    mult = max((_se._overfetch_multiplier(c) for c in cols), default=2)
+    mult = max((_se._overfetch_multiplier(c, content_type_of) for c in cols), default=2)
     return max(n * mult, len(cols) * max(5, n * mult))
 
 
@@ -467,8 +467,8 @@ def _variant_desired(variant: str):
         raise ValueError(f"unknown floor variant {variant!r}")
     floor = floors[variant]
 
-    def _desired(cols: list[str], n: int, *, deep: bool = False) -> int:
-        mult = max((_se._overfetch_multiplier(c) for c in cols), default=2)
+    def _desired(cols: list[str], n: int, *, deep: bool = False, content_type_of=None) -> int:
+        mult = max((_se._overfetch_multiplier(c, content_type_of) for c in cols), default=2)
         return max(n * mult, len(cols) * floor(n, mult))
 
     return _desired

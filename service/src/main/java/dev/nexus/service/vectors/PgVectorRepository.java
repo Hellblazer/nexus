@@ -101,6 +101,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.Executors;
@@ -579,6 +580,16 @@ public final class PgVectorRepository {
             throw new IllegalArgumentException("collection must not be null or blank");
         }
         return CollectionRegistry.lookup(tenantScope, tenant, collection).dimension();
+    }
+
+    /**
+     * The {@code lifecycle_state} of {@code collection}'s catalog row, empty when it has none (RDR-229 P2.5): what
+     * the routes' quarantine refusals ask instead of testing the name prefix. Served from the registry cache when
+     * the row is cached, else one single-column read ({@link CollectionRegistry#lifecycleState}); it never throws
+     * for an unregistered name.
+     */
+    public Optional<String> lifecycleState(String tenant, String collection) {
+        return CollectionRegistry.lifecycleState(tenantScope, tenant, collection);
     }
 
     /**
@@ -6760,7 +6771,9 @@ FROM scope s
         // nexus-wbfpw.71: store-delete would remove quarantined rows with no audit row, and a quarantined
         // chunk has no manifest row to make the guard below protect it. Refused; the sanctioned paths are
         // restore, expiry, and the audited collection delete.
-        dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine("store-delete", collection);
+        // RDR-229 P2.5: the collection's row decides (registry cache, else one short read); a name with no row is
+        // judged by its prefix. dimForCollection below then fills the cache for the rows it admits.
+        dev.nexus.service.db.QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "store-delete", collection);
         int dim = dimForCollection(tenant, collection);
         if (ids == null || ids.isEmpty()) return 0;
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
@@ -7562,8 +7575,9 @@ FROM scope s
 
     /** The origin of a restore: a registered, live, non-quarantine collection, never a bare name. */
     private void checkRestoreOrigin(String tenant, String originCollection) {
+        // RDR-229 P2.5: the origin's row decides (registry cache, else one short read); no row, the prefix.
         if (originCollection == null || originCollection.isBlank()
-                || dev.nexus.service.db.QuarantineOrigin.isQuarantineName(originCollection)) {
+                || dev.nexus.service.db.QuarantineOrigin.isQuarantine(tenantScope, tenant, originCollection)) {
             throw new IllegalArgumentException("the origin collection must be a non-quarantine collection, got: "
                 + originCollection + " (name the collection the chunks came from, not its quarantine- sibling)");
         }
@@ -7582,15 +7596,18 @@ FROM scope s
 
     /** A sibling a caller named: a registered quarantine collection. */
     private void checkRestoreSibling(String tenant, String quarantineCollection) {
-        if (!dev.nexus.service.db.QuarantineOrigin.isQuarantineName(quarantineCollection)) {
+        // RDR-229 P2.5: the sibling's row decides (registry cache, else one short read), not its name. A name with
+        // no row keeps its old outcomes: a prefixed one is "not registered" below, a plain one is not a sibling.
+        Optional<String> state = CollectionRegistry.lifecycleState(tenantScope, tenant, quarantineCollection);
+        if (state.isPresent() && !"quarantine".equals(state.get())) {
+            throw new IllegalArgumentException(quarantineCollection + " is not a quarantine collection (lifecycle_state="
+                + state.get() + ")");
+        }
+        if (!dev.nexus.service.db.QuarantineOrigin.isQuarantine(state, quarantineCollection)) {
             throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
                 + quarantineCollection);
         }
-        var sibling = CollectionRegistry.lookup(tenantScope, tenant, quarantineCollection);
-        if (!"quarantine".equals(sibling.lifecycleState())) {
-            throw new IllegalArgumentException(quarantineCollection + " is not a quarantine collection (lifecycle_state="
-                + sibling.lifecycleState() + ")");
-        }
+        CollectionRegistry.lookup(tenantScope, tenant, quarantineCollection);
     }
 
     /**
@@ -7693,7 +7710,7 @@ FROM scope s
     }
 
     private static List<String> siblingNames(DSLContext ctx, String tenant, String originCollection) {
-        String reaperName = "quarantine-" + originCollection;
+        String reaperName = dev.nexus.service.db.QuarantineOrigin.PREFIX + originCollection;
         Field<String> originTag = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
         List<String> found =
             ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)

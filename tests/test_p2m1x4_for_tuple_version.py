@@ -88,11 +88,20 @@ def test_an_empty_row_version_falls_back_to_the_conformant_name_loudly(monkeypat
     assert all(e["log_level"] == "warning" for e in warned)
 
 
-@pytest.mark.parametrize("name", ["a-legacy-slug", "code__1-1__bge-base-en-v15-768__v0"])
-def test_an_empty_row_version_with_no_usable_name_version_raises(monkeypatch, name) -> None:
-    cat = _client(monkeypatch, _row(name=name, model_version=""))
+def test_an_empty_row_version_with_a_v0_name_raises(monkeypatch) -> None:
+    cat = _client(monkeypatch, _row(name="code__1-1__bge-base-en-v15-768__v0", model_version=""))
     with pytest.raises(ValueError, match="empty model_version"):
         cat.collection_for("code", _OWNER, _MODEL)
+
+
+def test_an_empty_row_version_with_a_slug_name_is_answered_as_it_is(monkeypatch) -> None:
+    """Engine 0.1.200 (RDR-229 P2.8): a grandfathered slug row with a blank version can win its
+    tuple. It is returned unchanged; only a bump refuses (tests/test_rdr229_p28_subject_by_attributes.py)."""
+    cat = _client(monkeypatch, _row(name="notes-from-2024", model_version="", legacy_grandfathered=True))
+    got = cat.collection_for("code", _OWNER, _MODEL)
+    assert got.render() == "notes-from-2024"
+    with pytest.raises(ValueError, match="model_version"):
+        cat.collection_for("code", _OWNER, _MODEL, bump=True)
 
 
 @pytest.mark.parametrize(
@@ -104,3 +113,11 @@ def test_a_row_for_another_tuple_is_loud(monkeypatch, field, value) -> None:
     cat = _client(monkeypatch, _row(**{field: value}))
     with pytest.raises(ValueError, match="for_tuple answered"):
         cat.collection_for("code", _OWNER, _MODEL)
+
+
+def test_a_row_with_no_readable_version_logs_the_warning_once(monkeypatch) -> None:
+    """The version is read once per call: a second read logged the unreadable warning twice."""
+    cat = _client(monkeypatch, _row(name="notes-from-2024", model_version="", legacy_grandfathered=True))
+    with capture_logs() as logs:
+        cat.collection_for("code", _OWNER, _MODEL)
+    assert [e["event"] for e in logs].count("collection_for_row_model_version_unreadable") == 1

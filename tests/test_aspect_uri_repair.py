@@ -16,6 +16,9 @@ from __future__ import annotations
 from nexus.aspect_uri_repair import plan_source_uri_backfill
 from nexus.db.t2.records import AspectRecord
 
+import pytest
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 def _row(
     *,

@@ -146,7 +146,7 @@ def test_the_knowledge_map_cache_and_the_subagent_start_block_carry_no_sensitive
     from nexus.hooks.subagent_start import _knowledge_map_section
 
     monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: {"content_type": "knowledge"})
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: {"content_type": "knowledge"})
 
     t3, tax = _T3(), _ComputingTaxonomy()
     discover_for_collection(COLLECTION, tax, t3, quiet=True)

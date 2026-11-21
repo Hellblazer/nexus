@@ -405,6 +405,8 @@ class EmbedPostureHandlersTest {
         assertThat(body.get("catalog_move_supported").asBoolean()).isTrue();
         // nexus-uwggq.2.5: the RDR-241 Phase 2 engine read route, its flag its own
         assertThat(body.get("catalog_sensitive_locators_supported").asBoolean()).isTrue();
+        // RDR-229 P1.2: GET /v1/catalog/uri_segment_census, its flag its own
+        assertThat(body.get("catalog_uri_segment_census_supported").asBoolean()).isTrue();
         assertThat(body.get("chash_constraints_validate_job_supported").asBoolean()).isTrue();
         // nexus-csayy.2 (RDR-248): the tenant export routes and their format version
         assertThat(body.get("tenant_export_supported").asBoolean()).isTrue();

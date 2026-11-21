@@ -51,6 +51,7 @@ import java.util.function.Supplier;
  *  "catalog_stub_metadata_supported":true,
  *  "chash_conformance_constraints_supported":true,
  *  "catalog_manifest_foreign_collection_supported":true,
+ *  "catalog_uri_segment_census_supported":true,
  *  "catalog_index_run_census_supported":true,
  *  "catalog_next_seq_drift_read_supported":true,
  *  "catalog_docs_by_scheme_supported":true,
@@ -63,6 +64,7 @@ import java.util.function.Supplier;
  *  "tenant_export_format_version":1,
  *  "tenant_import_supported":true,
  *  "vector_topic_route_supported":true,
+ *  "taxonomy_prune_exact_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -644,6 +646,18 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * RDR-229 P1.2 (nexus-p2m1x.2) capability advertisement: does {@code GET /v1/catalog/uri_segment_census} group the
+     * tenant's {@code chroma://} and {@code nx-note://} source-URI rows by table, scheme, segment and collection, so
+     * {@code nx doctor} counts residue without walking the catalog? An engine before the change answers 404. Always
+     * present, always {@code true} on an engine carrying the change (engine-service 0.1.200). Cloud clients see it only
+     * once the public conexus edge allowlists it (the {@code nx_answer_steps_supported} precedent, nexus-04sff;
+     * engine-release pre-tag check 3e).
+     */
+    static void appendCatalogUriSegmentCensusCapabilityField(StringBuilder body) {
+        body.append(",\"catalog_uri_segment_census_supported\":true");
+    }
+
+    /**
      * nexus-f3yqd capability advertisement: does {@code GET /v1/catalog/index-run/census?limit=N} answer the stale
      * index-run fences, the unstamped-document baseline and the failed documents with ownerless chunks that {@code nx
      * doctor} otherwise reads from a walk of every document?
@@ -779,6 +793,20 @@ public final class VersionHandler implements HttpHandler {
      */
     static void appendVectorTopicRouteCapabilityField(StringBuilder body) {
         body.append(",\"vector_topic_route_supported\":true");
+    }
+
+    /**
+     * nexus-p2m1x.9 (RDR-229 P2.4) capability advertisement: does {@code POST /v1/taxonomy/assignments/prune_projection}
+     * honour {@code match: "exact"} (delete only the named collection) as well as the default {@code "prefix"}?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown {@code match}
+     * key and prunes by prefix, so a client that wants exact-name pruning must read this flag before it relies on
+     * the field (an outage or an absent flag reads as unsupported, and the client keeps its own prefix-collision
+     * guard). Always present, always {@code true} on an engine carrying the change. Cloud clients see it only once
+     * the public conexus edge allowlists it (the {@code vector_topic_route_supported} precedent).
+     */
+    static void appendTaxonomyPruneExactCapabilityField(StringBuilder body) {
+        body.append(",\"taxonomy_prune_exact_supported\":true");
     }
 
     /**
@@ -1022,6 +1050,8 @@ public final class VersionHandler implements HttpHandler {
         appendChashConformanceConstraintsCapabilityField(body);
         // GH #1611: GET /v1/catalog/manifest/foreign_collection (documents with manifest chunks outside their collection).
         appendCatalogManifestForeignCollectionCapabilityField(body);
+        // RDR-229 P1.2: GET /v1/catalog/uri_segment_census (chroma:// and nx-note:// rows grouped by segment and collection).
+        appendCatalogUriSegmentCensusCapabilityField(body);
         // nexus-f3yqd (R2): POST /v1/catalog/manifest/fill, the engine-side fill job.
         appendCatalogManifestFillJobCapabilityField(body);
         // nexus-f3yqd: GET /v1/catalog/index-run/census and GET /v1/catalog/owners/next_seq_drift (the doctor's bounded reads).
@@ -1045,6 +1075,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection.
         appendVectorTopicRouteCapabilityField(body);
         appendIdentitySelfSeatCapabilityField(body);
+        // nexus-p2m1x.9 (RDR-229 P2.4): match=exact on POST /v1/taxonomy/assignments/prune_projection.
+        appendTaxonomyPruneExactCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

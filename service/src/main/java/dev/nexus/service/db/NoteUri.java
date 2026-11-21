@@ -69,53 +69,61 @@ public final class NoteUri {
 
     /**
      * The source_uri of a row moving from collection {@code oldColl} to {@code newColl}, for rename
-     * and re-home: {@code nx-note://<old>/} becomes {@code nx-note://<new>/} and
-     * {@code chroma://<old>/} becomes {@code chroma://<new>/}. Every other value is unchanged, so
-     * residue keeps its spelling and {@code nxexp://} values are not touched.
+     * and re-home: {@code nx-note://<old>/} becomes {@code nx-note://<new>/}, and only when {@link #isNote} classes
+     * the value as a note, which is to say when {@code oldColl} carries no file-routed prefix. Every other value is
+     * unchanged: {@code chroma://} residue and the legacy spelling (which becomes a stale note that the repair
+     * rewrites), an {@code nx-note://} value with a file-routed segment (moving it onto a prefix-free label would turn
+     * it into a note), and {@code nxexp://} values. RDR-229 P2.10; the plpgsql twin is
+     * {@code nexus.catalog_reconcile_commit} (catalog-049).
      */
     public static Field<String> moveTo(Field<String> uri, String oldColl, String newColl) {
+        if (segmentFileRouted(oldColl)) {
+            return uri;
+        }
         String oldNote = NOTE + oldColl + "/";
-        String oldLegacy = LEGACY + oldColl + "/";
         return DSL.when(startsWith(uri, DSL.val(oldNote)),
                 DSL.val(NOTE + newColl + "/").concat(DSL.substring(uri, oldNote.length() + 1)))
-            .when(startsWith(uri, DSL.val(oldLegacy)),
-                DSL.val(LEGACY + newColl + "/").concat(DSL.substring(uri, oldLegacy.length() + 1)))
             .otherwise(uri);
     }
 
     /**
      * As {@link #moveTo(Field, String, String)}, with the old collection read from the row (the
-     * collection update, where each row's current collection is the old one).
+     * collection update, where each row's current collection is the old one). The file-routed test is SQL on that
+     * column, {@code starts_with} per prefix and not LIKE, because {@code _} is a LIKE wildcard.
      */
     public static Field<String> moveTo(Field<String> uri, Field<String> oldColl, String newColl) {
         Field<String> oldNote = DSL.val(NOTE).concat(oldColl).concat(DSL.val("/"));
-        Field<String> oldLegacy = DSL.val(LEGACY).concat(oldColl).concat(DSL.val("/"));
-        return DSL.when(startsWith(uri, oldNote),
+        return DSL.when(startsWith(uri, oldNote).and(notFileRouted(oldColl)),
                 DSL.val(NOTE + newColl + "/").concat(
                     DSL.substring(uri, DSL.charLength(oldColl).plus(NOTE.length() + 2))))
-            .when(startsWith(uri, oldLegacy),
-                DSL.val(LEGACY + newColl + "/").concat(
-                    DSL.substring(uri, DSL.charLength(oldColl).plus(LEGACY.length() + 2))))
             .otherwise(uri);
     }
 
     /** {@link #moveTo(Field, String, String)} on one value, for a pre-check computed outside SQL. */
     public static String moveTo(String uri, String oldColl, String newColl) {
-        if (uri == null) {
-            return null;
+        if (uri == null || segmentFileRouted(oldColl)) {
+            return uri;
         }
-        for (String scheme : List.of(NOTE, LEGACY)) {
-            String prefix = scheme + oldColl + "/";
-            if (uri.startsWith(prefix)) {
-                return scheme + newColl + "/" + uri.substring(prefix.length());
-            }
-        }
-        return uri;
+        String prefix = NOTE + oldColl + "/";
+        return uri.startsWith(prefix) ? NOTE + newColl + "/" + uri.substring(prefix.length()) : uri;
     }
 
-    /** True for a URI that {@link #moveTo} would rewrite out of {@code coll}, in either note spelling. */
+    /** True for a URI that {@link #moveTo} would rewrite out of {@code coll}: exactly its {@code nx-note://} notes. */
     public static Condition namesCollection(Field<String> uri, String coll) {
-        return startsWith(uri, DSL.val(NOTE + coll + "/")).or(startsWith(uri, DSL.val(LEGACY + coll + "/")));
+        if (segmentFileRouted(coll)) {
+            return DSL.falseCondition();
+        }
+        return startsWith(uri, DSL.val(NOTE + coll + "/"));
+    }
+
+    /** SQL: {@code coll} carries none of {@link #FILE_ROUTED_PREFIXES} (a null column is unknown, so it matches no row). */
+    private static Condition notFileRouted(Field<String> coll) {
+        Condition routed = null;
+        for (String p : FILE_ROUTED_PREFIXES) {
+            Condition one = startsWith(coll, DSL.val(p));
+            routed = routed == null ? one : routed.or(one);
+        }
+        return routed.not();
     }
 
     /**
@@ -170,19 +178,6 @@ public final class NoteUri {
         return uri;
     }
 
-    /** True when the collection name opens with a file-routed prefix ({@code rdr__}, {@code docs__}, {@code code__}). */
-    public static boolean isFileRoutedCollection(String collection) {
-        if (collection == null) {
-            return false;
-        }
-        for (String p : FILE_ROUTED_PREFIXES) {
-            if (collection.startsWith(p)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
     static Condition startsWith(Field<String> uri, Field<String> prefix) {
         return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, prefix));
@@ -190,7 +185,19 @@ public final class NoteUri {
 
     private static boolean fileRouted(String afterScheme) {
         int slash = afterScheme.indexOf('/');
-        String segment = slash < 0 ? afterScheme : afterScheme.substring(0, slash);
+        return segmentFileRouted(slash < 0 ? afterScheme : afterScheme.substring(0, slash));
+    }
+
+    /**
+     * The URI-segment test of {@link #isNote}: the segment opens with a frozen file-routed prefix. {@link #moveTo} and
+     * {@link #namesCollection} use this, not {@link #isFileRoutedCollection}: the old collection IS the URI's segment
+     * ({@code nx-note://<old>/}), so they classify exactly what {@code isNote} classifies, and they do not move with the
+     * live-collection test that RDR-229 P2.9 repoints to the registry row's content type.
+     */
+    private static boolean segmentFileRouted(String segment) {
+        if (segment == null) {
+            return false;
+        }
         for (String p : FILE_ROUTED_PREFIXES) {
             if (segment.startsWith(p)) {
                 return true;

@@ -15,6 +15,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -90,6 +91,21 @@ class TupleShapeValidatorTest {
                 TupleShapeValidator.validateOut(ci, Map.of("topic", "t--done"),
                         Map.of("from", "github", "kind", "sha", "verdict", "red"), "{}", "n1", false));
         assertEquals("verdict", ex.field());
+    }
+
+    /** The carried-forward branch verdict is declared and optional: a row with it and a row without it both pass. */
+    @Test
+    void ciBoardDoneRowAcceptsBranchOutcomeAndARowWithoutIt() {
+        TemplateSchema ci = template("board/ci/<topic>");
+        String sha = "0000000000000000000000000000000000000000";
+        assertDoesNotThrow(() -> TupleShapeValidator.validateOut(ci, Map.of("topic", "t--done"),
+                Map.of("from", "github", "kind", "sha", "sha", sha, "outcome", "success", "branch_outcome", "failure"),
+                "{}", "n1", false));
+        assertDoesNotThrow(() -> TupleShapeValidator.validateOut(ci, Map.of("topic", "t--done"),
+                Map.of("from", "github", "kind", "sha", "sha", sha, "outcome", "success"),
+                "{}", "n1", false));
+        assertEquals("string", ci.dimensions().get("branch_outcome").type());
+        assertFalse(ci.dimensions().get("branch_outcome").required());
     }
 
     // ── shape refusals ───────────────────────────────────────────────────

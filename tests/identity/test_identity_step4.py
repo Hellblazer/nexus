@@ -78,6 +78,23 @@ def row_a_take_over_records_a_takeover_row_a_new_generation_and_ends_the_callers
     assert world.indexed("s2")["identity"] == alpha, "the session index follows the take-over"
 
 
+def row_a_take_over_releases_the_callers_previous_seat_bound_under_a_vanished_hostname(world: World) -> None:
+    """GitHub issue 1679: the caller holds the seat ``beta``, bound before the host key under a hostname the network has
+    since changed. The engine reads the release as the holder's own only when it names that host, so the client sends the
+    host the row records (proved by the hook's token file), and ``beta`` ends unheld instead of staying with a dead binding."""
+    alpha, beta = world.seat("alpha"), world.seat("beta")
+    legacy = world.q("legacy-102")
+    key = world.host
+    world.process(200, os_start=T1, session_id="s2")
+    world.host = world.procs.host = legacy
+    assert world.hook(200, "startup", "s2", seat="beta").identity == beta
+    world.host = world.procs.host = key
+    lines = claim(_env(world, 200), world.q("alpha"))
+    assert any("took over" in line for line in lines) and any("closed the previous identity" in line for line in lines), lines
+    assert world.identity(beta)["state"] == "unheld" and world.events(beta) == ["start", "release"]
+    assert world.identity(alpha)["holder"]["pid"] == 200
+
+
 def row_release_frees_a_gone_holders_seat_with_the_verdict_and_is_refused_while_the_holder_runs(world: World) -> None:
     alpha, beta = world.seat("alpha"), world.seat("beta")
     for pid, name in ((100, "alpha"), (101, "beta")):
@@ -221,6 +238,7 @@ def row_a_delegated_child_writes_its_own_threads_entry_reads_its_parents_and_is_
 
 ROWS = (
     row_a_take_over_records_a_takeover_row_a_new_generation_and_ends_the_callers_ephemeral,
+    row_a_take_over_releases_the_callers_previous_seat_bound_under_a_vanished_hostname,
     row_release_frees_a_gone_holders_seat_with_the_verdict_and_is_refused_while_the_holder_runs,
     row_promote_keeps_the_binding_and_the_next_launch_that_names_the_seat_binds_it,
     row_rename_retires_the_old_alias_appends_a_rename_row_and_a_new_name_is_never_id_shaped,

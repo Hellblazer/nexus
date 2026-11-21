@@ -33,6 +33,14 @@ class MiniYamlTest {
     }
 
     @Test
+    void anUnquotedKeyThatStartsWithDashesIsAKey() {
+        Map<String, Object> doc = MiniYaml.parse("t.yaml", "retention_by_suffix:\n  --x: 123\n");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> m = (Map<String, Object>) doc.get("retention_by_suffix");
+        assertEquals(Map.of("--x", 123L), m);
+    }
+
+    @Test
     void parsesBlockSequenceOfScalars() {
         String yaml = """
                 keys:

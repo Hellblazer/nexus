@@ -114,6 +114,32 @@ final class OwnerFixture {
         return this;
     }
 
+    /** A done row with {@code dims.outcome} and {@code dims.branch_outcome}; a null {@code branchOutcome} omits the dim. */
+    OwnerFixture doneBranch(String sha, String outcome, String branchOutcome) {
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", "github");
+        dims.put("kind", "sha");
+        dims.put("sha", sha);
+        dims.put("outcome", outcome);
+        if (branchOutcome != null) {
+            dims.put("branch_outcome", branchOutcome);
+        }
+        dones.add(new BoardRow("d" + (++seq), tick(), dims, "{\"state\":\"concluded\",\"sha\":\"" + sha + "\"}", null));
+        return this;
+    }
+
+    /** A done row with {@code dims.outcome}, no {@code branch_outcome}, and a body whose {@code carried} is null. */
+    OwnerFixture doneCarriedNull(String sha, String outcome) {
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", "github");
+        dims.put("kind", "sha");
+        dims.put("sha", sha);
+        dims.put("outcome", outcome);
+        dones.add(new BoardRow("d" + (++seq), tick(), dims,
+            "{\"state\":\"concluded\",\"sha\":\"" + sha + "\",\"carried\":null}", null));
+        return this;
+    }
+
     /** A done row before the adapter's result dims: the verdict is in {@code runs} only. */
     OwnerFixture doneRuns(String sha, String... conclusions) {
         Map<String, String> dims = new LinkedHashMap<>();
@@ -153,11 +179,16 @@ final class OwnerFixture {
     }
 
     OwnerFixture ack(String pusherSeat, String sha) {
+        return ack(pusherSeat, sha, "s" + pusherSeat);
+    }
+
+    /** An ack row with the given {@code from} dim and sender session (null: no session stamp). */
+    OwnerFixture ack(String from, String sha, String senderSession) {
         Map<String, String> dims = new LinkedHashMap<>();
-        dims.put("from", pusherSeat);
+        dims.put("from", from);
         dims.put("kind", "ack");
         dims.put("sha", sha);
-        owners.add(new BoardRow("a" + (++seq), tick(), dims, "{}", "s" + pusherSeat));
+        owners.add(new BoardRow("a" + (++seq), tick(), dims, "{}", senderSession));
         return this;
     }
 

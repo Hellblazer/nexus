@@ -564,13 +564,17 @@ def chunker_loop(
     corpus: str = "",
     target_model: str = "voyage-context-3",
     doc_id: str = "",
+    row_model: str | None = None,
 ) -> None:
     """Incrementally chunk pages as they arrive, overlapping with extraction.
+
+    *row_model* is the model the caller's ``_target_model`` read (the row's when a row backs the collection):
+    the chunker's token window follows it, with no second catalog read (RDR-229 P2.2).
 
     Caches accumulated page text in memory to avoid O(pages²) re-reads from
     SQLite. Only NEW pages are fetched on each iteration via ``read_pages_from``.
     """
-    chunker = PDFChunker(chunk_chars=chunk_chars, token_window=window_for_collection(corpus, target_model))
+    chunker = PDFChunker(chunk_chars=chunk_chars, token_window=window_for_collection(corpus, target_model, row_model=row_model))
     written_up_to = db.count_embedded_chunks(content_hash)
     total_embedded = written_up_to
     now_iso = datetime.now(UTC).isoformat()
@@ -2107,6 +2111,7 @@ def pipeline_index_pdf(
     force: bool = False,
     force_re_embed: bool = False,
     doc_id: str = "",
+    row_model: str | None = None,
     hooks: "HookRegistry | None" = None,
     source_uri: str = "",
     allow_degraded_extraction: bool = False,
@@ -2415,7 +2420,7 @@ def pipeline_index_pdf(
                     chunker_loop, content_hash, db, cancel, embed_fn,
                     extraction_done=extraction_done, chunking_done=chunking_done,
                     pdf_path=str(pdf_path), corpus=corpus, target_model=target_model,
-                    doc_id=doc_id,
+                    doc_id=doc_id, row_model=row_model,
                 )
                 all_futures.add(chunk_future)
                 if hooks is None:

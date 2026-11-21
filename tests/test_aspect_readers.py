@@ -26,6 +26,8 @@ import pytest
 from tests.conftest import make_vector_test_client
 from tests._module_seam import setattr_in
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── Note-URI helpers (RDR-231, nexus-bivz3.10) ───────────────────────────────
 
@@ -280,9 +282,9 @@ class TestIdentityFieldDispatch:
         # WITH TEETH: every dispatch entry must be the single-element
         # tuple ('doc_id',). A regression that re-introduces source_path
         # or title fails this assertion directly.
-        for prefix, fields in CHROMA_IDENTITY_FIELD.items():
+        for content_type, fields in CHROMA_IDENTITY_FIELD.items():
             assert fields == ("doc_id",), (
-                f"{prefix!r} dispatched on {fields!r}, expected ('doc_id',)"
+                f"{content_type!r} dispatched on {fields!r}, expected ('doc_id',)"
             )
 
 

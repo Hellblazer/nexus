@@ -3,8 +3,7 @@
 
 RDR-137 Phase 5.2b (nexus-tts0d.21): the five pure helpers
 (``_repo_identity``, ``_repo_identity_with_main``, ``_safe_collection``,
-``_resolve_repo_collection``, ``_sanitise_owner_segment``, plus
-``list_sibling_collections``) lived in :mod:`nexus.registry` before
+``_resolve_repo_collection`` and ``_sanitise_owner_segment``) lived in :mod:`nexus.registry` before
 RDR-137 because they were colocated with the legacy ``RepoRegistry``
 class. They are not registry-coupled: they implement git-worktree-
 stable repo identity and the RDR-103 conformant collection-naming
@@ -357,7 +356,8 @@ def _sanitise_owner_segment(name: str) -> str:
 def _resolve_repo_collection(
     repo: Path, content_type: str, *, cat: Any = None,
 ) -> str:
-    """Return the conformant collection name for ``(repo, content_type)``.
+    """Return the collection name for ``(repo, content_type)``: the registered
+    label when a catalog row exists (RDR-229 P2.8), else a conformant name.
 
     Catalog-aware path: when ``cat`` is supplied AND has an owner
     registered for ``repo``, returns the catalog-minted
@@ -376,7 +376,7 @@ def _resolve_repo_collection(
     """
     if cat is not None:
         try:
-            return cat.collection_for_repo(repo, content_type).render()
+            return cat.collection_for_repo(repo, content_type).label
         except LookupError:
             # Owner not registered; fall through to synthesis.
             _log.debug(
@@ -421,85 +421,6 @@ def _resolve_repo_collection(
     )
 
 
-def list_sibling_collections(
-    collection_name: str,
-    t3_client: Any,
-) -> list[str]:
-    """Return all T3 collections sharing the same repo identity.
-
-    Handles both forms:
-
-    * **Legacy 2-segment** (``docs__art-architecture-8c2e74c0``):
-      siblings are collections whose name ends with ``-8c2e74c0``
-      (the 8-char hash suffix).
-    * **RDR-103 conformant 4-segment**
-      (``code__owner-1-2__voyage-code-3__v1``):
-      siblings are collections that share the same ``__<owner_id>__``
-      segment regardless of content_type, embedding_model, or
-      version. RDR-137 followup IMP-27 (nexus-43qgm.27): pre-fix the
-      function silently returned ``[]`` for ALL conformant names
-      because ``rsplit('-', 1)`` produced ``("...__v", "1")`` and the
-      8-char length check failed.
-
-    Always excludes the input + ``taxonomy__*``.
-
-    The conformant branch matches the catalog ROW's ``owner_id``. Since
-    nexus-6pbwx the engine rewrites a legacy slug-named repo collection's
-    ``owner_id`` to its documents' owner segment (``1-15``), so such a
-    collection no longer finds its slug-named siblings here. Harmless today:
-    nothing in ``src`` calls this function (``taxonomy_cmd`` stopped using it,
-    GH #238, and ``registry`` only re-exports it), and
-    ``tests/test_6pbwx_owner_readers.py`` pins that, so a new caller has to
-    decide the sibling rule deliberately.
-    """
-    from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
-        collection_owner,
-        is_conformant_collection_name,
-    )
-
-    matcher: Any = None
-    if is_conformant_collection_name(collection_name):
-        # Conformant path — share by owner_id segment.
-        # RDR-204 Phase 3 THE REPOINT (nexus-ft04v.26): collection_owner
-        # now reads *collection_name*'s catalog row and raises
-        # CollectionNotRegisteredError when it has none -- this function
-        # finds siblings of an EXISTING (presumably registered) collection,
-        # not a candidate being minted, so that is the correct behaviour
-        # here; a caller invoking this on an unregistered name should see
-        # the failure, not a silently wrong sibling set.
-        owner_id = collection_owner(collection_name)
-        owner_segment = f"__{owner_id}__"
-        matcher = lambda n: owner_segment in n  # noqa: E731
-    else:
-        # Legacy 2-segment path — share by 8-char hash suffix.
-        parts = collection_name.rsplit("-", 1)
-        if len(parts) != 2 or len(parts[1]) != 8:
-            return []
-        hash8 = parts[1]
-        matcher = lambda n: n.endswith(f"-{hash8}")  # noqa: E731
-
-    from nexus.db.http_vector_client import live_collection_rows  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
-
-    try:
-        # nexus-bc7ps: sibling projection is routing; a quarantine sibling
-        # shares the owner segment and must not be a search target.
-        all_colls = live_collection_rows(t3_client, routing=True)
-    except Exception:  # noqa: BLE001 — boundary catch of T3 client errors; degrade to empty sibling list
-        return []
-
-    siblings = []
-    for coll in all_colls:
-        name = coll.name if hasattr(coll, "name") else str(coll)
-        if name == collection_name:
-            continue
-        if name.startswith("taxonomy__"):
-            continue
-        if matcher(name):
-            siblings.append(name)
-
-    return sorted(siblings)
-
-
 __all__ = (
     "_repo_identity",
     "_repo_identity_with_main",
@@ -508,7 +429,6 @@ __all__ = (
     "_safe_collection",
     "_sanitise_owner_segment",
     "is_worktree_or_tempdir_path",
-    "list_sibling_collections",
     "owner_repo_root_best_effort",
     "reconstruct_absolute_registered_path",
     "should_skip_ephemeral_registration",

@@ -81,7 +81,7 @@ def test_the_knowledge_map_no_longer_prints_the_stale_label(tmp_path, monkeypatc
     from nexus import context
 
     monkeypatch.setattr(context, "_repo_collections", lambda _repo: None)
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda _c: {"content_type": "knowledge"})
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda _c, *, refresh=True, strict=False: {"content_type": "knowledge"})
     tax = _Taxonomy()
     before = context.generate_context_l1(tax, output_path=tmp_path / "before.txt")
     assert STALE in before.read_text(encoding="utf-8")

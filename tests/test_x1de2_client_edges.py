@@ -19,6 +19,8 @@ from nexus.commands import enrich
 from nexus.db.t2.http_document_aspects_store import HttpDocumentAspectsStore, _body_to_record
 from nexus.db.t2.records import AspectRecord, with_doc_id
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── (51) _open_plan_library: plans service unavailable ─────────────────────
 

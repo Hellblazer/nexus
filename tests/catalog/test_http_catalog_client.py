@@ -2192,7 +2192,7 @@ class TestHttpCatalogClientRoundTrip:
     def test_legacy_grandfathered_derivation_journey(
         self, client: HttpCatalogClient,
     ) -> None:
-        from nexus.corpus import is_conformant_collection_name
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
         # The BARE ``register_collection(name)`` shape — by construction the
         # non-conformant branch of every call site's conformance fork — must

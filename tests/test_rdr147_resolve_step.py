@@ -361,7 +361,8 @@ def test_resolve_is_a_non_embedding_tool() -> None:
     assert "traverse" in runner._NON_EMBEDDING_TOOLS
 
 
-def test_the_embedding_domain_check_lets_resolve_through() -> None:
+def test_the_embedding_domain_check_lets_resolve_through(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)  # no registry row: the name answers, no tenant
     # A collection arg of the wrong model for the declared domain trips the guard on a retrieval tool ...
     wrong = {"collections": "knowledge__x__bge-768__v1"}
     with pytest.raises(runner.PlanRunEmbeddingDomainError):

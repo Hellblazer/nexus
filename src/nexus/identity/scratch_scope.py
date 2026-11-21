@@ -9,9 +9,11 @@ is the client half: the scope a caller reads and writes, and a store bound to it
 
 * The scope is the caller's own identity. A delegated child (``claude -p``) reads its **parent's** scope: its writes
   are refused by the engine (the child's token is not the parent's), which is the point, and its reads are not checked.
-* The store is a plain :class:`~nexus.db.http_scratch_store.HttpScratchStore` carrying the session's own minted
-  session token and the identity scope as its ``session_id``; ``HttpScratchStore`` attaches the identity token itself
-  for an ``identity:`` scope, so a write needs nothing else here.
+* The store is a plain :class:`~nexus.db.http_scratch_store.HttpScratchStore` bound to the identity scope as its
+  ``session_id`` and sending **no** ``X-Nexus-T1-Session`` header: the engine admits a request with none, leaves the
+  scope's reads open and fences its writes on the identity token alone, which ``HttpScratchStore`` attaches itself for an
+  ``identity:`` scope. So the store needs no session lease and mints nothing: a ``/clear`` start can read it before the
+  new session id has a lease (nexus-hczdo).
 * The scope is bounded by the client, not the engine: an entry over 2 KB is refused, and so is a non-pointer put once the
   scope holds 20 entries (the resume pointer has its own slot); nothing is evicted. The rule is in
   :mod:`nexus.db.http_scratch_store` (``IDENTITY_ENTRY_MAX_BYTES``, ``IDENTITY_SCOPE_MAX_ENTRIES``).
@@ -60,9 +62,9 @@ def scope_id(owner: str) -> str:
 def identity_scratch(base: Any = None, *, client: Any = None, identity: str | None = None) -> Any:
     """A T1-shaped store bound to the caller's identity scope.
 
-    *base* is the session's own T1 store (``get_t1_database()`` by default): the identity store reuses its minted session
-    token and endpoint, so the engine's token gate admits the call. *client* is the identity client that finds the
-    delegated parent (built from the config when None, and closed afterwards)."""
+    The store sends no session token, so it needs no session lease and never creates a session. *base* is accepted for
+    old callers and ignored: nothing is borrowed from it (none passes one now). *client* is the identity client that finds the delegated
+    parent (built from the config when None, and closed afterwards)."""
     from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred: http store must not load on every CLI start
     from nexus.identity.bind_client import IdentityApiError, IdentityClient, IdentityUnavailableError  # noqa: PLC0415
 
@@ -78,12 +80,7 @@ def identity_scratch(base: Any = None, *, client: Any = None, identity: str | No
     finally:
         if owned and client is not None:
             client.close()
-    if base is None:
-        from nexus.db.t1 import get_t1_database  # noqa: PLC0415
-
-        base = get_t1_database()
-    inner = getattr(base, "_store", base)               # the CLI-dedicated wrapper holds the real store
-    token = getattr(inner, "_session_token", None)
-    # export_adopted_token=False: this store is not the process's own scope, so a token it adopts after a 401 must never
-    # replace the NX_T1_SESSION of the scope the process holds.
-    return HttpScratchStore(session_id=scope_id(owner), _session_token=token or None, export_adopted_token=False)
+    # send_session_token=False: the engine needs no session for an identity-scope call (see the module docstring), and
+    # a lease for this process's session id may not exist yet. export_adopted_token=False: this store is not the
+    # process's own scope, so nothing it adopts may replace the NX_T1_SESSION of the scope the process holds.
+    return HttpScratchStore(session_id=scope_id(owner), send_session_token=False, export_adopted_token=False)

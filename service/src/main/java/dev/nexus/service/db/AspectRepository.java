@@ -189,9 +189,19 @@ public final class AspectRepository {
      * inside the transaction, after the lock, so the claim is locked for the (short) time they take; a
      * claim-less write has no lock and runs the gates first, as ever. Nothing is written on any refusal.
      *
-     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, then
-     * {@code document_aspects}, in every path, so a rename that rewrites task bodies before its registry
-     * loop cannot deadlock against a persist of the same document.
+     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, so a
+     * rename that rewrites task bodies before its registry loop cannot deadlock against a fenced persist of the
+     * same document. After it come the catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and then
+     * {@code document_aspects}; the catalog-first order is the reverse of the rename's and the collection
+     * delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL
+     * aborts one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under
+     * {@link DeadlockRetry}: this one here, the rename and the delete through {@code manifestWriteTxn}. The
+     * retried body is only the database transaction (nothing leaves it; the handler answers after it returns), so
+     * a rerun repeats no side effect. {@link DeadlockRetry} makes at most four attempts; after them the 40P01
+     * propagates and the handler answers 500. A retried upsert reads the collection through the in-process
+     * {@code CollectionRegistry}, which a rename or delete evicts only after its commit, so a retry that checks the
+     * name before that eviction can still write under the retired name (an orphan row; the same window as an
+     * upsert that started just before the rename committed). It is not a 409 or 422 in that case.
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
         // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
@@ -209,20 +219,24 @@ public final class AspectRepository {
         if (claimId == null) {
             // No fence: the payload gates run before a transaction opens, as ever.
             ValidUpsert valid = validateUpsert(body);
-            return valid == null ? -1L : tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid));
+            if (valid == null) return -1L;
+            return DeadlockRetry.run("aspect.upsert " + valid.collection(),
+                () -> tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid)));
         }
         // Fenced: the claim is looked up and locked FIRST, so a lapsed or foreign claim answers 404 or 403
         // whatever the payload is (nexus-eyynd M1); the payload gates run after it, in the same transaction.
-        return tenantScope.withTenant(tenant, ctx -> {
-            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then
-            // document_aspects, in every path. This lookup takes the first lock; the insert takes the second.
+        return DeadlockRetry.run("aspect.upsert fenced", () -> tenantScope.withTenant(tenant, ctx -> {
+            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then the
+            // catalog row (RDR-254) and document_aspects. This lookup takes the first lock; the write the rest.
             // A rename rewrites task bodies (tuple row locks) before its registry loop updates
-            // document_aspects, so the orders agree and neither can deadlock the other.
+            // document_aspects, so a claim on a task of the collection being renamed serializes with it. The claim
+            // check reads only doc_id, not the body's collection, so that is the usual case, not a guarantee: the
+            // DeadlockRetry around this transaction covers the rest.
             var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
             return valid == null ? -1L : writeAspect(ctx, tenant, body, valid);
-        });
+        }));
     }
 
     /** An upsert body that passed the confidence, required-field and doc_id gates. */
@@ -279,6 +293,8 @@ public final class AspectRepository {
         double confidence = v.confidence();
         OffsetDateTime extractedAtTs = v.extractedAt();
         ensureCollectionRegistered(ctx, tenant, collection);
+        // RDR-254: a doc_id naming a trashed or alias document never replaces the row's doc_id (AspectDocIdAttribution).
+        Field<String> docIdOnConflict = AspectDocIdAttribution.onConflict(ctx, tenant, docId, EX_DOC_ID_COALESCE);
         var result = ctx.insertInto(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID,
                 DOCUMENT_ASPECTS.COLLECTION,
@@ -337,7 +353,7 @@ public final class AspectRepository {
             // nexus-x1de2 (52): an id-less re-upsert must never strip an
             // attribution a previous write established — same COALESCE the
             // other two writers already use.
-            .set(DOCUMENT_ASPECTS.DOC_ID,                 EX_DOC_ID_COALESCE)
+            .set(DOCUMENT_ASPECTS.DOC_ID,                 docIdOnConflict)
             .returning(DOCUMENT_ASPECTS.ID)
             .fetch();
         return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);

@@ -10,6 +10,7 @@ import dev.nexus.service.db.CatalogSensitiveLocatorReads;
 import dev.nexus.service.db.CatalogSensitiveReads;
 import dev.nexus.service.db.ManifestFillableCount;
 import dev.nexus.service.db.ManifestForeignCollectionReads;
+import dev.nexus.service.db.UriSegmentCensusReads;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,6 +46,7 @@ final class CatalogBoundedReadRoutes {
     private final CatalogSensitiveLocatorReads locatorReads;
     private final ManifestFillableCount fillableCount;
     private final ManifestForeignCollectionReads foreignReads;
+    private final UriSegmentCensusReads uriSegmentReads;
     private final CatalogDocReads docReads;
 
     CatalogBoundedReadRoutes(CatalogRepository repo) {
@@ -52,6 +54,7 @@ final class CatalogBoundedReadRoutes {
         this.locatorReads = new CatalogSensitiveLocatorReads(repo);
         this.fillableCount = new ManifestFillableCount(repo);
         this.foreignReads = new ManifestForeignCollectionReads(repo);
+        this.uriSegmentReads = new UriSegmentCensusReads(repo);
         this.docReads = new CatalogDocReads(repo);
     }
 
@@ -183,6 +186,50 @@ final class CatalogBoundedReadRoutes {
         body.put("limit", page.limit());
         body.put("capped", page.capped());
         body.put("documents", docs);
+        send(exchange, 200, body);
+    }
+
+    /**
+     * GET /v1/catalog/uri_segment_census?limit=N (RDR-229 P1.2, nexus-p2m1x.2, engine 0.1.200):
+     * {@code {count, limit, capped, groups:[{table, scheme, segment, collection, content_type, rows}]}}.
+     *
+     * <p>The tenant's {@code chroma://} and {@code nx-note://} source-URI rows grouped by table
+     * ({@code catalog_documents}, {@code document_aspects}, {@code document_highlights}), scheme ({@code chroma} or
+     * {@code nx-note}), segment and collection, each with its row count and its collection's registry content type
+     * ({@link UriSegmentCensusReads} has the statement). {@code count} is every group; {@code groups} lists at most
+     * {@code limit} of them (1 to {@link UriSegmentCensusReads#MAX_LIMIT}, default the maximum; anything else is a 400);
+     * {@code capped} is true when more exist. A new path, so an old engine answers 404, which a client reads as
+     * "cannot say", never "none". A statement timeout answers 503.
+     */
+    void uriSegmentCensus(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"GET".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Integer limit = limitParam(exchange, UriSegmentCensusReads.DEFAULT_LIMIT, UriSegmentCensusReads.MAX_LIMIT);
+        if (limit == null) return;
+        UriSegmentCensusReads.Page page;
+        try {
+            page = uriSegmentReads.list(tenant, limit);
+        } catch (RuntimeException e) {
+            if (!CatalogHandler.hasSqlState(e, CatalogRepository.QUERY_CANCELED)) throw e;
+            log.warn("event=catalog_uri_segment_census_timeout tenant={} limit={}", tenant, limit);
+            timeout(exchange, "uri segment census exceeded its time bound");
+            return;
+        }
+        List<Map<String, Object>> groups = new ArrayList<>(page.groups().size());
+        for (var g : page.groups()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("table", g.table());
+            m.put("scheme", g.scheme());
+            m.put("segment", g.segment());
+            m.put("collection", g.collection());
+            m.put("content_type", g.contentType());
+            m.put("rows", g.rows());
+            groups.add(m);
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("count", page.count());
+        body.put("limit", page.limit());
+        body.put("capped", page.capped());
+        body.put("groups", groups);
         send(exchange, 200, body);
     }
 

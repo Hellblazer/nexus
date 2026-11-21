@@ -293,7 +293,7 @@ identity_records      id  kind=seat|ephemeral|delegated  parent=<id or none>  ge
                       display_name=<name or null>  created_by=<sam|restart|session|dispatch|identity:i<n>>  created_at=<UTC>  ended_at=<UTC or null>
 identity_aliases      name  identity=<id>  state=live|retired  since=<UTC>  retired_at=<UTC or null>  renamed_to=<name or null>
 identity_bindings     identity=<id>  seq  event=start|clear|resume|fork|takeover|release|rename|end|lapse|revive|gone  generation=<n>  lease=leased|unleased
-                      session_id=<uuid>  host=<hostname>  pid=<n>  started_at=<ms>  proc_start=<UTC, to the second>  pane=<tmux pane or null>
+                      session_id=<uuid>  host=<machine key, else hostname>  pid=<n>  started_at=<ms>  proc_start=<UTC, to the second>  pane=<tmux pane or null>
                       client_version=<conexus version>  prior_session_id=<uuid or null>
                       holder_gone={host, pid, started_at, proc_start} or null  at=<UTC>
 identity_sessions     session_id  identity=<id>  generation=<n>        (the session index)
@@ -311,8 +311,8 @@ identity; names matching `i<digits>` are reserved and cannot be aliases. An
 alias names one live identity at a time.
 
 **A generation is one process holding a seat** (Sam, 2026-11-16, decision 2 as
-amended). A process is one start of a Claude Code process, known by its host,
-its pid and the `startedAt` its registry file records. Claude Code's in-place
+amended). A process is one start of a Claude Code process, known by its host
+(a machine key, defined under "A host is a machine key" below), its pid and the `startedAt` its registry file records. Claude Code's in-place
 `/restart` keeps the pid and the OS start time but writes a new `startedAt`,
 which is how the restart script already tells a new start
 (`nexus_rdr/253-research-9` (a); measured in `nexus_rdr/253-research-10` (1)). A seat's state is `unheld` when created or released, `live` while its
@@ -327,6 +327,78 @@ current generation across `/clear`, which the `/clear` spike shows happens in
 the same process (`nexus_rdr/253-research-5`). The generation check stops a
 superseded process: the old process after a restart, a resume elsewhere or a
 take-over.
+
+**A host is a machine key, not a hostname** (GH #1679; code on branch `feature/gh1679-stable-host-identity`, tip `a4ac5cfa3d`,
+reviews T2 `nexus/review-4e48325fa-gh1679-2026-11-21-r2` and `nexus/critique-4e48325fa-gh1679-2026-11-21-r2`). Wherever this
+document says a binding, a token file or a holder names a "host", it means `this_host()` of the process that wrote it: the
+machine's key, else its hostname. The first design used `gethostname()`, which follows DHCP and VPN: a laptop was
+`ip-10-122-0-102.ec2.internal` one day and `-105` the next, so a resumed session met its own old binding as another host,
+judged it by its lease alone and was refused the seat although the holder was dead on this machine (`hostname.py` module
+docstring: "a resumed session met its own old binding as \"another host\"").
+
+*What the key is derived from.* `nxh1-` plus the first 32 hex digits of an HMAC-SHA256 whose key is an identifier the OS keeps
+for the life of the install and whose message is a fixed domain string and the identifier's source name
+(`hostname.py:host_key`: `return KEY_PREFIX + digest[:32]`). The raw identifier never leaves the machine, and the key is never
+cached on disk (module docstring: "A key is never cached on disk: a copied config directory would carry it to another
+machine."). The identifier on each OS:
+
+- macOS: `IOPlatformUUID`, read from `/usr/sbin/ioreg -rd1 -c IOPlatformExpertDevice` (`hostname.py:_macos_uuid`:
+  `_IOREG_UUID = re.compile(r'"IOPlatformUUID"\s*=\s*"([^"]+)"')`). Not `LocalHostName`, which Migration Assistant copies to a
+  new Mac (module docstring).
+- Linux: `/etc/machine-id`, then `/var/lib/dbus/machine-id`, read only by a process in the initial pid namespace and only when
+  the text is 32 hex digits and not all zeros (`hostname.py:_linux_machine_id`: `if pid_ns() != INIT_PID_NS:` then `return None`;
+  `if _HEX32.fullmatch(text) and text != "0" * 32:`). A container that bind-mounts the host's file has another process table, so
+  it gets no key.
+- Windows: the `MachineGuid` value under `HKLM\SOFTWARE\Microsoft\Cryptography`, read with
+  `winreg.QueryValueEx(key, "MachineGuid")` (`hostname.py:_windows_machine_guid`).
+
+*The fallback.* When no identifier is safe to equate (none readable, `ioreg` missing or timing out, an unusable Linux id, a
+Linux process outside the initial pid namespace, another OS), `this_host()` returns the hostname, escaped when the hostname
+itself starts with the key prefix so a fallback name is never read as a key: `return f"host-{name}" if
+name.startswith(KEY_PREFIX) else name` (`hostname.py:this_host`). A failed probe is retried once at once and then not for
+`PROBE_RETRY_S = 60.0` seconds (`hostname.py:_stable_host_cached`); a success is kept for the life of the process. On macOS
+and Windows a probe that gave nothing is logged once as `host_key_unavailable`. A false "same host" is the dangerous error,
+because this machine's pid probe would then judge a holder on another machine and free a live seat; the refusals above exist
+so a fallback is never weaker than the hostname.
+
+*A key that is not this machine's is never local.* After the equal-host case, a holder whose host is any other key is judged
+not local with no further test (`hostname.py:holder_is_local`: `if is_key(name):` then `return False`), and the holder check
+then says `other_host` and judges it by its lease alone.
+
+*A name that is not a key is local only on proof.* A binding written before the key existed, or by a machine that had none,
+carries a hostname, and a name is not proof of locality: two machines can both be `ubuntu`, and a machine that changed
+networks no longer answers to its old name. Such a holder is this machine's only when this machine's own token file for the
+holder's `(pid, startedAt)` records that same host, or when the asking process is that holder (its own pid and `startedAt`,
+which it read from its own registry file):
+`if process is not None and process == (pid, started): return True`, and
+`record = read_token_file(token_path(identity_dir, pid, started))` then `return record is not None and record.host == name`
+(`hostname.py:holder_is_local`). The bind path applies the same rule when it adopts the host name an identity's own holder row
+records, because the engine compares `host` as a string on `clear`, `fork`, `refresh` and a self-`release`
+(`binder.py:_as_holder`: "Only a name this machine answers to is adopted; any other host stays as it is."). A listing of "the
+bindings on this host" asks the engine under every name this machine has used, the key, the current `gethostname()` and the
+hosts its own token files record (`hostname.py:listing_names`), and each returned holder is judged afterwards by the rule above.
+
+*What stays possible.*
+(1) A machine image cloned without regenerating the identifier (a VM clone, an AMI baked with a filled `/etc/machine-id`)
+gives two machines one key, and each then treats the other's holders as local (module docstring: "a machine image cloned
+without regenerating the identifier ... gives two machines one key"; the platforms' own cloning tools regenerate it, inferred
+from that docstring, not tested here).
+(2) An identity directory shared or copied between machines (an NFS home, an rsync of `~/.config/nexus`) lets machine A read
+machine B's token files and accept B's non-key hostname as its own, so it judges B's holder by A's pid table (module docstring:
+"machine A then sees machine B's token files and accepts B's pre-key hostname as its own"). That reaches only rows written under
+a non-key name, which stop being written once both machines run this client.
+(3) Two machines with the same short hostname still compare equal for a `labrun` work ref, which carries only the short name
+(`work.py:_process_gone` docstring: "two machines that share a short name still compare equal here").
+
+*Work refs and owner records.* The `<host>:<pid>:<started>` ref of a `labrun` row carries the short hostname, `gethostname()`
+up to its first dot, because `lab-remote` writes it that way (`work.py:_process_gone` docstring: "`lab-remote` writes
+`gethostname()` up to its first dot"; the `lab-remote` script itself was not read, so that it writes the short name is inferred
+from this docstring). The reader matches the ref's short host against `machine_short_names(here)`, which holds this
+machine's own name and, when `here` is its key, its `gethostname()` (`hostname.py:machine_short_names`). Owner records a
+long-lived registrar writes carry the full host, which is the key from this release on:
+`record_owner(owner_dir, identity, kind, ref, pid=pid, start=table.os_start(pid), host=table.host, procs=table)`
+(`work.py:_own_record`; `table.host` is `Processes.host`, which returns `self._host if self._host is not None else this_host()`,
+`holder.py`).
 
 **Binding.** One engine route, `bind`, takes the seat (or identity), the
 caller's evidence (session id, host, pid, `startedAt`, the process's OS start
@@ -345,7 +417,9 @@ identity's state to `lapsed`, whatever its lease, and a recorded `gone` frees
 the seat. A second `gone` for the same holder appends no row and answers
 `recorded: false`. A route lists the bindings
 whose host is a given host. At every SessionStart, after its own bind or
-rebind, the hook lists the live, lapsed and `unleased` bindings on its host,
+rebind, the hook lists the live, lapsed and `unleased` bindings on its host
+(under each of this machine's names, `hostname.py:bindings_here`, each holder
+judged by the local-proof rule),
 skips its own process's binding and every delegated identity in this pass (a
 delegated identity is renewed by the `nx` dispatcher, and the process that
 holds its binding is the dispatcher, which has no registry file), runs the holder
@@ -392,7 +466,7 @@ policy, with the result for the session in the last column:
 |---|---|---|
 | `startup` after an in-place `/restart` with no exchange (a binding on this host has this process's `pid` and `proc_start`) | any, unless another process holds it now | the same identity rebound, new generation, event `start`; checked before every other `startup` row |
 | `startup`, a seat named | unheld or ended, or its holder no longer exists | bound, new generation, event `start` |
-| `startup`, a seat named | lapsed, holder still running (same host), or lapsed less than 10 minutes ago (another host) | ephemeral, as for a live holder |
+| `startup`, a seat named | lapsed, holder still running (same host: this machine's key, or a non-key name it can prove), or lapsed less than 10 minutes ago (another host) | ephemeral, as for a live holder |
 | `startup`, `NX_SEAT` naming no seat | n/a | ephemeral; the hook prints a notice that `NX_SEAT` names no seat (a seat that was renamed gets a notice naming its new name). The engine has no route that lists seats, so the hook does not list them |
 | `startup`, a seat named | live in another process | ephemeral; the hook prints the holder and, in an interactive session only, the remedy `nx identity claim <seat> --take-over` |
 | `startup`, no seat named | n/a | ephemeral, event `start` |
@@ -451,7 +525,12 @@ tenant credential is the trust boundary for a request that names no process.
 **A holder that no longer exists.** The check is the client's: the engine
 cannot read a laptop's files, least of all in cloud mode. Before binding, the
 hook (or `nx identity claim`) reads the current holder from the engine and,
-when the holder is on its own host, judges it in up to three steps. First, it
+when the holder is on its own host, judges it in up to three steps. "On its own
+host" is decided before any step: the holder's host is this machine's key, or a
+non-key name this machine can prove was its own (see "A host is a machine key"
+above); any other holder is `other_host` (`holder.py:check_holder`: `if not
+holder_is_local(holder, host=here, identity_dir=identity_dir):` then `return
+Verdict(OTHER_HOST, ...)`). First, it
 looks for a registry file naming the holder's pid with the holder's
 `startedAt`. Second, it probes that pid. Third, it compares the running
 process's OS start time with the binding's `proc_start`, so a pid reused after
@@ -488,14 +567,21 @@ one rule covers every restart mode: an exit and relaunch, an in-place
 all) all find the old holder gone and bind by the table's `resume` row with a
 new generation. The restart script needs no release step. A holder on the same
 host that the check cannot judge is freed only by a take-over; its lapsed lease
-does not free it. A holder on another host is judged by its lease alone: lapsed
-plus the 10-minute reservation, and only then is its seat free.
+does not free it. A holder on another host (a key that is not this machine's, or
+a non-key name with no local proof) is judged by its lease alone: lapsed
+plus the 10-minute reservation, and only then is its seat free. The bind path's
+reservation test treats a holder under any of this machine's names as not on
+another host (`binder.py:_reservation_over`: "A holder under any of this machine's
+names is not on another host.").
 
 An in-place `/restart` of a conversation with
 no exchange yet starts a new session id with `source: startup`
 (`253-research-10` (2)) and loses its `-n` name. Before applying the
 `startup` rows, the hook therefore looks for the most recent binding on its
-host whose `pid` and `proc_start` are its own process's (an in-place
+host (asked under every name this machine has used, the holder then judged by the
+local-proof rule above: `binder.py:_rebind`: `holder_is_local(holder,
+host=facts.host, identity_dir=self._idir, process=(facts.claude_pid,
+holder.get("started_at")))`) whose `pid` and `proc_start` are its own process's (an in-place
 `/restart` keeps both, `253-research-10` (1); the hook reads its own OS start
 time from `ps`, so this needs no registry file). If one exists and no other
 process holds that identity now, the process rebinds it: the old holder's
@@ -545,7 +631,7 @@ The claim binds the caller's own Claude process (its nearest Claude ancestor,
 file. The caller's previous identity is closed: an ephemeral one gets `end`
 (its state is then pruned by retention), and a seat the caller held gets
 `release`, leaving that seat `unheld`. `nx identity release <seat>` frees a
-seat whose holder is gone: on the holder's host it runs the holder check and
+seat whose holder is gone: on the holder's host (judged as in "A host is a machine key") it runs the holder check and
 is refused while the holder runs; for a holder on another host it is refused
 until the lease has lapsed and its 10-minute reservation has passed. Because it frees only a gone holder's seat and binds
 nothing, it needs no interactivity or ancestry guard, and a person can run it
@@ -569,7 +655,7 @@ the file name comes from the registry's current `startedAt`, read on every
 call, so a process that outlives the restart reads the new file). The file holds the identity, the generation, the token and when
 it expires, the current session id and every session id the process has held
 under that identity (a cross-seat switch starts the list again), the process's
-pid, `startedAt`, `proc_start` and host, and the registry directory the
+pid, `startedAt`, `proc_start` and host (the machine key, else the hostname; the record is what a later process reads as local proof for a non-key name), and the registry directory the
 process's registry file lives in. The hook and the MCP server both rewrite it,
 so each change is a read, an edit and a write under a file lock; a writer that
 finds the file naming another identity or generation than the one it holds
@@ -615,7 +701,7 @@ not a new binding) and rewrites its process's one token file. A renewal or refre
 `generation_superseded`, and the server stops writing identity state and says so. The engine marks a seat
 `lapsed`, without changing the generation, when it reads a binding whose last
 renewal is more than 300 seconds old; the next renewal from the same process
-appends `revive`. On the holder's own host the probe above decides: a running
+appends `revive`. On the holder's own host (this machine's key, or a non-key name with local proof) the probe above decides: a running
 holder keeps its seat however long its lease has lapsed (a stuck process, a
 long sleep), and a gone holder frees it at once. From another host a lapsed
 seat stays reserved for 10 minutes after the lapse is due (300 seconds after
@@ -862,6 +948,11 @@ restart script's promote.
   scope is bounded in the client, not the engine (the engine holds no cap): an
   entry over 2 KB is refused, and so is a put of a note once the scope holds 20
   notes; the resume pointer has a slot of its own, and nothing is evicted. The
+  client's identity-scope store sends no session token: the engine admits an
+  identity-scope call with none (reads open, writes fenced on the identity token
+  alone), so the scope can be read and written by a process whose session id has no
+  T1 lease, as at SessionStart after `/clear`, and by a plain `nx scratch --scope
+  identity`. The
   pointer is one entry tagged `resume-pointer` (the thread, worktree, `state:` and
   `waiting_on:` of the seat's board entry, at most 1 KB): the PreCompact checkpoint
   hook and a SessionEnd hook for reason `clear` write it, put before the earlier
@@ -1001,7 +1092,7 @@ Self-certifying identifiers, signed binding events, witnesses.
   holder; only the one-shot `nx identity claim --take-over` supersedes a live
   process.
 - **A crash leaves a seat held**: on the same host the relaunch finds the
-  holder's process gone and binds at once; across hosts it waits for the
+  holder's process gone and binds at once (the same host in the sense of "A host is a machine key": a key, or a non-key name with local proof, so a network change that renames the laptop no longer makes it "another host", commit `00a6c88d6d`: "so a resumed session keeps its identity across a network change"); across hosts it waits for the
   lapse, or for a person's `nx identity release`.
 - **A child takes its parent's seat**: no inherited variable carries
   take-over authority, and a delegated child's hook does not bind.
@@ -1194,15 +1285,15 @@ table in the conexus `nexus` skill, and a 30-day retire rule.
 Part 1 of the registered work (nexus-hczdo) names who registers what: `nx tuple wait`
 (a `wait` for the session id) and `nx ci wait` (a `wait`, ref `ci:<branch>@<sha>`)
 through `Label`, `nx identity work run` (a command's row), `lab-remote` (a `labrun`,
-ref `<host>:<pid>:<started>`), the git-worktrees skill (a `worktree`), and the
+ref `<host>:<pid>:<started>`, where `<host>` is the machine's short hostname, not its key; see "A host is a machine key"), the git-worktrees skill (a `worktree`), and the
 SubagentStart and SubagentStop hooks (an `agent`, ref `agent:<agent id>`; the stop
 removes the row, and neither hook purges at the 200-row limit). The `agent` kind needs
 the engine release that carries changeset `identity-005`: an older engine answers `400
 bad_kind`, which the hooks log once per process and ignore, so agent rows begin with the
 engine release and not the client release. Three witnesses read a running row of a
 `wait`, `labrun`, `agent` or `watcher` as stale: its process is gone or was replaced (the
-`<host>:<pid>:<started>` ref, or the owner record a long-lived registrar writes under the
-identity directory's `work-owners/`), it was last written before the current holder
+`<host>:<pid>:<started>` ref, which names the short hostname, or the owner record a long-lived registrar writes under the
+identity directory's `work-owners/`, which names the machine key), it was last written before the current holder
 started, or nobody wrote it for 12 hours; a hand-registered row has the last two only.
 A wait is judged an earlier session's only when its ref is a session id (a UUID). The
 restart script reads every row, marks a stale one and does not block on it, and journals
@@ -1275,8 +1366,10 @@ None.
   (tests/hooks/test_resume_pointer.py); the reader prints one line of at most 400 bytes on `clear` only, drops a
   pointer over 48 hours old, and logs one `resume_line` event per `clear` start (hit, empty, error or timeout, with
   `age_s`; tests/hooks/test_resume_line.py); and a journey row writes through the real `nx scratch` commands, binds a
-  `clear`, and reads the line back through the reader's real opener when the new session id has a T1 session; without
-  one the reader prints nothing and creates no session (tests/identity/test_work_engine_rows.py).
+  `clear`, and reads the line back through the reader's real opener when the new session id has no T1 lease yet (the MCP
+  watcher publishes it 0-5 s after SessionStart, so at a `/clear` it never has one): the identity-scope store sends no
+  `X-Nexus-T1-Session`, the reader never calls `get_t1_database` and creates no session, and no lease file appears
+  (tests/identity/test_work_engine_rows.py).
 - Each restart mode (exit and relaunch, in-place `/restart`, `--revive` after a
   reboot) finds the old holder gone and binds the next generation, with no
   release step.
@@ -1461,3 +1554,5 @@ four state kinds). T2 `nexus_rdr/253-decisions-2026-11-16`.
 - 2026-11-20: wording matched to the reviewed token-file fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/review-token-file-restart-2026-11-20-r1` and `nexus/critique-token-file-restart-2026-11-20-r1`): the token file name comes from the registry's current `startedAt`, read on every call, so a process that outlives an in-place `/restart` follows it to the new file; a registry or token file that cannot be read is read once more after about 10 ms; the identity token goes only on identity-scope scratch writes, and a write's 401 re-reads the file once; Test Plan line for the long-lived process across an in-place `/restart`.
 - 2026-11-20: wording amended to match the reviewed Step 6 part 3 code (grant 3), bead nexus-hczdo (reviews T2 `nexus/review-47774ae08-nexus-hczdo-2026-11-20` and `nexus/critique-step6-part3-2026-11-20-r1`): per-identity T2 notes are guarded by the client, not fenced by the engine (seats only, own project only, the seven project-keyed store writes, the id-keyed paths not covered); a delegated identity keeps none and `--mine` writes from it are refused; retention does not prune `identity/<id>`; RDR-238 curate reads `identity/*`, the use measure is transcript reads; RDR-209 graduation excludes `identity/*`.
 - 2026-11-20: Step 6 part 2 recorded (the resume pointer; fix round 1, reviews T2 `nexus/review-step6-part2-2026-11-20-r1` and `nexus/critique-step6-part2-2026-11-20-r1`, decision T2 `nexus/decision-identity-scratch-caps-client-side-2026-11-20`): the identity scope's caps (2 KB an entry, 20 notes, a reserved slot for the resume pointer) are enforced in the client's identity-scope put, not by the engine, and the earlier text that implied an engine cap says so now; the pointer is one `resume-pointer` entry written at PreCompact and at SessionEnd with reason `clear`, printed once on `clear`, with no session-scope fallback.
+- 2026-11-20: wording matched to the reviewed resume-line fix (grant 3; bead nexus-hczdo; reviews T2 `nexus/critique-resume-line-no-lease-2026-11-20-r1`): the identity-scope store sends no T1 session token, so the `/clear` resume line prints with no lease for the new session id; the Test Plan line that said it printed nothing without one is corrected.
+- 2026-11-21: wording amended to match the reviewed GH #1679 code (grant 3; branch `feature/gh1679-stable-host-identity`, tip `a4ac5cfa3d`; reviews T2 `nexus/review-4e48325fa-gh1679-2026-11-21-r2` and `nexus/critique-4e48325fa-gh1679-2026-11-21-r2`): a binding's host is a stable machine key (`nxh1-<32 hex>`, from the macOS hardware UUID, the Linux machine id in the initial pid namespace or the Windows MachineGuid) with a hostname fallback; a key that is not this machine's is never local; a non-key name is local only on this machine's own token-file or registry proof for the holder's `(pid, startedAt)`; a cloned image or a copied identity directory under a non-key name remains possible; a `lab-remote` work ref carries the short hostname while owner records carry the key.

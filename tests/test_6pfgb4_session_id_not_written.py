@@ -28,8 +28,8 @@ def test_the_factory_neither_takes_nor_emits_session_id():
 
 
 def test_the_note_chunk_payload_carries_no_session_id(monkeypatch):
-    monkeypatch.setattr(corpus, "embedding_model_row_preferred", lambda name: "bge-base-en-v1.5")
-    chunks = _chunk_payload("knowledge__subject", ["one piece"], [{"chash": _CHASH}], content_type="prose")
+    monkeypatch.setattr(corpus, "embedding_model_for_write", lambda name, **kw: ("bge-base-en-v1.5", True))
+    chunks, _known = _chunk_payload("knowledge__subject", ["one piece"], [{"chash": _CHASH}], content_type="prose")
     assert len(chunks) == 1, "the payload examined nothing"
     assert "session_id" not in chunks[0]["metadata"]
 

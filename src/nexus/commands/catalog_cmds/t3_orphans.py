@@ -79,14 +79,14 @@ def classify_t3_orphan_collections(cat: "CatalogReader", t3_db: Any) -> list[dic
     an empty (falsely clean) orphan list, or to guess around by dropping a
     collection that might actually be tombstoned-only.
     """
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — command-local import (nexus.db.rows.lifecycle)
 
     # nexus-5z0us sibling: the listing carries each collection's physical
     # chunk count (stored_count; an older engine sends count only). Asking
     # get_collection per name re-listed the whole tenant each time.
     listing = {
         c["name"]: c for c in t3_db.list_collections()
-        if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+        if not bypasses_canonical_schema(c["name"], c)
     }
     t3_names = set(listing)
     docs_per_coll: dict[str, int] = cat.collection_doc_counts()

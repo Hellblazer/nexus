@@ -161,7 +161,23 @@ things to avoid carefully; they are impossible.
    cancelled: a sha whose only run was cancelled by the next push gets a wake
    too. Once the adapter's result dims are on, the row also carries `sha` and
    `outcome` dims (failure if any run failed, else cancelled, else success;
-   absent when a conclusion is unknown and nothing failed). For a truncated
+   absent when a conclusion is unknown and nothing failed). With the
+   adapter's FOLD_BRANCH_OUTCOME switch on it also carries `branch_outcome`:
+   `outcome` with the latest earlier result of each path-filtered workflow
+   that has no run on this sha (Service CI) folded in, and a `carried` list in
+   the body. The owner stamper reads `branch_outcome` ahead of `outcome`, so a
+   Service CI red a later sha never re-ran keeps the red episode open and a
+   clear needs every workflow's latest result green; `outcome` stays this
+   sha's own, and a per-sha failure is never overridden. A row with no
+   `branch_outcome` whose body carries a null `carried` (the carry read
+   failed), a `carried` list holding an entry that is not `success` (a
+   carried skipped or neutral does not pass), or a `carried_n` above the
+   list's length (an absent list counts as empty) has no verdict when its
+   per-sha result is success. No clear, and the stamper logs
+   `board_done_no_verdict` with `reason=carry_failed` (null, unreadable or
+   trimmed carry data), `carried_not_green` (a carried entry is present and
+   not success, so develop holds a red), `cancelled` or `unknown`; a per-sha
+   failure still counts. For a truncated
    list, or a missing conclusion, read the `kind=run` rows or the check runs,
    and a cancelled run per the rule below. The
    wake is best-effort: the adapter drops it without retry on a GitHub or

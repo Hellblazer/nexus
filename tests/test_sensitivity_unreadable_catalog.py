@@ -30,7 +30,7 @@ from tests.test_aspect_sensitivity_gates import (  # noqa: F401 — fixtures reu
     _COLL, _SECRET, _Log, _doc, _flag, _record, _task_docs, db, llm_calls, logs, model,
 )
 
-pytestmark = pytest.mark.usefixtures("t2_service_env")
+pytestmark = [pytest.mark.usefixtures("t2_service_env"), pytest.mark.usefixtures("named_collection_rows")]  # RDR-229 P2.9: prefix-named fixtures get a catalog row
 
 
 @pytest.fixture(autouse=True)

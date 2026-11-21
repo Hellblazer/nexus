@@ -109,6 +109,12 @@ def _install(monkeypatch, rec: _RecordingCat) -> _RecordingCat:
     return rec
 
 
+def _t3_calls(db) -> list:
+    """The T3 calls a double recorded, less the catalog-row reads: the chunker reads the collection's row for
+    its token window (RDR-229 P2.2), which is a read of the registry, not a write to T3."""
+    return [c for c in db.mock_calls if not str(c).startswith("call._resolve_collection_row")]
+
+
 def _http_db() -> MagicMock:
     """A service-backed T3 that fails the test if anything on it is called."""
     return MagicMock(spec=HttpVectorClient)
@@ -229,7 +235,7 @@ def test_every_fallback_writes_through_the_writer_and_never_touches_the_db(
 
     n = run(tmp_path, monkeypatch, db=db, hooks=hooks)
 
-    assert db.mock_calls == []                                   # ctx.db is never touched
+    assert _t3_calls(db) == []                                   # ctx.db is never touched
     data = [(k, b) for k, b in cat.calls if k in ("write_many", "append")]
     assert len(data) == -(-n // 7) > 1                           # non-vacuity: several requests
     assert [k for k, _ in data] == ["write_many"] + ["append"] * (len(data) - 1)
@@ -494,7 +500,7 @@ def test_an_identity_less_oversize_file_writes_zero_chunks_and_is_counted(
     db = _http_db()
     n = run(tmp_path, monkeypatch, doc_id="", db=db)
     assert n == 0
-    assert db.mock_calls == [], db.mock_calls       # no upsert, no other T3 call
+    assert _t3_calls(db) == [], _t3_calls(db)       # no upsert, no other T3 call
     assert cat.calls == []                          # and no catalog write either
     drops = get_manifest_identity_drops()
     assert len(drops) == 1 and drops[0]["written"] is False
@@ -534,7 +540,7 @@ def test_an_identity_less_oversize_file_fires_no_hook(cat, tmp_path, monkeypatch
     db = _http_db()
     assert run(tmp_path, monkeypatch, doc_id="", db=db, hooks=hooks) == 0
     assert hooks.calls == [], hooks.calls
-    assert db.mock_calls == [] and cat.calls == []
+    assert _t3_calls(db) == [] and cat.calls == []
 
 
 def test_an_identity_less_file_on_a_non_service_t3_keeps_its_write(
@@ -571,7 +577,7 @@ def test_a_service_backed_t3_with_no_batcher_is_a_wiring_bug_and_fails_loud(
     db = _http_db()
     with pytest.raises(RuntimeError, match="no ChunkBatcher"):
         run(tmp_path, monkeypatch, batcher=None, db=db)
-    assert db.mock_calls == [] and cat.calls == []
+    assert _t3_calls(db) == [] and cat.calls == []
 
 
 def test_an_identity_less_file_with_no_batcher_never_needs_the_writer(
@@ -586,7 +592,7 @@ def test_an_identity_less_file_with_no_batcher_never_needs_the_writer(
     _cap(monkeypatch, 16)
     db = _http_db()
     assert run(tmp_path, monkeypatch, doc_id="", batcher=None, db=db) == 0
-    assert db.mock_calls == [] and cat.calls == []
+    assert _t3_calls(db) == [] and cat.calls == []
 
 
 # ── which exception ended the write ──────────────────────────────────────────

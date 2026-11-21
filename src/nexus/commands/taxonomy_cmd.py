@@ -7,6 +7,7 @@ import contextvars
 import hashlib
 import json
 import re
+from collections.abc import Collection
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -14,11 +15,17 @@ import click
 import numpy as np
 import structlog
 
+from nexus.catalog.rows.legacy_names import is_taxonomy_collection_name
 from nexus.commands._help_links import PROJECTION_TUNING_EPILOG
 from nexus.commands._helpers import T2_SHARED_CLIENT_CTX_KEY as _T2_SHARED_CLIENT_CTX_KEY
 from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import (
     t2_shared_client_from_context as _command_shared_t2_client,
+)
+from nexus.commands._taxonomy_prune import (
+    exact_prune_confirmed,
+    prune_plan,
+    prune_supports_exact,
 )
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.sensitivity import bound_to
@@ -67,8 +74,13 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str]:
+def _enumerate_discoverable_collections(
+    t3: Any, exclude: list[str], exclude_content_types: Collection[str] = (),
+) -> list[str]:
     """Return collection names with >=5 chunks, skipping excludes + taxonomy__.
+
+    ``exclude`` holds glob patterns that name labels; ``exclude_content_types`` holds content types read
+    from the listing row (RDR-229 P2.9), or from the client row cache for a handle whose listing carries none.
 
     Backend-uniform: raw T3 exposes ``_client.list_collections()`` (Chroma
     Collection objects); service T3 exposes ``list_collections()`` (list of
@@ -78,22 +90,25 @@ def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str
 
     from nexus.db.http_vector_client import is_service_backed, live_collection_rows  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    names: list[tuple[str, int]] = []
+    from nexus.collection_route import content_type_excluded, listing_content_type  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    names: list[tuple[str, int, str | None]] = []
     if is_service_backed(t3):
         # nexus-bc7ps: discovery is a ROUTING consumer. A quarantine-<name>
         # collection listed here reached canonical_embedding_model and died on
         # an unknown content type (2026-09-16T01:14:11Z); live rows only.
         for c in live_collection_rows(t3):
-            names.append((c.get("name", ""), int(c.get("count", 0) or 0)))
+            names.append((c.get("name", ""), int(c.get("count", 0) or 0), listing_content_type(c)))
     else:
         for c in t3._client.list_collections():
-            names.append((c.name, c.count()))
+            names.append((c.name, c.count(), None))
     return [
-        name for name, count in names
+        name for name, count, content_type in names
         if count >= MIN_DISCOVER_CHUNKS
         and name
-        and not name.startswith("taxonomy__")
+        and not is_taxonomy_collection_name(name)
         and not any(fnmatch(name, pat) for pat in exclude)
+        and not content_type_excluded(name, exclude_content_types, content_type=content_type)
     ]
 
 
@@ -747,26 +762,32 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         click.echo("Specify --collection <name> or --all.")
         return
 
+    from nexus.collection_route import content_type_excluded, taxonomy_local_exclude_types  # noqa: PLC0415 - deferred to avoid circular import at module load
+
     cfg = load_config()
     exclude = (
         cfg.get("taxonomy", {}).get("local_exclude_collections", [])
         if is_local_mode() else []
     )
+    exclude_types = taxonomy_local_exclude_types()
     t3 = make_t3()
 
     if discover_all:
         # Backend-support is checked per-collection inside the loop below
         # (authoritative); enumeration itself needs no taxonomy handle.
-        targets = _enumerate_discoverable_collections(t3, exclude)
+        targets = _enumerate_discoverable_collections(t3, exclude, exclude_types)
         if not targets:
             click.echo("No eligible collections found.")
             return
         click.echo(f"Discovering topics for {len(targets)} collections...")
     else:
-        if is_local_mode() and any(fnmatch(collection, pat) for pat in exclude):
+        if is_local_mode() and (
+            any(fnmatch(collection, pat) for pat in exclude) or content_type_excluded(collection, exclude_types)
+        ):
             click.echo(
                 f"Warning: {collection!r} matches taxonomy.local_exclude_collections "
-                f"({exclude}); locally embedded code clusters poorly. Discovering anyway; "
+                f"({exclude}) or taxonomy.local_exclude_content_types ({exclude_types}); "
+                "locally embedded code clusters poorly. Discovering anyway; "
                 "a 'skipped' line below means discovery itself found nothing to persist, "
                 "not this exclusion."
             )
@@ -1243,14 +1264,21 @@ def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: i
     if all_collections:
         names = sorted(get_live_collection_names())
         # Same exclusion the per-flush hook honours in local mode
-        # (taxonomy.local_exclude_collections; code__* by default, since
-        # general-purpose local embeddings cluster code poorly).
+        # (taxonomy.local_exclude_collections label patterns, and
+        # taxonomy.local_exclude_content_types, ``code`` by default, read from
+        # each collection's row, since general-purpose local embeddings cluster
+        # code poorly).
         from fnmatch import fnmatch  # noqa: PLC0415 - stdlib, only this branch needs it
 
+        from nexus.collection_route import content_type_excluded, taxonomy_local_exclude_types  # noqa: PLC0415 - deferred to avoid circular import at module load
         from nexus.config import is_local_mode, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
         if is_local_mode():
             exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-            names = [n for n in names if not any(fnmatch(n, pat) for pat in exclude)]
+            exclude_types = taxonomy_local_exclude_types()
+            names = [
+                n for n in names
+                if not any(fnmatch(n, pat) for pat in exclude) and not content_type_excluded(n, exclude_types)
+            ]
     budget = max_chunks or _DRAIN_MAX_CHUNKS
     any_lost = False
     for name in names:
@@ -2792,9 +2820,10 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
 @click.option(
     "--threshold", "-t", default=None, type=float,
     help=(
-        "Cosine similarity threshold. When omitted, per-corpus-type "
-        "defaults apply: code__* → 0.70, knowledge__* → 0.50, "
-        "docs__*/rdr__* → 0.55. The tuning guide is linked at the end of this help."
+        "Cosine similarity threshold. When omitted, a per-corpus-type "
+        "default applies, read from the collection's catalog content type "
+        "(its name's prefix only when no catalog row backs it): code → 0.70, "
+        "knowledge → 0.50, docs/rdr → 0.55. The tuning guide is linked at the end of this help."
     ),
 )
 @click.option("--top-k", default=3, type=int, show_default=True, help="Top-k centroids per chunk")
@@ -2804,9 +2833,10 @@ def label_cmd(collection: str, relabel_all: bool) -> None:
     "--prune-below-threshold", "prune_below_threshold", is_flag=True,
     help=(
         "Recovery: delete projection assignments whose stored raw cosine is "
-        "below the corpus threshold (explicit --threshold, else the per-prefix "
-        "default), for the source collection given or, with --backfill, for "
-        "every corpus prefix. Undoes a pass that admitted weak matches (GH #1528)."
+        "below the corpus threshold (explicit --threshold, else the "
+        "per-content-type default), for the source collection given or, with "
+        "--backfill, for every collection. Undoes a pass that admitted weak "
+        "matches (GH #1528)."
     ),
 )
 @click.option(
@@ -2835,8 +2865,9 @@ def project_cmd(
 
     \b
     Threshold resolution (RDR-077 Phase 4a):
-      explicit --threshold overrides; otherwise the per-prefix default
-      applies (see --threshold option for the full table).
+      explicit --threshold overrides; otherwise the default of the
+      collection's catalog content type applies (see --threshold option for
+      the full table).
     \b
     Examples:
       nx taxonomy project docs__art-architecture --against knowledge__art
@@ -2844,8 +2875,8 @@ def project_cmd(
       nx taxonomy project code__nexus --use-icf --persist
       nx taxonomy project --backfill --persist
     """
-    from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
     from nexus.db import make_t3  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     db = _T2Database(_default_db_path(), client=_command_shared_t2_client())
     t3 = make_t3()
@@ -2858,27 +2889,61 @@ def project_cmd(
     # Resolve threshold: explicit flag wins; otherwise per-corpus default
     # (defaults applied at the per-source level inside _run_backfill).
     resolved_threshold = threshold
-    if resolved_threshold is None and source_collection:
-        resolved_threshold = default_projection_threshold(source_collection)
+    if resolved_threshold is None and source_collection and not prune_below_threshold:
+        resolved_threshold = projection_threshold(source_collection)
 
     try:
         if prune_below_threshold:
-            # GH #1528 (nexus-4tfxp): one engine-side DELETE per prefix, on the
+            # GH #1528 (nexus-4tfxp): one engine-side DELETE per collection, on the
             # stored RAW cosine, so a pass that admitted weak matches can be
-            # undone without a rebuild.
-            if backfill or not source_collection:
-                targets = [
-                    (prefix, threshold if threshold is not None else default_projection_threshold(prefix + "x"))
-                    for prefix in ("code__", "knowledge__", "docs__", "rdr__")
-                ]
-            else:
-                targets = [(source_collection, resolved_threshold)]
+            # undone without a rebuild. RDR-229 P2.4: each collection's threshold
+            # is its row's content type, so the walk is per full collection name,
+            # never per name prefix. Prune deletes, so it never acts on a guess from
+            # the name when the row read was unreadable (see _prune_plan).
+            exact = prune_supports_exact()
+            if exact and not exact_prune_confirmed(db.taxonomy):
+                click.echo("the engine did not confirm exact matching; using the guarded prune")
+                exact = False
+            plan = prune_plan(
+                db.taxonomy, threshold,
+                only=None if (backfill or not source_collection) else source_collection,
+                exact=exact,
+            )
             total_removed = 0
-            for prefix, thr in targets:
-                removed = db.taxonomy.prune_projection_below(prefix, thr)
+            unapplied: str | None = None
+            for name, thr in plan.targets:
+                removed, applied = db.taxonomy.prune_projection_below(name, thr, exact=exact)
                 total_removed += removed
-                click.echo(f"  {prefix}: removed {removed} projection assignment(s) below {thr:.2f}")
+                if removed or len(plan.targets) == 1 or (exact and applied != "exact"):
+                    click.echo(f"  {name}: removed {removed} projection assignment(s) below {thr:.2f}")
+                if exact and applied != "exact":
+                    # The /version flag and the prune can reach different engines (a rollback inside the
+                    # flag's cache window, two instances): an exact-planned prune whose reply does not echo
+                    # exact ran in the engine's own mode, so the guard the plan dropped was needed. Stop.
+                    unapplied = name
+                    break
             click.echo(f"Pruned {total_removed} projection assignment(s).")
+            if unapplied is not None:
+                click.echo(
+                    "the engine did not apply exact matching; no further collections pruned; rerun without "
+                    "exact or after the engine is current. "
+                    f"{unapplied} ran in the engine's own matching mode, which may have reached longer names it prefixes."
+                )
+                raise click.ClickException("the prune was stopped after the first collection: exact matching was not applied")
+            if plan.skipped:
+                click.echo(
+                    f"{len(plan.skipped)} skipped: pruned only down to the lowest threshold of a "
+                    "collection whose name they prefix (the engine matches a prune by name prefix); "
+                    "their rows between that and their own threshold remain."
+                )
+            if plan.refused:
+                click.echo(
+                    f"{len(plan.refused)} refused: the catalog row could not be read, so the "
+                    "threshold would be a guess from the name; pass --threshold to prune at one you choose."
+                )
+                raise click.ClickException(
+                    f"{len(plan.refused)} collection(s) refused: the prune is incomplete"
+                )
             return
         if backfill:
             _run_backfill(
@@ -2896,9 +2961,10 @@ def project_cmd(
         #
         # GitHub #238 + bead nexus-gwhy: single-source defaults to
         # every collection with topics minus the source, matching the
-        # backfill target set. Previously the single-source path tried
-        # ``list_sibling_collections`` first (same-repo, different-prefix
-        # collections) and fell back only if empty; users with multiple
+        # backfill target set. Previously the single-source path tried a
+        # same-repo, different-prefix sibling match first (a name matcher,
+        # since deleted: siblings are now found by row tuple, RDR-210) and
+        # fell back only if empty; users with multiple
         # collections under one prefix family (e.g. several ``docs__*``
         # from distinct repos) saw "against 1 collection(s)" while
         # ``project --backfill`` on the same source targeted the full set.
@@ -3114,10 +3180,11 @@ def _run_backfill(
     """Project all collections against each other.
 
     When *threshold* is None, applies the RDR-077 per-corpus-type default
-    for each source collection (``default_projection_threshold``). An
+    for each source collection, read from its catalog row
+    (``projection_threshold``). An
     explicit *threshold* short-circuits that and applies uniformly.
     """
-    from nexus.corpus import default_projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
+    from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 - deferred to avoid circular import at module load
 
     collections = _without_superseded(taxonomy.get_distinct_collections())
 
@@ -3139,7 +3206,7 @@ def _run_backfill(
             continue
         per_src_threshold = (
             threshold if threshold is not None
-            else default_projection_threshold(src)
+            else projection_threshold(src)
         )
         _progress(
             f"  [{i}/{len(collections)}] {src} → {len(targets)} target(s) "
@@ -3294,9 +3361,10 @@ def hubs_cmd(
     "--threshold", "-t", default=None, type=float,
     help=(
         "Count projections whose raw cosine similarity falls below this "
-        "value. Defaults to the per-corpus-type value "
-        "(code__* 0.70, knowledge__* 0.50, docs__*/rdr__* 0.55). The tuning "
-        "guide is linked at the end of this help."
+        "value. Defaults to the value of the collection's catalog content "
+        "type (code 0.70, knowledge 0.50, docs/rdr 0.55; its name's prefix "
+        "only when no catalog row backs it). The tuning guide is linked at "
+        "the end of this help."
     ),
 )
 @click.option(

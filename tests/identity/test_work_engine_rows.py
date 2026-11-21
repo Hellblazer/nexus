@@ -23,6 +23,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands import scratch as scratch_cmd
+from nexus.config import nexus_config_dir
 from nexus.db import t1 as t1_mod
 from nexus.db.http_scratch_store import IDENTITY_SCOPE_MAX_ENTRIES, IdentityScratchCapError
 from nexus.db.t1 import mint_t1_session_token
@@ -206,7 +207,9 @@ def row_a_note_in_the_identity_project_is_still_found_after_a_rename(world: Worl
     store = HttpMemoryStore(base_url=world.base_url, tenant="default", _token=os.environ["NX_SERVICE_TOKEN"])
     project = identity_project(alpha)
     assert project == f"identity/{alpha}"
-    store.put(project, "plan", "the seat's own note")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        _nobody(monkeypatch)    # a Claude-ancestored run must not reach the identity-notes guard with the dev's own token
+        store.put(project, "plan", "the seat's own note")
     world.client.rename(world.q("alpha"), world.q("omega"))
     assert world.identity(alpha)["name"] == world.q("omega")
     found = store.get(identity_project(alpha), "plan")
@@ -311,9 +314,10 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
     """RDR-253 Step 6 part 2: the writer (the real ``nx scratch --scope identity`` commands, driven through
     ``_resume_pointer.write``) and the reader (``nexus.hooks.resume_line``, its default opener) meet in the engine. The writer
     leaves one ``resume-pointer`` entry, the next write puts first and prunes the old one, a ``/clear`` binds a new session id,
-    and SessionStart's reader prints exactly that line when a T1 session is available; with none (the new session id's lease
-    is not published yet) it prints nothing and creates no session. Other sources print nothing. The 2 KB and
-    20-entry caps are held against the real store."""
+    and SessionStart's reader prints exactly that line, including when the new session id has no T1 lease yet (the MCP
+    watcher publishes it 0-5 s after SessionStart, so at ``/clear`` it never has one): the identity scope needs no session,
+    so the reader reads it with no session header, never calls ``get_t1_database`` and creates no session (nexus-hczdo).
+    Other sources print nothing. The 2 KB and 20-entry caps are held against the real store."""
     script = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "_resume_pointer.py"
     spec = importlib.util.spec_from_file_location("resume_pointer_journey", script)
     assert spec and spec.loader
@@ -335,7 +339,8 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
     with pytest.MonkeyPatch.context() as monkeypatch:
         _as(monkeypatch, world, 100)
         monkeypatch.setattr(IdentityClient, "from_config", classmethod(lambda cls: IdentityClient(world.base_url, world._tenant_token)))
-        monkeypatch.setattr(t1_mod, "get_t1_database", lambda *a, **k: session)
+        for name in ("NX_T1_SESSION", "NX_T1_SESSION_ID", "NX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
+            monkeypatch.delenv(name, raising=False)
 
         board = "## The thread the seat was on\nref: nexus-row01\nstate: halfway\nworktree: /w/row\nwaiting_on: review\n"
         first = rp.compose(board, [], "/w/row")
@@ -347,20 +352,23 @@ def row_a_clear_prints_the_resume_pointer_the_hook_wrote_and_prunes_the_one_befo
         assert [e["content"] for e in pointers] == [second], "put first, then the earlier pointer is deleted: one remains"
 
         world.hook(100, "clear", "s2")                                            # /clear: a new session id, the same identity
-        line = resume_line.with_resume_line("GUIDANCE", {"session_id": world.q("s2"), "source": "clear"})
-        assert line and line.startswith("GUIDANCE\n\nResume pointer (identity scratch, written just now): thread: The thread the seat was on")
-        assert "worktree: /w/row" in line and "state: nearly done" in line and "waiting_on: review" in line and line.count("\n") == 2
-        for source in ("resume", "startup", "compact", "fork"):
-            assert resume_line.with_resume_line("GUIDANCE", {"source": source}) == "GUIDANCE", source
-
-        def no_lease(*_a, **_k):
-            raise t1_mod.T1ServerNotFoundError("no T1 session lease resolves for the new session id")
-
-        monkeypatch.setattr(t1_mod, "get_t1_database", no_lease)                   # the new session's lease is not published yet
+        s2 = world.q("s2")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", s2)                          # what Claude Code sets: an explicit id with NO lease, NO NX_T1_SESSION
+        config_dir = nexus_config_dir()
+        leases_before = sorted(p.name for p in config_dir.glob("t1_session_lease.*"))
+        assert not [n for n in leases_before if s2 in n], "no lease for the new session id exists before the read"
+        with pytest.raises(t1_mod.T1ServerNotFoundError):                          # intended: get_t1_database stays strict about an explicit id with no lease
+            t1_mod.get_t1_database()                                              # (the pre-fix reader's path), so the row is not vacuous. If it is ever made
+                                                                                  # lenient this goes red for that reason, not because the reader regressed.
         minted: list[str] = []
         monkeypatch.setattr(t1_mod, "mint_t1_session_token", lambda sid, *, context: minted.append(sid) or {"session_token": "t"})
-        assert resume_line.with_resume_line("GUIDANCE", {"source": "clear"}) == "GUIDANCE", "no lease: nothing printed"
-        assert minted == [], "the reader creates no T1 session to get round a missing lease"
+        line = resume_line.with_resume_line("GUIDANCE", {"session_id": s2, "source": "clear"})
+        assert line and line.startswith("GUIDANCE\n\nResume pointer (identity scratch, written just now): thread: The thread the seat was on")
+        assert "worktree: /w/row" in line and "state: nearly done" in line and "waiting_on: review" in line and line.count("\n") == 2
+        assert minted == [], "the reader creates no T1 session"
+        assert sorted(p.name for p in config_dir.glob("t1_session_lease.*")) == leases_before, "and publishes no lease"
+        for source in ("resume", "startup", "compact", "fork"):
+            assert resume_line.with_resume_line("GUIDANCE", {"source": source}) == "GUIDANCE", source
 
         # the caps, against the real store: 2 KB an entry; 20 non-pointer entries; the pointer's slot is its own
         with pytest.raises(IdentityScratchCapError, match="2048"):

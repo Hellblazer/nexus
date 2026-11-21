@@ -68,6 +68,9 @@ class _FailingT3:
     def list_collections(self):  # for t3_collection_name's probe
         return []
 
+    def collection_exists(self, name):  # the write probe in t3_collection_name must answer (RDR-229 P2.8)
+        return False
+
     def put(self, **kwargs):
         raise RuntimeError("engine 500: upsert-chunks failed")
 

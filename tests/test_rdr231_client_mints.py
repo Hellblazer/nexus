@@ -25,6 +25,8 @@ from nexus.aspect_readers import (
     uri_for,
 )
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _SRC = Path(nexus.__file__).resolve().parent
 
 

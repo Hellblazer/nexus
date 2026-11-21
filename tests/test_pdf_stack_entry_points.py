@@ -192,6 +192,9 @@ def repo_cmd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("nexus.commands.index._collections_without_topics", lambda *a, **k: set())
     monkeypatch.setattr("nexus.commands.index._collections_with_failed_discover", lambda *a, **k: set())
     monkeypatch.setattr("nexus.commands.index._any_collection_has_topics", lambda *a, **k: True)
+    # RDR-254 Phase 3: the repo move hints read the catalog after the run; with index_repository replaced that
+    # read would be the run's first catalog touch, on a tenant-free test.
+    monkeypatch.setattr("nexus.commands.index._repo_hints", lambda *a, **k: [])
     repo = tmp_path / "myrepo"
     repo.mkdir()
     (repo / ".git").mkdir()

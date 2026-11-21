@@ -52,6 +52,8 @@ from nexus.aspect_worker import (
 import nexus.commands.enrich as _en
 from nexus.aspect_worker_tuples import HeldClaim
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── scaffolding ─────────────────────────────────────────────────────────────
 

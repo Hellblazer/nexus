@@ -271,10 +271,24 @@ class CollectionParseGateTest {
      * list mirrors the client's {@code aspect_readers.FILE_ROUTED_PREFIXES}
      * and the backfill predicate, and {@code NoteUriCorpusTest} pins all
      * three to one corpus file.
+     *
+     * <p>{@code db/CollectionRegistration.java} declares 1 (RDR-229 P2.5 D1, nexus-p2m1x.10): the conformant-name
+     * pattern that reads the {@code vN} of a conformant name. It has two callers: the ETL import of a NEW row that
+     * carries no {@code model_version} (a name from another install or an older era, a MIGRATION SOURCE in the RDR's
+     * classification), and {@code ReembedHandler.register}, which reads the version off the target name the client
+     * minted. It is the only place the engine reads a version out of a name, and it is retired at P4 with the name
+     * parsers.
+     *
+     * <p>The same regex also reads a MODEL out of a name ({@code CollectionRegistration.modelOfConformantName}),
+     * which adds no literal, so this per-file census cannot see it. Its callers are pinned separately by
+     * {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS} (nexus-p2m1x.28): the one caller is {@code TargetSelection.foreignOrigin}, a
+     * MIGRATION-SOURCE read of a re-embed source row deleted by cutover; it retires at P4, with the name parsers.
      */
-    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of("dev/nexus/service/db/NoteUri.java", 3);
+    private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of(
+        "dev/nexus/service/db/CollectionRegistration.java", 1,
+        "dev/nexus/service/db/NoteUri.java", 3);
 
-    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 3;
+    private static final int COLLECTION_LITERAL_TOTAL_CEILING = 4;
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the
@@ -317,16 +331,16 @@ class CollectionParseGateTest {
      *   <li>{@code PgVectorRepository.java} 1: {@code "quarantine-" + originCollection} (the reaper's sibling name).</li>
      * </ul>
      * Reduce-only, both directions, a file at zero carries no entry (the rule of {@link #COLLECTION_LITERAL_CENSUS}).
+     * RDR-229 P2.5 (nexus-p2m1x.10) took all six to zero: {@code ChunkReaper.QUARANTINE_PREFIX} aliases
+     * {@code QuarantineOrigin.PREFIX}, registration takes {@code lifecycle_state} explicitly (the import fallback
+     * reads the constant, in {@code CollectionRegistration}), and the sibling label reads the constant.
      *
      * <p>Known limit: a literal that holds the prefix after a JSON quote ({@code "{\"name\":\"quarantine-..."}) is not
      * counted; only a start-of-literal prefix and an SQL-quoted one are.
      */
-    private static final Map<String, Integer> QUARANTINE_LITERAL_CENSUS = Map.of(
-        "dev/nexus/service/ChunkReaper.java", 1,
-        "dev/nexus/service/db/CatalogRepository.java", 4,
-        "dev/nexus/service/vectors/PgVectorRepository.java", 1);
+    private static final Map<String, Integer> QUARANTINE_LITERAL_CENSUS = Map.of();
 
-    private static final int QUARANTINE_LITERAL_TOTAL_CEILING = 6;
+    private static final int QUARANTINE_LITERAL_TOTAL_CEILING = 0;
 
     /**
      * Reads of the prefix outside declarations and import lines, at develop {@code 1d341b77f}: 35. A literal-only census
@@ -350,21 +364,42 @@ class CollectionParseGateTest {
      * PgVectorRepository 3, ChashRepository 2, ChunkConstraintAdmin 2, and 1 each in VectorHandler,
      * ChunkKeyAllowlistCheck and ChunkKeySweep. The first cut pinned 15 (the first three shapes); round 1 added the
      * other three, which is why this pin moved and the literal pin did not.
+     *
+     * <p>RDR-229 P2.5 (nexus-p2m1x.10), 35 -> 34. Guards on an existing collection read {@code lifecycle_state};
+     * the prefix is read only where no row exists, so the {@code requireNotQuarantine} call sites still count
+     * (the guard falls back to the prefix for an end with no row). ChunkReaper 4 -> 3, QuarantineOrigin 6 -> 4
+     * ({@code isQuarantineName} is private, the row-less rule), VectorHandler 1 -> 0 (the name-only overload is
+     * gone), PgVectorRepository 3 -> 2. New: CollectionRegistration 4, which is the named residuals the RDR's
+     * item 2 lists: the ETL import's prefix fallback (two reads, its content-type and name tests, moved here from
+     * CatalogRepository's literals), its state-and-name agreement check, and the client route's refusal of a new
+     * {@code quarantine-} name. The bypass-set readers (ChunkKeyPlan, ChunkConstraintAdmin, ChunkKeyAllowlistCheck,
+     * ChunkKeySweep) are unchanged pending the allow-list CHECK ruling.
+     *
+     * <p>Review round 2 (N1), 34 -> 35: ReembedHandler 0 -> 1, {@code requireRegistrable}'s refusal of a re-embed
+     * target named {@code quarantine-...}, so the prefix guard stays "a quarantine- name is an engine mint". It is a
+     * name read for a name no row exists for yet, the same class as the client route's refusal in
+     * CollectionRegistration.
+     *
+     * <p>Review round 3, 35 -> 36: QuarantineOrigin 4 -> 5, {@code requireMoverSibling}, the 400 for a
+     * {@code quarantine_collection} without the prefix on {@code POST /v1/vectors/gc/quarantine-orphans} (the SQL
+     * mover registers whatever it is given as a quarantine collection). The same registration-side name-guard class as
+     * the client route's refusal; nothing else was lowered to hide it.
      */
     private static final Map<String, Integer> QUARANTINE_READ_CENSUS = Map.ofEntries(
-        Map.entry("dev/nexus/service/ChunkReaper.java", 4),
+        Map.entry("dev/nexus/service/ChunkReaper.java", 3),
         Map.entry("dev/nexus/service/db/CatalogRepository.java", 5),
         Map.entry("dev/nexus/service/db/ChashRepository.java", 2),
-        Map.entry("dev/nexus/service/db/QuarantineOrigin.java", 6),
+        Map.entry("dev/nexus/service/db/CollectionRegistration.java", 4),
+        Map.entry("dev/nexus/service/db/QuarantineOrigin.java", 5),
         Map.entry("dev/nexus/service/http/CatalogHandler.java", 4),
-        Map.entry("dev/nexus/service/http/VectorHandler.java", 1),
+        Map.entry("dev/nexus/service/http/ReembedHandler.java", 1),
         Map.entry("dev/nexus/service/vectors/ChunkConstraintAdmin.java", 2),
         Map.entry("dev/nexus/service/vectors/ChunkKeyAllowlistCheck.java", 1),
         Map.entry("dev/nexus/service/vectors/ChunkKeyPlan.java", 6),
         Map.entry("dev/nexus/service/vectors/ChunkKeySweep.java", 1),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 3));
+        Map.entry("dev/nexus/service/vectors/PgVectorRepository.java", 2));
 
-    private static final int QUARANTINE_READ_TOTAL_CEILING = 35;
+    private static final int QUARANTINE_READ_TOTAL_CEILING = 36;
 
     private static final Pattern QUARANTINE_READ = Pattern.compile(
         "(?<!String\\s{1,40})\\bQUARANTINE_PREFIX\\b"

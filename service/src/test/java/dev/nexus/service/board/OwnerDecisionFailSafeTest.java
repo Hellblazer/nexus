@@ -116,6 +116,54 @@ class OwnerDecisionFailSafeTest {
     }
 
     @Test
+    void ackOnTipCountsOnlyAStampedAckWhoseFromIsTheRowsOwner() {
+        OwnerFixture owner = oneRed();
+        owner.recordNow(owner.decide());   // owner A
+        owner.ack("A", "X");
+        assertThat(OwnerDecision.ackOnTip(owner.owners)).as("the owner's stamped ack").isTrue();
+
+        OwnerFixture other = oneRed();
+        other.recordNow(other.decide());
+        other.ack("L", "X");   // stamped, on the tip, after the row, but from another identity
+        assertThat(OwnerDecision.ackOnTip(other.owners)).as("a non-owner's stamped ack").isFalse();
+
+        OwnerFixture unstamped = oneRed();
+        unstamped.recordNow(unstamped.decide());
+        unstamped.ack("A", "X", null);   // from=<owner id> typed by hand, no sender session
+        assertThat(OwnerDecision.ackOnTip(unstamped.owners)).as("an ack with no sender session").isFalse();
+
+        OwnerFixture mixed = oneRed();
+        mixed.recordNow(mixed.decide());
+        mixed.ack("L", "X");
+        mixed.ack("A", "X");
+        assertThat(OwnerDecision.ackOnTip(mixed.owners)).as("one counting ack among others").isTrue();
+    }
+
+    @Test
+    void ackOnTipSeesAnAckRowOnTheRowsTipPostedAtOrAfterTheRowAndNoOther() {
+        OwnerFixture none = oneRed();
+        none.recordNow(none.decide());
+        assertThat(OwnerDecision.ackOnTip(none.owners)).as("no ack row").isFalse();
+
+        OwnerFixture after = oneRed();
+        after.recordNow(after.decide());
+        after.ack("A", "X");
+        assertThat(OwnerDecision.ackOnTip(after.owners)).as("an ack row on the tip, after the row").isTrue();
+
+        OwnerFixture before = oneRed();
+        before.ack("A", "X");   // posted before the row: a handed-away owner's late ack cannot suppress the next escalation
+        before.recordNow(before.decide());
+        assertThat(OwnerDecision.ackOnTip(before.owners)).as("an ack older than the row").isFalse();
+
+        OwnerFixture otherTip = oneRed();
+        otherTip.recordNow(otherTip.decide());
+        otherTip.ack("A", "Z");
+        assertThat(OwnerDecision.ackOnTip(otherTip.owners)).as("an ack on another sha").isFalse();
+
+        assertThat(OwnerDecision.ackOnTip(List.of())).as("no rows").isFalse();
+    }
+
+    @Test
     void aForgedRowWithASessionStampIsNotTheCurrentRow() {
         OwnerFixture f = oneRed();
         f.recordNow(f.decide());

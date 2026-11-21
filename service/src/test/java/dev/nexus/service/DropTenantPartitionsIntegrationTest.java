@@ -18,6 +18,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -25,6 +26,13 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import org.jooq.Condition;
+import org.jooq.impl.SQLDataType;
 
 import static dev.nexus.service.PartitionScratch.CODE_3;
 import static dev.nexus.service.PartitionScratch.MINILM_384;
@@ -377,6 +385,510 @@ class DropTenantPartitionsIntegrationTest {
             assertThat(PartitionScratch.createTenantPartitions(ctx, "chunks", "p225-drop-redo", true)).isPositive();
             assertThat(PartitionScratch.createTenantPartitions(ctx, "taxonomy_centroids", "p225-drop-redo", true)).isPositive();
             assertThat(leaves(ctx, "p225-drop-redo")).hasSize(modelPartitions(ctx));
+        }
+    }
+
+    // ── lock order: the roots first (the 2026-11-20 production deadlock) ─────
+
+    /** A model no partition carries: a search for it prunes every partition, so only the root is locked. */
+    private static final String NO_SUCH_MODEL = "p225-no-such-model";
+
+    /** The function's bounds (vectors-066): attempts, per-attempt lock_timeout, and the backoff step (0.2 s x attempt). */
+    private static final int ATTEMPTS = 5;
+    private static final long ATTEMPT_TIMEOUT_MS = 500;
+    private static final long BACKOFF_STEP_MS = 200;
+    /**
+     * Five full budgets plus the four sleeps between them: 5 x budget + 200 x (1 + 2 + 3 + 4). A lock that waited its
+     * own 10 s lock_timeout, or a budget that is not one deadline per attempt, shows as a give-up far above this.
+     */
+    private static long minGiveUpMs(long budgetMs) {
+        return ATTEMPTS * budgetMs + BACKOFF_STEP_MS * (ATTEMPTS - 1) * ATTEMPTS / 2;
+    }
+
+    private static final long MIN_GIVE_UP_MS = minGiveUpMs(ATTEMPT_TIMEOUT_MS);
+
+    /** Slack over the minimum: statement and scheduling overhead on a loaded test host (the real overhead is tens of ms). */
+    private static final long GIVE_UP_SLACK_MS = 3000;
+
+    private static final Condition IS_RELATION_LOCK = DSL.field(DSL.name("locktype"), String.class).eq("relation");
+
+    /**
+     * A reader that is mid-search: AccessShare on the root of nexus.chunks and, so far, on nothing below it (the
+     * planner takes the partitions after the root, and a search whose model no partition carries stops there).
+     */
+    private static void holdOnlyTheRoot(Connection s) throws SQLException {
+        s.setAutoCommit(false);
+        dsl(s).fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(NO_SUCH_MODEL));
+    }
+
+    private static int backendPid(Connection c) {
+        return dsl(c).select(DSL.function("pg_backend_pid", Integer.class)).fetchOne(0, Integer.class);
+    }
+
+    private static final org.jooq.Table<?> PG_LOCKS = DSL.table(DSL.name("pg_catalog", "pg_locks"));
+
+    /** One relation lock of a backend, the relation as regclass text (schema-qualified when not on the search path). */
+    private record RelLock(String relation, String mode, boolean granted) {}
+
+    private static List<RelLock> relationLocks(Connection obs, int pid) {
+        var regclass = org.jooq.impl.DefaultDataType.getDefaultDataType("regclass");
+        return dsl(obs).select(DSL.field(DSL.name("relation")).cast(regclass).cast(SQLDataType.VARCHAR),
+                DSL.field(DSL.name("mode"), String.class), DSL.field(DSL.name("granted"), Boolean.class))
+            .from(PG_LOCKS)
+            .where(DSL.field(DSL.name("pid"), Integer.class).eq(pid).and(IS_RELATION_LOCK))
+            .fetch(r -> new RelLock(r.value1(), r.value2(), Boolean.TRUE.equals(r.value3())));
+    }
+
+    /** Every model partition and leaf under the two roots, as regclass text. */
+    private static java.util.Set<String> belowTheRoots(Connection obs) {
+        var out = new java.util.HashSet<String>();
+        for (String parent : List.of("chunks", "taxonomy_centroids")) {
+            for (var mp : PartitionScratch.children(dsl(obs), parent)) {
+                out.add("nexus." + mp.name());
+                for (var leaf : PartitionScratch.children(dsl(obs), mp.name())) out.add("nexus." + leaf.name());
+            }
+        }
+        return out;
+    }
+
+    /** Whether backend {@code pid} is queued for a lock on the root of nexus.chunks. */
+    private static boolean waitingForTheRoot(Connection obs, int pid) {
+        return relationLocks(obs, pid).stream().anyMatch(l -> !l.granted() && l.relation().equals("nexus.chunks"));
+    }
+
+    /** Whether backend {@code pid} is queued for any relation lock. */
+    private static boolean waitingForAnyLock(Connection obs, int pid) {
+        return relationLocks(obs, pid).stream().anyMatch(l -> !l.granted());
+    }
+
+    /** The locks of {@code mode} backend {@code pid} holds on anything below the roots of chunks or taxonomy_centroids. */
+    private static List<RelLock> locksBelowTheRoots(Connection obs, int pid, java.util.Set<String> below, String mode) {
+        return relationLocks(obs, pid).stream()
+            .filter(l -> l.granted() && l.mode().equals(mode) && below.contains(l.relation())).toList();
+    }
+
+    /** Schema-qualified names of the tables (relkind r or p) on which backend {@code pid} holds ACCESS EXCLUSIVE. */
+    private static java.util.Set<String> accessExclusiveTables(Connection obs, int pid) {
+        var l = DSL.table(DSL.name("pg_catalog", "pg_locks")).as("l");
+        var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
+        var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        return dsl(obs).select(DSL.field(DSL.name("n", "nspname"), String.class), DSL.field(DSL.name("c", "relname"), String.class))
+            .from(l)
+            .join(c).on(DSL.field(DSL.name("c", "oid")).eq(DSL.field(DSL.name("l", "relation"))))
+            .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("c", "relnamespace"))))
+            .where(DSL.field(DSL.name("l", "pid"), Integer.class).eq(pid))
+            .and(DSL.field(DSL.name("l", "locktype"), String.class).eq("relation"))
+            .and(DSL.field(DSL.name("l", "mode"), String.class).eq("AccessExclusiveLock"))
+            .and(DSL.field(DSL.name("l", "granted"), Boolean.class).isTrue())
+            .and(DSL.field(DSL.name("c", "relkind")).cast(SQLDataType.VARCHAR).in("r", "p"))
+            .fetchSet(r -> r.value1() + "." + r.value2());
+    }
+
+    /** Polls (bounded) until {@code cond} holds; fails at once if the drop already finished, which is the case it excludes. */
+    private static void awaitWhileRunning(String what, Future<?> drop, java.util.function.BooleanSupplier cond) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (!cond.getAsBoolean()) {
+            if (drop.isDone()) {
+                Object outcome;
+                try {
+                    outcome = drop.get();
+                } catch (ExecutionException e) {
+                    outcome = e.getCause();
+                }
+                throw new AssertionError("the drop finished (" + outcome + ") before " + what);
+            }
+            if (System.nanoTime() > deadline) throw new AssertionError("timed out waiting for " + what);
+            Thread.sleep(10);
+        }
+    }
+
+    /**
+     * Searches enter nexus.chunks through the root and lock the partitions after it; the drop used to lock leaf by
+     * leaf, so one of each could wait on the other (the cloud deadlock, engine 0.1.199). It now takes both roots
+     * first. A reader that holds the root and nothing below it makes the drop queue at the root, holding no
+     * exclusive lock below it, and the reader can then lock the partitions the drop is about to detach.
+     */
+    @Test
+    void theDropQueuesAtTheRootBeforeLockingAnyPartition_soAReaderMidSearchCannotDeadlockWithIt() throws Exception {
+        final String TA = "p225-drop-lockorder";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 8000L);
+        }
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try (Connection s = admin(); Connection d = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            holdOnlyTheRoot(s);
+            int sPid = backendPid(s);
+            java.util.Set<String> below = belowTheRoots(obs);
+            assertThat(locksBelowTheRoots(obs, sPid, below, "AccessShareLock")).as("the reader holds nothing below the root").isEmpty();
+            int dPid = backendPid(d);
+
+            StringBuilder notices = new StringBuilder();   // jOOQ drains the connection's warnings, so a listener reads them
+            var cfg = new org.jooq.impl.DefaultConfiguration().set(d).set(SQLDialect.POSTGRES)
+                .set(new org.jooq.impl.DefaultExecuteListenerProvider(new org.jooq.impl.DefaultExecuteListener() {
+                    @Override
+                    public void warning(org.jooq.ExecuteContext c) {
+                        for (SQLWarning w = c.sqlWarning(); w != null; w = w.getNextWarning()) notices.append(w.getMessage()).append('\n');
+                    }
+                }));
+            Future<Integer> drop = pool.submit(() -> PartitionScratch.dropTenantPartitions(DSL.using(cfg), TA));
+            awaitWhileRunning("the drop queued for the root of nexus.chunks", drop, () -> waitingForTheRoot(obs, dPid));
+            assertThat(locksBelowTheRoots(obs, dPid, below, "AccessExclusiveLock"))
+                .as("while it waits for the root the drop holds no exclusive lock on a model partition or leaf").isEmpty();
+
+            // The reader goes on into the partitions the drop will detach: it must get them at once.
+            dsl(s).select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("lock_timeout"), DSL.val("3s"), DSL.val(true))).fetch();
+            dsl(s).fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(CODE_3));   // the call returning (inside lock_timeout) is the assertion
+            assertThat(locksBelowTheRoots(obs, sPid, below, "AccessShareLock"))
+                .as("the reader now holds partitions below the root (and the lock matching sees them)").isNotEmpty();
+            s.commit();
+
+            assertThat(drop.get(30, TimeUnit.SECONDS)).isEqualTo(expectedLeaves);
+            assertThat(notices.toString()).contains(TA).contains("held").contains("attempt");
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+        }
+        assertThat(rowCounts(TA)).allSatisfy((t, n) -> assertThat(n).as("rows left in %s", t).isZero());
+    }
+
+    /**
+     * A reader that outlasts every attempt makes the drop give up with a named, retryable error and change nothing
+     * (the deletes and the lock attempts are one transaction); once the reader is gone a rerun drops the lot.
+     */
+    @Test
+    void aReaderThatHoldsTheRootThroughEveryAttempt_makesTheDropGiveUpWithTheNamedError_andNothingIsDetached() throws Exception {
+        final String TA = "p225-drop-giveup";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 9000L);
+        }
+        Map<String, Integer> before = rowCounts(TA);
+        List<String> leavesBefore;
+        int expectedLeaves;
+        try (Connection obs = pg.createConnection("")) {
+            leavesBefore = leaves(dsl(obs), TA);
+            expectedLeaves = modelPartitions(dsl(obs));
+        }
+        try (Connection s = admin(); Connection d = admin()) {
+            holdOnlyTheRoot(s);
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> PartitionScratch.dropTenantPartitions(dsl(d), TA))
+                .satisfies(t -> assertThat(sqlState(t)).as("lock_not_available").isEqualTo("55P03"))
+                .hasMessageContaining("held a lock it needs; rerun, after index builds finish if one is running")
+                .hasMessageContaining(TA);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            assertThat(elapsedMs).as("every attempt waits its full budget and sleeps its backoff before the next")
+                .isBetween(MIN_GIVE_UP_MS, MIN_GIVE_UP_MS + GIVE_UP_SLACK_MS);
+            s.rollback();
+        }
+        try (Connection obs = pg.createConnection("")) {
+            assertThat(leaves(dsl(obs), TA)).containsExactlyInAnyOrderElementsOf(leavesBefore);
+        }
+        assertThat(rowCounts(TA)).as("the deletes rolled back with the failed call").isEqualTo(before);
+
+        try (Connection a = admin()) {
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(a), TA)).isEqualTo(expectedLeaves);
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+        }
+        assertThat(rowCounts(TA)).allSatisfy((t, n) -> assertThat(n).as("rows left in %s", t).isZero());
+    }
+
+    /**
+     * The cycle a root-first lock alone leaves open: a manifest writer holds RowExclusive on a table that references
+     * chunks and then needs the root for its foreign-key check, while the drop holds the roots and wants that table
+     * to detach. The drop now takes the referencing tables first, so it queues behind the writer holding nothing the
+     * writer needs; the writer reaches the root, commits, and the drop completes. No 40P01 on either side.
+     */
+    @Test
+    void aManifestWriterHoldingTheReferencingTableThenNeedingTheRoot_neverDeadlocksWithTheDrop() throws Exception {
+        final String TA = "p225-drop-writer";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 10000L);
+        }
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try (Connection w = admin(); Connection d = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            w.setAutoCommit(false);
+            PgContainerHelper.lockTable(w, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            int dPid = backendPid(d);
+            Future<Integer> drop = pool.submit(() -> PartitionScratch.dropTenantPartitions(dsl(d), TA));
+            awaitWhileRunning("the drop queued behind the writer", drop, () -> waitingForAnyLock(obs, dPid));
+
+            String writerState = null;
+            try {
+                dsl(w).fetchCount(CHUNKS, CHUNKS.EMBEDDING_MODEL.eq(NO_SUCH_MODEL));   // the foreign-key check's root access
+                w.commit();
+            } catch (RuntimeException e) {
+                writerState = sqlState(e);
+                w.rollback();
+            }
+            assertThat(writerState).as("the writer reaches the root and commits; a deadlock victim would be 40P01").isNull();
+            assertThat(drop.get(30, TimeUnit.SECONDS)).as("the drop completes once the writer is done").isEqualTo(expectedLeaves);
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+        }
+    }
+
+    /**
+     * Index builds (CREATE INDEX CONCURRENTLY), REINDEX CONCURRENTLY and vacuum hold SHARE UPDATE EXCLUSIVE on a
+     * leaf for minutes. The drop locks only its own tenant's partitions, so such a lock on ANOTHER tenant's leaf must
+     * not make it give up.
+     */
+    @Test
+    void aShareUpdateExclusiveLockOnAnotherTenantsLeaf_doesNotBlockTheDrop() throws Exception {
+        final String TA = "p225-drop-othersue";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 11000L);
+        }
+        int expectedLeaves;
+        String bystanderLeaf;
+        try (Connection obs = pg.createConnection("")) {
+            expectedLeaves = modelPartitions(dsl(obs));
+            bystanderLeaf = leaves(dsl(obs), TB).getFirst();
+        }
+        try (Connection s = admin(); Connection d = admin()) {
+            s.setAutoCommit(false);
+            PgContainerHelper.lockTable(s, DSL.table(DSL.name("nexus", bystanderLeaf)),
+                PgContainerHelper.LockMode.SHARE_UPDATE_EXCLUSIVE);
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(d), TA)).isEqualTo(expectedLeaves);
+            s.rollback();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+            assertThat(leaves(dsl(a), TB)).contains(bystanderLeaf);
+        }
+    }
+
+    /** A tenant with no leaves is answered from the catalog: 0, and no lock on either root (nothing to wait for). */
+    @Test
+    void aTenantWithNoLeaves_returnsZeroWithoutLockingTheRoots() throws Exception {
+        try (Connection a = admin(); Connection obs = pg.createConnection("")) {
+            // read the partition names first: once the call holds locks, a catalog read of a partition bound waits for it
+            java.util.Set<String> roots = new java.util.HashSet<>(belowTheRoots(obs));
+            roots.add("nexus.chunks");
+            roots.add("nexus.taxonomy_centroids");
+            a.setAutoCommit(false);
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(a), "p225-no-leaves-at-all")).isZero();
+            assertThat(relationLocks(obs, backendPid(a)).stream().filter(l -> roots.contains(l.relation())).toList())
+                .as("no lock of any mode on either root or anything below it").isEmpty();
+            a.rollback();
+        }
+    }
+
+    /**
+     * Two drops of different tenants hold RowExclusive on the manifest tables from their deletes and would each want
+     * ACCESS EXCLUSIVE on them, waiting for the other's: the drops serialize, so both succeed.
+     */
+    @Test
+    void twoConcurrentDropsOfDifferentTenants_bothSucceed() throws Exception {
+        final String T1 = "p225-drop-conc1";
+        final String T2 = "p225-drop-conc2";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), T1, 14000L);
+            seed(dsl(su), T2, 15000L);
+        }
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        try (Connection d1 = admin(); Connection d2 = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            Future<Integer> f1 = pool.submit(() -> {
+                go.await();
+                return PartitionScratch.dropTenantPartitions(dsl(d1), T1);
+            });
+            Future<Integer> f2 = pool.submit(() -> {
+                go.await();
+                return PartitionScratch.dropTenantPartitions(dsl(d2), T2);
+            });
+            go.countDown();
+            assertThat(f1.get(60, TimeUnit.SECONDS)).isEqualTo(expectedLeaves);
+            assertThat(f2.get(60, TimeUnit.SECONDS)).isEqualTo(expectedLeaves);
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), T1)).isEmpty();
+            assertThat(leaves(dsl(a), T2)).isEmpty();
+        }
+    }
+
+    /**
+     * Inside the open transaction after the call: the drop holds no lock of any mode on another tenant's
+     * taxonomy_centroids leaf, and on another tenant's chunks leaf nothing but AccessShare and RowShare. Those two are
+     * the ones the manifest delete's statement triggers take on every chunks leaf (their locking read of nexus.chunks
+     * cannot be pruned at plan time); they conflict with nothing but ACCESS EXCLUSIVE, so they do not stop another
+     * tenant's index build, vacuum or serialized drop. What must be absent is the AccessShare lock a catalog walk over
+     * the partition tree (pg_partition_tree) took on every leaf of both roots and held to commit.
+     */
+    @Test
+    void theDropHoldsNoLockOnAnotherTenantsLeafBeyondTheDeleteTriggers() throws Exception {
+        final String TA = "p225-drop-nolock";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 16000L);
+        }
+        try (Connection a = admin(); Connection obs = pg.createConnection("")) {
+            java.util.Set<String> chunksLeaves = new java.util.HashSet<>();
+            java.util.Set<String> centroidsLeaves = new java.util.HashSet<>();
+            for (String leaf : leaves(dsl(obs), TB)) {
+                (leaf.startsWith("taxonomy_centroids_") ? centroidsLeaves : chunksLeaves).add("nexus." + leaf);
+            }
+            assertThat(chunksLeaves).isNotEmpty();
+            assertThat(centroidsLeaves).isNotEmpty();
+            a.setAutoCommit(false);
+            PartitionScratch.dropTenantPartitions(dsl(a), TA);
+            List<RelLock> held = relationLocks(obs, backendPid(a));
+            assertThat(held.stream().filter(l -> centroidsLeaves.contains(l.relation())).toList())
+                .as("locks held by the drop on the bystander tenant's taxonomy_centroids leaves").isEmpty();
+            assertThat(held.stream().filter(l -> chunksLeaves.contains(l.relation())
+                    && !l.mode().equals("AccessShareLock") && !l.mode().equals("RowShareLock")).toList())
+                .as("locks beyond the delete triggers' on the bystander tenant's chunks leaves").isEmpty();
+            a.rollback();
+        }
+    }
+
+    /**
+     * The up-front lock set is complete and not larger than needed: after the call, in the same transaction, the
+     * tables the drop holds ACCESS EXCLUSIVE on are exactly the four tables around the leaves, the two roots, and this
+     * tenant's own model partitions and leaves. A lock DETACH or DROP takes that the lock step did not (it would then
+     * surface only under contention) shows up here as an extra table; one the step takes needlessly, as a missing one.
+     */
+    @Test
+    void theAccessExclusiveLocksTheDropHolds_areExactlyTheUpFrontSet() throws Exception {
+        final String TA = "p225-drop-lockset";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 17000L);
+        }
+        try (Connection a = admin(); Connection obs = pg.createConnection("")) {
+            java.util.Set<String> expected = new java.util.TreeSet<>(List.of(
+                "nexus.catalog_document_chunks", "nexus.topic_assignments", "nexus.chunk_orphaned_at",
+                "nexus.catalog_collections", "nexus.chunks", "nexus.taxonomy_centroids"));
+            for (String parent : List.of("chunks", "taxonomy_centroids")) {
+                for (var mp : PartitionScratch.children(dsl(obs), parent)) expected.add("nexus." + mp.name());
+            }
+            for (String leaf : leaves(dsl(obs), TA)) expected.add("nexus." + leaf);
+            a.setAutoCommit(false);
+            PartitionScratch.dropTenantPartitions(dsl(a), TA);
+            assertThat(accessExclusiveTables(obs, backendPid(a))).containsExactlyInAnyOrderElementsOf(expected);
+            a.rollback();
+        }
+    }
+
+    /**
+     * A manifest table held past one attempt's budget makes the drop give up: inside the time bound (not the
+     * function's 10 s), naming the tenant, changing nothing; a rerun after the holder is gone drops everything.
+     */
+    @Test
+    void aReferencingTableHeldPastTheBudget_makesTheDropGiveUpInsideTheBound() throws Exception {
+        final String TA = "p225-drop-refheld";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 18000L);
+        }
+        Map<String, Integer> before = rowCounts(TA);
+        List<String> leavesBefore;
+        int expectedLeaves;
+        try (Connection obs = pg.createConnection("")) {
+            leavesBefore = leaves(dsl(obs), TA);
+            expectedLeaves = modelPartitions(dsl(obs));
+        }
+        try (Connection w = admin(); Connection d = admin()) {
+            w.setAutoCommit(false);
+            PgContainerHelper.lockTable(w, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> PartitionScratch.dropTenantPartitions(dsl(d), TA))
+                .satisfies(t -> assertThat(sqlState(t)).as("lock_not_available").isEqualTo("55P03"))
+                .hasMessageContaining("held a lock it needs; rerun, after index builds finish if one is running")
+                .hasMessageContaining(TA);
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            assertThat(elapsedMs).as("give-up time with the manifest table held")
+                .isBetween(MIN_GIVE_UP_MS, MIN_GIVE_UP_MS + GIVE_UP_SLACK_MS);
+            w.rollback();
+        }
+        try (Connection obs = pg.createConnection("")) {
+            assertThat(leaves(dsl(obs), TA)).containsExactlyInAnyOrderElementsOf(leavesBefore);
+        }
+        assertThat(rowCounts(TA)).isEqualTo(before);
+        try (Connection a = admin()) {
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(a), TA)).isEqualTo(expectedLeaves);
+        }
+    }
+
+    /**
+     * The budget is half of deadlock_timeout when that is below 1 s: at deadlock_timeout = 100 ms the budget is 50 ms,
+     * so the give-up (root held by a reader) takes 5 x 50 ms + the sleeps, well under the 4.5 s of the default budget.
+     */
+    @Test
+    void theBudgetFollowsDeadlockTimeout() throws Exception {
+        final String TA = "p225-drop-budget";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 19000L);
+        }
+        final long budgetMs = 50;
+        try (Connection s = admin(); Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            dsl(su).select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("deadlock_timeout"), DSL.val("100ms"), DSL.val(false))).fetch();
+            holdOnlyTheRoot(s);
+            long t0 = System.nanoTime();
+            assertThatThrownBy(() -> PartitionScratch.dropTenantPartitions(dsl(su), TA))
+                .satisfies(t -> assertThat(sqlState(t)).isEqualTo("55P03"));
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            assertThat(elapsedMs).as("give-up time at deadlock_timeout = 100 ms (budget 50 ms)")
+                .isBetween(minGiveUpMs(budgetMs), minGiveUpMs(budgetMs) + 1500);
+            s.rollback();
+            assertThat(PartitionScratch.dropTenantPartitions(dsl(su), TA)).isPositive();
+        }
+    }
+
+    /**
+     * One deadline per attempt, not one per lock. Two holders on two up-front tables, each cleared well inside the 500 ms
+     * budget but one after the other: the first table (catalog_document_chunks) is released about 350 ms after the drop
+     * starts waiting on it, the second (chunk_orphaned_at) about 350 ms after that. A budget applied lock by lock waits
+     * 350 ms and 350 ms, each under 500, and takes the locks on attempt 1. One deadline per attempt has spent 350 of its
+     * 500 ms when the second lock comes up, gives up on that attempt at 500 ms (the second holder runs to about 700), and
+     * takes the locks on a later attempt, once both are gone.
+     */
+    @Test
+    void theWaitsOfOneAttemptShareOneDeadline_soTwoShortHoldsInSequenceCostTheFirstAttempt() throws Exception {
+        final String TA = "p225-drop-deadline";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 20000L);
+        }
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        StringBuilder notices = new StringBuilder();   // jOOQ drains the connection's warnings, so a listener reads them
+        try (Connection first = admin(); Connection second = admin(); Connection d = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            first.setAutoCommit(false);
+            second.setAutoCommit(false);
+            PgContainerHelper.lockTable(first, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            PgContainerHelper.lockTable(second, CHUNK_ORPHANED_AT, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            var cfg = new org.jooq.impl.DefaultConfiguration().set(d).set(SQLDialect.POSTGRES)
+                .set(new org.jooq.impl.DefaultExecuteListenerProvider(new org.jooq.impl.DefaultExecuteListener() {
+                    @Override
+                    public void warning(org.jooq.ExecuteContext c) {
+                        for (SQLWarning w = c.sqlWarning(); w != null; w = w.getNextWarning()) notices.append(w.getMessage()).append('\n');
+                    }
+                }));
+            int dPid = backendPid(d);
+            Future<Integer> drop = pool.submit(() -> PartitionScratch.dropTenantPartitions(DSL.using(cfg), TA));
+            awaitWhileRunning("the drop to queue behind the first holder", drop, () -> waitingForAnyLock(obs, dPid));
+            Thread.sleep(350);
+            first.commit();
+            Thread.sleep(350);
+            second.commit();
+            assertThat(drop.get(30, TimeUnit.SECONDS)).as("the drop completes once both holders are gone").isEqualTo(expectedLeaves);
+            var m = java.util.regex.Pattern.compile("locks taken on attempt (\\d+) of").matcher(notices);
+            assertThat(m.find()).as("the NOTICE names the attempt: %s", notices).isTrue();
+            assertThat(Integer.parseInt(m.group(1)))
+                .as("two sequential waits of 350 ms exceed one 500 ms attempt budget, so attempt 1 cannot take the locks")
+                .isGreaterThanOrEqualTo(2);
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
         }
     }
 }

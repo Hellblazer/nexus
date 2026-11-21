@@ -16,6 +16,8 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.memory import memory
+from nexus.db import http_scratch_store as hss
+from nexus.db import t1 as t1_mod
 from nexus.commands.scratch import scratch
 from nexus.db.t2.http_memory_store import identity_project
 from nexus.identity import scratch_scope
@@ -63,7 +65,9 @@ def test_no_identity_is_an_error_naming_it_never_a_fall_back(monkeypatch) -> Non
         scope_owner(Client())
 
 
-def test_the_store_carries_the_identity_scope_and_the_sessions_own_token(monkeypatch) -> None:
+def test_the_store_is_bound_to_the_identity_scope_and_sends_no_session_token(monkeypatch) -> None:
+    """nexus-hczdo: the engine needs no session for an identity-scope call, and at ``/clear`` the new session id has no
+    lease to borrow a token from, so the store takes nothing from *base* and never asks for a session."""
     holds(monkeypatch, "i7")
     built: list[dict[str, Any]] = []
 
@@ -71,13 +75,52 @@ def test_the_store_carries_the_identity_scope_and_the_sessions_own_token(monkeyp
         def __init__(self, **kw: Any) -> None:
             built.append(kw)
 
+    def never(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("identity_scratch asked for the session's own T1 store")
+
     monkeypatch.setattr("nexus.db.http_scratch_store.HttpScratchStore", Store)
+    monkeypatch.setattr("nexus.db.t1.get_t1_database", never)
     base = SimpleNamespace(_store=SimpleNamespace(_session_token="minted-token"))        # the CLI-dedicated wrapper
     scratch_scope.identity_scratch(base, client=Client(i7={"id": "i7", "kind": "seat"}))
-    scratch_scope.identity_scratch(SimpleNamespace(_session_token="direct"), client=Client(i7={"id": "i7", "kind": "seat"}))
-    assert built == [{"session_id": "identity:i7", "_session_token": "minted-token", "export_adopted_token": False},
-                     {"session_id": "identity:i7", "_session_token": "direct", "export_adopted_token": False}], \
-        "never the process's own scope: an adopted token must not replace NX_T1_SESSION"
+    scratch_scope.identity_scratch(client=Client(i7={"id": "i7", "kind": "seat"}))
+    expected = {"session_id": "identity:i7", "send_session_token": False, "export_adopted_token": False}
+    assert built == [expected, expected], "never the process's own scope, and no token borrowed from a base"
+
+
+def test_a_real_identity_store_has_no_session_header_and_no_session_recovery_with_no_lease_and_no_env(monkeypatch, tmp_path) -> None:
+    """The unit twin of the ``/clear`` journey row: an explicit session id, no lease file, no ``NX_T1_SESSION``."""
+    holds(monkeypatch, "i7")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    for name in ("NX_T1_SESSION", "NX_T1_SESSION_ID", "NX_SESSION_ID"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s2-brand-new")
+    monkeypatch.setattr(hss, "_resolve_endpoint", lambda: ("http://127.0.0.1:1", "bearer"))
+    called: list[str] = []
+    monkeypatch.setattr(t1_mod, "get_t1_database", lambda *a, **k: called.append("get_t1_database"))
+    monkeypatch.setattr(t1_mod, "mint_t1_session_token", lambda *a, **k: called.append("mint"))
+    monkeypatch.setattr(t1_mod, "read_t1_session_lease", lambda *a, **k: called.append("lease_read"))
+
+    store = scratch_scope.identity_scratch(client=Client(i7={"id": "i7", "kind": "seat"}))
+    try:
+        assert store.session_id == "identity:i7"
+        assert hss._HEADER_T1_SESSION not in store._headers and hss._HEADER_T1_SESSION not in store._client.headers
+        assert store._headers["Authorization"] == "Bearer bearer", "the bearer is untouched"
+        store.session_recovery = lambda *a, **k: called.append("recovery") or "fresh"      # a registered hook must not be consulted
+        assert store._refresh_session_token_from_lease("x") is False
+        assert store._recover_borrowed_session("x") is False
+        store._adopt_session_token("fresh", "identity:i7")
+        assert hss._HEADER_T1_SESSION not in store._headers, "an adopt never installs a session header"
+    finally:
+        store.close()
+    assert called == [] and not list(tmp_path.glob("t1_session_lease.*")), called
+
+
+def test_a_session_store_still_sends_its_session_token() -> None:
+    store = hss.HttpScratchStore(base_url="http://127.0.0.1:1", session_id="s", _token="x", _session_token="tok")
+    try:
+        assert store._headers[hss._HEADER_T1_SESSION] == "tok" and store._client.headers[hss._HEADER_T1_SESSION] == "tok"
+    finally:
+        store.close()
 
 
 # ── nx scratch --scope ──────────────────────────────────────────────────────
@@ -113,6 +156,16 @@ def stores(monkeypatch: pytest.MonkeyPatch) -> dict[str, Entries]:
 def test_the_default_scope_is_the_session(stores) -> None:
     out = CliRunner().invoke(scratch, ["list"])
     assert out.exit_code == 0 and "session" in out.output and "identity" not in out.output
+
+
+def test_scope_identity_needs_no_session_lease(monkeypatch, stores) -> None:
+    """nexus-hczdo: ``nx scratch --scope identity`` never asks for the session's T1 store, so it works with no lease."""
+    def never() -> Any:
+        raise AssertionError("nx scratch --scope identity asked for the session's own T1 store")
+
+    monkeypatch.setattr("nexus.commands.scratch.get_t1_database", never)
+    out = CliRunner().invoke(scratch, ["--scope", "identity", "list"])
+    assert out.exit_code == 0 and "identity" in out.output, out.output
 
 
 def test_scope_identity_reads_and_writes_the_identity_store(stores) -> None:
@@ -254,6 +307,25 @@ def test_the_mcp_tool_refuses_persist_and_flag_for_identity_scratch_and_closes_t
     core.scratch(action="list", scope="identity")
     assert closed and set(closed) == {"closed"}, "the per-call identity store is closed"
     assert "unknown scope" in core.scratch_manage(action="promote", entry_id="e", scope="galaxy")
+
+
+def test_the_mcp_identity_scope_needs_no_session_store(monkeypatch, stores) -> None:
+    """nexus-hczdo: ``scratch``/``scratch_manage`` with ``scope="identity"`` never resolve the session's T1 store, so they work
+    when it cannot be resolved (no lease for the session id). The session scope still needs it."""
+    from nexus.mcp import core
+
+    def no_session_store() -> Any:
+        raise RuntimeError("no T1 session resolves for this process")
+
+    stores["identity"].resolve_prefix_candidates = lambda i: [i]                       # type: ignore[attr-defined]
+    stores["identity"].promote = lambda *a, **k: SimpleNamespace(action="new")         # type: ignore[attr-defined]
+    monkeypatch.setattr(core, "_get_t1", no_session_store)
+    monkeypatch.setattr(core, "_record_tier_write", lambda **k: None)
+    monkeypatch.setattr(core, "_t2_ctx", lambda: contextlib.nullcontext(None))
+    assert core.scratch(action="list", scope="identity").startswith("[identity]")
+    assert core.scratch(action="put", content="n", tags="x", scope="identity").startswith("[identity] Stored")
+    assert core.scratch_manage(action="promote", entry_id="e", project="p", title="t", scope="identity").startswith("[identity] Promoted")
+    assert "no T1 session resolves" in core.scratch(action="list"), "the session scope still resolves the session store"
 
 
 def test_mine_for_a_delegated_child_reads_its_parents_project_and_never_writes_it(monkeypatch, db) -> None:

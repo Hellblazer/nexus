@@ -49,7 +49,6 @@ _RELOCATED_HELPERS = frozenset({
     "_resolve_repo_collection",
     "_safe_collection",
     "_sanitise_owner_segment",
-    "list_sibling_collections",
 })
 
 
@@ -76,7 +75,6 @@ __all__ = (
     "_resolve_repo_collection",
     "_safe_collection",
     "_sanitise_owner_segment",
-    "list_sibling_collections",
 )
 
 

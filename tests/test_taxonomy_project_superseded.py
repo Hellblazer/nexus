@@ -34,6 +34,10 @@ def _registry(monkeypatch, rows: list[dict[str, Any]] | Exception) -> None:
         return _Catalog(rows)
 
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", make)
+    # RDR-229 P2.4: each collection's projection threshold reads its catalog row through
+    # get_collection_row; with no row answered here it takes the name derivation, and the
+    # test reaches no engine.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda *_a, **_k: None)
 
 
 _ROWS = [

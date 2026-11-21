@@ -395,7 +395,8 @@ class DataMovesSchemaLiquibaseTest {
             try (Connection as = DriverManager.getConnection(empty.getJdbcUrl(), admin, pass)) {
                 DSLContext actx = DSL.using(as, SQLDialect.POSTGRES);
                 insert(actx, "admin-move");
-                assertThat(actx.fetchCount(DATA_MOVES)).as("nexus_admin reads and writes the registry").isEqualTo(1);
+                assertThat(actx.fetchCount(DATA_MOVES, DATA_MOVES.LABEL.eq("admin-move")))
+                    .as("nexus_admin reads and writes the registry (the walk itself registered the first real move)").isEqualTo(1);
             }
         }
     }

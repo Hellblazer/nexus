@@ -129,6 +129,10 @@ def test_real_index_repo_command_shares_one_t2_httpx_client(
     shared_client_tally = _instrument_build_shared_t2_client(monkeypatch)
     t2_snapshots = _instrument_t2database(monkeypatch)
     client_tally = _instrument_httpx_clients(monkeypatch)
+    # RDR-254 Phase 3: the repo move hints read the catalog through the process-shared catalog client after the run.
+    # A real run has built that client while indexing; with index_repository mocked the hint would build it first and
+    # count as a third client that a real run never adds. This test pins T2 sharing, so the hint is stubbed.
+    monkeypatch.setattr("nexus.commands.index._repo_hints", lambda *a, **k: [])
 
     with patch("nexus.commands.index._registry", return_value=reg):
         with patch("nexus.indexer.index_repository", return_value={"files_changed": 0}):

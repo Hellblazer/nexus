@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 import nexus.catalog.recovery_bundle as rb
@@ -21,6 +22,8 @@ from tests.catalog.test_recovery_bundle import (  # noqa: F401 — fake_catalog 
     _stub_import_doc,
     fake_catalog,
 )
+
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes item 1's NoRow outcome without a listing
 
 H = "cd" * 32
 BAD_SPAN = f"dchash:{H}:9-4"

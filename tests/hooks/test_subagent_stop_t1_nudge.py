@@ -45,6 +45,14 @@ def _no_recorder_child(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
     return spawned
 
 
+@pytest.fixture(autouse=True)
+def _stop_forgets_no_real_row(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Every stop, nudged or not, now removes the agent's work row (gh#1680); no test here reaches an engine."""
+    forgotten: list[tuple] = []
+    monkeypatch.setattr("nexus.identity.work.forget_own", lambda kind, ref, **k: forgotten.append((kind, ref)) or True)
+    return forgotten
+
+
 def _assistant(*blocks: dict) -> dict:
     return {"type": "assistant", "message": {"role": "assistant", "content": list(blocks)}}
 

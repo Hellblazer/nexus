@@ -1261,6 +1261,50 @@ class TestETLFidelity:
         assert coll is not None
         assert coll["name"] == coll_name
 
+    def test_find_collection_answers_a_grandfathered_non_conformant_label(self, cat) -> None:
+        """RDR-229 P2.8 (nexus-p2m1x.13), engine 0.1.200: ``for_tuple`` answers a
+        ``legacy_grandfathered`` row, so a knowledge subject registered under a label
+        that is not of the conformant shape is found by its tuple (before the filter
+        dropped, this answered 404 and ``find_collection`` returned ``None``)."""
+        label = "p213-notes-from-2024"
+        cat.register_collection(
+            label, content_type="knowledge", owner_id="p213-field-notes",
+            embedding_model="bge-base-en-v15-768",
+        )  # legacy_grandfathered is derived: True for a non-conformant name
+        assert cat.get_collection(label)["legacy_grandfathered"] is True, "guard: the row is flagged"
+
+        found = cat.find_collection("knowledge", "p213-field-notes", "bge-base-en-v15-768")
+
+        assert found is not None
+        assert found.label == label
+        assert found.model_version == 1
+        assert cat.find_collection("knowledge", "p213-no-such-subject", "bge-base-en-v15-768") is None
+
+    def test_a_grandfathered_slug_with_a_blank_version_is_answered_as_it_is(self, cat, pg_instance) -> None:
+        """RDR-229 P2.8, engine 0.1.200 (RDR-229 Technical Design item 11 (legacy_grandfathered goes, D5): "the P2.8 test for that row is not yet written"): the lead's row through the real engine
+        route: ``legacy_grandfathered`` true, a non-conformant slug name, an empty ``model_version``.
+        ``for_tuple`` answers it; the client answers the row as it is with no version, and only a
+        bump refuses, naming both fixes."""
+        slug = "p213-blank-notes-from-2024"
+        model = "bge-base-en-v15-768"
+        # Seeded by SQL: engine 0.1.200's upsert refuses a blank model_version for a NEW row (P2.5, D1)
+        # and the ETL import cannot create this shape either, but production-era rows of it exist.
+        _psql(pg_instance, (
+            "INSERT INTO nexus.catalog_collections "
+            "(tenant_id, name, content_type, owner_id, embedding_model, model_version, "
+            "legacy_grandfathered, lifecycle_state) "
+            f"VALUES ('default', '{slug}', 'knowledge', '1-213', '{model}', '', true, 'live') "
+            "ON CONFLICT DO NOTHING;"
+        ))
+        assert cat.get_collection(slug)["legacy_grandfathered"] is True, "guard: the row is flagged"
+        assert cat.get_collection(slug)["model_version"] == "", "guard: the version is blank"
+
+        found = cat.find_collection("knowledge", "1-213", model)
+        assert found is not None and found.label == slug and found.model_version is None
+        assert cat.collection_for("knowledge", "1.213", model).render() == slug
+        with pytest.raises(ValueError, match="set the row's model_version, or re-register the collection"):
+            cat.collection_for("knowledge", "1.213", model, bump=True)
+
     def test_rename_collection(self, cat) -> None:
         """rename_collection returns the count of DOCUMENTS updated (not collections).
 

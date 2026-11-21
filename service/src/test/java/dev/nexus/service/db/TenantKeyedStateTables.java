@@ -105,6 +105,7 @@ final class TenantKeyedStateTables {
         keyed.put("ChunkReaper.resumeExpiry", REAPER);
         // RDR-252 Step 3 (nexus-igea9): the owner stamper's armed ack deadlines, one scheduled task per (tenant, base topic).
         keyed.put("AckDeadlineTimer.armed", "AckDeadlineTimer");
+        keyed.put("AckDeadlineTimer.failures", "AckDeadlineTimer");
         keyed.put("NexusService.dataSweepFailuresByTenant", DATA_SWEEP);
         TenantKeyedStateCoverageEntries.fill(keyed, notKeyed);   // nexus-7fku2.1.2: TaxonomyCoverage and its invalidation helper
         keyed.put("TupleWaitRegistry.WaitKey.tenant", TUPLE_WAITS);   // the key of groups
@@ -126,6 +127,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
             + "job that holds it is evicted under EngineJobs.jobs");
         notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
+        notKeyed.put("CollectionTupleLock.Tuple.tenantId", "one component of a tuple a caller passes to take a per-tuple "
+            + "advisory lock for that transaction; never stored, so a tenant reset has nothing to drop");
         notKeyed.put("TenantImportSessions.servedModels", "the router's served-model supplier; holds no tenant's data");
         notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
         notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
@@ -207,6 +210,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PdfStubMetadataReads.CollectionStubs.examples", RESULT);   // nexus-f3yqd: one collection's example names in that answer
         notKeyed.put("ChashConformanceConstraints.Report.constraints", RESULT);   // nexus-f3yqd: one chash-conformance call's entries (no tenant data: pg_catalog)
         notKeyed.put("ManifestForeignCollectionReads.Page.documents", RESULT);   // GH #1611: one foreign-collection call's documents
+        notKeyed.put("UriSegmentCensusReads.Page.groups", RESULT);   // RDR-229 P1.2: one uri-segment-census call's groups
         notKeyed.put("ManifestForeignCollectionReads.Doc.collections", RESULT);   // GH #1611: one listed document's other collections
         // nexus-f3yqd: the census and drift answers' example lists, each built for one request and dropped with its response
         notKeyed.put("IndexRunCensusReads.Stale.examples", RESULT);
@@ -270,6 +274,9 @@ final class TenantKeyedStateTables {
         notKeyed.put("CatalogRepository.Rewritten.ledger", "a component of one stale-note repair batch's result, "
             + "the ledger of the rows that call changed, built for that request and returned in its response "
             + "(nexus-bivz3.24); nothing keeps it between requests");
+        notKeyed.put("CatalogRepository.ImportCollectionsResult.stateCorrected", "a component of one ETL collection "
+            + "import's result, the names of the new rows that call imported as quarantine although they carried live "
+            + "(RDR-229 P2.5), built for that request and returned in its response; nothing keeps it between requests");
         notKeyed.put("ChunkConstraintAdmin.TenantProbe.tenant", "a component of one table-wide probe row (the "
             + "tenant name beside its counts), built for that request and dropped with its response");
         for (String f : List.of("ChunkKeyPlan.allowed", "ChunkKeyPlan.rowKeys", "ChunkKeyPlan.bypassPrefixes",
@@ -699,6 +706,7 @@ final class TenantKeyedStateTables {
             "TemplateSchema.keyValues",
             "TemplateSchema.keys",
             "TemplateSchema.nameSegments",
+            "TemplateSchema.retentionBySuffix",
             "TemplateSchemaParser.ParsedKeys.names",
             "TemplateSchemaParser.ParsedKeys.values"
         )) {
@@ -787,7 +795,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PgVectorRepository.pciIndexes", PCI_OFF);
         // RDR-252 Step 3 (nexus-igea9): the owner stamper. Everything below is a value read or built for one evaluation
         // (a record's components, a holder of a function or of the timer); none outlives the call that built it
-        // except the timer's armed map, which is keyed above and cleared by the AckDeadlineTimer evictor.
+        // except the timer's armed and failures maps, which are keyed above and cleared by the AckDeadlineTimer evictor.
         String evaluation = "a component of a value record built for one owner evaluation and dropped with it; "
             + "it is not stored";
         for (String f : List.of(

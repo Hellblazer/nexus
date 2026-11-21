@@ -24,7 +24,7 @@ the tool groups by embedding model.
 """
 from __future__ import annotations
 
-from nexus.corpus import embedding_model_for_collection_name
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
 from nexus.mcp import core
 import pytest
 
@@ -383,7 +383,7 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
         name = "code__acme__model-code__v1"
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda n: {
+            lambda n, *, refresh=True, strict=False: {
                 "content_type": "code", "owner_id": "acme",
                 "embedding_model": "model-ctx", "lifecycle_state": "live",
             } if n == name else None,
@@ -403,7 +403,7 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
         other = "docs__acme__model-ctx__v1"
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda n: {
+            lambda n, *, refresh=True, strict=False: {
                 "content_type": "code" if n == name else "docs",
                 "owner_id": "acme",
                 "embedding_model": "model-ctx",
@@ -431,7 +431,7 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
             DOCS_COL: {"content_type": "docs", "owner_id": "acme-1-1",
                        "embedding_model": "model-ctx", "lifecycle_state": "live"},
         }
-        monkeypatch.setattr(mi, "get_collection_row", lambda n: rows.get(n))
+        monkeypatch.setattr(mi, "get_collection_row", lambda n, *, refresh=True, strict=False: rows.get(n))
 
         groups = _group_collections_by_model([CODE_COL, DOCS_COL])
 
@@ -444,7 +444,7 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
         import nexus.mcp_infra as mi
         from nexus.mcp.core import _group_collections_by_model
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda n: None)
+        monkeypatch.setattr(mi, "get_collection_row", lambda n, *, refresh=True, strict=False: None)
 
         groups = _group_collections_by_model(["ghost__unregistered"])
 

@@ -2977,6 +2977,8 @@ class SchemaUpgradeRehearsalIntegrationTest {
             .join(tables).on(tSchema.eq(cSchema).and(tTable.eq(cTable)).and(tType.eq("BASE TABLE")))
             .where(cSchema.eq("nexus"))
             .and(cType.in("text", "character varying", "jsonb", "json"))
+            // the registry's move texts (RDR-229 P2.10, catalog-049-2) name the scheme to find residue: SQL, not URI data
+            .and(cTable.ne("data_moves"))
             .fetch();
         assertThat(cols).as("the sweep must see the URI columns it is checking")
             .anySatisfy(r -> assertThat(r.value2()).isEqualTo("source_uri"));

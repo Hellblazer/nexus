@@ -236,14 +236,16 @@ Topic taxonomy settings. Topics are auto-discovered after `nx index repo`.
 ```yaml
 taxonomy:
   auto_label: true                       # Generate labels through the LLM backend (default); needs the claude CLI or an anthropic_api_key
-  local_exclude_collections: ["code__*"] # Skip code collections in local mode (general-purpose local embeddings are poor for code)
+  local_exclude_content_types: [code]    # Skip code collections in local mode (general-purpose local embeddings are poor for code)
+  local_exclude_collections: []          # Glob patterns on collection labels to skip in local mode
   collection_prefixes: [docs, code, knowledge, rdr]  # Prefixes recognized by nx taxonomy validate-refs (RDR-081)
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `auto_label` | `true` | Auto-label topics after discover through the LLM backend (the `claude` CLI, an `anthropic_api_key`, or `openai_compat`). Set `false` to keep c-TF-IDF labels. |
-| `local_exclude_collections` | `["code__*"]` | Glob patterns for collections to skip in local mode. Cloud mode (Voyage embeddings) ignores this — set to `[]` to enable all collections locally. |
+| `local_exclude_content_types` | `["code"]` | Content types to skip in local mode, matched against each collection's catalog row (RDR-229), never its name. Cloud mode (Voyage embeddings) ignores this. |
+| `local_exclude_collections` | `[]` | Glob patterns on collection labels to skip in local mode. Cloud mode ignores this. Setting `local_exclude_collections` (even to `[]`) without `local_exclude_content_types` makes your config own the exclusion, so `local_exclude_collections: []` enables all collections locally; set `local_exclude_content_types` explicitly to exclude content types. |
 | `collection_prefixes` | `["docs", "code", "knowledge", "rdr"]` | Prefix whitelist for `nx taxonomy validate-refs`. Extend this when your project adds a new user-facing collection prefix (e.g. `"custom"`). Internal-prefix collections (`taxonomy__*`, `plans__*`) are implementation-fixed and intentionally excluded. |
 
 ## Entity keys
@@ -472,7 +474,10 @@ run:
    `pg_background` library must be installed on the server (a self-managed
    host: its package or build, with no `shared_preload_libraries` entry). The
    local bundle's provisioning does all of this on every service start
-   (`nexus.db.pg_bootstrap.dml_utils`); a bring-your-own-Postgres DBA runs it
+   (`nexus.db.pg_bootstrap.dml_utils`), provided the extracted bundle has
+   `pg_background`: one first set up on conexus 8.2.0 or earlier has not, and a
+   plain `nx upgrade` replaces it (`nx doctor`'s `PostgreSQL bundle` row warns
+   until it does); a bring-your-own-Postgres DBA runs it
    once, as a superuser, connected to the nexus database:
 
    ```sql

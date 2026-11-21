@@ -95,7 +95,7 @@ def target_collection_name(
     placeholder owner (``default``, or one of ``tenant_ids``: the row's own tenant id, hygiene-002's stand-in), or an
     owner that does not make a conformant name.
     """
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if owner_id is None or not str(owner_id).strip():
         raise TargetNameError("its catalog row has no owner_id, so there is no owner to name the target after")

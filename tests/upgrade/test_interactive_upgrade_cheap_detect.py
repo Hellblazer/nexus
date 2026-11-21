@@ -19,6 +19,9 @@ from nexus.upgrade_ladder.rungs.manifest_span_fill import ManifestSpanFillRung
 from nexus.upgrade_ladder.rungs.note_tags_array import NoteTagsArrayRung
 from nexus.upgrade_ladder.unattended import bounded_reads, cheap_detect, unattended_run
 
+import pytest
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 class _Walks:
     def __init__(self) -> None:

@@ -24,6 +24,8 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 from nexus.commands import catalog as _cat_cmd
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 DOCUMENTS = 50_000
 
 
@@ -121,8 +123,9 @@ class TestBackfillSourceUri:
         assert scoped == walked
         report = json.loads(scoped)
         assert report["by_collection"] == {
-            "knowledge__x": {"count": DOCUMENTS // 10, "candidate": False},
-            "rdr__x": {"count": DOCUMENTS // 10, "candidate": True},
+            # candidate_rows (RDR-229 P2.10): the collection's rows the verb counts as residue to re-derive
+            "knowledge__x": {"count": DOCUMENTS // 10, "candidate": False, "candidate_rows": 0},
+            "rdr__x": {"count": DOCUMENTS // 10, "candidate": True, "candidate_rows": DOCUMENTS // 10},
         }
         assert report["candidates"] == report["rederivable"] == DOCUMENTS // 10
         assert all(u["was"].startswith("chroma://") for u in report["updates"])  # none of the CHROMA:// rows
