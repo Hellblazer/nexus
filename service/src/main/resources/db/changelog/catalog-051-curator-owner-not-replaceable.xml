@@ -36,20 +36,43 @@
     they would write lands a live, unsuperseded row on a tuple a different live, unsuperseded collection already
     holds: the row keeps its old owner and the trigger RAISEs a NOTICE naming both collections and the owner it did
     not take (the collection already holding the tuple is the lowest-named one). A row that is itself not live or
-    is superseded never counts toward the tuple, so its rewrite is unchanged. Functions replaced, same signatures,
-    SECURITY INVOKER, no new function and no new trigger: nexus.catalog_collections_owner_from_docs() (the BEFORE
-    trigger on catalog_collections) and nexus.catalog_documents_owner_to_collection() (the AFTER trigger on
-    catalog_documents). The check is a read, so two writers onto one free tuple could both pass it, and under the
-    unique index the second would end in a bare 23505. Each function therefore takes
-    pg_advisory_xact_lock(hashtext('catalog_tuple/' || tenant || '/' || content_type || '/' || owner || '/' ||
-    model || '/' || version)) before its holder SELECT, for a row that counts toward the tuple: the second writer
-    waits for the first to commit and then sees the holder (READ COMMITTED gives that SELECT a fresh snapshot). The
-    lock is held to the end of the transaction and is the only new lock; a transaction that already holds
-    collection row locks and then waits on the tuple lock can in principle deadlock with one that holds the tuple
-    lock and waits for one of those rows, which the engine's 40P01 retry covers.
+    is superseded never counts toward the tuple, so its rewrite is unchanged. Two trigger functions are replaced, same
+    signatures, SECURITY INVOKER, no new trigger: nexus.catalog_collections_owner_from_docs() (the BEFORE trigger on
+    catalog_collections) and nexus.catalog_documents_owner_to_collection() (the AFTER trigger on catalog_documents).
+    The check is a read, so two writers onto one free tuple could both pass it, and under the unique index the second
+    would end in a bare 23505. Each function therefore takes pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+    tenant, content_type, owner_id, embedding_model, model_version)) before its holder SELECT, for a row that counts
+    toward the tuple: the second writer waits for the first to commit and then sees the holder (READ COMMITTED gives
+    that SELECT a fresh snapshot). The lock is held to the end of the transaction. A transaction that already holds
+    collection row locks and then waits on the tuple lock can in principle deadlock with one that holds the tuple lock
+    and waits for one of those rows, which the engine's 40P01 retry covers.
+
+    THE LOCK KEY, catalog-051-1a (a new function, nexus.collection_tuple_lock_key, in its own changeSet before 049-2).
+    Every writer that serialises on a tuple must derive the SAME key, or two writers on one tuple do not wait for each
+    other; and any writer that takes several tuple locks must take them in one order, or two of them deadlock. So the key
+    is a SQL function and nothing else computes it: the Java side (CollectionTupleLock) selects it through the function
+    and never re-implements the hash, and sorts the keys ascending before locking.
+      ENCODING. Each of the five parts is written as its length in characters, a colon, then the part, and the parts are
+      concatenated after the same encoding of the fixed tag 'catalog_tuple'. Example: ('t','docs','1-2','m','v1') encodes
+      as 13:catalog_tuple1:t4:docs3:1-21:m2:v1. The encoding is injective: reading left to right, the digits up to the first
+      colon give the length n of the next part, which is exactly the next n characters, so no two different tuples give one
+      string, whatever characters a value holds (a '/' or ':' or digits inside a value cannot move a boundary, which a plain
+      separator would allow: ('a/b','c') and ('a','b/c') collide under a '/' join). A NULL part is read as '' (the columns
+      are NOT NULL, so this is only defence).
+      HASH. md5 of that string, the first 16 hex digits taken as 64 bits and read as a signed bigint:
+      ('x' || left(md5(encoded), 16))::bit(64)::bigint. pg_advisory_xact_lock(bigint) takes a 64-bit key, so the whole key
+      space is used; the earlier hashtext() gave 32 bits, which for the ~10^5 tuples of a large estate makes a false
+      collision (two unrelated tuples sharing a lock, harmless but a needless wait and a needless deadlock edge) likely
+      rather than negligible. md5 is not used for security here, only as a stable, version-independent spreader:
+      hashtext and hashtextextended are internal and not documented as stable across Postgres major versions (a
+      lock key that differed between an old and a new engine on one database would stop two writers serialising); md5
+      is. hashtextextended is 64-bit and would also have worked; md5 was chosen for that stability.
+      A collision still only serialises two tuples that did not need it; it never lets two writers on one tuple overlap,
+      because equal tuples give equal keys.
     A collection that keeps its slug owner because of the guard stays replaceable, so each later document insert
     into it runs the owner aggregate again and repeats the NOTICE until the tuple frees or the owner is set by hand.
-    NO DATA EFFECT: function bodies only. ROLLBACK of catalog-051-2 restores catalog-044-2's two bodies verbatim.
+    NO DATA EFFECT: function bodies only. ROLLBACK of catalog-051-2 restores catalog-044-2's two bodies verbatim, and
+    ROLLBACK of catalog-051-1a drops the key function.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -84,8 +107,36 @@ $fn$;
         </rollback>
     </changeSet>
 
+    <changeSet id="catalog-051-1a" author="nexus-p2m1x.14">
+        <comment>nexus.collection_tuple_lock_key(tenant, content_type, owner_id, embedding_model, model_version) returns the 64-bit advisory-lock key of a collection tuple: md5 of a length-prefixed encoding of the five parts, first 64 bits as a signed bigint. The one derivation every tuple-lock taker uses (the 049-2 triggers and the Java CollectionTupleLock). IMMUTABLE, PARALLEL SAFE, SECURITY INVOKER; no data effect.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.collection_tuple_lock_key(p_tenant text, p_content_type text, p_owner_id text,
+                                                           p_embedding_model text, p_model_version text)
+    RETURNS bigint
+    LANGUAGE sql
+    IMMUTABLE
+    PARALLEL SAFE
+    SECURITY INVOKER
+AS $fn$
+    SELECT ('x' || left(md5(
+               '13:catalog_tuple'
+            || length(coalesce(p_tenant, ''))::text          || ':' || coalesce(p_tenant, '')
+            || length(coalesce(p_content_type, ''))::text    || ':' || coalesce(p_content_type, '')
+            || length(coalesce(p_owner_id, ''))::text        || ':' || coalesce(p_owner_id, '')
+            || length(coalesce(p_embedding_model, ''))::text || ':' || coalesce(p_embedding_model, '')
+            || length(coalesce(p_model_version, ''))::text   || ':' || coalesce(p_model_version, '')
+           ), 16))::bit(64)::bigint
+$fn$;
+        </sql>
+        <rollback>
+            <sql>
+DROP FUNCTION IF EXISTS nexus.collection_tuple_lock_key(text, text, text, text, text);
+            </sql>
+        </rollback>
+    </changeSet>
+
     <changeSet id="catalog-051-2" author="nexus-p2m1x.14">
-        <comment>catalog-044's two owner-from-documents trigger functions skip the rewrite when the new owner would land a live, unsuperseded code/docs/rdr collection on a (tenant_id, content_type, owner_id, embedding_model, model_version) tuple another live, unsuperseded collection already holds: the old owner stays and a NOTICE names both collections and the owner not taken. Same signatures and SECURITY INVOKER; no data effect.</comment>
+        <comment>catalog-044's two owner-from-documents trigger functions skip the rewrite when the new owner would land a live, unsuperseded code/docs/rdr collection on a (tenant_id, content_type, owner_id, embedding_model, model_version) tuple another live, unsuperseded collection already holds: the old owner stays and a NOTICE names both collections and the owner not taken. Same signatures and SECURITY INVOKER; each takes the tuple's advisory lock through nexus.collection_tuple_lock_key before its holder lookup; no data effect.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
     RETURNS TRIGGER
@@ -104,8 +155,8 @@ BEGIN
             -- transaction-scoped advisory lock on the tuple makes two writers onto one free tuple take turns, so the
             -- second one's SELECT sees the first one's committed row instead of racing it into the unique index.
             IF NEW.lifecycle_state = 'live' AND NEW.superseded_by = '' THEN
-                PERFORM pg_advisory_xact_lock(hashtext('catalog_tuple/' || NEW.tenant_id || '/' || NEW.content_type
-                    || '/' || v_owner || '/' || NEW.embedding_model || '/' || NEW.model_version));
+                PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                    NEW.tenant_id, NEW.content_type, v_owner, NEW.embedding_model, NEW.model_version));
             END IF;
             SELECT h.name INTO v_holder
               FROM nexus.catalog_collections h
@@ -170,8 +221,8 @@ BEGIN
                 -- catalog-051-2: a live, unsuperseded row must not land on a tuple another such row holds; the
                 -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
                 IF v_ls = 'live' AND v_sb = '' THEN
-                    PERFORM pg_advisory_xact_lock(hashtext('catalog_tuple/' || NEW.tenant_id || '/' || v_ct
-                        || '/' || v_new || '/' || v_em || '/' || v_mv));
+                    PERFORM pg_advisory_xact_lock(nexus.collection_tuple_lock_key(
+                        NEW.tenant_id, v_ct, v_new, v_em, v_mv));
                 END IF;
                 SELECT h.name INTO v_holder
                   FROM nexus.catalog_collections h

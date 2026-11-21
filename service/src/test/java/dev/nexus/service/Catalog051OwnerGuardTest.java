@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -17,13 +18,18 @@ import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
+import org.jooq.ExecuteContext;
+import org.jooq.ExecuteListener;
 import org.jooq.SQLDialect;
+import org.jooq.impl.DefaultConfiguration;
+import org.jooq.impl.DefaultExecuteListener;
+import org.jooq.impl.DefaultExecuteListenerProvider;
+import org.jooq.impl.SQLDataType;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.SQLWarning;
 import java.util.ArrayList;
@@ -47,9 +53,9 @@ import java.util.concurrent.TimeUnit;
 class Catalog051OwnerGuardTest {
 
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
-    private static final String TENANT = "catalog049-guard-tenant";
+    static final String TENANT = "catalog049-guard-tenant";
     private static final String OTHER_TENANT = "catalog049-guard-other";
-    private static final String DOCS_MODEL = "voyage-context-3";
+    static final String DOCS_MODEL = "voyage-context-3";
 
     private static final String HOLDER = "docs__held-cafe0001__voyage-context-3__v1";
     private static final String SLUG_DOCS = "docs__legacy-ab12cd34__voyage-context-3__v1";
@@ -64,7 +70,7 @@ class Catalog051OwnerGuardTest {
         + "WHERE lifecycle_state = 'live' AND superseded_by = ''";
 
     @FunctionalInterface
-    private interface Body {
+    interface Body {
         void run(Connection su, DSLContext ctx) throws Exception;
     }
 
@@ -189,20 +195,11 @@ class Catalog051OwnerGuardTest {
             try (Connection a = openConnection(su); Connection b = openConnection(su)) {
                 a.setAutoCommit(false);
                 b.setAutoCommit(false);
-                int bPid;
-                try (var st = b.createStatement(); var rs = st.executeQuery("SELECT pg_backend_pid()")) {
-                    rs.next();
-                    bPid = rs.getInt(1);
-                }
+                int bPid = backendPid(b);
                 b.commit();
                 insertDocumentOn(a, "1.70.1", s1);                     // A: S1 takes 1-70, uncommitted
-                CompletableFuture<List<String>> bResult = CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return insertDocumentOn(b, "1.70.2", s2);       // B: blocks behind A
-                    } catch (SQLException e) {
-                        throw new IllegalStateException(e);
-                    }
-                });
+                CompletableFuture<List<String>> bResult = CompletableFuture.supplyAsync(
+                    () -> insertDocumentOn(b, "1.70.2", s2));       // B: blocks behind A
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
                 while (!isWaitingOnALock(su, bPid)) {
                     assertThat(bResult.isDone()).as("B must be waiting for A, not finished").isFalse();
@@ -247,14 +244,16 @@ class Catalog051OwnerGuardTest {
         soft.assertThat(ownerOf(ctx, before)).as("%s does not hold the tuple (BEFORE trigger)", what).isEqualTo(beforeOwner);
     }
 
-    private static boolean isWaitingOnALock(Connection su, int pid) throws SQLException {
-        try (PreparedStatement ps = su.prepareStatement(
-            "SELECT 1 FROM pg_stat_activity WHERE pid = ? AND wait_event_type = 'Lock'")) {
-            ps.setInt(1, pid);
-            try (var rs = ps.executeQuery()) {
-                return rs.next();
-            }
-        }
+    static boolean isWaitingOnALock(Connection su, int pid) {
+        return DSL.using(su, SQLDialect.POSTGRES).fetchExists(DSL.selectOne()
+            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_activity")))
+            .where(DSL.field(DSL.name("pid"), Integer.class).eq(pid))
+            .and(DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")));
+    }
+
+    static int backendPid(Connection c) {
+        return DSL.using(c, SQLDialect.POSTGRES)
+            .select(DSL.function("pg_backend_pid", SQLDataType.INTEGER)).fetchOne(0, Integer.class);
     }
 
     /** One live holder of (docs, 1-33, model, v1), three slug-owned collections, and a superseded holder of (code, 1-35). */
@@ -270,9 +269,9 @@ class Catalog051OwnerGuardTest {
         collection(ctx, SLUG_OVER_SUPERSEDED, "code", "over-5ca1ab1e", "voyage-code-3", "v1", "live", "");
     }
 
-    private static PostgreSQLContainer<?> pgInUse;
+    static PostgreSQLContainer<?> pgInUse;
 
-    private static void withMigratedDatabase(Body body) throws Exception {
+    static void withMigratedDatabase(Body body) throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         pgInUse = pg;
         try {
@@ -309,7 +308,7 @@ class Catalog051OwnerGuardTest {
             .values(TENANT, prefix, name, type, "", 0L).execute();
     }
 
-    private static void collection(DSLContext ctx, String name, String contentType, String owner, String model,
+    static void collection(DSLContext ctx, String name, String contentType, String owner, String model,
                                    String version, String lifecycle, String supersededBy) {
         collection(ctx, TENANT, name, contentType, owner, model, version, lifecycle, supersededBy);
     }
@@ -323,59 +322,52 @@ class Catalog051OwnerGuardTest {
     }
 
     /** Inserts one live document and returns the server NOTICE messages the insert raised. */
-    private static List<String> insertDocument(Connection su, String tumbler, String collection) throws SQLException {
+    private static List<String> insertDocument(Connection su, String tumbler, String collection) {
         return insertDocumentOn(su, tumbler, collection);
     }
 
-    private static List<String> insertDocumentOn(Connection conn, String tumbler, String collection) throws SQLException {
-        conn.clearWarnings();
-        List<String> notices = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) VALUES (?, ?, ?, ?)")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, tumbler);
-            ps.setString(3, "doc " + tumbler);
-            ps.setString(4, collection);
-            ps.executeUpdate();
-            for (SQLWarning w = ps.getWarnings(); w != null; w = w.getNextWarning()) {
-                notices.add(w.getMessage());
-            }
-        }
-        for (SQLWarning w = conn.getWarnings(); w != null; w = w.getNextWarning()) {
-            if (!notices.contains(w.getMessage())) {
-                notices.add(w.getMessage());
-            }
-        }
-        return notices;
+    static List<String> insertDocumentOn(Connection conn, String tumbler, String collection) {
+        return withNotices(conn, d -> d.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID,
+                CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .values(TENANT, tumbler, "doc " + tumbler, collection).execute());
     }
 
-    /** Registers a live collection through plain JDBC and returns the server NOTICE messages the insert raised. */
+    /** Registers a live collection and returns the server NOTICE messages the insert raised. */
     private static List<String> registerCollectionOn(Connection conn, String name, String contentType, String owner,
-                                                     String model, String version) throws SQLException {
+                                                     String model, String version) {
+        return withNotices(conn, d -> d.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID,
+                CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.SUPERSEDED_BY)
+            .values(TENANT, name, contentType, owner, model, version, "live", "").execute());
+    }
+
+    /** Runs {@code work} on {@code conn} and returns the server NOTICE messages its statements raised. */
+    static List<String> withNotices(Connection conn, java.util.function.Consumer<DSLContext> work) {
         List<String> notices = new ArrayList<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, model_version, "
-                + "lifecycle_state, superseded_by) VALUES (?, ?, ?, ?, ?, ?, 'live', '')")) {
-            ps.setString(1, TENANT);
-            ps.setString(2, name);
-            ps.setString(3, contentType);
-            ps.setString(4, owner);
-            ps.setString(5, model);
-            ps.setString(6, version);
-            ps.executeUpdate();
-            for (SQLWarning w = ps.getWarnings(); w != null; w = w.getNextWarning()) {
-                notices.add(w.getMessage());
+        ExecuteListener collect = new DefaultExecuteListener() {
+            @Override
+            public void executeEnd(ExecuteContext e) {
+                try {
+                    for (SQLWarning w = e.statement().getWarnings(); w != null; w = w.getNextWarning()) {
+                        notices.add(w.getMessage());
+                    }
+                } catch (SQLException ex) {
+                    throw new IllegalStateException(ex);
+                }
             }
-        }
+        };
+        work.accept(DSL.using(new DefaultConfiguration().set(conn).set(SQLDialect.POSTGRES)
+            .set(new DefaultExecuteListenerProvider(collect))));
         return notices;
     }
 
     /** A second, independent connection to the same database as {@code su}. */
-    private static Connection openConnection(Connection su) throws SQLException {
+    static Connection openConnection(Connection su) throws SQLException {
         return pgInUse.createConnection("");
     }
 
-    private static String ownerOf(DSLContext ctx, String name) {
+    static String ownerOf(DSLContext ctx, String name) {
         String owner = ctx.select(CATALOG_COLLECTIONS.OWNER_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name))
             .fetchOne(CATALOG_COLLECTIONS.OWNER_ID);
