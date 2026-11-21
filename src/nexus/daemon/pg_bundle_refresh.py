@@ -373,11 +373,11 @@ def refresh_when_pg_background_is_missing(
 def check_pg_bundle(config_dir: Path | None = None) -> list[Any]:
     """``nx doctor``'s row for the extracted PostgreSQL bundle: a warning while a local install's bundle lacks
     pg_background. Nothing for cloud mode, an install on its own PostgreSQL, or a bundle that has it."""
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 - deferred, CLI startup cost
+    import nexus.config as _config  # noqa: PLC0415 - deferred, CLI startup cost
     from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 - deferred, CLI startup cost
     from nexus.health import HealthResult  # noqa: PLC0415 - deferred: that module is heavy
 
-    config_dir = config_dir if config_dir is not None else nexus_config_dir()
+    config_dir = config_dir if config_dir is not None else _config.nexus_config_dir()
     if not bundle_lacks_pg_background(config_dir):
         return []
     tag = "engine-service-v" + ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
