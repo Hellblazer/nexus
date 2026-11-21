@@ -301,7 +301,27 @@ class CollectionParseGateTest {
     private static final Map<String, Integer> NAME_MODEL_READ_CALLS = Map.of(
         "dev/nexus/service/reembed/TargetSelection.java", 1);
 
-    private static final Pattern NAME_MODEL_READ = Pattern.compile("CollectionRegistration\\s*\\.\\s*modelOfConformantName\\s*\\(");
+    /** Every use of the read's name: a qualified call, a bare call under a static import, a method reference. */
+    private static final Pattern NAME_MODEL_READ = Pattern.compile("\\bmodelOfConformantName\\b");
+
+    private static final Pattern DECLARED_AS_STRING_METHOD = Pattern.compile("String\\s+$");
+
+    /**
+     * Uses of {@code modelOfConformantName} outside comments, import lines and the declaration of the method itself
+     * (the one preceded by its return type). A statically imported bare call and a method reference count, as a
+     * qualified call does.
+     */
+    static int countNameModelReads(String rawSource) {
+        String blanked = IMPORT_LINE.matcher(blankComments(rawSource)).replaceAll(m -> " ".repeat(m.group().length()));
+        Matcher m = NAME_MODEL_READ.matcher(blanked);
+        int n = 0;
+        while (m.find()) {
+            if (!DECLARED_AS_STRING_METHOD.matcher(blanked.substring(Math.max(0, m.start() - 12), m.start())).find()) {
+                n++;
+            }
+        }
+        return n;
+    }
 
     /**
      * Per-file declared count of {@link #countSplitDunderCalls} — the
@@ -675,9 +695,7 @@ class CollectionParseGateTest {
             List<Path> javaFiles = files.filter(p -> p.toString().endsWith(".java")).toList();
             filesWalked = javaFiles.size();
             for (Path p : javaFiles) {
-                Matcher m = NAME_MODEL_READ.matcher(blankComments(Files.readString(p)));
-                int n = 0;
-                while (m.find()) n++;
+                int n = countNameModelReads(Files.readString(p));
                 if (n > 0) actual.put(root.relativize(p).toString().replace(java.io.File.separatorChar, '/'), n);
             }
         }
@@ -686,6 +704,21 @@ class CollectionParseGateTest {
         assertThat(actual).as("callers of modelOfConformantName: a new one is a new name-read site and needs a "
             + "declared reason; a removed one lowers this pin (nexus-p2m1x.28, retires at RDR-229 P4)")
             .isEqualTo(NAME_MODEL_READ_CALLS);
+    }
+
+    @Test
+    void nameModelReadCount_seesQualifiedBareAndReferenceUses_butNotTheDeclarationCommentsOrImports() {
+        String src = String.join("\n",
+            "import static dev.nexus.service.db.CollectionRegistration.modelOfConformantName;",
+            "// modelOfConformantName(commented)",
+            "class A {",
+            "    /** modelOfConformantName in javadoc */",
+            "    public static String modelOfConformantName(String n) { return null; }",
+            "    void q(String n) { CollectionRegistration.modelOfConformantName(n); }",
+            "    void b(String n) { modelOfConformantName(n); }",
+            "    void r() { java.util.function.Function<String, String> f = CollectionRegistration::modelOfConformantName; }",
+            "}");
+        assertThat(countNameModelReads(src)).isEqualTo(3);
     }
 
     /** Each total ceiling equals the sum of its declared census, so lowering a census and forgetting its ceiling fails. */
