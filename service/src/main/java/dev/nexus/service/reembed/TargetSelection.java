@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.reembed;
 
+import dev.nexus.service.db.CollectionRegistration;
+import dev.nexus.service.db.ReembedJobRepository.Job;
+
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
@@ -179,21 +182,68 @@ public final class TargetSelection {
             .toList();
     }
 
-    /** The 409 reason when {@link #tupleMates} finds any: names the source and its mates and says why. */
+    /** The 409 reason when {@link #tupleMates} finds any: names the source and its mates, says why, and the exit. */
     public static String sharedSourceTupleReason(String source, List<String> mates, String contentType,
                                                  String ownerId, String embeddingModel) {
         return "source collection " + source + " shares its lookup tuple (content type " + contentType + ", owner "
             + ownerId + ", model " + embeddingModel + ") with " + String.join(", ", mates)
-            + ": two collections with the same owner, content type and model cannot be told apart when the "
-            + "re-embed target is chosen by that tuple, so " + source + " would be moved into a target that "
-            + String.join(", ", mates) + " also uses. Give the collections distinct owners first";
+            + ": collections with the same owner, content type and model cannot be told apart when the re-embed "
+            + "target is chosen by that tuple, so " + source + " would be moved into a target that "
+            + String.join(", ", mates) + " also uses. " + ownerExit("one of the twins is re-owned or superseded");
     }
 
-    /** The 409 reason when the live target was filled by a job from a different source collection. */
-    public static String foreignOriginReason(String source, String target, String originSource) {
-        return "target " + target + " holds documents re-embedded from " + originSource + ", another source "
-            + "collection, not from this job's source " + source + "; moving " + source + " into it would merge "
-            + "two collections that only share a lookup tuple";
+    /** Why a client cannot fix a shared tuple, and what can. {@code then} finishes "can start once ...". */
+    private static String ownerExit(String then) {
+        return "A client cannot change a collection's owner (the registry keeps the owner a collection was "
+            + "registered with); an owner changes only through an engine data move (RDR-229 owner-is-source). "
+            + "A re-embed of the source can start once " + then + ".";
+    }
+
+    /**
+     * The job that makes a live target another source's: a job whose target is {@code target}, whose source is not
+     * {@code source}, that <b>moved at least one document</b> ({@code documents_moved}, the job row's count of
+     * documents copied; a job that was aborted or failed before copying one put nothing in the target), and whose
+     * source shares this source's lookup tuple. The foreign source's tuple is read from its registry row (superseded
+     * rows are listed): same content type, owner and model. A source whose row is gone (a default cutover deletes it)
+     * is read by the model token of its conformant name, since a model never changes on a collection and the target
+     * already fixed its owner and content type; a name that is not conformant reads as an unknown model, which counts
+     * (a refusal, never a merge). The newest such job wins ({@code jobs} is newest first).
+     *
+     * <p>A v2 of an already-moved source has the same model and a different name, so it is refused too: a deliberate
+     * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin.
+     * Its exit is the same: re-own or supersede one of the two.
+     */
+    public static Job foreignOrigin(List<Job> jobs, List<CollectionRow> rows, String target, String source,
+                                    String contentType, String ownerId, String embeddingModel) {
+        for (Job j : jobs) {
+            if (!target.equals(j.targetCollection()) || source.equals(j.sourceCollection())
+                || j.documentsMoved() <= 0) {
+                continue;
+            }
+            CollectionRow row = rows.stream().filter(r -> r.name().equals(j.sourceCollection())).findFirst()
+                .orElse(null);
+            boolean twin;
+            if (row != null) {
+                twin = contentType.equals(row.contentType()) && ownerId.equals(row.ownerId())
+                    && embeddingModel.equals(row.embeddingModel());
+            } else {
+                String model = CollectionRegistration.modelOfConformantName(j.sourceCollection());
+                twin = model == null || model.equals(embeddingModel);
+            }
+            if (twin) {
+                return j;
+            }
+        }
+        return null;
+    }
+
+    /** The 409 reason when {@link #foreignOrigin} finds a job: names the source, the target and the other source. */
+    public static String foreignOriginReason(String source, String target, Job origin) {
+        return "the job log shows another source collection, " + origin.sourceCollection() + ", was re-embedded into "
+            + "target " + target + " (job " + origin.jobId() + ", " + origin.state() + ", "
+            + origin.documentsMoved() + " document(s) moved) and it shares this source's lookup tuple, so "
+            + source + " would be moved into a target that " + origin.sourceCollection() + " already filled. "
+            + ownerExit(source + " or " + origin.sourceCollection() + " is re-owned");
     }
 
     /** A job in a lock state whose source is the candidate target: its id and state, to name in a refusal. */

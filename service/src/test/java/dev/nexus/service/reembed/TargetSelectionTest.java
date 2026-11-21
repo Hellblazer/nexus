@@ -4,6 +4,7 @@ package dev.nexus.service.reembed;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.nexus.service.db.ReembedJobRepository.Job;
 import dev.nexus.service.reembed.TargetSelection.Absent;
 import dev.nexus.service.reembed.TargetSelection.CollectionRow;
 import dev.nexus.service.reembed.TargetSelection.Decision;
@@ -334,14 +335,80 @@ class TargetSelectionTest {
             OWNER, "voyage-context-3")).containsExactly(mate.name());
     }
 
+    private static final String VC3 = "voyage-context-3";
+    private static final String TARGET = "docs__1-7__bge-base-en-v15-768__v1";
+
+    /** A job of the log: {@code source} moved {@code moved} documents into {@link #TARGET}. */
+    private static Job job(String source, long moved) {
+        return new Job(UUID.randomUUID(), source, TARGET, "done", "deleted", "", 1, null, moved, 0, 0, 0, 0, null,
+            false, false, null, null, null, null, null);
+    }
+
+    private static CollectionRow rowOf(String name, String owner, String model) {
+        return new CollectionRow(name, CT, owner, model, "v1", false, "", "live");
+    }
+
+    private static Job foreign(List<Job> jobs, List<CollectionRow> rows) {
+        return TargetSelection.foreignOrigin(jobs, rows, TARGET, SOURCE, CT, OWNER, VC3);
+    }
+
     @Test
-    void theRefusalsNameBothCollectionsAndSayWhy() {
+    void aForeignJobWhoseSourceHasTheSameTupleIsTheOrigin_evenWhenItsRowIsSuperseded() {
+        Job moved = job("docs__wow-addon-dev__voyage-context-3__v1", 3);
+        var rows = List.of(new CollectionRow(moved.sourceCollection(), CT, OWNER, VC3, "v1", false, TARGET, "live"));
+        assertThat(foreign(List.of(moved), rows)).isSameAs(moved);
+    }
+
+    @Test
+    void aSiblingOnAnotherModelIsNotATwin_whetherItsRowIsThereOrGone() {
+        Job moved = job("docs__1-7__bge-base-en-v15-768__v1", 3);
+        assertThat(foreign(List.of(moved), List.of(rowOf(moved.sourceCollection(), OWNER, "bge-base-en-v15-768"))))
+            .as("row present").isNull();
+        assertThat(foreign(List.of(moved), List.of())).as("row gone: the conformant name's model token").isNull();
+    }
+
+    @Test
+    void aTwinWhoseRowIsGoneIsReadByItsNamesModel_andAnUnreadableNameCounts() {
+        assertThat(foreign(List.of(job("docs__wow-addon-dev__voyage-context-3__v1", 3)), List.of())).isNotNull();
+        assertThat(foreign(List.of(job("docs__legacy", 3)), List.of())).as("model unknown: refuse, never merge")
+            .isNotNull();
+    }
+
+    @Test
+    void aForeignSourceNowOwnedElsewhereIsNotATwin() {
+        Job moved = job("docs__wow-addon-dev__voyage-context-3__v1", 3);
+        assertThat(foreign(List.of(moved), List.of(rowOf(moved.sourceCollection(), "1-9", VC3)))).isNull();
+    }
+
+    @Test
+    void aJobThatMovedNoDocumentIsNotAnOrigin_andNeitherIsOneIntoAnotherTargetOrFromThisSource() {
+        assertThat(foreign(List.of(job("docs__wow-addon-dev__voyage-context-3__v1", 0)), List.of())).isNull();
+        var other = new Job(UUID.randomUUID(), "docs__wow-addon-dev__voyage-context-3__v1", "docs__elsewhere__v1",
+            "done", "deleted", "", 1, null, 3, 0, 0, 0, 0, null, false, false, null, null, null, null, null);
+        assertThat(foreign(List.of(other), List.of())).isNull();
+        assertThat(foreign(List.of(job(SOURCE, 3)), List.of())).isNull();
+    }
+
+    @Test
+    void aV2OfAMovedSourceIsRefused_aDeliberateConservativeRefusal() {
+        Job moved = job("docs__1-7__voyage-context-3__v1", 3);
+        // The v1 row is gone and its name carries this source's model; the log is keyed by name, so v2 is another source.
+        assertThat(TargetSelection.foreignOrigin(List.of(moved), List.of(), TARGET,
+            "docs__1-7__voyage-context-3__v2", CT, OWNER, VC3)).isSameAs(moved);
+    }
+
+    @Test
+    void theRefusalsNameBothCollections_sayWhy_andGiveTheOwnerIsSourceExit() {
         String shared = TargetSelection.sharedSourceTupleReason(SOURCE, List.of("docs__wow-addon-dev__x__v1"), CT,
-            OWNER, "voyage-context-3");
+            OWNER, VC3);
         assertThat(shared).contains(SOURCE).contains("docs__wow-addon-dev__x__v1").contains(OWNER)
-            .contains("same owner");
-        String foreign = TargetSelection.foreignOriginReason(SOURCE, "docs__1-7__bge__v1", "docs__other__x__v1");
-        assertThat(foreign).contains(SOURCE).contains("docs__1-7__bge__v1").contains("docs__other__x__v1")
-            .contains("another source");
+            .contains("same owner").contains("client cannot change a collection's owner")
+            .contains("engine data move").contains("owner-is-source").contains("re-owned or superseded");
+        Job origin = job("docs__other__x__v1", 3);
+        String foreign = TargetSelection.foreignOriginReason(SOURCE, TARGET, origin);
+        assertThat(foreign).contains(SOURCE).contains(TARGET).contains("docs__other__x__v1")
+            .contains("the job log shows").contains(origin.jobId().toString()).contains("3 document(s) moved")
+            .contains("engine data move").contains(SOURCE + " or docs__other__x__v1 is re-owned")
+            .doesNotContain("holds documents");
     }
 }
