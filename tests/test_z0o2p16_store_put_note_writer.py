@@ -76,14 +76,6 @@ def col(t2_service_env) -> str:
 
 
 @pytest.fixture
-def fresh_col(t2_service_env) -> str:
-    """A subject nothing has written to yet: its collection is not registered in this tenant."""
-    from nexus.corpus import t3_collection_name
-
-    return t3_collection_name(_FRESH_SUBJECT, for_write=True)
-
-
-@pytest.fixture
 def vec(t2_service_env):
     import nexus.db.http_vector_client as hvc
 
@@ -220,7 +212,7 @@ class TestOneRequest:
 
 class TestFirstWriteToANewSubject:
     def test_a_first_put_registers_the_collection_and_lands_the_note_in_one_request(
-        self, fresh_col, vec, wire,
+        self, t2_service_env, vec, wire,
     ):
         """The collection registration rides the note's own request (write_manifest_many registers
         before it sends), so a subject nothing has written to yet needs no separate T3 write first."""
@@ -231,6 +223,12 @@ class TestFirstWriteToANewSubject:
         assert result.exit_code == 0, result.output
         assert "Stored:" in result.output
         assert wire.writes == ["/manifest/write_many"], wire.paths
+        # RDR-229 P3.8: a new subject's collection is minted by the engine (a c<id> label), so it is found by its
+        # row's attributes after the put, as a read finds it, and not rendered before it.
+        from nexus.corpus import t3_collection_name
+        from nexus.knowledge_subject import catalog_subject_finder
+
+        fresh_col = t3_collection_name(_FRESH_SUBJECT, subject_finder=catalog_subject_finder())
         chashes = [_chash(p) for p in note_pieces(content, fresh_col)]
         assert _present(vec, chashes, fresh_col) == set(chashes)
 

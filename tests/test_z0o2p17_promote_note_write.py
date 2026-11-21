@@ -70,6 +70,10 @@ def _no_retry_sleeps(monkeypatch):
 @pytest.fixture
 def local_t3() -> T3Database:
     db = T3Database(_client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction())
+    # RDR-229 P3.8: promote's collection probe finds the subject's collection by this name, as it does an existing
+    # subject's. Without it the subject reads as new, and a new knowledge subject goes to the label the engine
+    # mints (a c<id>), which is not the conformant name these tests read the note back under.
+    db.get_or_create_collection(_COLLECTION)
     from nexus.mcp_infra import inject_t3
 
     inject_t3(db)

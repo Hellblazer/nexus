@@ -241,6 +241,22 @@ def t3(monkeypatch):
     _clear_ephemeral_collections(client)
 
 
+@pytest.fixture()
+def subject_collection(t3):
+    """``fixture-subject``'s collection already exists in the fake T3 (what a second write to a subject finds).
+
+    RDR-229 P3.8: a write to a NEW knowledge subject registers it by attributes and goes to the label the engine
+    mints, a ``c<id>`` this in-memory ``T3Database`` cannot hold (it refuses a client-supplied label of the
+    minted form), and a read through it finds no row to resolve that label by. A test about what a stored note
+    looks like to ``store_list``, ``store_get`` and ``search`` takes the subject as an existing one, so the write
+    and the reads share the collection's conformant name, as they did before the mint."""
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
+
+    name = f"knowledge__fixture-subject__{_MODEL_TOKENS[_TIER1_MODEL]}__v1"
+    t3.get_or_create_collection(name)
+    return name
+
+
 @pytest.fixture(autouse=True)
 def _patch_t2(t2_path, monkeypatch):
     import nexus.mcp.core as mod
@@ -499,11 +515,16 @@ class TestNexusHmxiRoundTripGrandfathering:
 
         monkeypatch.setattr("nexus.catalog.store_hook.catalog_store_hook_tracked", _register_document)
         note_writes: list[str] = []
-        double_write_note = note_write.write_note
 
         def _recording_write_note(**kw):
+            # Records where the note goes and writes nowhere: the in-memory T3 cannot hold the engine's label
+            # (it refuses one of the minted form), and this test pins names, not a landed note.
             note_writes.append(kw["collection"])
-            return double_write_note(**kw)
+            return note_write.NoteWriteResult(
+                catalog_doc_id=kw["catalog_doc_id"], collection=kw["collection"],
+                chunk_ids=[hashlib.sha256(p.encode()).hexdigest() for p in kw["pieces"]],
+                chunks_written=len(kw["pieces"]), completed=True,
+            )
 
         monkeypatch.setattr(note_write, "write_note", _recording_write_note)
 
@@ -1028,7 +1049,7 @@ def test_store_list_docs_groups_a_split_note_as_one_document(t3, local_mode_writ
 
 
 @pytest.mark.t2_tenant
-def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mode_write):
+def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mode_write, subject_collection):
     """nexus-sis0m.5: identical text in one collection is one T3 row by
     design, so two titled notes with the same content share their chunk.
     Keying each chunk to one tumbler listed the pair as one document."""
@@ -1044,7 +1065,7 @@ def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mo
 
 
 @pytest.mark.t2_tenant
-def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_mode_write):
+def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_mode_write, subject_collection):
     """nexus-sis0m.5: a chunk row carries its last writer's title, so a hit
     or a get by id named only the second of two notes with the same text.
     A get by chash shows the live catalog documents holding the chunk; a search hit shows
@@ -1069,7 +1090,7 @@ def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_m
 
 
 @pytest.mark.t2_tenant
-def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mode_write):
+def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mode_write, subject_collection):
     """A chunk with no manifest row is never merged into a neighbour.
 
     That covers a manifest-less note (live by design — the ``live_chunks``
@@ -1086,7 +1107,7 @@ def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mo
 
 
 @pytest.mark.t2_tenant
-def test_store_list_docs_says_so_when_the_catalog_cannot_be_read(t3, local_mode_write, monkeypatch):
+def test_store_list_docs_says_so_when_the_catalog_cannot_be_read(t3, local_mode_write, monkeypatch, subject_collection):
     """A degraded grouping is announced, never silent (nexus-39upx hazard 4).
 
     Without the catalog the manifest is unavailable, so the view falls back
@@ -1979,7 +2000,7 @@ def test_page_beyond_lookahead_refetches_wider(monkeypatch):
     assert calls[1] >= 22  # refetched wide enough for the requested window
 
 @pytest.mark.t2_tenant
-def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write):
+def test_store_put_invalidates_page_cache(t3, monkeypatch, local_mode_write, subject_collection):
     """Batch-f1655f55 critique fold: a write inside the TTL window must not
     leave a same-identity page burst serving pre-write results — store_put
     clears the page cache so the next search refetches.
