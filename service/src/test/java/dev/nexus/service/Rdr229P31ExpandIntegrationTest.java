@@ -281,8 +281,13 @@ class Rdr229P31ExpandIntegrationTest {
                 PgContainerHelper.insertCollection(ctx, TENANT, other);
 
                 // 1. A chunk INSERT with the collection set and collection_id NULL (what a pre-P3.1 engine writes).
-                assertThat(sqlStateAndMessage(() -> PgContainerHelper.insertChunk1024(ctx, TENANT, COLLECTION, hex("33".repeat(32)),
-                    Vector.of(new float[1024]))))
+                // Written by hand, not through PgContainerHelper.insertChunk1024: since stage 2a that seed sets the id.
+                var chunks = dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+                assertThat(sqlStateAndMessage(() -> ctx.insertInto(chunks)
+                    .set(chunks.TENANT_ID, TENANT).set(chunks.COLLECTION, COLLECTION)
+                    .set(chunks.CHASH, hex("33".repeat(32)))
+                    .set(chunks.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION))
+                    .set(chunks.CHUNK_TEXT, "text").set(chunks.EMBEDDING_1024, Vector.of(new float[1024])).execute()))
                     .as("chunk INSERT, collection set, collection_id NULL").startsWith("23514").contains("chunks_collection_id_check");
 
                 // 2. A catalog_collections UPDATE that sets superseded_by non-empty with superseded_by_id NULL (a pre-P3.1 supersede).

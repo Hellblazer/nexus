@@ -218,11 +218,7 @@ class TaxonomyCentroidAnnPlanShapeTest {
             for (int dim : new int[] {1024, 768, 384}) {
                 PgContainerHelper.insertCollection(ctx, TENANT, supFor(dim), modelFor(dim));
                 PgContainerHelper.insertCollection(ctx, TENANT, liveFor(dim), modelFor(dim));
-                ctx.update(CATALOG_COLLECTIONS)
-                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "successor-of-" + supFor(dim))
-                    .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
-                    .and(CATALOG_COLLECTIONS.NAME.eq(supFor(dim)))
-                    .execute();
+                CollectionIdSeeds.supersede(ctx, TENANT, supFor(dim), "successor-of-" + supFor(dim));
             }
             // Deterministic filler positions (CLAUDE.md: seeded randomness) -- a
             // client-side seeded Random replaces the retired setseed(0.42)/random()

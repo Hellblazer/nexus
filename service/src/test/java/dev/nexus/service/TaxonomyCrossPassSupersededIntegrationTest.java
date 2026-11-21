@@ -306,8 +306,10 @@ class TaxonomyCrossPassSupersededIntegrationTest {
     private void supersede(String tenant, String name, String successor) throws Exception {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            CollectionIdSeeds.registerSuccessor(DSL.using(su, SQLDialect.POSTGRES), tenant, successor);
             int n = DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
                 .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, successor)
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, dev.nexus.service.db.CollectionIds.idOf(tenant, successor))
                 .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, java.time.OffsetDateTime.now())
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
                 .execute();

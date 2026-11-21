@@ -106,9 +106,7 @@ class CollectionSupersededUpsertRouteTest {
             PgContainerHelper.insertCollection(dsl, TENANT, DEAD);
             PgContainerHelper.insertCollection(dsl, TENANT, WARM);
             // DEAD is retired by a direct row write: no process cache ever held it live.
-            dsl.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, SUCCESSOR)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(DEAD))
-                .execute();
+            CollectionIdSeeds.supersede(dsl, TENANT, DEAD, SUCCESSOR);
         }
     }
 

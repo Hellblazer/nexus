@@ -592,7 +592,7 @@ class CollectionRegistryTest {
 
         // An explicit registration clears superseded_by without touching the cache.
         tenantScope.withTenant(TENANT, ctx -> ctx.update(CATALOG_COLLECTIONS)
-            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "").setNull(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(name)))
             .execute());
 

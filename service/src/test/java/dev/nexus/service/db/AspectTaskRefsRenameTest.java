@@ -437,8 +437,7 @@ class AspectTaskRefsRenameTest {
         String retired = coll("retired");
         register(tenant, a);
         register(tenant, retired);
-        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "elsewhere")
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(retired)).execute());
+        su(ctx -> { dev.nexus.service.CollectionIdSeeds.supersede(ctx, tenant, retired, "elsewhere"); return null; });
         outTask(tenant, retired, "1.6.1");
 
         assertThatThrownBy(() -> catalog.renameCollection(tenant, a, retired))

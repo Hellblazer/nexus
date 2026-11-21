@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -137,6 +138,7 @@ abstract class IndexRunCensusTestBase {
             dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "t")
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.METADATA, JSONB.valueOf(metadataJson))
                 .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f)).execute();
         }
@@ -152,6 +154,7 @@ abstract class IndexRunCensusTestBase {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, position)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, tenant, collection))
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .execute();
         }
     }
@@ -200,6 +203,7 @@ abstract class IndexRunCensusTestBase {
                 .set(CATALOG_DOCUMENTS.TITLE, "doc " + d.tumbler).set(CATALOG_DOCUMENTS.CONTENT_TYPE, d.contentType)
                 .set(CATALOG_DOCUMENTS.FILE_PATH, d.filePath).set(CATALOG_DOCUMENTS.SOURCE_URI, d.sourceUri)
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, d.collection).set(CATALOG_DOCUMENTS.CHUNK_COUNT, d.chunkCount)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, d.collection))
                 .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf(d.metaJson))
                 .set(CATALOG_DOCUMENTS.INDEX_STATE, d.state).set(CATALOG_DOCUMENTS.INDEX_RUN_ID, d.runId)
                 .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, d.contentHash)

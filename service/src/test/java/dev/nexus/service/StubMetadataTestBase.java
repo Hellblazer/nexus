@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.TenantConstants;
@@ -133,6 +134,7 @@ abstract class StubMetadataTestBase {
             var insert = dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "stub")
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.METADATA, JSONB.valueOf(metadataJson));
             // a vector's width is its model's dimension (the model partition's CHECK)
             (model.endsWith("-384") ? insert.set(CHUNKS.EMBEDDING_384, VectorSeeds.vec(384, 0.1f))
@@ -150,6 +152,7 @@ abstract class StubMetadataTestBase {
                 .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler).set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
                 .set(CATALOG_DOCUMENTS.FILE_PATH, filePath).set(CATALOG_DOCUMENTS.SOURCE_URI, sourceUri)
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf(metadataJson))
                 .set(CATALOG_DOCUMENTS.DELETED_AT, deleted ? OffsetDateTime.parse("2026-11-01T00:00:00+00:00") : null)
                 .execute();
@@ -166,6 +169,7 @@ abstract class StubMetadataTestBase {
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, position)
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, tenant, collection))
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .execute();
         }
     }
