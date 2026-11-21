@@ -72,7 +72,7 @@ public final class CollectionMintSupport {
             .execute();
     }
 
-    static boolean indexPresent(DSLContext ctx) {
+    public static boolean indexPresent(DSLContext ctx) {
         return ctx.fetchExists(ctx.selectOne().where(
             DSL.function("to_regclass", Object.class, DSL.val("nexus." + INDEX)).isNotNull()));
     }
