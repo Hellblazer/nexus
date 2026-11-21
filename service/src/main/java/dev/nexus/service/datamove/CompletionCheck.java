@@ -133,6 +133,25 @@ public final class CompletionCheck {
         Gate3Source NOT_INSTALLED = ctx -> Optional.empty();
     }
 
+    /**
+     * R7's pre-flight (RDR-229 item 6, "dangling tombstones"; linda's ruling 2026-11-21): the registry's tombstones whose
+     * {@code superseded_by} names no row of their tenant, by content type, and the tombstones the stamp resolved to its fallback
+     * (their {@code superseded_by_id} is their own {@code collection_id}: retired, no successor). Counts only: {@code /v1/status}
+     * is unauthenticated, so no name or tenant leaves the engine. {@code registryRows} is how many registry rows were read, so a
+     * zero is told from a registry that was not read. What the admin role can see: where the migrating role is the serving role and
+     * the registry is row-secured with no owner-read policy, it reads no row, and {@code registryRows} says 0.
+     */
+    public record Dangling(long registryRows, long total, Map<String, Long> byContentType, long selfIdTotal,
+                           Map<String, Long> selfIdByContentType, boolean read) {
+        public Dangling {
+            byContentType = Map.copyOf(new java.util.TreeMap<>(byContentType));
+            selfIdByContentType = Map.copyOf(new java.util.TreeMap<>(selfIdByContentType));
+        }
+
+        /** The registry was not read (the table is absent, or this result was built by hand). */
+        public static final Dangling UNREAD = new Dangling(0L, 0L, Map.of(), 0L, Map.of(), false);
+    }
+
     /** Counts the rows that still violate a table's CHECK. */
     @FunctionalInterface
     interface ViolatorCounter {
@@ -156,10 +175,19 @@ public final class CompletionCheck {
      * @param violators               tables whose stamp is done and whose CHECK is still NOT VALID, with the rows that violate it
      * @param gate3Uncovered          planned collections with no VALID id index, when gate 3 was asked
      * @param gate3Why                why gate 3 does not hold, or empty
+     * @param dangling                R7's pre-flight: the registry's tombstones that name no successor, by content type
      */
     public record Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
                          boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
-                         List<String> gate3Uncovered, String gate3Why) {
+                         List<String> gate3Uncovered, String gate3Why, Dangling dangling) {
+
+        /** As above with no dangling-tombstone read (a caller that built the result by hand). */
+        public Result(boolean gate1, boolean gate2, boolean gate3, List<LabelState> labels, List<CheckState> checks,
+                      boolean supersededByCheckPresent, long supersededByWaiting, List<Violators> violators,
+                      List<String> gate3Uncovered, String gate3Why) {
+            this(gate1, gate2, gate3, labels, checks, supersededByCheckPresent, supersededByWaiting, violators, gate3Uncovered,
+                gate3Why, Dangling.UNREAD);
+        }
 
         public List<LabelState> incomplete() {
             return labels.stream().filter(l -> !l.satisfied()).toList();
@@ -222,6 +250,12 @@ public final class CompletionCheck {
             Optional<IdIndexCoverage> coverage = gate3.read(ctx);
             if (coverage.isEmpty()) {
                 why = "this release builds no id-predicate index (P3.4), so no collection has a valid one";
+            } else if (coverage.get().planned().isEmpty() && liveCollections(ctx, tables) > 0) {
+                // Review F5: an empty plan over a populated registry is a planner that found nothing, or failed quietly; it
+                // is a pass only when there is nothing to plan.
+                long live = liveCollections(ctx, tables);
+                why = "the planner plans no collection while " + live + " live collection(s) are registered, so there is nothing "
+                    + "to say they are covered";
             } else {
                 uncovered = new ArrayList<>(coverage.get().uncovered());
                 gate3Holds = uncovered.isEmpty();
@@ -232,7 +266,7 @@ public final class CompletionCheck {
             }
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
-            waiting, List.copyOf(violators), List.copyOf(uncovered), why);
+            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables));
     }
 
     // ---- one label ---------------------------------------------------------------------------------------------------
@@ -403,6 +437,49 @@ public final class CompletionCheck {
         Field<Long> supersededById = DSL.field(DSL.name("superseded_by_id"), Long.class);
         Field<String> modelVersion = DSL.field(DSL.name("model_version"), String.class);
         return ctx.fetchCount(c, supersededBy.ne("").and(supersededById.isNull()).and(modelVersion.eq("")));
+    }
+
+    /** Live registry rows (not a tombstone, not a quarantine): what the planner could index. */
+    private static long liveCollections(DSLContext ctx, Set<String> tables) {
+        if (!tables.contains("catalog_collections")) {
+            return 0L;
+        }
+        Table<?> c = DSL.table(DSL.name("nexus", "catalog_collections"));
+        Condition live = DSL.field(DSL.name("superseded_by"), String.class).eq("");
+        if (columnExists(ctx, "catalog_collections", "lifecycle_state")) {
+            live = live.and(DSL.field(DSL.name("lifecycle_state"), String.class).eq("live"));
+        }
+        return ctx.fetchCount(c, live);
+    }
+
+    /** R7's pre-flight: see {@link Dangling}. A read, bounded by the registry's size (hundreds of rows). */
+    private static Dangling danglingTombstones(DSLContext ctx, Set<String> tables) {
+        if (!tables.contains("catalog_collections")) {
+            return Dangling.UNREAD;
+        }
+        Table<?> c = DSL.table(DSL.name("nexus", "catalog_collections")).as("c");
+        Table<?> s = DSL.table(DSL.name("nexus", "catalog_collections")).as("s");
+        Field<String> contentType = DSL.field(DSL.name("c", "content_type"), String.class);
+        Field<String> supersededBy = DSL.field(DSL.name("c", "superseded_by"), String.class);
+        Condition dangling = supersededBy.ne("").andNotExists(DSL.selectOne().from(s)
+            .where(DSL.field(DSL.name("s", "tenant_id"), String.class).eq(DSL.field(DSL.name("c", "tenant_id"), String.class)))
+            .and(DSL.field(DSL.name("s", "name"), String.class).eq(supersededBy)));
+        Map<String, Long> byType = countsByType(ctx, c, contentType, dangling);
+        Map<String, Long> selfByType = Map.of();
+        if (columnExists(ctx, "catalog_collections", "superseded_by_id")) {
+            selfByType = countsByType(ctx, c, contentType, supersededBy.ne("").and(
+                DSL.field(DSL.name("c", "superseded_by_id"), Long.class).eq(DSL.field(DSL.name("c", "collection_id"), Long.class))));
+        }
+        return new Dangling(ctx.fetchCount(c), byType.values().stream().mapToLong(Long::longValue).sum(), byType,
+            selfByType.values().stream().mapToLong(Long::longValue).sum(), selfByType, true);
+    }
+
+    private static Map<String, Long> countsByType(DSLContext ctx, Table<?> c, Field<String> contentType, Condition where) {
+        Map<String, Long> out = new LinkedHashMap<>();
+        for (var r : ctx.select(contentType, DSL.count()).from(c).where(where).groupBy(contentType).fetch()) {
+            out.put(r.value1(), r.value2().longValue());
+        }
+        return out;
     }
 
     // ---- the rows that keep a CHECK NOT VALID -------------------------------------------------------------------------

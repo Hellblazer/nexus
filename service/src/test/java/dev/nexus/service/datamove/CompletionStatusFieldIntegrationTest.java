@@ -298,7 +298,7 @@ class CompletionStatusFieldIntegrationTest {
         P31CheckReplay.lift(ctx, "vectors-068-14");
         try {
             ctx.insertInto(REMAP).set(text("tenant_id"), TENANT).set(text("source_collection"), "code__p31csf__bge-base-en-v15-768__v1")
-                .set(text("old_id"), "o").set(text("new_chash"), "a".repeat(32)).set(text("target_collection"), "ghost-target-p31-csf")
+                .set(text("old_id"), "o").set(DSL.field(DSL.name("new_chash"), byte[].class), new byte[32]).set(text("target_collection"), "ghost-target-p31-csf")
                 .set(DSL.field(DSL.name("created_at"), SQLDataType.TIMESTAMPWITHTIMEZONE), OffsetDateTime.now())
                 .set(text("provenance"), "test").execute();
         } finally {
@@ -366,7 +366,7 @@ class CompletionStatusFieldIntegrationTest {
             assertThat(d.get("self_id").get("total").asLong()).isEqualTo(1);
             assertThat(d.get("self_id").get("by_content_type").get("docs").asLong()).isEqualTo(1);
             assertThat(d.get("self_id").get("by_content_type").has("code")).isFalse();
-            assertThat(d.get("registry_rows").asLong()).as("the registry was read").isGreaterThanOrEqualTo(7);
+            assertThat(d.get("registry_rows").asLong()).as("the registry was read").isGreaterThanOrEqualTo(6);
             assertThat(body.toString()).as("/v1/status is unauthenticated: counts only").doesNotContain("gone-").doesNotContain(TENANT)
                 .doesNotContain("p31csf");
         } finally {

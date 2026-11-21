@@ -1,0 +1,109 @@
+{
+  "embedding_mode" : "unknown",
+  "local_embed_activity" : null,
+  "embedder_activity" : { },
+  "raced_embeds_total" : 0,
+  "supplied_vector_mismatches_total" : 0,
+  "request_ledger_replays_total" : 0,
+  "request_ledger_in_flight_total" : 0,
+  "request_ledger_key_reused_total" : 0,
+  "request_ledger_takeovers_total" : 0,
+  "ownerless_writes_refused_total" : 0,
+  "ownerless_writes_would_refuse_total" : 0,
+  "chunk_metadata_key_would_refuse_total" : 0,
+  "chunk_metadata_key_would_refuse_by_route_class" : [ ],
+  "chunk_metadata_key_log_overflow_total" : 0,
+  "test_tenant_reset_route" : false,
+  "boot_work" : [ ],
+  "rdr229_completion" : {
+    "gate1" : false,
+    "gate2" : false,
+    "gate3" : false,
+    "gates_holding" : 0,
+    "gates_total" : 3,
+    "summary" : "gate 1 waits (15 of 16 stamp moves incomplete; the superseded_by CHECK is missing); gate 2 waits on gate 1; gate 3 waits: gate 2 does not hold",
+    "gate3_why" : "gate 2 does not hold",
+    "labels_total" : 16,
+    "labels_incomplete" : [ {
+      "label" : "rdr229-stamp-catalog_collections",
+      "table" : "catalog_collections",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-chunks",
+      "table" : "chunks",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-taxonomy_centroids",
+      "table" : "taxonomy_centroids",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-catalog_document_chunks",
+      "table" : "catalog_document_chunks",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-chunk_orphaned_at",
+      "table" : "chunk_orphaned_at",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-topic_assignments",
+      "table" : "topic_assignments",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-document_aspects",
+      "table" : "document_aspects",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-topics",
+      "table" : "topics",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-taxonomy_meta",
+      "table" : "taxonomy_meta",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-document_highlights",
+      "table" : "document_highlights",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-canary_query_ring",
+      "table" : "canary_query_ring",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-catalog_documents",
+      "table" : "catalog_documents",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-chash_remap",
+      "table" : "chash_remap",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-pdf_pipeline",
+      "table" : "pdf_pipeline",
+      "why" : "no row in nexus.data_moves"
+    }, {
+      "label" : "rdr229-stamp-reembed_jobs",
+      "table" : "reembed_jobs",
+      "why" : "no row in nexus.data_moves"
+    } ],
+    "checks_missing" : [ {
+      "table" : "catalog_collections",
+      "constraint" : "catalog_collections_superseded_by_id_check",
+      "what" : "waits: catalog_collections_superseded_by_id_check is not on catalog_collections yet; 1 registry row(s) with a blank model_version and no superseded_by_id hold its changeset back (D2's repair move or the superseded_by stamp clears them, then the next boot adds it); the switch is refused until then"
+    } ],
+    "superseded_by_waiting" : 1,
+    "validate_waits" : [ ],
+    "dangling_tombstones" : {
+      "read" : true,
+      "registry_rows" : 1,
+      "total" : 1,
+      "by_content_type" : {
+        "unknown" : 1
+      },
+      "self_id" : {
+        "total" : 0,
+        "by_content_type" : { }
+      }
+    }
+  },
+  "process_start_time" : "1970-01-01T00:00:00Z"
+}

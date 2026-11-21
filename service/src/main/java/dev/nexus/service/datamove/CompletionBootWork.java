@@ -13,11 +13,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -26,8 +24,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * RDR-229 P3.1 (nexus-p2m1x.17): runs {@link CompletionCheck} after the schema walk, on its own admin session and its own
- * thread, keeps the latest {@link CompletionCheck.Result} for the engine's Java to read ({@link #latest}), and reports it in
- * {@code /v1/status} {@code boot_work}, where {@code nx doctor} reads it ({@code nexus/rdr229_completion_health.py}).
+ * thread, keeps the latest {@link CompletionCheck.Result} for the engine's Java to read ({@link #latest}), and reports it in its
+ * own {@code /v1/status} field, {@code rdr229_completion} ({@link CompletionStatusJson}), where {@code nx doctor} reads it
+ * ({@code nexus/rdr229_completion_health.py}).
+ *
+ * <p><b>Not in {@code boot_work}</b> (fix round A, critique B1). {@code boot_work} is work in progress, and {@code nx upgrade}'s
+ * bundle swap and the 3h boot-write harness count every entry in it that is not a parked data move as work. The three gates wait
+ * by design (gate 3 cannot hold until P3.4 builds its id indexes), so an entry for them stays on every install, and on a bundle
+ * that lacks pg_background it deferred the very swap that lets the stamp moves run. An older nx reads {@code boot_work} the same
+ * way, so the state is never published there; nothing this class reports is work. (The moves themselves, which are work, are
+ * {@code boot_work} entries of {@link MoveBootWork}.)
  *
  * <p><b>It reads and reports; it writes nothing.</b> The session is opened {@code default_transaction_read_only = on}, so a
  * write would raise at the server, and the check itself holds no write. Sam's rule is no boot-time data migrations.
@@ -40,24 +46,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * at once calls {@link #refresh}. The rows that keep a CHECK NOT VALID are counted by a bounded scan, so that count is
  * cached for {@link #VIOLATOR_TTL} per table.
  *
- * <p>The entries, none of which names a collection or a tenant ({@code /v1/status} is unauthenticated): {@value #SUMMARY_ID}
- * (the three gates, {@code done} of {@code total} gates holding; absent once all three hold, because {@code boot_work} is
- * work in progress and {@code nx upgrade} and {@code nx daemon status} repeat every entry), {@value #CHECK_PREFIX}{@code <constraint>} for a listed
- * CHECK that is missing (the superseded_by one waits on D2's data and says how many rows), and {@value #VALIDATE_PREFIX}
- * {@code <table>} for a table whose stamp is done and whose CHECK is still NOT VALID (orphan rows).
+ * <p>The field names no collection or tenant ({@code /v1/status} is unauthenticated); {@link #statusJson} renders it from the
+ * last sample, in memory.
  */
 public final class CompletionBootWork implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(CompletionBootWork.class);
 
-    /** The entry that says where the three gates stand. */
-    public static final String SUMMARY_ID = "rdr229-completion";
-    /** The prefix of the entry of a listed CHECK that is missing. */
-    public static final String CHECK_PREFIX = "rdr229-check:";
-    /** The prefix of the entry of a table whose CHECK is still NOT VALID after its stamp. */
-    public static final String VALIDATE_PREFIX = "rdr229-validate:";
-    public static final String UNIT = "gates";
-    public static final String ON_STOP = "the check is read again on the next boot; nothing is lost";
     /** The slow poll that backs the two events: a read this long after the last one, whatever caused it. */
     public static final Duration SAFETY_POLL = Duration.ofSeconds(60);
     /** How often the schedule asks whether the safety poll is due; the read itself is at most once per {@link #SAFETY_POLL}. */
@@ -78,7 +73,6 @@ public final class CompletionBootWork implements AutoCloseable {
     private final BootWorkRegistry registry;
     private final Reader reader;
     private final Object sampleLock = new Object();
-    private final Set<String> published = new HashSet<>();
     private final Clock clock;
     /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
     private volatile Executor eventExecutor;
@@ -108,6 +102,16 @@ public final class CompletionBootWork implements AutoCloseable {
         this.reader = Objects.requireNonNull(reader, "reader");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.eventExecutor = eventExecutor;
+        registry.rdr229Completion(this::statusJson);
+    }
+
+    /**
+     * The {@code rdr229_completion} field of {@code /v1/status} as a JSON object, rendered from the last sample (memory only, no
+     * query), or null before the first read: a client reads an absent field as "not known yet".
+     */
+    public String statusJson() {
+        CompletionCheck.Result r = latest;
+        return r == null ? null : CompletionStatusJson.render(r);
     }
 
     /** The result of the last sample, or null before the first one. */
@@ -216,12 +220,7 @@ public final class CompletionBootWork implements AutoCloseable {
             s.shutdownNow();
         }
         closed = true;
-        synchronized (published) {
-            for (String id : published) {
-                registry.finish(id);
-            }
-            published.clear();
-        }
+        registry.rdr229Completion(null);
         try {
             reader.abort();
         } finally {
@@ -230,9 +229,10 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * One sample: evaluates the check and brings the {@code boot_work} entries to match.
+     * One sample: evaluates the check and keeps the result for {@link #statusJson}.
      *
-     * @return how many entries there are now, or -1 when the check could not be read (the entries stay as they were)
+     * @return how many things the field lists as waiting (the summary while a gate waits, plus a row per missing CHECK and per
+     *         table whose CHECK is NOT VALID), or -1 when the check could not be read (the field stays as it was)
      */
     int publish() {
         synchronized (sampleLock) {
@@ -253,50 +253,29 @@ public final class CompletionBootWork implements AutoCloseable {
                 return -1;
             }
             latest = result;
-            return apply(result);
+            long holding = (result.gate1() ? 1 : 0) + (result.gate2() ? 1 : 0) + (result.gate3() ? 1 : 0);
+            return (holding < 3 ? 1 : 0) + (int) result.checks().stream().filter(c -> !c.present()).count()
+                + byTable(result.violators()).size();
         }
     }
 
-    private int apply(CompletionCheck.Result r) {
-        Map<String, Entry> desired = new LinkedHashMap<>();
-        long holding = (r.gate1() ? 1 : 0) + (r.gate2() ? 1 : 0) + (r.gate3() ? 1 : 0);
-        if (holding < 3) {   // boot_work is work in progress: nx upgrade and nx daemon status repeat every entry
-            desired.put(SUMMARY_ID, new Entry(summary(r), holding, 3L));
-        }
-        for (CompletionCheck.CheckState c : r.checks()) {
-            if (!c.present()) {
-                desired.put(CHECK_PREFIX + c.constraint(), new Entry(missing(c, r), null, null));
-            }
-        }
-        for (CompletionCheck.Violators v : byTable(r.violators())) {
-            desired.put(VALIDATE_PREFIX + v.table(), new Entry(validateWaits(v), null, null));
-        }
-        synchronized (published) {
-            Set<String> gone = new HashSet<>(published);
-            for (var e : desired.entrySet()) {
-                if (published.add(e.getKey())) {
-                    registry.register(e.getKey(), e.getValue().what(), e.getValue().done(), e.getValue().total(), UNIT,
-                        true, ON_STOP);
-                }
-                registry.update(e.getKey(), e.getValue().what(), e.getValue().done(), e.getValue().total(), null);
-                gone.remove(e.getKey());
-            }
-            for (String id : gone) {
-                registry.finish(id);
-                published.remove(id);
-            }
-            return published.size();
-        }
-    }
+    /** One table whose stamp is done and whose CHECK(s) are still NOT VALID: every such constraint of it, with the summed counts. */
+    record TableWait(String table, java.util.List<String> constraints, long orphans, long unstamped, boolean counted) { }
 
-    private record Entry(String what, Long done, Long total) { }
-
-    /** One entry per table: a table with two name columns has a CHECK per column, and the operator sees one VALIDATE waiting, with the sum. */
-    static java.util.List<CompletionCheck.Violators> byTable(java.util.List<CompletionCheck.Violators> all) {
-        Map<String, CompletionCheck.Violators> merged = new LinkedHashMap<>();
+    /**
+     * One row per table: a table with two name columns (chash_remap, reembed_jobs) has a CHECK per column, and the operator sees one
+     * VALIDATE waiting that names every one of them, with the sum.
+     */
+    static java.util.List<TableWait> byTable(java.util.List<CompletionCheck.Violators> all) {
+        Map<String, TableWait> merged = new LinkedHashMap<>();
         for (CompletionCheck.Violators v : all) {
-            merged.merge(v.table(), v, (a, b) -> new CompletionCheck.Violators(a.table(), a.constraint() + ", " + b.constraint(),
-                a.orphans() + b.orphans(), a.unstamped() + b.unstamped(), a.counted() && b.counted()));
+            merged.merge(v.table(), new TableWait(v.table(), java.util.List.of(v.constraint()), v.orphans(), v.unstamped(), v.counted()),
+                (a, b) -> {
+                    var constraints = new java.util.ArrayList<>(a.constraints());
+                    constraints.addAll(b.constraints());
+                    return new TableWait(a.table(), java.util.List.copyOf(constraints), a.orphans() + b.orphans(),
+                        a.unstamped() + b.unstamped(), a.counted() && b.counted());
+                });
         }
         return java.util.List.copyOf(merged.values());
     }
@@ -322,12 +301,20 @@ public final class CompletionBootWork implements AutoCloseable {
             + "(its changeset text is in vectors-068-collection-id-expand.xml)";
     }
 
-    static String validateWaits(CompletionCheck.Violators v) {
-        String counts = v.counted()
-            ? v.orphans() + " orphan row(s) (a name with no registry row in its tenant) and " + v.unstamped() + " unstamped row(s)"
+    /**
+     * The operator text of a table whose stamp move is done and whose CHECK stays NOT VALID. The move does not run again on its own
+     * (it is complete), so registering the missing collection does not stamp the rows: the step is {@code nexus.rdr229_restamp}
+     * (vectors-070), which registers the table's stamp move once more, guarded to run only when the table's stamp move is complete,
+     * a CHECK of the table is NOT VALID and no orphan row remains. The new move stamps the rows and validates the CHECK(s).
+     */
+    static String validateWaits(TableWait w) {
+        String counts = w.counted()
+            ? w.orphans() + " orphan row(s) (a name with no registry row in its tenant) and " + w.unstamped() + " unstamped row(s)"
             : "rows that could not be counted";
-        return "waits: " + counts + " keep " + v.constraint() + " on " + v.table()
-            + " NOT VALID; its VALIDATE waits instead of failing a boot";
+        return "waits: " + counts + " keep " + String.join(", ", w.constraints()) + " on " + w.table()
+            + " NOT VALID. To finish: register each missing collection or delete the orphan rows, then run  SELECT nexus.rdr229_restamp('"
+            + w.table() + "');  as the migrating role. It re-registers this table's stamp move once no orphan remains; the move stamps "
+            + "the rows and validates the CHECK.";
     }
 
     /** The reader of a running engine: its own read-only admin session, kept between samples and replaced after a failure. */
