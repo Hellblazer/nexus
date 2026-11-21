@@ -387,7 +387,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
 
                     // A live row can be superseded, and then the tuple is free again.
                     DSL.using(su, SQLDialect.POSTGRES).execute(
-                        "UPDATE nexus.catalog_collections SET superseded_by = 'docs__v3' WHERE tenant_id = 't1' AND name = 'docs__a'");
+                        "UPDATE nexus.catalog_collections SET superseded_by = 'docs__v3', superseded_by_id = 1 WHERE tenant_id = 't1' AND name = 'docs__a'");
                     assertThatCode(() -> seed(su, "t1", "docs__fresh", "docs", "owner-1", MODEL, "", "live", ""))
                         .doesNotThrowAnyException();
                 }
@@ -540,10 +540,12 @@ class CollectionTupleUniqueIndexLiquibaseTest {
 
     private static void seed(Connection su, String tenant, String name, String contentType, String owner, String model,
                              String modelVersion, String lifecycle, String supersededBy) {
+        // P3.1's catalog_collections_superseded_by_id_check: a tombstone (superseded_by <> '') carries a superseded_by_id too
+        // (any value: this test judges the live-tuple index, not the successor's id)
         DSL.using(su, SQLDialect.POSTGRES).execute(
             "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, model_version, "
-                + "lifecycle_state, superseded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            tenant, name, contentType, owner, model, modelVersion, lifecycle, supersededBy);
+                + "lifecycle_state, superseded_by, superseded_by_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            tenant, name, contentType, owner, model, modelVersion, lifecycle, supersededBy, supersededBy.isEmpty() ? null : 1L);
     }
 
     private static Long duplicates(Connection conn) {
