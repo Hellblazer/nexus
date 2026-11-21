@@ -395,15 +395,26 @@ for _site in LEDGER:
 #: P2.9 reland (nexus-p2m1x.14): 228 -> 229. The import's routing read falls back to the name when the row
 #: resolver fails (``exporter.import_collection``, P2.5's contract that a failed lookup never aborts the import):
 #: one more NoRow mint, empty at P3.8. mint 127 -> 128, primitive_call 191 -> 192.
-PARSE_SITE_PIN: int = 229
+#:
+#: P2.2 (nexus-p2m1x.7, 2026-11-21), re-measured on develop 410e44c308 (P2.9's reland): 229 -> 218. The parsers moved
+#: into ``legacy_names`` (the floor: calls inside it are not sites). The 19 holdovers it owned left the holdover class:
+#: 13 read the row through ``embedding_model_for`` and left the ledger, the five ``T3Database`` reads are mint (no
+#: catalog, so NoRow by construction) and ``doctor_search``'s drift probe is diagnostic. The NoRow derivation is
+#: counted once in ``rows/resolve.py`` and once in ``embed_window.py`` (mint); the two blank-version fallbacks are
+#: migration-source (one is the existing ``version_from_for_tuple_row`` site, now a call of
+#: ``version_of_blank_row_label``); ``_target_model`` and the note write call ``embedding_model_for_write`` (one site
+#: each). P2.9's three ``taxonomy__`` name tests are calls of ``legacy_names.is_taxonomy_collection_name``
+#: (migration-source, const_prefix 2 and startswith 1 -> primitive_call 3). holdover 23 -> 4, diagnostic 42 -> 43,
+#: mint 128 -> 134, migration-source 19 -> 20, primitive_call 192 -> 184, const_prefix 7 -> 5, startswith 3 -> 2.
+PARSE_SITE_PIN: int = 218
 CLASS_PIN: dict[str, int] = {
-    "mint": 128, "holdover": 23, "diagnostic": 42,
-    "migration-source": 19, "label-pattern": 10, "file-path": 5,
+    "mint": 134, "holdover": 4, "diagnostic": 43,
+    "migration-source": 20, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 192, "const_prefix": 7, "fnmatch": 14,
-    "strip_prefix": 4, "startswith": 3, "split": 2,
+    "primitive_call": 184, "const_prefix": 5, "fnmatch": 14,
+    "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }
@@ -822,12 +833,12 @@ def test_pin_matches_documented_total() -> None:
     265 -- 255 at P2.5, nexus-p2m1x.10, when twelve bypass-schema prefix tests
     became one helper; then 255 -- 245 at P2.3, nexus-p2m1x.8, when the repo
     indexer's target models became row reads; then 245 -- 240 at P2.7 part A,
-    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted; then 240 -- 229
-    at P2.2, nexus-p2m1x.7) is derived
+    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted; then 240 -- 228
+    at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then 229 -- 218 at P2.2, nexus-p2m1x.7) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 229
+    assert PARSE_SITE_PIN == 218
 
 
 # ---------------------------------------------------------------------------
@@ -945,7 +956,7 @@ def test_every_fnmatch_is_labelled_by_what_it_matches() -> None:
 def test_the_routing_class_is_measured_not_listed() -> None:
     """RDR-229 P2.9 emptied the routing class: 22 sites read a row now, and the three ``taxonomy__`` name
     tests left (the lifecycle bypass, ``manifest_backfill``, ``taxonomy_cmd``) are migration sources (a legacy
-    name no row backs and no row can tell apart; P2.2, nexus-p2m1x.7, moves them into legacy_names). Nothing
+    name no row backs and no row can tell apart; read through ``legacy_names.is_taxonomy_collection_name``, P2.2). Nothing
     is left to route by name."""
     assert not _by_class("routing")
     assert "routing" not in CLASS_PIN  # the class is empty: no pin to keep
