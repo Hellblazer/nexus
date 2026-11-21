@@ -22,8 +22,17 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -37,6 +46,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code collections-002}: the engine role holds no UPDATE on the shared sequence, and the function only raises it), logs a WARN naming the old and new values, and draws again;
  * a second taken id is a {@link MintedLabel.SequenceBehindDataException} (lead ruling T2
  * {@code nexus_rdr/229-lead-ruling-collection-id-by-default-2026-11-21}). Its own database: it moves the sequence.
+ *
+ * <p>The heal draws FORWARD (linda's ruling on the heal race, bead nexus-p2m1x.28): it calls {@code nextval} until it has
+ * drawn the floor, never {@code setval}, so it cannot move the shared sequence back past an id another session (another
+ * tenant, a plain DEFAULT-identity insert) has already drawn. At most {@value #BOUND} draws: a floor further above the
+ * sequence than that is refused with the gap and the operator remedy.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -46,6 +60,8 @@ class CollectionMintHealTest {
     private static final String SVC_ROLE = "svc_mint_heal";
     private static final String SVC_PASS = "svc_mint_heal_pass";
     private static final String MODEL = "bge-base-en-v15-768";
+    /** The most draws one heal makes (collections-002). */
+    static final int BOUND = 100_000;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -133,6 +149,9 @@ class CollectionMintHealTest {
         String definition = su(CollectionMintSupport::healFunctionDefinition);
         assertThat(definition).as("a definer function with its search_path pinned")
             .contains("SECURITY DEFINER").containsIgnoringCase("search_path");
+        assertThat(definition).as("the heal draws forward with nextval and never calls setval: a setval can move the sequence "
+                + "back past an id another session has just drawn")
+            .containsIgnoringCase("nextval").doesNotContainPattern("(?i)setval\\s*\\(");
     }
 
     @Test @Order(1)
@@ -208,9 +227,123 @@ class CollectionMintHealTest {
         assertThat(nextSequenceValue() - 1).as("the sequence only moved forward").isGreaterThanOrEqualTo(n + 4);
     }
 
+    @Test @Order(5)
+    void aFloorMoreThanTheBoundAboveTheSequenceIsRefusedWithTheGapAndTheRemedyAndMovesNothing() {
+        long last = nextSequenceValue() - 1;
+        long floor = last + BOUND + 1;
+
+        assertThatThrownBy(() -> healAs(floor))
+            .as("a gap above the bound is refused, not drawn")
+            .hasMessageContaining(Long.toString(floor))
+            .hasMessageContaining(Long.toString(last))
+            .hasMessageContaining(Long.toString(BOUND + 1L))
+            .hasMessageContaining("setval")
+            .hasMessageContaining("engine stopped");
+        assertThat(nextSequenceValue()).as("the refusal drew nothing").isEqualTo(last + 1);
+    }
+
+    @Test @Order(6)
+    void aFloorExactlyTheBoundAboveTheSequenceIsDrawnTo() {
+        long last = nextSequenceValue() - 1;
+
+        Long reached = healAs(last + BOUND);
+
+        assertThat(reached).as("the heal drew up to the floor").isEqualTo(last + BOUND);
+        assertThat(nextSequenceValue()).isEqualTo(last + BOUND + 1);
+    }
+
+    @Test @Order(7)
+    void aMintWhoseHealIsRefusedForItsGapAnswersTheRefusalWithTheMessageAndWritesNothing() {
+        String third = "mint-heal-tenant-gap";
+        long n = nextSequenceValue();
+        su(ctx -> {
+            CollectionMintSupport.insertLiveRow(ctx, third, "gap-held-at-next", "restored-gap-a", MODEL, n);
+            CollectionMintSupport.insertLiveRow(ctx, third, "gap-held-far-above", "restored-gap-b", MODEL, n + BOUND + 50L);
+            return null;
+        });
+        try {
+            assertThatThrownBy(() -> repo.mintCollection(third, attrs("subject-gap"), true))
+                .isInstanceOf(MintedLabel.SequenceBehindDataException.class)
+                .hasMessageContaining(Long.toString(n + BOUND + 50L))
+                .hasMessageContaining("setval")
+                .hasMessageContaining("engine stopped");
+            long written = su(ctx -> (long) ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(third)
+                .and(CATALOG_COLLECTIONS.OWNER_ID.eq("subject-gap"))));
+            assertThat(written).as("nothing was written").isZero();
+            assertThat(nextSequenceValue()).as("only the mint's own draw moved the sequence").isEqualTo(n + 1);
+        } finally {
+            su(ctx -> ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(third)).execute());
+        }
+    }
+
+    @Test @Order(8)
+    void drawersRacingTheHealInTwoTenantsNeverSeeAnIdTwice() throws Exception {
+        // Tenant A draws ids as its mints do (a stream of nextval); tenant B inserts rows whose id the column's DEFAULT
+        // identity assigns; the heal runs with a floor one above the sequence's value at that instant, the interleaving a
+        // concurrent draw has to cross. A setval-based heal sets the sequence back past an id one of them has just drawn,
+        // and the next draw repeats it, possibly in the other tenant: UNIQUE is (tenant_id, collection_id), so nothing else
+        // refuses the repeat. Every id either side drew or was assigned must be distinct.
+        String other = "mint-heal-tenant-b";
+        int heals = 100_000;
+        var start = new CountDownLatch(1);
+        var healed = new AtomicBoolean(false);
+        ExecutorService pool = Executors.newFixedThreadPool(3);
+        try {
+            Future<List<long[]>> tenantA = pool.submit(() -> {
+                List<long[]> drawn = new ArrayList<>();
+                try (Connection c = pg.createConnection("")) {
+                    var ctx = DSL.using(c, SQLDialect.POSTGRES);
+                    start.await();
+                    do {
+                        drawn.add(CollectionMintSupport.drawIds(ctx, 20_000));
+                    } while (!healed.get());
+                }
+                return drawn;
+            });
+            Future<List<Long>> tenantB = pool.submit(() -> {
+                List<Long> assigned = new ArrayList<>();
+                try (Connection c = pg.createConnection("")) {
+                    var ctx = DSL.using(c, SQLDialect.POSTGRES);
+                    start.await();
+                    for (int k = 0; k < 20_000 && !healed.get(); k++) {
+                        assigned.add(CollectionMintSupport.insertWithDefaultId(ctx, other, "race-b-" + k, "race-owner-" + k, MODEL));
+                    }
+                }
+                return assigned;
+            });
+            Future<Integer> healer = pool.submit(() -> {
+                try (Connection c = svcDs.getConnection()) {
+                    start.await();
+                    return CollectionMintSupport.healAtTheEdge(DSL.using(c, SQLDialect.POSTGRES), heals);
+                } finally {
+                    healed.set(true);
+                }
+            });
+            start.countDown();
+
+            assertThat(healer.get(180, TimeUnit.SECONDS)).as("every heal call ran").isEqualTo(heals);
+            long[] all = Arrays.stream(new long[][] {
+                tenantA.get(60, TimeUnit.SECONDS).stream().flatMapToLong(Arrays::stream).toArray(),
+                tenantB.get(60, TimeUnit.SECONDS).stream().mapToLong(Long::longValue).toArray()
+            }).flatMapToLong(Arrays::stream).toArray();
+            assertThat(all.length).as("the drawers overlapped the heals (non-vacuity)").isGreaterThan(20_000);
+            Arrays.sort(all);
+            List<Long> repeated = new ArrayList<>();
+            for (int i = 1; i < all.length; i++) {
+                if (all[i] == all[i - 1]) {
+                    repeated.add(all[i]);
+                }
+            }
+            assertThat(repeated).as("ids drawn or assigned twice across the two tenants, of " + all.length + " drawn").isEmpty();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     @Test @Order(9)
     void aSecondTakenIdAfterTheHealIsRefusedAsSequenceBehindData() {
-        // The sequence cycles over [1, max]: after the heal (setval to max) the next draw wraps to 1, which is a row too.
+        // The sequence cycles over [1, max]: the first draw wraps to 1 (a row), the heal draws forward to max, and the next draw
+        // wraps to 1 again, which is a row too.
         su(ctx -> {
             // the cycle spans the largest id of every tenant, and a heal only knows its own tenant's: the other tenant of the
             // test above goes, so this tenant's largest id is the sequence's largest
