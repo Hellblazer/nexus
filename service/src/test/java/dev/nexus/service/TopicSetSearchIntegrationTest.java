@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.Chash;
@@ -179,7 +180,7 @@ class TopicSetSearchIntegrationTest {
 
     private void insertChunk(DSLContext dsl, int dim, String collection, String model, String key, double theta) {
         dsl.insertInto(CHUNKS)
-            .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.CHASH, chash(key))
+            .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, collection).set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection)).set(CHUNKS.CHASH, chash(key))
             .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, text(key))
             .set(VectorSeeds.chunkEmbedding(dim),
                  VectorSeeds.vecXY(dim, (float) Math.cos(theta), (float) Math.sin(theta)))
@@ -188,7 +189,7 @@ class TopicSetSearchIntegrationTest {
 
     private long insertTopic(DSLContext dsl, String label, String collection) {
         return dsl.insertInto(TOPICS)
-            .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, label).set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.TENANT_ID, TENANT).set(TOPICS.LABEL, label).set(TOPICS.COLLECTION, collection).set(TOPICS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(TOPICS.CREATED_AT, SEED_TS)
             .returningResult(TOPICS.ID).fetchOne(TOPICS.ID);
     }
@@ -196,7 +197,7 @@ class TopicSetSearchIntegrationTest {
     private void assign(DSLContext dsl, long topic, String sourceCollection, String model, String key) {
         dsl.insertInto(TOPIC_ASSIGNMENTS)
             .set(TOPIC_ASSIGNMENTS.TENANT_ID, TENANT).set(TOPIC_ASSIGNMENTS.DOC_ID, chash(key))
-            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection)
+            .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topic).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, sourceCollection).set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(TENANT, sourceCollection))
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS).set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, model)
             .execute();
     }
@@ -207,6 +208,7 @@ class TopicSetSearchIntegrationTest {
             .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, doc)
             .set(CATALOG_DOCUMENTS.TITLE, "Doc " + doc).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CATALOG_DOCUMENTS.SENSITIVE, sensitive)
             .set(CATALOG_DOCUMENTS.DELETED_AT, tombstoned ? SEED_TS : null)
             .execute();
@@ -214,6 +216,7 @@ class TopicSetSearchIntegrationTest {
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(key))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
             .execute();
     }
