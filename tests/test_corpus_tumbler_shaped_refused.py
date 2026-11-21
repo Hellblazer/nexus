@@ -115,3 +115,24 @@ def test_nx_dt_capture_refuses_a_tumbler_shaped_corpus_for_a_markdown_capture_on
     with patch("nexus.commands.dt._is_darwin", return_value=False):
         pdf = CliRunner().invoke(dt, ["capture", "--corpus", "1_20", "--file", "x.pdf"])
     assert "owner segment" not in pdf.output and "macOS-only" in pdf.output, pdf.output
+    # A markdown capture with a --collection never builds the docs name: not refused either.
+    with patch("nexus.commands.dt._is_darwin", return_value=False):
+        named = CliRunner().invoke(dt, ["capture", "--corpus", "1_20", "--collection", "knowledge__x", "--file", "x.md"])
+    assert "owner segment" not in named.output and "macOS-only" in named.output, named.output
+
+
+def test_nx_dt_index_refuses_a_tumbler_shaped_corpus_before_it_reads_any_devonthink_record():
+    # The corpus is checked up front, so a mixed batch (PDFs, then a markdown note) refuses before its PDFs are indexed.
+    with patch("nexus.commands.dt._gather_records") as gather:
+        result = CliRunner().invoke(dt, ["index", "--corpus", "1-20", "--uuid", "00000000-0000-0000-0000-000000000000"])
+    assert result.exit_code == 2, result.output
+    assert "owner segment" in result.output
+    gather.assert_not_called()
+
+
+def test_nx_dt_index_with_a_collection_or_a_normal_corpus_goes_on_to_read_the_records():
+    for argv in (["--corpus", "1-20", "--collection", "knowledge__x"], ["--corpus", "my-notes"]):
+        with patch("nexus.commands.dt._gather_records", return_value=[]) as gather:
+            result = CliRunner().invoke(dt, ["index", *argv, "--uuid", "00000000-0000-0000-0000-000000000000"])
+        assert "owner segment" not in result.output, (argv, result.output)
+        gather.assert_called_once()
