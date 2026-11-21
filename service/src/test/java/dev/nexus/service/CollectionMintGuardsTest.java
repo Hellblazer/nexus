@@ -428,8 +428,9 @@ class CollectionMintGuardsTest {
 
     @Test
     void aMintWhoseConflictTargetMatchesNoUniqueIndexFallsBackToTheTupleLock_andMintsOneRow() {
-        aNonInferableIndexOfTheSameName(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live").and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")));
         String owner = "guards-42p10";
+        aNonInferableIndexOfTheSameName(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live").and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+            .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner)));
 
         var first = repo.mintCollection(TENANT, attrs(owner), true);
         var again = repo.mintCollection(TENANT, attrs(owner), true);
@@ -442,7 +443,7 @@ class CollectionMintGuardsTest {
 
     @Test
     void aMintWhoseInsertMeetsTheTupleIndexsUniqueViolationIsANamedRetryableConflict_notAnInternalError() {
-        // The same-named index also covers a tombstone (it has no superseded_by filter), and a tombstone is no live row of the
+        // The same-named index also covers a tombstone (its predicate has no superseded_by filter), and a tombstone is no live row of the
         // tuple: the mint finds nothing to answer, its plain insert (the fallback of the case above) meets the index's own
         // 23505, and that is the same named, retryable refusal an insert that leaves no live row gets, as it would be for an
         // index built between the mint's probe and its insert (a second engine whose boot migrated, an operator).
@@ -451,7 +452,8 @@ class CollectionMintGuardsTest {
             CollectionMintSupport.insertTombstone(ctx, TENANT, "guards-23505-tomb", owner, MODEL, "guards-23505-successor");
             return null;
         });
-        aNonInferableIndexOfTheSameName(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"));
+        // the predicate names this test's owner: the class's other tests leave tombstones and live rows of one tuple
+        aNonInferableIndexOfTheSameName(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live").and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner)));
 
         assertThatThrownBy(() -> repo.mintCollection(TENANT, attrs(owner), true))
             .as("not a bare unique violation")
