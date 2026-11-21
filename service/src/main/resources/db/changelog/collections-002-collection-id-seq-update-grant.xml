@@ -22,12 +22,21 @@
 DO $$
 DECLARE
     seq text;
+    seq_owner text;
 BEGIN
     seq := pg_get_serial_sequence('nexus.catalog_collections', 'collection_id');
     IF seq IS NULL THEN
         RAISE EXCEPTION 'collections-002: nexus.catalog_collections.collection_id has no owned sequence — schema drift';
     END IF;
-    EXECUTE format('GRANT UPDATE ON SEQUENCE %s TO nexus_svc', seq);
+    -- Only the sequence's owner can grant on it (grants-nexus-svc iterates owner-restricted for the same reason): a boot
+    -- must never halt on a privilege, so a sequence owned by another role is reported and left, and the engine's heal then
+    -- fails loudly at the setval, naming the sequence, until that owner grants UPDATE.
+    SELECT pg_get_userbyid(c.relowner) INTO seq_owner FROM pg_class c WHERE c.oid = seq::regclass;
+    IF seq_owner = current_user THEN
+        EXECUTE format('GRANT UPDATE ON SEQUENCE %s TO nexus_svc', seq);
+    ELSE
+        RAISE WARNING 'collections-002: % is owned by %, not by the migration role %: UPDATE not granted to nexus_svc; a restore that leaves collection_id behind its rows cannot be healed until its owner grants it', seq, seq_owner, current_user;
+    END IF;
 END
 $$;
         </sql>
