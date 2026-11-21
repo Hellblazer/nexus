@@ -56,7 +56,7 @@ is PITR. The window stays open only while the moves cannot run:
 - On the cloud, the window lasts until pg_background is installed on the cloud's PostgreSQL (nexus-f3yqd.2.23).
 
 The query above counts any stamp move, the registry's included. Whether Sam's "a stamp" means that one, or only the moves of
-the large tables, is an open question for him (critique S3 of nexus-p2m1x.17); until he answers, the registry's completion
+the large tables, is an open question for him; until he answers, the registry's completion
 closes the window.
 
 ## Procedure
@@ -138,7 +138,11 @@ SELECT conrelid::regclass AS relation, conname FROM pg_catalog.pg_constraint
    permanent failure), and gate 1 of the completion check never holds. This step adds every listed CHECK back, `NOT VALID` with
    the expression the changeset used, in one transaction as `nexus_admin`. A `NOT VALID` constraint scans no row, so the rows the
    previous engine wrote meanwhile cannot fail it; the stamp moves fill their ids. It skips a table or id column the install lacks and a
-   constraint that is already there, so it is safe to run twice. `psql -X -v ON_ERROR_STOP=1 --single-transaction -f
+   constraint that is already there, so it is safe to run twice. One CHECK is held back on the same data condition as vectors-068-19:
+   `catalog_collections_superseded_by_id_check` is skipped, with a `NOTICE` that says so, while a tombstone with a blank
+   `model_version` has no `superseded_by_id`, because D2's repair move (`repair-catalog-collection-model-version`) updates exactly
+   those rows and a `NOT VALID` CHECK would refuse it with SQLSTATE `23514`. If you see that `NOTICE`, run the re-add again once that
+   move has completed; until then the verification query below returns that one constraint fewer and gate 1 reports it missing. `psql -X -v ON_ERROR_STOP=1 --single-transaction -f
    rdr-229-p31-readd.sql` (the file is `docs/runbooks/rdr-229-p31-readd.sql`) runs this text, or paste it:
 
 <!-- p31-readd:begin -->
@@ -153,13 +157,19 @@ SELECT conrelid::regclass AS relation, conname FROM pg_catalog.pg_constraint
 --   psql -X -v ON_ERROR_STOP=1 --single-transaction -f rdr-229-p31-readd.sql
 -- A NOT VALID constraint scans no row, so rows the previous engine wrote meanwhile cannot fail it; the stamp moves
 -- fill their ids. It is safe to run twice. A table or id column that is absent (the retired queue) is skipped.
+-- catalog_collections_superseded_by_id_check is held back, with a NOTICE, while a tombstone with a blank model_version
+-- has no superseded_by_id (vectors-068-19's precondition): run this script again once D2's repair move has completed.
 SET LOCAL lock_timeout = '5s';
 DO $q$
 BEGIN
     IF to_regclass('nexus.catalog_collections') IS NOT NULL
        AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass('nexus.catalog_collections') AND attname = 'superseded_by_id' AND NOT attisdropped)
        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = to_regclass('nexus.catalog_collections') AND conname = 'catalog_collections_superseded_by_id_check') THEN
-        ALTER TABLE nexus.catalog_collections ADD CONSTRAINT catalog_collections_superseded_by_id_check CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID;
+        IF EXISTS (SELECT 1 FROM nexus.catalog_collections c WHERE c.superseded_by <> '' AND c.superseded_by_id IS NULL AND c.model_version = '') THEN
+            RAISE NOTICE 'catalog_collections_superseded_by_id_check skipped: a tombstone with a blank model_version has no superseded_by_id, and D2''s repair-catalog-collection-model-version move would meet 23514 on it; run this script again once that move has completed';
+        ELSE
+            ALTER TABLE nexus.catalog_collections ADD CONSTRAINT catalog_collections_superseded_by_id_check CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID;
+        END IF;
     END IF;
 END
 $q$;
@@ -386,7 +396,12 @@ A stamp move that finishes while some row names a collection with no registry ro
 table's CHECK stays `NOT VALID`; `nx doctor` shows a "RDR-229 VALIDATE <table>" warning, and the engine's `/v1/status`
 `rdr229_completion.validate_waits` carries the same text. The move is complete, so it does not run again: registering the
 missing collection alone stamps nothing, and `VALIDATE CONSTRAINT` by hand would still fail with SQLSTATE `23514`. An orphan row
-also cannot be updated by any writer while its id is NULL, for the same CHECK.
+is write-frozen: any UPDATE of an orphan row fails with SQLSTATE `23514` (its name is set and its id is NULL) until its collection
+is registered or the row is deleted. That includes the engine's own writes to that row.
+
+The doctor row says how many orphan rows there are. If it says 0 and only unstamped rows remain (rows that name a registered
+collection but whose id is still empty, written while the stamp ran or by a previous engine), there is nothing to register or
+delete: skip step 1 and run step 2 alone, which finishes it.
 
 1. **Remove the orphans.** Either register each missing collection, or delete the rows that name it.
 2. **Run the restamp.** As the migrating role (`nexus_admin`):
@@ -399,6 +414,12 @@ also cannot be updated by any writer while its id is NULL, for the same CHECK.
    rows that have become resolvable and validates the CHECK. It answers `registered: ...` or `not registered: <reason>` (for
    example, an orphan row is still there) and writes nothing else; run it again after fixing what the reason names. The move is
    throttled like any stamp move and shows under the Data moves rows while it runs.
+
+   The function looks for an orphan row by reading the table in block ranges, and stops after 60 seconds
+   (`nexus.rdr229_restamp_probe_ms`, in milliseconds, set per session). On a table it cannot read in that time it answers `not
+   registered: the orphan probe of <table> did not finish within 60000 ms (K of M blocks read); nothing was registered`, and writes
+   nothing; run it again, or give the session a longer bound first (`SET nexus.rdr229_restamp_probe_ms = 300000;`). A
+   `statement_timeout` set inside the function would not bound it, so the bound is the function's own.
 
 The listings `nx doctor` prints for the dangling-tombstone and self-id counts are read-only queries, also run as `nexus_admin`.
 

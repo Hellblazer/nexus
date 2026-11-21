@@ -8,13 +8,19 @@
 --   psql -X -v ON_ERROR_STOP=1 --single-transaction -f rdr-229-p31-readd.sql
 -- A NOT VALID constraint scans no row, so rows the previous engine wrote meanwhile cannot fail it; the stamp moves
 -- fill their ids. It is safe to run twice. A table or id column that is absent (the retired queue) is skipped.
+-- catalog_collections_superseded_by_id_check is held back, with a NOTICE, while a tombstone with a blank model_version
+-- has no superseded_by_id (vectors-068-19's precondition): run this script again once D2's repair move has completed.
 SET LOCAL lock_timeout = '5s';
 DO $q$
 BEGIN
     IF to_regclass('nexus.catalog_collections') IS NOT NULL
        AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass('nexus.catalog_collections') AND attname = 'superseded_by_id' AND NOT attisdropped)
        AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = to_regclass('nexus.catalog_collections') AND conname = 'catalog_collections_superseded_by_id_check') THEN
-        ALTER TABLE nexus.catalog_collections ADD CONSTRAINT catalog_collections_superseded_by_id_check CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID;
+        IF EXISTS (SELECT 1 FROM nexus.catalog_collections c WHERE c.superseded_by <> '' AND c.superseded_by_id IS NULL AND c.model_version = '') THEN
+            RAISE NOTICE 'catalog_collections_superseded_by_id_check skipped: a tombstone with a blank model_version has no superseded_by_id, and D2''s repair-catalog-collection-model-version move would meet 23514 on it; run this script again once that move has completed';
+        ELSE
+            ALTER TABLE nexus.catalog_collections ADD CONSTRAINT catalog_collections_superseded_by_id_check CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID;
+        END IF;
     END IF;
 END
 $q$;

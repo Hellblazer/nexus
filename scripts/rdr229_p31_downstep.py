@@ -11,8 +11,10 @@ CHECKs are gone). conexus runs it; the runbook is docs/runbooks/rdr-229-p31-roll
 The down-step drops the CHECKs but DATABASECHANGELOG still records vectors-068-3 to -19 as run, so a later deploy of the
 P3.1 engine does not add them again, and a stamp move's on_complete then fails on a constraint that does not exist (42704).
 The re-add is the other half: the same list, the same expressions the changesets add them with, each NOT VALID (so it
-scans no row), each guarded so it can run twice and skips a table or id column the install lacks. The runbook runs it after
-the redeploy and before it releases the pause.
+scans no row), each guarded so it can run twice and skips a table or id column the install lacks. The one CHECK vectors-068-19
+holds back while a tombstone with a blank model_version has no superseded_by_id (D2's repair move would meet 23514 on it) is
+held back here on the same condition, with a NOTICE; the operator runs the re-add again once that move has completed. The
+runbook runs it after the redeploy and before it releases the pause.
 
 The constraint names come from service/src/main/resources/db/rdr229/p31-checks.tsv, the list the changesets, the
 completion check and this script share, so a table added to it is added to both.
@@ -49,6 +51,9 @@ UNPAUSE_END = "<!-- p31-unpause:end -->"
 
 # What paused_by says, so the unpause releases only the rows this procedure paused and never an operator's own hold.
 PAUSED_BY = "rdr229 down-step"
+
+# vectors-068-19's precondition, word for word (tests/test_rdr229_p31_downstep.py compares it with the changeset text).
+SUPERSEDED_HELD_BACK = "c.superseded_by <> '' AND c.superseded_by_id IS NULL AND c.model_version = ''"
 
 _NAME = re.compile(r"^\w+$")
 
@@ -130,17 +135,34 @@ def generate_readd(list_text: str) -> str:
         "--   psql -X -v ON_ERROR_STOP=1 --single-transaction -f rdr-229-p31-readd.sql",
         "-- A NOT VALID constraint scans no row, so rows the previous engine wrote meanwhile cannot fail it; the stamp moves",
         "-- fill their ids. It is safe to run twice. A table or id column that is absent (the retired queue) is skipped.",
+        "-- catalog_collections_superseded_by_id_check is held back, with a NOTICE, while a tombstone with a blank model_version",
+        "-- has no superseded_by_id (vectors-068-19's precondition): run this script again once D2's repair move has completed.",
         "SET LOCAL lock_timeout = '5s';",
     ]
     for table, name_column, id_column, constraint, kind in parse_rows(list_text):
         expression = check_expression(name_column, id_column, kind)
+        add = f"ALTER TABLE nexus.{table} ADD CONSTRAINT {constraint} CHECK ({expression}) NOT VALID;"
         lines += [
             "DO $q$",
             "BEGIN",
             f"    IF to_regclass('nexus.{table}') IS NOT NULL",
             f"       AND EXISTS (SELECT 1 FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass('nexus.{table}') AND attname = '{id_column}' AND NOT attisdropped)",
             f"       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conrelid = to_regclass('nexus.{table}') AND conname = '{constraint}') THEN",
-            f"        ALTER TABLE nexus.{table} ADD CONSTRAINT {constraint} CHECK ({expression}) NOT VALID;",
+        ]
+        if kind == "SUPERSEDED":
+            # vectors-068-19's data precondition: a NOT VALID CHECK refuses the UPDATE of an unstamped tombstone with 23514, and D2's
+            # repair-catalog-collection-model-version move UPDATEs exactly the tombstones with a blank model_version. The changeset skips
+            # the CHECK while one exists and retries at the next boot; this script skips it and says so, and the operator runs it again.
+            lines += [
+                f"        IF EXISTS (SELECT 1 FROM nexus.{table} c WHERE {SUPERSEDED_HELD_BACK}) THEN",
+                f"            RAISE NOTICE '{constraint} skipped: a tombstone with a blank model_version has no {id_column}, and D2''s repair-catalog-collection-model-version move would meet 23514 on it; run this script again once that move has completed';",
+                "        ELSE",
+                f"            {add}",
+                "        END IF;",
+            ]
+        else:
+            lines += [f"        {add}"]
+        lines += [
             "    END IF;",
             "END",
             "$q$;",
