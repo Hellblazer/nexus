@@ -35,12 +35,14 @@ public final class MintedLabel {
 
     /**
      * A drawn id was already a row even after the sequence was healed once: something is writing explicit ids
-     * concurrently. A 409 on the route.
+     * concurrently. A 409 on the route. "Even after the heal" covers every tenant's ids only where D2's owner-read policy
+     * lets the heal's definer function read them; elsewhere it covers this tenant's.
      */
     public static final class SequenceBehindDataException extends IllegalStateException {
         public SequenceBehindDataException(long id) {
             super("minting a collection: the drawn collection_id " + id + " is already a row after the collection_id"
-                + " sequence was drawn forward to the largest collection_id of any tenant; something is inserting explicit ids"
+                + " sequence was drawn forward to the largest collection_id of any tenant the heal can read (every tenant where the"
+                + " owner-read policy exists, else this one); something is inserting explicit ids"
                 + " concurrently. Check the setval on pg_get_serial_sequence('nexus.catalog_collections','collection_id')");
         }
 
