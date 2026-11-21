@@ -40,8 +40,13 @@ public final class MintedLabel {
     public static final class SequenceBehindDataException extends IllegalStateException {
         public SequenceBehindDataException(long id) {
             super("minting a collection: the drawn collection_id " + id + " is already a row after the collection_id"
-                + " sequence was set to max(collection_id); something is inserting explicit ids concurrently. Check the"
-                + " setval on pg_get_serial_sequence('nexus.catalog_collections','collection_id')");
+                + " sequence was drawn forward to the tenant's largest collection_id; something is inserting explicit ids"
+                + " concurrently. Check the setval on pg_get_serial_sequence('nexus.catalog_collections','collection_id')");
+        }
+
+        /** The heal refused (its message names the gap and the operator remedy): carried through to the 409 as it is. */
+        public SequenceBehindDataException(String message) {
+            super(message);
         }
     }
 
