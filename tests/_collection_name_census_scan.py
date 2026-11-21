@@ -119,6 +119,9 @@ from tests._lint_line_anchor import resolve_anchor
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC = REPO_ROOT / "src" / "nexus"
 CORPUS_REL = "src/nexus/corpus.py"
+#: The parser definitions and the migration-source floor (RDR-229 P2.2): the parser roots live here,
+#: and a call inside it is the floor, never a site. Every other name read is a classified census caller.
+LEGACY_NAMES_REL = "src/nexus/catalog/rows/legacy_names.py"
 
 #: Collection-type / lifecycle prefixes a raw ``startswith``/``endswith``
 #: call names when it parses a collection NAME. RDR-204's five plus
@@ -365,9 +368,11 @@ def _is_raw_parse_call(node: ast.AST) -> bool:
 
 def derive_parser_helpers(
     corpus_tree: ast.Module, extra_roots: frozenset[str] = frozenset(),
+    legacy_tree: ast.Module | None = None,
 ) -> frozenset[str]:
-    """The fifth class's helper set, derived from ``corpus.py``'s own call
-    graph (RDR-229 Technical Design item 4), never typed as a list.
+    """The fifth class's helper set, derived from the call graph of ``legacy_names.py`` (where the
+    parser definitions live since RDR-229 P2.2) and ``corpus.py`` (whose functions reach them),
+    never typed as a list (RDR-229 Technical Design item 4).
 
     Roots are the parser definitions: a module-level function that applies a
     module-level compiled regex (``re.compile``), or that holds a raw
@@ -383,21 +388,23 @@ def derive_parser_helpers(
     """
     regexes: set[str] = set()
     aliases: dict[str, str] = {}
-    for n in corpus_tree.body:
-        if not isinstance(n, ast.Assign):
-            continue
-        v = n.value
-        if (
-            isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-            and v.func.attr == "compile"
-            and isinstance(v.func.value, ast.Name) and v.func.value.id == "re"
-        ):
-            regexes |= {t.id for t in n.targets if isinstance(t, ast.Name)}
-        elif isinstance(v, ast.Name):
-            for t in n.targets:
-                if isinstance(t, ast.Name):
-                    aliases[t.id] = v.id
-    funcs = _module_functions(corpus_tree)
+    funcs: dict[str, ast.AST] = {}
+    for tree in (corpus_tree, *([legacy_tree] if legacy_tree is not None else [])):
+        for n in tree.body:
+            if not isinstance(n, ast.Assign):
+                continue
+            v = n.value
+            if (
+                isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
+                and v.func.attr == "compile"
+                and isinstance(v.func.value, ast.Name) and v.func.value.id == "re"
+            ):
+                regexes |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+            elif isinstance(v, ast.Name):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        aliases[t.id] = v.id
+        funcs.update(_module_functions(tree))
     refs: dict[str, set[str]] = {}
     reach: set[str] = {n for n in extra_roots if n in funcs}
     for name, fn in funcs.items():
@@ -426,9 +433,11 @@ def derive_parser_helpers(
 def live_parser_helpers() -> frozenset[str]:
     tree = _parse(REPO_ROOT / CORPUS_REL)
     assert tree is not None, f"{CORPUS_REL} does not parse"
+    legacy_tree = _parse(REPO_ROOT / LEGACY_NAMES_REL)
+    assert legacy_tree is not None, f"{LEGACY_NAMES_REL} does not parse"
     from tests import _collection_name_census_cross as _cross  # noqa: PLC0415 - the cross module imports this one
 
-    return derive_parser_helpers(tree, _cross.corpus_roots())
+    return derive_parser_helpers(tree, _cross.corpus_roots(), legacy_tree)
 
 
 def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
@@ -763,7 +772,8 @@ def _raw_sites_uncached(
     another. ``primitive_call`` hits inside ``corpus.py`` are dropped: the
     helpers call one another by construction, and the coordinator's ruling
     (RDR-204 nexus-ft04v.26) scopes the fifth class to callers outside
-    ``corpus.py``'s own bodies.
+    ``corpus.py``'s own bodies; ``legacy_names.py``, the floor since RDR-229
+    P2.2, holds the parser definitions, so no hit inside it is a site.
 
     Raises ``ValueError`` naming any file that does not parse: a file the
     walk cannot read is a hole in the census, never a quiet zero."""
@@ -791,6 +801,8 @@ def _raw_sites_uncached(
         hits = scan_file(path, tree_consts, helpers, dunders, roots)
         if rel == CORPUS_REL:
             hits = [(ln, s) for ln, s in hits if s != "primitive_call"]
+        elif rel == LEGACY_NAMES_REL:
+            hits = []  # the parsers' own bodies: the floor, whatever shape they spell
         if hits:
             found[rel] = hits
     return found

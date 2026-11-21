@@ -51,9 +51,14 @@ def test_the_row_wins_over_name_model() -> None:
     assert _target_model(_store({"embedding_model": _BGE}), _LEGACY, name_model=_MINI) == (_BGE, True)
 
 
-@pytest.mark.parametrize("row", [None, {"content_type": "docs"}], ids=["no-row", "row-without-model"])
-def test_no_row_answers_name_model_when_given(row) -> None:
-    assert _target_model(_store(row), _LEGACY, name_model=_MINI) == (_MINI, True)
+def test_no_row_answers_name_model_when_given() -> None:
+    assert _target_model(_store(None), _LEGACY, name_model=_MINI) == (_MINI, True)
+
+
+def test_a_row_without_a_model_answers_name_model_flagged_as_a_guess() -> None:
+    """The row is the source of the model, so a row with none is Unreadable (RDR-229 P2.2): the answer is the
+    name's, flagged, as for a failed listing, and no stamp is judged against it."""
+    assert _target_model(_store({"content_type": "docs"}), _LEGACY, name_model=_MINI) == (_MINI, False)
 
 
 def test_an_unreadable_row_answers_name_model_flagged_as_a_guess() -> None:

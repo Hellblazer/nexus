@@ -48,7 +48,7 @@ def scope(monkeypatch):
     monkeypatch.setattr(core, "_get_collection_names", lambda: [ALPHA, BETA, CODE])
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",
-        lambda name: {"content_type": name.split("__", 1)[0], "lifecycle_state": "live"},
+        lambda name, *, refresh=True, strict=False: {"content_type": name.split("__", 1)[0], "lifecycle_state": "live"},
     )
     monkeypatch.setattr(core, "_get_collection_counts", lambda **_kw: {ALPHA: 2, BETA: 2, CODE: 5})
     # structured store_get_many asks the catalog for each chunk's owners (nexus-tko2w); these

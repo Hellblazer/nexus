@@ -62,7 +62,7 @@ VOY_RDR = "rdr__voyowner__voyage-context-3__v1"
 BGE_KNOW = f"knowledge__bgeowner__{BGE}__v1"
 
 
-def _row_for(name: str) -> dict:
+def _row_for(name: str, *, refresh: bool = True, strict: bool = False) -> dict:
     """A catalog row whose embedding_model is the name's own token (the
     shared ``catalog_row_for_collection_name`` only knows Voyage tokens)."""
     row = catalog_row_for_collection_name(name)

@@ -45,9 +45,6 @@ QUAR_NOROW: str = (
 WM_P24: str = (
     "Taxonomy threshold keyed by the name's prefix; becomes a row read at P2.4."
 )
-WM_P22: str = (
-    'RDR-204 (b) read-path model read from the name; becomes a resolve_collection Row read at P2.2.'
-)
 MINT_QUAR: str = (
     "Mints the quarantine sibling's name from the origin's; the row is preferred and the name read only when the origin has none (RDR-204 coordinator ruling 2026-09-08)."
 )
@@ -68,4 +65,13 @@ LABEL_TYPED: str = (
     'It matches the label string the user typed (`<value>__` as a name prefix) and decomposes nothing; it stays because a '
     "repo row's owner_id is the tumbler segment, so code__<slug>-<hash8> matches no tuple. A prefix match "
     'whose own row is not live (or superseded) is dropped by it; a name with no row is kept.'
+)
+MINT_T3DB: str = (
+    'T3Database is the test-only Chroma-era facade (it dies with the chromadb dependency, RDR-155 P3) and holds no catalog, so the NoRow outcome is the only one it can have: the model comes from the name (RDR-229 item 1).'
+)
+DIAG_DRIFT: str = (
+    "doctor_search's model_drift probe compares what the NAME says (this site) with the model the collection reports, which is the row's since P2.2 (HttpVectorClient.collection_metadata); a row read here would make the probe vacuous (RDR-204 (d))."
+)
+MIG_BLANK: str = (
+    "RDR-229 P2.2: a registry row with a blank model_version takes the version from its conformant label (legacy_names.version_of_blank_row_label) until D2 (nexus-f3yqd.2.23) completes; the label is from an older era. Removed once D2's cloud run completes (no bead owns it, RDR-229 Phase 1.4)."
 )

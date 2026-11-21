@@ -208,10 +208,10 @@ def test_line_chunks_fit_the_window(window) -> None:
 # ── wiring ───────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(("path", "needle"), [
-    ("src/nexus/code_indexer.py", "token_window=window_for_collection(ctx.corpus, ctx.embedding_model)"),
-    ("src/nexus/prose_indexer.py", "window_for_collection(ctx.corpus, ctx.embedding_model)"),
-    ("src/nexus/doc_indexer.py", "window_for_collection(collection_name, target_model)"),
-    ("src/nexus/pipeline_stages.py", "token_window=window_for_collection(corpus, target_model)"),
+    ("src/nexus/code_indexer.py", "token_window=window_for_collection(ctx.corpus, ctx.embedding_model, row_model=ctx.embedding_model)"),
+    ("src/nexus/prose_indexer.py", "window_for_collection(ctx.corpus, ctx.embedding_model, row_model=ctx.embedding_model)"),
+    ("src/nexus/doc_indexer.py", "window_for_collection(collection_name, target_model, row_model=row_model)"),
+    ("src/nexus/pipeline_stages.py", "token_window=window_for_collection(corpus, target_model, row_model=row_model)"),
 ])
 def test_every_indexer_chunks_to_its_models_window(path, needle) -> None:
     """Wiring pin: a chunk site that stops passing the window goes back to
@@ -227,7 +227,7 @@ def test_doc_indexer_pins_the_window_to_the_collection_not_the_ef() -> None:
     both partials must hand them the collection (nexus-25wlq)."""
     src = (REPO_ROOT / "src/nexus/doc_indexer.py").read_text(encoding="utf-8")
     assert "window_for_model" not in src
-    assert src.count("window_for_collection(collection_name, target_model)") == 2
+    assert src.count("window_for_collection(collection_name, target_model") == 2
     assert src.count("collection_name=col_name") == 3  # pdf partial, markdown partial x2
 
 
@@ -250,6 +250,91 @@ def test_markdown_chunks_use_the_collections_window_not_the_efs(tmp_path, monkey
     w = window_for_model("bge-base-en-v15-768")
     assert w is not None and len(out) >= 3
     assert all(w.count(text) <= 512 for _id, text, _meta, _p in out)
+
+
+def test_markdown_chunks_use_the_rows_window_for_a_conformant_name_whose_row_differs(
+    tmp_path, monkeypatch, cloud_mode
+) -> None:
+    """RDR-229 P2.2: the name says voyage (no window), the row's model is bge (512): the row decides."""
+    from nexus.doc_indexer import _markdown_chunks
+
+    asked: list[str] = []
+    real = window_for_model
+
+    def spy(model: str):
+        asked.append(model)
+        return real(model)
+
+    spy.cache_clear = real.cache_clear  # type: ignore[attr-defined]
+    monkeypatch.setattr("nexus.embed_window.window_for_model", spy)
+    _synthetic_tokenizer(tmp_path / "tokenizer.json")
+    monkeypatch.setenv("NX_SERVICE_BGE_DIR", str(tmp_path))
+    md = tmp_path / "doc.md"
+    md.write_text("# T\n\n" + " ".join(f"word{i}" for i in range(300)) + "\n", encoding="utf-8")
+    name = "docs__repo-1-1__voyage-context-3__v1"
+    _markdown_chunks(md, "h", "all-MiniLM-L6-v2", "2026-01-01", "corp", collection_name=name)
+    assert asked == ["voyage-context-3"]
+    asked.clear()
+    _markdown_chunks(
+        md, "h", "all-MiniLM-L6-v2", "2026-01-01", "corp", collection_name=name,
+        row_model="bge-base-en-v15-768",
+    )
+    assert asked == ["bge-base-en-v15-768"]
+
+
+def test_index_document_hands_its_chunker_the_model_it_already_read(cloud_mode) -> None:
+    """RDR-229 P2.2: no second catalog read for the window. ``_index_document`` passes the chunker the model
+    ``_target_model`` read (the row's when a row backs the collection); a local-mode override passes none."""
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+
+    from nexus.doc_indexer import _index_document
+    from nexus.errors import CatalogIdentityMissingError
+
+    f = Path(__file__)
+    seen: list[dict] = []
+
+    def chunk_fn(*a, **kw):
+        seen.append(kw)
+        return [("c" * 64, "hello", {"chunk_text_hash": "c" * 64, "embedding_model": "m"}, {"line_start": 1})]
+
+    for flag, expect in ((True, {"row_model": "bge-base-en-v15-768"}), (False, {})):
+        seen.clear()
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value=""), \
+                patch("nexus.doc_indexer._doc_id_for_path", return_value=""), \
+                patch("nexus.doc_indexer._register_before_read"), \
+                patch("nexus.doc_indexer._target_model", return_value=("bge-base-en-v15-768", True)), \
+                pytest.raises(CatalogIdentityMissingError):
+            _index_document(
+                f, "corp", chunk_fn, MagicMock(), collection_name="docs__repo-1-1__voyage-context-3__v1",
+                embed_fn=lambda texts, model: ([[0.1] * 4] * len(texts), model), force=True,
+                chunk_row_model=flag,
+            )
+        assert seen == [expect]
+
+
+def test_index_markdown_asks_for_its_chunkers_row_model(tmp_path) -> None:
+    """index_markdown builds the markdown chunker's partial before any store exists, so it asks
+    ``_index_document`` to hand the chunker the model it reads (``chunk_row_model``)."""
+    from unittest.mock import MagicMock, patch
+
+    from nexus.doc_indexer import index_markdown
+
+    md = tmp_path / "doc.md"
+    md.write_text("# T\n\nbody text\n", encoding="utf-8")
+    seen: dict = {}
+
+    def fake_index_document(path, corpus, chunk_fn, *a, **kw):
+        seen.update(kw)
+        seen["chunk_fn"] = chunk_fn
+        return 0
+
+    with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.1.1"), \
+            patch("nexus.doc_indexer._index_document", side_effect=fake_index_document):
+        index_markdown(md, corpus="corp", t3=MagicMock(), collection_name="docs__repo-1-1__bge-base-en-v15-768__v1")
+    assert seen["chunk_row_model"] is True
+    assert seen["chunk_fn"].func.__name__ == "_markdown_chunks"
 
 
 def test_pdf_chunks_use_the_collections_window_not_the_efs(tmp_path, monkeypatch) -> None:

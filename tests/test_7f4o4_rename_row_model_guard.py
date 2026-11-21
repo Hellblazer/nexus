@@ -157,7 +157,7 @@ class TestRenameModelConflictHelper:
             ) is None
 
     def test_name_fallback_hook_can_decline_the_legacy_guess(self) -> None:
-        from nexus.corpus import embedding_model_for_collection_name
+        from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
 
         with patch("nexus.mcp_infra.get_collection_row", return_value=None):
             assert rename_model_conflict(

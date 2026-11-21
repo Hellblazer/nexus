@@ -56,7 +56,7 @@ class TestTargetName:
         assert rj.target_collection_name("knowledge", "notes", VB) == f"knowledge__notes__{VB}__v1"
 
     def test_result_is_a_conformant_name(self):
-        from nexus.corpus import is_conformant_collection_name
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
         assert is_conformant_collection_name(rj.target_collection_name("knowledge", "1.1", VB))
 

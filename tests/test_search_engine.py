@@ -88,7 +88,7 @@ def test_hybrid_mixed_corpus_no_warning(capsys, monkeypatch):
 
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",
-        lambda name: catalog_row_for_collection_name(name),
+        lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
     )
     results = [
         SearchResult(id="1", content="code", distance=0.1,
@@ -2355,7 +2355,7 @@ class TestApplyRankingBoosts:
 
         monkeypatch.setattr(
             "nexus.mcp_infra.get_collection_row",
-            lambda name: catalog_row_for_collection_name(name),
+            lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
         )
 
     def test_empty_results_returns_empty(self):
@@ -2450,7 +2450,7 @@ class TestBoostWindow:
 
         monkeypatch.setattr(
             "nexus.mcp_infra.get_collection_row",
-            lambda name: catalog_row_for_collection_name(name),
+            lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
         )
 
     @staticmethod

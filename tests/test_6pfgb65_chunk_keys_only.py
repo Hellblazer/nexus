@@ -111,6 +111,7 @@ def test_a_note_write_sends_chunk_keys_only(monkeypatch) -> None:
     from nexus.catalog.note_write import write_note
 
     monkeypatch.setattr(corpus, "embedding_model_row_preferred", lambda name: "bge-base-en-v1.5")
+    monkeypatch.setattr(corpus, "embedding_model_for_write", lambda name, **kw: ("bge-base-en-v1.5", True))
     rec = _RecordingCat()
     write_note(
         catalog_doc_id="1.1.1", collection=_COLL, pieces=["a note about chunk keys", "and a second piece"],
@@ -622,4 +623,4 @@ def test_the_document_indexers_fallback_registration_passes_the_content_type_it_
 def test_index_markdown_names_its_content_type_to_the_document_indexer() -> None:
     import nexus.doc_indexer as di
 
-    assert 'content_type="markdown",\n    )' in inspect.getsource(di.index_markdown)
+    assert 'content_type="markdown",' in inspect.getsource(di.index_markdown)

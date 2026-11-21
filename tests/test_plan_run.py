@@ -715,9 +715,10 @@ async def test_run_step_ref_to_missing_step_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_rejects_cross_embedding_dispatch() -> None:
+async def test_run_rejects_cross_embedding_dispatch(monkeypatch) -> None:
     """``scope.taxonomy_domain=code`` cannot dispatch to a ``docs__``
     collection (a different embedding domain)."""
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)  # no registry row: the name answers, no tenant
     from nexus.plans.runner import PlanRunEmbeddingDomainError, plan_run
 
     plan = {
@@ -737,7 +738,8 @@ async def test_run_rejects_cross_embedding_dispatch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_allows_matching_taxonomy_domain() -> None:
+async def test_run_allows_matching_taxonomy_domain(monkeypatch) -> None:
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)  # no registry row: the name answers, no tenant
     from nexus.plans.runner import plan_run
 
     plan = {

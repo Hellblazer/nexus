@@ -53,7 +53,7 @@ def fake_row(monkeypatch):
     import nexus.mcp_infra as mi
 
     rows: dict[str, dict] = {}
-    monkeypatch.setattr(mi, "get_collection_row", lambda name: rows.get(name))
+    monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: rows.get(name))
     return rows
 
 
@@ -68,7 +68,7 @@ def _fake_collection_rows(monkeypatch):
     via the ``fake_row`` fixture (function-scoped, applied after this one)."""
     import nexus.mcp_infra as mi
 
-    def _fake_get_collection_row(name: str) -> dict | None:
+    def _fake_get_collection_row(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
         content_type = name.partition("__")[0] if "__" in name else ""
         return {
             "content_type": content_type,

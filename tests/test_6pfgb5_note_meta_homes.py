@@ -123,6 +123,7 @@ def cat(monkeypatch):
 def no_row_lookup(monkeypatch):
     """put_note sizes its pieces from the collection row's embedding model; that read is storage."""
     monkeypatch.setattr("nexus.corpus.embedding_model_row_preferred", lambda collection: "bge-base-en-v15-768")
+    monkeypatch.setattr("nexus.corpus.embedding_model_for_write", lambda collection, **kw: ("bge-base-en-v15-768", True))
 
 
 def _note_keys(doc) -> dict:

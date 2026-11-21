@@ -75,7 +75,8 @@ def test_live_callers_of_both_roots_are_counted() -> None:
         "src/nexus/commands/collection.py": "candidates = resolve_corpus(name, [c[\"name\"] for c in cols])",
         "src/nexus/sensitive_write.py": "return CollectionName.parse(collection_name)",
         "src/nexus/catalog/sensitivity_doctor.py": "token = CollectionName.parse(collection).embedding_model",
-        "src/nexus/catalog/collection_name.py": "version = CollectionName.parse(name).model_version",
+        # P2.2: the P1.4 fallback is legacy_names.version_of_blank_row_label now, a counted call of a derived helper
+        "src/nexus/catalog/collection_name.py": 'return version_of_blank_row_label(row.get("name"), models=KNOWN_EMBEDDING_MODELS)',
     }
     for rel, text in named.items():
         lines = (_scan.REPO_ROOT / rel).read_text(encoding="utf-8").splitlines()
