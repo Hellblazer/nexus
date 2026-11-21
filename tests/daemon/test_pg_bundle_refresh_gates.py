@@ -235,7 +235,7 @@ def test_the_doctor_runs_the_bundle_row(world, monkeypatch):
         return step
 
     monkeypatch.setattr(health, "_row_stepper", stepper)
-    monkeypatch.setattr("nexus.config.nexus_config_dir", lambda: world.cfg)
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(world.cfg))
 
     with patch("nexus.config.is_local_mode", return_value=True):
         results, _local = health.run_health_checks(engine_status=None)
