@@ -391,15 +391,20 @@ for _site in LEDGER:
 #: routing 25 -> 0, mint 117 -> 127, migration-source 16 -> 19, const_prefix 21 -> 7, loop_prefix 7 -> 0,
 #: primitive_call 181 -> 191, glob_default 1 -> 0. (The tenth mint is ``topic_route.is_prose``: the request's
 #: names carry no row on a cold cache, so the prose test answers NoRow from the name.)
-PARSE_SITE_PIN: int = 228
+#:
+#: RDR-229 owner-is-source (the .nxexp import's owner derivation, ``nexus.nxexp_owner``), 228 -> 231: three mint sites
+#: for the one case that still reads the name, a no-row collection whose owner stem is ``<slug>-<hash8>`` (the repo
+#: owner's repo_hash): two splits in ``resolve_import_owner_tumbler`` and the call from ``exporter``'s wrapper. They
+#: empty with the importer's no-row case at P3.8. mint 127 -> 130, split 2 -> 4, primitive_call 191 -> 192.
+PARSE_SITE_PIN: int = 231
 CLASS_PIN: dict[str, int] = {
-    "mint": 127, "holdover": 23, "diagnostic": 42,
+    "mint": 130, "holdover": 23, "diagnostic": 42,
     "migration-source": 19, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 191, "const_prefix": 7, "fnmatch": 14,
-    "strip_prefix": 4, "startswith": 3, "split": 2,
+    "primitive_call": 192, "const_prefix": 7, "fnmatch": 14,
+    "strip_prefix": 4, "startswith": 3, "split": 4,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }
@@ -822,7 +827,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 228
+    assert PARSE_SITE_PIN == 231
 
 
 # ---------------------------------------------------------------------------

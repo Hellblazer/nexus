@@ -24,6 +24,9 @@ MINT_NOROW: str = (
 MINT_ROUTE: str = (
     "Item 1 NoRow/Unreadable outcome at a router (RDR-229 P2.9): the row's content_type decides, and the name's own `<type>__` segment (corpus.routing_content_type / candidate_content_type) answers only for a collection with no row. Empties at P3.8."
 )
+MINT_OWNER_STEM: str = (
+    "RDR-229 owner-is-source: an .nxexp import with no row owner, no live document and no bundle owner reads the owner stem (`<slug>-<hash8>`: the repo owner's repo_hash) from the name of the collection it is registering, because no row exists to say. Empties with the importer's last no-row case (P3.8)."
+)
 DIAG_D: str = (
     'RDR-204 (d): its purpose is to report or discover a name the catalog row does not back, so a row read would make it vacuous.'
 )

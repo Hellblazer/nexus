@@ -548,6 +548,13 @@ def export_collection(
     if _owners_apply(db):
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
         reader = make_catalog_reader()
+        # RDR-229: the repo owner rides the header, so an import registers the collection's documents
+        # under its source (nexus.nxexp_owner).
+        from nexus.nxexp_owner import export_owner_header  # noqa: PLC0415 — deferred: keeps the import graph as it was
+
+        if (owner_header := export_owner_header(collection_name, reader)) is not None:
+            header["owner"] = owner_header
+            header_line = json.dumps(header).encode() + b"\n"
 
     with open(output_path, "wb") as f:
         f.write(header_line)
@@ -650,48 +657,14 @@ def export_collection(
     }
 
 
-def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any) -> Tumbler:
-    """The owner an import-minted document is registered under
-    (nexus-wbfpw.31, nexus-wbfpw.33). Read from the collection's CATALOG
-    ROW, never from its name (RDR-204): an owner segment is not always
-    tumbler-derived (``code__arcaneum-2ad2825c__...``), and a name with a
-    non-canonical model segment does not even parse.
+def _resolve_import_owner_tumbler(
+    collection_name: str, reader: Any, writer: Any, **kwargs: Any,
+) -> Tumbler:
+    """The owner an import-minted document is registered under: the collection's source (RDR-229,
+    nexus-wbfpw.31, nexus-wbfpw.33). The derivation lives in :mod:`nexus.nxexp_owner`."""
+    from nexus.nxexp_owner import resolve_import_owner_tumbler  # noqa: PLC0415 — deferred: keeps the import graph as it was
 
-    * A non-knowledge collection whose row's ``owner_id`` is a registered
-      owner: that owner. Writers store it in the name's hyphenated form
-      (``1-1``), and before nexus-7tys2 ``upsertCollection`` overwrote it
-      from the name on every chunk write. The fixed engine no longer does,
-      but nothing backfills a row that was already overwritten, so those
-      still hold the name's segment. Both the stored value and its
-      hyphens-as-dots form are tried, and either is used only when the
-      catalog confirms it is a registered owner. A slug
-      (``arcaneum-2ad2825c``) matches no owner and falls through.
-    * Otherwise, for a non-knowledge collection, the owner of a live
-      document already in it.
-    * Everything else (a knowledge collection, or a collection with no
-      usable row and no documents, such as gate-xr789's): the
-      ``knowledge`` curator, the owner ``catalog_store_hook_tracked``
-      registers every note under. Liveness needs a live owning document,
-      not a particular owner.
-    """
-    row = reader.get_collection(collection_name) or {}
-    if row.get("content_type") != "knowledge":
-        owner_id = str(row.get("owner_id") or "")
-        for candidate in dict.fromkeys((owner_id, owner_id.replace("-", "."))):
-            if candidate and reader.get_owner_by_prefix(candidate) is not None:
-                try:
-                    return Tumbler.parse(candidate)
-                except Exception:  # noqa: BLE001 — an unparseable owner id falls through
-                    _log.warning(
-                        "import_owner_row_unparseable", collection=collection_name, owner_id=candidate,
-                    )
-        existing = reader.list_by_collection(collection_name, limit=1)
-        if existing:
-            return existing[0].tumbler.owner_address()
-    owner_t = reader.curator_owner_tumbler_by_name("knowledge")
-    if owner_t is not None:
-        return owner_t
-    return writer.register_owner("knowledge", "curator")
+    return resolve_import_owner_tumbler(collection_name, reader, writer, **kwargs)
 
 
 def _locate_owner_group(
@@ -1154,6 +1127,8 @@ class _OwnerImport:
         embedding_model: str,
         file_hash: str,
         skip_existing: bool,
+        bundle_owner: dict | None = None,
+        content_type: str = "",
     ) -> None:
         self.db = db
         self.collection_name = collection_name
@@ -1161,6 +1136,12 @@ class _OwnerImport:
         self.embedding_model = embedding_model
         self.file_hash = file_hash
         self.skip_existing = skip_existing
+        #: the export header's ``owner`` and declared content type: what the owner derivation reads
+        #: when the collection has no row and no live document (:mod:`nexus.nxexp_owner`)
+        self.bundle_owner = bundle_owner
+        self.content_type = content_type
+        #: why the knowledge curator was taken for want of any source, else ``None`` (RDR-229)
+        self.owner_fallback_reason: str | None = None
         #: owner groups met so far by the writing pass (rows are never kept: the import streams)
         self.groups: dict[str, dict] = {}
         self.imported_count = 0
@@ -1257,6 +1238,9 @@ class _OwnerImport:
                 minted=len(self._minted))
         return removed
 
+    def _note_owner_fallback(self, reason: str) -> None:
+        self.owner_fallback_reason = reason
+
     # ── prepass ───────────────────────────────────────────────────────────────
 
     def plan(self, pre: dict[str, dict]) -> None:
@@ -1276,7 +1260,9 @@ class _OwnerImport:
             }
         if pre and self._owner_tumbler is None:
             self._owner_tumbler = _resolve_import_owner_tumbler(
-                self.collection_name, self._reader, self._writer)
+                self.collection_name, self._reader, self._writer,
+                bundle_owner=self.bundle_owner, content_type=self.content_type,
+                on_fallback=self._note_owner_fallback)
         for key, g in pre.items():
             # One group's failure must not strand every later group: record it, carry on, report all
             # at the end.
@@ -1953,6 +1939,8 @@ def import_collection(
             embedding_model=_wire_embedding_model(
                 db, collection_name, effective_model, name_carries_model=name_carries_model),
             file_hash=_file_sha256(input_path), skip_existing=skip_existing,
+            bundle_owner=header.get("owner") if isinstance(header.get("owner"), dict) else None,
+            content_type=str(header.get("database_type") or ""),
         )
     else:
         # A non-service handle (the InMemoryVectorClient unit-test substrate).
@@ -2022,6 +2010,7 @@ def import_collection(
     unowned_count = 0
     vector_mismatches = 0
     sweep_skipped = 0
+    owner_fallback_reason: str | None = None
     failures: list[tuple[str, str]] = []
     unowned_documents: list[dict[str, Any]] = []
     # A first read of the file, for counts only: each document's record count says which page is its
@@ -2165,6 +2154,7 @@ def import_collection(
             sweep_skipped = summary["sweep_skipped"]
             vector_mismatches = owner_import.vector_mismatches
             failures = owner_import.failures
+            owner_fallback_reason = owner_import.owner_fallback_reason
             _log.info(
                 "import_owners_reconciled",
                 collection=collection_name,
@@ -2236,5 +2226,9 @@ def import_collection(
         "unowned_documents": unowned_documents,
         "vector_mismatches": vector_mismatches,
         "sweep_skipped": sweep_skipped,
+        # RDR-229: 1 when the knowledge curator was taken for want of any source (the reason follows),
+        # so a caller importing many collections can total the ones whose owner was not their source.
+        "owner_fallback_count": 1 if owner_fallback_reason else 0,
+        "owner_fallback_reason": owner_fallback_reason or "",
         "elapsed_seconds": round(elapsed, 2),
     }
