@@ -2895,6 +2895,9 @@ def project_cmd(
             # never per name prefix. Prune deletes, so it never acts on a guess from
             # the name when the row read was unreadable (see _prune_plan).
             exact = prune_supports_exact()
+            if exact and not _exact_prune_confirmed(db.taxonomy):
+                click.echo("the engine did not confirm exact matching; using the guarded prune")
+                exact = False
             plan = _prune_plan(
                 db.taxonomy, threshold,
                 only=None if (backfill or not source_collection) else source_collection,
@@ -3177,6 +3180,29 @@ def prune_supports_exact() -> bool:
     except Exception:  # noqa: BLE001 - a capability probe never fails a prune; unknown keeps the guard
         _log.warning("taxonomy_prune_exact_probe_failed", exc_info=True)
         return False
+
+
+def _exact_prune_confirmed(taxonomy: Any) -> bool:
+    """Did the engine that will run the prunes apply ``match: "exact"`` to a verification prune?
+
+    The ``/version`` flag and the prune can reach different engines (a rollback inside the flag's
+    cache window, two instances), and an engine that ignores ``match`` prunes by name prefix, so the
+    first REAL exact prune could already over-delete. One prune with ``match=exact`` for a name no
+    collection can have (``nexus-exact-probe-`` and a random hex; no collection name starts with it
+    or is a prefix of it) at threshold 0.0 settles it first: even a prefix match deletes nothing.
+    Only an echoed ``"exact"`` confirms; a missing or ``"prefix"`` echo, or a failed call, does not,
+    and the caller then runs the guarded plan, which is safe on any engine.
+    """
+    import uuid  # noqa: PLC0415 - one call per prune sweep
+
+    try:
+        _removed, applied = taxonomy.prune_projection_below(
+            f"nexus-exact-probe-{uuid.uuid4().hex}", 0.0, exact=True,
+        )
+    except Exception:  # noqa: BLE001 - an unanswered verification is an unconfirmed one: the guarded plan is safe
+        _log.warning("taxonomy_prune_exact_verification_failed", exc_info=True)
+        return False
+    return applied == "exact"
 
 
 class _PrunePlan(NamedTuple):
