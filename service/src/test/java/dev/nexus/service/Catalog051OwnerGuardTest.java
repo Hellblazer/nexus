@@ -17,6 +17,7 @@ import org.jooq.ExecuteListener;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DefaultConfiguration;
 import org.jooq.impl.DefaultExecuteListener;
+import org.jooq.impl.DefaultDataType;
 import org.jooq.impl.DefaultExecuteListenerProvider;
 import org.jooq.impl.SQLDataType;
 import org.jooq.impl.DSL;
@@ -314,14 +315,19 @@ class Catalog051OwnerGuardTest {
             .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model).set(CATALOG_COLLECTIONS.MODEL_VERSION, version)
             .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, lifecycle).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy);
         if (!supersededBy.isEmpty()) {
-            // RDR-229 P3.1 (R7): a tombstone carries its successor's registry id, or its own when the successor is not registered. The row must
-            // go in already superseded (the BEFORE trigger under test reads it on insert), so the id is the successor's when there is one and
-            // else the next free id, which stands for the row's own: the owner trigger never reads it.
+            // RDR-229 P3.1 (R7): a tombstone carries its successor's registry id, or its own when the successor is not registered (retired, no
+            // successor). The row must go in already superseded (the BEFORE trigger under test reads it on insert), so its own id is drawn from the
+            // column's sequence first, as RestoreIdFill draws a restored row's, and is both the row's collection_id and, when no successor is
+            // registered, its superseded_by_id.
+            Long own = ctx.select(DSL.function("nextval", SQLDataType.BIGINT,
+                    DSL.function("pg_get_serial_sequence", SQLDataType.VARCHAR, DSL.val("nexus.catalog_collections"), DSL.val("collection_id"))
+                        .cast(new DefaultDataType<>(SQLDialect.POSTGRES, Object.class, "regclass"))))
+                .fetchOne(0, Long.class);
             var succ = CATALOG_COLLECTIONS.as("succ");
-            var all = CATALOG_COLLECTIONS.as("all_rows");
+            insert.set(CATALOG_COLLECTIONS.COLLECTION_ID, own);
             insert.set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(
                 DSL.field(DSL.select(succ.COLLECTION_ID).from(succ).where(succ.TENANT_ID.eq(tenant)).and(succ.NAME.eq(supersededBy))),
-                DSL.field(DSL.select(DSL.coalesce(DSL.max(all.COLLECTION_ID), 0L).plus(1L)).from(all))));
+                DSL.val(own)));
         }
         insert.execute();
     }
@@ -336,19 +342,28 @@ class Catalog051OwnerGuardTest {
      * NOT VALID CHECK refuses on a new row. The CHECK is lifted for the one insert and added back NOT VALID, as an upgrade leaves a store.
      */
     static void insertLegacyDocument(Connection su, DSLContext ctx, String tumbler, String collection) {
+        insertLegacyDocument(su, ctx, TENANT, tumbler, collection);
+    }
+
+    /** {@link #insertLegacyDocument(Connection, DSLContext, String, String)} for another tenant (CatalogRepositoryTest's). */
+    static void insertLegacyDocument(Connection su, DSLContext ctx, String tenant, String tumbler, String collection) {
         P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
         try {
-            insertDocument(su, tumbler, collection);
+            insertDocumentOn(su, tenant, tumbler, collection);
         } finally {
             P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
         }
     }
 
     static List<String> insertDocumentOn(Connection conn, String tumbler, String collection) {
+        return insertDocumentOn(conn, TENANT, tumbler, collection);
+    }
+
+    static List<String> insertDocumentOn(Connection conn, String tenant, String tumbler, String collection) {
         return withNotices(conn, d -> d.insertInto(CATALOG_DOCUMENTS)
-            .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
             .set(CATALOG_DOCUMENTS.TITLE, "doc " + tumbler).set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
-            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, collection))   // RDR-229 P3.1: the id beside the name
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))   // RDR-229 P3.1: the id beside the name
             .execute());
     }
 

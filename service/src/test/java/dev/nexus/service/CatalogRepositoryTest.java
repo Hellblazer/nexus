@@ -2146,19 +2146,20 @@ class CatalogRepositoryTest {
 
     /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
     @Test @Order(60)
-    void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() {
+    void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() throws Exception {
         String tenant = "own6pbwx-mixed-tenant";
         putOwner(tenant, "1.22", "knowledge", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
         String name = "docs__mixed-6pbwx__voyage-context-3__v1";
-        // RDR-229 P3.1: a document names its collection by registry id, so putDoc registers the collection (slug owner) before the
-        // first document lands, and a curator document that lands first now settles the owner (catalog-051: a curator stands). The
-        // repo document therefore goes first; the three curator documents that outnumber it then leave the repo owner in place.
+        // RDR-229 P3.1: the documents exist BEFORE their collection registers, as on an upgraded install (a name, no registry row, no id: the NOT VALID
+        // CHECK refuses it on a new row, and putDoc registers first). Catalog051OwnerGuardTest's helper lifts the CHECK for each insert and puts it back NOT VALID.
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            for (String t : List.of("1.22.1", "1.22.2", "1.22.3", "1.23.1")) Catalog051OwnerGuardTest.insertLegacyDocument(su, ctx, tenant, t, name);
+            assertThat(ctx.fetchCount(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID.isNull())))
+                .as("non-vacuity: four documents in the legacy state").isEqualTo(4);
+        }
         registerColl(tenant, name, "docs", "mixed-6pbwx");
-        putDoc(tenant, "1.23.1", "docs", name);
-        putDoc(tenant, "1.22.1", "docs", name);
-        putDoc(tenant, "1.22.2", "docs", name);
-        putDoc(tenant, "1.22.3", "docs", name);
         assertThat(ownerOf(tenant, name)).isEqualTo("1-23");
     }
 
