@@ -190,10 +190,68 @@ def test_a_local_embedder_collection_is_left_alone(name: str) -> None:
     assert sw.resolve_sensitive_collection(name, ack=False, what="t") == name
 
 
-def test_an_unknown_embedder_reads_as_external_and_has_no_sibling() -> None:
+@pytest.fixture
+def rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
+    """The registry rows ``mcp_infra.get_collection_row`` answers, by label; a label not in it has no row."""
+    held: dict[str, dict] = {}
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: held.get(name))
+    return held
+
+
+def _row(content_type: str, owner_id: str, model: str) -> dict:
+    return {"content_type": content_type, "owner_id": owner_id, "embedding_model": model, "lifecycle_state": "live"}
+
+
+def test_an_unknown_embedder_reads_as_external_and_has_no_sibling(rows) -> None:
     assert sw.is_external_embedder("knowledge__legacy") is True
     with pytest.raises(sw.ExternalEmbedderRefusedError, match="no bge sibling"):
         sw.resolve_sensitive_collection("knowledge__legacy", ack=False, what="t")
+
+
+# RDR-229 P3.8: the engine mints a new subject's label (``c19``), so the name says nothing about the embedder; the
+# registry row does.
+
+def test_a_minted_label_reads_its_embedder_from_its_registry_row(rows) -> None:
+    rows["c19"] = _row("knowledge", "rfvyy-ext", BGE)
+    rows["c20"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    assert sw.is_external_embedder("c19") is False
+    assert sw.is_external_embedder("c20") is True
+
+
+def test_a_minted_label_with_no_row_or_an_unreadable_one_reads_as_external(monkeypatch: pytest.MonkeyPatch, rows) -> None:
+    assert sw.is_external_embedder("c19") is True, "no row: unknown reads as external"
+
+    def down(name: str, **kw):
+        raise ConnectionError("registry unreachable")
+
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", down)
+    assert sw.is_external_embedder("c19") is True, "an unreadable row fails closed"
+    assert sw.bge_sibling("c19") is None
+
+
+def test_the_ack_free_route_of_a_minted_voyage_label_is_the_subjects_bge_collection(monkeypatch: pytest.MonkeyPatch, rows) -> None:
+    rows["c416"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", lambda ct, owner, model: None)
+    assert sw.bge_sibling("c416") == f"knowledge__rfvyy-ext__{BGE}__v1"
+    assert sw.resolve_sensitive_collection("c416", ack=False, what="t") == f"knowledge__rfvyy-ext__{BGE}__v1"
+
+
+def test_a_registered_bge_collection_of_the_subject_is_the_sibling_whatever_its_label(monkeypatch: pytest.MonkeyPatch, rows) -> None:
+    """Rendering a name beside a live minted row would register a second live collection on one tuple (409)."""
+    from nexus.catalog.collection_name import CollectionAttributes
+
+    rows["c416"] = _row("knowledge", "rfvyy-ext", "voyage-context-3")
+    seen: list[tuple[str, str, str]] = []
+
+    def find(ct: str, owner: str, model: str):
+        seen.append((ct, owner, model))
+        return CollectionAttributes(
+            collection_id=417, label="c417", content_type=ct, owner_id=owner, embedding_model=model,
+            model_version=1, dimension=None, lifecycle_state="live")
+
+    monkeypatch.setattr("nexus.catalog.rows.resolve.find_collection", find)
+    assert sw.bge_sibling("c416") == "c417"
+    assert seen == [("knowledge", "rfvyy-ext", BGE)]
 
 
 def test_a_voyage_posture_install_has_no_bge_route(monkeypatch: pytest.MonkeyPatch) -> None:
