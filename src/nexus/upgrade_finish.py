@@ -2568,6 +2568,7 @@ def converge_engine(
                 tag, config_dir, installed_by="upgrade-finish engine convergence",
                 restart_after=False, quiesce=guard,
             ),
+            unattended=unattended,
         )
     except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
         # can raise more than BinaryVerificationError -- _atomic_copy

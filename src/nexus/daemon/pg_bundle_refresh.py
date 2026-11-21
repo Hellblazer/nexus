@@ -34,10 +34,12 @@ import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: ``(config_dir, tag)`` -> why the refresh failed, for the rest of this process. The finish
-#: pass can call engine convergence twice in one invocation; a failed download is not repeated
-#: (the same rule as ``upgrade_finish._ENGINE_INSTALL_FAILURES``). The next ``nx`` run retries.
-_REFRESH_FAILURES: dict[tuple[str, str], str] = {}
+#: ``(config_dir, tag)`` -> ``(why, refused)`` for the rest of this process. The finish pass can call
+#: engine convergence twice in one invocation; a failed download or a refused swap is not repeated
+#: (the same rule as ``upgrade_finish._ENGINE_INSTALL_FAILURES``). The next ``nx`` run retries a failure
+#: (``refused`` False); a refusal is deterministic for the archive's bytes, and the archive stays placed, so the
+#: next run re-checks it without a download (:func:`_placed_archive`).
+_REFRESH_FAILURES: dict[tuple[str, str], tuple[str, bool]] = {}
 
 
 def bundle_has_pg_background(extract_root: Path) -> bool:
@@ -112,7 +114,7 @@ class BundleRefresh:
         if self.problem:
             tail = f" {self.next_step}" if self.next_step else ""
             return [
-                f"NOTE: the PostgreSQL bundle was not refreshed: {self.problem}. The bundle in place is "
+                f"NOTE: the PostgreSQL bundle was not refreshed: {self.problem.rstrip('. ')}. The bundle in place is "
                 f"unchanged and the stack keeps running on it.{tail}"
             ]
         return []
@@ -162,6 +164,21 @@ def _pinned_bundle_in_place(config_dir: Path, tag: str) -> bool:
     return isinstance(meta, dict) and meta.get("tag") == tag and marker == f"sha256={meta.get('sha256')}\n"
 
 
+def _placed_archive(config_dir: Path, tag: str) -> Path | None:
+    """The archive already placed for *tag* (the sidecar names the tag and the digest it was verified with, and the
+    file still has that digest), or ``None``. A refused or deferred refresh re-checks it without downloading again."""
+    from nexus.daemon import binary_install  # noqa: PLC0415 - deferred, CLI startup cost
+
+    try:
+        meta = json.loads((config_dir / "service" / binary_install._PG_SIDECAR_NAME).read_text(encoding="utf-8"))  # noqa: SLF001
+        archive = binary_install.pg_bundle_dest(config_dir)
+        if meta.get("tag") == tag and archive.is_file() and binary_install.compute_sha256(archive) == meta.get("sha256"):
+            return archive
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
+
 def _lacks_text(tag: str) -> str:
     return (
         f"the PostgreSQL bundle of {tag} does not contain pg_background, so data moves stay blocked: the "
@@ -188,18 +205,29 @@ def prepare_refresh(tag: str, config_dir: Path) -> PreparedBundle:
         return prep
     key = (str(config_dir), tag)
     if key in _REFRESH_FAILURES:
-        prep.done = BundleRefresh(problem=f"{_REFRESH_FAILURES[key]} (already tried in this run)")
+        why, refused = _REFRESH_FAILURES[key]
+        prep.done = BundleRefresh(
+            problem=f"{why.rstrip('. ')} (already tried in this run)",
+            next_step="" if refused else _retry_text(config_dir, tag),
+        )
         return prep
     try:
-        archive, _prov = fetch_pg_bundle(tag, config_dir, installed_by="upgrade-finish engine convergence")
-        pg_bundle.prestage_bundle(archive, root)
+        archive = _placed_archive(config_dir, tag)
+        if archive is None:
+            archive, _prov = fetch_pg_bundle(tag, config_dir, installed_by="upgrade-finish engine convergence")
+        swaps = pg_bundle.prestage_bundle(archive, root)
+        if swaps and prep.lacked and not pg_bundle.bundle_has_pg_background(pg_bundle.staging_dir(root)):
+            pg_bundle.discard_staging(root)  # lacking for lacking: a restart of PostgreSQL for nothing
+            prep.done = BundleRefresh(problem=_lacks_text(tag))
+            return prep
     except pg_bundle.PgBundleSwapRefused as exc:
         _log.warning("pg_bundle_refresh_refused", tag=tag, error=str(exc))
+        _REFRESH_FAILURES[key] = (str(exc), True)
         prep.done = BundleRefresh(problem=str(exc))
         return prep
     except Exception as exc:  # noqa: BLE001 - "never raises": every failure here leaves the old bundle
         _log.warning("pg_bundle_refresh_failed", tag=tag, stage="prepare", error=str(exc), exc_info=True)
-        _REFRESH_FAILURES[key] = str(exc)
+        _REFRESH_FAILURES[key] = (str(exc), False)
         prep.done = BundleRefresh(problem=str(exc), next_step=_retry_text(config_dir, tag))
         return prep
     prep.archive = archive
@@ -231,10 +259,11 @@ def apply_refresh(
         swap_in_pg_bundle(prep.archive, config_dir, quiesce)
     except pg_bundle.PgBundleSwapRefused as exc:
         _log.warning("pg_bundle_refresh_refused", tag=prep.tag, error=str(exc))
+        _REFRESH_FAILURES[(str(config_dir), prep.tag)] = (str(exc), True)
         return BundleRefresh(problem=str(exc))
     except Exception as exc:  # noqa: BLE001 - "never raises": every failure here leaves the old bundle
         _log.warning("pg_bundle_refresh_failed", tag=prep.tag, stage="swap", error=str(exc), exc_info=True)
-        _REFRESH_FAILURES[(str(config_dir), prep.tag)] = str(exc)
+        _REFRESH_FAILURES[(str(config_dir), prep.tag)] = (str(exc), False)
         return BundleRefresh(problem=str(exc), next_step=_retry_text(config_dir, prep.tag))
     refreshed = (marker.read_text(encoding="utf-8") if marker.is_file() else "") != before
     if (prep.lacked or refreshed) and not pg_bundle.bundle_has_pg_background(root):
@@ -244,21 +273,55 @@ def apply_refresh(
 
 def refresh_bundle_alongside_engine(
     tag: str, config_dir: Path, install_engine: Callable[[AbstractContextManager[Any]], object],
+    *, unattended: bool = False,
 ) -> BundleRefresh:
     """The engine-change path: the bundle is downloaded and staged first, with the stack still up;
     then ONE stop covers the engine swap (*install_engine*, handed its guard) and the bundle swap,
     and nothing starts until the caller's restart-and-verify does. An exception from
-    *install_engine* propagates (the stack is started again, as before); the bundle's never does."""
+    *install_engine* propagates (the stack is started again, as before); the bundle's never does.
+
+    A bundle swap stops PostgreSQL, which an engine replacement alone does not, and that kills an index
+    build in flight. So an *unattended* run, or one that finds the engine busy (:func:`engine_busy_reason`),
+    installs the engine as it always did and leaves the bundle alone: the swap is reported pending, and the
+    doctor row and the next attended ``nx upgrade`` (the converged-engine leg) take it."""
     from nexus.daemon.replace_quiesce import SharedQuiesce  # noqa: PLC0415 - deferred, CLI startup cost
     from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
 
-    prep = prepare_refresh(tag, config_dir)
+    hold = _hold_reason(config_dir, unattended)
+    if hold is not None:
+        prep = PreparedBundle(tag=tag, done=_pending(config_dir, tag, hold))
+    else:
+        prep = prepare_refresh(tag, config_dir)
     try:
         with SharedQuiesce(config_dir, restart_after=False) as shared:
             install_engine(shared.guard("engine"))
             return apply_refresh(prep, config_dir, shared.guard("pg_bundle"))
     finally:
         pg_bundle.discard_staging(pg_bundle.bundle_extract_root(config_dir))
+
+
+def _hold_reason(config_dir: Path, unattended: bool) -> str | None:
+    """Why a bundle swap must not run now, for a local install with an extracted bundle: an unattended run, or
+    a busy engine. ``None`` when it may run (or there is no bundle to swap)."""
+    if not refresh_applicable(config_dir):
+        return None
+    if unattended:
+        return "this is an unattended run, and replacing the bundle restarts PostgreSQL"
+    busy = engine_busy_reason(config_dir)
+    return f"{busy}; replacing the bundle restarts PostgreSQL, which stops that work" if busy else None
+
+
+def _pending(config_dir: Path, tag: str, why: str) -> BundleRefresh:
+    """A bundle swap held back: said only when the bundle lacks pg_background (what the doctor row tracks)."""
+    if not bundle_lacks_pg_background(config_dir):
+        return BundleRefresh()
+    return BundleRefresh(
+        problem=f"held back: {why}",
+        next_step=(
+            "Run `nx upgrade` when the engine is idle (or "
+            f"`nx daemon service install-binary {tag}` to do it now); `nx doctor` has a PostgreSQL bundle row until then."
+        ),
+    )
 
 
 # -- the idle gate of the converged-engine leg ---------------------------------------------------------
@@ -299,6 +362,15 @@ def _progress_rows(config_dir: Path) -> int | None:
         return None
 
 
+def _is_parked_move(entry: dict) -> bool:
+    """A data-move entry whose state is ``blocked:``, ``failed:`` or ``paused:``: the engine reports every open move
+    in ``boot_work``, and one of these is waiting, not working (a move blocked on a missing pg_background is exactly
+    what the bundle swap fixes, so it must not defer the swap). ``working:``, ``queued:``, ``stalled:`` and every
+    entry that is not a move (index builds, the worker's own) are work."""
+    ident, what = str(entry.get("id") or ""), str(entry.get("what") or "")
+    return ident.startswith("data-move:") and what.partition(":")[0].strip().lower() in ("blocked", "failed", "paused")
+
+
 def engine_busy_reason(config_dir: Path) -> str | None:
     """Why the stack should not be bounced now, or ``None`` when it is idle.
 
@@ -310,9 +382,9 @@ def engine_busy_reason(config_dir: Path) -> str | None:
         if not _service_up(config_dir):
             return None
         return "the engine is running but its status cannot be read, so whether it is building indexes is unknown"
-    work = status.get("boot_work")
-    if isinstance(work, list) and work:
-        names = ", ".join(sorted({str(e.get("what") or e.get("id") or "work")[:60] for e in work if isinstance(e, dict)}))
+    work = [e for e in (status.get("boot_work") or []) if isinstance(e, dict) and not _is_parked_move(e)]
+    if work:
+        names = ", ".join(sorted({str(e.get("what") or e.get("id") or "work")[:60] for e in work}))
         return f"the engine reports background work ({names or 'work in progress'})"
     rows = _progress_rows(config_dir)
     if rows is None:
@@ -348,18 +420,26 @@ def refresh_when_pg_background_is_missing(
     if busy:
         return [
             f"NOTE: the PostgreSQL bundle lacks pg_background; replacing it is deferred: {busy}. Replacing it "
-            "restarts PostgreSQL, which stops that work. Run `nx upgrade` again when the engine is idle."
+            f"restarts PostgreSQL, which stops that work. Run `nx upgrade` again when the engine is idle, or "
+            f"`nx daemon service install-binary {tag}` to do it now."
         ]
     from nexus.daemon.replace_quiesce import RestartAfterReplaceError, SharedQuiesce  # noqa: PLC0415 - deferred, CLI startup cost
     from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
 
     prep = prepare_refresh(tag, config_dir)  # the download and the staging, with the stack still up
     shared = SharedQuiesce(config_dir)
+    result: BundleRefresh | None = None
     try:
         with shared:
             result = apply_refresh(prep, config_dir, shared.guard("pg_bundle"))
     except RestartAfterReplaceError as exc:
-        return [
+        done = result.lines() if result is not None else []
+        if exc.slow_start:  # the supervisor is alive and the engine has not answered yet: it may be migrating
+            return done + [
+                f"NOTE: the PostgreSQL bundle was refreshed and the stack is still starting: {exc} "
+                "Check `nx daemon service status` and `nx doctor`."
+            ]
+        return done + [
             f"NEEDS HUMAN: the PostgreSQL bundle was refreshed but the stack could not be started again: {exc}"
         ]
     except Exception as exc:  # noqa: BLE001 - "never raises"
