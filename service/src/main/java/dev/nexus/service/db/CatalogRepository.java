@@ -10063,6 +10063,14 @@ public final class CatalogRepository {
     }
 
     /**
+     * RDR-229 P3.8 (nexus-p2m1x.28): register a collection that has no name; the engine mints it. STUB until the
+     * implementation commit: the failing tests of the mint compile against this.
+     */
+    public Map<String, Object> mintCollection(String tenant, Map<String, Object> coll, boolean clientRoute) {
+        throw new UnsupportedOperationException("RDR-229 P3.8: the mint is not built yet");
+    }
+
+    /**
      * Get a collection by name. Returns null if not found.
      *
      * <p>Carries {@code aspects_enabled} (RDR bead nexus-l46pu, follow-up to

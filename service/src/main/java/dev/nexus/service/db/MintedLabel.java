@@ -45,6 +45,13 @@ public final class MintedLabel {
         }
     }
 
+    /** Every drawn id's label is a live row's name: a 409 on the route. */
+    public static final class LabelsTakenException extends IllegalStateException {
+        public LabelsTakenException(String message) {
+            super(message);
+        }
+    }
+
     private MintedLabel() {
     }
 
