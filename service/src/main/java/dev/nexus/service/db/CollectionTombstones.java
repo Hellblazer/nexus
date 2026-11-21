@@ -1,0 +1,106 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.db;
+
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.impl.DSL;
+
+import java.time.OffsetDateTime;
+import java.util.List;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+
+/**
+ * RDR-229 P3.1 stage 2b (nexus-p2m1x.17), residual R7: the writers that retire a registry row, and the delete that
+ * can leave one pointing at nothing. {@code superseded_by_id = collection_id} means "retired, successor gone"; only
+ * two writers create it, the stamp move and {@link #deleteRegistryRows}.
+ *
+ * <p>Moved out of {@code CatalogRepository} (over its size cap) as the area this bead rewrites: the repository's
+ * {@code supersedeCollection} is a delegate of {@link #supersede}.
+ */
+final class CollectionTombstones {
+
+    private CollectionTombstones() {}
+
+    /**
+     * Supersede {@code name} by {@code supersededBy}: the CAS UPDATE of {@code CatalogRepository.supersedeCollection}
+     * with the successor's id set in the same statement.
+     *
+     * <p>The target must be registered, and the refusal is typed ({@link UnregisteredCollectionException}) rather
+     * than the 23514 a NULL subselect would give, and not the "already superseded" that
+     * {@code ReembedRunner} reads from a zero row count. The check reads the target in this transaction; the id the
+     * statement writes is its own subselect, so name and id come from one registry row.
+     *
+     * @return the number of rows updated (0 means no {@code (tenant, name)} row, or a different target already set)
+     */
+    static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
+        CollectionIds.require(ctx, tenant, supersededBy);
+        return ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CollectionIds.idOf(tenant, supersededBy))
+            // nexus-0svvu (a): stamp only on the transition OUT OF '' (a genuine first supersede); a row that
+            // already carries THIS target keeps whatever instant it already has.
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
+                DSL.when(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""), stampedAt)
+                   .otherwise(CATALOG_COLLECTIONS.SUPERSEDED_AT))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                .and(CATALOG_COLLECTIONS.NAME.eq(name))
+                // nexus-cecqy / nexus-0svvu / nexus-2sovp: LOAD-BEARING, do not weaken or remove this conjunct.
+                // It is the one source of the DIFFERENT-target refusal: the loser of a concurrent supersede to
+                // another target matches zero rows, and renameCollectionTxn's emptiness/identity asymmetry
+                // (nexus-2sovp) depends on this CAS staying exactly this strict.
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
+                    .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
+            .execute();
+    }
+
+    /**
+     * A row {@code name} just inserted with {@code superseded_by} left empty becomes the tombstone of
+     * {@code supersededBy}: the name, and the successor's registry id, or its own {@code collection_id} when the
+     * successor has no row (a backup or an ETL import can name one that never existed, R7). Two statements (insert
+     * live, then this) because the successor may be inserted in the same batch, after this row, and a statement
+     * cannot see its own sibling rows.
+     */
+    static void stampTombstone(DSLContext ctx, String tenant, String name, String supersededBy) {
+        if (supersededBy == null || supersededBy.isEmpty()) return;
+        var s = CATALOG_COLLECTIONS.as("succ");
+        Field<Long> successor = DSL.field(DSL.select(s.COLLECTION_ID).from(s)
+            .where(s.TENANT_ID.eq(tenant)).and(s.NAME.eq(supersededBy)));
+        ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.coalesce(successor, CATALOG_COLLECTIONS.COLLECTION_ID))
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+            .execute();
+    }
+
+    /**
+     * Delete registry rows, the successor-delete repair first, in the caller's transaction. Every surviving row that
+     * names one of {@code names} as its successor, by id (post-stamp) or by name (pre-stamp), becomes "retired, no
+     * successor": its {@code superseded_by_id} is its own {@code collection_id}. A row left naming a deleted id would
+     * read as live once the name column is gone, and any foreign key on {@code superseded_by_id} (ON DELETE NO
+     * ACTION, never SET NULL) would refuse the delete.
+     *
+     * <p>The rows of {@code names} are deleted in one statement, so a chain of tombstones that all go (A names B names
+     * C) needs no leaf-first order. A tombstone that holds nothing is the caller's to list in {@code names}
+     * (nexus-s80u9); one that holds content stays and is repaired here.
+     *
+     * @return the number of registry rows deleted
+     */
+    static int deleteRegistryRows(DSLContext ctx, String tenant, List<String> names) {
+        if (names.isEmpty()) return 0;
+        var d = CATALOG_COLLECTIONS.as("gone");
+        Field<Long> goneId = d.COLLECTION_ID;
+        ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.notIn(names))
+            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.in(names)
+                .or(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID.in(
+                    DSL.select(goneId).from(d).where(d.TENANT_ID.eq(tenant)).and(d.NAME.in(names)))))
+            .execute();
+        return ctx.deleteFrom(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(names))
+            .execute();
+    }
+}

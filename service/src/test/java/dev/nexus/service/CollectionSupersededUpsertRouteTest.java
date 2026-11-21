@@ -192,7 +192,7 @@ class CollectionSupersededUpsertRouteTest {
         var warm = upsert(WARM, owned, "refreshed text");
         assertThat(warm.statusCode()).as("the live write that warms the cache, body: %s", warm.body()).isEqualTo(200);
 
-        catalog.supersedeCollection(TENANT, WARM, WARM_SUCCESSOR, "");
+        SupersedeSeeds.supersede(catalog, TENANT, WARM, WARM_SUCCESSOR, "");
 
         assertSupersededRefusal(upsert(WARM, owned, "text after the retire"), WARM, WARM_SUCCESSOR);
     }

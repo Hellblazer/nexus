@@ -2780,7 +2780,7 @@ class CatalogRepositoryTest {
             "embedding_model", "voyage-code-3",
             "model_version", "v0"
         ));
-        int updated = repo.supersedeCollection(TENANT_A, "code__nexus__voyage-code-3__v0",
+        int updated = SupersedeSeeds.supersede(repo, TENANT_A, "code__nexus__voyage-code-3__v0",
             "code__nexus__voyage-code-3__v1", "2026-06-01T00:00:00Z");
         assertThat(updated).isEqualTo(1);
         var coll = repo.getCollection(TENANT_A, "code__nexus__voyage-code-3__v0");
@@ -2802,12 +2802,12 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "chainguard", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
 
         // A DIFFERENT target must match zero rows — this is what the handler reports as 409.
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v3", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v3", ""))
             .as("chaining to a different target must match no rows")
             .isEqualTo(0);
         assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))
@@ -2816,7 +2816,7 @@ class CatalogRepositoryTest {
 
         // The SAME target stays idempotent (the .or() disjunct) — re-asserting a supersession
         // must not start failing.
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("re-asserting the same target is idempotent, not a chain")
             .isEqualTo(1);
     }
@@ -2841,13 +2841,13 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "samestamp", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
         String stamp = (String) repo.getCollection(TENANT_A, name).get("superseded_at");
         assertThat(stamp).as("guard: the first supersede stamped an instant").isNotBlank();
 
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("same-target re-assertion still reports the row as marked")
             .isEqualTo(1);
         assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
@@ -2872,7 +2872,7 @@ class CatalogRepositoryTest {
 
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
-            java.util.concurrent.Callable<Integer> task = () -> repo.supersedeCollection(TENANT_A, name, target, "");
+            java.util.concurrent.Callable<Integer> task = () -> SupersedeSeeds.supersede(repo, TENANT_A, name, target, "");
             var f1 = pool.submit(task);
             var f2 = pool.submit(task);
             int r1 = f1.get();
@@ -2888,7 +2888,7 @@ class CatalogRepositoryTest {
             // already equal to the target (not '') and had to take the CASE's ELSE
             // branch, or this third, purely sequential, same-target call would move
             // the stamp — proving the loser's write did NOT re-stamp during the race.
-            assertThat(repo.supersedeCollection(TENANT_A, name, target, "")).isEqualTo(1);
+            assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, target, "")).isEqualTo(1);
             assertThat(repo.getCollection(TENANT_A, name).get("superseded_at"))
                 .as("the recorded supersession instant must survive both the race and a "
                     + "further same-target re-assertion")
@@ -2913,7 +2913,7 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "revive", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
-        assertThat(repo.supersedeCollection(TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
+        assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
             .isEqualTo(1);
         // NON-VACUITY: the row really is tombstoned before the re-registration.
         assertThat(repo.getCollection(TENANT_A, name).get("superseded_by"))

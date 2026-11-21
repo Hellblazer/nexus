@@ -86,7 +86,7 @@ class SupersedeDuringEmbedWriteTest extends AtomicWriteTestBase {
 
     private String retireDuringNextEmbed(Fx f) {
         String successor = f.collection().replace("__v1", "__v2");
-        hooked.arm(() -> assertThat(repo.supersedeCollection(TENANT, f.collection(), successor, "")).isEqualTo(1));
+        hooked.arm(() -> assertThat(SupersedeSeeds.supersede(repo, TENANT, f.collection(), successor, "")).isEqualTo(1));
         return successor;
     }
 

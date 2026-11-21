@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -238,8 +239,8 @@ class CatalogDeleteCollectionCascadeTest {
             PgContainerHelper.insertCollection(ctx, TENANT_F8D, COLL_DEL);
             // The document is homed in COLL_HOME.
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-               .values(TENANT_F8D, "f8d-doc", "F8D Doc", COLL_HOME)
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+               .values(TENANT_F8D, "f8d-doc", "F8D Doc", COLL_HOME, CollectionIds.require(ctx, TENANT_F8D, COLL_HOME))
                .execute();
             // Its chunk content lives in COLL_DEL (the collection about to be deleted).
             // RDR-191 (nexus-o8dil.48): nexus.chunks unified -- embedding_1024
@@ -251,9 +252,9 @@ class CatalogDeleteCollectionCascadeTest {
             // behind), so it is reachable by neither scope symmetrically.
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                            CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                           CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                           CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                .values(TENANT_F8D, "f8d-doc", 0, chashBytes("f8dasym"), COLL_DEL,
-                       PgContainerHelper.collectionModel(ctx, TENANT_F8D, COLL_DEL))
+                       PgContainerHelper.collectionModel(ctx, TENANT_F8D, COLL_DEL), CollectionIds.require(ctx, TENANT_F8D, COLL_DEL))
                .execute();
         }
 
@@ -353,8 +354,8 @@ class CatalogDeleteCollectionCascadeTest {
         PgContainerHelper.insertCollection(ctx, tenant, COLL);
         // catalog_documents + manifest
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-           .values(tenant, "dc-doc-1", "Doc 1", COLL)
+                       CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+           .values(tenant, "dc-doc-1", "Doc 1", COLL, CollectionIds.require(ctx, tenant, COLL))
            .execute();
         // chunks: 4 rows (RDR-225: a collection has ONE model, hence one dimension, so the
         // former 2/1/1 spread across 384/768/1024 is four 1024-wide rows of this voyage-context-3
@@ -385,19 +386,19 @@ class CatalogDeleteCollectionCascadeTest {
         // already registered under COLL, so stamp the manifest row the same.
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-           .values(tenant, "dc-doc-1", 0, chashBytes("dc384a"), COLL, model)
+                       CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+           .values(tenant, "dc-doc-1", 0, chashBytes("dc384a"), COLL, model, CollectionIds.require(ctx, tenant, COLL))
            .execute();
         // (chash_index seeds removed — RDR-187/nexus-piwya.9: router dropped)
         // topics: 1 (explicit id)
         long topicId = Math.abs((long) (tenant + COLL).hashCode());
         ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.DOC_COUNT,
-                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS)
-           .values(topicId, tenant, "topic-dc", COLL, 0, OffsetDateTime.now(), "pending")
+                       TOPICS.CREATED_AT, TOPICS.REVIEW_STATUS, TOPICS.COLLECTION_ID)
+           .values(topicId, tenant, "topic-dc", COLL, 0, OffsetDateTime.now(), "pending", CollectionIds.require(ctx, tenant, COLL))
            .execute();
         // taxonomy_meta: 1 (fk-003-4 RESTRICT — must be purged before the registry row)
-        ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION)
-           .values(tenant, COLL)
+        ctx.insertInto(TAXONOMY_META, TAXONOMY_META.TENANT_ID, TAXONOMY_META.COLLECTION, TAXONOMY_META.COLLECTION_ID)
+           .values(tenant, COLL, CollectionIds.require(ctx, tenant, COLL))
            .execute();
         // topic_assignments: 2, both with source_collection=COLL, referencing the topic
         // nexus-tk070.p3c: doc_id is bytea now — a genuine 64-hex chash, not the
@@ -412,13 +413,13 @@ class CatalogDeleteCollectionCascadeTest {
         // identities).
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-           .values(tenant, hexChashBytes("dc-doc-1"), topicId, "projection", COLL, OffsetDateTime.now(), model)
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+           .values(tenant, hexChashBytes("dc-doc-1"), topicId, "projection", COLL, OffsetDateTime.now(), model, CollectionIds.require(ctx, tenant, COLL))
            .execute();
         ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
-                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-           .values(tenant, hexChashBytes("dc-doc-2"), topicId, "projection", COLL, OffsetDateTime.now(), model)
+                       TOPIC_ASSIGNMENTS.ASSIGNED_AT, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID)
+           .values(tenant, hexChashBytes("dc-doc-2"), topicId, "projection", COLL, OffsetDateTime.now(), model, CollectionIds.require(ctx, tenant, COLL))
            .execute();
         // centroids: one per dim (cugrk), one unified nexus.taxonomy_centroids table
         // (RDR-191). PK is (tenant_id, collection, topic_id) -- three DIFFERENT
@@ -431,8 +432,8 @@ class CatalogDeleteCollectionCascadeTest {
         for (int i = 0; i < 3; i++) {
             ctx.insertInto(TAXONOMY_CENTROIDS, TAXONOMY_CENTROIDS.TENANT_ID, TAXONOMY_CENTROIDS.COLLECTION,
                            TAXONOMY_CENTROIDS.TOPIC_ID, TAXONOMY_CENTROIDS.LABEL,
-                           TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.EMBEDDING_1024)
-               .values(tenant, COLL, topicId + i, "", model, vector(1024))
+                           TAXONOMY_CENTROIDS.EMBEDDING_MODEL, TAXONOMY_CENTROIDS.EMBEDDING_1024, TAXONOMY_CENTROIDS.COLLECTION_ID)
+               .values(tenant, COLL, topicId + i, "", model, vector(1024), CollectionIds.require(ctx, tenant, COLL))
                .execute();
         }
         // document_aspects: 2, both doc-rooted at dc-doc-1 (the collection's only
@@ -448,19 +449,19 @@ class CatalogDeleteCollectionCascadeTest {
         // (deleteCollectionTxn step 5), ahead of the doc_id-keyed cascade (step 6).
         ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-           .values(tenant, COLL, "/p/a1.md", OffsetDateTime.now(), "v1", "docling", "dc-doc-1", "file:///p/a1.md")
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+           .values(tenant, COLL, "/p/a1.md", OffsetDateTime.now(), "v1", "docling", "dc-doc-1", "file:///p/a1.md", CollectionIds.require(ctx, tenant, COLL))
            .execute();
         ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                        DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-           .values(tenant, COLL, "/p/a2.md", OffsetDateTime.now(), "v1", "docling", "dc-doc-1", "file:///p/a2.md")
+                       DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+           .values(tenant, COLL, "/p/a2.md", OffsetDateTime.now(), "v1", "docling", "dc-doc-1", "file:///p/a2.md", CollectionIds.require(ctx, tenant, COLL))
            .execute();
         // document_highlights: 1 (doc-rooted). hygiene-001 step 3: source_uri NOT NULL now.
         ctx.insertInto(DOCUMENT_HIGHLIGHTS, DOCUMENT_HIGHLIGHTS.TENANT_ID, DOCUMENT_HIGHLIGHTS.DOC_ID,
                        DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI,
-                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT)
-           .values(tenant, "dc-doc-1", COLL, "file:///dc-doc-1-hl", "hi", OffsetDateTime.now())
+                       DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD, DOCUMENT_HIGHLIGHTS.INGESTED_AT, DOCUMENT_HIGHLIGHTS.COLLECTION_ID)
+           .values(tenant, "dc-doc-1", COLL, "file:///dc-doc-1-hl", "hi", OffsetDateTime.now(), CollectionIds.require(ctx, tenant, COLL))
            .execute();
     }
 

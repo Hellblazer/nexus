@@ -3,6 +3,7 @@
 package dev.nexus.service.http;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.SupersedeSeeds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.AtomicWriteTestBase;
 import dev.nexus.service.db.TaxonomyRepository;
@@ -91,7 +92,7 @@ class TaxonomySupersededWriteTest extends AtomicWriteTestBase {
 
     private String retire(Live l) {
         String successor = l.collection().replace("__v1", "__v2");
-        assertThat(repo.supersedeCollection(TENANT, l.collection(), successor, "")).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(repo, TENANT, l.collection(), successor, "")).isEqualTo(1);
         return successor;
     }
 

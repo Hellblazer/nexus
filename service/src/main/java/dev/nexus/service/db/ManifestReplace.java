@@ -5,7 +5,7 @@ package dev.nexus.service.db;
 import org.jooq.DSLContext;
 import org.jooq.Record;
 import org.jooq.Row3;
-import org.jooq.Row13;
+import org.jooq.Row14;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 
@@ -236,9 +236,12 @@ final class ManifestReplace {
     /** One UPDATE ... FROM (VALUES ...): every payload column from the incoming row, so one statement-level trigger run. */
     private static void update(DSLContext ctx, String tenant, String docId, String collection, String embeddingModel,
                                List<Incoming> changed) {
+        // RDR-229 P3.1: the registry's id, read in this transaction, for every rewritten row (the CHECK refuses a name
+        // with no id on an updated row version).
+        final Long collectionId = CollectionIds.require(ctx, tenant, collection);
         @SuppressWarnings("unchecked")
-        Row13<Integer, byte[], Integer, Integer, Integer, Integer, Integer, String, String, String, String, Integer,
-            Boolean>[] values = changed.stream().map(in -> DSL.row(
+        Row14<Integer, byte[], Integer, Integer, Integer, Integer, Integer, String, Long, String, String, String,
+            Integer, Boolean>[] values = changed.stream().map(in -> DSL.row(
                 DSL.val(in.position(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(HexFormat.of().parseHex(in.chashHex()), SQLDataType.BLOB).cast(SQLDataType.BLOB),
                 DSL.val(in.chunkIndex(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
@@ -247,15 +250,16 @@ final class ManifestReplace {
                 DSL.val(in.charStart(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.charEnd(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(collection, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
+                DSL.val(collectionId, SQLDataType.BIGINT).cast(SQLDataType.BIGINT),
                 DSL.val(embeddingModel, SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionTitle(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.sectionType(), SQLDataType.VARCHAR).cast(SQLDataType.VARCHAR),
                 DSL.val(in.pageNumber(), SQLDataType.INTEGER).cast(SQLDataType.INTEGER),
                 DSL.val(in.labelsWritten(), SQLDataType.BOOLEAN).cast(SQLDataType.BOOLEAN)))
-            .toArray(Row13[]::new);
+            .toArray(Row14[]::new);
         var v = DSL.values(values).asTable("v", "position", "chash", "chunk_index", "line_start", "line_end",
-            "char_start", "char_end", "collection", "embedding_model", "section_title", "section_type",
-            "page_number", "labels_written");
+            "char_start", "char_end", "collection", "collection_id", "embedding_model", "section_title",
+            "section_type", "page_number", "labels_written");
         ctx.update(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, v.field("chash", byte[].class))
             .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, v.field("chunk_index", Integer.class))
@@ -264,6 +268,7 @@ final class ManifestReplace {
             .set(CATALOG_DOCUMENT_CHUNKS.CHAR_START, v.field("char_start", Integer.class))
             .set(CATALOG_DOCUMENT_CHUNKS.CHAR_END, v.field("char_end", Integer.class))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, v.field("collection", String.class))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, v.field("collection_id", Long.class))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, v.field("embedding_model", String.class))
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE, v.field("section_title", String.class))
             .set(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, v.field("section_type", String.class))

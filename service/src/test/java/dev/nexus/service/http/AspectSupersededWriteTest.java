@@ -3,6 +3,7 @@
 package dev.nexus.service.http;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.SupersedeSeeds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.AtomicWriteTestBase;
 import dev.nexus.service.db.AspectRepository;
@@ -84,7 +85,7 @@ class AspectSupersededWriteTest extends AtomicWriteTestBase {
 
     private String retire(Fx f) {
         String successor = f.collection().replace("__v1", "__v2");
-        assertThat(repo.supersedeCollection(TENANT, f.collection(), successor, "")).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(repo, TENANT, f.collection(), successor, "")).isEqualTo(1);
         return successor;
     }
 
