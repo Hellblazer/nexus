@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
 import subprocess
 import sys
@@ -172,7 +173,14 @@ def test_a_split_name_held_by_an_owner_of_this_hash_is_not_extended(tmp_path):
     assert _name(_Cat(_owner(first), own), second) == f"nexus-{_HASH}"
 
 
-def test_a_split_is_logged_with_the_name_the_candidate_and_the_other_root(tmp_path):
+@pytest.fixture
+def info_logs():
+    """The suite filters structlog at WARNING; an info event is dropped before it reaches ``capture_logs`` unless the
+    level is lowered for the test (the conftest restores the configuration after it)."""
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+
+def test_a_split_is_logged_with_the_name_the_candidate_and_the_other_root(tmp_path, info_logs):
     first, second = _clone(tmp_path, "work"), _clone(tmp_path, "scratch")
     with structlog.testing.capture_logs() as logs:
         _name(_Cat(_owner(first)), second)
@@ -181,7 +189,7 @@ def test_a_split_is_logged_with_the_name_the_candidate_and_the_other_root(tmp_pa
         "info", "nexus", f"nexus-{_HASH}", str(first))
 
 
-def test_no_split_is_not_logged(tmp_path):
+def test_no_split_is_not_logged(tmp_path, info_logs):
     with structlog.testing.capture_logs() as logs:
         _name(_Cat(), _clone(tmp_path, "scratch"))
     assert [e for e in logs if e["event"] == "repo_owner_split"] == []

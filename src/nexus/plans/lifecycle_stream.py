@@ -9,8 +9,10 @@ they lead the reserved share and neither the share cap nor the operator input ca
 
 Where the records live. The RDR tooling writes them to T2 project ``<repo>_rdr`` (``nx rdr``,
 the rdr-gate skill), ``<repo>`` being the main-checkout basename. The catalog registers a repo owner
-under that same name (``indexer``: ``register_owner(name=repo_name, owner_type="repo")``), so the
-project is ``<owner name>_rdr`` where the owner is the one holding the RESOLVED DOCUMENT. It is never
+under that same name (``indexer``: ``register_owner(name=repo_name, owner_type="repo")``), except a second
+live clone of a same-named folder, whose owner is ``<repo>-<repo hash>`` (RDR-254 Phase 4), so the project is
+``<basename of the owner's recorded root>_rdr`` (the owner's name when it records no root) where the owner is the
+one holding the RESOLVED DOCUMENT. It is never
 taken from the request: an ART RDR-084 reads ``ART_rdr`` and cannot read ``nexus_rdr``. An owner that
 is not a repo owner, has no name, or is not in the catalog leaves the project undetermined, and the
 stream says so instead of guessing.
@@ -345,8 +347,8 @@ class _Run:
 
 
 def _project_for(source: ResolvedSource, cat: NamedSourceCatalog | None) -> tuple[str, str]:
-    """``(project, "")`` or ``("", why)``. The project is ``<owner name>_rdr`` for the repo owner that
-    holds the resolved document; nothing else names it."""
+    """``(project, "")`` or ``("", why)``. The project is ``<repo basename>_rdr`` for the repo owner that
+    holds the resolved document (the basename of its recorded root, else its name); nothing else names it."""
     if cat is None:
         return "", "the catalog is unavailable, so the document's owner cannot be read"
     try:
@@ -362,7 +364,12 @@ def _project_for(source: ResolvedSource, cat: NamedSourceCatalog | None) -> tupl
     name = str(row.get("name") or "").strip()
     if not name:
         return "", f"owner {owner_addr} has no name, so its RDR project cannot be named"
-    return f"{name}_rdr", ""
+    # RDR-254 Phase 4: a second live clone's owner is ``<folder>-<repo hash>``, but the RDR tooling writes
+    # ``<repo basename>_rdr``, so the project comes from the recorded root's basename when the owner has one (either
+    # separator: a root another machine recorded can be a Windows path).
+    root = str(row.get("repo_root") or "").strip().rstrip("/\\")
+    base = root.replace("\\", "/").rsplit("/", 1)[-1] if root else ""
+    return f"{base or name}_rdr", ""
 
 
 def _read_source(source: ResolvedSource, cat: NamedSourceCatalog | None, run: _Run) -> SourceLifecycle:
