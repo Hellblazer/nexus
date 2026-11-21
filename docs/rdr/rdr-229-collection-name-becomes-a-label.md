@@ -1966,8 +1966,9 @@ its acceptance is that test green plus the census pin it lowers.
   the row first and parses the name only when that answers nothing
   (`scoring.py:175-182`), item 1's NoRow outcome, which stays (T2
   `229-research-49`).
-  *Amended 2026-11-20 (lead ruling on critique S4, bead nexus-p2m1x.9; T2
-  `nexus/critique-p2m1x9-2026-11-20-r1` and
+  *Amended 2026-11-20 (bead nexus-p2m1x.9; the lead's ruling answered S4 of
+  the client critique, T2 `nexus/critique-p2m1x9-2026-11-20-r1`, and this text
+  comes from S1 of the engine critique, T2
   `nexus/critique-p2m1x9-engine-2026-11-20-r1`).* With the threshold read
   from the row, the engine's `POST /v1/taxonomy/assignments/prune_projection`
   (`TaxonomyRepository.pruneProjectionBelow`, `startsWith` on
@@ -1980,8 +1981,11 @@ its acceptance is that test green plus the census pin it lowers.
   a reply that echoes the mode applied (`{"removed": N, "match":
   "prefix"|"exact"}`), and `taxonomy_prune_exact_supported: true` on
   `/version`. The client sends `match: "exact"` only when the flag reads true,
-  and then only after one verification prune (`match: "exact"`, threshold 0.0,
-  a name no collection can have, so even a prefix match deletes nothing) whose
+  and then only after one verification prune (`match: "exact"`, for a name no
+  collection has: the fixed prefix `nexus-exact-probe-` and a random 128-bit
+  suffix, so no collection name starts with it except by a collision of
+  negligible chance, and even a prefix match therefore reaches no rows; the
+  guarantee is the name, not the threshold) whose
   reply echoes `"exact"`; a missing or `"prefix"` echo, or a failed call, runs
   the whole sweep guarded, and a real reply that stops echoing `"exact"` ends
   the sweep at once. Without the flag the client keeps its guard (it prunes a
