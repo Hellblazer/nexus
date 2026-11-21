@@ -3899,8 +3899,8 @@ class TestProjectCmd:
         """project <src> default targets every collection with topics minus src.
 
         GitHub #238 + bead nexus-gwhy. Before the fix, single-source
-        project preferred same-hash siblings (via list_sibling_collections)
-        and fell back to all-collections only when siblings was empty.
+        project preferred same-hash siblings (via a name matcher, since
+        deleted by RDR-229 P2.7) and fell back to all-collections only when siblings was empty.
         For multi-repo families (e.g. three docs__<repo>-<hash> from
         distinct projects), the heuristic silently narrowed the target
         set. After the fix, the default matches backfill: all

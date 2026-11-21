@@ -944,8 +944,9 @@ def test_the_routing_class_is_measured_not_listed() -> None:
 def test_only_the_five_rdr_classes_and_the_two_fnmatch_labels_are_final() -> None:
     """``holdover`` is the one provisional label, and it never stands bare:
     each carries a note that names the Phase 2 step (P2.n) that moves it
-    (P2.2 read-path model reads, P2.3 write model, P2.4 taxonomy threshold,
-    P2.7 retire the name matcher). No holdover is left without an owner."""
+    (P2.2 read-path model reads, P2.4 taxonomy threshold; the P2.3 write
+    model and P2.7 name matcher holdovers are gone). No holdover is left
+    without an owner."""
     assert set(_scan.CLASSES) == {
         "mint", "migration-source", "diagnostic", "routing", "uri-classifier",
         "label-pattern", "file-path", "holdover",
