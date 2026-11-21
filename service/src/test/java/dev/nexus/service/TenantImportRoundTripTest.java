@@ -52,6 +52,8 @@ import java.util.TreeSet;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TenantImportRoundTripTest {
 
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(TenantImportRoundTripTest.class);
+
     private static final String SRC = "t-imp-rt-src";
 
     private ImportTestEnv env;
@@ -516,7 +518,24 @@ class TenantImportRoundTripTest {
             return null;
         });
         assertThat(failures).as("the seed").isEmpty();
+        // the battery's history rows name a collection that is no registry row: add two that do, carrying the source's ids
+        env.su(ctx -> {
+            CollectionIdSites.seedHistory(ctx, tenant, successor, TenantExportBatteryTest.Seed.collection(tenant, 384));
+            return null;
+        });
         return token;
+    }
+
+    /**
+     * The strict audit of the target's exported history tables, with the per-table counts in the message: each row whose name
+     * names a restored registry row carries exactly that row's id, a row naming none carries none, and each table was seeded
+     * (a count of zero is a setup failure).
+     */
+    private void assertHistoryRefilledByName(String tenant) {
+        List<CollectionIdSites.HistoryFinding> found = env.su(ctx -> CollectionIdSites.auditHistoryStrict(ctx, tenant));
+        LOG.info("history_strict tenant={} found={}", tenant, found);
+        assertThat(CollectionIdSites.historyProblems(found, true))
+            .as("history rows not on the restored registry row's id for their name; rows examined per table: " + found).isEmpty();
     }
 
     @Test
@@ -559,6 +578,8 @@ class TenantImportRoundTripTest {
         // every chunk and child row is on its collection's NEW id, and none is on the source's
         List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, dst, CollectionIdSites.exportedSites()));
         assertThat(found.stream().filter(f -> !f.clean()).toList()).as("child rows whose id is null or is not the target registry's").isEmpty();
+        // the restore refilled the exported history tables BY NAME: each row carries exactly the restored registry's id for its name
+        assertHistoryRefilledByName(dst);
         assertThat(CollectionIdSites.unexamined(found)).as("restored sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
         // the tables the backup excludes come back empty: the restore carries none of the source's rows, so none of its ids
         List<String> carried = new ArrayList<>();
@@ -666,6 +687,8 @@ class TenantImportRoundTripTest {
         List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, dst, CollectionIdSites.exportedSites()));
         assertThat(CollectionIdSites.unexamined(found)).as("restored sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
         assertThat(found.stream().filter(f -> !f.clean()).toList()).as("rows on a collection's id that is not the target registry's").isEmpty();
+        // the restore refilled the exported history tables BY NAME: each row carries exactly the restored registry's id for its name
+        assertHistoryRefilledByName(dst);
     }
 
     /**
@@ -713,6 +736,8 @@ class TenantImportRoundTripTest {
         List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, dst, CollectionIdSites.exportedSites()));
         assertThat(CollectionIdSites.unexamined(found)).as("restored sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
         assertThat(found.stream().filter(f -> !f.clean()).toList()).as("twins not on the restored registry row's id").isEmpty();
+        // the restore refilled the exported history tables BY NAME: each row carries exactly the restored registry's id for its name
+        assertHistoryRefilledByName(dst);
         CollectionIdSites.Finding registry = env.su(ctx -> CollectionIdSites.registryAudit(ctx, dst));
         assertThat(registry.clean() && registry.examined() == 3).as("the restored registry: " + registry).isTrue();
     }
