@@ -15,8 +15,8 @@ import structlog.testing
 from nexus.identity import hostname
 from nexus.identity.delegated import check_dispatcher, delegated_token_path
 from nexus.identity.binder import LaunchFacts, SessionBinder
-from nexus.identity.holder import GONE, OTHER_HOST, RUNNING, check_holder, normalise_instant, read_registry_entry, this_host
-from nexus.identity.ops import _holder_line
+from nexus.identity.holder import GONE, OTHER_HOST, RUNNING, Processes, check_holder, normalise_instant, read_registry_entry, this_host
+from nexus.identity.ops import CallerFacts, IdentityEnv, _holder_line, judge
 from nexus.identity.resolver import _by_registry
 from nexus.identity.sweep import sweep_host
 from nexus.identity.token_file import TokenFile, token_path, write_token_file
@@ -269,8 +269,8 @@ def _lease(tmp_path: Path, procs: FakeProcesses) -> Any:
 
 
 def test_the_lease_refreshes_under_the_host_its_own_token_file_records(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """The engine compares ``host`` as a string on refresh and fork: a process bound under the pre-key hostname must keep
-    speaking under it, and a token file that names a foreign key must not change the host."""
+    """The engine compares ``host`` as a string on refresh and fork: a process speaks under the host its own binding
+    records (its token file is named by its own pid and startedAt), a pre-key hostname or a key alike."""
     key = hostname.host_key("ioplatformuuid", MAC_UUID)
     _machine(monkeypatch, stable=key, name="ip-105")
     procs = FakeProcesses(tmp_path / "sessions", host=this_host())
@@ -280,8 +280,47 @@ def test_the_lease_refreshes_under_the_host_its_own_token_file_records(monkeypat
     assert lease._process_evidence()["host"] == key, "no token file: the machine's own name"
     _token(idir, 100, host="ip-102", procs=procs)
     assert lease._process_evidence()["host"] == "ip-102"
-    _token(idir, 100, host=hostname.host_key("ioplatformuuid", MAC_UUID[:-1] + "8"), procs=procs)
+    _token(idir, 100, host=key, procs=procs)
     assert lease._process_evidence()["host"] == key
+
+
+def test_a_lease_built_under_a_failed_probe_speaks_the_key_once_the_probe_recovers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The MCP server's Processes was built while ``ioreg`` failed (a sandbox, a transient); the hook bound the row under the
+    key. The probe recovers on its retry: the lease's evidence host follows the file and the machine, not the construction."""
+    key = hostname.host_key("ioplatformuuid", MAC_UUID)
+    _machine(monkeypatch, stable=None, name="constantine.local")
+    FakeProcesses(tmp_path / "sessions", host="x").start(100, T0)         # the registry file of pid 100
+    procs = Processes(sessions_dir=tmp_path / "sessions")                 # the real class, default host
+    assert procs.host == "constantine.local"
+    lease = _lease(tmp_path, procs)
+    assert lease._process_evidence()["host"] == "constantine.local"
+    _machine(monkeypatch, stable=key, name="constantine.local")           # the probe recovered
+    assert procs.host == key and lease._process_evidence()["host"] == key
+    _token(tmp_path / "config" / "identity", 100, host=key, procs=procs)
+    assert lease._process_evidence()["host"] == key
+
+
+def test_a_hostname_that_looks_like_a_key_is_never_read_as_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    _machine(monkeypatch, stable=None, name="nxh1-0123456789abcdef0123456789abcdef")
+    assert not hostname.is_key(this_host()) and this_host() == "host-nxh1-0123456789abcdef0123456789abcdef"
+    assert hostname.holder_is_local({"host": "nxh1-0123456789abcdef0123456789abcdef", "pid": 1, "started_at": 1},
+                                    host=this_host()) is False
+
+
+def test_the_operator_commands_judge_a_delegated_dispatcher_under_a_vanished_name_as_the_sweep_does(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``nx identity alive`` and ``release`` go through ``ops.judge``: it must pass the identity dir and id to the dispatcher
+    check, or it reads a pre-key dispatcher as another host's while the sweep records it gone."""
+    _machine(monkeypatch, stable=hostname.host_key("ioplatformuuid", MAC_UUID), name="ip-105")
+    procs = FakeProcesses(tmp_path / "sessions", host=this_host())
+    idir = tmp_path / "identity"
+    write_token_file(delegated_token_path(idir, "i9"), TokenFile(
+        identity="i9", generation=1, token=None, expires_at=None, session_id=None, pid=700, started_at=700_000,
+        proc_start=T0, host="ip-102"))
+    env = IdentityEnv(client=FakeEngine(), procs=procs, identity_dir=idir, environ={},
+                      caller=lambda: CallerFacts(claude_pid=0, ancestors=()))
+    view = {"id": "i9", "kind": "delegated",
+            "holder": {"host": "ip-102", "pid": 700, "started_at": 700_000, "proc_start": T0}}
+    assert judge(env, view).state == GONE
 
 
 # ── the probe ───────────────────────────────────────────────────────────────
