@@ -31,6 +31,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.commands.catalog import catalog
+from nexus.corpus import collection_registration_kwargs
 
 pytestmark = pytest.mark.t2_tenant
 
@@ -301,7 +302,7 @@ class TestEmpty:
         """A collection registered in the catalog's collections projection
         (register_collection) but carrying zero documents is a legitimate
         state — report informationally, exit 0."""
-        env.register_collection("rdr__known-empty")
+        env.register_collection("rdr__known-empty", **collection_registration_kwargs("rdr__known-empty"))
         runner = CliRunner()
         result = runner.invoke(catalog, ["audit-membership", "rdr__known-empty"])
         assert result.exit_code == 0, result.output
@@ -330,7 +331,7 @@ class TestEmpty:
         assert "rdr__nothing-here" in result.output
 
     def test_verify_scoped_known_empty_collection_stays_clean(self, env: Catalog) -> None:
-        env.register_collection("rdr__known-empty")
+        env.register_collection("rdr__known-empty", **collection_registration_kwargs("rdr__known-empty"))
         runner = CliRunner()
         result = runner.invoke(catalog, ["verify", "--collection", "rdr__known-empty"])
         assert result.exit_code == 0, result.output

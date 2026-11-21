@@ -441,7 +441,7 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     )
     slug = f"code__wbfpw33slug-2ad2825c__{_MODEL}__v1"
     writer.register_collection(
-        slug, content_type="code", owner_id=str(owner_tumbler), embedding_model=_MODEL,
+        slug, content_type="code", owner_id=str(owner_tumbler), embedding_model=_MODEL, model_version="v1",
     )
     assert _resolve_import_owner_tumbler(slug, reader, writer) == owner_tumbler
 
@@ -449,7 +449,7 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     hyphen = f"code__wbfpw33hyphen-row__{_MODEL}__v1"
     writer.register_collection(
         hyphen, content_type="code",
-        owner_id=owner_segment_for_tumbler(str(owner_tumbler)), embedding_model=_MODEL,
+        owner_id=owner_segment_for_tumbler(str(owner_tumbler)), embedding_model=_MODEL, model_version="v1",
     )
     assert _resolve_import_owner_tumbler(hyphen, reader, writer) == owner_tumbler
 
@@ -483,7 +483,7 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     # The row holds the slug as its owner, the shape a collection first
     # registered by name carries (and what the chunk write used to leave here
     # on every collection); the resolver must fall through it.
-    writer.register_collection(dst, content_type="code", owner_id=slug, embedding_model=_MODEL)
+    writer.register_collection(dst, content_type="code", owner_id=slug, embedding_model=_MODEL, model_version="v1")
 
     records = []
     for i in range(2):
@@ -533,7 +533,7 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     # document's owner: the document gave the row the owner segment when it landed.
     seeded = f"code__wbfpw33seeded-2ad2825c__{_MODEL}__v1"
     writer.register_collection(
-        seeded, content_type="code", owner_id="wbfpw33seeded-2ad2825c", embedding_model=_MODEL,
+        seeded, content_type="code", owner_id="wbfpw33seeded-2ad2825c", embedding_model=_MODEL, model_version="v1",
     )
     seeded_doc = writer.register(
         owner=owner, title="wbfpw33 seeded", content_type="code",
