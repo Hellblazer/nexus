@@ -342,7 +342,10 @@ def test_a_409_on_the_ambient_writer_reads_back_through_the_reader_and_a_missing
     monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
     monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
     reader = MagicMock()
-    reader.get_collection.return_value = read_back
+    # the pre-read finds no row (the name is new to this process); the read-back after the 409 answers read_back,
+    # which for a retired row is the race in which another writer registered and then superseded the name
+    answers = iter([None, read_back])
+    reader.get_collection.side_effect = lambda _name: next(answers, read_back)
     monkeypatch.setattr(factory, "make_catalog_reader", lambda: reader)
     exc = httpx.HTTPStatusError("collections 'a' and 'b' are both live for the tuple", request=MagicMock(),
                                 response=MagicMock(status_code=409))
