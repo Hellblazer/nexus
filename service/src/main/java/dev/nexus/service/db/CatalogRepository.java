@@ -10409,7 +10409,18 @@ public final class CatalogRepository {
             // Java step here could reach.
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
+            //    catalog-049-2 (RDR-229): a live, unsuperseded code/docs/rdr row holds a tuple that may have kept a slug
+            //    collection's owner off it; read the row before it goes and re-derive those slug rows after.
+            var freed = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live")).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                .fetchOne();
             counts.put("catalog_collections", ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).execute());
+            if (freed != null) {
+                rederiveOwnersHeldBack(ctx, tenant, freed.value1(), freed.value2(), freed.value3(), freed.value4());
+            }
             // 8. nexus-s80u9 (7.77.0 shakeout N5): a rename retires the old name as a tombstone that names its
             //    successor (renameCollectionTxn step 3). With the successor deleted the tombstone names nothing
             //    and, having been emptied by the re-home, holds nothing: debris the ghost sweep and `nx doctor`
@@ -10455,6 +10466,52 @@ public final class CatalogRepository {
         return all;
     }
 
+    private static final String TUMBLER_SHAPED_OWNER = "^[0-9]+(-[0-9]+)*$";
+
+    /**
+     * catalog-049-2 (RDR-229): re-run catalog-044's owner derivation for one row with a no-op write. The write names
+     * {@code owner_id}, so the BEFORE INSERT OR UPDATE OF owner_id trigger fires even though the value does not change;
+     * it re-derives a replaceable owner from the row's documents, and catalog-049-2's guard now sees whatever tuple
+     * has been freed since the documents arrived. A tumbler-shaped, curator or knowledge owner is left alone by the trigger.
+     */
+    private static void rederiveOwner(DSLContext ctx, String tenant, String name) {
+        ctx.update(CATALOG_COLLECTIONS)
+           .set(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.OWNER_ID)
+           .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+           .and(CATALOG_COLLECTIONS.NAME.eq(name))
+           .execute();
+    }
+
+    /**
+     * catalog-049-2 (RDR-229): a collection holding the tuple {@code (contentType, ownerId, model, version)} has just
+     * gone (deleted). The rows its tuple may have held back are the live, unsuperseded slug-owned ones of the same
+     * content type, model and version that have a live document under {@code ownerId}'s tumbler prefix; re-derive each.
+     * Bounded by the slug-owned rows of one (content type, model, version), which are the legacy rows only.
+     */
+    private static void rederiveOwnersHeldBack(DSLContext ctx, String tenant, String contentType, String ownerId,
+                                               String model, String version) {
+        if (!java.util.List.of("code", "docs", "rdr").contains(contentType) || !ownerId.matches(TUMBLER_SHAPED_OWNER)) {
+            return;
+        }
+        String prefix = ownerId.replace('-', '.') + ".";
+        for (String held : ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
+                .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
+                .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq(version))
+                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                .and(CATALOG_COLLECTIONS.OWNER_ID.notLikeRegex(TUMBLER_SHAPED_OWNER))
+                .and(org.jooq.impl.DSL.exists(org.jooq.impl.DSL.selectOne().from(CATALOG_DOCUMENTS)
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+                    .and(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(CATALOG_COLLECTIONS.NAME))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull())
+                    .and(CATALOG_DOCUMENTS.TUMBLER.startsWith(prefix))))
+                .fetch(CATALOG_COLLECTIONS.NAME)) {
+            rederiveOwner(ctx, tenant, held);
+        }
+    }
+
     /**
      * Supersede a collection.
      *
@@ -10481,8 +10538,8 @@ public final class CatalogRepository {
         Field<java.time.OffsetDateTime> stampedAt = supersededAt == null || supersededAt.isBlank()
             ? DSL.currentOffsetDateTime()
             : DSL.val(tsOrNull(supersededAt));
-        int updated = tenantScope.withTenant(tenant, ctx ->
-            ctx.update(CATALOG_COLLECTIONS)
+        int updated = tenantScope.withTenant(tenant, ctx -> {
+            int n = ctx.update(CATALOG_COLLECTIONS)
                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
                // nexus-0svvu (a): the WHERE's same-target disjunct below (nexus-cecqy) is
                // deliberately permissive — re-asserting the SAME target must match the
@@ -10518,8 +10575,15 @@ public final class CatalogRepository {
                    // THIRD value underneath an observed read once this CAS is in place.
                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
                        .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
-               .execute()
-        );
+               .execute();
+            // catalog-049-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
+            // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
+            // as renameCollectionTxn's: it fires catalog-044's BEFORE trigger on UPDATE OF owner_id.
+            if (n > 0 && supersededBy != null && !supersededBy.isEmpty()) {
+                rederiveOwner(ctx, tenant, supersededBy);
+            }
+            return n;
+        });
         // nexus-mp8ys: post-commit, like every evict (see CollectionRegistry.evict). The cached row
         // names no successor; left in place it would let an implicit chunk write to the retired
         // name pass the registry check, which is the stranding this refusal exists to stop. The
@@ -11610,11 +11674,7 @@ public final class CatalogRepository {
             // AFTER trigger's guard kept Y's slug owner. X is retired now; this no-op write names owner_id, which
             // fires catalog-044's BEFORE trigger (UPDATE OF owner_id) again, and the guard now sees a free tuple
             // unless a third live collection holds it. A tumbler-shaped or knowledge owner is untouched by the trigger.
-            ctx.update(CATALOG_COLLECTIONS)
-               .set(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.OWNER_ID)
-               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
-               .and(CATALOG_COLLECTIONS.NAME.eq(newName))
-               .execute();
+            rederiveOwner(ctx, tenant, newName);
             return counts;
         });
     }
