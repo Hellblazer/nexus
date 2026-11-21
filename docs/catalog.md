@@ -282,13 +282,15 @@ In `.nexus.yml`:
 ```yaml
 taxonomy:
   auto_label: true                       # Label with Claude haiku (default)
-  local_exclude_collections: ["code__*"] # Skip code in local mode (general-purpose local embeddings cluster code poorly)
+  local_exclude_content_types: [code]    # Skip code collections in local mode (general-purpose local embeddings cluster code poorly)
+  local_exclude_collections: []          # Glob patterns on collection labels to skip in local mode
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `auto_label` | `true` | Auto-label topics with Claude haiku after discover. Requires the `claude` CLI. |
-| `local_exclude_collections` | `["code__*"]` | Glob patterns to skip in local mode. Cloud mode ignores this setting. |
+| `local_exclude_content_types` | `["code"]` | Content types to skip in local mode, matched against each collection's catalog row, never its name. Cloud mode ignores this setting. |
+| `local_exclude_collections` | `[]` | Glob patterns on collection labels to skip in local mode. Cloud mode ignores this setting. Setting it (even to `[]`) without `local_exclude_content_types` makes your config own the exclusion, so `[]` enables code taxonomy locally. |
 
 ### Local vs cloud quality
 

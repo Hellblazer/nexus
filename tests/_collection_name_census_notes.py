@@ -21,6 +21,9 @@ MINT_REG: str = (
 MINT_NOROW: str = (
     'Item 1 NoRow/Unreadable outcome: reads the row first and answers with the mint-class name derivation only when no row answers. Stays until P3.8.'
 )
+MINT_ROUTE: str = (
+    "Item 1 NoRow/Unreadable outcome at a router (RDR-229 P2.9): the row's content_type decides, and the name's own `<type>__` segment (corpus.routing_content_type / candidate_content_type) answers only for a collection with no row. Empties at P3.8."
+)
 DIAG_D: str = (
     'RDR-204 (d): its purpose is to report or discover a name the catalog row does not back, so a row read would make it vacuous.'
 )
@@ -31,13 +34,13 @@ MIG_SRC: str = (
     'Migration source: the name comes from another install or an older era.'
 )
 BYPASS: str = (
-    'The taxonomy__ half of the schema-bypass test, one site since P2.5 gathered the twelve into db/rows/lifecycle.py (P2.9 moves it to the row); the quarantine- half of the same test reads the row (P2.5).'
+    'The taxonomy__ half of the schema-bypass test, one site since P2.5 gathered the twelve into db/rows/lifecycle.py: a legacy name no row backs and no row can tell apart, so a migration source (RDR-229 P2.9 ruling). P2.2 (nexus-p2m1x.7) moves it into legacy_names; the quarantine- half of the same test reads the row (P2.5).'
+)
+TAXONOMY_LEGACY: str = (
+    'A taxonomy__ name test: a legacy name no row backs and no row can tell apart, so a migration source (RDR-229 P2.9 ruling). P2.2 (nexus-p2m1x.7) moves it into legacy_names.'
 )
 QUAR_NOROW: str = (
     "The quarantine- half of the schema-bypass test, for a name with no row or a row with no lifecycle_state only: a row's lifecycle_state decides when there is one (P2.5). Goes with the name parsers at P4."
-)
-ROUTE: str = (
-    "Picks behaviour by the name's content-type prefix; P2.9 reads the row's content_type instead."
 )
 WM_P23: str = (
     'RDR-204 (b) write-model resolution from the name alone; becomes a row read at P2.3 (Gap 1).'
@@ -56,9 +59,6 @@ MINT_PARSE: str = (
 )
 MINT_T3: str = (
     'Builds the candidate name `<user_arg>__` to find an existing collection for a bare content type (item 1: mint).'
-)
-ROUTE_DEFAULT: str = (
-    'Shipped default exclude pattern that is itself a prefix pattern; P2.9 replaces it.'
 )
 LABEL: str = (
     'User-configured name pattern matched against a collection name: it names labels, not a prefix (item 1).'

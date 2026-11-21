@@ -27,6 +27,8 @@ from nexus.aspect_readers import uri_for
 from nexus.catalog.store_hook import catalog_store_hook_tracked
 from nexus.catalog.tumbler import Tumbler
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _COLLECTION = "knowledge__6pfgb31__bge-base-en-v15-768__v1"
 _CHASH = "cd" * 32
 

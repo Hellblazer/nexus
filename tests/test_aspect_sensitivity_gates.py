@@ -30,7 +30,7 @@ from nexus.aspect_worker import AspectExtractionWorker
 from nexus.sensitivity import SensitiveDocumentRefused, llm_bound
 from tests._catalog_fixture_ops import register_real_doc_id
 
-pytestmark = pytest.mark.usefixtures("t2_service_env")
+pytestmark = [pytest.mark.usefixtures("t2_service_env"), pytest.mark.usefixtures("named_collection_rows")]  # RDR-229 P2.9: prefix-named fixtures get a catalog row
 
 _SUB = "aspects"
 _KEYS = {"queue": "aspects"}

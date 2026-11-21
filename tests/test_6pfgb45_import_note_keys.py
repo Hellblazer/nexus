@@ -28,6 +28,9 @@ from nexus.catalog.multi_document_write import PageWriteResult
 from nexus.catalog.note_ttl import has_own_keys, note_ttl_days
 from nexus.exporter import _OwnerImport, _PageRec
 
+import pytest
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _COLL = "knowledge__art__bge-base-en-v15-768__v1"
 _NOTE_URI = f"nx-note://{_COLL}/a-note"
 

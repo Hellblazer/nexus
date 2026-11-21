@@ -26,6 +26,8 @@ from click.testing import CliRunner
 from nexus.commands.aspects import aspects_group
 from nexus.operators import aspect_sql
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── Shared fixture: patch document_aspects to service mode ────────────────────
 

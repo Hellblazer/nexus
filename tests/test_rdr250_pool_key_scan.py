@@ -45,6 +45,8 @@ from tests.test_rdr147_resolution_repair import (
 from tests.test_rdr232_coverage_ledger import RDR_COLL, _cov, _request, _structured
 from tests.test_rdr232_coverage_repair import _h, _run, by_topic
 
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes NoRow without a listing
+
 #: Anchors the generator reads: the first two ids of the search step. Everything after them is the pool.
 ANCHORS = 2
 POOL_PLAN = {"steps": [

@@ -51,6 +51,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "CHROMA_IDENTITY_FIELD",
+    "FILE_ROUTED_CONTENT_TYPES",
     "FILE_ROUTED_PREFIXES",
     "HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S",
     "HTTPS_ETAG_CAPTURE_TIMEOUT_S",
@@ -105,6 +106,26 @@ HTTPS_ETAG_META_KEY = "https_etag"
 #: backfill candidate filter, nexus-r0kum's aspect-writer attribution
 #: guard) cannot silently diverge from each other.
 FILE_ROUTED_PREFIXES: tuple[str, ...] = ("rdr__", "docs__", "code__")
+
+#: RDR-229 P2.9: the content types whose collections are file-routed, read from a collection's ROW by
+#: :func:`is_file_routed_collection`. :data:`FILE_ROUTED_PREFIXES` is no longer a test of a live
+#: collection's name: it is the frozen list the URI-string classifiers (:func:`is_note_uri`) read, because
+#: a note URI's collection segment can name a collection that was renamed or never registered, so no row
+#: answers for it. ``tests/test_rdr229_p29_routing_by_content_type.py`` holds the two lists equal.
+FILE_ROUTED_CONTENT_TYPES: tuple[str, ...] = ("rdr", "docs", "code")
+
+
+def is_file_routed_collection(collection: str, *, db: object = None) -> bool:
+    """True when *collection*'s content type is a file-routed one (``rdr``, ``docs``, ``code``).
+
+    The content type is :func:`nexus.corpus.routing_content_type`'s: the catalog row (``db``'s own resolver,
+    else the client row cache), and, when no row backs a collection a write may be creating or the listing
+    cannot be read, the candidate name's own segment (RDR-229 item 1's NoRow and Unreadable outcomes). A
+    prefix-free label with no row is not file-routed (P3.8).
+    """
+    from nexus.corpus import routing_content_type  # noqa: PLC0415 — deferred: corpus is the heavier module
+
+    return routing_content_type(collection, db=db) in FILE_ROUTED_CONTENT_TYPES
 
 
 #: RDR-231: the stored scheme of a note ``source_uri``. A note is
@@ -198,7 +219,7 @@ def _warn_unanchored_relative_once(collection: str, source_path: str) -> None:
 
 
 def uri_for(
-    collection: str, source_path: str, *, repo_root: str | None = None,
+    collection: str, source_path: str, *, repo_root: str | None = None, db: object = None,
 ) -> str | None:
     """Persistent URI for ``(collection, source_path)``. Single source
     of truth for the going-forward writer in
@@ -210,10 +231,23 @@ def uri_for(
     SQLite ``NULL`` in :class:`AspectRecord` writes and matches the
     migration's NULL-on-empty backfill behavior.
 
-    Filesystem-backed collections (``rdr__/docs__/code__``) get a
-    ``file://`` URI; everything else (``knowledge__`` and any future
-    prefix) gets ``nx-note://`` (via :func:`note_uri`) with the literal
-    source_path as the path component. The note reader handles the title/source_path
+    Filesystem-backed collections get a ``file://`` URI; everything else
+    (``knowledge`` and any future content type) gets ``nx-note://`` (via
+    :func:`note_uri`) with the literal source_path as the path component.
+    The collection's content type is :func:`nexus.corpus.routing_content_type`'s
+    (RDR-229 P2.9, item 1's three outcomes):
+
+    * **Row**: the catalog row's ``content_type`` (``rdr``, ``docs`` and ``code``
+      are filesystem-backed).
+    * **NoRow**: a collection a write is creating holds no chunk and has no row;
+      after one cache invalidate and re-read the candidate name's own ``<type>__``
+      segment answers, so a first write to a new ``docs__`` collection still
+      gets ``file://``, as before.
+    * **Unreadable**: the listing could not be read; the same name derivation,
+      with a warning.
+
+    Only a prefix-free label (``c1234``) with no row stays a note URI, until
+    P3.8: no string rule tells it from a note. The note reader handles the title/source_path
     identity-field fallback for knowledge collections internally
     (research-5, id 1014).
 
@@ -251,7 +285,7 @@ def uri_for(
 
     if not source_path:
         return None
-    if collection.startswith(FILE_ROUTED_PREFIXES):
+    if is_file_routed_collection(collection, db=db):
         # nexus-yg70j defect B / nexus-3e4s: NEVER anchor on the process CWD.
         #
         # `os.path.abspath` on a RELATIVE path calls getcwd(), which makes this
@@ -398,10 +432,10 @@ ReadResult = ReadOk | ReadFail
 # below preserves that behavior for back-compat callers; the load-bearing
 # claim post-RDR-101 is the doc_id-keyed path.
 CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
-    "rdr__":       ("doc_id",),
-    "docs__":      ("doc_id",),
-    "code__":      ("doc_id",),
-    "knowledge__": ("doc_id",),
+    "rdr":       ("doc_id",),
+    "docs":      ("doc_id",),
+    "code":      ("doc_id",),
+    "knowledge": ("doc_id",),
 }
 
 
@@ -410,10 +444,10 @@ CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
 # table. Slated for removal once the prune verb (.10.3) lands and chunks
 # uniformly carry ``doc_id`` metadata.
 _LEGACY_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
-    "rdr__":       ("source_path",),
-    "docs__":      ("source_path",),
-    "code__":      ("source_path",),
-    "knowledge__": ("source_path", "title"),
+    "rdr":       ("source_path",),
+    "docs":      ("source_path",),
+    "code":      ("source_path",),
+    "knowledge": ("source_path", "title"),
 }
 
 
@@ -423,10 +457,9 @@ def _identity_fields_for(collection: str) -> tuple[str, ...]:
     prefix maps to ``("doc_id",)`` uniformly; the legacy multi-field
     probe lives behind ``_legacy_identity_fields_for`` for back-compat.
     """
-    for prefix, fields in CHROMA_IDENTITY_FIELD.items():
-        if collection.startswith(prefix):
-            return fields
-    return ("doc_id",)
+    from nexus.corpus import routing_content_type  # noqa: PLC0415 — deferred: corpus is the heavier module
+
+    return CHROMA_IDENTITY_FIELD.get(routing_content_type(collection) or "", ("doc_id",))
 
 
 def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
@@ -436,10 +469,9 @@ def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
     for ``knowledge__*``. Used by ``_read_chroma_uri`` only when no
     ``doc_id_lookup`` is supplied.
     """
-    for prefix, fields in _LEGACY_IDENTITY_FIELDS.items():
-        if collection.startswith(prefix):
-            return fields
-    return ("source_path",)
+    from nexus.corpus import routing_content_type  # noqa: PLC0415 — deferred: corpus is the heavier module
+
+    return _LEGACY_IDENTITY_FIELDS.get(routing_content_type(collection) or "", ("source_path",))
 
 
 # ── file:// reader ───────────────────────────────────────────────────────────

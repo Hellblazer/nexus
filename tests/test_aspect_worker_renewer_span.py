@@ -33,6 +33,9 @@ from nexus.aspect_worker_tuples import ClaimRenewer, HeldClaim, TupleQueueSide
 from nexus.db.t2.http_tuple_store import ClaimNotFoundError
 from tests._settle import FakeClock
 
+import pytest
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _LEASE_S = 2
 _RENEW_S = 1.0
 _STALL_S = 3 * _RENEW_S
