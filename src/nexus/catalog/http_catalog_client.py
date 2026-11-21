@@ -3767,7 +3767,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 raise
             return CollectionAttributes.from_for_tuple(answer or {}, **tuple_of)
         self._post("/collections/upsert", {"name": name, **body})
-        return CollectionAttributes.from_for_tuple({"name": name, **attrs}, **tuple_of)
+        digits = model_version[1:] if model_version[:1] == "v" else ""
+        return CollectionAttributes(  # what was asked: the engine answered no row, and keeps an existing row's own values
+            collection_id=None, label=name, **tuple_of, dimension=None, lifecycle_state=None,
+            model_version=int(digits) if digits.isascii() and digits.isdigit() and int(digits) >= 1 else None,
+        )
 
     def delete_collection_projection(self, name: str, *, reason: str = "") -> bool:
         # No hard-delete route in initial service; guard+track for bead nexus-gmiaf.24
