@@ -100,8 +100,8 @@ class CollectionMintRestoreTest {
                 + "' AND embedding_model = '" + BGE + "' AND lifecycle_state = 'live' AND name <> 'twin-of-bge-p38' LIMIT 1");
             return null;
         });
-        String original = env.su(ctx -> ctx.fetchValue("SELECT name FROM nexus.catalog_collections WHERE tenant_id = '" + src
-            + "' AND embedding_model = '" + BGE + "' AND name <> 'twin-of-bge-p38' ORDER BY name LIMIT 1", String.class));
+        String original = env.su(ctx -> ctx.resultQuery("SELECT name FROM nexus.catalog_collections WHERE tenant_id = '" + src
+            + "' AND embedding_model = '" + BGE + "' AND name <> 'twin-of-bge-p38' ORDER BY name LIMIT 1").fetchOne(0, String.class));
         var file = env.export(srcToken);
         // the duplicate leaves the source, then the index can be built (a duplicate anywhere refuses its build)
         env.su(ctx -> ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + src + "' AND name = 'twin-of-bge-p38'"));
