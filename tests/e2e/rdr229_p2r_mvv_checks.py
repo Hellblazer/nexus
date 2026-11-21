@@ -15,10 +15,19 @@ with the row's model under the other name, then its owner corrected by SQL (the 
 checks run in sequence against that one collection:
 
 1. ``nx index md`` into it stamps the row's model into chunk metadata.
-2. ``nx search`` calibrates and thresholds with the row's model.
+2. PRE-SATISFIED GUARD: ``nx search`` calibrates and thresholds with the row's model. The row-preferred model
+   resolver landed before Phase 2 (7476beecce, nexus-ml9vu), so this guards against a regression and proves no
+   Phase 2 work.
 3. The engine quarantines one of its chunks into a sibling whose ``lifecycle_state`` column says ``quarantine``,
-   and the engine's lifecycle guards read that column, not the ``quarantine-`` prefix.
-4. A recovery bundle recorded under legacy names restores.
+   and the guards it probes (rename's source side) read that column, not the ``quarantine-`` prefix. It does not
+   prove the engine never reads the prefix: the mover still requires a ``quarantine-`` sibling name and P2.5
+   keeps named name reads (the engine census's QUARANTINE_READ ceiling, 36).
+4. PRE-SATISFIED GUARD: a recovery bundle recorded under legacy names restores. P2.1's non-stranding tests made it
+   hold before Phase 2 by design; this guards against a regression.
+
+LIMIT OF CHECKS 1 AND 2: the substrate engine embeds with one model (bge), so the row's model here equals the
+engine's default model. A reader that ignored the row and used the engine default would still pass, and the
+checks tell "reads the row" from "reads the name" only. The name says Voyage on purpose, so a name reader fails.
 
 Each check records ``{n, name, status, evidence, error}`` to ``$P2R_RESULTS`` (one JSON line) whatever happens in
 it, and the test fails at the end when any did not pass, so a red check never hides the ones after it. A check
@@ -187,7 +196,9 @@ def _md(root: Path, label: str) -> Path:
 
 
 def check_index_md(ctx: dict[str, Any]) -> dict[str, Any]:
-    """1. ``nx index md`` into the fixture collection stamps the ROW's model, not the name's token."""
+    """1. ``nx index md`` into the fixture collection stamps the ROW's model, not the name's token. Limit: the row's
+    model is also the engine's default (bge), so this cannot tell the row from the engine default, only from the
+    name's Voyage token."""
     name, ctl = ctx["name"], ctx["control"]
     runner = CliRunner()
     seeded = {ctx["orphan"]}
@@ -211,7 +222,9 @@ def check_index_md(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_search_calibration(ctx: dict[str, Any]) -> dict[str, Any]:
-    """2. ``nx search`` over the fixture and a control calibrates and thresholds by the row's model.
+    """2. PRE-SATISFIED GUARD (the row-preferred resolver is nexus-ml9vu, 7476beecce, before Phase 2): ``nx search``
+    over the fixture and a control calibrates and thresholds by the row's model. Same limit as check 1: the row's
+    model is the engine's default here.
 
     The window spans two collections that embed with ONE model (the engine's). A name-reading calibrator sees
     ``voyage-context-3`` for one and bge for the other, takes two distinct models, and applies a per-model scale
@@ -258,14 +271,18 @@ def check_search_calibration(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_quarantine_sibling(ctx: dict[str, Any]) -> dict[str, Any]:
-    """3. A quarantine of one chunk registers a sibling whose lifecycle_state is ``quarantine``, and the engine
-    reads that column, not the ``quarantine-`` prefix.
+    """3. A quarantine of one chunk registers a sibling whose lifecycle_state column says ``quarantine``, and the
+    rename route's source-side guard reads that column.
 
     (a) The engine's own mover quarantines the fixture's one orphan chunk; the sibling's ROW is read back from the
-    database and must say ``quarantine`` (the prefix is the client's naming; the state is the engine's column).
-    (b) A name the prefix rule misclassifies, in both directions, probed on the engine's own routes with no client
-    in the way: a plain-named collection whose row says ``quarantine`` is refused a rename; a ``quarantine-``-named
-    collection whose row says ``live`` is not. An engine that reads the prefix does the opposite of both."""
+    database and must say ``quarantine``.
+    (b) A name the prefix rule misclassifies, in both directions, probed on the engine's own rename route with no
+    client in the way: a plain-named collection whose row says ``quarantine`` is refused; a ``quarantine-``-named
+    collection whose row says ``live`` is not. An engine that reads the prefix there does the opposite of both.
+
+    WHAT THIS DOES NOT PROVE: that the engine never reads the prefix. The mover still requires the sibling's name to
+    start with ``quarantine-`` (a registration-side name guard), and P2.5 keeps named name reads for names with no
+    row (the engine census's QUARANTINE_READ ceiling, 36). It proves the state is a column the guard it probes reads."""
 
     name, tenant = ctx["name"], ctx["tenant"]
     mi.invalidate_collections_cache()
@@ -311,7 +328,8 @@ def check_quarantine_sibling(ctx: dict[str, Any]) -> dict[str, Any]:
 
 
 def check_recovery_bundle(ctx: dict[str, Any]) -> dict[str, Any]:
-    """4. A recovery bundle recorded under legacy names restores: a legacy two-segment name and a conformant name
+    """4. PRE-SATISFIED GUARD (P2.1's non-stranding tests held it before Phase 2): a recovery bundle recorded under
+    legacy names restores: a legacy two-segment name and a conformant name
     that another install minted with its own embedding model, neither of which has a row on this install."""
 
     tenant = ctx["tenant"]
@@ -452,21 +470,29 @@ def _p210_collection(ctx: dict[str, Any], name: str, content_type: str) -> None:
     mi.invalidate_collections_cache()
 
 
-def _p210_doc(ctx: dict[str, Any], collection: str, uri: str) -> str:
+def _p210_doc(ctx: dict[str, Any], collection: str, uri: str, *, owner: Any = None,
+              content_type: str = "prose") -> str:
     """A catalog document filed under *collection* whose source_uri is exactly *uri* (substrate SQL sets it: no
     client call spells a ``chroma://`` value). Returns the tumbler."""
     def go() -> str:
         ctx["n"] += 1
         n = ctx["n"]
-        tumbler = str(ctx["cat"].register(ctx["owner"], f"p210-doc-{n}", content_type="prose",
-                                          physical_collection=collection, source_uri=f"file:///p2r210/{n}.md",
-                                          file_path=f"p2r210-{n}.md"))
+        # a repo owner refuses a source_uri outside its repo_root (/r); the curator owner takes any
+        root = "/r" if owner is not None else "/p2r210"
+        tumbler = str(ctx["cat"].register(owner or ctx["owner"], f"p210-doc-{n}", content_type=content_type,
+                                          physical_collection=collection, source_uri=f"file://{root}/{n}.md",
+                                          file_path=f"p2r210-{n}.md", head_hash="H0"))
         _sql(f"UPDATE nexus.catalog_documents SET source_uri = {_lit(uri)} "
              f"WHERE tenant_id = {_lit(ctx['tenant'])} AND tumbler = {_lit(tumbler)}")
         if _doc_uri(ctx, tumbler) != uri:
             raise RuntimeError(f"source_uri of {tumbler} is not {uri!r} after the seed")
         return tumbler
     return _seed(f"document under {collection}", go)
+
+
+def _file_path(ctx: dict[str, Any], tumbler: str) -> str:
+    return _sql("SELECT file_path FROM nexus.catalog_documents "
+                f"WHERE tenant_id = {_lit(ctx['tenant'])} AND tumbler = {_lit(tumbler)}")
 
 
 def _doc_uri(ctx: dict[str, Any], tumbler: str) -> str:
@@ -507,8 +533,9 @@ def _p210_preflight(ctx: dict[str, Any]) -> None:
 
 
 def _wait_for_moves(ev: dict[str, Any]) -> None:
-    """Wait on the registry and on /v1/status boot_work, never on a fixed sleep: all three moves have completed_at,
-    then boot_work lists none of them."""
+    """Wait on the registry and on /v1/status boot_work: all three moves have completed_at, then boot_work lists none
+    of them. Each wait is a bounded poll of a condition (a deadline, one read per second), not a sleep standing in
+    for the condition."""
     deadline = time.monotonic() + WORKER_DEADLINE_S
     while True:
         rows = _sql("SELECT label || '|' || (completed_at IS NOT NULL) FROM nexus.data_moves "
@@ -618,41 +645,110 @@ def _p210_part_backfill(ctx: dict[str, Any]) -> dict[str, Any]:
     return ev
 
 
+def _shown(tumbler: str) -> tuple[str, str]:
+    """``(source_uri, physical_collection)`` of a document as ``nx catalog show --json`` prints it."""
+    res = CliRunner().invoke(main, ["catalog", "show", tumbler, "--json"])
+    doc = _json_object(res.output)
+    return str(doc.get("source_uri", "")), str(doc.get("physical_collection", ""))
+
+
+def _mv_rename(ctx: dict[str, Any], old: str, new: str, docs: list[str]) -> None:
+    res = CliRunner().invoke(main, ["collection", "rename", old, new])
+    if res.exit_code != 0:
+        raise RuntimeError(f"nx collection rename {old} {new} exited {res.exit_code}: {res.output[-400:]}")
+
+
+def _mv_rename_to_prefix_free(ctx: dict[str, Any], old: str, new: str, docs: list[str]) -> None:
+    # a rename that changes the content-type prefix is the operator override of the CLI's prefix guard
+    res = CliRunner().invoke(main, ["collection", "rename", old, new, "--force-prefix-change"])
+    if res.exit_code != 0:
+        raise RuntimeError(f"nx collection rename {old} {new} --force-prefix-change exited {res.exit_code}: "
+                           f"{res.output[-400:]}")
+
+
+def _mv_rehome(ctx: dict[str, Any], old: str, new: str, docs: list[str]) -> None:
+    _p210_collection(ctx, new, "docs")  # a re-home goes onto a live target
+    for _ in range(5):
+        code, text = _engine_post("/v1/catalog/collections/rehome", {"source": old, "target": new})
+        if code != 200:
+            raise RuntimeError(f"POST /v1/catalog/collections/rehome answered {code}: {text[:300]}")
+        if json.loads(text).get("done"):
+            return
+    raise RuntimeError("the re-home was not done after five batches")
+
+
+def _mv_update(ctx: dict[str, Any], old: str, new: str, docs: list[str]) -> None:
+    for tumbler in docs:
+        ctx["cat"].update(tumbler, physical_collection=new)
+
+
+def _mv_reconcile_commit(ctx: dict[str, Any], old: str, new: str, docs: list[str]) -> None:
+    paths = [_file_path(ctx, t) for t in docs]
+    rows = [{"seq": i, "kind": "present", "file_path": path, "content_type": "docs", "title": path,
+             "physical_collection": new, "head_hash": "H1", "source_mtime": 1.0, "content_hash": "",
+             "base_metadata": {}, "stamp": {}, "sensitive": False} for i, path in enumerate(paths)]
+    owner, run = str(ctx["repo_owner"]), f"p2r-{uuid.uuid4().hex[:8]}"
+    ctx["cat"].reconcile_stage(owner, run, "partial", len(rows), rows)
+    outcome = ctx["cat"].reconcile_commit(owner, run)
+    actions = sorted(str(r.get("action")) for r in outcome.get("rows", []))
+    if actions != ["updated"] * len(docs):
+        raise RuntimeError(f"the reconcile commit did not repoint both documents by the update arm: {actions}")
+
+
+#: The moves P2.10 names that a fixture can drive (RDR P2.10 text and item 7). A re-embed move is NOT driven: it
+#: re-registers the documents under a sibling of another embedding model, and this substrate engine embeds with one
+#: model only (the local bge-768), so there is no second model to move to. It is listed in the evidence, not faked.
+_MOVE_PROBES = (
+    ("rename to a prefixed label", "docs__gate-old", "docs__gate-new", _mv_rename),
+    ("rename to a prefix-free label", "docs__gate-oldb", "plainb", _mv_rename_to_prefix_free),
+    ("re-home onto a prefix-free label", "docs__gate-oldc", "plainc", _mv_rehome),
+    ("collection update onto a prefix-free label", "docs__gate-oldd", "plaind", _mv_update),
+    ("reconcile commit onto a prefix-free label", "docs__gate-olde", "plaine", _mv_reconcile_commit),
+)
+
+
 def _p210_part_moves(ctx: dict[str, Any]) -> dict[str, Any]:
-    """(1) URI moves leave chroma:// residue alone and move notes that name the collection."""
-    ev: dict[str, Any] = {}
-    _p210_collection(ctx, "docs__gate-old", "docs")
+    """(1) A move of a file-routed collection's documents leaves ``chroma://`` residue and an ``nx-note://`` value
+    with a file-routed segment on their old segment, whichever move it is, and a note that names a non-file-routed
+    label still follows its rename. Probes: rename onto a prefixed and onto a prefix-free label, re-home, collection
+    update and reconcile commit onto a prefix-free label. Not driven: the re-embed move (see ``_MOVE_PROBES``)."""
+    ev: dict[str, Any] = {"probes": {}, "not_driven": ["re-embed move: needs a second embedding model"]}
+    failures: list[str] = []
+    for label, old, new, move in _MOVE_PROBES:
+        _p210_collection(ctx, old, "docs")
+        residue, note = f"chroma://{old}//abs/path/r.md", f"nx-note://{old}/n"
+        docs = [_p210_doc(ctx, old, residue, owner=ctx["repo_owner"], content_type="docs"),
+                _p210_doc(ctx, old, note, owner=ctx["repo_owner"], content_type="docs")]
+        try:
+            move(ctx, old, new, docs)
+        except Exception as exc:  # noqa: BLE001 -- a move the fixture cannot drive is the gate's own error
+            raise _GateError(f"fixture: the {label} probe failed: {type(exc).__name__}: {exc}", ev) from exc
+        got = [_shown(t) for t in docs]
+        ev["probes"][label] = {"residue": got[0], "file_routed_note": got[1]}
+        if [g[1] for g in got] != [new, new]:
+            raise _GateError(f"fixture: the {label} probe did not move the documents: {got}", ev)
+        if got[0][0] != residue:
+            failures.append(f"{label}: chroma:// residue is now {got[0][0]!r}, it must keep {residue!r}")
+        if got[1][0] != note:
+            failures.append(f"{label}: the file-routed nx-note:// value is now {got[1][0]!r}, it must keep {note!r}")
+
+    # the control that keeps the rule narrow: a note of a non-file-routed label follows its rename
     _p210_collection(ctx, "plainstem", "knowledge")
-    a = _p210_doc(ctx, "docs__gate-old", "chroma://docs__gate-old//abs/path/a.md")
-    c = _p210_doc(ctx, "docs__gate-old", "nx-note://docs__x/n2")
     b = _p210_doc(ctx, "plainstem", "nx-note://plainstem/n1")
-    for old, new in (("docs__gate-old", "docs__gate-new"), ("plainstem", "plainstem2")):
-        res = CliRunner().invoke(main, ["collection", "rename", old, new])
-        if res.exit_code != 0:
-            raise _GateError(f"fixture: nx collection rename {old} {new} exited {res.exit_code}: {res.output[-400:]}", ev)
-
-    def shown(tumbler: str) -> tuple[str, str]:
-        res = CliRunner().invoke(main, ["catalog", "show", tumbler, "--json"])
-        doc = _json_object(res.output)
-        return str(doc.get("source_uri", "")), str(doc.get("physical_collection", ""))
-
-    got = {"chroma_residue": shown(a), "note_of_renamed_label": shown(b), "docs_note": shown(c)}
-    ev["after_rename"] = got
-    _require(got["chroma_residue"][1] == "docs__gate-new" and got["note_of_renamed_label"][1] == "plainstem2",
-             f"fixture: the renames did not move the documents: {got}", ev)
-    _require(got["chroma_residue"][0] == "chroma://docs__gate-old//abs/path/a.md",
-             f"a rename rewrote chroma:// residue: {got['chroma_residue'][0]!r} (it must keep its old segment)", ev)
-    _require(got["note_of_renamed_label"][0] == "nx-note://plainstem2/n1",
-             f"the note of the renamed label is {got['note_of_renamed_label'][0]!r}, want nx-note://plainstem2/n1", ev)
-    _require(got["docs_note"][0] == "nx-note://docs__x/n2",
-             f"a file-routed segment is not a note, yet it was rewritten: {got['docs_note'][0]!r}", ev)
+    _mv_rename(ctx, "plainstem", "plainstem2", [b])
+    ev["note_of_renamed_label"] = _shown(b)
+    if ev["note_of_renamed_label"] != ("nx-note://plainstem2/n1", "plainstem2"):
+        failures.append(f"the note of the renamed label is {ev['note_of_renamed_label']}, want nx-note://plainstem2/n1")
+    _require(not failures, "; ".join(failures), ev)
     return ev
 
 
 def check_p210(ctx: dict[str, Any]) -> dict[str, Any]:
-    """6. P2.10: URI moves leave residue alone, already-moved residue is repaired by registered data moves, and the
-    backfill verb re-derives it. Part (2) runs first (its fixture needs the empty tenant), then (3) over its result,
-    then (1), whose rename leaves a residue row that would change (3)'s census."""
+    """6. P2.10: URI moves leave residue alone (rename, re-home, collection update and reconcile commit, onto a
+    prefixed and onto a prefix-free label; the re-embed move cannot be driven on this one-model substrate and is
+    named in the evidence), already-moved residue is repaired by registered data moves, and the backfill verb
+    re-derives it. Part (2) runs first (its fixture needs the empty tenant), then (3) over its result, then (1),
+    whose moves leave residue rows that would change (3)'s census."""
     _p210_preflight(ctx)
     ev: dict[str, Any] = {"parts": {}}
     failures: dict[str, str] = {}
@@ -676,7 +772,9 @@ def test_rdr229_p2r_mvv_p210(t2_service_env: str) -> None:
     mi.invalidate_collections_cache()
     with HttpCatalogClient() as cat:
         owner = _seed("owner", lambda: cat.register_owner("p2r-p210-owner", owner_type="curator", tumbler_prefix="97.1"))
-        ctx = {"tenant": t2_service_env, "cat": cat, "owner": owner, "n": 0}
+        repo_owner = _seed("repo owner", lambda: cat.register_owner(
+            "p2r-p210-repo", owner_type="repo", repo_hash="p2rp210", repo_root="/r", tumbler_prefix="97.2"))
+        ctx = {"tenant": t2_service_env, "cat": cat, "owner": owner, "repo_owner": repo_owner, "n": 0}
         ok = _run_check(6, "P2.10: URI moves leave residue alone; repaired residue is re-derived; the backfill verb is relaxed",
                         lambda: check_p210(ctx))
     assert ok, "check 6 did not pass"
