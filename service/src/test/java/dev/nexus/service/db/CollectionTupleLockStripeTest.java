@@ -218,8 +218,81 @@ class CollectionTupleLockStripeTest {
         assertThat((Integer) result.get(1)).as("held, as reported").isEqualTo((int) expected);
     }
 
+    /** Two tuples whose keys are distinct stripes, lower key first. */
+    private List<CollectionTupleLock.Tuple> twoStripes() {
+        CollectionTupleLock.Tuple first = new CollectionTupleLock.Tuple(T, "knowledge", "pair-0", MODEL, "v1");
+        long k0 = su(ctx -> CollectionTupleLock.key(ctx, first));
+        for (int i = 1; i < 1000; i++) {
+            CollectionTupleLock.Tuple other = new CollectionTupleLock.Tuple(T, "knowledge", "pair-" + i, MODEL, "v1");
+            long k = su(ctx -> CollectionTupleLock.key(ctx, other));
+            if (k != k0) {
+                return k0 < k ? List.of(first, other) : List.of(other, first);
+            }
+        }
+        throw new IllegalStateException("no second stripe in 1000 tuples");
+    }
+
+    /**
+     * Two transactions take two stripes, each in the order given, meeting at a barrier after the first lock: by hand
+     * (pg_advisory_xact_lock one key after the other) or through {@link CollectionTupleLock#lock}. Answers each side's
+     * outcome, "ok" or the SQLSTATE it failed with.
+     */
+    private List<String> crossing(boolean throughTheHelper) throws Exception {
+        List<CollectionTupleLock.Tuple> pair = twoStripes();
+        List<List<CollectionTupleLock.Tuple>> orders = List.of(pair, List.of(pair.get(1), pair.get(0)));
+        java.util.concurrent.CyclicBarrier afterFirst = new java.util.concurrent.CyclicBarrier(2);
+        List<CompletableFuture<String>> sides = new ArrayList<>();
+        for (List<CollectionTupleLock.Tuple> order : orders) {
+            sides.add(CompletableFuture.supplyAsync(() -> {
+                try (Connection c = pg.createConnection("")) {
+                    c.setAutoCommit(false);
+                    DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+                    try {
+                        if (throughTheHelper) {
+                            afterFirst.await(10, TimeUnit.SECONDS);
+                            CollectionTupleLock.lock(ctx, order);
+                        } else {
+                            ctx.select(DSL.function("pg_advisory_xact_lock", SQLDataType.VARCHAR,
+                                DSL.val(CollectionTupleLock.key(ctx, order.get(0))))).fetch();
+                            afterFirst.await(10, TimeUnit.SECONDS);
+                            ctx.select(DSL.function("pg_advisory_xact_lock", SQLDataType.VARCHAR,
+                                DSL.val(CollectionTupleLock.key(ctx, order.get(1))))).fetch();
+                        }
+                        c.commit();
+                        return "ok";
+                    } catch (org.jooq.exception.DataAccessException e) {
+                        c.rollback();
+                        return e.sqlState();
+                    }
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            }));
+        }
+        List<String> out = new ArrayList<>();
+        for (CompletableFuture<String> side : sides) {
+            out.add(side.get(60, TimeUnit.SECONDS));
+        }
+        return out;
+    }
+
     @Test
-    void twoConcurrentBatchesWhoseStripesInterleaveBothComplete() throws Exception {
+    void twoTransactionsTakingTwoStripesInOppositeOrders_deadlockByHand_andNeverThroughTheHelper() throws Exception {
+        // control: the harness sees a deadlock when there is one
+        assertThat(crossing(false)).as("by hand, opposite orders: one side is the deadlock victim")
+            .containsExactlyInAnyOrder("40P01", "ok");
+        // the helper sorts before it locks, so opposite input orders take the stripes in one order
+        List<CollectionTupleLock.Tuple> pair = twoStripes();
+        List<Long> forward = scope.withTenant(T, ctx -> CollectionTupleLock.lock(ctx, pair));
+        List<Long> backward = scope.withTenant(T, ctx -> CollectionTupleLock.lock(ctx, List.of(pair.get(1), pair.get(0))));
+        assertThat(backward).as("one ascending order whatever the input order").isEqualTo(forward).isSorted().hasSize(2);
+        for (int round = 0; round < 5; round++) {
+            assertThat(crossing(true)).as("through the helper, round %d: both complete", round).containsExactly("ok", "ok");
+        }
+    }
+
+    @Test
+    void twoConcurrentLargeBatchesBothComplete_eachHoldingEachOfItsStripes() throws Exception {
         CountDownLatch go = new CountDownLatch(1);
         List<CompletableFuture<Integer>> batches = new ArrayList<>();
         for (String prefix : List.of("left-", "right-")) {

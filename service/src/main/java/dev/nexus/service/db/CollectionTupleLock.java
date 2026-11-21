@@ -21,14 +21,14 @@ import java.util.TreeSet;
  * locks. Two unrelated tuples in one stripe serialize (a waiter waits for the holder's whole transaction, and a large batch
  * holds nearly every stripe until it commits); accepted by design, see the changeset's header.
  *
- * <p><b>One key derivation.</b> The key is {@code nexus.collection_tuple_lock_key(...)}, the SQL function of changelog
- * catalog-051-1a, and nothing else computes it. The two triggers call the function; this class SELECTs it, so Java never
+ * <p><b>One key derivation.</b> The key is {@code nexus.collection_tuple_lock_key(...)}, the SQL function changelog
+ * catalog-051-1a created and collections-003-1 striped, and nothing else computes it. The two triggers call the function; this class SELECTs it, so Java never
  * re-implements the encoding or the hash. Two writers on one tuple therefore always take the same lock and wait for each
  * other.
  *
  * <p><b>One order.</b> A caller that takes SEVERAL tuple locks in one transaction MUST take them through
  * {@link #lock(DSLContext, Collection)}, never one {@code pg_advisory_xact_lock} after another in its own order: that
- * method SELECTs every key in one round trip, sorts the keys ascending by the {@code bigint} the SQL function returns,
+ * method SELECTs every key ({@link #KEYS_PER_STATEMENT} tuples a statement), sorts the keys ascending by the {@code bigint} the SQL function returns,
  * drops duplicates and locks them in that order, so two such callers can never each hold a lock the other waits for.
  * {@link #lockTuple} is the one-tuple case of the same order. A trigger takes the one lock of its own row, per row and
  * in row order, so a statement that fires it for several rows is not sorted (see collections-003-1's header).
@@ -56,7 +56,7 @@ public final class CollectionTupleLock {
     }
 
     /**
-     * Take {@code pg_advisory_xact_lock} for each tuple: every key SELECTed in one round trip, sorted ascending, each key
+     * Take {@code pg_advisory_xact_lock} for each tuple: every key SELECTed ({@link #KEYS_PER_STATEMENT} tuples a statement), sorted ascending, each key
      * once, locked in that order.
      *
      * @return the keys in the order they were locked (ascending, no duplicates); empty when {@code tuples} is empty
