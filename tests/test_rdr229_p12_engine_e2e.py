@@ -59,11 +59,13 @@ def _seed(tenant: str) -> None:
         cat.register_collection(DOCS_V2, content_type="docs", owner_id="99-1", embedding_model=model, model_version="v2")
         cat.register_collection(KNOW, content_type="knowledge", owner_id="e2esub", embedding_model=model, model_version="v1")
         cat.register_collection(LABEL, content_type="docs", owner_id="99-5", embedding_model=model, model_version="v1")
-        cat.register_collection(LABEL2, content_type="docs", owner_id="99-5", embedding_model=model, model_version="v1")
+        # RDR-229 P3.8: the engine refuses a second live collection on a tuple, so the two D4 pairs (LABEL/LABEL2, TIE_LEGACY/TIE_CONF)
+        # register their second member at v2 and the SQL below sets it to v1, the shape an install that predates the guard carries
+        cat.register_collection(LABEL2, content_type="docs", owner_id="99-5", embedding_model=model, model_version="v2")
         cat.register_collection(CODE_BAD, content_type="docs", owner_id="99-2", embedding_model=model, model_version="v1")
         cat.register_collection(MINTED, content_type="code", owner_id="99-3", embedding_model=model, model_version="v1")
         cat.register_collection(TIE_LEGACY, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v1")
-        cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v1")
+        cat.register_collection(TIE_CONF, content_type="docs", owner_id="99-6", embedding_model=model, model_version="v2")
         # RDR-229 P2.5 (D1): the route refuses a NEW row with a blank model_version, so NOVER registers at v1
         # and the SQL below blanks it, the shape a legacy row still has on an install until D2 repairs it.
         cat.register_collection(NOVER, content_type="docs", owner_id="99-7", embedding_model=model, model_version="v1")
@@ -109,6 +111,9 @@ def _seed(tenant: str) -> None:
         f"{_collection_id(tenant, LABEL)});")
     # RDR-229 P3.8 (item 11): the client no longer writes legacy_grandfathered, so the grandfathered rows of the
     # census are flagged here, the way a pre-RDR-103 install carries them.
+    for second in (LABEL2, TIE_CONF):
+        sql.append(f"UPDATE nexus.catalog_collections SET model_version = 'v1' "
+                   f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(second)};")
     for flagged in (LABEL, MINTED, NOVER):
         sql.append(f"UPDATE nexus.catalog_collections SET legacy_grandfathered = true "
                    f"WHERE tenant_id = {_sql_str(tenant)} AND name = {_sql_str(flagged)};")
