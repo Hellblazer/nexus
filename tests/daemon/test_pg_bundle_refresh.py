@@ -187,10 +187,10 @@ def world(tmp_path, monkeypatch) -> _World:
 
 def _converged(cfg: Path, *, version: str = _REQUIRED_STR) -> dict:
     """A receipt backed by a real binary on disk: the box is converged."""
-    svc = cfg / "service"
-    svc.mkdir(parents=True, exist_ok=True)
+    binary = b.well_known_binary_path(cfg)  # nexus-service.exe on Windows
+    binary.parent.mkdir(parents=True, exist_ok=True)
     payload = b"native-engine-image"
-    (svc / "nexus-service").write_bytes(payload)
+    binary.write_bytes(payload)
     return {"version": version, "tag": "engine-service-v" + version, "sha256": hashlib.sha256(payload).hexdigest()}
 
 
