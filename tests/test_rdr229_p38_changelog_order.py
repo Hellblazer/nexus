@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """collections-001 (the live-tuple index) must follow the changesets it depends on in the master changelog (RDR-229 P3.8).
 
-Two dependencies, both unmerged at the time of writing:
+Two dependencies, both on develop since the 0.1.200 tag:
 
 * D2's ``vectors-065`` (``catalog_collections_owner_read``). collections-001-1's counter is a SECURITY INVOKER function
   that reads every tenant's rows of ``nexus.catalog_collections`` through that policy. The table is FORCE ROW LEVEL
@@ -11,9 +11,8 @@ Two dependencies, both unmerged at the time of writing:
   that would land a document's collection on a live tuple another collection holds. The index must not exist before it:
   without it the trigger turns a document write into an unnamed unique violation.
 
-Each dependency has two tests. The PRESENCE test is a strict xfail: the moment the changeset is included it XPASSes, which
-fails the run and forces the mark off. The ORDER test is live and unmarked: when the changeset is present, the index
-changeset comes after it. It passes vacuously while the changeset is absent; the presence test is what keeps that visible.
+Each dependency has two tests. The PRESENCE test asserts the changeset is included (it was a strict xfail until both
+landed). The ORDER test asserts the index changeset comes after it.
 
 A changeset is found by its id, in the file that holds it, not by that file's name: a renamed file must not hide the order.
 """
@@ -65,11 +64,6 @@ def test_a_changeset_is_found_by_id_in_the_file_that_holds_it() -> None:
     assert _position("no-such-changeset-prefix-p38") is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="D2's vectors-065 (catalog_collections_owner_read) is not on develop yet; remove this mark when it lands, "
-    "RDR-229 P3.8 nexus-p2m1x.28",
-)
 def test_the_owner_read_policy_changeset_is_included() -> None:
     assert _position(_OWNER_READ_PREFIX) is not None, f"no included file holds a {_OWNER_READ_PREFIX}* changeset"
 
@@ -77,7 +71,7 @@ def test_the_owner_read_policy_changeset_is_included() -> None:
 def test_when_the_owner_read_policy_is_included_the_live_tuple_index_follows_it() -> None:
     policy = _position(_OWNER_READ_PREFIX)
     if policy is None:
-        return  # absent: test_the_owner_read_policy_changeset_is_included is the strict xfail that says so
+        return  # absent: test_the_owner_read_policy_changeset_is_included fails and says so
     index = _position(_INDEX_CHANGESET)
     assert index is not None
     assert index > policy, (
@@ -86,11 +80,6 @@ def test_when_the_owner_read_policy_is_included_the_live_tuple_index_follows_it(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="marlowe's catalog-051 (catalog-044's AFTER trigger skips an owner rewrite onto a held live tuple, with a NOTICE) "
-    "is not on develop yet; remove this mark when it lands, RDR-229 P3.8 nexus-p2m1x.28",
-)
 def test_the_catalog_044_trigger_skip_changeset_is_included() -> None:
     assert _position(_TRIGGER_SKIP_PREFIX) is not None, f"no included file holds a {_TRIGGER_SKIP_PREFIX}* changeset"
 
@@ -98,7 +87,7 @@ def test_the_catalog_044_trigger_skip_changeset_is_included() -> None:
 def test_when_the_catalog_044_trigger_skip_is_included_the_live_tuple_index_follows_it() -> None:
     skip = _position(_TRIGGER_SKIP_PREFIX)
     if skip is None:
-        return  # absent: test_the_catalog_044_trigger_skip_changeset_is_included is the strict xfail that says so
+        return  # absent: test_the_catalog_044_trigger_skip_changeset_is_included fails and says so
     index = _position(_INDEX_CHANGESET)
     assert index is not None
     assert index > skip, (
