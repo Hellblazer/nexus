@@ -18,6 +18,7 @@ def _wire(
     unreadable: bool = False, exact: bool = False, exact_log: list[bool] | None = None,
     unreadable_names: tuple[str, ...] = (), projection_counts: dict[str, int] | None = None,
     probe: bool = True, echo: str | None = "auto",
+    probe_log: list | None = None, probe_echo: str | None = "same", probe_raises: bool = False,
 ) -> None:
     """*rows* maps collection name -> catalog content_type (the live listing).
     *unreadable* makes the listing and every row read raise, as an outage does;
@@ -27,7 +28,10 @@ def _wire(
     ``"auto"`` echoes the mode asked for (a current engine), ``None`` is a reply with no
     ``match`` key (an engine without the echo), any other string is sent as is.
     *exact* is what the engine's exact-name prune capability probe answers; *exact_log*
-    collects the ``exact`` flag of each prune call."""
+    collects the ``exact`` flag of each real prune call. The verification prune sent before the
+    first exact prune (a ``nexus-exact-probe-<hex>`` name) is recorded in *probe_log* as
+    ``(name, threshold, exact, real prunes already made)`` and answers *probe_echo* (``"same"``:
+    as *echo* does), or raises when *probe_raises*."""
     rows = rows or {}
     if probe:  # False: the test installs its own catalog reader, so the real probe runs
         monkeypatch.setattr("nexus.commands.taxonomy_cmd.prune_supports_exact", lambda: exact, raising=False)
@@ -40,6 +44,14 @@ def _wire(
             return dict(projection_counts or {})
 
         def prune_projection_below(self, prefix: str, thr: float, *, exact: bool = False) -> int:
+            if prefix.startswith("nexus-exact-probe-"):  # the verification prune: matches no collection
+                if probe_log is not None:
+                    probe_log.append((prefix, thr, exact, [p[0] for p in pruned]))
+                if probe_raises:
+                    raise RuntimeError("engine unreachable")
+                mode = ("exact" if exact else "prefix") if probe_echo == "same" and echo == "auto" else (
+                    echo if probe_echo == "same" else probe_echo)
+                return 0, mode
             pruned.append((prefix, round(thr, 2)))
             if exact_log is not None:
                 exact_log.append(exact)
@@ -340,12 +352,13 @@ def test_prune_sends_exact_and_drops_the_collision_guard_when_the_engine_support
 
 @pytest.mark.parametrize("echo", [None, "prefix"], ids=["no-echo", "echoed-prefix"])
 def test_prune_stops_at_once_when_the_engine_did_not_apply_exact_matching(monkeypatch, echo) -> None:
-    """The /version flag and the prune can disagree (a rollback inside the flag cache, two instances): a
-    reply whose ``match`` is not ``exact`` ends the sweep after the FIRST prune, exits non-zero, and says so."""
+    """The instance can change after the verification prune confirmed exact (the second line of defence): a
+    real reply whose ``match`` is not ``exact`` ends the sweep after the FIRST real prune, exits non-zero,
+    and says so."""
     pruned: list[tuple[str, float]] = []
     exact_log: list[bool] = []
     _wire(
-        monkeypatch, pruned, removed=1, exact=True, exact_log=exact_log, echo=echo,
+        monkeypatch, pruned, removed=1, exact=True, exact_log=exact_log, echo=echo, probe_echo="exact",
         rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "docs__z": "docs"},
     )
     result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
@@ -355,6 +368,70 @@ def test_prune_stops_at_once_when_the_engine_did_not_apply_exact_matching(monkey
     assert "rerun without exact or after the engine is current" in result.output
     assert pruned[0][0] in result.output, "names the collection that already ran in the engine's own mode"
     assert result.exit_code != 0
+
+
+def test_a_verification_prune_precedes_the_first_real_exact_prune(monkeypatch) -> None:
+    """Before any real prune with exact=True, one prune with match=exact goes to a name no collection can
+    match, at threshold 0.0: even a prefix match deletes nothing, so an engine that ignores exact is found
+    out without a real collection being touched."""
+    pruned: list[tuple[str, float]] = []
+    probes: list = []
+    rows = {"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge"}
+    _wire(monkeypatch, pruned, removed=1, exact=True, probe_log=probes, rows=rows)
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert len(probes) == 1
+    name, thr, exact_sent, real_before = probes[0]
+    assert name.startswith("nexus-exact-probe-") and name not in rows
+    assert not any(real.startswith(name) or name.startswith(real) for real in rows), "matches no collection"
+    assert (thr, exact_sent) == (0.0, True)
+    assert real_before == [], "before the first real prune"
+    assert len(pruned) == 2 and "did not confirm" not in result.output
+
+
+@pytest.mark.parametrize("probe_echo", [None, "prefix"], ids=["no-echo", "echoed-prefix"])
+def test_an_unconfirmed_verification_falls_back_to_the_guarded_plan_for_the_whole_sweep(
+    monkeypatch, probe_echo,
+) -> None:
+    pruned: list[tuple[str, float]] = []
+    exact_log: list[bool] = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact=True, exact_log=exact_log, probe_echo=probe_echo, echo="auto",
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge", "docs__z": "docs"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert "the engine did not confirm exact matching; using the guarded prune" in result.output
+    assert exact_log == [False, False, False], "nothing is pruned in exact mode"
+    assert pruned == [("code__1-1__m__v1", 0.5), ("code__1-1__m__v10", 0.5), ("docs__z", 0.55)], "the floor applies"
+    assert "1 skipped" in result.output
+
+
+def test_a_verification_prune_that_fails_falls_back_to_the_guarded_plan(monkeypatch) -> None:
+    pruned: list[tuple[str, float]] = []
+    exact_log: list[bool] = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact=True, exact_log=exact_log, probe_raises=True,
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "--backfill", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert "using the guarded prune" in result.output
+    assert exact_log == [False, False] and len(pruned) == 2
+
+
+def test_the_single_source_form_is_verified_too(monkeypatch) -> None:
+    pruned: list[tuple[str, float]] = []
+    exact_log: list[bool] = []
+    probes: list = []
+    _wire(
+        monkeypatch, pruned, removed=1, exact=True, exact_log=exact_log, probe_log=probes, probe_echo=None,
+        rows={"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge"},
+    )
+    result = CliRunner().invoke(taxonomy, ["project", "code__1-1__m__v1", "--prune-below-threshold"])
+    assert result.exit_code == 0, result.output
+    assert len(probes) == 1 and exact_log == [False]
+    assert pruned == [("code__1-1__m__v1", 0.5)], "the guarded floor, not the exact threshold"
 
 
 def test_prune_continues_when_the_engine_echoes_exact(monkeypatch) -> None:
