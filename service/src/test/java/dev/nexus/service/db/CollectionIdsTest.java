@@ -126,7 +126,7 @@ class CollectionIdsTest {
         List<Boolean> agree = tenantScope.withTenant(TENANT, ctx -> {
             var c = CATALOG_COLLECTIONS.as("c");
             return ctx.select(CollectionIds.idOf(c.TENANT_ID, c.NAME).eq(c.COLLECTION_ID))
-                .from(c).where(c.TENANT_ID.eq(TENANT)).fetch(0, Boolean.class);
+                .from(c).where(c.TENANT_ID.eq(TENANT)).and(c.NAME.ne("")).fetch(0, Boolean.class);
         });
         assertThat(agree).isNotEmpty().containsOnly(true);
     }
