@@ -15,4 +15,9 @@ public interface AckIdentity {
 
     /** Maps nothing: an ack's {@code from} is left as sent. */
     AckIdentity NONE = (tenant, senderSession) -> null;
+
+    /** The engine's own mapping: the identity {@link Identities#countedIdentity} counts the stamp for. */
+    static AckIdentity counting(dev.nexus.service.db.IdentityRepository identities) {
+        return (tenant, senderSession) -> Identities.countedIdentity(identities, tenant, senderSession);
+    }
 }
