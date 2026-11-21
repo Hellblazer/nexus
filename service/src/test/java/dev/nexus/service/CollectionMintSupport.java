@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Name;
@@ -55,6 +56,19 @@ final class CollectionMintSupport {
             .on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
                 CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
             .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("").and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
+            .execute();
+    }
+
+    /**
+     * A unique index of the live tuple's own name over the tuple columns but with another predicate, as an operator or an
+     * older build could leave: the mint's {@code ON CONFLICT ... WHERE} cannot be inferred onto it (42P10) when the predicate
+     * is not implied by the mint's own.
+     */
+    static void createIndexWhere(DSLContext ctx, Condition predicate) {
+        ctx.createUniqueIndexIfNotExists(DSL.name(INDEX))
+            .on(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE,
+                CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+            .where(predicate)
             .execute();
     }
 
