@@ -14,7 +14,9 @@ even parse. Only when the row names no registered owner and the collection holds
 derive the source, in this order, never refusing a collection (stranding user data is forbidden):
 
 1. the bundle's ``owner`` header (an export since RDR-229 records the repo owner's ``repo_hash`` and
-   ``repo_root``): the existing owner with that ``repo_hash``, else a new repo owner;
+   ``repo_root``): the existing owner with that ``repo_hash``, else a new repo owner with an empty
+   ``repo_root`` (the header's root is the source machine's path, so the first ``nx index repo`` here
+   backfills the real one; the header keeps ``repo_root`` as information only);
 2. a collection name of the repo-synth stem shape ``<slug>-<hash8>`` (``code__arcaneum-2ad2825c__...``)
    whose collection is a ``code`` one, or a ``docs``/``rdr`` one when the target catalog already holds
    that repo's owner (a repo owner with ``repo_hash`` ``<hash8>``, from an earlier ``nx index repo`` or a
@@ -23,7 +25,8 @@ derive the source, in this order, never refusing a collection (stranding user da
 3. a ``docs`` corpus with neither: its corpus curator, named the way the doc indexer names it (the stem
    is the corpus). A hash-suffixed stem here looks like a repo's collection that came before its ``code``
    one, so the import says so once (``on_hint``, the structlog warning) and the collection stays with the
-   curator, because an existing owner is never moved by a later import;
+   curator, because an existing owner is never moved by a later import. A tumbler-shaped stem
+   (``docs__1-14__...``) is an owner id, not a corpus name, so it has no corpus curator and goes to 4;
 4. the knowledge curator, with a loud warning naming the collection and the reason, and the caller's
    *on_fallback* hook told so the import summary can count it.
 
@@ -43,6 +46,9 @@ _log = structlog.get_logger(__name__)
 #: A repo-synth owner stem: ``<name>-<hash8>`` (``nexus.repo_identity._safe_collection``), the hash being
 #: the first 8 hex characters of the main repo path's sha256, which is the repo owner's ``repo_hash``.
 _REPO_STEM = re.compile(r"^(?P<slug>.+)-(?P<hash>[0-9a-f]{8})$")
+
+#: An owner TUMBLER in a name's owner segment (``docs__1-14__...``, the hyphenated form): not a corpus name.
+_TUMBLER_STEM = re.compile(r"^[0-9]+(-[0-9]+)*$")
 
 
 def owner_stem(collection_name: str) -> tuple[str, tuple[str, str] | None]:
@@ -112,8 +118,8 @@ def resolve_import_owner_tumbler(
     repo_hash = str((bundle_owner or {}).get("repo_hash") or "")
     if repo_hash:                                                           # (1) the bundle's owner
         slug = str((bundle_owner or {}).get("name") or "") or (stem_parts[0] if stem_parts else "")
-        return _repo_owner(
-            reader, writer, repo_hash, root=str((bundle_owner or {}).get("repo_root") or ""), name=slug)
+        # root="": the header's repo_root is the source machine's path; backfill fills in this machine's
+        return _repo_owner(reader, writer, repo_hash, root="", name=slug)
     if stem_parts is not None and (ctype == "code" or (
         ctype in ("docs", "rdr") and (                                      # the repo is already known here
             reader.owner_for_repo(stem_parts[1]) is not None
@@ -123,10 +129,11 @@ def resolve_import_owner_tumbler(
     )):
         return _repo_owner(reader, writer, stem_parts[1], root="", name=stem_parts[0])   # (2) the stem
     if ctype == "docs":                                                     # (3) the corpus curator
-        if stem:
+        if stem and not _TUMBLER_STEM.match(stem):
             if stem_parts is not None:
-                hint = (f"{stem} looks like a repo's collection; import its code__ bundle first, and this "
-                        f"collection stays with its corpus curator otherwise")
+                hint = (f"{stem} looks like a repo's collection; it was given its corpus curator as owner. "
+                        f"To give it the repo's owner, import that repo's code__ bundle, then remove this "
+                        f"collection and import it again.")
                 _log.warning("import_docs_stem_looks_like_a_repo", collection=collection_name, hint=hint)
                 if on_hint is not None:
                     on_hint(hint)
