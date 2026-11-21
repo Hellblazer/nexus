@@ -2454,6 +2454,9 @@ public final class CatalogHandler implements HttpHandler {
     private void handleCollectionUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        // RDR-229 P3.8: a body naming a collection_id is refused (400) before anything is written, the profile seed below
+        // included.
+        dev.nexus.service.db.CollectionMint.refuseSuppliedId(body);
         // RDR-204 Phase 1 (bead nexus-ft04v.6/.8): this IS the single choke
         // point for "register a collection" (the client's
         // register_collection() -> POST /v1/catalog/collections/upsert ->

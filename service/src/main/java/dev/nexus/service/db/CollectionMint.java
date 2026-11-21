@@ -18,6 +18,8 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
@@ -83,7 +85,7 @@ public final class CollectionMint {
      * Refuse a request body that names a {@code collection_id}: the id is assigned by the engine, from the sequence.
      * A 400 ({@link IllegalArgumentException}) on every route that registers a collection row.
      */
-    static void refuseSuppliedId(Map<String, Object> coll) {
+    public static void refuseSuppliedId(Map<String, Object> coll) {
         if (coll != null && coll.containsKey("collection_id")) {
             throw new IllegalArgumentException("collection_id is assigned by the engine and is not accepted in a request "
                 + "(collection '" + CatalogRepository.s(coll, "name") + "'); drop it from the body");
@@ -122,6 +124,11 @@ public final class CollectionMint {
                 "registering a collection by attributes requires model_version; none was supplied");
         }
         String state = CollectionRegistration.explicitLifecycleState(coll);
+        if (clientRoute) {
+            // the client route registers live collections only, as the named upsert does (dormant, disputed and quarantine
+            // are the engine's own states)
+            CollectionRegistration.requireClientState(state, "<minted for owner " + owner + ">");
+        }
         if (state == null) {
             state = "live";
         }
@@ -132,7 +139,7 @@ public final class CollectionMint {
 
         Map<String, Object> live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
         if (live != null) {
-            return live;
+            return withDisplayName(ctx, tenant, live, coll);
         }
         var model = CollectionRegistration.resolveNewRowModel(ctx, tenant, contentType, requestedModel, "<minted>");
         boolean indexed = tupleIndexExists(ctx);
@@ -142,13 +149,13 @@ public final class CollectionMint {
             lockTuple(ctx, tenant, contentType, owner, requestedModel, version);
             live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
             if (live != null) {
-                return live;
+                return withDisplayName(ctx, tenant, live, coll);
             }
         }
 
         MintedLabel.Choice choice = MintedLabel.choose(
             () -> ctx.fetchValue(DSL.function("nextval", Long.class, SEQUENCE)),
-            id -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id))),
+            id -> idTaken(ctx, id),
             label -> ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(label)))),
             colliding -> healSequence(ctx, tenant, colliding));
@@ -172,16 +179,38 @@ public final class CollectionMint {
                     .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
                 .doNothing().execute()
             : insert.execute();
-        return minted(liveRow(ctx, tenant, contentType, owner, requestedModel, version), inserted, contentType, owner,
-            requestedModel, version);
+        Map<String, Object> row = minted(liveRow(ctx, tenant, contentType, owner, requestedModel, version), inserted,
+            contentType, owner, requestedModel, version);
+        // a lost race answers the winner's row, which gets the display_name this request carries, as a found row does
+        return inserted == 0 ? withDisplayName(ctx, tenant, row, coll) : row;
     }
 
-    /** The row a mint answers: {@code row}, or, when the insert left no live row of the tuple visible, an internal error. */
+    /**
+     * A mint that finds its row applies a non-blank {@code display_name} the way the named upsert does (the durable marker
+     * some callers stamp once, {@code KNOWLEDGE_CORPUS_OPT_IN_MARKER}); a blank one never clobbers an existing value.
+     */
+    private static Map<String, Object> withDisplayName(DSLContext ctx, String tenant, Map<String, Object> row,
+                                                       Map<String, Object> coll) {
+        String display = CatalogRepository.s(coll, "display_name");
+        if (display == null || display.isBlank() || display.equals(row.get("display_name"))) {
+            return row;
+        }
+        ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.DISPLAY_NAME, display)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq((String) row.get("name"))).execute();
+        row.put("display_name", display);
+        return row;
+    }
+
+    /**
+     * The row a mint answers: {@code row}, or, when the insert reported {@code inserted} rows and left no live row of the
+     * tuple visible (the row that held it was superseded or removed between the two statements), a named, retryable 409.
+     */
     public static Map<String, Object> minted(Map<String, Object> row, int inserted, String contentType, String owner,
                                              String model, String version) {
         if (row == null) {
-            throw new IllegalStateException("minting a collection for (" + contentType + ", " + owner + ", " + model
-                + ", " + version + "): the insert reported " + inserted + " rows and no live row of the tuple is visible");
+            throw new LiveTupleConflict("minting a collection for (" + contentType + ", " + owner + ", " + model
+                + ", " + version + "): the insert reported " + inserted + " rows and no live row of the tuple is visible; the "
+                + "tuple's holder changed while it was being registered, so try again");
         }
         return row;
     }
@@ -225,6 +254,92 @@ public final class CollectionMint {
             text = text.substring(0, where);
         }
         return text.startsWith("ERROR: ") ? text.substring("ERROR: ".length()) : text;
+    }
+
+    /**
+     * Whether any row of ANY tenant holds {@code id}. An id is unique across the installation (RDR-229 item 6), but a
+     * tenant-scoped session reads only its own rows (FORCE RLS), so the answer comes from the definer function
+     * {@code nexus.collection_id_taken} (changeset {@code collections-002}), which returns a boolean and no tenant's data.
+     * The session's own rows are asked too, so where the function cannot read (D2's owner-read policy not yet applied)
+     * the check is no weaker than the per-tenant one it replaces.
+     */
+    static boolean idTaken(DSLContext ctx, long id) {
+        return ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.COLLECTION_ID.eq(id)))
+            || Boolean.TRUE.equals(ctx.fetchValue(DSL.function(DSL.name("nexus", "collection_id_taken"), Boolean.class, DSL.val(id))));
+    }
+
+    /**
+     * Draw the next free {@code collection_id} from the column's sequence, for a row whose label the caller chooses (a
+     * rename's new row): the mint's own draw, taken-id check and one forward heal, with no label to match.
+     */
+    static long drawId(DSLContext ctx, String tenant) {
+        return MintedLabel.choose(() -> ctx.fetchValue(DSL.function("nextval", Long.class, SEQUENCE)), id -> idTaken(ctx, id),
+            label -> false, colliding -> healSequence(ctx, tenant, colliding)).collectionId();
+    }
+
+    // ── the race the pre-check cannot see ───────────────────────────────────────────────────────
+
+    private static final java.util.regex.Pattern PK_KEY =
+        java.util.regex.Pattern.compile("Key \\(tenant_id, name\\)=\\([^,]*, (.*?)\\) already exists");
+
+    private static boolean violates(Throwable e, String constraint) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof SQLException se && "23505".equals(se.getSQLState()) && se.getMessage() != null
+                    && se.getMessage().contains("\"" + constraint + "\"")) {
+                return true;
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Run {@code work} (a registration in its own transaction). With the partial UNIQUE index present a registration that
+     * passed its pre-check and then met a concurrent insert of the same tuple raises the index's own 23505; the work's
+     * transaction is gone, so {@code recheck} runs in a new one, finds the winner and throws the same refusal naming both
+     * collections the pre-check does. A minted label that another row took between the draw and the insert (the primary key)
+     * is a named 409 too. Anything else, and a recheck that finds nothing, rethrows the original.
+     */
+    static <T> T refusingRace(TenantScope scope, String tenant, Supplier<T> work, Consumer<DSLContext> recheck) {
+        try {
+            return work.get();
+        } catch (RuntimeException e) {
+            if (recheck != null && violates(e, CollectionTupleIndexProbe.INDEX)) {
+                scope.withTenant(tenant, ctx -> {
+                    recheck.accept(ctx);
+                    return null;
+                });
+            } else if (violates(e, "catalog_collections_pk")) {
+                var key = PK_KEY.matcher(String.valueOf(e.getMessage()));
+                throw new MintedLabel.LabelsTakenException("registering a collection: the label "
+                    + (key.find() ? "'" + key.group(1) + "' " : "") + "was taken by another registration while this one ran; "
+                    + "try again");
+            }
+            throw e;
+        }
+    }
+
+    /** Record the tuple a registration is about to write, for {@link #recheckOf}. */
+    static void remember(String[] t, String name, String contentType, String owner, String model, String version) {
+        t[0] = name;
+        t[1] = contentType;
+        t[2] = owner;
+        t[3] = model;
+        t[4] = version;
+    }
+
+    /** A recheck of one tuple: refuse, naming both, when another live collection than {@code t[0]} holds {@code t}. */
+    static Consumer<DSLContext> recheckOf(String tenant, String[] t) {
+        return ctx -> {
+            if (t[0] != null) {
+                String held = heldBy(ctx, tenant, t[1], t[2], t[3], t[4], t[0]);
+                if (held != null) {
+                    throw conflict(t[0], held, t[1], t[2], t[3], t[4]);
+                }
+            }
+        };
     }
 
     /**
@@ -362,8 +477,20 @@ public final class CollectionMint {
     /** The refusal naming both collections of a live tuple (also the restore load's). */
     public static LiveTupleConflict conflict(String name, String holder, String contentType, String owner, String model,
                                              String version) {
-        return new LiveTupleConflict("collections '" + holder + "' and '" + name + "' are both live for the tuple "
+        return new LiveTupleConflict(both(name, holder, contentType, owner, model, version)
+            + ". Rename, supersede or drop one of them, then try again.");
+    }
+
+    /** The same refusal for a restore, whose remedy is not a request the file's owner can retry: the backup holds the pair. */
+    public static LiveTupleConflict conflictInBackup(String name, String holder, String contentType, String owner,
+                                                     String model, String version) {
+        return new LiveTupleConflict(both(name, holder, contentType, owner, model, version)
+            + "; re-own one of them first, or edit the backup.");
+    }
+
+    private static String both(String name, String holder, String contentType, String owner, String model, String version) {
+        return "collections '" + holder + "' and '" + name + "' are both live for the tuple "
             + "(content_type " + contentType + ", owner_id " + owner + ", embedding_model " + model + ", model_version "
-            + version + "); a tuple has one live collection. Rename, supersede or drop one of them, then try again.");
+            + version + "); a tuple has one live collection";
     }
 }
