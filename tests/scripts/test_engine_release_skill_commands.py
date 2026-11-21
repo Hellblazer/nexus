@@ -213,17 +213,20 @@ _FLAGS_WITHOUT_VALUE = frozenset({"--no-pci-wait"})
 
 
 def _leg_parts(leg: str) -> tuple[list[str], list[str], dict[str, str | None]]:
-    """A leg as (lab-remote options, the remote script's steps, the harness's options).
+    """A leg as (the ssh host, the remote script's steps, the harness's options).
 
+    The legs build the gate jar, so they run over ssh in the pool host's own clone, as engine builds do
+    (``build-gate-jar.sh --lab-run`` takes the build lease before the grant), never through lab-remote:
+    inside a grant the jar build refuses at once while another build holds the lease (nexus-dfg0q).
     Tokenised with shlex so a bound with digits appended, or a dropped option, changes
     an exact comparison instead of passing a substring check."""
     outer = shlex.split(leg)
-    assert outer[0] == "lab-remote" and "--" in outer, f"not a lab-remote command: {leg}"
-    sep = outer.index("--")
-    remote, rest = outer[1:sep], outer[sep + 1 :]
-    assert rest[:2] == ["bash", "-c"] and len(rest) == 3, f"remote command is not one bash -c script: {rest}"
-    steps = [x.strip() for x in rest[2].split("&&")]
+    assert outer[0] == "ssh" and len(outer) == 3, f"not one ssh command with one remote script: {leg}"
+    host, script = outer[1:2], outer[2]
+    steps = [x.strip() for x in script.split("&&")]
     argv = shlex.split(steps[-1])
+    assert argv[:4] == ["lab-run", "-c", "lab-m", "--"], f"the harness runs under a lab-m grant: {argv}"
+    argv = argv[4:]
     assert argv[:3] == ["uv", "run", "python"] and argv[3] == "scripts/upgrade_boot_writes.py", argv
     opts: dict[str, str | None] = {}
     toks = argv[4:]
@@ -237,7 +240,7 @@ def _leg_parts(leg: str) -> tuple[list[str], list[str], dict[str, str | None]]:
         else:
             opts[flag] = toks[i + 1]
             i += 2
-    return remote, steps, opts
+    return host, steps, opts
 
 
 _BOUND = "67108864"  # 64 MiB, Sam 2026-11-10 (halcyon)
@@ -269,11 +272,14 @@ def test_step_3h_has_exactly_the_three_legs_each_with_its_own_bound() -> None:
         "C": {**old, "--restart-mode": "kill", "--json": "output/gate/C.json"},
     }
     for name, leg in legs.items():
-        remote, steps, opts = _leg_parts(leg)
-        assert remote == ["--host", "chas", "-c", "lab-m", "--fetch", "output/gate"], f"Leg {name}: {remote}"
-        assert steps[:2] == ["mkdir -p output/gate", "scripts/build-gate-jar.sh"], (
-            f"Leg {name} must create its report directory and build the stamped jar in the tag tree: {steps}"
-        )
+        host, steps, opts = _leg_parts(leg)
+        assert host == ["$H-test"], f"Leg {name} must name its Linux pool host (the harness reads /proc): {host}"
+        assert steps[:4] == [
+            f"cd ~/src/nexus-wt/engine-cut-$TAG-{name}",
+            "uv sync -q",
+            "NX_BUILD_LEASE_WAIT=28800 scripts/build-gate-jar.sh --lab-run lab-m",
+            "mkdir -p output/gate",
+        ], f"Leg {name} must build the stamped jar in its own tag-tree worktree, lease before grant: {steps}"
         assert opts == expected[name], f"Leg {name} harness options differ:\n{opts}\n!=\n{expected[name]}"
 
 
