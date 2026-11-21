@@ -247,9 +247,7 @@ migration_wal_bytes_per_worker = 12143000
 # 2674 -> 2678 (2026-11-21, nexus-p2m1x.14, RDR-229 owner is the source): catalog-051-1, -1a and -2 CREATE OR REPLACE four functions (catalog_collection_owner_replaceable, collection_tuple_lock_key, catalog_collections_owner_from_docs, catalog_documents_owner_to_collection); vectors-067-1 is the re-own data move, no DDL. MEASURED, not counted: the Phase 2 integration tree (integration/rdr229-phase2 with P2.2 stacked, linda) on a qwent lab-m run (auto host) of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued reads ddl: migration=2678; the 2674 above was counted and is 4 short by exactly marlowe's four functions.
 # 2678 -> 2682 (2026-11-21, nexus-p2m1x.14, RDR-229 owner is the source, P2.R critique S4): vectors-067-2 and -3 add the owner-read policies catalog_owners_owner_read and gc_audit_owner_read for the re-own move's verification, each a DROP POLICY IF EXISTS and a CREATE POLICY (4 statements).
 # Measured: chas lab-m via lab-remote, 2026-11-21, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on d4a969d824 (on integration/rdr229-phase2 eb1e4cd42b): ddl: migration=2682.
-# 2682 -> 2683 (2026-11-21, nexus-p2m1x.26, RDR-229 P3.6): catalog-052-1 is one CREATE UNIQUE INDEX (idx_catalog_collections_live_label, partial over superseded_by = ''); no row is touched.
-# Measured: chas lab-m via lab-remote, 2026-11-21, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on the P3.6 tree (base origin/develop d124a736a; gate jar rebuilt), ddl: migration=2683.
-migration_ddl_per_worker = 2683
+migration_ddl_per_worker = 2682
 migration_ddl_per_worker_tolerance = 0.0
 
 [java_main]
