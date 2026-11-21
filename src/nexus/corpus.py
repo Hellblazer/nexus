@@ -5,15 +5,13 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeVar
+from typing import TypeVar
 
 import click
 import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
-
-if TYPE_CHECKING:
-    from nexus.catalog.collection_name import CollectionAttributes
+from nexus.corpus_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
 
 _log = structlog.get_logger(__name__)
 
@@ -338,26 +336,6 @@ class EmbeddingProfileMismatchError(RuntimeError):
             "leaves the two disagreeing until it restarts. A restart is "
             f"required for the engine to adopt this: {_SERVICE_RESTART_COMMAND}."
         )
-
-
-class CollectionRegistryUnreadableError(click.ClickException, RuntimeError):
-    """A write could not read the catalog row for the collection it names
-    (RDR-229 P2.8, item 1's Unreadable outcome).
-
-    A read falls back to the name resolution when the registry cannot be read,
-    but a write must not: the subject's collection may be registered under a
-    label the render does not produce, and writing to the rendered name would
-    split the subject across two collections. A ``ClickException``, so a CLI
-    writer (``nx index md``/``pdf``, ``nx dt index``) exits 1 with the message.
-    """
-
-
-class CollectionStoreUnreadableError(CollectionRegistryUnreadableError):
-    """A write could not probe the vector store for the collection it names (RDR-229 P2.8).
-
-    A read falls back to the rendered name; a write must not guess it, since the subject's data
-    may sit under another name. Same exit as the registry error, a message naming the probe.
-    """
 
 
 class CatalogReaderUnavailableError(RuntimeError):
@@ -1366,78 +1344,6 @@ def _refuse_placeholder_subject(user_arg: str) -> None:
         )
 
 
-SubjectFinder = Callable[[str, str, str], "CollectionAttributes | None"]
-"""``(content_type, owner_id, embedding_model) -> the registered row or None``:
-what :meth:`nexus.db.http_vector_client.HttpVectorClient.find_collection` and
-:func:`catalog_subject_finder` answer."""
-
-
-def catalog_subject_finder() -> SubjectFinder:
-    """A :data:`SubjectFinder` that reads the catalog registry row, and nothing else
-    (RDR-229 P2.8, item 5).
-
-    For the writers that hold no T3 handle (``nx index md``, ``nx index pdf``,
-    ``nx dt index``). It reads
-    ``make_catalog_reader().find_collection(...)`` for the process-default tenant
-    and closes the reader as ``HttpVectorClient.find_collection`` does. It never
-    probes T3 names, so the nexus-hmxi rule (indexers do not grandfather onto
-    legacy names) is untouched. The reader is built per call, never at
-    construction. A failed read raises; :func:`t3_collection_name` turns it into
-    :class:`CollectionRegistryUnreadableError` on a write.
-    """
-
-    def find(content_type: str, owner_id: str, embedding_model: str) -> "CollectionAttributes | None":
-        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
-
-        reader = make_catalog_reader()
-        try:
-            return reader.find_collection(content_type, owner_id, embedding_model)  # type: ignore[union-attr]
-        finally:
-            close = getattr(reader, "close", None)
-            if close is not None:
-                close()
-
-    return find
-
-
-def _knowledge_subject_label(
-    finder: "SubjectFinder | None", subject: str, model: str, rendered: str, *, for_write: bool,
-) -> "str | None":
-    """The label of the knowledge collection registered for *subject*, found by its
-    row's attributes, never by rendering (RDR-229 P2.8, item 5).
-
-    A knowledge collection's row carries its subject as ``owner_id``
-    (``docs/collections.md``; ``catalog-044`` exempts it from the owner rewrite),
-    so ``finder('knowledge', subject, model)`` finds it whatever shape
-    its label has. Answers the label only when it differs from *rendered*, the
-    name the resolution below would try first: a row under the rendered name
-    leaves that resolution, with its legacy fallbacks, exactly as it was.
-
-    ``None`` (the name resolution stands) when *finder* is ``None`` or no row
-    backs the subject. A store's ``find_collection`` answers only for its
-    own tenant (:meth:`nexus.db.http_vector_client.HttpVectorClient.find_collection`).
-    When the row cannot be read, a read falls back to the name resolution and a
-    write raises :class:`CollectionRegistryUnreadableError`.
-    """
-    from nexus.catalog.collection_name import CollectionAttributes  # noqa: PLC0415 — circular-dep avoidance (catalog)
-
-    if finder is None:
-        return None
-    try:
-        row = finder("knowledge", subject, model)
-    except Exception as exc:  # noqa: BLE001 — any failure is "unreadable": a read falls back, a write refuses
-        if for_write:
-            raise CollectionRegistryUnreadableError(
-                f"cannot read the catalog row for knowledge subject {subject!r}; "
-                f"refusing to write under the rendered name {rendered!r}: {exc}"
-            ) from exc
-        _log.warning("t3_collection_name_subject_row_read_failed", subject=subject, exc_info=True)
-        return None
-    if not isinstance(row, CollectionAttributes) or row.label == rendered:
-        return None
-    return row.label
-
-
 def t3_collection_name(
     user_arg: str, *, t3: object | None = None, for_write: bool = False,
     allow_placeholder: bool = False, subject_finder: "SubjectFinder | None" = None,
@@ -1457,10 +1363,8 @@ def t3_collection_name(
     (RDR-103 Phase 5) while preserving the operator habit of typing
     short ``--collection`` arguments.
 
-    RDR-229 P2.8: a knowledge subject whose conformant collection holds nothing
-    is found by its catalog row (``t3.find_collection``, or the *subject_finder*
-    a t3-less writer passes), so a label of any shape resolves; a write that
-    cannot read the row raises :class:`CollectionRegistryUnreadableError`.
+    RDR-229 P2.8: an empty conformant knowledge subject is found by its catalog row
+    (:func:`nexus.corpus_subject.knowledge_subject_label`), a label of any shape included.
 
     nexus-hmxi: when *t3* is supplied, the resolver checks for an
     existing T3 collection at the user-typed name BEFORE returning
@@ -1629,16 +1533,9 @@ def t3_collection_name(
     promoted = f"{ct}__{owner_segment}__{_resolve_promoted_model_token(ct, for_write=False)}__v1"
 
     if t3 is None:
-        # RDR-229 P2.8: a t3-less writer that passed a ``subject_finder`` finds the
-        # subject's registered collection by its row before it renders a name. No
-        # finder, no read: every other t3-less caller stays pure.
-        if ct == "knowledge" and subject_finder is not None:
-            found = _knowledge_subject_label(
-                subject_finder, owner_segment, _resolve_promoted_model_token(ct, for_write=False),
-                promoted, for_write=for_write,
-            )
-            if found is not None:
-                return found
+        # RDR-229 P2.8: a t3-less writer that passed a subject_finder reads the row first; no finder, no read.
+        if found := knowledge_subject_label(subject_finder, ct, owner_segment, promoted, for_write=for_write):
+            return found
         if for_write:
             # Pure write-shaped call with no t3 to probe against (e.g.
             # the indexers) — no legacy collection could possibly be
@@ -1672,17 +1569,9 @@ def t3_collection_name(
                         "queryable."
                     ),
                 )
-            # RDR-229 P2.8: the conformant name holds nothing, so a knowledge subject
-            # registered under another label is found by its catalog row before the
-            # name fallbacks below. An existing conformant collection never gets here,
-            # so the common case makes no catalog read.
-            if ct == "knowledge":
-                found = _knowledge_subject_label(
-                    getattr(t3, "find_collection", None), owner_segment,
-                    _resolve_promoted_model_token(ct, for_write=False), promoted, for_write=for_write,
-                )
-                if found is not None:
-                    return found
+            # RDR-229 P2.8: the conformant name holds nothing, so the subject's row is read before the fallbacks.
+            if found := knowledge_subject_label(getattr(t3, "find_collection", None), ct, owner_segment, promoted, for_write=for_write):
+                return found
             if t3.collection_exists(user_arg):  # type: ignore[attr-defined]
                 return user_arg
             # Bare-prefix legacy fallback (#535 / nexus-6mr0): when the
@@ -1761,21 +1650,13 @@ def t3_collection_name(
                     # cleanly by the for_write recompute at the bottom
                     # of this function, so the caller sees ONE raise,
                     # not a probe-time one).
-    except CollectionRegistryUnreadableError:
-        # A write that cannot read the subject's row refuses; the best-effort probe
-        # below must not swallow it into a rendered name.
+    except CollectionRegistryUnreadableError:  # a write that cannot read the subject's row refuses
         raise
-    except LocalVoyageCredentialMissingError:
-        # Raised by the write-model resolution inside the probe: the strict recompute below
-        # raises it again, so the caller sees one raise of the same type.
+    except LocalVoyageCredentialMissingError:  # the strict recompute below raises it again, once
         pass
     except Exception as exc:  # noqa: BLE001 — best-effort probe: a READ falls through to the auto-promoted shape on any backend failure
-        # A WRITE must not guess the rendered name when it could not look (RDR-229 P2.8).
-        if for_write:
-            raise CollectionStoreUnreadableError(
-                f"cannot probe the vector store for the collection of {user_arg!r}; "
-                f"refusing to write under the rendered name {promoted!r}: {exc}"
-            ) from exc
+        if for_write:  # a WRITE must not guess the rendered name when it could not look (RDR-229 P2.8)
+            raise CollectionStoreUnreadableError.for_probe(user_arg, promoted, exc) from exc
     if for_write:
         # Nothing pre-existing to grandfather onto: this IS a brand-new
         # mint. Recompute strictly — raises loud if local.embed_model is
