@@ -382,14 +382,25 @@ the engine's next write. A later deploy of the P3.1 engine then needs step 7. No
 
 ## Orphan rows (a VALIDATE that cannot finish)
 
-**PLACEHOLDER: the operator steps wait for developer A's re-run text for the stamp (nexus-p2m1x.17 fix round A; critique
-S1, code review F4).** Write them from that text; do not invent them here.
+A stamp move that finishes while some row names a collection with no registry row in its tenant (an orphan) completes, and its
+table's CHECK stays `NOT VALID`; `nx doctor` shows a "RDR-229 VALIDATE <table>" warning, and the engine's `/v1/status`
+`rdr229_completion.validate_waits` carries the same text. The move is complete, so it does not run again: registering the
+missing collection alone stamps nothing, and `VALIDATE CONSTRAINT` by hand would still fail with SQLSTATE `23514`. An orphan row
+also cannot be updated by any writer while its id is NULL, for the same CHECK.
 
-What is known now. A stamp move that finishes while some row names a collection with no registry row (an orphan) completes, and
-its table's CHECK stays `NOT VALID`; `nx doctor` names the table and the orphan count. Do not follow the "register that
-collection, or remove the rows, then validate" advice an earlier `nx doctor` row printed: registering a collection does not stamp the
-rows that already name it (the stamp move has completed and does not run again), so `VALIDATE CONSTRAINT` still fails with
-SQLSTATE `23514`. A row that is an orphan also cannot be updated by any writer while its id is NULL, for the same CHECK.
+1. **Remove the orphans.** Either register each missing collection, or delete the rows that name it.
+2. **Run the restamp.** As the migrating role (`nexus_admin`):
+
+   ```sql
+   SELECT nexus.rdr229_restamp('<table>');
+   ```
+
+   It registers the table's stamp move once more, as `<label>-rerun-N`, which supersedes the completed move. That move stamps the
+   rows that have become resolvable and validates the CHECK. It answers `registered: ...` or `not registered: <reason>` (for
+   example, an orphan row is still there) and writes nothing else; run it again after fixing what the reason names. The move is
+   throttled like any stamp move and shows under the Data moves rows while it runs.
+
+The listings `nx doctor` prints for the dangling-tombstone and self-id counts are read-only queries, also run as `nexus_admin`.
 
 ## Local and bring-your-own installs
 

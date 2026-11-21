@@ -14,13 +14,9 @@ import subprocess
 import uuid
 from pathlib import Path
 
-import pytest
-
 from nexus.rdr229_completion_health import DANGLING_QUERY, SELF_ID_QUERY
-from tests._chunk_seed import _lit, ambient_tenant
+from tests._chunk_seed import _lit
 from tests._engine_substrate import ensure_engine
-
-pytestmark = pytest.mark.t2_tenant
 
 _MODEL = "bge-base-en-v15-768"
 
@@ -42,8 +38,10 @@ def _ours(query: str, tenant: str) -> list[list[str]]:
 
 
 def test_each_query_returns_exactly_the_seeded_row_and_none_of_the_others() -> None:
-    tenant = ambient_tenant()
     tag = uuid.uuid4().hex[:8]
+    # A tenant of its own, seeded by the superuser and removed after: the test mints no tenant through the engine, so it adds
+    # nothing to the tenant-minting ceiling.
+    tenant = f"r7q-{tag}"
 
     def name(role: str) -> str:
         return f"knowledge__r7q{tag}{role}__{_MODEL}__v1"
