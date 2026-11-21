@@ -23,10 +23,10 @@ def ckpt_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_a_legacy_checkpoint_of_an_old_shape_collection_is_still_deleted(ckpt_dir: Path) -> None:
-    legacy = ckpt_dir / f"{_HASH}-code__repo-1a2b3c4d__voyage-code-3__v1.json"
+    legacy = ckpt_dir / f"{_HASH}-code__repo-1a2b3c4d__model-code__v1.json"
     legacy.write_text("{}", encoding="utf-8")
 
-    checkpoint.delete_checkpoint(_HASH, "code__repo-1a2b3c4d__voyage-code-3__v1")
+    checkpoint.delete_checkpoint(_HASH, "code__repo-1a2b3c4d__model-code__v1")
 
     assert not legacy.exists()
 

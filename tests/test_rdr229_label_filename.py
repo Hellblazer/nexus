@@ -33,7 +33,7 @@ def test_the_name_is_one_safe_path_component(label: str) -> None:
 
 
 def test_a_conformant_collection_name_is_unchanged() -> None:
-    for name in ("code__repo-1a2b3c4d__voyage-code-3__v1", "knowledge__my_subject__bge-base-en-v15-768__v1"):
+    for name in ("code__repo-1a2b3c4d__model-code__v1", "knowledge__my_subject__bge-base-en-v15-768__v1"):
         assert safe_label_filename(name) == name
 
 
