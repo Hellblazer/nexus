@@ -1579,7 +1579,12 @@ bundle and export format record each collection's registry row, including
 `collection_id`, label and attributes, and import registers from the row.
 Import re-maps the source installation's `collection_id` to the id the
 target mints, and keeps the label (or reports a clash with a live label on
-the target and refuses that collection). An old bundle, which carries names
+the target and refuses that collection). A label of the minted form
+(`c<digits>`, item 8) is the source installation's own rendering, and the
+same string on the target names an unrelated collection. So import does not
+keep it and never treats it as a clash: it registers the row by its
+attributes, takes the label the target mints, and reports the pair as
+`collections_relabelled` (P3.9). An old bundle, which carries names
 only, still imports through `legacy_names` for N minor releases after the
 release that ships the new format. N is open for Sam to set at the gate
 (Open Item O1; this draft proposes 20, about 25 days at the measured rate
