@@ -198,7 +198,11 @@ public final class TargetSelection {
             + "cannot be re-owned; the move records each skip and its holder: " + REOWN_SKIPPED_QUERY;
     }
 
-    /** Where an operator reads the rows the re-own move (vectors-067) skipped, and the live collection that held each tuple. */
+    /**
+     * Where an operator reads the rows the re-own move (vectors-067) skipped, and the collection that held each tuple (live,
+     * dormant or disputed: the move's held predicate is unsuperseded and not in quarantine). The hint appears in the reason of
+     * every twin refusal ({@link #sharedSourceTupleReason}), whether or not the source was skipped by the move.
+     */
     static final String REOWN_SKIPPED_QUERY =
         "SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'";
 

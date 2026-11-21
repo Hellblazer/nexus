@@ -42,11 +42,13 @@
     THE VERSION IN A TUPLE. model_version is '' on a row until RDR-229 D2's repair move (vectors-064) writes it from the name,
     and the worker may run this move before D2 completes (D2 blocked or backed off, another move's turn). A row's version is
     therefore read as COALESCE(NULLIF(model_version, ''), substring(name from '__(v[0-9]+)$'), ''): the stored value, else
-    the version D2 will write (the same substring expression D2's template uses), else '' for a name D2 leaves blank. It is
-    compared that way everywhere this move compares tuples (the stem rows and the holders in occ, the ranking in ranked, the
-    verification), so a blank-version row is seen as the v1 twin of a native v1 collection and skipped, not moved onto the
-    tuple D2 would then make a duplicate. The tuple LOCK below uses the version as STORED, because that is what the index and
-    every other writer's lock key see.
+    the trailing __vN of the name, else ''. The trailing __vN is read whether or not the name is conformant: D2's template only
+    repairs a name that matches its conformance regex, so a non-conformant name ending __vN stays '' after D2 while this move
+    reads it as vN. That errs toward HELD (such a row is skipped and reported, never moved onto a tuple), which is the safe
+    direction. It is compared that way everywhere this move compares tuples (the stem rows and the holders in occ, the ranking
+    in ranked, the verification), so a blank-version row is seen as the v1 twin of a native v1 collection and skipped, not moved
+    onto the tuple D2 would then make a duplicate. The tuple LOCK below uses the version as STORED, because that is what the
+    index and every other writer's lock key see.
 
     WHERE AN OPERATOR LOOKS. SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'
     (per tenant: gc_audit is tenant-isolated, so read it with the tenant set). details is a JSON object with the keys
@@ -67,16 +69,27 @@
 
     THE DESTINATION TUPLE LOCKS (S2). catalog-051-2's triggers take pg_advisory_xact_lock(nexus.collection_tuple_lock_key(...)) on
     the tuple a row would land on, so a document registration and a re-own cannot both claim one free tuple. The move takes the
-    same lock on the same key for each tuple it moves a row onto: CTE tk selects the DISTINCT keys of the rows ranked 1 (the rows
-    that will move), computed by the one SQL function with the stored version, ORDER BY the key, MATERIALIZED; CTE tlk calls
-    pg_advisory_xact_lock(k.key) for each row of tk; the UPDATE references tlk (AND (SELECT count(*) FROM tlk) >= 0), which
-    runs it to completion before the UPDATE writes a row. ORDER. The keys are locked in ascending order, which is the order
+    same lock on the same key for each tuple it moves a row onto, and ONLY for the rows this chunk moves: CTE mv holds the
+    chunk's rows (the one place that carries <driving_table> and <chunking_clause>; rows that match the chunking clause, are
+    curator-owned, are not skipped), with each row's tuple key computed by the one SQL function from the stored version; CTE tk
+    selects the DISTINCT keys of mv, ORDER BY the key, MATERIALIZED; CTE tlk calls pg_advisory_xact_lock(k.key) for each row of
+    tk; the UPDATE reads mv and references tlk (AND (SELECT count(*) FROM tlk) >= 0), which runs it to completion before the
+    UPDATE writes a row. A chunk therefore holds at most chunk_size tuple locks (1000), however many tuples the tenant has: a
+    tenant with more tuples than the lock table holds (about 6400 at max_locks_per_transaction 64) cannot fail the move with
+    53200, which is class 53 and would retry forever. ORDER. The keys are locked in ascending order, which is the order
     CollectionTupleLock.lock uses for every Java caller, so no two takers of several tuples hold a lock the other waits on. In
     one statement that order holds because tlk's FROM is the materialised tk, a subquery with DISTINCT and ORDER BY that the
     planner does not flatten or re-sort, and the volatile function in tlk's select list is evaluated for the rows in the order
     tk returns them (the function is parallel-unsafe, so no parallel scan reorders it). The owner lock comes first: tlk's WHERE
-    EXISTS (SELECT 1 FROM lck) makes the lck CTE run before the first tuple lock, the order upsertOwner followed by a trigger
-    takes (owner, then tuple), so the move cannot take them the other way round and deadlock with it. RESIDUAL, the same as
+    EXISTS (SELECT 1 FROM lck) makes the lck CTE run before the first tuple lock. THE CYCLE THAT REMAINS. That fixes the order
+    among advisory locks, not against row locks, so a deadlock with another transaction exists: a transaction that holds the
+    row lock of collection X (an UPDATE or a document write that touched it) and then waits on tuple lock K, held by this
+    move, cycles with the move's later UPDATE of X; likewise a transaction that holds a tuple lock and then calls upsertOwner
+    (the owner lock) while the move holds the owner lock and waits on that tuple. PostgreSQL kills one of the two with 40P01.
+    Who retries: the move, when it is the victim (DataMoveFailureClassifier treats 40P01 as transient and the worker retries the
+    chunk, which is safe because a chunk is one statement). Who surfaces it: when the other side is the victim, a plain
+    document registration (upsertDocument, registerDocument), upsertCollection and supersedeCollection are not wrapped in
+    DeadlockRetry, so the caller sees the 40P01 error (see catalog-051's header for the wrapped paths). RESIDUAL, the same as
     the owner lock's: the statement's snapshot is taken before any of these locks are granted, so a trigger rewrite that
     commits between the snapshot and the grant is not seen by occ; under the P3.8 index the move's UPDATE then raises 23505,
     which DataMoveFailureClassifier treats as permanent, so the move is reported failed and a superseding move re-runs it;
@@ -88,7 +101,8 @@
     uses ('1.' || max(second segment) + 1, consecutive for several new owners), the INSERT of the skip reports, and the UPDATE of
     the driving table. All the sub-statements share one snapshot, so the UPDATE cannot read the INSERT's rows through
     catalog_owners: it joins the INSERT's RETURNING to the owners already visible. <driving_table> and <chunking_clause> appear
-    once, in the UPDATE (dml_utils requires exactly once); the CTEs read the tenant's catalog rows by name, so each chunk re-derives
+    once, in the mv CTE (dml_utils requires exactly once; the UPDATE names the driving table and joins mv on its primary key, and
+    re-checks that the row is still curator-owned and not superseded, which a row changed after the snapshot re-evaluates); the CTEs read the tenant's catalog rows by name, so each chunk re-derives
     the tenant's repo stems, the owner INSERT is a no-op after the first, and the report INSERT adds only rows not yet reported.
     A stem's rows may fall in different chunks (code__ sorts before docs__), which is why a stem whose owner already exists is a
     repo. The tenant is current_setting('nexus.tenant'): the worker runs the move once per tenant.
@@ -220,16 +234,6 @@ VALUES ('rdr229-reown-repo-stems-from-curator',
     SELECT k.name, k.owner_id, k.content_type, k.dest_prefix, k.first_name,
            ''destination tuple claimed in this run by '' || k.first_name
       FROM ranked k WHERE k.rn > 1
-), tk AS MATERIALIZED (
-    SELECT DISTINCT nexus.collection_tuple_lock_key(current_setting(''nexus.tenant'', true), m.content_type,
-                                                    replace(m.dest_prefix, ''.'', ''-''), m.embedding_model, m.stored_version) AS key
-      FROM ranked m
-     WHERE m.rn = 1
-     ORDER BY 1
-), tlk AS (
-    SELECT pg_advisory_xact_lock(k.key) AS locked
-      FROM tk k
-     WHERE EXISTS (SELECT 1 FROM lck)
 ), reported AS (
     INSERT INTO nexus.gc_audit (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
     SELECT current_setting(''nexus.tenant'', true), ''rdr229_reown_skipped'', k.name,
@@ -242,21 +246,39 @@ VALUES ('rdr229-reown-repo-stems-from-curator',
                         WHERE g.tenant_id = current_setting(''nexus.tenant'', true)
                           AND g.operation = ''rdr229_reown_skipped'' AND g.collection = k.name)
     RETURNING id
+), mv AS MATERIALIZED (
+    SELECT t.tenant_id, t.name, replace(w.tumbler_prefix, ''.'', ''-'') AS dest,
+           CASE WHEN t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' THEN
+                nexus.collection_tuple_lock_key(t.tenant_id, t.content_type, replace(w.tumbler_prefix, ''.'', ''-''),
+                                                t.embedding_model, t.model_version) END AS key
+      FROM <driving_table>
+     CROSS JOIN stems s
+      JOIN repo_owner w ON w.repo_hash = s.hash8
+     WHERE <chunking_clause>
+       AND t.tenant_id = current_setting(''nexus.tenant'', true)
+       AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
+       AND t.owner_id IS DISTINCT FROM replace(w.tumbler_prefix, ''.'', ''-'')
+       AND ((t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' AND t.superseded_by = ''''
+             AND split_part(t.name, ''__'', 1) = t.content_type AND split_part(t.name, ''__'', 2) = s.stem
+             AND NOT EXISTS (SELECT 1 FROM skipped k WHERE k.name = t.name))
+         OR (t.lifecycle_state = ''quarantine''
+             AND EXISTS (SELECT 1 FROM stemrows o WHERE o.stem = s.stem AND t.name = ''quarantine-'' || o.name)
+             AND NOT EXISTS (SELECT 1 FROM skipped k WHERE t.name = ''quarantine-'' || k.name)))
+), tk AS MATERIALIZED (
+    SELECT DISTINCT m.key FROM mv m WHERE m.key IS NOT NULL ORDER BY 1
+), tlk AS (
+    SELECT pg_advisory_xact_lock(k.key) AS locked
+      FROM tk k
+     WHERE EXISTS (SELECT 1 FROM lck)
 )
-UPDATE <driving_table>
-   SET owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
-  FROM stems s JOIN repo_owner w ON w.repo_hash = s.hash8
- WHERE <chunking_clause>
-   AND t.tenant_id = current_setting(''nexus.tenant'', true)
+UPDATE nexus.catalog_collections u
+   SET owner_id = m.dest
+  FROM mv m
+ WHERE u.tenant_id = m.tenant_id AND u.name = m.name
    AND (SELECT count(*) FROM tlk) >= 0
-   AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
-   AND t.owner_id IS DISTINCT FROM replace(w.tumbler_prefix, ''.'', ''-'')
-   AND ((t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' AND t.superseded_by = ''''
-         AND split_part(t.name, ''__'', 1) = t.content_type AND split_part(t.name, ''__'', 2) = s.stem
-         AND NOT EXISTS (SELECT 1 FROM skipped k WHERE k.name = t.name))
-     OR (t.lifecycle_state = ''quarantine''
-         AND EXISTS (SELECT 1 FROM stemrows o WHERE o.stem = s.stem AND t.name = ''quarantine-'' || o.name)
-         AND NOT EXISTS (SELECT 1 FROM skipped k WHERE t.name = ''quarantine-'' || k.name)))',
+   AND nexus.catalog_owner_is_curator(u.tenant_id, u.owner_id)
+   AND u.owner_id IS DISTINCT FROM m.dest
+   AND (u.lifecycle_state = ''quarantine'' OR u.superseded_by = '''')',
         'nexus', 'catalog_collections', 1000, 0, 60000,
         'SELECT 1 FROM nexus.catalog_collections t
  WHERE t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' AND t.superseded_by = ''''
