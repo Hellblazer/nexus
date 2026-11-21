@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -1927,6 +1928,7 @@ class PgVectorRepositoryContractTest {
                 // chash is bytea(32) now (RDR-180) — bind the decoded digest, not hex text.
                 .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
                 .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 // RDR-225: the manifest row carries its collection's model, as the chunk it points at does.
                 .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
                     PgContainerHelper.collectionModel(seed, tenant, collection))

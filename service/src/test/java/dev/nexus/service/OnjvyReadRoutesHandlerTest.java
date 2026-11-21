@@ -2,6 +2,7 @@ package dev.nexus.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantConstants;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.jooq.SQLDialect;
@@ -354,6 +355,7 @@ class OnjvyReadRoutesHandlerTest {
             DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, tenant)
                 .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chashHex))
                 .set(CHUNKS.EMBEDDING_MODEL, model)
                 .set(CHUNKS.CHUNK_TEXT, "routes-test chunk")

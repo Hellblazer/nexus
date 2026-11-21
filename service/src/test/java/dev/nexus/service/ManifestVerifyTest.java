@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.DSL;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
@@ -618,6 +619,7 @@ class ManifestVerifyTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
@@ -645,6 +647,7 @@ class ManifestVerifyTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenantId)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenantId, collection))
             .set(CHUNKS.CHASH, HexFormat.of().parseHex(chashHex))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenantId, collection))
             .set(CHUNKS.CHUNK_TEXT, "chunk text")

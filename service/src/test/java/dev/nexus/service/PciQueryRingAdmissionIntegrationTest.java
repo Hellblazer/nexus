@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.AspectRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.PciIndexSet;
 import dev.nexus.service.vectors.PciQueryRing;
@@ -188,13 +189,14 @@ class PciQueryRingAdmissionIntegrationTest {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             var at = java.time.OffsetDateTime.parse("2026-01-01T00:00:00+00:00");
             String model = PgContainerHelper.collectionModel(ctx, TENANT, collection);
-            long topic = ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
-                .values(TENANT, TOPIC_LABEL, collection, at).returning(TOPICS.ID).fetchOne().getId();
+            long topic = ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, TOPICS.CREATED_AT)
+                .values(TENANT, TOPIC_LABEL, collection, CollectionIds.require(ctx, TENANT, collection), at).returning(TOPICS.ID).fetchOne().getId();
             for (String chash : chashes) {
                 ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
+                        TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                        TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, TOPIC_ASSIGNMENTS.ASSIGNED_AT,
                         TOPIC_ASSIGNMENTS.EMBEDDING_MODEL)
-                    .values(TENANT, HexFormat.of().parseHex(chash), topic, collection, at, model)
+                    .values(TENANT, HexFormat.of().parseHex(chash), topic, collection, CollectionIds.require(ctx, TENANT, collection), at, model)
                     .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
                     .doNothing().execute();
             }

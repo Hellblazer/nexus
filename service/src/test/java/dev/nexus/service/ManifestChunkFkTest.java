@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
@@ -93,6 +94,16 @@ class ManifestChunkFkTest {
         vecRepo = new PgVectorRepository(tenantScope, embedder, embedder);
     }
 
+    /** Registers {@code name} for {@code tenant} (P3.1: a write under an unregistered collection is a typed 422). */
+    private void registerCollection(String tenant, String name) {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), tenant, name);
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     @AfterAll
     void stopAll() {
         if (svcDs != null) svcDs.close();
@@ -166,6 +177,7 @@ class ManifestChunkFkTest {
     void manifestWrite_chashWithNoMatchingChunk_isRejected() throws Exception {
         String doc = "fk-reject-doc";
         String chash = Chash.ofText("fk-reject-no-chunk").toHex();
+        registerCollection(TENANT, COLLECTION);
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK reject doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", COLLECTION));
@@ -185,6 +197,7 @@ class ManifestChunkFkTest {
     void manifestWrite_chashWithMatchingChunk_succeeds() throws Exception {
         String doc = "fk-accept-doc";
         String chash = Chash.ofText("fk-accept-with-chunk").toHex();
+        registerCollection(TENANT, COLLECTION);
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK accept doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", COLLECTION));
@@ -213,6 +226,7 @@ class ManifestChunkFkTest {
         String chash = Chash.ofText("fk-cascade-chunk").toHex();
         String oldCollection = "knowledge__fk-cascade-old__minilm-l6-v2-384__v1";
         String newCollection = "knowledge__fk-cascade-new__minilm-l6-v2-384__v1";
+        registerCollection(TENANT, oldCollection);
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK cascade doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", oldCollection));
@@ -242,6 +256,7 @@ class ManifestChunkFkTest {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, newCollection);
             int updated = DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
                 .set(CHUNKS.COLLECTION, newCollection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, newCollection))
                 .where(CHUNKS.TENANT_ID.eq(TENANT))
                 .and(CHUNKS.COLLECTION.eq(oldCollection))
                 .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(chash)))
@@ -271,6 +286,7 @@ class ManifestChunkFkTest {
         // orphan the manifest row.
         String doc = "fk-del-reject-doc";
         String chash = Chash.ofText("fk-del-reject-chunk").toHex();
+        registerCollection(TENANT, COLLECTION);
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK delete-reject doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", COLLECTION));
@@ -316,6 +332,7 @@ class ManifestChunkFkTest {
         String doc = "fk-purge-aged-tomb";
         String chash = Chash.ofText("fk-purge-chunk").toHex();
 
+        registerCollection(TENANT, collection);
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK purge doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", collection));
@@ -374,6 +391,7 @@ class ManifestChunkFkTest {
         String doc = "fk-delcoll-doc";
         String chash = Chash.ofText("fk-delcoll-chunk").toHex();
 
+        registerCollection(TENANT, collection);
         catalogRepo.upsertDocument(TENANT, Map.of(
             "tumbler", doc, "title", "FK delete-collection doc", "content_type", "paper",
             "corpus", "knowledge", "physical_collection", collection));

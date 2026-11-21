@@ -6,6 +6,7 @@ import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_768;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -204,15 +205,18 @@ class GraphHopParityTest {
             .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
             .set(CATALOG_DOCUMENTS.CORPUS, "research")
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL_EXPLAIN)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT_A, COLL_EXPLAIN))
             .execute();
         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                 CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.AUTHOR, CATALOG_DOCUMENTS.YEAR,
-                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+                CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.CORPUS, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
             .select(ctx.select(DSL.val(TENANT_A, CATALOG_DOCUMENTS.TENANT_ID),
                     DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.concat(DSL.inline("Doc "), DSL.cast(g, SQLDataType.VARCHAR)), DSL.inline("exauthor"),
                     DSL.inline(2024), DSL.inline("paper"), DSL.inline("research"),
-                    DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION))
+                    DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION),
+                    CollectionIds.idOf(TENANT_A, COLL_EXPLAIN))
                 .from(series))
             .execute();
         // RDR-180: chash is bytea(32) now — the lpad'd decimal string is still valid
@@ -222,9 +226,10 @@ class GraphHopParityTest {
         // nexus.chunks row before the manifest row below -- chunk insert first.
         // Embedding: [(g % 100) / 100, 1, 0 ... 0], built as pgvector text and cast to the generated
         // field's own vector type.
-        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.CHASH,
+                CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
             .select(ctx.select(DSL.val(TENANT_A, CHUNKS.TENANT_ID), DSL.val(COLL_EXPLAIN, CHUNKS.COLLECTION),
+                    CollectionIds.idOf(TENANT_A, COLL_EXPLAIN),
                     DSL.function("decode", SQLDataType.BLOB,
                         DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
                         DSL.inline("hex")),
@@ -238,7 +243,7 @@ class GraphHopParityTest {
             .execute();
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
             .select(ctx.select(DSL.val(TENANT_A, CATALOG_DOCUMENT_CHUNKS.TENANT_ID),
                     DSL.concat(DSL.inline("ex"), DSL.cast(g, SQLDataType.VARCHAR)),
                     DSL.inline(0),
@@ -246,6 +251,7 @@ class GraphHopParityTest {
                         DSL.lpad(DSL.cast(g, SQLDataType.VARCHAR), DSL.inline(64), DSL.inline("0")),
                         DSL.inline("hex")),
                     DSL.val(COLL_EXPLAIN, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
+                    CollectionIds.idOf(TENANT_A, COLL_EXPLAIN),
                     DSL.val(PgContainerHelper.collectionModel(ctx, TENANT_A, COLL_EXPLAIN),
                         CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL))
                 .from(series))
@@ -760,6 +766,7 @@ class GraphHopParityTest {
             .set(CATALOG_DOCUMENTS.CONTENT_TYPE, "paper")
             .set(CATALOG_DOCUMENTS.CORPUS, "research")
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
             .execute();
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires the
@@ -767,6 +774,7 @@ class GraphHopParityTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .set(CHUNKS.CHUNK_TEXT, tumbler)
@@ -779,6 +787,7 @@ class GraphHopParityTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()

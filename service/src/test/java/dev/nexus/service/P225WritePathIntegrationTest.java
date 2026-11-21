@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.ChashRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionModelMismatchException;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.ModelPartitions;
@@ -266,9 +267,10 @@ class P225WritePathIntegrationTest {
                 .hasMessageContaining("_dimension_chk");
             // A row filed under another model than its collection's: the composite foreign key to the registry.
             var vec = dev.nexus.service.jooq.binding.Vector.of(new float[1024]);
-            assertThatThrownBy(() -> ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH,
-                        CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-                    .values(TA, col, dev.nexus.service.db.Chash.fromHex(h(32)).toBytes(), CONTEXT_3, "x", vec).execute())
+            assertThatThrownBy(() -> ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID,
+                    CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
+                    .values(TA, col, CollectionIds.require(ctx, TA, col), dev.nexus.service.db.Chash.fromHex(h(32)).toBytes(),
+                            CONTEXT_3, "x", vec).execute())
                 .isInstanceOf(DataAccessException.class)
                 .satisfies(t -> {
                     Throwable c = t;

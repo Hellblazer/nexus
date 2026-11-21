@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -80,6 +81,26 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
         return uri.isEmpty() ? doc.get("tumbler").asText() : uri;
     }
 
+    private static boolean registered(JsonNode sc, String key) {
+        for (JsonNode c : sc.get("collections")) if (c.asText().equals(key)) return true;
+        return false;
+    }
+
+    /**
+     * The census's "ghost" shape: a live document whose collection has no registry row. Since P3.1 the write of such a
+     * row is refused (the id column cannot be set), so the collection is registered for the insert and its registry
+     * row removed after it, which leaves the row the census must classify.
+     */
+    private void insertOfAGoneCollection(Doc doc, String coll) throws Exception {
+        collection(TENANT, coll);
+        insert(TENANT, doc);
+        try (var su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES).deleteFrom(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(coll)).execute();
+        }
+    }
+
     private String collectionName(String key) {
         return switch (key) {
             case "" -> "";
@@ -130,7 +151,11 @@ class IndexRunCensusParityTest extends IndexRunCensusTestBase {
                 .indexed(time(d.get("indexed_at")));
             doc.filePath = d.get("file_path").asText();
             if (d.get("deleted").asBoolean()) doc.tombstoned();
-            insert(TENANT, doc);
+            if (!coll.isEmpty() && (!sc.has("collections") || !registered(sc, d.get("collection").asText()))) {
+                insertOfAGoneCollection(doc, coll);
+            } else {
+                insert(TENANT, doc);
+            }
             tumblerName.put(d.get("tumbler").asText(), name(d));
             for (int p = 0; p < d.get("manifest_rows").asInt(); p++) {
                 manifest(TENANT, doc.tumbler, p, coll, chunk(TENANT, coll, "{}"));

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.ManifestFill;
 import dev.nexus.service.db.ManifestFillableCount;
 import org.jooq.DSLContext;
@@ -69,7 +70,8 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                 docs.add(dsl.insertInto(CATALOG_DOCUMENTS)
                     .set(CATALOG_DOCUMENTS.TENANT_ID, TENANT).set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
                     .set(CATALOG_DOCUMENTS.TITLE, "doc " + d).set(CATALOG_DOCUMENTS.FILE_PATH, path)
-                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, COLL)
+                    .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)).set(CATALOG_DOCUMENTS.CONTENT_TYPE, "prose")
                     .set(CATALOG_DOCUMENTS.INDEXED_AT, OffsetDateTime.parse(DOC_AT))
                     .set(CATALOG_DOCUMENTS.METADATA, JSONB.valueOf("{}")));
                 for (int r = 0; r < ROWS_PER_DOC; r++) {
@@ -81,7 +83,8 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                             ? "{\"title\":\"" + title + "\",\"indexed_at\":\"" + OK_AT + "\"}"
                             : "{\"title\":\"" + title + "\",\"indexed_at\":\"" + OK_AT + "\",\"section_title\":\"S\"}";
                     chunks.add(dsl.insertInto(CHUNKS)
-                        .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL).set(CHUNKS.CHASH, chash(d, r))
+                        .set(CHUNKS.TENANT_ID, TENANT).set(CHUNKS.COLLECTION, COLL)
+                        .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)).set(CHUNKS.CHASH, chash(d, r))
                         .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, "stub")
                         .set(CHUNKS.EMBEDDING_768, VectorSeeds.vec(768, 0.1f))
                         .set(CHUNKS.METADATA, JSONB.valueOf(meta)));
@@ -89,7 +92,8 @@ class ManifestFillablePlanTest extends ManifestFillableTestBase {
                         .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, tumbler)
                         .set(CATALOG_DOCUMENT_CHUNKS.POSITION, r).set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, r)
                         .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash(d, r))
-                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL)
+                        .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, COLL)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
                         .set(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN, labelsWritten && r != fullRows);
                     manifest.add(r < fullRows
                         ? m.set(CATALOG_DOCUMENT_CHUNKS.LINE_START, r * 10 + 1).set(CATALOG_DOCUMENT_CHUNKS.LINE_END, r * 10 + 9)

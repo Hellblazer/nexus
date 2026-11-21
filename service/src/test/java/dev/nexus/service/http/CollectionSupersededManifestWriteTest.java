@@ -81,6 +81,7 @@ class CollectionSupersededManifestWriteTest extends AtomicWriteTestBase {
 
     private String retire(Seeded s) {
         String successor = s.fx().collection().replace("__v1", "__v2");
+        registerCollection(successor);   // a retired name points at a registered successor (P3.1: its id is stored)
         assertThat(repo.supersedeCollection(TENANT, s.fx().collection(), successor, "")).isEqualTo(1);
         return successor;
     }

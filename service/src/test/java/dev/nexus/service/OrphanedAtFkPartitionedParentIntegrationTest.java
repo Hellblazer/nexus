@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.exception.DataAccessException;
@@ -100,8 +101,9 @@ class OrphanedAtFkPartitionedParentIntegrationTest {
                .where(CHUNKS.TENANT_ID.eq(tenant)).execute();
             for (String[] d : new String[][] {{"d-code", CODE_COL}, {"d-ctx", CTX_COL}}) {
                 ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                    .values(tenant, d[0], "doc " + d[0], d[1]).execute();
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(tenant, d[0], "doc " + d[0], d[1], CollectionIds.require(ctx, tenant, d[1])).execute();
             }
             manifest(ctx, tenant, "d-code", CODE_COL, shared, 0);
             manifest(ctx, tenant, "d-ctx", CTX_COL, shared, 0);
@@ -112,8 +114,9 @@ class OrphanedAtFkPartitionedParentIntegrationTest {
     private static void manifest(DSLContext ctx, String tenant, String doc, String collection, String hex, int position) {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(tenant, doc, position, bytes(hex), collection, PgContainerHelper.collectionModel(ctx, tenant, collection))
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+            .values(tenant, doc, position, bytes(hex), collection, CollectionIds.require(ctx, tenant, collection),
+                    PgContainerHelper.collectionModel(ctx, tenant, collection))
             .execute();
     }
 
@@ -165,9 +168,10 @@ class OrphanedAtFkPartitionedParentIntegrationTest {
         Fixture f = seed("oafk-fk");
         // (CODE_COL, shared) exists only under the code model: a record naming it under the context model has no chunk.
         assertThatThrownBy(() -> su(ctx -> ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID,
-                CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT,
-                CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
-            .values(f.tenant(), CODE_COL, bytes(f.shared()), OffsetDateTime.now(), CONTEXT_3).execute()))
+                CHUNK_ORPHANED_AT.COLLECTION, CHUNK_ORPHANED_AT.COLLECTION_ID, CHUNK_ORPHANED_AT.CHASH,
+                CHUNK_ORPHANED_AT.ORPHANED_AT, CHUNK_ORPHANED_AT.EMBEDDING_MODEL)
+            .values(f.tenant(), CODE_COL, CollectionIds.require(ctx, f.tenant(), CODE_COL), bytes(f.shared()), OffsetDateTime.now(),
+                    CONTEXT_3).execute()))
             .satisfies(t -> assertThat(sqlState(t)).as("foreign_key_violation").isEqualTo("23503"));
         assertThat(records(f.tenant())).isEmpty();
 

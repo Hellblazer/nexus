@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.ReaperRepository;
 import org.jooq.DSLContext;
@@ -117,8 +118,9 @@ class Rdr192EmptyTenantParityIntegrationTest {
                         // (ownChunks' document insert without its manifest insert).
                         String doc = "legacy-" + collection;
                         ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                            .values(tenant, doc, "Legacy " + doc, collection)
+                                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                            .values(tenant, doc, "Legacy " + doc, collection, CollectionIds.require(ctx, tenant, collection))
                             .onConflictDoNothing()
                             .execute();
                         PgContainerHelper.insertChunks(ctx, tenant, collection, hex,
