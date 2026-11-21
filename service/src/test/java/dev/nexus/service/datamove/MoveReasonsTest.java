@@ -34,4 +34,52 @@ class MoveReasonsTest {
         assertThat(MoveReasons.withInstallHint("the library install has not run"))
             .isEqualTo("the library install has not run");
     }
+
+    // nexus-f3yqd.2.23: the class a client keys on, never the words
+
+    @Test
+    void classOf_isMissingPrerequisiteForAMissingExtension_behindTheRetryPrefix() {
+        String mp = MoveReasons.MISSING_PREREQUISITE;
+        assertThat(MoveReasons.classOf("pg_background is not installed")).isEqualTo(mp);
+        assertThat(MoveReasons.classOf("retry 2, last 2026-11-16T23:00:00Z: pg_background is not installed")).isEqualTo(mp);
+        assertThat(MoveReasons.classOf("retry 19, last 2026-11-16T23:00:00Z: pg_background is not installed")).isEqualTo(mp);
+    }
+
+    @Test
+    void classOf_dropsTheClassOnceTheRetryPolicySaysNeedsAnOperator() {
+        assertThat(MoveReasons.classOf("retry 20, last 2026-11-16T23:00:00Z: pg_background is not installed; needs an operator"))
+            .isNull();
+        assertThat(MoveReasons.classOf("pg_background is not installed; needs an operator")).isNull();
+    }
+
+    @Test
+    void classOf_readsTheRetryPolicysOwnOutput_beforeAndAtTheCap() {
+        var last = java.time.Instant.parse("2026-11-16T23:00:00Z");
+        String miss = "pg_background is not installed";
+        assertThat(MoveReasons.classOf(MoveRetryPolicy.blockedReason(MoveRetryPolicy.NEEDS_OPERATOR_AT - 1, last, miss)))
+            .as("one retry short of the cap").isEqualTo(MoveReasons.MISSING_PREREQUISITE);
+        String atCap = MoveRetryPolicy.blockedReason(MoveRetryPolicy.NEEDS_OPERATOR_AT, last, miss);
+        assertThat(atCap).endsWith("; needs an operator");
+        assertThat(MoveReasons.classOf(atCap)).as("at the cap").isNull();
+        assertThat(MoveReasons.classOf(MoveRetryPolicy.blockedReason(1, last, miss))).isEqualTo(MoveReasons.MISSING_PREREQUISITE);
+    }
+
+    @Test
+    void classOf_isNullForEveryOtherReason() {
+        assertThat(MoveReasons.classOf(null)).isNull();
+        assertThat(MoveReasons.classOf("")).isNull();
+        assertThat(MoveReasons.classOf("waiting for a background worker slot")).isNull();
+        assertThat(MoveReasons.classOf("dml_utils.run_migration_chunks_committing is not installed"))
+            .as("the library install passed before this miss: an engine or library defect, not a missing prerequisite").isNull();
+        assertThat(MoveReasons.classOf("retry 2, last 2026-11-16T23:00:00Z: dml_utils.run_migration_chunks_committing is not installed"))
+            .isNull();
+        assertThat(MoveReasons.classOf("library role dml_utils_owner is missing")).isNull();
+        assertThat(MoveReasons.classOf("the library install has not run")).isNull();
+        assertThat(MoveReasons.classOf("no separate admin role (NX_DB_ADMIN_* unset): the engine's one role holds no "
+            + "dml_utils_owner grant")).isNull();
+        assertThat(MoveReasons.classOf("the driving table nexus.t does not exist")).isNull();
+        assertThat(MoveReasons.classOf("run m/acme/leaf raised sqlstate=42883: pg_background is not installed"))
+            .as("run text that merely says it is not the install's reason").isNull();
+        assertThat(MoveReasons.classOf("some_other_extension is not installed")).isNull();
+    }
 }

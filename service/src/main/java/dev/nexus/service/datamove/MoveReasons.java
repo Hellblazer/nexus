@@ -37,6 +37,41 @@ final class MoveReasons {
     private static final Pattern NOT_INSTALLED = Pattern.compile("^([\\w.]+) is not installed\\s*$");
 
     /**
+     * The {@code boot_work} {@code reason_class} of a move blocked because the {@code pg_background} extension is not installed
+     * (nexus-f3yqd.2.23): {@code nx doctor} shows it as a warning, since the move waits for the install (and an engine restart,
+     * which is when {@code DmlUtilsInstaller} looks) and nothing is wrong with the data. A client keys on this value, never on
+     * the words of the reason. Not given to the {@code dml_utils} entry-point miss: that one comes after the library install
+     * passed, so it points at an engine or library defect and stays red.
+     */
+    static final String MISSING_PREREQUISITE = "missing_prerequisite";
+
+    /** The one name whose "is not installed" is a missing prerequisite: the extension the library install checks first. */
+    private static final String PREREQUISITE_EXTENSION = "pg_background";
+
+    /**
+     * The class of a blocked reason, or null when it has none: {@link #MISSING_PREREQUISITE} when the reason, behind the retry
+     * prefix, is exactly "pg_background is not installed". Null once the reason carries "; needs an operator" (the retry
+     * policy adds it from the {@value MoveRetryPolicy#NEEDS_OPERATOR_AT}th consecutive transient, about four hours): a block that
+     * long is a failure to look at, so the entry loses its class and the doctor row turns red. Anchored, so run text that
+     * mentions the phrase is not taken for the install's reason.
+     */
+    static String classOf(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return null;
+        }
+        String body = reason.strip();
+        Matcher retry = RETRY.matcher(body);
+        if (retry.find()) {
+            body = body.substring(retry.end());
+        }
+        if (NEEDS_OPERATOR.matcher(body).find()) {
+            return null;
+        }
+        Matcher missing = NOT_INSTALLED.matcher(body);
+        return missing.find() && PREREQUISITE_EXTENSION.equals(missing.group(1)) ? MISSING_PREREQUISITE : null;
+    }
+
+    /**
      * A library install that failed on Liquibase's checksum validation leaves the libraries FAILED on every boot, caught and
      * serving: a re-pin of the library changed a changeset the install had already applied, and library changesets are not
      * {@code runOnChange}. The reason Liquibase gave names the changeset; this says what happened and what to do, so

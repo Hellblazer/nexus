@@ -4,7 +4,11 @@
 The engine's move worker reports each open or failed data move as a ``/v1/status`` ``boot_work`` entry whose id is
 ``data-move:<label>``. The shape has no state field, so ``what`` begins with the state:
 
-* ``blocked:`` (the reason follows) and ``failed:`` (the failure follows): one red row per move.
+* ``blocked:`` (the reason follows) and ``failed:`` (the failure follows): one red row per move, except a ``blocked:``
+  entry whose ``reason_class`` is ``missing_prerequisite`` (the ``pg_background`` extension is not installed): that one
+  waits for the install and an engine restart and nothing is wrong with the data, so it is a warning until the engine's
+  retry cap (about four hours), when the engine drops the class and the row is red. The class is the engine's field,
+  never read from the words; an engine that predates it sends none, and its blocked move stays red.
 * ``stalled:``: a CALL that has completed no chunk for a long time; a warning, since a slow chunk looks the same.
 * ``paused:``: an operator holds the move; a note, never red.
 * ``working:``, ``queued:``, ``runs complete:``: no row of their own; the summary row counts them.
@@ -49,12 +53,25 @@ _ENGINE_STATE_ROWS: dict[str, tuple[str, str, str]] = {
 }
 
 SUMMARY_LABEL = "Data moves"
+#: ``reason_class`` of a ``blocked:`` entry whose move waits for the pg_background extension to be installed (``MoveReasons.MISSING_PREREQUISITE``).
+MISSING_PREREQUISITE = "missing_prerequisite"
 
 _RETRY_NOW = (
     "UPDATE nexus.data_moves SET transient_retries = 0, last_transient_at = NULL, last_transient = NULL "
     "WHERE label = '{label}'; (as nexus_admin) makes the next pass run at once"
 )
 _RESUME = "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label = '{label}'; (as nexus_admin)"
+
+
+def _install_bundle_command() -> str:
+    """The command that installs the pinned engine with its PostgreSQL bundle; the tag is read now, never hard-coded."""
+    try:
+        from nexus.daemon.binary_install import resolve_service_tag  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+        tag = resolve_service_tag()
+    except Exception:  # noqa: BLE001 — a hint must not crash `nx doctor`
+        tag = None
+    return f"`nx daemon service install-binary {tag or '<engine tag>'}`"
 
 
 def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -137,7 +154,20 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         tally[state or "unknown"] = tally.get(state or "unknown", 0) + 1
         text = _after_state(what)
         row_label = f"Data move {label}"
-        if state == "blocked":
+        if state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
+            rows.append(HealthResult(
+                label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "The move waits for the pg_background extension; nothing was changed and nothing is lost. The engine "
+                    "looks for the extension only when it starts, so installing it is not enough: restart the engine "
+                    "after. A local install's bundled PostgreSQL carries pg_background: "
+                    f"{_install_bundle_command()} installs the bundle and restarts the engine. A self-managed PostgreSQL "
+                    "needs pg_background installed, then the engine restarted. If the move is still blocked after about "
+                    "four hours of retries the engine drops the class and this row turns red (the full reason is in the "
+                    "engine log, event=data_move_blocked)",
+                ],
+            ))
+        elif state == "blocked":
             rows.append(HealthResult(
                 label=row_label, ok=False, detail=f"blocked: {text}{_counts(entry)}",
                 fix_suggestions=[

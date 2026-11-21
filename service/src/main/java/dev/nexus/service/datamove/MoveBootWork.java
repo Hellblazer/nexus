@@ -290,7 +290,7 @@ public final class MoveBootWork implements AutoCloseable {
             if (published.add(id)) {
                 registry.register(id, d.what(), d.done(), d.total(), UNIT, true, ON_STOP);
             }
-            registry.update(id, d.what(), d.done(), d.total(), d.step());
+            registry.update(id, d.what(), d.done(), d.total(), d.step(), d.reasonClass());
             gone.remove(id);
         }
         for (String id : gone) {
@@ -302,7 +302,11 @@ public final class MoveBootWork implements AutoCloseable {
         return published.size();
     }
 
-    private record Desired(String what, Long done, Long total, BootWorkRegistry.Step step) { }
+    private record Desired(String what, Long done, Long total, BootWorkRegistry.Step step, String reasonClass) {
+        Desired(String what, Long done, Long total, BootWorkRegistry.Step step) {
+            this(what, done, total, step, null);
+        }
+    }
 
     /** The reader of a running engine: its own admin session, kept between samples and replaced after a failure. */
     private static final class DbReader implements Reader {
@@ -406,14 +410,15 @@ public final class MoveBootWork implements AutoCloseable {
         if (state.isEmpty()) {
             if (move.transientRetries() > 0 && move.lastTransient() != null) {
                 return new Desired("blocked: " + label + ": " + MoveReasons.publicForm(move.lastTransient())
-                    + " (from before this engine started; details in the engine log)", done, total, null);
+                    + " (from before this engine started; details in the engine log)", done, total, null,
+                    MoveReasons.classOf(move.lastTransient()));
             }
             return new Desired("queued: " + label + " (the worker has not reached it yet)", done, total, null);
         }
         var s = state.get();
         return switch (s.kind()) {
             case BLOCKED -> new Desired("blocked: " + label + ": " + MoveReasons.publicForm(s.reason()) + blockedSince, done,
-                total, null);
+                total, null, MoveReasons.classOf(s.reason()));
             case FAILED -> new Desired("failed: " + label + ": " + MoveReasons.publicForm(s.reason()) + failedPointer(label),
                 done, total, null);
             case PAUSED -> new Desired("paused: " + label + (s.pausedBy() == null ? "" : " by " + s.pausedBy()), done, total,

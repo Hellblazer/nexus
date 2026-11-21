@@ -642,8 +642,14 @@ always reports how many times it has been retried:
   retries every 15 minutes indefinitely, so a move registered before its
   install or roles exist runs once they appear (the cloud order in
   Activation Step 1). After 20 consecutive transients, about four hours of
-  backoff, `blocked:` adds "needs an operator". nx doctor shows every
-  `blocked:` move red already; the cap only changes the text. The move is
+  backoff, `blocked:` adds "needs an operator". nx doctor shows a
+  `blocked:` move red, except a move blocked on `pg_background is not
+  installed`: the engine marks that entry `reason_class: missing_prerequisite`
+  (`MoveReasons.classOf`) and nx doctor shows a warning (the move waits for
+  the install and an engine restart, since `DmlUtilsInstaller.install` looks
+  for the extension only at boot), until the cap, where `classOf` returns
+  null and the row turns red. The `dml_utils.run_migration_chunks_committing`
+  miss comes after the library install passed, so it is never classed. The move is
   never made `failed:` for transient errors: a busy slot, a missing grant or
   a missing install before or during its runs is not the move's fault, and
   `failed:` would need a superseding move to clear. A grant or function the
@@ -855,8 +861,12 @@ grant loop (`nexus.partition_copy_access`, which copies the parent's grants to
 each new leaf, vectors-039).
 
 **Progress.** `/v1/status` `boot_work` lists each open or failed move in
-nexus-f3yqd.3's shape (BootWorkRegistry.java:45: id, what, startedAt, done,
-total, unit, safeToStop, onStop, step). `done` and `total` are
+nexus-f3yqd.3's shape (BootWorkRegistry.java:49: id, what, startedAt, done,
+total, unit, safeToStop, onStop, step, reasonClass). `reasonClass` is the wire
+field `reason_class`, present only on a `blocked:` entry whose reason is
+`pg_background is not installed` and has not reached the retry cap
+(`MoveReasons.classOf`, nexus-f3yqd.2.23); an engine that predates it sends none
+and its blocked move stays red. `done` and `total` are
 `total_chunks_completed` and `total_chunks` from
 `dml_utils_data.migration_run` (006-create-migration-tables.sql lines 27-28),
 summed over the move's active runs (`archived_at IS NULL`), `unit: "chunks"`. A run with no rows has a total
@@ -889,8 +899,10 @@ failed move, in `nexus.data_moves.failure`. A worker that failed to start, or a
 reporter that failed to start, is published as a `blocked:` entry (ids
 `data-move-worker` and `data-move-boot-work`), so that an empty list is never
 read as no move open. nx doctor shows one red row per `blocked:` or `failed:`
-move, a warning per `stalled:` move and a note per `paused:` move, and a red
-row for each of those two entries.
+move, except a `blocked:` move whose entry carries `reason_class:
+missing_prerequisite` (`pg_background is not installed`, before the retry cap),
+which is a warning; a warning per `stalled:` move and a note per `paused:`
+move, and a red row for each of those two entries.
 
 **Readers during a move.** Each move's RDR or bead states how readers behave
 while it runs: read both shapes, or keep the feature off until `completed_at`
@@ -1098,7 +1110,10 @@ launcher that upstream does not test.
 - **pg_background missing**: the engine skips the dml_utils changelogs and
   serves; the move worker does not start the move. boot_work
   reports it as `blocked: pg_background is not installed`, and nx doctor shows
-  a red line. Nothing falls back to a boot-time move.
+  a warning (`reason_class: missing_prerequisite`) until the retry cap (about
+  four hours), then a red line. The engine looks for the extension only at
+  boot, so the remedy is to install it and restart the engine. Nothing falls
+  back to a boot-time move.
 - **A chunk fails** (a constraint, a bad template): dml_utils stops launching
   chunks, lets the ones in flight commit, records the failure in
   migration_error, and raises. Unless its SQLSTATE is a recorded transient

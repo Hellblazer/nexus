@@ -430,4 +430,68 @@ class MoveBootWorkTest {
             .as("two :: that do not name a changelog file are not a changeset").doesNotContain("acme")
             .contains("a changeset");
     }
+
+    // ── nexus-f3yqd.2.23: the class of a blocked entry, for nx doctor ─────────────────────────────────────
+
+    @Test
+    void aMoveBlockedOnAMissingPrerequisite_carriesTheClass_andNoOtherEntryDoes() {
+        var m = move("m");
+        var other = move("o");
+        var failing = move("f");
+        reader.open = List.of(m, other, failing);
+        var w = work(Duration.ofMinutes(15));
+        states.blocked(m, "pg_background is not installed");
+        states.blocked(other, "waiting for a background worker slot");
+        states.failed(failing, "pg_background is not installed");
+
+        w.publish();
+
+        assertThat(entry("m").what()).startsWith("blocked: m: pg_background is not installed");
+        assertThat(entry("m").reasonClass()).isEqualTo("missing_prerequisite");
+        assertThat(entry("o").reasonClass()).isNull();
+        assertThat(entry("f").what()).startsWith("failed: f:");
+        assertThat(entry("f").reasonClass()).as("a failed move is never classed").isNull();
+    }
+
+    @Test
+    void theDmlUtilsEntryPointMissCarriesNoClass_aRetryPrefixedExtensionMissDoes_andTheCapDropsIt() {
+        var a = move("a");
+        var b = move("b");
+        var c = move("c");
+        reader.open = List.of(a, b, c);
+        var w = work(Duration.ofMinutes(15));
+        states.blocked(a, "dml_utils.run_migration_chunks_committing is not installed");
+        states.blocked(b, "retry 3, last 2026-11-16T23:00:00Z: pg_background is not installed");
+        states.blocked(c, "retry 20, last 2026-11-16T23:00:00Z: pg_background is not installed; needs an operator");
+
+        w.publish();
+
+        assertThat(entry("a").what()).startsWith("blocked: a: dml_utils.run_migration_chunks_committing is not installed");
+        assertThat(entry("a").reasonClass()).as("stays red").isNull();
+        assertThat(entry("b").reasonClass()).isEqualTo("missing_prerequisite");
+        assertThat(entry("c").what()).contains("needs an operator");
+        assertThat(entry("c").reasonClass()).as("past the retry cap the row turns red again").isNull();
+    }
+
+    @Test
+    void theClassClearsWhenTheMoveStopsBeingBlocked_andComesFromTheRowAfterARestart() {
+        var m = move("m");
+        reader.open = List.of(m);
+        var w = work(Duration.ofMinutes(15));
+        states.blocked(m, "pg_background is not installed");
+        w.publish();
+        assertThat(entry("m").reasonClass()).isEqualTo("missing_prerequisite");
+
+        states.working(m);
+        w.publish();
+        assertThat(entry("m").reasonClass()).isNull();
+
+        var restarted = new DataMove("r", "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 3,
+            java.time.OffsetDateTime.parse("2026-11-16T23:00:00Z"),
+            "retry 3, last 2026-11-16T23:00:00Z: pg_background is not installed");
+        reader.open = List.of(restarted);
+        w.publish();
+        assertThat(entry("r").what()).startsWith("blocked: r:");
+        assertThat(entry("r").reasonClass()).isEqualTo("missing_prerequisite");
+    }
 }
