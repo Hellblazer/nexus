@@ -13,8 +13,8 @@ aspects	canary_query_ring	nexus.canary_query_ring_upsert [vectors-069-collection
 aspects	canary_query_ring	rdr229-stamp-canary_query_ring [vectors-070-collection-id-stamp-moves.xml:166]	163	update	data_move	-	collection_id	yes	sets collection_id
 aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11582	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	canary_query_ring	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12032	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
-aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:105]	102	update	data_move	-	collection_id	yes	sets collection_id
-aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:183]	180	update	data_move	-	collection_id	yes	sets collection_id
+aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:108]	105	update	data_move	-	collection_id	yes	sets collection_id
+aspects	document_aspects	rdr229-p31-residue-document-aspects [catalog-052-residue-moves-supersede.xml:190]	187	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_aspects	rdr229-residue-document-aspects [catalog-049-note-uri-residue.xml:1509]	1506	update	data_move	-	collection_id	yes	superseded by rdr229-p31-residue-document-aspects
 aspects	document_aspects	rdr229-stamp-document_aspects [vectors-070-collection-id-stamp-moves.xml:183]	180	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/AspectRepository.java	289	insert	jooq	collection	collection_id	yes	
@@ -32,8 +32,8 @@ aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepos
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	11641	update	jooq	-	collection_id	yes	
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12032	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	document_aspects	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	264	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
-aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:135]	102	update	data_move	-	collection_id	yes	sets collection_id
-aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:232]	229	update	data_move	-	collection_id	yes	sets collection_id
+aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:140]	105	update	data_move	-	collection_id	yes	sets collection_id
+aspects	document_highlights	rdr229-p31-residue-document-highlights [catalog-052-residue-moves-supersede.xml:241]	238	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_highlights	rdr229-residue-document-highlights [catalog-049-note-uri-residue.xml:1538]	1506	update	data_move	-	collection_id	yes	superseded by rdr229-p31-residue-document-highlights
 aspects	document_highlights	rdr229-stamp-document_highlights [vectors-070-collection-id-stamp-moves.xml:200]	197	update	data_move	-	collection_id	yes	sets collection_id
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/AspectRepository.java	830	insert	jooq	collection	collection_id	yes	
@@ -92,7 +92,7 @@ catalog	catalog_documents	nexus.catalog_reconcile_commit [vectors-069-collection
 catalog	catalog_documents	nexus.catalog_reconcile_commit [vectors-069-collection-id-dual-write-functions.xml:6678]	6096	update	sql_function	physical_collection	physical_collection_id	yes	
 catalog	catalog_documents	nexus.document_restore [vectors-069-collection-id-dual-write-functions.xml:7531]	7525	update	sql_function	physical_collection	physical_collection_id	yes	
 catalog	catalog_documents	nexus.document_trash [vectors-069-collection-id-dual-write-functions.xml:7491]	7485	update	sql_function	physical_collection	physical_collection_id	yes	
-catalog	catalog_documents	rdr229-p31-residue-catalog-documents [catalog-052-residue-moves-supersede.xml:73]	70	update	data_move	-	physical_collection_id	yes	sets physical_collection_id
+catalog	catalog_documents	rdr229-p31-residue-catalog-documents [catalog-052-residue-moves-supersede.xml:76]	73	update	data_move	-	physical_collection_id	yes	sets physical_collection_id
 catalog	catalog_documents	rdr229-residue-catalog-documents [catalog-049-note-uri-residue.xml:1478]	1475	update	data_move	-	physical_collection_id	yes	superseded by rdr229-p31-residue-catalog-documents
 catalog	catalog_documents	rdr229-stamp-catalog_documents [vectors-070-collection-id-stamp-moves.xml:98]	95	update	data_move	-	physical_collection_id	yes	sets physical_collection_id
 catalog	catalog_documents	service/src/main/java/dev/nexus/service/db/CatalogMoves.java	225	update	jooq	-	physical_collection_id	yes	

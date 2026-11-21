@@ -47,7 +47,7 @@ class NoteUriResidueSupersedeIntegrationTest extends DataMoveIntegrationBase {
     static final String ASPECTS_NEW = "rdr229-p31-residue-document-aspects";
     static final String HIGHLIGHTS_NEW = "rdr229-p31-residue-document-highlights";
     /** The changesets that supersede, one per move, in the file's order. */
-    static final List<String> SUPERSEDE_CHANGESETS = List.of("catalog-052-1", "catalog-052-2", "catalog-052-3");
+    static final List<String> SUPERSEDE_CHANGESETS = List.of("catalog-052-1", "catalog-052-2", "catalog-052-3", "catalog-052-4");
 
     private static final String TENANT = "residue-p31";
     private static final OffsetDateTime NOW = OffsetDateTime.parse("2026-11-20T00:00:00Z");
