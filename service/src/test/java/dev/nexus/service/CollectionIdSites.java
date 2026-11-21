@@ -9,6 +9,7 @@ import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Record3;
+import org.jooq.Record4;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
 
@@ -157,6 +158,110 @@ public final class CollectionIdSites {
             out.add(new Finding(s.table() + "." + s.nameColumn(), idName, r.value1(), r.value2(), r.value3()));
         }
         return out;
+    }
+
+    /** The exported history tables (RDR-229 item 6): their id is refilled by name when a backup is restored. */
+    public static List<Site> exportedHistorySites() {
+        return exportedSites().stream().filter(Site::history).toList();
+    }
+
+    /**
+     * What {@link #auditHistoryStrict} found in one history table: {@code named} rows with a non-empty name, {@code resolvable}
+     * of them naming a registry row of the tenant, those resolvable rows whose id is null ({@code nullIds}), and the rows whose
+     * id is not exactly the registry's for their name ({@code wrong}: a resolvable row with another id, or a row naming no
+     * registry row that carries an id).
+     */
+    public record HistoryFinding(String table, long named, long resolvable, long nullIds, long wrong) {
+        public boolean clean() {
+            return nullIds == 0 && wrong == 0;
+        }
+
+        @Override
+        public String toString() {
+            return table + ": " + named + " rows with a name, " + resolvable + " naming a registry row, " + nullIds
+                + " of those with a null id, " + wrong + " with an id that is not the registry's for their name";
+        }
+    }
+
+    /**
+     * The strict audit of the exported history tables, for a TARGET: a restore refills their id by name from the restored
+     * registry, so every row whose name names a registry row of the tenant must carry exactly that row's {@code collection_id}
+     * (not merely some registry row's, which is all {@link #audit} asks of a history table), and a row whose name names none
+     * carries no id. The lenient rule stays for a source, and for history tables the backup does not carry, where a row keeps
+     * the id it had across a rename (linda's ruling b).
+     */
+    public static List<HistoryFinding> auditHistoryStrict(DSLContext ctx, String tenant) {
+        List<HistoryFinding> out = new ArrayList<>();
+        for (Site s : exportedHistorySites()) {
+            String idName = idColumn(ctx, s);
+            Table<?> t = table(s.table()).as("t");
+            Field<Long> id = DSL.field(DSL.name("t", idName), Long.class);
+            Field<String> name = DSL.field(DSL.name("t", s.nameColumn()), String.class);
+            Field<String> rowTenant = DSL.field(DSL.name("t", "tenant_id"), String.class);
+            Field<Long> expected = CollectionIds.idOf(rowTenant, name);
+            Condition named = name.isNotNull().and(name.ne(""));
+            Condition resolvable = named.and(expected.isNotNull());
+            Record4<Integer, Integer, Integer, Integer> r = ctx.select(DSL.count().filterWhere(named),
+                    DSL.count().filterWhere(resolvable), DSL.count().filterWhere(resolvable.and(id.isNull())),
+                    DSL.count().filterWhere(resolvable.and(id.isNotNull()).and(id.isDistinctFrom(expected))
+                        .or(named.and(expected.isNull()).and(id.isNotNull()))))
+                .from(t).where(rowTenant.eq(tenant)).fetchOne();
+            out.add(new HistoryFinding(s.table(), r.value1(), r.value2(), r.value3(), r.value4()));
+        }
+        return out;
+    }
+
+    /**
+     * The failures of {@link #auditHistoryStrict} in {@code found}. With {@code requireRows}, a table with no named row, or none
+     * naming a registry row, is a test-setup failure (a count of zero proves nothing); without it, only a wrong or null id fails,
+     * for a file the test cannot seed (the committed pre-P3.1 fixture, whose history rows name no registry row). Each message
+     * carries the per-table counts.
+     */
+    public static List<String> historyProblems(List<HistoryFinding> found, boolean requireRows) {
+        List<String> out = new ArrayList<>();
+        for (HistoryFinding f : found) {
+            if (requireRows && f.named() == 0) out.add("test-setup failure: " + f.table() + " holds no row with a name; " + f);
+            else if (requireRows && f.resolvable() == 0) out.add("test-setup failure: no " + f.table() + " row names a registry row; " + f);
+            else if (!f.clean()) out.add(f.toString());
+        }
+        if (found.size() != exportedHistorySites().size()) out.add("the strict audit covered " + found.size() + " history tables");
+        return out;
+    }
+
+    /** A chunk id as the relevance log's CHECK wants it: the lower-case hex of a SHA-256. */
+    private static String canonicalChunkId(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Two rows in each exported history table, one naming {@code first} and one naming {@code second}, each carrying that
+     * collection's registry id as the SOURCE holds it, so a restore that copied the source's ids (or refilled the wrong name's)
+     * is caught by {@link #auditHistoryStrict}. The battery seed's history rows name a collection that is not registered.
+     */
+    public static void seedHistory(DSLContext ctx, String tenant, String first, String second) {
+        OffsetDateTime now = OffsetDateTime.now();
+        int n = 0;
+        for (String collection : List.of(first, second)) {
+            Long id = CollectionIds.require(ctx, tenant, collection);
+            ctx.insertInto(table("relevance_log"))
+                .set(column("tenant_id"), tenant).set(column("query"), "hist-q-" + n).set(column("chunk_id"), canonicalChunkId("hist-chunk-" + tenant + n))
+                .set(column("action"), "hit").set(column("timestamp"), now)
+                .set(column("collection"), collection)
+                .set(column(idColumn(ctx, siteOf("relevance_log", "collection"))), id)
+                .execute();
+            ctx.insertInto(table("search_telemetry"))
+                .set(column("tenant_id"), tenant).set(column("ts"), now.plusSeconds(n)).set(column("query_hash"), "hist-" + n)
+                .set(column("collection"), collection)
+                .set(column(idColumn(ctx, siteOf("search_telemetry", "collection"))), id)
+                .set(column("raw_count"), 1).set(column("kept_count"), 1)
+                .execute();
+            n++;
+        }
     }
 
     /**
