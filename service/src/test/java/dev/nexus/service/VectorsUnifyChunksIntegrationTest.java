@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.exception.DataAccessException;
 import org.jooq.impl.DSL;
 import org.jooq.SQLDialect;
@@ -483,6 +484,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, "t1")
                     .set(CHUNKS.COLLECTION, "c768")
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf("t1", "c768"))
                     .set(CHUNKS.CHASH, chash32(20))
                     .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
                     .set(CHUNKS.CHUNK_TEXT, "x")
@@ -495,6 +497,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, "t1")
                     .set(CHUNKS.COLLECTION, "c768")
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf("t1", "c768"))
                     .set(CHUNKS.CHASH, chash32(21))
                     .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
                     .set(CHUNKS.CHUNK_TEXT, "x")
@@ -516,6 +519,7 @@ class VectorsUnifyChunksIntegrationTest {
                     assertThatCode(() -> ctx.insertInto(CHUNKS)
                             .set(CHUNKS.TENANT_ID, "t1")
                             .set(CHUNKS.COLLECTION, collection)
+                            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf("t1", collection))
                             .set(CHUNKS.CHASH, chash)
                             .set(CHUNKS.EMBEDDING_MODEL, model)
                             .set(CHUNKS.CHUNK_TEXT, "x")
@@ -694,6 +698,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, "t1")
                     .set(CHUNKS.COLLECTION, "c")
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf("t1", "c"))
                     .set(CHUNKS.CHASH, new byte[31])
                     .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
                     .set(CHUNKS.CHUNK_TEXT, "x")
@@ -712,6 +717,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatThrownBy(() -> ctx.insertInto(CHUNKS)
                     .set(CHUNKS.TENANT_ID, "t1")
                     .set(CHUNKS.COLLECTION, "c")
+                    .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf("t1", "c"))
                     .set(CHUNKS.CHASH, new byte[33])
                     .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
                     .set(CHUNKS.CHUNK_TEXT, "x")
@@ -728,6 +734,7 @@ class VectorsUnifyChunksIntegrationTest {
                 assertThatCode(() -> ctx.insertInto(CHUNKS)
                         .set(CHUNKS.TENANT_ID, "t1")
                         .set(CHUNKS.COLLECTION, "c")
+                        .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf("t1", "c"))
                         .set(CHUNKS.CHASH, chash32(40))
                         .set(CHUNKS.EMBEDDING_MODEL, "bge-base-en-v15-768")
                         .set(CHUNKS.CHUNK_TEXT, "x")

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -452,8 +453,9 @@ class TenantImportRoundTripTest {
                 .values(DSL.val(tenant), DSL.val("after the restore"), DSL.val(JSONB.valueOf("{}")), DSL.val(OffsetDateTime.now()),
                     DSL.val("research")).execute();
             ctx.insertInto(DSL.table(DSL.name("nexus", "topics")),
-                    col("tenant_id"), col("label"), col("collection"), col("created_at"))
+                    col("tenant_id"), col("label"), col("collection"), col("collection_id"), col("created_at"))
                 .values(DSL.val(tenant), DSL.val("after the restore"), DSL.val(TenantExportBatteryTest.Seed.collection(SRC, 768)),
+                    DSL.val(CollectionIds.require(ctx, tenant, TenantExportBatteryTest.Seed.collection(SRC, 768))),
                     DSL.val(OffsetDateTime.now()))
                 .execute();
             return null;

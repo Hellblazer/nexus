@@ -1316,6 +1316,9 @@ class ReembedRoutesTest {
         UUID first = id(startOk(t, t.src()));
         advance(t, first, "running", "cutover");
         // the source was superseded by something other than this job's target
+        // RDR-229 P3.1: the successor is registered first, under the engine's profile model (SupersedeSeeds would
+        // give it the source's, which the profile refuses for a knowledge name).
+        su(ctx -> { PgContainerHelper.insertCollection(ctx, t.tenant(), "somewhere-else", MINI); return null; });
         assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), "somewhere-else", null)).isEqualTo(1);
         Job cutover = job(t, first);
         jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
@@ -1378,6 +1381,8 @@ class ReembedRoutesTest {
         Tn t = tenant("reentdrain");
         UUID first = keptTombstonedLeg(t);
         // a job started directly on the re-entered job's TARGET as its source
+        // RDR-229 P3.1: a job's collections are registered (the engine refuses an unregistered one with a typed 422).
+        su(ctx -> { PgContainerHelper.insertCollection(ctx, t.tenant(), "knowledge__elsewhere__" + MINI + "__v1", MINI); return null; });
         Job draining = jobs.start(t.tenant(), t.tgt(), "knowledge__elsewhere__" + MINI + "__v1", null, false, false);
 
         var r = post(t, "/jobs", startBody(t.src()));

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import java.util.HexFormat;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -536,12 +537,16 @@ class TopicsDocCountDeadlockConcurrencyTest {
                 // it: ctx.render only builds the text). doc_id binds the decoded bytes directly (the old text did
                 // decode(?, 'hex') server side); 'centroid' stays a literal in the statement.
                 DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+                // RDR-229 P3.1: the assignment names its source collection's registry id beside the name.
+                final Long collectionId = CollectionIds.require(ctx, TENANT, collection);
                 var rows = ctx.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID,
                     TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.ASSIGNED_BY,
-                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
+                    TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
+                    TOPIC_ASSIGNMENTS.EMBEDDING_MODEL);
                 for (ChashTopic ct : sorted) {
                     rows = rows.values(DSL.val(TENANT), DSL.val(HexFormat.of().parseHex(ct.chashHex())),
-                        DSL.val(ct.topicId()), DSL.inline("centroid"), DSL.val(collection), DSL.val(MODEL));
+                        DSL.val(ct.topicId()), DSL.inline("centroid"), DSL.val(collection), DSL.val(collectionId),
+                        DSL.val(MODEL));
                 }
                 try (PreparedStatement ps = conn.prepareStatement(ctx.render(rows))) {
                     int p = 1;
@@ -649,6 +654,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(TAXONOMY_CENTROIDS)
             .set(TAXONOMY_CENTROIDS.TENANT_ID, TENANT)
             .set(TAXONOMY_CENTROIDS.COLLECTION, collection)
+            .set(TAXONOMY_CENTROIDS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(TAXONOMY_CENTROIDS.TOPIC_ID, topicId)
             .set(TAXONOMY_CENTROIDS.LABEL, "seed-centroid-label")
             .set(TAXONOMY_CENTROIDS.EMBEDDING_MODEL, MODEL)
@@ -660,6 +666,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, TENANT)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CHUNKS.CHASH, HexFormat.of().parseHex(hexChashValue))
             .set(CHUNKS.EMBEDDING_MODEL, MODEL)
             .set(CHUNKS.CHUNK_TEXT, "seed text " + hexChashValue)
