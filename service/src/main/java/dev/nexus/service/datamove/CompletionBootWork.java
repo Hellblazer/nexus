@@ -304,7 +304,7 @@ public final class CompletionBootWork implements AutoCloseable {
     /**
      * The operator text of a table whose stamp move is done and whose CHECK stays NOT VALID. The move does not run again on its own
      * (it is complete), so registering the missing collection does not stamp the rows: the step is {@code nexus.rdr229_restamp}
-     * (vectors-070), which registers the table's stamp move once more, guarded to run only when the table's stamp move is complete,
+     * (vectors-071), which registers the table's stamp move once more, guarded to run only when the table's stamp move is complete,
      * a CHECK of the table is NOT VALID and no orphan row remains. The new move stamps the rows and validates the CHECK(s).
      */
     static String validateWaits(TableWait w) {
