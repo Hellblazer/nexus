@@ -148,14 +148,23 @@ class CollectionIdTombstoneStampMoveIntegrationTest extends DataMoveIntegrationB
         return n[0];
     }
 
+    /** The table-wide run as the worker makes it: the migrating role's own connection, no tenant (see CollectionIdStampMovesIntegrationTest). */
+    private long adminTableWideRows() throws Exception {
+        String verification = registered.get("verification").toString();
+        try (var c = adminPool.getConnection()) {
+            return MoveSql.countRows(c, verification, null, VerifyingFinisher.COUNT_CAP);
+        }
+    }
+
     // ── the R7 rule ─────────────────────────────────────────────────────────────────────────────────────────
 
     @Test
-    void aTombstoneTakesItsLiveSuccessorsId_elseItsOwn_aLiveRowKeepsNull_andTheInvariantHoldsForEveryTenant() {
+    void aTombstoneTakesItsLiveSuccessorsId_elseItsOwn_aLiveRowKeepsNull_andTheInvariantHoldsForEveryTenant() throws Exception {
         seedShapes();
         assertThat(CollectionTombstones.invariantViolations(ctx(), T1)).as("non-vacuity: four unstamped tombstones break the invariant").isEqualTo(4);
         assertThat(CollectionTombstones.invariantViolations(ctx(), T2)).as("and one in the other tenant").isEqualTo(1);
         assertThat(verificationRows(T1)).as("the verification looks for tombstones with no id").isEqualTo(4);
+        assertThat(adminTableWideRows()).as("non-vacuity: the migrating role's table-wide run sees all five, in both tenants").isEqualTo(5);
         var before = Map.of("live", state(T1, "live"), "succ", state(T1, "succ"), "stamped", state(T1, "stamped"), "liveB", state(T2, "live"));
         register(Map.of());
 
@@ -178,6 +187,7 @@ class CollectionIdTombstoneStampMoveIntegrationTest extends DataMoveIntegrationB
         assertThat(verificationRows(T1)).isZero();
         assertThat(verificationRows(T2)).isZero();
         assertThat(verificationRows(null)).as("table-wide").isZero();
+        assertThat(adminTableWideRows()).as("table-wide, as the migrating role").isZero();
         assertThat(PgCatalogProbes.constraintValidated(ctx(), CHECK)).as("on_complete validated the CHECK").isTrue();
     }
 
@@ -214,7 +224,7 @@ class CollectionIdTombstoneStampMoveIntegrationTest extends DataMoveIntegrationB
         }
         register(Map.of("chunk_size", 1));
         int baselineFree = MovePreflight.freeWorkerSlots(ctx());
-        var first = productionWorker(300);
+        var first = worker(installed(), 300);   // the engine that dies: the runs only, as the base's kill test builds it
         var cycle = async(first::runCycle);
         long deadline = System.nanoTime() + Duration.ofMinutes(2).toNanos();
         while (whats.stream().noneMatch(w -> state(T1, w).supersededId() != null) && System.nanoTime() < deadline) {

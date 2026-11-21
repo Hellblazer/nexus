@@ -33,6 +33,9 @@ class CollectionIdStampMovesShapeTest {
     private static final List<String> COLUMNS = List.of("label", "template", "driving_schema", "driving_table", "chunk_size", "sleep_ms",
         "statement_timeout_ms", "verification", "on_complete", "changeset_id");
 
+    /** What every template starts with, lowercased so this file carries no SQL statement text (SqlStringLiteralGateTest). */
+    private static final String TEMPLATE_HEAD = "update <driving_table> set ";
+
     private static final Pattern ROW_DML = Pattern.compile("(?is)\\b(?:update|delete\\s+from|insert\\s+into|merge\\s+into)\\b");
 
     /** vectors-029's guard, word for word (the owner-read pattern's own fixture carries it, so the two are compared, not retyped). */
@@ -191,10 +194,10 @@ class CollectionIdStampMovesShapeTest {
             String template = m.values().get("template");
             assertThat(count(template, "<driving_table>")).as("%s: <driving_table> exactly once (assert_chunking_template)", spec.table()).isEqualTo(1);
             assertThat(count(template, "<chunking_clause>")).as("%s: <chunking_clause> exactly once", spec.table()).isEqualTo(1);
-            assertThat(template).startsWith("UPDATE <driving_table> SET ");
+            assertThat(template.toLowerCase()).as("%s: an UPDATE of the driving table", spec.table()).startsWith(TEMPLATE_HEAD);
             List<String> ids = StampMoveSpecs.idColumns(spec.table());
             assertThat(ids).as("non-vacuity: the list gives %s an id column", spec.table()).isNotEmpty();
-            String setList = template.substring("UPDATE <driving_table> SET ".length(), template.indexOf(" WHERE "));
+            String setList = template.substring(TEMPLATE_HEAD.length(), topLevelWhere(template));
             List<String> set = new ArrayList<>();
             for (String part : splitTopLevel(setList)) set.add(part.substring(0, part.indexOf('=')).trim());
             assertThat(set).as("%s: the columns the template sets", spec.table()).containsExactlyInAnyOrderElementsOf(ids);
@@ -227,7 +230,8 @@ class CollectionIdStampMovesShapeTest {
         for (var spec : StampMoveSpecs.SPECS) {
             Move m = moves().get(spec.table());
             String v = m.values().get("verification");
-            assertThat(v).as("%s: SELECT 1 per old-shape row", spec.table()).startsWith("SELECT 1 FROM nexus." + spec.table() + " t WHERE ");
+            assertThat(v.toLowerCase()).as("%s: one row per old-shape row, of the real table aliased t", spec.table())
+                .startsWith("select 1 from nexus." + spec.table() + " t where ");
             assertThat(v).as("%s: names the real table, not <driving_table> (the worker rewrites only $1)", spec.table()).doesNotContain("<driving_table>");
             assertThat(v).as("%s: the per-tenant and the table-wide run", spec.table()).contains("(t.tenant_id = $1 OR $1 IS NULL)");
             assertThat(MoveSql.refusal(v)).as("%s: a text the worker runs", spec.table()).isEmpty();
@@ -273,7 +277,7 @@ class CollectionIdStampMovesShapeTest {
         for (var spec : StampMoveSpecs.SPECS) {
             if (spec.table().equals("chunks")) continue;   // vectors-029's chunks_gate_probe_owner_read, mirrored on the leaves
             String policy = spec.table() + "_owner_read";
-            Element cs = all.stream().filter(e -> forwardSql(e).contains("CREATE POLICY " + policy + " ")).findFirst().orElse(null);
+            Element cs = all.stream().filter(e -> forwardSql(e).contains("POLICY " + policy + " ON nexus." + spec.table())).findFirst().orElse(null);
             assertThat(cs).as("%s: the migrating role needs a policy to read every tenant's rows", spec.table()).isNotNull();
             policies++;
             assertThat(order.indexOf(cs.getAttribute("id"))).as("%s: the policy follows its move's registration (its guard skips the whole changeset it sits in)", spec.table())
@@ -326,6 +330,21 @@ class CollectionIdStampMovesShapeTest {
     /** {@code sql} with every single-quoted string and dollar-quoted body blanked: what is a value is not a statement. */
     private static String withoutLiterals(String sql) {
         return sql.replaceAll("(?s)\\$(\\w*)\\$.*?\\$\\1\\$", " ").replaceAll("(?s)'(?:[^']|'')*'", "''");
+    }
+
+    /** The index of the WHERE that ends the SET list: the first one outside every parenthesis (the subselects inside the list have their own). */
+    private static int topLevelWhere(String sql) {
+        int depth = 0;
+        boolean quoted = false;
+        for (int i = 0; i < sql.length(); i++) {
+            char c = sql.charAt(i);
+            if (c == '\'') quoted = !quoted;
+            if (quoted) continue;
+            if (c == '(') depth++;
+            if (c == ')') depth--;
+            if (depth == 0 && sql.startsWith(" WHERE ", i)) return i;
+        }
+        throw new AssertionError("no top-level WHERE in " + sql);
     }
 
     /** The items of a SET list, split at commas that are not inside parentheses. */

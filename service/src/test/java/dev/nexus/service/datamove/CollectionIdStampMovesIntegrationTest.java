@@ -127,6 +127,18 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
         return n[0];
     }
 
+    /**
+     * The table-wide run of the verification as the worker makes it: on the migrating role's own connection (not the superuser's, which
+     * reads every row whatever the policies say), with no tenant. It sees the old-shape rows only where that role may read every tenant's rows
+     * of the driving table and of the registry the verification joins, which is what the owner-read policies are for.
+     */
+    private long adminTableWideRows(String table) throws Exception {
+        String verification = registration(table).get("verification").toString();
+        try (var c = adminPool.getConnection()) {
+            return MoveSql.countRows(c, verification, null, VerifyingFinisher.COUNT_CAP);
+        }
+    }
+
     private List<Long> expectedIds(String table, String tenant, String key, int n) {
         var ids = new ArrayList<Long>();
         ids.add(StampMoveSeeds.id(ctx(), tenant, key));
@@ -154,8 +166,10 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
     @Test
     void theWalkRegistersExactlyOneOpenMovePerCheckGuardedTable_inTheOrderTheWorkerTakesThem() {
         assertThat(movesAtBoot).as("the walk registers the stamp moves and no other").isEqualTo(StampMoveSpecs.SPECS.size());
-        var oldestFirst = ctx().select(LABEL).from(table("nexus", "data_moves")).orderBy(DSL.field(DSL.name("registered_at")), LABEL)
-            .fetch(LABEL);
+        var oldestFirst = registered.values().stream()
+            .sorted(java.util.Comparator.comparing((Map<String, Object> r) -> (java.time.OffsetDateTime) r.get("registered_at"))
+                .thenComparing(r -> r.get("label").toString()))
+            .map(r -> r.get("label").toString()).toList();
         assertThat(oldestFirst).as("registered_at orders the worker's pass: one changeset per move, so one transaction time each")
             .containsExactlyElementsOf(StampMoveSpecs.SPECS.stream().map(StampMoveSpecs.Spec::label).toList());
         for (var spec : StampMoveSpecs.SPECS) {
@@ -199,12 +213,14 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("tables")
-    void stampsTheOldRows_leavesAStampedAndAnEmptyRowAlone_verifiesCleanAndCompletes(String table) {
+    void stampsTheOldRows_leavesAStampedAndAnEmptyRowAlone_verifiesCleanAndCompletes(String table) throws Exception {
         String tenant = tenantFor(table, "stamp");
         boolean free = StampMoveSeeds.FREE_NAME_TABLES.contains(table);
         var seeded = StampMoveSeeds.seed(ctx(), table, tenant, new StampMoveSeeds.Plan(3, true, free, false));
         var before = StampMoveSeeds.rows(ctx(), table, tenant);
         assertThat(verificationRows(table, tenant)).as("non-vacuity: the three old rows are what the verification looks for").isEqualTo(3);
+        assertThat(adminTableWideRows(table)).as("non-vacuity: and the migrating role's table-wide run sees them, so the owner-read policies reach the table and the registry")
+            .isEqualTo(3);
         register(table, Map.of());
 
         assertThat(productionWorker(0).runCycle()).as("the one registered move is worked").isEqualTo(1);
@@ -224,6 +240,7 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
         }
         assertThat(verificationRows(table, tenant)).as("verify, per tenant").isZero();
         assertThat(verificationRows(table, null)).as("verify, table-wide").isZero();
+        assertThat(adminTableWideRows(table)).as("verify, table-wide, as the migrating role").isZero();
         for (String constraint : StampMoveSpecs.constraintsByTable().get(table)) {
             assertThat(PgCatalogProbes.constraintValidated(ctx(), constraint)).as("on_complete validated %s", constraint).isTrue();
         }
@@ -231,13 +248,11 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("freeNameTables")
-    void anOrphanNameKeepsItsNullTwin_isNotRewritten_andIsNotAVerificationFailure(String table) {
+    void anOrphanRowKeepsItsNullTwin_isNotRewritten_andIsNotAVerificationFailure(String table) {
         String tenant = tenantFor(table, "orphan");
         var seeded = StampMoveSeeds.seed(ctx(), table, tenant, new StampMoveSeeds.Plan(2, true, false, true));
         var before = StampMoveSeeds.rows(ctx(), table, tenant);
-        boolean half = StampMoveSpecs.idColumns(table).size() == 2;   // the source resolves and the target does not
-        assertThat(verificationRows(table, tenant)).as("non-vacuity: a name with no registry row is not what the verification looks for; the old rows are")
-            .isEqualTo(half ? 3 : 2);
+        assertThat(verificationRows(table, tenant)).as("non-vacuity: the two old rows are what the verification looks for, the orphan row is not").isEqualTo(2);
         register(table, Map.of());
 
         assertThat(productionWorker(0).runCycle()).isEqualTo(1);
@@ -247,16 +262,10 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
             assertThat(after.get(seeded.old().get(n)).ids().values()).as("%s row %d is stamped", table, n)
                 .containsExactlyElementsOf(expectedIds(table, tenant, seeded.old().get(n), n));
         }
-        if (half) {
-            var o = after.get(seeded.orphan());
-            assertThat(o.ids().get(StampMoveSpecs.idColumns(table).get(0))).as("%s: the source of the half orphan is stamped on its own column", table)
-                .isEqualTo(StampMoveSeeds.id(ctx(), tenant, seeded.orphan()));
-            assertThat(o.ids().get(StampMoveSpecs.idColumns(table).get(1))).as("%s: the target that resolves to nothing keeps its NULL twin", table).isNull();
-        } else {
-            assertThat(after.get(seeded.orphan())).as("%s: the orphan row is not rewritten, and its twin stays NULL", table)
-                .isEqualTo(before.get(seeded.orphan()));
-            assertThat(after.get(seeded.orphan()).ids().values()).containsOnlyNulls();
-        }
+        // a row with any name no registry row carries is left whole: an UPDATE of it would be refused by that name's own CHECK (name set, id NULL)
+        // whatever the update sets, so on chash_remap and reembed_jobs the row whose source resolves beside an orphan target is not stamped on its source either
+        assertThat(after.get(seeded.orphan())).as("%s: the orphan row is not rewritten, and its twin stays NULL", table).isEqualTo(before.get(seeded.orphan()));
+        assertThat(after.get(seeded.orphan()).ids().values()).containsOnlyNulls();
         assertThat(verificationRows(table, tenant)).as("what the verification looks for is gone, the orphan is not it").isZero();
         // the move did not fail in its walk or its verification; if it ends with a failure at all, it is the VALIDATE of the orphan's CHECK in on_complete,
         // which the orphan path (counted and reported, the VALIDATE waits) takes over
@@ -273,7 +282,7 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
         // one row a chunk, a pause between chunks: the run is in flight for seconds
         register(table, Map.of("chunk_size", 1));
         int baselineFree = MovePreflight.freeWorkerSlots(ctx());
-        var first = productionWorker(300);
+        var first = worker(installed(), 300);   // the engine that dies: the runs only, as the base's kill test builds it (a production handler would back the move off)
         var cycle = async(first::runCycle);
         awaitAnOldRowStamped(table, tenant, seeded.old());
         int pid = -1;

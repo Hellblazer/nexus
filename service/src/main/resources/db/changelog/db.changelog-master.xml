@@ -2314,6 +2314,16 @@
     <include file="db/changelog/vectors-069-collection-id-dual-write-functions.xml"/>
 
     <!--
+        Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 3, the stamp moves): one registered data move per table that carries a NOT VALID collection_id CHECK
+        (rdr229-stamp-<table>, with P3.2's chunk_size, sleep_ms and statement_timeout_ms), each filling the NULL id from nexus.catalog_collections by
+        (tenant_id, name) after the engine serves and validating the table's CHECKs as its on_complete, plus the owner-read policy the worker needs on each
+        driving table that has none. One INSERT per move and DDL only; no row of a user-data table is read or written at boot. DATA EFFECT: fifteen rows
+        added to nexus.data_moves. The number follows vectors-069 and is provisional until the final rebase. After vectors-069, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-070-collection-id-stamp-moves.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

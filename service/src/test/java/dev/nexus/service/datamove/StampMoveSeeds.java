@@ -151,7 +151,7 @@ final class StampMoveSeeds {
             }
             if (plan.empty()) write(ctx, table, tenant, emptyN, "", twoNames(table) ? "" : null, false);
             if (plan.orphan()) {
-                // chash_remap and reembed_jobs: the source resolves and the target does not, the half orphan the per-column rule covers
+                // chash_remap and reembed_jobs: the source resolves and the target does not (a row with any orphan name is left whole)
                 if (twoNames(table)) {
                     PgContainerHelper.insertCollection(ctx, tenant, collection(tenant, orphanN), BGE);
                 }
