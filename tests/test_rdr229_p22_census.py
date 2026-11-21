@@ -121,8 +121,13 @@ def test_the_pin_fell_from_the_p29_count() -> None:
     (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks it). RDR-229 P3.1 (nexus-p2m1x.17) leaves 215:
     its four register-before-write seams and HttpCatalogClient's three manifest registrations route through the one
     ``registration_retry.register_collection_for_write`` primitive, which the census counts once. P3.8 (nexus-p2m1x.28, -2: ``register_collection``
-    derives nothing from the name) leaves 213."""
-    assert PARSE_SITE_PIN == 213
+    derives nothing from the name) leaves 213.
+
+    P3.6 (nexus-p2m1x.26, 2026-11-21) lowers it to 211: ``validate_collection_name`` is the label rule and reads no part
+    of a name (the ChromaDB-shape regex and the overflow hint's ``split_candidate_collection_name`` are gone), so it is no
+    longer a derived helper and its two ``T3Database`` callers (create and the rename target) left the ledger. mint
+    131 -> 129, primitive_call 179 -> 177."""
+    assert PARSE_SITE_PIN == 211
 
 
 def test_collection_attributes_is_one_type() -> None:
