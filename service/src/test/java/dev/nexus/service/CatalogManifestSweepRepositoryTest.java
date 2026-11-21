@@ -200,10 +200,13 @@ class CatalogManifestSweepRepositoryTest {
         return repo.writeManifestMany(tenant, docs, collection, complete, sweep);
     }
 
-    /** RDR-229 P3.1: a document names its collection by registry id, so the collection is registered first (idempotent). */
+    /**
+     * RDR-229 P3.1: a document names its collection by registry id, so the collection is registered first (idempotent).
+     * Each name has its own owner (P3.8: a tuple has one live collection).
+     */
     private void registerCollection(String tenant, String collection) {
         repo.upsertCollection(tenant, Map.of(
-            "name", collection, "content_type", "code", "owner_id", "sweep-owner",
+            "name", collection, "content_type", "code", "owner_id", "sweep-" + collection.split("__")[1],
             "embedding_model", "minilm-l6-v2-384", "model_version", "v1"));
     }
 
