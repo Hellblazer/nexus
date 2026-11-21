@@ -410,6 +410,56 @@ class CollectionMintGuardsTest {
         }
     }
 
+    // ── a same-named index the mint's ON CONFLICT cannot be inferred onto ───────────────────────
+
+    /**
+     * A unique index named like the live-tuple index, over the same columns, whose predicate ({@code lifecycle_state = 'live'})
+     * is not implied by the mint's own ({@code lifecycle_state <> 'quarantine'}): the probe finds the name, and the mint's
+     * {@code ON CONFLICT ... WHERE} raises 42P10 (no unique index matches it). The mint falls back to the tuple lock and a
+     * plain insert instead of a 500.
+     */
+    private void aNonInferableIndexOfTheSameName(org.jooq.Condition predicate) {
+        su(ctx -> {
+            CollectionMintSupport.createIndexWhere(ctx, predicate);
+            return null;
+        });
+        assertThat(su(CollectionMintSupport::indexPresent)).as("guard: the index of that name is there").isTrue();
+    }
+
+    @Test
+    void aMintWhoseConflictTargetMatchesNoUniqueIndexFallsBackToTheTupleLock_andMintsOneRow() {
+        aNonInferableIndexOfTheSameName(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live").and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")));
+        String owner = "guards-42p10";
+
+        var first = repo.mintCollection(TENANT, attrs(owner), true);
+        var again = repo.mintCollection(TENANT, attrs(owner), true);
+
+        assertThat((String) first.get("name")).as("a minted label, not a 500").startsWith("c");
+        assertThat(again.get("name")).as("the second mint finds the row").isEqualTo(first.get("name"));
+        assertThat(again.get("collection_id")).isEqualTo(first.get("collection_id"));
+        assertThat(rowsOfOwner(owner)).as("one row").isEqualTo(1);
+    }
+
+    @Test
+    void aMintWhoseInsertMeetsTheTupleIndexsUniqueViolationIsANamedRetryableConflict_notAnInternalError() {
+        // The same-named index also covers a tombstone (it has no superseded_by filter), and a tombstone is no live row of the
+        // tuple: the mint finds nothing to answer, its plain insert (the fallback of the case above) meets the index's own
+        // 23505, and that is the same named, retryable refusal an insert that leaves no live row gets, as it would be for an
+        // index built between the mint's probe and its insert (a second engine whose boot migrated, an operator).
+        String owner = "guards-23505";
+        su(ctx -> {
+            CollectionMintSupport.insertTombstone(ctx, TENANT, "guards-23505-tomb", owner, MODEL, "guards-23505-successor");
+            return null;
+        });
+        aNonInferableIndexOfTheSameName(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"));
+
+        assertThatThrownBy(() -> repo.mintCollection(TENANT, attrs(owner), true))
+            .as("not a bare unique violation")
+            .isInstanceOf(CollectionMint.LiveTupleConflict.class).hasMessageContaining(owner).hasMessageContaining("try again");
+
+        assertThat(rowsOfOwner(owner)).as("the mint wrote nothing, only the tombstone is there").isEqualTo(1);
+    }
+
     // ── an insert that reports no row and leaves no live row ────────────────────────────────────
 
     @Test
