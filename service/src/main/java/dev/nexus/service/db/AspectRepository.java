@@ -189,9 +189,12 @@ public final class AspectRepository {
      * inside the transaction, after the lock, so the claim is locked for the (short) time they take; a
      * claim-less write has no lock and runs the gates first, as ever. Nothing is written on any refusal.
      *
-     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, then
-     * {@code document_aspects}, in every path, so a rename that rewrites task bodies before its registry
-     * loop cannot deadlock against a persist of the same document.
+     * <p>Lock order, shared with the rename helper (bead nexus-5r2sc.2.6): the tuples row lock FIRST, so a
+     * rename that rewrites task bodies before its registry loop cannot deadlock against a fenced persist of the
+     * same document. After it come the catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and then
+     * {@code document_aspects}; the catalog-first order is the reverse of the rename's and the collection
+     * delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL
+     * aborts one (accepted residual, see {@link AspectDocIdAttribution}).
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
         // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
@@ -214,8 +217,8 @@ public final class AspectRepository {
         // Fenced: the claim is looked up and locked FIRST, so a lapsed or foreign claim answers 404 or 403
         // whatever the payload is (nexus-eyynd M1); the payload gates run after it, in the same transaction.
         return tenantScope.withTenant(tenant, ctx -> {
-            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then
-            // document_aspects, in every path. This lookup takes the first lock; the insert takes the second.
+            // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then the
+            // catalog row (RDR-254) and document_aspects. This lookup takes the first lock; the write the rest.
             // A rename rewrites task bodies (tuple row locks) before its registry loop updates
             // document_aspects, so the orders agree and neither can deadlock the other.
             var claimRow = TupleRepository.lockLiveClaimRow(ctx, tenant, claimId, claimant);
@@ -279,9 +282,8 @@ public final class AspectRepository {
         double confidence = v.confidence();
         OffsetDateTime extractedAtTs = v.extractedAt();
         ensureCollectionRegistered(ctx, tenant, collection);
-        // On a conflict the row keeps its doc_id when the incoming one names a trashed or alias document, and the
-        // incoming doc_id wins otherwise (the COALESCE of nexus-x1de2, unchanged).
-        Field<String> docIdOnConflict = namesNonLiveDocument(ctx, tenant, docId) ? DOCUMENT_ASPECTS.DOC_ID : EX_DOC_ID_COALESCE;
+        // RDR-254: a doc_id naming a trashed or alias document never replaces the row's doc_id (AspectDocIdAttribution).
+        Field<String> docIdOnConflict = AspectDocIdAttribution.onConflict(ctx, tenant, docId, EX_DOC_ID_COALESCE);
         var result = ctx.insertInto(DOCUMENT_ASPECTS,
                 DOCUMENT_ASPECTS.TENANT_ID,
                 DOCUMENT_ASPECTS.COLLECTION,
@@ -344,35 +346,6 @@ public final class AspectRepository {
             .returning(DOCUMENT_ASPECTS.ID)
             .fetch();
         return result.isEmpty() ? -1L : result.get(0).get(DOCUMENT_ASPECTS.ID);
-    }
-
-    /**
-     * RDR-254 (aspect-queue race, found by the P5 minimum viable validation of GH #1571): whether {@code docId}
-     * names a document that is no longer a live identity, one that is trashed ({@code deleted_at} set) or an alias
-     * row ({@code alias_of} set).
-     *
-     * <p>An extraction is queued for a document T, a document move then absorbs T into S (S's row at the new path
-     * is re-keyed to S, T is trashed), and the extraction completes. Its upsert matches S's row by
-     * (tenant, collection, source_path), and without this check would set {@code doc_id} back to T, so
-     * {@code get_by_doc_id(S)} found nothing. With it, the row keeps S and the late write still updates the aspect
-     * FIELDS: T and S are the same file at the same path, and the move itself keeps the newer extraction when T's
-     * row is the newer one. No wire change: the answer is still {@code written:true} with the row's id.
-     *
-     * <p>The read takes {@code FOR SHARE} on the catalog row, in this transaction before the {@code document_aspects}
-     * write, so it cannot race a move: a move holding T's row (it trashes T, and it locks the catalog rows before it
-     * touches aspect rows) makes this wait for its commit and read T trashed; a move not yet started waits for this
-     * transaction. Lock order stays tuples, then catalog documents, then {@code document_aspects}, the move's order.
-     * A document with no catalog row is not trashed or an alias; the insert's foreign key refuses it as before.
-     */
-    private static boolean namesNonLiveDocument(DSLContext ctx, String tenant, String docId) {
-        var row = ctx.select(CATALOG_DOCUMENTS.DELETED_AT, CATALOG_DOCUMENTS.ALIAS_OF)
-            .from(CATALOG_DOCUMENTS)
-            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(docId)))
-            .forShare()
-            .fetchOne();
-        if (row == null) return false;
-        String aliasOf = row.value2();
-        return row.value1() != null || (aliasOf != null && !aliasOf.isBlank());
     }
 
     /** The aspect-extraction queue's subspace (the literal {@code aspects} template, RDR-235 E3). */
