@@ -215,6 +215,28 @@ class CatalogDualWriteIdTest {
     }
 
     @Test
+    void anUpdateOfAnUnknownOrTombstonedTumblerIsANoOpWhateverTheCollection_notTheTypedRefusal() {
+        // bob's finding (P3.5a): the collection was resolved before the tumbler was looked up, so this was a 422
+        // (tests/test_catalog_collections.py::test_update_document_collection_returns_false_on_unknown_tumbler)
+        assertThat(repo.updateDocument(T, "dw.nobody", Map.of("physical_collection", GHOST)))
+            .as("updateDocument of an unknown tumbler to an unregistered collection").isZero();
+        assertThat(repo.updateDocument(T, "dw.nobody", Map.of("physical_collection", C2)))
+            .as("updateDocument of an unknown tumbler to a registered collection").isZero();
+        assertThat(repo.updateDocumentsMany(T, List.of(
+                Map.of("tumbler", "dw.nobody", "physical_collection", GHOST),
+                Map.of("tumbler", "dw.nobody", "title", "x"))))
+            .as("updateDocumentsMany: an unknown tumbler's slot is 0, the batch is not refused").containsExactly(0, 0);
+
+        repo.upsertDocument(T, doc("dw.gone", C1));
+        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(T)).and(CATALOG_DOCUMENTS.TUMBLER.eq("dw.gone")).execute());
+        assertThat(repo.updateDocument(T, "dw.gone", Map.of("physical_collection", GHOST)))
+            .as("a tombstoned document is a no-op too (it was before the dual write)").isZero();
+        assertThat(docId("dw.gone")).as("nothing was written").isEqualTo(regId(C1));
+        assertThat(docsNaming(GHOST)).isZero();
+    }
+
+    @Test
     void updateDocument_movingTheCollection_carriesTheNewId_andOtherUpdatesKeepIt() {
         repo.upsertDocument(T, doc("dw.m1", C1));
         repo.updateDocument(T, "dw.m1", Map.of("title", "retitled"));
