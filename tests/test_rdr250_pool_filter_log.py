@@ -36,6 +36,8 @@ from tests.test_rdr250_pool_key_scan import (  # noqa: F401 — the autouse fixt
     pool_on,
 )
 
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes item 1's NoRow outcome without a listing
+
 
 # ── nexus-w8d30: the filter logs what it sent and got back ─────────────────────────────────────────────────
 

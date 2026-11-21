@@ -1845,7 +1845,15 @@ def import_collection(
     # target holds no chunk) item 1's NoRow derivation reads it from the name's own segment, so it skips
     # the check as it always did. Only a prefix-free label with no row runs the check (P3.8).
     # Aspect and highlight upserts and the reads are not covered (no unique key on source_uri).
-    if not is_file_routed_collection(collection_name, db=db):
+    try:
+        file_routed = is_file_routed_collection(collection_name, db=db)
+    except Exception as exc:  # noqa: BLE001 — P2.5's contract: any resolver failure falls back to the name, as the row read below does
+        from nexus.aspect_readers import FILE_ROUTED_CONTENT_TYPES  # noqa: PLC0415 — deferred: this branch is the rare failure path
+        from nexus.corpus import candidate_content_type  # noqa: PLC0415 — deferred: corpus imports a wide graph
+
+        _log.warning("import_target_routing_unresolved", collection=collection_name, error=str(exc))
+        file_routed = candidate_content_type(collection_name) in FILE_ROUTED_CONTENT_TYPES
+    if not file_routed:
         from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
 
         require_note_uri_engine()
