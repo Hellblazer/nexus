@@ -9836,6 +9836,12 @@ public final class CatalogRepository {
         String[] tuple = new String[5];
         CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
             String name           = s(coll, "name");
+            // RDR-229 P3.6: the label rule's shape clauses, on every client registration and BEFORE the first read,
+            // because a NUL bound into the lookup below is a database error and not a 400. Engine-internal callers
+            // (the minter, the movers) use the two-argument form and are not subject to it.
+            if (clientRoute) {
+                CollectionLabel.validateShape(name);
+            }
             // Raw, nullable/blank — used to key the profile lookup; nne() below still fills the written
             // CONTENT_TYPE column with "" as before when absent.
             String contentType    = s(coll, "content_type");
@@ -9920,6 +9926,9 @@ public final class CatalogRepository {
             } else {
                 if (clientRoute) {
                     CollectionRegistration.requireClientNameNotQuarantine(name);
+                    // RDR-229 P3.6: the minted-form clause of the label rule, on a NEW user-supplied label only (an
+                    // existing row re-registers whatever its label, so a row the engine minted keeps re-registering).
+                    CollectionLabel.requireNotMinted(name);
                 }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 CollectionRegistration.requireNameAgreesWithState(name, requestedState != null ? requestedState : "live");
