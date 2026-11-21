@@ -20,7 +20,7 @@ from nexus.commands._helpers import default_db_path as _default_db_path
 from nexus.commands._helpers import (
     t2_shared_client_from_context as _command_shared_t2_client,
 )
-from nexus.commands.taxonomy_prune import (
+from nexus.commands._taxonomy_prune import (
     exact_prune_confirmed,
     prune_plan,
     prune_supports_exact,
