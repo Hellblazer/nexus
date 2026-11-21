@@ -214,6 +214,41 @@ def test_the_readd_is_not_valid_guarded_and_touches_no_row():
     assert sql.count("pg_catalog.pg_attribute") >= 20, "the id column must exist before a CHECK names it"
 
 
+def _068_19_precondition() -> str:
+    """The data condition vectors-068-19's precondition holds the CHECK back on, read from the changeset text (entities decoded)."""
+    text = CHANGELOG_068.read_text(encoding="utf-8")
+    m = re.search(r'<changeSet id="vectors-068-19".*?<sqlCheck expectedResult="0">(.*?)</sqlCheck>', text, re.S)
+    assert m, "vectors-068-19's precondition is not found"
+    return " ".join(m.group(1).replace("&lt;", "<").replace("&gt;", ">").split())
+
+
+def test_the_readd_holds_back_the_superseded_by_check_exactly_where_068_19_does_and_says_so():
+    """Confirmation review N4. vectors-068-19 does not add catalog_collections_superseded_by_id_check while a tombstone with a blank
+    model_version has no superseded_by_id (D2's repair move UPDATEs exactly those rows and a NOT VALID CHECK would refuse it with
+    23514). The re-add must not bypass that: it SKIPS the one CHECK on the same data condition (taken from the changeset text) and
+    says so with a NOTICE; every other CHECK is added as before. The operator runs the re-add again once D2's move has finished."""
+    mod = _load()
+    sql = mod.generate_readd(LIST.read_text(encoding="utf-8"))
+    condition = _068_19_precondition().split("SELECT count(*) FROM ", 1)[1]
+    block = sql[sql.index("catalog_collections_superseded_by_id_check") - 600:]
+    block = block[: block.index("$q$;", block.index("ADD CONSTRAINT")) + 4]
+    flat = " ".join(block.split())
+    where = condition.split(" WHERE ", 1)[1]
+    assert where in flat, "the re-add's guard is the precondition of vectors-068-19, word for word"
+    assert "RAISE NOTICE" in flat and "skipped" in flat and "repair-catalog-collection-model-version" in flat
+    # the other nineteen are not held back by it
+    others = [b for b in sql.split("DO $q$") if "ADD CONSTRAINT" in b and "catalog_collections_superseded_by_id_check" not in b]
+    assert len(others) == 19 and not any("RAISE NOTICE" in b for b in others), "only the superseded_by CHECK has the precondition"
+
+
+def test_the_runbook_says_the_readd_skips_the_superseded_by_check_while_d2s_repair_is_open():
+    flat = " ".join(RUNBOOK.read_text(encoding="utf-8").split())
+    step = flat[flat.index("Re-add the CHECKs") :]
+    assert "catalog_collections_superseded_by_id_check" in step and "model_version" in step
+    assert "skipped" in step and "NOTICE" in step
+    assert "run the re-add again" in step
+
+
 def test_the_readd_follows_the_list_not_a_copy_of_it():
     mod = _load()
     text = LIST.read_text(encoding="utf-8")
