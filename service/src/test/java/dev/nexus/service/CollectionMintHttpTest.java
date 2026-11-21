@@ -174,6 +174,31 @@ class CollectionMintHttpTest {
         assertThat(rowsOwnedBy("http-refuse-1") + rowsOwnedBy("http-refuse-2")).as("nothing was written").isZero();
     }
 
+    @Test @Order(3)
+    void aRefusedCollectionIdSeedsNoEmbeddingProfileRow() throws Exception {
+        // The seed is a write (a profile row for the request's content type) that used to run before the refusal. A request the
+        // route refuses for its collection_id writes nothing at all.
+        String type = "p38-seed-probe-refused";
+        var refused = post("/v1/catalog/collections/upsert",
+            "{\"content_type\":\"" + type + "\",\"owner_id\":\"http-seed-1\",\"embedding_model\":\"" + MODEL
+                + "\",\"model_version\":\"v1\",\"collection_id\":777005}");
+        assertThat(refused.statusCode()).as(refused.body()).isEqualTo(400);
+        assertThat(profileRows(type)).as("a refused request seeds no profile row").isZero();
+
+        // non-vacuity: the same request without the id does reach the seed, so the zero above is the refusal's doing
+        String controlType = "p38-seed-probe-control";
+        post("/v1/catalog/collections/upsert",
+            "{\"content_type\":\"" + controlType + "\",\"owner_id\":\"http-seed-2\",\"embedding_model\":\"" + MODEL
+                + "\",\"model_version\":\"v1\"}");
+        assertThat(profileRows(controlType)).as("guard: a request that is not refused seeds one").isEqualTo(1L);
+    }
+
+    private long profileRows(String contentType) {
+        return su(ctx -> (long) ctx.fetchCount(dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE,
+            dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE.TENANT_ID.eq(TENANT)
+                .and(dev.nexus.service.jooq.nexus.Tables.EMBEDDING_PROFILE.CONTENT_TYPE.eq(contentType))));
+    }
+
     @Test @Order(4)
     void theImportRefusesARowCarryingACollectionId_single_and_batch() throws Exception {
         var single = post("/v1/catalog/import/collection",
