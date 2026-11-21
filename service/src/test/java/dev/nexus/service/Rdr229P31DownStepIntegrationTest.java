@@ -180,8 +180,12 @@ class Rdr229P31DownStepIntegrationTest {
         // the walk itself registered the stamp moves (vectors-070): the registry the down-step must leave alone
         List<String> before = ctx.select(DSL.field(DSL.name("xmin")).cast(org.jooq.impl.SQLDataType.VARCHAR),
                 DSL.field(DSL.name("label"), String.class)).from(moves).fetch(r -> r.value1() + ":" + r.value2());
-        assertThat(before).as("non-vacuity: the walk registered the 15 stamp moves, and nothing else").hasSize(15)
-            .allSatisfy(row -> assertThat(row).contains(":rdr229-stamp-"));
+        // the registry also holds develop's moves (the walk registers them too); the stamp moves are the ones this cut owns:
+        // one per table that carries a CHECK, the queue's only while its table exists
+        int stampMoves = PgCatalogProbes.tableExists(ctx, "nexus", QUEUE) ? 16 : 15;
+        assertThat(before.stream().filter(row -> row.contains(":rdr229-stamp-")).count())
+            .as("non-vacuity: the walk registered exactly the %d stamp moves this schema carries", stampMoves)
+            .isEqualTo(stampMoves);
 
         runDownStep();
         assertThatCode(this::runDownStep).as("a second run: IF EXISTS everywhere").doesNotThrowAnyException();
