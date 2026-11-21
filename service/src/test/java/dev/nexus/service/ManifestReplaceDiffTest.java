@@ -476,7 +476,7 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
     void aSupersededCollection_refusesAReplaceThatKeepsEveryRow() throws Exception {
         Fx f = fixture("sup");
         List<Map<String, Object>> rows = seedDoc(f, 3);
-        assertThat(repo.supersedeCollection(TENANT, f.collection(), f.collection().replace("__v1", "__v2"), "")).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(repo, TENANT, f.collection(), f.collection().replace("__v1", "__v2"), "")).isEqualTo(1);
         var before = snapshot(f.docId());
 
         for (boolean decline : List.of(false, true)) {

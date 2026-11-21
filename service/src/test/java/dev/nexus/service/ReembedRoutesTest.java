@@ -456,7 +456,7 @@ class ReembedRoutesTest {
             PgContainerHelper.insertCollection(ctx, t.tenant(), taken, BGE);
             return null;
         });
-        catalog.supersedeCollection(t.tenant(), taken, t.src(), null);
+        SupersedeSeeds.supersede(catalog, t.tenant(), taken, t.src(), null);
 
         var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + taken
             + "\"}");
@@ -475,11 +475,11 @@ class ReembedRoutesTest {
         if ("done".equals(how)) {
             advance(t, first, "running", "cutover");
             assertThat(jobs.setCutoverStep(t.tenant(), first, "superseded")).isTrue();
-            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
             advance(t, first, "done");
         } else {
             advance(t, first, "running", "aborted");
-            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
         }
         setProfile(t.tenant(), BGE, 768);
         return first;
@@ -541,7 +541,7 @@ class ReembedRoutesTest {
         register(t, third);
         setProfile(t.tenant(), BGE, 768);
         // The bge sibling A is superseded by a third collection, not by the source B of the new job.
-        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), third, null)).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), third, null)).isEqualTo(1);
 
         var r = post(t, "/jobs", startBody(t.tgt()));
 
@@ -1206,7 +1206,7 @@ class ReembedRoutesTest {
         UUID first = id(startOk(t, t.src()));
         advance(t, first, "running", "cutover");
         assertThat(jobs.setCutoverStep(t.tenant(), first, "superseded")).isTrue();
-        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
         Job cutover = job(t, first);
         jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
             Transition.disposition("kept_tombstoned")).orElseThrow();
@@ -1297,7 +1297,7 @@ class ReembedRoutesTest {
             Tn t = tenant("reentno" + disposition.replace("_", ""));
             UUID first = id(startOk(t, t.src()));
             advance(t, first, "running", "cutover");
-            assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+            assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
             Job cutover = job(t, first);
             jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
                 Transition.disposition(disposition)).orElseThrow();
@@ -1316,7 +1316,7 @@ class ReembedRoutesTest {
         UUID first = id(startOk(t, t.src()));
         advance(t, first, "running", "cutover");
         // the source was superseded by something other than this job's target
-        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), "somewhere-else", null)).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.src(), "somewhere-else", null)).isEqualTo(1);
         Job cutover = job(t, first);
         jobs.applyTransition(t.tenant(), first, "cutover", cutover.cutoverStep(), "done",
             Transition.disposition("kept_tombstoned")).orElseThrow();
@@ -1332,7 +1332,7 @@ class ReembedRoutesTest {
     void aReEntryIntoATargetThatIsSupersededIsRefused() throws Exception {
         Tn t = tenant("reenttgt");
         UUID first = keptTombstonedLeg(t);
-        assertThat(catalog.supersedeCollection(t.tenant(), t.tgt(), "elsewhere", null)).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(catalog, t.tenant(), t.tgt(), "elsewhere", null)).isEqualTo(1);
 
         var r = post(t, "/jobs", startBody(t.src()));
 

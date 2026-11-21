@@ -225,6 +225,7 @@ public final class CatalogMoves {
             ctx.update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, newUri)
                 .set(CATALOG_DOCUMENTS.FILE_PATH, newPath)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(s))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .execute();
@@ -233,6 +234,7 @@ public final class CatalogMoves {
         // Step 4's last part: S's highlights row names the new URI.
         c.highlightRowsRewritten += ctx.update(DOCUMENT_HIGHLIGHTS)
             .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, newUri)
+            .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(s))
                    .and(DOCUMENT_HIGHLIGHTS.SOURCE_URI.ne(newUri)))
             .execute();
@@ -313,12 +315,14 @@ public final class CatalogMoves {
         }
         if (facts.aliased()) {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, s)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.ALIAS_OF.eq(t))
                        .and(CATALOG_DOCUMENTS.TUMBLER.ne(s)))
                 .execute();
         }
         if (facts.selfAliased()) {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.ALIAS_OF, "")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(s))
                        .and(CATALOG_DOCUMENTS.ALIAS_OF.eq(t)))
                 .execute();
@@ -333,6 +337,7 @@ public final class CatalogMoves {
             ctx.update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, "")
                 .set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.in(chunk))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .execute();
@@ -367,6 +372,7 @@ public final class CatalogMoves {
                     .execute();
                 c.aspectRowsRewritten += ctx.update(DOCUMENT_ASPECTS)
                     .set(DOCUMENT_ASPECTS.DOC_ID, s).set(DOCUMENT_ASPECTS.SOURCE_URI, newUri)
+                    .set(DOCUMENT_ASPECTS.COLLECTION_ID, CatalogIdStamps.keepAspectId())
                     .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.DOC_ID.eq(t))
                            .and(DOCUMENT_ASPECTS.COLLECTION.eq(collection)).and(DOCUMENT_ASPECTS.SOURCE_PATH.eq(newPath)))
                     .execute();
@@ -402,6 +408,7 @@ public final class CatalogMoves {
             }
             c.aspectRowsRewritten += ctx.update(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.SOURCE_PATH, newPath).set(DOCUMENT_ASPECTS.SOURCE_URI, newUri)
+                .set(DOCUMENT_ASPECTS.COLLECTION_ID, CatalogIdStamps.keepAspectId())
                 .where(DOCUMENT_ASPECTS.TENANT_ID.eq(tenant).and(DOCUMENT_ASPECTS.ID.eq(r.value1())))
                 .execute();
         }
@@ -424,7 +431,11 @@ public final class CatalogMoves {
             // (the column is NOT NULL, and an empty string would name no collection).
             var q = ctx.update(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.DOC_ID, s).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, rowUri);
-            var set = collection == null || collection.isBlank() ? q : q.set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection);
+            // RDR-229 P3.1: the id follows the name; with no collection to move to the row keeps its own.
+            var set = collection == null || collection.isBlank()
+                ? q.set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
+                : q.set(DOCUMENT_HIGHLIGHTS.COLLECTION, collection)
+                    .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CollectionIds.idOf(tenant, collection));
             c.highlightRowsRewritten += set
                 .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(tenant).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(t)))
                 .execute();
@@ -687,6 +698,7 @@ public final class CatalogMoves {
         trashAbsorbed(ctx, tenant, ts);
         for (List<String> chunk : chunks(fp.orphans())) {
             ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, DSL.currentOffsetDateTime())
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
                 .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.in(chunk))
                        .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
                 .execute();
@@ -737,12 +749,16 @@ public final class CatalogMoves {
      */
     private static void rewrite(DSLContext ctx, String tenant, Counts c, List<Rewrite> plan) {
         if (plan.isEmpty()) return;
+        // The id expressions carry no bind parameter (CatalogIdStamps), so the bind order of the templates is unchanged.
         var docs = ctx.batch(ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.SOURCE_URI, "")
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CatalogIdStamps.keepDocumentId())
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq("").and(CATALOG_DOCUMENTS.TUMBLER.eq(""))));
         var asp = ctx.batch(ctx.update(DOCUMENT_ASPECTS).set(DOCUMENT_ASPECTS.SOURCE_URI, "")
+            .set(DOCUMENT_ASPECTS.COLLECTION_ID, CatalogIdStamps.keepAspectId())
             .where(DOCUMENT_ASPECTS.TENANT_ID.eq("").and(DOCUMENT_ASPECTS.DOC_ID.eq(""))
                    .and(DOCUMENT_ASPECTS.SOURCE_URI.eq(""))));
         var hl = ctx.batch(ctx.update(DOCUMENT_HIGHLIGHTS).set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, "")
+            .set(DOCUMENT_HIGHLIGHTS.COLLECTION_ID, CatalogIdStamps.keepHighlightId())
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq("").and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(""))
                    .and(DOCUMENT_HIGHLIGHTS.SOURCE_URI.eq(""))));
         for (Rewrite r : plan) {

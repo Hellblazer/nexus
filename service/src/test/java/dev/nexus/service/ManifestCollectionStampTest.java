@@ -1,6 +1,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import java.util.HexFormat;
 import org.jooq.SQLDialect;
@@ -91,6 +92,7 @@ class ManifestCollectionStampTest {
             dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, COLL)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.require(dsl, TENANT, COLL))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(CH_A))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, COLL))
                 .set(CHUNKS.CHUNK_TEXT, "alpha text")
@@ -125,6 +127,7 @@ class ManifestCollectionStampTest {
             dsl.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, coll)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.require(dsl, TENANT, coll))
                 .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
                 .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(dsl, TENANT, coll))
                 .set(CHUNKS.CHUNK_TEXT, text)

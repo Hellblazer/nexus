@@ -120,11 +120,19 @@ class CatalogDualWriteIdTest {
 
     /** Plants a document the stamp has not reached (name set, id NULL): the CHECK is lifted for the insert and put back NOT VALID. */
     private void plantUnstampedDocument(String tumbler, String collection) {
+        plantUnstampedDocument(tumbler, collection, false);
+    }
+
+    private void plantUnstampedDocument(String tumbler, String collection, boolean tombstoned) {
         su(ctx -> {
             ddl(ctx, "ALTER TABLE nexus.catalog_documents DROP CONSTRAINT " + DOC_CHECK);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                 .values(T, tumbler, "unstamped " + tumbler, collection).execute();
+            if (tombstoned) {
+                ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
+                    .where(CATALOG_DOCUMENTS.TENANT_ID.eq(T)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute();
+            }
             ddl(ctx, "ALTER TABLE nexus.catalog_documents ADD CONSTRAINT " + DOC_CHECK
                 + " CHECK ((NULLIF(physical_collection, '') IS NULL) = (physical_collection_id IS NULL)) NOT VALID");
             return null;
@@ -232,9 +240,7 @@ class CatalogDualWriteIdTest {
 
     @Test
     void restoreDocument_stampsAnUnstampedTombstone() {
-        plantUnstampedDocument("dw.s.restore", C2);
-        su(ctx -> ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
-            .where(CATALOG_DOCUMENTS.TUMBLER.eq("dw.s.restore")).execute());
+        plantUnstampedDocument("dw.s.restore", C2, true);
         assertThat(repo.restoreDocument(T, "dw.s.restore")).isEqualTo(1);
         assertThat(docId("dw.s.restore")).isEqualTo(regId(C2));
     }
@@ -267,11 +273,12 @@ class CatalogDualWriteIdTest {
             Map.of("position", 0, "chash", hex("mf-a"), "chunk_index", 0),
             Map.of("position", 1, "chash", hex("mf-b"), "chunk_index", 1)));
         assertThat(manifestIds("dw.mf1")).containsExactly(regId(C1), regId(C1));
-        // a replace that rewrites row 1 (a different chash at the same position) and adds row 2
+        // a replace that rewrites row 0's payload (a section title, the diff's UPDATE path; the chash stays, so no chunk
+        // is orphaned) and adds row 2 (the INSERT path)
         repo.writeManifest(T, "dw.mf1", C1, List.of(
-            Map.of("position", 0, "chash", hex("mf-a"), "chunk_index", 0),
-            Map.of("position", 1, "chash", hex("mf-c"), "chunk_index", 1),
-            Map.of("position", 2, "chash", hex("mf-b"), "chunk_index", 2)));
+            Map.of("position", 0, "chash", hex("mf-a"), "chunk_index", 0, "section_title", "Intro"),
+            Map.of("position", 1, "chash", hex("mf-b"), "chunk_index", 1),
+            Map.of("position", 2, "chash", hex("mf-c"), "chunk_index", 2)));
         assertThat(manifestIds("dw.mf1")).hasSize(3).containsOnly(regId(C1));
         repo.appendManifestChunks(T, "dw.mf1", C1, List.of(Map.of("position", 3, "chash", hex("mf-a"), "chunk_index", 3)));
         assertThat(manifestIds("dw.mf1")).hasSize(4).containsOnly(regId(C1));

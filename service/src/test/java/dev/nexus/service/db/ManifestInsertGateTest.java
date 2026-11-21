@@ -137,7 +137,10 @@ class ManifestInsertGateTest {
      * {@link #everyCatalogDocumentChunksUpdateAcrossTheWholeTree_isOnTheAllowlist}.
      */
     private static final Map<String, Set<String>> ALLOWED_UPDATE_SITES = Map.of(
-        "CatalogRepository.java", Set.of("renameCollectionTxn"),
+        // RDR-229 P3.1 (nexus-p2m1x.17): renameCollectionTxn and rehomeCollection give the manifest rows the chunk cascade
+        // renamed the target's collection_id (the id half of the dual write, CatalogIdStamps' class comment); both hold the
+        // shared sweep gate for both collections before it and run in the deadlock-retried manifestWriteTxn.
+        "CatalogRepository.java", Set.of("renameCollectionTxn", "rehomeCollection"),
         "ChashRepository.java", Set.of("renameCollection"),
         // nexus-f3yqd (R2): the manifest fill job's two UPDATEs write section labels and span columns of existing rows;
         // they re-point and re-home nothing. Their caller, ManifestFill.apply, takes the shared gate for every collection

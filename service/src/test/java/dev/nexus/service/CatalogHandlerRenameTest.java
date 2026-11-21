@@ -181,6 +181,8 @@ class CatalogHandlerRenameTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, "xm-doc-1")
                 .set(CATALOG_DOCUMENTS.TITLE, "XM")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, "hren__xm-src")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID,
+                    dev.nexus.service.db.CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, "hren__xm-src"))
                 .onConflictDoNothing()
                 .execute();
         }
@@ -222,6 +224,8 @@ class CatalogHandlerRenameTest {
                 .set(CATALOG_DOCUMENTS.TUMBLER, tumbler)
                 .set(CATALOG_DOCUMENTS.TITLE, "seeded")
                 .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID,
+                    dev.nexus.service.db.CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection))
                 .onConflictDoNothing()
                 .execute();
         }

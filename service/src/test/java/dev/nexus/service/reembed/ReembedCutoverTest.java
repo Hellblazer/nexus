@@ -3,6 +3,7 @@
 package dev.nexus.service.reembed;
 
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.SupersedeSeeds;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ReembedJobRepository.Job;
 import dev.nexus.service.db.ReembedJobRepository.Transition;
@@ -345,7 +346,7 @@ class ReembedCutoverTest extends ReembedFixture {
         Fx fx = pair("blocked");
         seedDocs(fx, 2, 3);
         Job started = startJob(fx, null, false);
-        assertThat(catalog.supersedeCollection(fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
+        assertThat(SupersedeSeeds.supersede(catalog, fx.tenant(), fx.src(), "somewhere-else", null)).isEqualTo(1);
         Probe probe = new Probe();
         ReembedRunner runner = runner(fx, ONE_DOC_PER_BATCH);
         runner.setPhaseHookForTests(probe.hook(Set.of()));
