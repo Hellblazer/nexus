@@ -194,7 +194,11 @@ public final class AspectRepository {
      * same document. After it come the catalog row of {@code doc_id} ({@code FOR SHARE}, RDR-254) and then
      * {@code document_aspects}; the catalog-first order is the reverse of the rename's and the collection
      * delete's, so an UNFENCED upsert during a rename or delete of its collection can deadlock and PostgreSQL
-     * aborts one (accepted residual, see {@link AspectDocIdAttribution}).
+     * aborts one (see {@link AspectDocIdAttribution}). Each side's whole transaction runs under
+     * {@link DeadlockRetry}: this one here, the rename and the delete through {@code manifestWriteTxn}. The
+     * retried body is only the database transaction (nothing leaves it; the handler answers after it returns), so
+     * a rerun repeats no side effect, and a rename or delete that committed first answers the retried upsert as
+     * it would one that started after it (409 naming the successor, or 422 for a collection no longer registered).
      */
     public long upsertAspect(String tenant, Map<String, Object> body) {
         // Before everything else: a malformed pair is a caller bug whatever the payload or the claim is.
@@ -212,11 +216,13 @@ public final class AspectRepository {
         if (claimId == null) {
             // No fence: the payload gates run before a transaction opens, as ever.
             ValidUpsert valid = validateUpsert(body);
-            return valid == null ? -1L : tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid));
+            if (valid == null) return -1L;
+            return DeadlockRetry.run("aspect.upsert " + valid.collection(),
+                () -> tenantScope.withTenant(tenant, ctx -> writeAspect(ctx, tenant, body, valid)));
         }
         // Fenced: the claim is looked up and locked FIRST, so a lapsed or foreign claim answers 404 or 403
         // whatever the payload is (nexus-eyynd M1); the payload gates run after it, in the same transaction.
-        return tenantScope.withTenant(tenant, ctx -> {
+        return DeadlockRetry.run("aspect.upsert fenced", () -> tenantScope.withTenant(tenant, ctx -> {
             // Lock order (shared with the rename helper, nexus-5r2sc.2.6): the tuples row lock FIRST, then the
             // catalog row (RDR-254) and document_aspects. This lookup takes the first lock; the write the rest.
             // A rename rewrites task bodies (tuple row locks) before its registry loop updates
@@ -225,7 +231,7 @@ public final class AspectRepository {
             requireClaimOnTaskFor(claimRow, claimId, body.get("doc_id") instanceof String d ? d : null);
             ValidUpsert valid = validateUpsert(body);
             return valid == null ? -1L : writeAspect(ctx, tenant, body, valid);
-        });
+        }));
     }
 
     /** An upsert body that passed the confidence, required-field and doc_id gates. */
