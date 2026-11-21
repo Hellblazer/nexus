@@ -33,6 +33,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
@@ -352,6 +353,9 @@ class CollectionMintHealTest {
                 }
                 return drawn;
             });
+            // how many of B's rows were assigned while the heals were still running: tenant A alone makes the draw count
+            // below large, so the cross-tenant leg needs its own evidence that B's ids crossed the heals
+            var assignedDuringTheHeals = new AtomicInteger();
             Future<List<Long>> tenantB = pool.submit(() -> {
                 List<Long> assigned = new ArrayList<>();
                 try (Connection c = pg.createConnection("")) {
@@ -362,6 +366,9 @@ class CollectionMintHealTest {
                     // run take minutes); tenant A's draws overlap every heal on their own
                     for (int k = 0; k < B_ROWS && !healed.get(); k++) {
                         assigned.add(CollectionMintSupport.insertWithDefaultId(ctx, other, "race-b-" + k, "race-owner-" + k, MODEL));
+                        if (!healed.get()) {
+                            assignedDuringTheHeals.incrementAndGet();
+                        }
                     }
                 }
                 return assigned;
@@ -382,6 +389,8 @@ class CollectionMintHealTest {
                 tenantB.get(60, TimeUnit.SECONDS).stream().mapToLong(Long::longValue).toArray()
             }).flatMapToLong(Arrays::stream).toArray();
             assertThat(all.length).as("the drawers overlapped the heals (non-vacuity)").isGreaterThan(20_000);
+            assertThat(tenantB.get(60, TimeUnit.SECONDS)).as("tenant B was assigned ids (the cross-tenant leg is not vacuous)").isNotEmpty();
+            assertThat(assignedDuringTheHeals.get()).as("tenant B's ids were assigned while the heals ran").isGreaterThan(0);
             Arrays.sort(all);
             List<Long> repeated = new ArrayList<>();
             for (int i = 1; i < all.length; i++) {
