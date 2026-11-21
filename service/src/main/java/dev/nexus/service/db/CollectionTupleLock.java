@@ -17,8 +17,9 @@ import java.util.TreeSet;
  * {@code (tenant_id, content_type, owner_id, embedding_model, model_version)}, and a writer that must not race another
  * writer onto the same tuple (the catalog-051-2 owner triggers, and the P3.8 mint when no unique index backs the tuple)
  * takes {@code pg_advisory_xact_lock} on that tuple's key, held to the end of its transaction. The key is STRIPED
- * (collections-003-1, RDR-229 P3.8): one of 256 keys in one namespace, so a batch takes at most 256 locks, and two unrelated
- * tuples in one stripe serialize briefly, accepted by design.
+ * (collections-003-1, RDR-229 P3.8): one of 256 keys in one namespace, shared by every tenant, so a batch takes at most 256
+ * locks. Two unrelated tuples in one stripe serialize (a waiter waits for the holder's whole transaction, and a large batch
+ * holds nearly every stripe until it commits); accepted by design, see the changeset's header.
  *
  * <p><b>One key derivation.</b> The key is {@code nexus.collection_tuple_lock_key(...)}, the SQL function of changelog
  * catalog-051-1a, and nothing else computes it. The two triggers call the function; this class SELECTs it, so Java never
@@ -29,7 +30,8 @@ import java.util.TreeSet;
  * {@link #lock(DSLContext, Collection)}, never one {@code pg_advisory_xact_lock} after another in its own order: that
  * method SELECTs every key in one round trip, sorts the keys ascending by the {@code bigint} the SQL function returns,
  * drops duplicates and locks them in that order, so two such callers can never each hold a lock the other waits for.
- * {@link #lockTuple} is the one-tuple case of the same order. A trigger takes only the one lock of its own row.
+ * {@link #lockTuple} is the one-tuple case of the same order. A trigger takes the one lock of its own row, per row and
+ * in row order, so a statement that fires it for several rows is not sorted (see collections-003-1's header).
  *
  * <p><b>The five values</b> are the row's own: {@code model_version} is the column's text as stored ({@code 'v1'} and so
  * on). Nothing here normalises, trims or lower-cases; the SQL function encodes them as given.
