@@ -25,6 +25,8 @@ from tests import _route_parity as rp
 from tests.test_search_fanout_recall_parity import _QUERIES_NORERANK, _QUERIES_RR300, _QUERIES_RR1000
 from tests.test_search_per_collection_route import _BGE, _MINI, _cols, _FakeEngine, _rows
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "measure_search_per_collection.py"
 _spec = importlib.util.spec_from_file_location("measure_search_per_collection", _SCRIPT)
 drv = importlib.util.module_from_spec(_spec)

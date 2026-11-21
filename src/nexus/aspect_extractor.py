@@ -103,6 +103,7 @@ import structlog
 
 from nexus import pdeathsig as _pdeathsig
 from nexus.aspect_readers import ReadFail, ReadOk, file_uri_path, note_uri, read_source, uri_for
+from nexus.corpus import routing_content_type
 from nexus.db.t2.records import AspectRecord
 from nexus.mcp_infra import get_t3
 from nexus.operators.dispatch import _write_prompt_file
@@ -411,7 +412,7 @@ _GENERAL_PROSE_CONFIG = ExtractorConfig(
 
 
 _REGISTRY: dict[str, ExtractorConfig] = {
-    "knowledge__": _SCHOLARLY_PAPER_CONFIG,
+    "knowledge": _SCHOLARLY_PAPER_CONFIG,
     # docs__* — NOT registered (nexus-z70w reverted #377). docs__<repo>
     # is populated by `nx index repo`, which sweeps any prose file in
     # the tree: markdown docs, .dict dictionaries, .jsonl fixtures,
@@ -429,7 +430,7 @@ _REGISTRY: dict[str, ExtractorConfig] = {
     # YAML frontmatter + labelled markdown sections; a deterministic
     # parser is more reliable and zero-cost compared to forcing the
     # 5-field LLM extraction shape onto the document.
-    "rdr__": ExtractorConfig(
+    "rdr": ExtractorConfig(
         extractor_name="rdr-frontmatter-v1",
         model_version="rdr-frontmatter-v1",  # not a real model, pinned to recipe id
         prompt_template="",  # unused (parser_fn shortcut)
@@ -873,7 +874,7 @@ def _truncate(text: str, cap: int) -> str:
 #: the engine's tenant-wide ``catalog_collections.aspects_enabled`` row
 #: attribute says so (nexus-l46pu follow-up — see
 #: :func:`docs_collection_opted_in`).
-_DOCS_PREFIX: str = "docs__"
+_DOCS_CONTENT_TYPE: str = "docs"
 #: The files in an opted-in docs__ collection that are prose worth a call.
 #: Not ``classifier.classify_file``: every file in a docs__ collection is
 #: already PROSE by that classifier, whose unknown-extension fall-through is
@@ -1021,7 +1022,7 @@ def docs_collection_opted_in(collection: str) -> bool:
     stale local entry would silently re-override a value another machine
     had already synced to the engine.
     """
-    if not collection.startswith(_DOCS_PREFIX):
+    if routing_content_type(collection) != _DOCS_CONTENT_TYPE:
         return False
     enabled, has_opinion = _engine_aspects_enabled(collection)
     if has_opinion:
@@ -1036,57 +1037,57 @@ def extraction_applies_to_source(collection: str, source_path: str) -> bool:
     ``collection``'s extractor. The prose-file rule applies only to a docs__
     collection that gets its extractor through the opt-in (nexus-kk4ut);
     anything the registry itself covers is unaffected."""
-    if not collection.startswith(_DOCS_PREFIX):
+    content_type = routing_content_type(collection)
+    if content_type != _DOCS_CONTENT_TYPE:
         return True
-    if any(collection.startswith(prefix) for prefix in _REGISTRY):
+    if content_type in _REGISTRY:
         return True
     return source_path.lower().endswith(_DOCS_PROSE_SUFFIXES)
 
 
 def select_config(collection: str) -> ExtractorConfig | None:
-    """Return the registered BASE ``ExtractorConfig`` whose prefix matches
-    ``collection``, or ``None`` if no prefix matches.
+    """Return the registered BASE ``ExtractorConfig`` for ``collection``'s
+    content type (its catalog row's, RDR-229 P2.9), or ``None`` if none is registered.
 
-    Two prefixes ship:
+    Two content types ship:
 
-    * ``knowledge__*`` → ``scholarly-paper-v1`` (Claude-CLI subprocess
+    * ``knowledge`` → ``scholarly-paper-v1`` (Claude-CLI subprocess
       path, RDR-089 Phase 1) as the base config. This is a starting
       point, not the final word: :func:`_resolve_config_for_document`
       (nexus-kmbys) re-routes any INDIVIDUAL document classified as
       general prose to ``general-prose-v1`` instead, so a
-      ``knowledge__*`` collection's rows can carry EITHER extractor_name
+      ``knowledge`` collection's rows can carry EITHER extractor_name
       depending on each document's shape. A caller that needs every
       extractor_name a collection's rows can actually carry — not just
       the prefix's base config — wants :func:`eligible_extractor_names`.
-    * ``rdr__*`` → ``rdr-frontmatter-v1`` (deterministic markdown +
+    * ``rdr`` → ``rdr-frontmatter-v1`` (deterministic markdown +
       frontmatter parser, RDR-089 Phase F; zero API cost). Not
-      shape-routed: every ``rdr__*`` row carries this one extractor_name.
+      shape-routed: every ``rdr`` row carries this one extractor_name.
 
-    ``docs__*`` → ``general-prose-v1`` ONLY when the collection is opted in
+    ``docs`` → ``general-prose-v1`` ONLY when the collection is opted in
     through ``aspects.docs_collections`` (nexus-kk4ut, option A2); every
-    other docs__ collection returns ``None``, as before.
+    other docs collection returns ``None``, as before.
 
-    Other prefixes (``code__``, bare ``knowledge`` without the
-    double-underscore separator, etc.) return ``None``.
+    Other content types (``code``), and a collection no row backs, return ``None``.
     """
-    for prefix, config in _REGISTRY.items():
-        if collection.startswith(prefix):
-            return config
+    config = _REGISTRY.get(routing_content_type(collection) or "")
+    if config is not None:
+        return config
     if docs_collection_opted_in(collection):
         return _GENERAL_PROSE_CONFIG
     return None
 
 
-def registered_prefixes() -> list[str]:
-    """The collection prefixes with a registered extractor config, e.g.
-    ``["knowledge__", "rdr__"]`` (nexus-hj7mg).
+def registered_content_types() -> list[str]:
+    """The content types with a registered extractor config, e.g.
+    ``["knowledge", "rdr"]`` (nexus-hj7mg; keyed by content type since RDR-229 P2.9).
 
-    The single source of truth for "which prefixes get aspects" is
+    The single source of truth for "which content types get aspects" is
     ``_REGISTRY`` — callers that need to tell a user what IS supported
     (as opposed to routing a specific collection via :func:`select_config`)
     derive the list from here rather than hardcoding it a second time,
     which is exactly how a caller's copy goes stale the next time a
-    prefix is added or removed.
+    content type is added or removed.
     """
     return list(_REGISTRY.keys())
 

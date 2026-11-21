@@ -21,6 +21,8 @@ from nexus.aspect_extractor import (
     _split_rdr_frontmatter,
 )
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── select_config routing ───────────────────────────────────────────────────
 
@@ -337,7 +339,7 @@ class TestExtractAspectsRdrPath:
         from dataclasses import replace
         bad_config = replace(config, parser_fn=boom)
         from nexus import aspect_extractor as mod
-        monkeypatch.setitem(mod._REGISTRY, "rdr__", bad_config)
+        monkeypatch.setitem(mod._REGISTRY, "rdr", bad_config)
 
         with patch("nexus.aspect_extractor._run_claude_isolated", side_effect=AssertionError(
             "must not invoke subprocess",

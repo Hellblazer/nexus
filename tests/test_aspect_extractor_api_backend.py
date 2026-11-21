@@ -30,6 +30,8 @@ from nexus.operators.llm_types import (
 from tests._llm_fake_server import FakeLLMServer, Step, anthropic_error, anthropic_stream
 from tests.test_aspect_extractor import _PAPER_SHAPED_CONTENT, _make_completed, _ok_stdout
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 KEY = "sk-ant-api03-ASPECTSECRET0123456789abcdef"
 INNER = json.loads(_ok_stdout())["result"]  # the model's response text, as the extractor expects it
 

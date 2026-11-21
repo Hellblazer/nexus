@@ -29,6 +29,8 @@ from nexus.scoring import apply_quality_boost, quality_score
 from nexus.search_engine import _attach_display_paths
 from nexus.types import SearchResult
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 COLL = "knowledge__papers__m__v1"
 A, B = "1.1.1", "1.1.2"
 H_SHARED, H_A, H_B = "5" * 64, "a" * 64, "b" * 64

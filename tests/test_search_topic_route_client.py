@@ -32,6 +32,8 @@ from tests.test_search_per_collection_route import (  # type: ignore[import-not-
     _rows,
 )
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _EVENT = "search_topic_route"
 _TOP1 = {"mode": "top1"}
 
