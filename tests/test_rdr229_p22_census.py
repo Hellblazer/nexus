@@ -16,7 +16,6 @@ These guards pin what P2.2 changed:
 from __future__ import annotations
 
 import ast
-import pathlib
 
 import pytest
 
