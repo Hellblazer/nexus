@@ -141,6 +141,44 @@ class CatalogHandlerForTupleTest {
             .as("the live row answers, not the superseded one").isEqualTo("new-notes-p28");
     }
 
+    /**
+     * RDR-229 P3.8: the row the client finds by tuple or by name carries its {@code collection_id}, so the client's
+     * {@code find_collection} can answer it (it answered {@code collection_id=None}: neither route sent the key). The
+     * row is minted, so its id is the one the mint answered.
+     */
+    @Test
+    void forTupleAndGetAnswerTheRowsCollectionId() throws Exception {
+        var minted = post("/v1/catalog/collections/upsert",
+            "{\"content_type\":\"knowledge\",\"owner_id\":\"id-on-the-wire-p38\",\"embedding_model\":\""
+                + KNOWLEDGE_MODEL + "\",\"model_version\":\"v1\"}");
+        assertThat(minted.statusCode()).as(minted.body()).isEqualTo(200);
+        var mintedRow = mapper.readValue(minted.body(), MAP_T);
+        long id = ((Number) mintedRow.get("collection_id")).longValue();
+        String name = (String) mintedRow.get("name");
+
+        var byTuple = get(forTuple("knowledge", "id-on-the-wire-p38", KNOWLEDGE_MODEL));
+        var byName = get("/v1/catalog/collections/get?name=" + name);
+
+        assertThat(byTuple.statusCode()).isEqualTo(200);
+        assertThat(byName.statusCode()).isEqualTo(200);
+        var tupleRow = mapper.readValue(byTuple.body(), MAP_T);
+        var nameRow = mapper.readValue(byName.body(), MAP_T);
+        assertThat(tupleRow.get("name")).isEqualTo(name);
+        assertThat(tupleRow).as("for_tuple carries the id").containsKey("collection_id");
+        assertThat(((Number) tupleRow.get("collection_id")).longValue()).as("for_tuple's id is the minted one").isEqualTo(id);
+        assertThat(nameRow).as("get carries the id").containsKey("collection_id");
+        assertThat(((Number) nameRow.get("collection_id")).longValue()).as("get's id is the minted one").isEqualTo(id);
+
+        // a row registered by name gets its id from the column's default, and answers it the same way
+        assertThat(post("/v1/catalog/collections/upsert",
+            "{\"name\":\"named-id-p38\",\"content_type\":\"knowledge\",\"owner_id\":\"named-id-owner-p38\","
+                + "\"embedding_model\":\"" + KNOWLEDGE_MODEL + "\",\"model_version\":\"v1\"}").statusCode()).isEqualTo(200);
+        var named = mapper.readValue(get("/v1/catalog/collections/get?name=named-id-p38").body(), MAP_T);
+        var namedByTuple = mapper.readValue(get(forTuple("knowledge", "named-id-owner-p38", KNOWLEDGE_MODEL)).body(), MAP_T);
+        assertThat(named.get("collection_id")).as("a named row's id is on the wire").isNotNull();
+        assertThat(namedByTuple.get("collection_id")).isEqualTo(named.get("collection_id"));
+    }
+
     private static String forTuple(String contentType, String ownerId, String model) {
         return "/v1/catalog/collections/for_tuple?content_type=" + contentType
             + "&owner_id=" + ownerId + "&embedding_model=" + model;
