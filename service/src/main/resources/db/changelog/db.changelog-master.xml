@@ -2408,11 +2408,12 @@
     <include file="db/changelog/collections-001-tuple-unique-index.xml"/>
 
     <!--
-        RDR-229 P3.8 (nexus-p2m1x.28): UPDATE on the collection_id sequence for nexus_svc, so the mint can heal a sequence
-        behind the data once (setval). No data effect. After collections-001 (and vectors-068, which creates the identity
-        column), before the grants-nexus-svc.xml runAlways block.
+        RDR-229 P3.8 (nexus-p2m1x.28): nexus.collection_id_seq_heal, the SECURITY DEFINER function through which nexus_svc
+        (which holds no UPDATE on the shared sequence) heals a sequence behind the data once. No data effect. After
+        collections-001 (and vectors-068, which creates the identity column), before the grants-nexus-svc.xml runAlways
+        block.
     -->
-    <include file="db/changelog/collections-002-collection-id-seq-update-grant.xml"/>
+    <include file="db/changelog/collections-002-collection-id-seq-heal-function.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
