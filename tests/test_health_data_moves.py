@@ -119,10 +119,8 @@ def test_a_move_blocked_on_a_missing_prerequisite_is_a_warning_not_red():
     assert row.ok is False and row.warn is True
     assert row.detail.startswith("blocked: m1: pg_background is not installed")
     hint = " ".join(row.fix_suggestions)
-    from nexus.daemon.binary_install import resolve_service_tag  # noqa: PLC0415
-
-    assert f"nx daemon service install-binary {resolve_service_tag()}" in hint
-    assert "nx upgrade" not in hint and "self-managed" in hint and "nothing was changed" in hint
+    assert "`nx upgrade` replaces that bundle" in hint and "install-binary" not in hint
+    assert "self-managed" in hint and "nothing was changed" in hint
     assert "restart the engine" in hint and "retries by itself" not in hint
     assert _by_label(rows)[SUMMARY_LABEL].ok
 
