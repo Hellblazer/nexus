@@ -120,7 +120,7 @@ class CollectionMintHttpTest {
 
     private long nextSequenceValue() {
         return su(ctx -> {
-            String seq = ctx.fetchValue("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')", String.class);
+            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
             var r = ctx.fetchOne("SELECT last_value, is_called FROM " + seq);
             return r.get(1, Boolean.class) ? r.get(0, Long.class) + 1 : r.get(0, Long.class);
         });
@@ -264,13 +264,13 @@ class CollectionMintHttpTest {
     @Test @Order(10)
     void aTakenIdAfterTheHealIs409() throws Exception {
         su(ctx -> {
-            String seq = ctx.fetchValue("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')", String.class);
+            String seq = ctx.resultQuery("SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')").fetchOne(0, String.class);
             ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + TENANT + "' AND collection_id = 1");
             ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
                     CATALOG_COLLECTIONS.COLLECTION_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
                 .values(TENANT, "cycle-anchor-p38", 1L, "knowledge", "http-cycle-anchor", MODEL, "v1", "live").execute();
-            long max = ctx.fetchValue("SELECT max(collection_id) FROM nexus.catalog_collections", Long.class);
+            long max = ctx.resultQuery("SELECT max(collection_id) FROM nexus.catalog_collections").fetchOne(0, Long.class);
             ctx.execute("SELECT setval('" + seq + "', " + max + ")");
             ctx.execute("ALTER SEQUENCE " + seq + " MAXVALUE " + max + " CYCLE");
             return null;
