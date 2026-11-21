@@ -1359,10 +1359,10 @@ def get_collection_row(name: str, *, refresh: bool = True, strict: bool = False)
             # (to the name, or to no cap). Only the names readers surface the failure.
             if strict:
                 raise
-            return None
+            return _minted_row(name)
     row = _collections_cache[2].get(name)
     if not row or "content_type" not in row:
-        return None
+        return _minted_row(name)
     return row
 
 
