@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.8 (bead nexus-p2m1x.28): nexus.collection_id_seq_heal(p_floor bigint), the one way the engine role moves the
+    shared collection_id sequence.
+
+    The engine mints a collection's id from nexus.catalog_collections.collection_id's own sequence (nextval). A restore that
+    wrote explicit ids and left the sequence behind them makes the next draw an id some row already holds; the mint then
+    heals the sequence ONCE and draws again (CollectionMint, MintedLabel; lead ruling T2
+    nexus_rdr/229-lead-ruling-collection-id-by-default-2026-11-21). Healing is a setval, which needs UPDATE on the sequence.
+
+    The sequence is ONE for every tenant, and nexus_svc serves every tenant. UPDATE on it would let any tenant's request set
+    the identity every other tenant draws from to any value. So nexus_svc gets no UPDATE (the grants-nexus-svc-1 sequence
+    grants, USAGE and SELECT, stand) and EXECUTE on this SECURITY DEFINER function instead. The function runs as the
+    migration role, which owns the sequence, and does one thing: it raises the sequence to p_floor when p_floor is above the
+    sequence's last value, and never lowers it. The caller's floor is its own tenant's largest id (all a FORCE-RLS-bound
+    request can see), so a heal for one tenant cannot move the sequence below ids another tenant has already drawn. The
+    function reads and writes no table, its search_path is pinned to pg_catalog, pg_temp so nothing a caller creates shadows
+    a name it uses, and a NULL or non-positive floor changes nothing. It answers the sequence's last value afterwards.
+
+    One window is accepted. The last-value read and the setval are two steps of one statement, so a draw by another session
+    between them that carries the sequence past the floor could be set back to the floor. The window is microseconds and the
+    unique key is (tenant_id, collection_id), so the worst case is a refused second draw in the one tenant (the mint's own
+    409), never a duplicate id.
+
+    Owner-only and never halting a boot: the migration role creates the function; the grant runs only where nexus_svc
+    exists; a sequence owned by another role is reported with a WARNING and left (the heal then fails loudly at the setval,
+    naming the sequence). Nothing here raises. Placed after collections-001 and before the grants-nexus-svc.xml runAlways
+    block; it needs the identity column of vectors-068-1.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="collections-002-collection-id-seq-heal-function" author="nexus-p2m1x.28">
+        <comment>nexus.collection_id_seq_heal(bigint): a SECURITY DEFINER function, search_path pinned, that raises the collection_id sequence to a floor and never lowers it; EXECUTE revoked from PUBLIC and granted to nexus_svc, which holds no UPDATE on the sequence (RDR-229 P3.8). DATA EFFECT: none; a function definition and a privilege, no row read or written.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.collection_id_seq_heal(p_floor bigint)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+    v_seq  pg_catalog.regclass;
+    v_last bigint;
+BEGIN
+    v_seq := pg_catalog.pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')::pg_catalog.regclass;
+    IF v_seq IS NULL THEN
+        RAISE EXCEPTION 'nexus.collection_id_seq_heal: nexus.catalog_collections.collection_id has no owned sequence'
+            USING ERRCODE = 'undefined_object';
+    END IF;
+    v_last := pg_catalog.pg_sequence_last_value(v_seq);
+    IF p_floor IS NOT NULL AND p_floor >= 1 AND (v_last IS NULL OR p_floor > v_last) THEN
+        v_last := pg_catalog.setval(v_seq, GREATEST(p_floor, COALESCE(pg_catalog.pg_sequence_last_value(v_seq), 0)));
+    END IF;
+    RETURN v_last;
+END
+$fn$;
+
+REVOKE EXECUTE ON FUNCTION nexus.collection_id_seq_heal(bigint) FROM PUBLIC;
+
+DO $grant$
+DECLARE
+    seq       text := pg_catalog.pg_get_serial_sequence('nexus.catalog_collections', 'collection_id');
+    seq_owner text;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles r WHERE r.rolname = 'nexus_svc') THEN
+        GRANT EXECUTE ON FUNCTION nexus.collection_id_seq_heal(bigint) TO nexus_svc;
+    ELSE
+        RAISE NOTICE 'collections-002: role nexus_svc does not exist; EXECUTE on nexus.collection_id_seq_heal not granted';
+    END IF;
+    IF seq IS NOT NULL THEN
+        SELECT pg_catalog.pg_get_userbyid(c.relowner) INTO seq_owner FROM pg_catalog.pg_class c WHERE c.oid = seq::pg_catalog.regclass;
+        IF seq_owner IS DISTINCT FROM current_user THEN
+            RAISE WARNING 'collections-002: % is owned by %, not by the migration role %: the definer function runs as the migration role and cannot setval it; a restore that leaves collection_id behind its rows cannot be healed until the migration role owns it', seq, seq_owner, current_user;
+        END IF;
+    END IF;
+END
+$grant$;
+        ]]></sql>
+        <rollback>
+            <sql>DROP FUNCTION IF EXISTS nexus.collection_id_seq_heal(bigint);</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
