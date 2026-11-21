@@ -5,11 +5,11 @@ package dev.nexus.service.db;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+
 import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Clock;
 import java.util.function.Supplier;
 
@@ -36,13 +36,11 @@ public final class CollectionTupleIndexProbe {
 
     /** {@code true} when the index exists, {@code false} when it does not, {@code null} when the probe could not run. */
     public static Boolean present(DataSource ds) {
-        try (Connection c = ds.getConnection();
-             PreparedStatement ps = c.prepareStatement("SELECT to_regclass(?) IS NOT NULL")) {
-            ps.setString(1, "nexus." + INDEX);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() ? rs.getBoolean(1) : null;
-            }
-        } catch (SQLException | RuntimeException e) {
+        try {
+            DSLContext ctx = DSL.using(ds, SQLDialect.POSTGRES);
+            return ctx.fetchExists(ctx.selectOne().where(
+                DSL.function("to_regclass", Object.class, DSL.val("nexus." + INDEX)).isNotNull()));
+        } catch (RuntimeException e) {
             log.warn("event=collection_tuple_index_probe_unavailable error={}", e.getMessage());
             return null;
         }
