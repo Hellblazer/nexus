@@ -118,6 +118,16 @@ final class StamperEnv implements AutoCloseable {
             Map.of("from", stamp, "kind", "ack", "sha", sha), "{}", UUID.randomUUID().toString(), null, stamp);
     }
 
+    /**
+     * An ack row as the engine stores it after stamping: {@code from} an identity id, {@code stamp} the sender session,
+     * or null for a row with no session (a raw client, or a hand-typed {@code from}).
+     */
+    void ackFrom(String tenant, String base, String sha, String from, String stamp) {
+        String topic = base + "--owner";
+        tuples.out(tenant, "board/ci/" + topic, Map.of("topic", topic),
+            Map.of("from", from, "kind", "ack", "sha", sha), "{}", UUID.randomUUID().toString(), null, stamp);
+    }
+
     /** The owner and clear rows of a topic, oldest first. */
     List<Row> ownerRows(String tenant, String base) {
         return tuples.rdp(tenant, "board/ci/" + base + "--owner", Map.of(), 200, null).stream()

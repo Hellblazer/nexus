@@ -25,8 +25,8 @@ import java.util.concurrent.TimeUnit;
  * <p>A task never ends its own schedule: nothing here throws out of the executor's thread, and a hand-off that
  * fails is retried after {@link #RETRY} for as long as the cause lasts. What fails and is retried is a red that may
  * already be acknowledged, or a fault in the database; an unacknowledged red is escalated by the stamper whether or
- * not the identity read works. The {@value #STUCK_ATTEMPTS}th consecutive failure of a topic, and every
- * {@value #STUCK_ATTEMPTS} after it, raises the error-level log event {@code board_ack_deadline_stuck}; it posts no
+ * not the identity read works. The {@value #STUCK_ATTEMPTS}th failure of a topic since its last success, cancel or
+ * eviction, and every {@value #STUCK_ATTEMPTS} after it, raises the error-level log event {@code board_ack_deadline_stuck}; it posts no
  * row. The failed attempt that starts a run logs its stack, the later ones their message.
  */
 public final class AckDeadlineTimer {
@@ -42,7 +42,7 @@ public final class AckDeadlineTimer {
     /** How long after a failed hand-off the same topic is tried again. */
     static final Duration RETRY = Duration.ofSeconds(30);
 
-    /** After this many consecutive failures of one topic's hand-off, and every this many after, an error event says so. */
+    /** After this many failures of one topic's hand-off since its last success, cancel or eviction, and every this many after, an error event says so. */
     static final int STUCK_ATTEMPTS = 12;
 
     private record Key(String tenant, String base) { }

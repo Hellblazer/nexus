@@ -179,11 +179,16 @@ final class OwnerFixture {
     }
 
     OwnerFixture ack(String pusherSeat, String sha) {
+        return ack(pusherSeat, sha, "s" + pusherSeat);
+    }
+
+    /** An ack row with the given {@code from} dim and sender session (null: no session stamp). */
+    OwnerFixture ack(String from, String sha, String senderSession) {
         Map<String, String> dims = new LinkedHashMap<>();
-        dims.put("from", pusherSeat);
+        dims.put("from", from);
         dims.put("kind", "ack");
         dims.put("sha", sha);
-        owners.add(new BoardRow("a" + (++seq), tick(), dims, "{}", "s" + pusherSeat));
+        owners.add(new BoardRow("a" + (++seq), tick(), dims, "{}", senderSession));
         return this;
     }
 
