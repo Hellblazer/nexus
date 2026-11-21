@@ -101,7 +101,7 @@ class CollectionIdQueueStampMoveIntegrationTest extends DataMoveIntegrationBase 
     }
 
     private static String policyChangeset() throws Exception {
-        return changesetContaining("CREATE POLICY " + QUEUE + "_owner_read", "the move over a row-level-security table needs the migrating role to read every tenant's rows");
+        return changesetContaining("POLICY " + QUEUE + "_owner_read ON nexus." + QUEUE, "the move over a row-level-security table needs the migrating role to read every tenant's rows");
     }
 
     private int registeredRows() {

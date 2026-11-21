@@ -22,7 +22,7 @@ import java.util.regex.Pattern;
 
 /**
  * RDR-229 P3.1 stage 3 (nexus-p2m1x.17): the registry of the per-table stamp moves, read as text. One move per CHECK-guarded table of
- * {@code db/rdr229/p31-checks.tsv} (the queue is another move's), each registered by one INSERT into {@code nexus.data_moves} and nothing else,
+ * {@code db/rdr229/p31-checks.tsv} (the retired queue's is conditional: R3), each registered by one INSERT into {@code nexus.data_moves} and nothing else,
  * with the values P3.2 set ({@link StampMoveSpecs}), a template that sets exactly the table's id columns, a verification that returns the
  * rows whose name resolves and whose id is NULL, and an {@code on_complete} that validates exactly the table's listed constraints. The
  * integration test ({@link CollectionIdStampMovesIntegrationTest}) runs them; this one pins what the INSERTs say, so an edit that drops a
@@ -132,45 +132,66 @@ class CollectionIdStampMovesShapeTest {
     // ── one move per CHECK-guarded table, in the order the worker takes them ──────────────────────────────────
 
     @Test
-    void everyCheckGuardedTableHasExactlyOneMove_theQueueHasNone_andTheRegistryIsFirst() throws Exception {
+    void everyCheckGuardedTableHasExactlyOneMove_theQueuesIsConditional_theRegistryIsFirst_andChunksLast() throws Exception {
         var moves = moves();
-        var expected = StampMoveSpecs.SPECS.stream().map(StampMoveSpecs.Spec::table).toList();
+        var expected = StampMoveSpecs.WITH_QUEUE.stream().map(StampMoveSpecs.Spec::table).toList();
+        assertThat(expected).as("non-vacuity: the 15 moves a fresh walk registers and the queue's").hasSize(StampMoveSpecs.SPECS.size() + 1);
         assertThat(moves.keySet()).as("the moves, in registration order (the worker takes the oldest first)").containsExactlyElementsOf(expected);
         assertThat(StampMoveSpecs.constraintsByTable().keySet())
             .as("the list and the specs name the same tables: a table added to p31-checks.tsv gets a move").containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(moves).as("the retired queue's stamp is another move's (R3)").doesNotContainKey("aspect_extraction_queue");
         assertThat(expected.get(0)).as("the registry, a small table whose tombstones the other moves' readers want settled first").isEqualTo("catalog_collections");
         assertThat(expected.get(expected.size() - 1)).as("the 38-hour chunks stamp starts last, so the small moves finish first").isEqualTo("chunks");
     }
 
+    /**
+     * R3: the queue's move is registered only while the table AND its collection_id column exist (no row is the check's "incomplete", and a kept queue
+     * would never complete), by a DO guard inside the one INSERT's changeset and, as vectors-068-18, a precondition that retries the changeset while the
+     * table exists without its column. CollectionIdQueueStampMoveIntegrationTest runs both postures; this pins the text.
+     */
+    @Test
+    void theQueuesMoveIsRegisteredOnlyWhileTheTableAndItsColumnExist_guardedAsVectors068_18Is() throws Exception {
+        Move m = moves().get("aspect_extraction_queue");
+        assertThat(m.hasPreconditions()).as("the retry precondition, as vectors-068-18's").isTrue();
+        Element cs = shippedChangesets().stream().filter(e -> e.getAttribute("id").equals(m.changesetId())).findFirst().orElseThrow();
+        Element pre = children(cs, "preConditions").get(0);
+        assertThat(pre.getAttribute("onFail")).as("unrecorded, so the next boot retries it while the column is missing").isEqualTo("CONTINUE");
+        assertThat(pre.getAttribute("onError")).isEqualTo("CONTINUE");
+        assertThat(children(pre, "sqlCheck").get(0).getTextContent()).contains("to_regclass('nexus.aspect_extraction_queue')").contains("collection_id");
+        String sql = m.forwardSql();
+        assertThat(sql).as("the DO guard: nothing is registered for a table that is absent or has no id column")
+            .contains("IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL").contains("a.attname = 'collection_id'");
+        assertThat(count(sql.toLowerCase(), "insert into nexus.data_moves")).as("one INSERT, inside the guard").isEqualTo(1);
+        assertThat(sql.toLowerCase().indexOf("insert into nexus.data_moves")).as("the INSERT follows the guard").isGreaterThan(sql.indexOf("a.attname = 'collection_id'"));
+        assertThat(m.values().get("on_complete")).as("the VALIDATE runs only where the table and its CHECK exist")
+            .contains("to_regclass('nexus.aspect_extraction_queue')").contains("pg_constraint");
+    }
+
     /** The two halves of stage 3 agree on every label: the one the changesets register and the ones the completion check reads. */
     @Test
-    void theLabelsTheChangesetsRegisterAreTheLabelsTheCompletionCheckReads_exceptTheQueuesWhichNoChangesetRegistersYet() throws Exception {
+    void theLabelsTheChangesetsRegisterAreTheLabelsTheCompletionCheckReads_sixteenOfSixteen() throws Exception {
         var registered = new java.util.TreeSet<String>();
         for (var e : moves().entrySet()) {
             registered.add(e.getValue().values().get("label"));
         }
-        assertThat(registered).as("non-vacuity").hasSize(StampMoveSpecs.SPECS.size());
+        assertThat(registered).as("non-vacuity: 15 moves and the queue's, one label per table the check reads").hasSize(StampMoveSpecs.WITH_QUEUE.size());
         assertThat(StampMoveSpecs.LABEL_PREFIX).as("one prefix in both halves").isEqualTo(StampLabels.PREFIX);
         assertThat(StampLabels.all()).as("every label a changeset registers is one the check reads").containsAll(registered);
-        var readButNeverRegistered = new java.util.TreeSet<>(StampLabels.all());
-        readButNeverRegistered.removeAll(registered);
-        assertThat(readButNeverRegistered)
-            .as("the only label the check reads and no changeset registers is the retired queue's: R3 has P3.1 register it while the table and its "
-                + "collection_id column exist (the check treats it as not applicable while they do not), and no changeset does yet")
-            .containsExactly(StampLabels.labelFor("aspect_extraction_queue"));
+        assertThat(registered).as("registered-versus-read pin: the 16 labels the check reads (R3: the queue's is registered, conditionally, so it is never a label with no row on an install that kept the table)")
+            .hasSize(16).containsExactlyInAnyOrderElementsOf(StampLabels.all());
     }
 
     @Test
     void eachMoveIsOneInsertInAChangesetOfItsOwn_withNoGuard_andItsOwnIdAsTheChangesetId() throws Exception {
         var moves = moves();
-        assertThat(moves).as("non-vacuity").hasSize(StampMoveSpecs.SPECS.size());
+        assertThat(moves).as("non-vacuity").hasSize(StampMoveSpecs.WITH_QUEUE.size());
         for (var e : moves.entrySet()) {
             Move m = e.getValue();
             String where = e.getKey();
-            assertThat(m.hasPreconditions()).as("%s: a guard would skip the INSERT in a posture the move is meant to be registered in", where).isFalse();
+            boolean queue = where.equals("aspect_extraction_queue");   // R3: the one conditional move, see its own test
+            assertThat(m.hasPreconditions()).as("%s: a guard would skip the INSERT in a posture the move is meant to be registered in", where).isEqualTo(queue);
             assertThat(ROW_DML.matcher(withoutLiterals(m.forwardSql())).results().count())
-                .as("%s: the one INSERT and no other row DML (the template and verification text are values)", where).isEqualTo(1);
+                .as("%s: the one INSERT and no other row DML (the template and verification text are values; the queue's INSERT is inside its DO guard's dollar-quoted body)", where)
+                .isEqualTo(queue ? 0 : 1);
             assertThat(m.values().get("changeset_id")).as("%s: names the changeset that registers it", where).isEqualTo(m.changesetId());
             assertThat(m.changesetId()).startsWith(StampMoveSpecs.CHANGESET_PREFIX);
             assertThat(m.values().get("label")).as("data_moves_label_check refuses a slash").doesNotContain("/");
@@ -186,7 +207,7 @@ class CollectionIdStampMovesShapeTest {
     @Test
     void theThrottleAndTheBoundAreP32s_andTheBoundCoversTheRecheckBudgetOfTheTable() throws Exception {
         var moves = moves();
-        for (var spec : StampMoveSpecs.SPECS) {
+        for (var spec : StampMoveSpecs.WITH_QUEUE) {
             Move m = moves.get(spec.table());
             assertThat(m.chunkSize()).as("%s chunk_size", spec.table()).isEqualTo(spec.chunkSize());
             assertThat(m.sleepMs()).as("%s sleep_ms", spec.table()).isEqualTo(spec.sleepMs());
@@ -208,7 +229,7 @@ class CollectionIdStampMovesShapeTest {
 
     @Test
     void theTemplateSetsExactlyTheIdColumnsOfItsTable_onlyForRowsWhoseNameResolves_andHasTheChunkingMarkersOnce() throws Exception {
-        for (var spec : StampMoveSpecs.SPECS) {
+        for (var spec : StampMoveSpecs.WITH_QUEUE) {
             Move m = moves().get(spec.table());
             String template = m.values().get("template");
             assertThat(count(template, "<driving_table>")).as("%s: <driving_table> exactly once (assert_chunking_template)", spec.table()).isEqualTo(1);
@@ -246,7 +267,7 @@ class CollectionIdStampMovesShapeTest {
 
     @Test
     void theVerificationReturnsTheRowsOfTheOldShapeThatResolve_selectsOne_andTakesTheTenantAsDollarOne() throws Exception {
-        for (var spec : StampMoveSpecs.SPECS) {
+        for (var spec : StampMoveSpecs.WITH_QUEUE) {
             Move m = moves().get(spec.table());
             String v = m.values().get("verification");
             assertThat(v.toLowerCase()).as("%s: one row per old-shape row, of the real table aliased t", spec.table())
@@ -269,7 +290,7 @@ class CollectionIdStampMovesShapeTest {
         var moves = moves();
         var byTable = StampMoveSpecs.constraintsByTable();
         int validated = 0;
-        for (var spec : StampMoveSpecs.SPECS) {
+        for (var spec : StampMoveSpecs.WITH_QUEUE) {
             String onComplete = moves.get(spec.table()).values().get("on_complete");
             assertThat(onComplete).as("%s: the CHECK's VALIDATE finishes the move", spec.table()).isNotBlank();
             var named = new ArrayList<String>();
@@ -281,7 +302,7 @@ class CollectionIdStampMovesShapeTest {
             assertThat(onComplete.replaceAll("(?is)alter\\s+table\\s+nexus\\.\\w+\\s+validate\\s+constraint\\s+\\w+\\s*;?", "").replaceAll("(?is)\\bdo\\b.*", "").trim())
                 .as("%s: on_complete holds the VALIDATEs and nothing else", spec.table()).isEmpty();
         }
-        assertThat(validated).as("non-vacuity: 19 listed constraints without the queue's").isEqualTo(19);
+        assertThat(validated).as("non-vacuity: 20 listed constraints, the queue's included").isEqualTo(20);
     }
 
     // ── the policy the worker needs to read the driving table ───────────────────────────────────────────────
@@ -316,6 +337,19 @@ class CollectionIdStampMovesShapeTest {
             assertThat(ROW_DML.matcher(withoutLiterals(sql)).results().count()).as("%s: no row DML", spec.table()).isZero();
         }
         assertThat(policies).as("non-vacuity: 10 policies, all but chunks', the registry's and the three catalog-050 owns").isEqualTo(StampMoveSpecs.SPECS.size() - 2 - OWNED_ELSEWHERE.size());
+        // the retired queue's policy (nothing else creates one on that table, so this file does): guarded for the table's absence, after its move
+        Element queuePolicy = all.stream().filter(e -> forwardSql(e).contains("POLICY aspect_extraction_queue_owner_read ON nexus.aspect_extraction_queue")).findFirst().orElse(null);
+        assertThat(queuePolicy).as("aspect_extraction_queue: the migrating role needs a policy to read every tenant's rows of a kept queue").isNotNull();
+        assertThat(order.indexOf(queuePolicy.getAttribute("id"))).as("the queue's policy follows its move's registration")
+            .isGreaterThan(order.indexOf(moves.get("aspect_extraction_queue").changesetId()));
+        Element queueGuard = children(queuePolicy, "preConditions").get(0);
+        assertThat(queueGuard.getAttribute("onFail")).as("skipped, unrecorded, while the kept table has no id column or another role owns it").isEqualTo("CONTINUE");
+        assertThat(guardOf(queuePolicy)).as("vectors-029's exposure guard, word for word, is the first term of the queue's condition")
+            .contains(guard.substring(guard.indexOf("COUNT")));
+        String queueSql = forwardSql(queuePolicy);
+        assertThat(queueSql).contains("IF to_regclass('nexus.aspect_extraction_queue') IS NOT NULL").contains("FOR SELECT TO CURRENT_USER").contains("USING (true)")
+            .contains("RAISE EXCEPTION");
+        assertThat(ROW_DML.matcher(withoutLiterals(queueSql)).results().count()).as("aspect_extraction_queue: no row DML").isZero();
         for (String owned : List.of("catalog_collections", "catalog_documents", "document_aspects", "document_highlights")) {
             assertThat(all.stream().filter(e -> forwardSql(e).contains(owned + "_owner_read")).map(e -> e.getAttribute("id")).toList())
                 .as("two changesets owning one policy break each other's rollback: this file creates none on %s, whose owner-read policy is vectors-065's or catalog-050's", owned)

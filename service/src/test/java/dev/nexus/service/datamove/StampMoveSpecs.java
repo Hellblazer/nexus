@@ -79,6 +79,22 @@ final class StampMoveSpecs {
         new Spec("topic_assignments", 1000, 4000, 120),
         new Spec("chunks", 100, 20_000, 3360));
 
+    /**
+     * The retired queue's move (residual R3): registered by vectors-070-30 only where the table is kept with its id column, so a fresh walk
+     * registers none and {@link #SPECS} (what the walk registers) leaves it out. It sits before chunks in the file, so the small moves finish first.
+     */
+    static final Spec QUEUE = new Spec("aspect_extraction_queue", 1000, 4000, 120);
+
+    /** {@link #SPECS} and the conditional queue move, in the order the changeset file registers them. */
+    static final List<Spec> WITH_QUEUE = withQueueBeforeChunks();
+
+    private static List<Spec> withQueueBeforeChunks() {
+        List<Spec> out = new ArrayList<>(SPECS.subList(0, SPECS.size() - 1));
+        out.add(QUEUE);
+        out.add(SPECS.get(SPECS.size() - 1));
+        return List.copyOf(out);
+    }
+
     /** A row of p31-checks.tsv: {@code constraint} is {@code -} for a history table. */
     record Check(String table, String nameColumn, String idColumn, String constraint, String kind) {
         boolean validated() {
@@ -101,11 +117,11 @@ final class StampMoveSpecs {
         }
     }
 
-    /** The constraints of {@code table} the move validates, by table: the queue is another move's, the history tables have none. */
+    /** The constraints of {@code table} the move validates, by table (the queue's included: its move is conditional, not absent), the history tables have none. */
     static Map<String, List<String>> constraintsByTable() {
         Map<String, List<String>> out = new LinkedHashMap<>();
         for (Check c : checks()) {
-            if (c.validated() && !c.table().equals("aspect_extraction_queue")) {
+            if (c.validated()) {
                 out.computeIfAbsent(c.table(), k -> new ArrayList<>()).add(c.constraint());
             }
         }

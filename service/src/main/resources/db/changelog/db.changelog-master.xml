@@ -2380,7 +2380,7 @@
         (rdr229-stamp-<table>, with P3.2's chunk_size, sleep_ms and statement_timeout_ms), each filling the NULL id from nexus.catalog_collections by
         (tenant_id, name) after the engine serves and validating the table's CHECKs as its on_complete, plus the owner-read policy the worker needs on each
         driving table that has none and no other changeset's (10; catalog_collections' is vectors-065's, and catalog_documents', document_aspects' and document_highlights' are catalog-050's). One INSERT per move and DDL only; no row of a user-data table is read or written at boot. DATA EFFECT: fifteen rows
-        added to nexus.data_moves. The number follows vectors-069 and is provisional until the final rebase. After vectors-069, before the
+        added to nexus.data_moves, and a sixteenth (the retired aspect_extraction_queue's, vectors-070-30, with its policy vectors-070-31) only on an install that kept that table with its collection_id column. The number follows vectors-069 and is provisional until the final rebase. After vectors-069, before the
         grants-nexus-svc.xml runAlways block. ORDER: the registry's own policy is D2's vectors-065 and the three above it are catalog-050's (this file creates none of the four), and the registry stamp move reads the registry
         through it, so this include must come AFTER vectors-065 (the include above).
     -->
