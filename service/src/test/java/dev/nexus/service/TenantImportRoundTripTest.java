@@ -32,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Export, then import into an empty tenant (RDR-248 Test Plan, "export then import into an empty tenant"; bead
@@ -94,6 +95,10 @@ class TenantImportRoundTripTest {
         Set<String> out = new HashSet<>(Set.of("tenant_id"));
         if (t.reassignedId() != null) out.add(t.reassignedId());
         out.addAll(t.triggerMaintained());
+        // RDR-229 P3.11: collection_id and its kin are referenced columns, not reassigned keys; a restore maps them to the
+        // target's registry ids, so they differ from the source's by design and are compared through the registry instead
+        // (aBackupWithCollectionIdRestoresEveryChunkAndChildRowOnTheTargetsNewId). Absent before P3.1: the file has no such column.
+        out.addAll(CollectionIdSites.idColumnsOf(t.table()));
         for (Reference r : t.references()) {
             var parent = TenantExport.entry(r.parentTable());
             if (parent.isPresent() && parent.get().reassignedId() != null && r.parentColumns().contains(parent.get().reassignedId())) {
@@ -461,5 +466,112 @@ class TenantImportRoundTripTest {
         Set<Long> after = new HashSet<>(labels("memory", "title", tenant).keySet());
         after.addAll(labels("plans", "query", tenant).keySet());
         assertThat(after).hasSize(restored.size() + 2).containsAll(restored);
+    }
+
+    // ── RDR-229 P3.11: the backup carries collection_id, and a restore maps it to the target's ──────────────────
+
+    /** The registry's ids of {@code tenant}, by collection name. */
+    private Map<String, Long> registryIds(String tenant) {
+        return env.su(ctx -> {
+            Map<String, Long> m = new LinkedHashMap<>();
+            for (Record r : ctx.fetch("select name, collection_id from nexus.catalog_collections where tenant_id = ?", tenant)) {
+                m.put(r.get(0, String.class), r.get(1, Long.class));
+            }
+            return m;
+        });
+    }
+
+    /**
+     * A source tenant as an engine at P3.1 would hold it: seeded as the battery seeds it, then every id column stamped from
+     * the tenant's own registry (the seed inserts by name, as the engine's data move stamps old rows), one collection
+     * tombstoned under another so {@code superseded_by_id} holds a value to map. Returns the tenant's token.
+     */
+    private String stampedSource(String tenant, String tombstone, String successor) throws Exception {
+        String token = env.newTenant(tenant);
+        List<String> failures = new ArrayList<>();
+        env.su(ctx -> {
+            TenantExportBatteryTest.Seed.rows(ctx, tenant, 1, failures);
+            TenantExportBatteryTest.Seed.fillNulls(ctx, tenant, failures);
+            return null;
+        });
+        assertThat(failures).as("the seed").isEmpty();
+        env.su(ctx -> {
+            for (CollectionIdSites.Site s : CollectionIdSites.exportedSites()) {
+                String id = CollectionIdSites.idColumn(ctx, s);
+                // a row whose name names no registry row gets NULL, whatever the seed's fill put in the new column
+                ctx.execute("update nexus.\"" + s.table() + "\" t set \"" + id + "\" = (select c.collection_id from nexus.catalog_collections c "
+                    + "where c.tenant_id = t.tenant_id and c.name = t.\"" + s.nameColumn() + "\") where t.tenant_id = ?", tenant);
+            }
+            ctx.execute("update nexus.catalog_collections t set superseded_by = ?, superseded_by_id = s.collection_id, superseded_at = now() "
+                + "from nexus.catalog_collections s where t.tenant_id = ? and s.tenant_id = t.tenant_id and s.name = ? and t.name = ?",
+                successor, tenant, successor, tombstone);
+            return null;
+        });
+        return token;
+    }
+
+    @Test
+    void aBackupWithCollectionIdRestoresEveryChunkAndChildRowOnTheTargetsNewId() throws Exception {
+        String src = "t-imp-cid-src", dst = "t-imp-cid-dst";
+        String successor = TenantExportBatteryTest.Seed.collection(src, 768), tombstone = TenantExportBatteryTest.Seed.collection(src, 1024);
+        String token = stampedSource(src, tombstone, successor);
+        // the source is sound, and the check that follows can fail: it holds ids at every exported site, none null
+        CollectionIdSites.Finding srcRegistry = env.su(ctx -> CollectionIdSites.registryAudit(ctx, src));
+        assertThat(srcRegistry.clean() && srcRegistry.examined() == 3).as("the source registry: " + srcRegistry).isTrue();
+        List<CollectionIdSites.Finding> srcFindings = env.su(ctx -> CollectionIdSites.audit(ctx, src, CollectionIdSites.exportedSites()));
+        assertThat(srcFindings.stream().filter(f -> !f.clean()).toList()).as("the stamped source").isEmpty();
+        Map<String, Long> srcIds = registryIds(src);
+        assertThat(srcIds.values()).doesNotContainNull().hasSize(3);
+
+        // the backup carries the id: the registry's section names the column
+        ImportTestEnv.BackupFile backup = env.export(token);
+        assertThat(backup.table("catalog_collections").withArray("columns").toString())
+            .as("the file's catalog_collections columns").contains("\"collection_id\"").contains("\"superseded_by_id\"");
+        long highestBefore = env.su(ctx -> ctx.fetchOne("select max(collection_id) from nexus.catalog_collections").get(0, Long.class));
+
+        String dstToken = env.newTenant(dst);
+        JsonNode end = env.restore(dstToken, backup);
+
+        assertThat(end.get("status").asText()).as(end.toString()).isEqualTo("committed");
+        Map<String, Long> dstIds = registryIds(dst);
+        assertThat(dstIds.keySet()).as("the registry's names are kept").isEqualTo(srcIds.keySet());
+        assertThat(dstIds.values()).as("every restored registry row has an id").doesNotContainNull();
+        // Sam's P3.8 ruling: a restore never writes the source's id; the engine mints the target's. Both tenants share this
+        // database and its one sequence here, so a restore that kept an id would repeat the source's, and a restore that
+        // minted would draw above every id issued before it.
+        assertThat(dstIds.values()).as("the restore writes no id of the source").doesNotContainAnyElementsOf(srcIds.values());
+        assertThat(dstIds.values()).as("a restore never restarts the id sequence: every restored id is above every id issued before")
+            .allMatch(id -> id > highestBefore);
+        // every chunk and child row is on its collection's NEW id, and none is on the source's
+        List<CollectionIdSites.Finding> found = env.su(ctx -> CollectionIdSites.audit(ctx, dst, CollectionIdSites.exportedSites()));
+        assertThat(found.stream().filter(f -> !f.clean()).toList()).as("child rows whose id is null or is not the target registry's").isEmpty();
+        assertThat(found.stream().filter(f -> f.examined() == 0).map(Object::toString).toList())
+            .as("sites with no row to check (the seed must reach every one)").isEmpty();
+        Set<Long> childIds = new TreeSet<>();
+        env.su(ctx -> {
+            for (CollectionIdSites.Site s : CollectionIdSites.exportedSites()) {
+                String id = CollectionIdSites.idColumn(ctx, s);
+                childIds.addAll(ctx.fetch("select distinct \"" + id + "\" from nexus.\"" + s.table() + "\" where tenant_id = ? and \"" + id
+                    + "\" is not null", dst).getValues(0, Long.class));
+            }
+            return null;
+        });
+        assertThat(childIds).as("ids the target's child rows hold").isNotEmpty().doesNotContainAnyElementsOf(srcIds.values())
+            .isSubsetOf(dstIds.values());
+        // the tombstone's successor id is mapped as well: it names the target's row, not the source's
+        CollectionIdSites.Finding dstRegistry = env.su(ctx -> CollectionIdSites.registryAudit(ctx, dst));
+        assertThat(dstRegistry.clean() && dstRegistry.examined() == 3).as("the target registry's tombstone fields: " + dstRegistry).isTrue();
+        Long successorId = env.su(ctx -> ctx.fetchOne("select superseded_by_id from nexus.catalog_collections where tenant_id = ? and name = ?",
+            dst, tombstone).get(0, Long.class));
+        assertThat(successorId).as("the tombstone points at the target's id of its successor").isEqualTo(dstIds.get(successor));
+
+        // a mint after the restore draws above everything restored: no collision with an id the restore wrote
+        String fresh = TenantExportBatteryTest.Seed.collection(dst + "-fresh", 768);
+        long minted = env.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, dst, fresh);
+            return ctx.fetchOne("select collection_id from nexus.catalog_collections where tenant_id = ? and name = ?", dst, fresh)
+                .get(0, Long.class);
+        });
+        assertThat(minted).as("the next collection after the restore").isGreaterThan(java.util.Collections.max(dstIds.values()));
     }
 }
