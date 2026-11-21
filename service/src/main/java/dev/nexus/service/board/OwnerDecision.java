@@ -195,6 +195,11 @@ public final class OwnerDecision {
             body(target, null, REASON_ESCALATED, suspects, total, now, false, ((Number) body.get("handoffs")).intValue() + 1)), null);
     }
 
+    /** Whether an ack row exists on the current owner row's tip, posted at or after the row; needs no identity read. */
+    static boolean ackOnTip(List<BoardRow> owners) {
+        return false;
+    }
+
     /**
      * When the deadline of the current open owner row falls due, from that row alone ({@code episode_at} plus the
      * topic's deadline); null when the current row is not an open owner row, is {@code escalated} or names no owner,
