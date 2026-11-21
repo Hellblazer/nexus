@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import java.util.HexFormat;
 import java.time.OffsetDateTime;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -310,6 +311,7 @@ class ChashHandlerRerouteTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, TENANT)
             .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, collection))
             .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash.toHex()))
             .set(CHUNKS.EMBEDDING_MODEL, dim == 384 ? MODEL_384 : MODEL_768)
             .set(CHUNKS.CHUNK_TEXT, "wire chunk " + chash.toHex().substring(0, 8))

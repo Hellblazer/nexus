@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
@@ -166,9 +167,9 @@ class ChunkConstraintRoutesIntegrationTest extends ChunkKeysTestBase {
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
                 ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
                         CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
                     .values(tenant, doc, 0, Chash.fromHex(chash).toBytes(), origin,
-                        PgContainerHelper.collectionModel(ctx, tenant, origin)).execute();
+                        PgContainerHelper.collectionModel(ctx, tenant, origin), CollectionIds.require(ctx, tenant, origin)).execute();
                 PgContainerHelper.readdCatalogChunksFkNotValid(su);
             }
         }

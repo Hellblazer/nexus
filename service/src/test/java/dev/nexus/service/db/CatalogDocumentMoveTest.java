@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
@@ -100,7 +101,8 @@ class CatalogDocumentMoveTest {
         repo.upsertOwner(t, o);
     }
 
-    private String doc(String t, String ownerPrefix, String title, String sourceUri, String filePath) {
+    private String doc(String t, String ownerPrefix, String title, String sourceUri, String filePath) throws Exception {
+        registerCollection(t, COLL);   // RDR-229 P3.1: a document names its collection by registry id
         Map<String, Object> f = new LinkedHashMap<>();
         f.put("title", title);
         f.put("file_path", filePath);
@@ -188,14 +190,16 @@ class CatalogDocumentMoveTest {
             PgContainerHelper.insertCollection(dsl, t, COLL);
             byte[] chash = sha256(text);
             dsl.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, t).set(CHUNKS.COLLECTION, COLL).set(CHUNKS.CHASH, chash)
+                .set(CHUNKS.TENANT_ID, t).set(CHUNKS.COLLECTION, COLL)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(t, COLL)).set(CHUNKS.CHASH, chash)
                 .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, text)
                 .set(CHUNKS.EMBEDDING_768, Vector.of(new float[768]))
                 .execute();
             dsl.insertInto(CATALOG_DOCUMENT_CHUNKS)
                 .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, t).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
                 .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
-                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLL)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(t, COLL)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                 .execute();
         }
     }
