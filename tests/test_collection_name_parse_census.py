@@ -396,29 +396,31 @@ for _site in LEDGER:
 #: resolver fails (``exporter.import_collection``, P2.5's contract that a failed lookup never aborts the import):
 #: one more NoRow mint, empty at P3.8. mint 127 -> 128, primitive_call 191 -> 192.
 #:
-#: P2.2 (nexus-p2m1x.7, 2026-11-21), re-measured on develop 410e44c308 (P2.9's reland): 229 -> 218. The parsers moved
-#: into ``legacy_names`` (the floor: calls inside it are not sites). The 19 holdovers it owned left the holdover class:
-#: 13 read the row through ``embedding_model_for`` and left the ledger, the five ``T3Database`` reads are mint (no
-#: catalog, so NoRow by construction) and ``doctor_search``'s drift probe is diagnostic. The NoRow derivation is
-#: counted once in ``rows/resolve.py`` and once in ``embed_window.py`` (mint); the two blank-version fallbacks are
-#: migration-source (one is the existing ``version_from_for_tuple_row`` site, now a call of
-#: ``version_of_blank_row_label``); ``_target_model`` and the note write call ``embedding_model_for_write`` (one site
-#: each). P2.9's three ``taxonomy__`` name tests are calls of ``legacy_names.is_taxonomy_collection_name``
-#: (migration-source, const_prefix 2 and startswith 1 -> primitive_call 3). holdover 23 -> 4, diagnostic 42 -> 43,
-#: mint 128 -> 134, migration-source 19 -> 20, primitive_call 192 -> 184, const_prefix 7 -> 5, startswith 3 -> 2.
-#: P2.4 (nexus-p2m1x.9): the four taxonomy-threshold holdovers (three calls in ``taxonomy_cmd.py``, one in
-#: ``http_taxonomy_store.py``, each a caller of ``default_projection_threshold``) read the catalog row now, and
-#: the one NoRow name derivation they share is a single mint-class entry in ``projection_threshold.py``. The pins
-#: below are re-derived, measured, on the stacked Phase 2 integration tree (linda), not hand-moved here.
-PARSE_SITE_PIN: int = 229
+#: PHASE 2 INTEGRATION (2026-11-21), measured on the stacked integration/rdr229-phase2 tree (develop 0701d16d9c
+#: plus D2, P2.4 with gh1680 and gh1679, P2.10, the shared-tuple guards, owner-is-source and P2.2): 229 -> 218,
+#: the moves below being each step's own, taken on its own tree (D2, P2.10, gh1680, gh1679 and the shared-tuple
+#: guards moved nothing); the pins are the one measurement of the sum.
+#:   P2.2 (nexus-p2m1x.7), -11: the parsers moved into ``legacy_names`` (the floor: calls inside it are not
+#:     sites). Of the 19 holdovers it owned, 13 read the row through ``embedding_model_for`` and left the ledger,
+#:     the five ``T3Database`` reads became mint (no catalog: NoRow by construction), ``doctor_search``'s drift
+#:     probe diagnostic. The NoRow derivation is one mint site each in ``rows/resolve.py`` and ``embed_window.py``;
+#:     the two blank-version fallbacks and P2.9's three taxonomy tests are migration-source. holdover 23 -> 4,
+#:     diagnostic +1, mint 128 -> 134, migration-source +1, primitive_call 192 -> 184, const_prefix -2, startswith -1.
+#:   P2.4 (nexus-p2m1x.9), -3: the four taxonomy-threshold holdovers (three calls in ``taxonomy_cmd.py``, one in
+#:     ``http_taxonomy_store.py``, each a caller of ``default_projection_threshold``) read the catalog row now, and
+#:     the one NoRow name derivation they share is a single mint-class entry in ``projection_threshold.py``.
+#:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
+#:   owner-is-source (marlowe), +3: three migration-source sites in ``nxexp_owner.py`` (``owner_stem`` reads
+#:     the name of a recovery bundle's collection, MIG_BUNDLE_STEM), one a ``split``: migration-source 20 -> 23,
+#:     primitive_call 181 -> 183, split 2 -> 3. On its own tree that step measured 232 against 229.
+PARSE_SITE_PIN: int = 218
 CLASS_PIN: dict[str, int] = {
-    "mint": 134, "holdover": 4, "diagnostic": 43,
-    "migration-source": 20, "label-pattern": 10, "file-path": 5,
-    "uri-classifier": 2,
+    "mint": 135, "diagnostic": 43, "migration-source": 23,
+    "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 184, "const_prefix": 5, "fnmatch": 14,
-    "strip_prefix": 4, "startswith": 2, "split": 2,
+    "primitive_call": 183, "const_prefix": 5, "fnmatch": 14,
+    "strip_prefix": 4, "startswith": 2, "split": 3,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }
@@ -992,7 +994,7 @@ def test_only_the_five_rdr_classes_and_the_two_fnmatch_labels_are_final() -> Non
         "label-pattern", "file-path", "holdover",
     }
     holdovers = _by_class("holdover")
-    assert sum(s.n for s in holdovers) == CLASS_PIN["holdover"]
+    assert sum(s.n for s in holdovers) == CLASS_PIN.get("holdover", 0)  # the class is empty: no pin to keep
     assert all(re.search(r"\bP2\.[0-9]+\b", s.note) for s in holdovers), (
         "a holdover note must name the Phase 2 step (P2.n) that moves it"
     )
