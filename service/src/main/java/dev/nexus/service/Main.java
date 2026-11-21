@@ -686,6 +686,13 @@ public final class Main {
         // It READS (the session is read-only at the server) and reports where the three gates stand in /v1/status
         // boot_work; no boot-time data migration, the stamp is a visible data move. Never takes the engine down.
         var completionCheck = startCompletionBootWork(bootWork, adminConnection);
+        // The check reads again when a worker's move completes and when a reconciler pass ends; its 60 s poll backs those up.
+        if (completionCheck != null) {
+            if (dataMoveWorker != null) {
+                dataMoveWorker.onMoveCompleted(completionCheck::onMoveCompleted);
+            }
+            pciReconciler.onPassEnded(completionCheck::onReconcilerPassEnded);
+        }
 
         // Parent-death watchdog (nexus-03bcg): exit if the supervisor (our parent
         // process) dies, so an OOM-killed supervisor leaves no orphaned-but-serving

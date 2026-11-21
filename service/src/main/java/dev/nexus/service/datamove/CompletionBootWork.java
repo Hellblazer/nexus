@@ -18,9 +18,11 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * RDR-229 P3.1 (nexus-p2m1x.17): runs {@link CompletionCheck} after the schema walk, on its own admin session and its own
@@ -30,11 +32,13 @@ import java.util.concurrent.TimeUnit;
  * <p><b>It reads and reports; it writes nothing.</b> The session is opened {@code default_transaction_read_only = on}, so a
  * write would raise at the server, and the check itself holds no write. Sam's rule is no boot-time data migrations.
  *
- * <p>The state is re-read every {@link #DEFAULT_INTERVAL}, so the engine's id readers, P3.3b's pass, P3.4's builds and the
- * one-row rename see a gate hold within seconds of the move worker recording a {@code completed_at}, with no restart (the
- * RDR names the worker's completion and a reconciler pass end as the re-read points; a consumer that must read at once calls
- * {@link #refresh}). The rows that keep a CHECK NOT VALID are counted by a bounded scan, so that count is cached for
- * {@link #VIOLATOR_TTL} per table.
+ * <p>The state is re-read when the facts it reads can have changed, not on a short timer (RDR-229 item 6, "Readers during the
+ * stamp"): when the move worker records a move's completion ({@link #onMoveCompleted}, called by
+ * {@code DataMoveWorker}) and when a PCI reconciler pass ends ({@link #onReconcilerPassEnded}, called by {@code PciReconciler}),
+ * so the engine's id readers, P3.3b's pass, P3.4's builds and the one-row rename see a gate hold with no restart. A
+ * {@link #SAFETY_POLL} of 60 s reads again if no event came in that time, in case one was missed. A consumer that must read
+ * at once calls {@link #refresh}. The rows that keep a CHECK NOT VALID are counted by a bounded scan, so that count is
+ * cached for {@link #VIOLATOR_TTL} per table.
  *
  * <p>The entries, none of which names a collection or a tenant ({@code /v1/status} is unauthenticated): {@value #SUMMARY_ID}
  * (the three gates, {@code done} of {@code total} gates holding; absent once all three hold, because {@code boot_work} is
@@ -54,7 +58,10 @@ public final class CompletionBootWork implements AutoCloseable {
     public static final String VALIDATE_PREFIX = "rdr229-validate:";
     public static final String UNIT = "gates";
     public static final String ON_STOP = "the check is read again on the next boot; nothing is lost";
-    public static final Duration DEFAULT_INTERVAL = Duration.ofSeconds(5);
+    /** The slow poll that backs the two events: a read this long after the last one, whatever caused it. */
+    public static final Duration SAFETY_POLL = Duration.ofSeconds(60);
+    /** How often the schedule asks whether the safety poll is due; the read itself is at most once per {@link #SAFETY_POLL}. */
+    private static final Duration TICK = Duration.ofSeconds(1);
     /** How long a table's violating-row count is kept: the scan is bounded, not free. */
     public static final Duration VIOLATOR_TTL = Duration.ofMinutes(10);
 
@@ -72,6 +79,12 @@ public final class CompletionBootWork implements AutoCloseable {
     private final Reader reader;
     private final Object sampleLock = new Object();
     private final Set<String> published = new HashSet<>();
+    private final Clock clock;
+    /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
+    private volatile Executor eventExecutor;
+    private final AtomicBoolean readOwed = new AtomicBoolean();
+    private volatile Instant lastSampleAt;
+    private volatile Duration safetyPoll = SAFETY_POLL;
     private volatile CompletionCheck.Result latest;
     private volatile boolean closed;
     private String lastError;
@@ -86,8 +99,15 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     CompletionBootWork(BootWorkRegistry registry, Reader reader) {
+        this(registry, reader, Clock.systemUTC(), null);
+    }
+
+    /** As above with the clock the safety poll reads and the executor an event's read runs on injected (tests: a fixed clock, a direct executor). */
+    CompletionBootWork(BootWorkRegistry registry, Reader reader, Clock clock, Executor eventExecutor) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.reader = Objects.requireNonNull(reader, "reader");
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.eventExecutor = eventExecutor;
     }
 
     /** The result of the last sample, or null before the first one. */
@@ -101,29 +121,88 @@ public final class CompletionBootWork implements AutoCloseable {
         return latest;
     }
 
-    /** Samples every {@link #DEFAULT_INTERVAL}, on a daemon thread. A second call does nothing. */
-    public synchronized void start() {
-        start(DEFAULT_INTERVAL);
+    /**
+     * The worker finished a move ({@code completed_at} is recorded): read again, off the worker's thread. A burst of events is
+     * one read. Never throws and never blocks the caller.
+     */
+    public void onMoveCompleted() {
+        requestRead();
     }
 
-    synchronized void start(Duration interval) {
+    /** A PCI reconciler pass ended: read again, as {@link #onMoveCompleted}. */
+    public void onReconcilerPassEnded() {
+        requestRead();
+    }
+
+    private void requestRead() {
+        readOwed.set(true);
+        Executor e = eventExecutor;
+        if (e == null || closed) {
+            return;   // before start: the first sample reads everything
+        }
+        try {
+            e.execute(this::readIfOwed);
+        } catch (RuntimeException rejected) {
+            // the schedule was shut down by close(): nothing to read for
+        }
+    }
+
+    private void readIfOwed() {
+        if (!readOwed.getAndSet(false)) {
+            return;   // an earlier event's read already covered this one
+        }
+        sampleSafely();
+    }
+
+    /** Reads when {@link #SAFETY_POLL} has passed since the last sample (an event's or the poll's own). Public to the schedule and the tests. */
+    void pollIfDue() {
+        Instant last = lastSampleAt;
+        if (last == null || !clock.instant().isBefore(last.plus(safetyPoll))) {
+            sampleSafely();
+        }
+    }
+
+    private void sampleSafely() {
+        try {
+            publish();
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable t) {   // a surprise costs one sample, never the thread
+            log.warn("event=rdr229_completion_failed cause=\"{}\"", FailureHandler.oneLine(t.toString()));
+        }
+    }
+
+    /** Samples once now, then on the two events, with a read every {@link #SAFETY_POLL} behind them, on a daemon thread. A second call does nothing. */
+    public synchronized void start() {
+        start(SAFETY_POLL);
+    }
+
+    synchronized void start(Duration safetyPoll) {
         if (scheduler != null) {
             return;
         }
+        this.safetyPoll = safetyPoll;
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "rdr229-completion-check");
             t.setDaemon(true);
             return t;
         });
-        scheduler.scheduleWithFixedDelay(() -> {
-            try {
-                publish();
-            } catch (VirtualMachineError e) {
-                throw e;
-            } catch (Throwable t) {   // a surprise costs one sample, never the thread
-                log.warn("event=rdr229_completion_failed cause=\"{}\"", FailureHandler.oneLine(t.toString()));
-            }
-        }, 0, interval.toMillis(), TimeUnit.MILLISECONDS);
+        if (eventExecutor == null) {
+            eventExecutor = scheduler;   // events read on the schedule's own thread, so reads never overlap
+        }
+        long tickMs = Math.min(TICK.toMillis(), safetyPoll.toMillis());
+        scheduler.execute(this::sampleSafely);
+        scheduler.scheduleWithFixedDelay(this::pollIfDueSafely, tickMs, tickMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void pollIfDueSafely() {
+        try {
+            pollIfDue();
+        } catch (VirtualMachineError e) {
+            throw e;
+        } catch (Throwable t) {
+            log.warn("event=rdr229_completion_failed cause=\"{}\"", FailureHandler.oneLine(t.toString()));
+        }
     }
 
     @Override
@@ -160,6 +239,7 @@ public final class CompletionBootWork implements AutoCloseable {
             if (closed) {
                 return -1;
             }
+            lastSampleAt = clock.instant();
             CompletionCheck.Result result;
             try {
                 result = reader.read();
@@ -188,7 +268,7 @@ public final class CompletionBootWork implements AutoCloseable {
                 desired.put(CHECK_PREFIX + c.constraint(), new Entry(missing(c, r), null, null));
             }
         }
-        for (CompletionCheck.Violators v : r.violators()) {
+        for (CompletionCheck.Violators v : byTable(r.violators())) {
             desired.put(VALIDATE_PREFIX + v.table(), new Entry(validateWaits(v), null, null));
         }
         synchronized (published) {
@@ -210,6 +290,16 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     private record Entry(String what, Long done, Long total) { }
+
+    /** One entry per table: a table with two name columns has a CHECK per column, and the operator sees one VALIDATE waiting, with the sum. */
+    static java.util.List<CompletionCheck.Violators> byTable(java.util.List<CompletionCheck.Violators> all) {
+        Map<String, CompletionCheck.Violators> merged = new LinkedHashMap<>();
+        for (CompletionCheck.Violators v : all) {
+            merged.merge(v.table(), v, (a, b) -> new CompletionCheck.Violators(a.table(), a.constraint() + ", " + b.constraint(),
+                a.orphans() + b.orphans(), a.unstamped() + b.unstamped(), a.counted() && b.counted()));
+        }
+        return java.util.List.copyOf(merged.values());
+    }
 
     static String summary(CompletionCheck.Result r) {
         long total = r.labels().size();
