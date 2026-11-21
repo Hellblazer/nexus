@@ -127,6 +127,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("EngineJobs.Job.state", "a job's lifecycle enum (running, done, failed); no tenant's data, and the "
             + "job that holds it is evicted under EngineJobs.jobs");
         notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
+        notKeyed.put("CollectionTupleLock.Tuple.tenantId", "one component of a tuple a caller passes to take a per-tuple "
+            + "advisory lock for that transaction; never stored, so a tenant reset has nothing to drop");
         notKeyed.put("TenantImportSessions.servedModels", "the router's served-model supplier; holds no tenant's data");
         notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
         notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
