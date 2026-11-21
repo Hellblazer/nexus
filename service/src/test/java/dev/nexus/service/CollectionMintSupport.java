@@ -82,6 +82,21 @@ final class CollectionMintSupport {
         insert.execute();
     }
 
+    /**
+     * A live {@code code} row with an explicit creation stamp, as a superuser writes it. The tie-break tests of
+     * {@code CatalogRepositoryTest} model D4's accepted duplicate (two live rows of one tuple), which a named upsert now
+     * refuses (RDR-229 P3.8), so they cannot register the second row through the repository.
+     */
+    static void insertCodeRowAt(DSLContext ctx, String tenant, String name, String owner, String model, String version,
+                                String createdAt, boolean legacyGrandfathered) {
+        ctx.insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant).set(CATALOG_COLLECTIONS.NAME, name)
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, "code").set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model).set(CATALOG_COLLECTIONS.MODEL_VERSION, version)
+            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live").set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, legacyGrandfathered)
+            .set(CATALOG_COLLECTIONS.CREATED_AT, java.time.OffsetDateTime.parse(createdAt)).execute();
+    }
+
     static void deleteRow(DSLContext ctx, String tenant, String name) {
         ctx.deleteFrom(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute();

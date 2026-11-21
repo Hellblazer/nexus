@@ -422,9 +422,9 @@ class CollectionMintTest {
                 if (!imported.get(90, TimeUnit.SECONDS)) {
                     refusedImports++;
                 }
-                assertThat(su(ctx -> (long) ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
-                        .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))))
-                    .as("one live row for tuple %s (the import was %s)", owner, refusedImports).isEqualTo(1L);
+                Long liveRows = su(ctx -> (long) ctx.fetchCount(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)
+                    .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))));
+                assertThat(liveRows).as("one live row for tuple %s (imports refused so far: %s)", owner, refusedImports).isEqualTo(1L);
             }
         } finally {
             pool.shutdownNow();
