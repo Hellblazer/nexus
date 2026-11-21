@@ -22,6 +22,8 @@ public final class P31CheckReplay {
 
     /** {@code catalog_collections.superseded_by_id}'s CHECK. */
     public static final String COLLECTIONS_SUPERSEDED = "vectors-068-2";
+    /** {@code catalog_document_chunks.collection_id}'s CHECK (the manifest). */
+    public static final String MANIFEST = "vectors-068-5";
     /** {@code document_aspects.collection_id}'s CHECK. */
     public static final String DOCUMENT_ASPECTS = "vectors-068-8";
     /** {@code document_highlights.collection_id}'s CHECK. */
