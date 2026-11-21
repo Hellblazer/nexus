@@ -20,8 +20,8 @@ import java.util.function.Predicate;
  * {@code label == "c" + collectionId} holds for every minted row and a skipped id is never used (design-gate
  * proposal, T2 {@code nexus_rdr/229-p3.8-design-gate-proposal-2026-11-21}, pending Sam).
  *
- * <p>The label rendering itself belongs to P3.6's {@code CollectionLabel.mintedLabel} (elsinore), which also holds the
- * minted-form predicate; {@link #render} delegates to it once that class lands.
+ * <p>The label is {@link CollectionLabel#mintedLabel} (P3.6, elsinore), the same class that holds the minted-form
+ * predicate the label rule refuses a user label by, so the two cannot drift.
  */
 public final class MintedLabel {
 
@@ -62,17 +62,12 @@ public final class MintedLabel {
             if (idTaken.test(id)) {
                 throw new SequenceBehindDataException(id);
             }
-            String label = render(id);
+            String label = CollectionLabel.mintedLabel(id);
             if (!labelTaken.test(label)) {
                 return new Choice(id, label);
             }
         }
         throw new IllegalStateException("minting a collection label: the labels of " + MAX_DRAWS
             + " drawn collection ids were all live; a live label of the minted form c<digits> is in the way");
-    }
-
-    /** Placeholder for {@code CollectionLabel.mintedLabel} (P3.6): {@code "c"} and the id in decimal. */
-    static String render(long collectionId) {
-        return "c" + collectionId;
     }
 }
