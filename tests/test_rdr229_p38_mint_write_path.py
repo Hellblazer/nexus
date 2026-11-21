@@ -16,6 +16,7 @@ import pytest
 
 import nexus.catalog.factory as factory
 import nexus.corpus as corpus
+from nexus.catalog.rows import legacy_names
 import nexus.mcp_infra as mcp_infra
 from nexus import collection_mint
 from nexus.catalog.collection_name import CollectionAttributes
@@ -119,7 +120,7 @@ def test_no_conformant_name_is_rendered_for_the_new_subject() -> None:
 
     rendered = f"knowledge__{_SUBJECT}__{_model()}__v1"
     assert label != rendered
-    assert not corpus.is_conformant_collection_name(label)
+    assert not legacy_names.is_conformant_collection_name(label)
     (args, kwargs), = t3.writer.calls
     assert args == () and "name" not in kwargs, "the registration carries no name at all"
 
