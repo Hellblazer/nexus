@@ -10,6 +10,7 @@ the run saw. The run itself needs a network, uv and an engine.
 from __future__ import annotations
 
 import importlib.util
+import stat
 import sys
 from pathlib import Path
 
@@ -127,12 +128,38 @@ def test_a_pending_bundle_row_in_doctor_is_a_finding():
 
 
 def test_the_idle_wait_needs_consecutive_quiet_reads_and_gives_up_at_its_bound():
-    reads = iter([[["2"]], [["0"]], [["1"]], [["0"]], [["0"]], [["0"]]])
+    reads = iter(["work", None, "work", None, None, None])
     now = {"t": 0.0}
 
     def sleep(s):
         now["t"] += s
 
-    assert ur.wait_until_idle(lambda _q: next(reads), polls=3, poll_s=1.0, bound_s=60.0, clock=lambda: now["t"], sleep=sleep)
-    assert not ur.wait_until_idle(lambda _q: [["1"]], polls=3, poll_s=10.0, bound_s=30.0, clock=lambda: now["t"], sleep=sleep)
-    assert not ur.wait_until_idle(lambda _q: None, polls=1, poll_s=10.0, bound_s=30.0, clock=lambda: now["t"], sleep=sleep)
+    assert ur.wait_until_idle(lambda: next(reads), polls=3, poll_s=1.0, bound_s=60.0, clock=lambda: now["t"], sleep=sleep)
+    assert not ur.wait_until_idle(lambda: "an index build", polls=3, poll_s=10.0, bound_s=30.0, clock=lambda: now["t"], sleep=sleep)
+
+
+def test_the_busy_rule_is_the_products_own(tmp_path):
+    """busy_per_product runs the candidate's engine_busy_reason with its interpreter: here a stand-in interpreter whose
+    one-liner answer is the rule's, to pin the contract (empty is idle, text is busy, a failure is busy)."""
+    fake = tmp_path / "python"
+    fake.write_text("#!/bin/sh\n" + 'case "$FAKE" in idle) echo "";; busy) echo "the engine reports background work (x)";; *) echo oops >&2; exit 3;; esac\n', encoding="utf-8")
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    assert ur.busy_per_product(fake, tmp_path, {"FAKE": "idle"}) is None
+    assert "background work" in ur.busy_per_product(fake, tmp_path, {"FAKE": "busy"})
+    assert "exited 3" in ur.busy_per_product(fake, tmp_path, {"FAKE": "boom"})
+    assert "could not run" in ur.busy_per_product(tmp_path / "missing", tmp_path, {})
+
+
+def test_the_installed_engine_version_is_read_from_the_receipt(tmp_path):
+    assert ur.installed_engine_version(tmp_path) is None
+    (tmp_path / "service").mkdir()
+    (tmp_path / "service" / "nexus-service.meta.json").write_text('{"version": "0.1.199"}', encoding="utf-8")
+    assert ur.installed_engine_version(tmp_path) == "0.1.199"
+
+
+def test_the_engine_first_leg_must_be_untouched_before_nx_upgrade():
+    assert ur.engine_first_findings(bundle_present=False, engine="0.1.199", pin="0.1.199") == []
+    assert any("already has pg_background" in f for f in ur.engine_first_findings(bundle_present=True, engine="0.1.199", pin="0.1.199"))
+    assert any("could not be read" in f for f in ur.engine_first_findings(bundle_present=None, engine="0.1.199", pin="0.1.199"))
+    assert any("not the candidate's pin" in f for f in ur.engine_first_findings(bundle_present=False, engine="0.1.189", pin="0.1.199"))
+    assert any("not the candidate's pin" in f for f in ur.engine_first_findings(bundle_present=False, engine=None, pin=None))

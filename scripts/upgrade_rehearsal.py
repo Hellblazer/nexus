@@ -56,8 +56,11 @@ Old-bundle starts (nexus-f3yqd.2.23). conexus 8.2.0 is the last release whose Po
 no blocked data move and no ``PostgreSQL bundle`` warning in ``nx doctor``; a start whose bundle already had it is a
 finding (nothing was exercised). ``8.2.0`` is the ordinary hop, where the engine changes and the refresh comes with it.
 ``8.2.0+engine-first`` is the constructed leg: ``nx daemon service install-binary <pin> --no-pg-bundle`` puts the
-candidate's pinned engine on the box first (the driver then waits for the engine to idle, because the bundle leg defers
-while it works), so the engine is already current and only the bundle leg of a plain ``nx upgrade`` can fix it.
+candidate's pinned engine on the box first, so the engine is already current and only the bundle leg of a plain
+``nx upgrade`` can fix it. The first ``nx`` call after a version change runs a finish pass that would install the
+engine and the bundle, so the driver sets the version stamp first; it waits for the engine to idle by the product's own
+rule (``engine_busy_reason``, boot work included) because the bundle leg defers while it works; and right before
+``nx upgrade`` it checks that the engine is the pin and the bundle still lacks pg_background (else the leg is vacuous).
 
 The ceilings are per start and come from the first real-store runs (chas lab-m, 2026-11-10, the develop
 wheel, conexus 8.1.0 with engine 0.1.186; the f3yqd.1 seeder's 86,000 rows, 2.4 GB, and for 7.76.0 140,000
@@ -275,9 +278,6 @@ ENGINE_FIRST_CEILING_S: float = 900.0  # a ~190 MB download and a restart; judge
 IDLE_WAIT_BOUND_S: float = 900.0
 IDLE_POLLS: int = 3
 IDLE_POLL_S: float = 5.0
-IDLE_SQL = (
-    "select (select count(*) from pg_stat_progress_create_index) + (select count(*) from pg_stat_progress_vacuum)"
-)
 _PG_BACKGROUND_CONTROLS = (
     Path("pg-bundle/bundle/share/postgresql/extension/pg_background.control"),
     Path("pg-bundle/bundle/share/extension/pg_background.control"),
@@ -328,25 +328,67 @@ def bundle_refresh_findings(
     return out
 
 
+def busy_per_product(python: Path, config: Path, env: dict[str, str]) -> str | None:
+    """Why the candidate's own idle rule (``nexus.daemon.pg_bundle_refresh.engine_busy_reason``: ``boot_work`` empty
+    but for a data move that is only blocked, failed or paused, and no index build or vacuum) says the engine is
+    busy, or ``None`` when it is idle. Run with the installed candidate's python, so the rehearsal judges by the rule
+    the bundle leg itself uses. A run that fails to answer is busy: unknown is not idle."""
+    code = (
+        "import sys; from pathlib import Path; "
+        "from nexus.daemon.pg_bundle_refresh import engine_busy_reason; "
+        "print(engine_busy_reason(Path(sys.argv[1])) or '')"
+    )
+    try:
+        done = subprocess.run(  # noqa: S603 - the installed candidate's interpreter, fixed argv
+            [str(python), "-I", "-c", code, str(config)], env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"the idle rule could not run: {exc}"
+    if done.returncode != 0:
+        return f"the idle rule exited {done.returncode}: {done.stderr.strip()[-200:]}"
+    return done.stdout.strip() or None
+
+
 def wait_until_idle(
-    sql: SqlFn, *, bound_s: float = IDLE_WAIT_BOUND_S, polls: int = IDLE_POLLS, poll_s: float = IDLE_POLL_S,
-    clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+    busy: Callable[[], str | None], *, bound_s: float = IDLE_WAIT_BOUND_S, polls: int = IDLE_POLLS,
+    poll_s: float = IDLE_POLL_S, clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """True once no index build or vacuum has been running for *polls* reads in a row. The converged-engine leg
-    waits for the engine to idle after ``install-binary`` boots a new engine, because the bundle leg defers
-    while one is working."""
+    """True once *busy* has said "idle" (``None``) for *polls* reads in a row. The converged-engine leg waits for the
+    engine to idle after ``install-binary`` boots a new engine, because the bundle leg defers while one is working."""
     deadline, quiet = clock() + bound_s, 0
     while clock() < deadline:
-        try:
-            rows = sql(IDLE_SQL)
-            busy = rows is None or int(rows[0][0]) > 0  # a read that failed is not idle
-        except (ProbeError, ValueError, IndexError):
-            busy = True
-        quiet = 0 if busy else quiet + 1
+        quiet = quiet + 1 if busy() is None else 0
         if quiet >= polls:
             return True
         sleep(poll_s)
     return False
+
+
+def installed_engine_version(config: Path) -> str | None:
+    """The engine version the install's receipt names (``service/nexus-service.meta.json``), or ``None``."""
+    try:
+        data = json.loads((config / "service" / "nexus-service.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version.lstrip("v") if isinstance(version, str) else None
+
+
+def engine_first_findings(*, bundle_present: bool | None, engine: str | None, pin: str | None) -> list[str]:
+    """What the constructed converged-engine leg must hold right before ``nx upgrade``: the engine is already the
+    candidate's pin and the bundle still lacks pg_background. Otherwise the finish pass of an earlier ``nx`` call did
+    the work, and ``nx upgrade`` would judge nothing."""
+    out: list[str] = []
+    if bundle_present is None or bundle_present:
+        out.append(
+            f"engine-first: the bundle {'could not be read' if bundle_present is None else 'already has pg_background'} "
+            f"before nx upgrade, so the converged-engine leg did not run"
+        )
+    if pin is None or engine != pin:
+        out.append(f"engine-first: the engine is {engine!r} before nx upgrade, not the candidate's pin {pin!r}")
+    return out
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -2606,6 +2648,19 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                     steps.append(StepResult(name=name, status="not-run", reason=why_not_run))
                     continue
                 argv = engine_first_argv(nx, pin)
+                # The first nx call after a version change runs the finish pass, which installs the engine AND now
+                # the bundle: consume the stamp first, so install-pinned-engine is the only thing that moves.
+                (config / "last_seen_version").write_text(cfg.candidate + "\n", encoding="utf-8")
+                say(f"[{from_version}] engine-first: version stamp set to {cfg.candidate} (no finish pass)")
+            if name == "upgrade" and variant == ENGINE_FIRST:
+                # immediately before nx upgrade: the engine is the pin and the old bundle is still the old bundle
+                findings.extend(
+                    engine_first_findings(
+                        bundle_present=bundle_has_pg_background(config),
+                        engine=installed_engine_version(config),
+                        pin=installed_engine_pin(home),
+                    )
+                )
             before: PgCounters | None = None
             if name == "upgrade":
                 try:
@@ -2659,7 +2714,11 @@ def rehearse(from_version: str, cfg: Config) -> dict:
             stop = not r.ok
             if stop:
                 why_not_run = f"{name} {r.status}: {r.reason}"
-            elif name == ENGINE_FIRST_STEP and not wait_until_idle(probe.sql):
+            elif name == ENGINE_FIRST_STEP and not wait_until_idle(
+                lambda: busy_per_product(
+                    home / ".local" / "share" / "uv" / "tools" / "conexus" / "bin" / "python", config, cur["env"],
+                )
+            ):
                 findings.append(
                     f"the engine was still building indexes {IDLE_WAIT_BOUND_S:g}s after {ENGINE_FIRST_STEP}: "
                     "the bundle leg defers while it works, so the leg cannot be judged"
