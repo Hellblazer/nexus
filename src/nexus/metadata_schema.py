@@ -172,21 +172,34 @@ def validate(metadata: dict[str, Any]) -> None:
 
 
 #: Content type a chunk written straight to a collection (a note) is stamped
-#: with, by collection prefix. The ONE copy: ``T3Database.put`` and the note writer share it.
-_PREFIX_CONTENT_TYPES: tuple[tuple[str, str], ...] = (
-    ("code__", "code"),
-    ("docs__", "prose"),
-    ("rdr__", "markdown"),
-    ("knowledge__", "prose"),
-)
+#: with, by the collection's catalog content type (RDR-229 P2.9). The ONE copy:
+#: ``T3Database.put`` and the note writer share it.
+_CHUNK_CONTENT_TYPES: dict[str, str] = {
+    "code": "code",
+    "docs": "prose",
+    "rdr": "markdown",
+    "knowledge": "prose",
+}
 
 
-def chunk_content_type_for_collection(collection: str) -> str:
-    """The chunk ``content_type`` for *collection*'s prefix; anything unlisted is ``prose``."""
-    for prefix, content_type in _PREFIX_CONTENT_TYPES:
-        if collection.startswith(prefix):
-            return content_type
-    return "prose"
+def chunk_content_type_for_collection(collection: str, *, catalog: bool = True) -> str:
+    """The chunk ``content_type`` for *collection*, by its catalog row's content type; anything unlisted
+    is ``prose``.
+
+    ``catalog=False`` is for the retired, test-only ``T3Database`` facade, which has no catalog (it derives
+    its own listing rows from names): the candidate name's own segment answers and no row is read.
+
+    A write may be creating *collection*, and a collection that holds no chunk yet has no row in the
+    client's cache. RDR-229 item 1's NoRow outcome then applies, as at every router a write reaches
+    (:func:`nexus.corpus.routing_content_type`): the candidate name's own content-type segment answers, so a
+    note put into a new ``code`` collection is stamped ``code`` and takes no entity key (the
+    non-stranding guard of item 9 holds this until P4.4).
+    """
+    from nexus.corpus import candidate_content_type, routing_content_type  # noqa: PLC0415 — deferred: corpus imports this module
+
+    if not catalog:
+        return _CHUNK_CONTENT_TYPES.get(candidate_content_type(collection) or "", "prose")
+    return _CHUNK_CONTENT_TYPES.get(routing_content_type(collection) or "", "prose")
 
 
 # ── Position fields (RDR-236 Phase 4 Step 0, nexus-6pfgb.65) ────────────────

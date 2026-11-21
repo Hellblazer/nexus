@@ -3847,14 +3847,14 @@ def aspects_show_cmd(tumbler_or_title: str, as_json: bool, field: str) -> None:
         # aspects` itself uses so this can never drift out of sync with
         # it, and say the actual fact for an unsupported prefix instead
         # of naming a command that fails.
-        from nexus.aspect_extractor import registered_prefixes, select_config  # noqa: PLC0415 — circular-dep avoidance; command-local import
+        from nexus.aspect_extractor import registered_content_types, select_config  # noqa: PLC0415 — circular-dep avoidance; command-local import
 
         if select_config(entry.physical_collection) is None:
-            prefixes = ", ".join(f"{p}*" for p in registered_prefixes())
+            content_types = ", ".join(registered_content_types())
             click.echo(
                 f"Aspects are not extracted for "
                 f"{entry.physical_collection!r} collections (tumbler "
-                f"{entry.tumbler}, {entry.title!r}). Supported: {prefixes}."
+                f"{entry.tumbler}, {entry.title!r}). Supported content types: {content_types}."
             )
         else:
             click.echo(
