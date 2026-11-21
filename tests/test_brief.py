@@ -231,6 +231,33 @@ def test_me_without_a_startup_note_prints_one_line_saying_so(monkeypatch) -> Non
     assert "no startup note" in result.text.lower() and "identity/i5" in result.text
 
 
+def test_me_does_not_suggest_a_write_the_identity_would_refuse(monkeypatch) -> None:
+    """gh#1680: an ephemeral or delegated identity keeps no identity notes, and the hint named ``nx memory put --mine``,
+    which that same identity refuses. The hint follows what ``notes.check_write`` says the caller may do."""
+    from nexus.identity import notes  # noqa: PLC0415
+
+    def refuse(project: str) -> None:
+        raise notes.IdentityNotesRefused("this ephemeral identity keeps no identity notes; only a seat does: write the note in project T2")
+
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: _Store(None))
+    monkeypatch.setattr(notes, "check_write", refuse)
+    result = brief.render("me")
+    assert result.ok and "\n" not in result.text
+    assert "no startup note" in result.text.lower() and "identity/i5" in result.text
+    assert "--mine" not in result.text, "the refused write must not be offered"
+    assert "only a seat" in result.text
+
+
+def test_me_still_suggests_the_mine_write_to_a_seat(monkeypatch) -> None:
+    from nexus.identity import notes  # noqa: PLC0415
+
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: _Store(None))
+    monkeypatch.setattr(notes, "check_write", lambda project: None)
+    assert "nx memory put --mine --title startup" in brief.render("me").text
+
+
 def test_me_without_an_identity_says_so(monkeypatch) -> None:
     def no_identity() -> str:
         raise click.ClickException("--mine needs an identity, and no identity is bound to this process")
