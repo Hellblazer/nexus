@@ -363,6 +363,17 @@ class CollectionLabelRuleRouteTest {
     }
 
     @Test
+    void theRepositoryReportNamesTheRuleAndTheLabel() {
+        var result = repo.importCollectionsBatchReport(TENANT,
+            List.of(importRow("repo good"), importRow("repo/bad"), importRow("repo/bad")));
+        assertThat(result.imported()).as("a repeated refused row is two rows sent, both refused").isEqualTo(1);
+        assertThat(result.refused()).hasSize(1);
+        assertThat(result.refused().get(0).name()).isEqualTo("repo/bad");
+        assertThat(result.refused().get(0).rule()).isEqualTo("no_slash");
+        assertThat(result.refused().get(0).reason()).contains("repo/bad").contains("'/'");
+    }
+
+    @Test
     void importKeepsAMintedFormRowAndAnExistingRowThatBreaksTheRule() throws Exception {
         // another install's engine-minted label imports as it is (the minted-form clause is for a user's own label)
         var minted = post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow("c4242"))));

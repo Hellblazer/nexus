@@ -13661,23 +13661,26 @@ public final class CatalogRepository {
      * The result of an ETL collection import: the rows sent, and the NEW rows whose {@code live} state was corrected
      * to {@code quarantine} because their name or content_type carries the prefix
      * ({@link CollectionRegistration#stateCorrectedOnImport}, RDR-229 P2.5). The route returns both; an existing row
-     * is skipped and never named.
+     * is skipped and never named. {@code refused} names the rows whose label the P3.6 rule refuses (RDR-229 item 10):
+     * only those rows are refused, the rest of the batch imports, and {@code imported} counts the rows sent that
+     * were not refused.
      */
-    public record ImportCollectionsResult(int imported, List<String> stateCorrected) {}
+    public record ImportCollectionsResult(int imported, List<String> stateCorrected,
+                                          List<ImportLabelRefusals.Refusal> refused) {}
 
     /** {@link #importCollectionsBatch}, also naming the rows whose state it corrected. */
     public ImportCollectionsResult importCollectionsBatchReport(String tenant, List<Map<String, Object>> rows) {
-        if (rows == null || rows.isEmpty()) return new ImportCollectionsResult(0, List.of());
+        if (rows == null || rows.isEmpty()) return new ImportCollectionsResult(0, List.of(), List.of());
         var freshRows = new java.util.concurrent.atomic.AtomicReference<List<Map<String, Object>>>(List.of());
         return CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
-            // RDR-229 P3.6: a NUL or a lone surrogate cannot be bound into the lookups below (a database error, not a 400).
-            for (var coll : rows) CollectionLabel.requireStorable(s(coll, "name"));
+            var refusals = new ImportLabelRefusals();
+            for (var coll : rows) CollectionMint.refuseSuppliedId(coll);
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
-            for (var coll : rows) {
-                CollectionMint.refuseSuppliedId(coll);
-                unique.put(s(coll, "name"), coll);
-            }
-            List<Map<String, Object>> deduped = List.copyOf(unique.values());
+            for (var coll : rows) unique.put(s(coll, "name"), coll);
+            // RDR-229 P3.6 and item 10: a NUL or a lone surrogate cannot be bound into the lookups below (a database
+            // error, not a 400); the row is refused, the batch goes on.
+            List<Map<String, Object>> deduped = List.copyOf(
+                refusals.keepStorable(List.copyOf(unique.values()), c -> s(c, "name")));
 
             // nexus-3fsyx: validate the WHOLE deduped batch before any chunk's INSERT
             // executes, mirroring doImportCollection's single-row guard -- a batch with
@@ -13698,12 +13701,12 @@ public final class CatalogRepository {
             // of the existing names for the whole batch.
             Set<String> existing = existingCollectionNames(ctx, tenant,
                 deduped.stream().map(c -> s(c, "name")).toList());
-            List<Map<String, Object>> fresh = deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList();
-            CollectionRegistration.requireStatesAgreeWithNames(fresh);
-            // RDR-229 P3.6: the label rule's shape on a NEW row (the whole batch refuses, nothing lands), never the
+            // RDR-229 P3.6 and item 10: the label rule's shape on a NEW row, which is refused alone, never the
             // minted-form clause (an import carries another install's labels, engine-minted ones included) and never
-            // an existing row (skipped above).
-            for (var coll : fresh) CollectionLabel.validateShape(s(coll, "name"));
+            // an existing row (skipped here). A row refused for its label is judged by no later check.
+            List<Map<String, Object>> fresh = refusals.keepShaped(
+                deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList(), c -> s(c, "name"));
+            CollectionRegistration.requireStatesAgreeWithNames(fresh);
             freshRows.set(fresh);
             CollectionMint.refuseLiveTupleConflicts(ctx, tenant, fresh);
             List<String> corrected = fresh.stream().filter(CollectionRegistration::stateCorrectedOnImport)
@@ -13750,7 +13753,11 @@ public final class CatalogRepository {
                 CollectionTombstones.repointTombstonesNaming(ctx, tenant, landed);
             }
             corrected.forEach(name -> logStateCorrected(tenant, name));
-            return new ImportCollectionsResult(rows.size(), corrected);
+            var refused = refusals.inSentOrder(rows.stream().map(c -> s(c, "name")).toList());
+            refused.forEach(r -> log.warn("event=collection_import_label_refused tenant={} rule={} label_chars={}",
+                tenant, r.rule(), r.name().length()));
+            return new ImportCollectionsResult(
+                (int) rows.stream().filter(c -> !refusals.refuses(s(c, "name"))).count(), corrected, refused);
         }), ctx -> CollectionMint.refuseLiveTupleConflicts(ctx, tenant, freshRows.get()));
     }
 
@@ -13799,7 +13806,9 @@ public final class CatalogRepository {
             return;
         }
         CollectionRegistration.requireStatesAgreeWithNames(List.of(coll));
-        CollectionLabel.validateShape(s(coll, "name"));  // RDR-229 P3.6: a new row's shape, as the batch does
+        // RDR-229 P3.6: a new row's shape. One row is one collection, so refusing the call IS refusing that collection
+        // (item 10); the batch report names a refused row instead because it has others to carry on with.
+        CollectionLabel.validateShape(s(coll, "name"));
         CollectionMint.refuseLiveTupleConflicts(ctx, tenant, List.of(coll));
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
