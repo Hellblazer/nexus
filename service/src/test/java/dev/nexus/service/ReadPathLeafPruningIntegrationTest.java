@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TaxonomyRepository;
@@ -308,21 +309,23 @@ class ReadPathLeafPruningIntegrationTest {
     private void seedCatalog(DSLContext dsl, String tenant, String coll) {
         String doc = "own-" + coll;
         dsl.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
-                DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.DOC_ID)
-            .values(tenant, coll, "rp/" + coll, OffsetDateTime.now(), "v1", "rp", "file:///rp/" + coll, doc)
+                DOCUMENT_ASPECTS.COLLECTION_ID, DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT,
+                DOCUMENT_ASPECTS.MODEL_VERSION, DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.SOURCE_URI,
+                DOCUMENT_ASPECTS.DOC_ID)
+            .values(tenant, coll, CollectionIds.require(dsl, tenant, coll), "rp/" + coll, OffsetDateTime.now(), "v1", "rp",
+                    "file:///rp/" + coll, doc)
             .onConflictDoNothing()
             .execute();
-        long topic = dsl.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.CREATED_AT)
-            .values(tenant, TOPIC, coll, OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
+        long topic = dsl.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION, TOPICS.COLLECTION_ID, TOPICS.CREATED_AT)
+            .values(tenant, TOPIC, coll, CollectionIds.require(dsl, tenant, coll), OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
             .returning(TOPICS.ID).fetchOne().getId();
         topicIds.put(tenant + "/" + coll, topic);
         String model = modelOf(coll);
         for (String h : chashes.get(tenant + "/" + coll)) {
             dsl.insertInto(TOPIC_ASSIGNMENTS, TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID,
-                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION,
+                    TOPIC_ASSIGNMENTS.TOPIC_ID, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID,
                     TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, TOPIC_ASSIGNMENTS.ASSIGNED_AT)
-                .values(tenant, HexFormat.of().parseHex(h), topic, coll, model,
+                .values(tenant, HexFormat.of().parseHex(h), topic, coll, CollectionIds.require(dsl, tenant, coll), model,
                     OffsetDateTime.parse("2026-01-01T00:00:00+00:00"))
                 .onConflictDoNothing()
                 .execute();

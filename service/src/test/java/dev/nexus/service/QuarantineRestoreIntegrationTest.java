@@ -7,6 +7,7 @@ import dev.nexus.service.ChunkReaper.Settings;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -143,9 +144,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         try (Connection su = pg.createConnection("")) {
             DSL.using(su, SQLDialect.POSTGRES)
                 .insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
-                    CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.METADATA)
-                .values(tenant, tumbler, title, collection, chunkCount, filePath,
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CATALOG_DOCUMENTS.CHUNK_COUNT, CATALOG_DOCUMENTS.FILE_PATH,
+                        CATALOG_DOCUMENTS.METADATA)
+                .values(tenant, tumbler, title, collection, CollectionIds.require(DSL.using(su, SQLDialect.POSTGRES), tenant, collection), chunkCount, filePath,
                     JSONB.jsonb(MAPPER.writeValueAsString(metadata)))
                 .execute();
         }
@@ -184,10 +186,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(hex), List.of(seed + " text"),
                 embedder.embed(List.of(seed + " text")), List.of(Map.<String, Object>of("title", seed)));
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
                     CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-               .values(tenant, doc, position, Chash.fromHex(hex).toBytes(), position, collection,
+               .values(tenant, doc, position, Chash.fromHex(hex).toBytes(), position, collection, CollectionIds.require(ctx, tenant, collection),
                     PgContainerHelper.collectionModel(ctx, tenant, collection)).execute();
         }
         return hex;
@@ -1688,10 +1690,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
         try (Connection su = pg.createConnection("")) {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
-                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID,
                     CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                .values(t, doc, 0, Chash.fromHex(current).toBytes(), 0, c,
+                .values(t, doc, 0, Chash.fromHex(current).toBytes(), 0, c, CollectionIds.require(ctx, t, c),
                     PgContainerHelper.collectionModel(ctx, t, c)).execute();
         }
 

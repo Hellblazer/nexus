@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -320,6 +321,7 @@ class PgVectorCombinedQueryContractTest {
             .set(TOPIC_ASSIGNMENTS.DOC_ID, HexFormat.of().parseHex(chash))
             .set(TOPIC_ASSIGNMENTS.TOPIC_ID, topicId)
             .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION, collection)
+            .set(TOPIC_ASSIGNMENTS.SOURCE_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(TOPIC_ASSIGNMENTS.ASSIGNED_AT, SEED_TS)
             .set(TOPIC_ASSIGNMENTS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(TOPIC_ASSIGNMENTS.TENANT_ID, TOPIC_ASSIGNMENTS.DOC_ID, TOPIC_ASSIGNMENTS.TOPIC_ID)
@@ -338,6 +340,7 @@ class PgVectorCombinedQueryContractTest {
             .set(CATALOG_DOCUMENTS.TITLE, "Doc")
             .set(CATALOG_DOCUMENTS.CONTENT_TYPE, contentType)
             .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+            .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER).doNothing()
             .execute();
     }
@@ -359,6 +362,7 @@ class PgVectorCombinedQueryContractTest {
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                 CATALOG_DOCUMENT_CHUNKS.POSITION).doNothing()
@@ -372,6 +376,7 @@ class PgVectorCombinedQueryContractTest {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.CHASH, HexFormat.of().parseHex(chash))
             .set(CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, tenant, collection))
             .set(CHUNKS.CHUNK_TEXT, text)
@@ -386,6 +391,7 @@ class PgVectorCombinedQueryContractTest {
             .set(TOPICS.TENANT_ID, tenant)
             .set(TOPICS.LABEL, label)
             .set(TOPICS.COLLECTION, collection)
+            .set(TOPICS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(TOPICS.CREATED_AT, SEED_TS)
             .returningResult(TOPICS.ID)
             .fetchOne(TOPICS.ID);

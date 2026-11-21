@@ -7,6 +7,7 @@ import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.DeadlockRetry;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.RacedEmbedActivity;
@@ -157,15 +158,14 @@ class ManifestWriteDeadlockRetryTest {
                           .and(CHUNKS.CHASH.eq(bytes(h)))).execute();
             }
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-               .values(TENANT, s.doc(), "doc " + s.doc(), s.coll()).execute();
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+               .values(TENANT, s.doc(), "doc " + s.doc(), s.coll(), CollectionIds.require(ctx, TENANT, s.coll())).execute();
             int pos = 0;
             for (String h : List.of(s.c1(), s.c2())) {
-                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                        CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
-                        CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                        CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                   .values(TENANT, s.doc(), pos++, bytes(h), s.coll(),
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
+                   .values(TENANT, s.doc(), pos++, bytes(h), s.coll(), CollectionIds.require(ctx, TENANT, s.coll()),
                            PgContainerHelper.collectionModel(ctx, TENANT, s.coll())).execute();
             }
         });
