@@ -36,6 +36,15 @@ import java.util.stream.Collectors;
  * applies the datamove/owner-read-policy/policy.xml fixture (the same pattern, the same name) to catalog_collections; when
  * vectors-065 lands, delete {@code standIn} and the real policy is already there.
  *
+ * <p><b>Where an operator looks for a skipped row.</b> {@code SELECT collection, details FROM nexus.gc_audit WHERE operation =
+ * 'rdr229_reown_skipped'}, read with the tenant set (gc_audit is tenant-isolated). {@code details} carries {@code reason},
+ * {@code owner_id}, {@code destination_owner_id}, {@code content_type} and {@code held_by}. The template writes exactly two
+ * reasons: {@code 'destination tuple held by <name>'} (another live collection already holds the destination tuple) and
+ * {@code 'destination tuple claimed in this run by <name>'} (the row sorts after {@code <name>} among rows that would move onto one
+ * free tuple). The verification requires each report: an occupied row passes only with its gc_audit row, so a skip is never
+ * silent ({@code anOccupiedRowWithNoReport_blocksCompletion_soASkipIsNeverSilent}); the occupied and claimed cases are the
+ * restored-legacy test and the two same-hash tests (one chunk, then chunk_size 1).
+ *
  * <p>Falsifiers, by hand: drop the {@code lck} CTE or its {@code CROSS JOIN lck} and the lock test sees the move complete
  * while the lock is held; make {@code repo_owner} read only {@code ins} and the existing-owner test moves nothing; drop the
  * repo-owner arm of {@code cand} and the docs-only-with-an-owner and chunk-straddle tests leave rows on the curator; drop
@@ -406,6 +415,54 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
                 CATALOG_COLLECTIONS.MODEL_VERSION)
             .having(DSL.count().gt(1)).fetch();
         assertThat(twins).as("P3.8's partial UNIQUE shape: at most one live row per tuple").isEmpty();
+    }
+
+    /** Two curator-owned stems of one repo hash and different slugs, neither with an owner yet: one free tuple, two claimants. */
+    private void twoStemsOfOneHash(int chunkSize) throws Exception {
+        owner(T, "1.40", "knowledge", "curator", null);
+        collection(T, "code__a-c0ffee11__voyage-code-3__v1", "1-40");
+        collection(T, "code__b-c0ffee11__voyage-code-3__v1", "1-40");
+        collection(T, "quarantine-code__b-c0ffee11__voyage-code-3__v1", "1-40", "quarantine", "");
+        register();
+        ctx().update(table("nexus", "data_moves"))
+            .set(DSL.field(DSL.name("chunk_size"), Integer.class), chunkSize)
+            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).execute();
+
+        runToCompletion();
+
+        assertThat(ownersOf(T)).as("one owner for the hash, whatever the number of stems")
+            .containsExactly("1.40=knowledge/curator//", "1.41=a/repo/c0ffee11/");
+        assertThat(ownerOf(T, "code__a-c0ffee11__voyage-code-3__v1")).as("the first by name moves").isEqualTo("1-41");
+        assertThat(ownerOf(T, "code__b-c0ffee11__voyage-code-3__v1")).as("the other is skipped, alone in its tuple")
+            .isEqualTo("1-40");
+        assertThat(ownerOf(T, "quarantine-code__b-c0ffee11__voyage-code-3__v1")).as("a skipped origin's sibling stays")
+            .isEqualTo("1-40");
+        var reports = skipReports(T);
+        assertThat(reports).as("the skipped row is reported once, however many chunks ran").hasSize(1);
+        assertThat(reports.get(0)).startsWith("code__b-c0ffee11__voyage-code-3__v1 ")
+            .contains("destination tuple claimed in this run by code__a-c0ffee11__voyage-code-3__v1");
+        var twins = ctx().select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION, DSL.count())
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))
+            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+            .groupBy(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION)
+            .having(DSL.count().gt(1)).fetch();
+        assertThat(twins).as("at most one live row per (content_type, owner_id, model, version)").isEmpty();
+    }
+
+    @Test
+    void twoRowsClaimingOneFreeTuple_inOneChunk_theFirstByNameMoves_theOtherIsSkippedAndReported() throws Exception {
+        twoStemsOfOneHash(1000);
+        assertThat(progress(LABEL).total()).as("non-vacuity: one chunk covers the tenant's three rows").isLessThan(3);
+    }
+
+    @Test
+    void twoRowsClaimingOneFreeTuple_inSeparateChunks_theFirstByNameMoves_theOtherIsSkippedAndReported() throws Exception {
+        twoStemsOfOneHash(1);
+        assertThat(progress(LABEL).total()).as("non-vacuity: every collection is a chunk of its own")
+            .isGreaterThanOrEqualTo(3);
     }
 
     /** Only the occupied legacy row: a move that does nothing leaves it curator-owned, so the verification alone decides. */

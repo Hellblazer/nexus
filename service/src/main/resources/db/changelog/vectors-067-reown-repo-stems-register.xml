@@ -33,9 +33,24 @@
     row's name, details = the reason, its owner_id, the destination owner_id and the name of the row that holds the tuple),
     once per row, so a rerun adds none. gc_audit is the engine's existing per-tenant audit; the worker keeps nothing per row
     (dml_utils records only run totals and chunk errors, and a single SQL statement cannot RAISE NOTICE), and the report rows are
-    what an operator reads: SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'. Two rows
-    of one chunk that would move onto the SAME tuple are not told apart: the UNIQUE index refuses the second and the chunk
-    fails loud.
+    what an operator reads.
+
+    WHERE AN OPERATOR LOOKS. SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'
+    (per tenant: gc_audit is tenant-isolated, so read it with the tenant set). details is a JSON object with the keys
+    reason, owner_id, destination_owner_id, content_type and held_by. The template writes exactly two reason values:
+      'destination tuple held by <name>'                   the destination tuple is already held by the live collection <name>
+      'destination tuple claimed in this run by <name>'    <name> sorts first among the rows that would move onto the same free tuple
+    (<name> is also in held_by). The verification REQUIRES each report: a curator-owned repo-stem row whose destination
+    tuple is held by another row passes only when its gc_audit row exists, and any other curator-owned repo-stem row blocks the
+    move, so a skip that is not reported keeps the move from completing.
+
+    CLAIMED IN THE SAME RUN. Two or more rows that would move onto the same FREE destination tuple (two stems of one repo hash
+    with different slugs, say) cannot all move: the statement ranks them with row_number() over the destination tuple, by
+    collection name, over every row of the tenant (not only the chunk), so the first by name is the one that moves and every
+    other row is skipped and reported with reason 'destination tuple claimed in this run by <name>'. The ranking does not
+    depend on which chunk a row falls in. Across chunks the occupied check covers it: once the first row's chunk has
+    committed, a later chunk sees it holding the tuple, so the others are occupied (their report is already written, and a
+    rerun adds none). One owner is minted per hash8, however many stems carry it.
 
     ONE STATEMENT, ONE CHUNK. The template is a single statement with data-modifying CTEs: the advisory lock
     CatalogRepository.upsertOwner takes (pg_advisory_xact_lock(hashtext('catalog_owners/' || tenant)); the CTE is REFERENCED by the
@@ -108,10 +123,10 @@ VALUES ('rdr229-reown-repo-stems-from-curator',
       FROM nexus.catalog_owners o
      WHERE o.tenant_id = current_setting(''nexus.tenant'', true) AND o.tumbler_prefix LIKE ''1.%''
 ), fresh AS (
-    SELECT s.stem, s.slug, s.hash8, s.nth, row_number() OVER (ORDER BY s.stem) AS rn
-      FROM stems s
+    SELECT d.stem, d.slug, d.hash8, d.nth, row_number() OVER (ORDER BY d.stem) AS rn
+      FROM (SELECT DISTINCT ON (s.hash8) s.stem, s.slug, s.hash8, s.nth FROM stems s ORDER BY s.hash8, s.stem) d
      WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_owners r
-                        WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.repo_hash = s.hash8)
+                        WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.repo_hash = d.hash8)
 ), ins AS (
     INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root)
     SELECT current_setting(''nexus.tenant'', true), ''1.'' || (mx.n + f.rn),
@@ -130,8 +145,8 @@ VALUES ('rdr229-reown-repo-stems-from-curator',
     SELECT r.tumbler_prefix, r.repo_hash FROM nexus.catalog_owners r
      WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.owner_type = ''repo''
        AND r.repo_hash IS NOT NULL AND r.repo_hash <> ''''
-), skipped AS (
-    SELECT r.name, r.owner_id, r.content_type, w.tumbler_prefix AS dest_prefix, min(h.name) AS occupant
+), occ AS (
+    SELECT r.name, r.owner_id, r.content_type, w.tumbler_prefix AS dest_prefix, min(h.name) AS held_by
       FROM stemrows r
       JOIN stems s ON s.stem = r.stem
       JOIN repo_owner w ON w.repo_hash = s.hash8
@@ -143,13 +158,33 @@ VALUES ('rdr229-reown-repo-stems-from-curator',
        AND h.lifecycle_state = ''live'' AND h.superseded_by = '''' AND h.name <> r.name
      WHERE nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), r.owner_id)
      GROUP BY r.name, r.owner_id, r.content_type, w.tumbler_prefix
+), ranked AS (
+    SELECT m.name, m.owner_id, m.content_type, m.dest_prefix,
+           row_number() OVER (PARTITION BY m.dest_prefix, m.content_type, m.embedding_model, m.model_version
+                              ORDER BY m.name) AS rn,
+           first_value(m.name) OVER (PARTITION BY m.dest_prefix, m.content_type, m.embedding_model, m.model_version
+                                     ORDER BY m.name) AS first_name
+      FROM (SELECT r.name, r.owner_id, r.content_type, r.embedding_model, r.model_version, w.tumbler_prefix AS dest_prefix
+              FROM stemrows r
+              JOIN stems s ON s.stem = r.stem
+              JOIN repo_owner w ON w.repo_hash = s.hash8
+             WHERE nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), r.owner_id)
+               AND NOT EXISTS (SELECT 1 FROM occ o WHERE o.name = r.name)) m
+), skipped AS (
+    SELECT o.name, o.owner_id, o.content_type, o.dest_prefix, o.held_by,
+           ''destination tuple held by '' || o.held_by AS reason
+      FROM occ o
+    UNION ALL
+    SELECT k.name, k.owner_id, k.content_type, k.dest_prefix, k.first_name,
+           ''destination tuple claimed in this run by '' || k.first_name
+      FROM ranked k WHERE k.rn > 1
 ), reported AS (
     INSERT INTO nexus.gc_audit (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
     SELECT current_setting(''nexus.tenant'', true), ''rdr229_reown_skipped'', k.name,
            ''data-move:rdr229-reown-repo-stems-from-curator'', false, 0, ''[]''::jsonb,
-           jsonb_build_object(''reason'', ''the destination tuple is held by another live collection'',
+           jsonb_build_object(''reason'', k.reason,
                               ''owner_id'', k.owner_id, ''destination_owner_id'', replace(k.dest_prefix, ''.'', ''-''),
-                              ''content_type'', k.content_type, ''held_by'', k.occupant)
+                              ''content_type'', k.content_type, ''held_by'', k.held_by)
       FROM skipped k
      WHERE NOT EXISTS (SELECT 1 FROM nexus.gc_audit g
                         WHERE g.tenant_id = current_setting(''nexus.tenant'', true)
