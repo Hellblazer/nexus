@@ -382,14 +382,19 @@ for _site in LEDGER:
 #: ``resolve_corpus`` is not a root of its own. It is still a derived helper, because its typed-value split reaches
 #: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
 #: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
-PARSE_SITE_PIN: int = 240
+#:
+#: P3.8 client core (nexus-p2m1x.28, 2026-11-21): 240 -> 238. ``HttpCatalogClient.register_collection`` stopped deriving
+#: ``legacy_grandfathered`` and the three attributes from the name: its two mint sites (``is_conformant_collection_name``
+#: and ``collection_registration_kwargs``) are gone. mint 117 -> 115, primitive_call 181 -> 179. The new-subject write in
+#: ``t3_collection_name`` adds no site (it reuses the ``ct``/``owner_segment`` split the function already counts).
+PARSE_SITE_PIN: int = 238
 CLASS_PIN: dict[str, int] = {
-    "mint": 117, "holdover": 23, "diagnostic": 42, "routing": 25,
+    "mint": 115, "holdover": 23, "diagnostic": 42, "routing": 25,
     "migration-source": 16, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 181, "const_prefix": 21, "fnmatch": 14,
+    "primitive_call": 179, "const_prefix": 21, "fnmatch": 14,
     "loop_prefix": 7, "strip_prefix": 4, "startswith": 3, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -809,11 +814,13 @@ def test_pin_matches_documented_total() -> None:
     265 -- 255 at P2.5, nexus-p2m1x.10, when twelve bypass-schema prefix tests
     became one helper; then 255 -- 245 at P2.3, nexus-p2m1x.8, when the repo
     indexer's target models became row reads; then 245 -- 240 at P2.7 part A,
-    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted) is derived
+    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted; then 240 -- 238
+    at P3.8, nexus-p2m1x.28, when ``register_collection`` stopped deriving from the
+    name) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 240
+    assert PARSE_SITE_PIN == 238
 
 
 # ---------------------------------------------------------------------------
