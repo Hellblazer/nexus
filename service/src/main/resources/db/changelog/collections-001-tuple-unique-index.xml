@@ -52,7 +52,9 @@
     no reason it can name.
 
     LOCKS. The counter reads (ACCESS SHARE). The index build takes SHARE on nexus.catalog_collections only, for one build
-    of a registry of hundreds of rows. Neither names a chunk table, a chunk leaf or the index builder, so
+    of a registry of hundreds of rows, and takes it under SET LOCAL lock_timeout = '5s': SHARE waits behind every open
+    writer of the registry, and a boot must not wait behind one for ever. A build that cannot get its lock in time fails, is
+    rolled back and logged (failOnError="false"), the walk goes on, and the next boot retries it (nothing is recorded). Neither names a chunk table, a chunk leaf or the index builder, so
     tests/test_changelog_continue_precondition_chunks_lint.py allows the CONTINUE changeset and SchemaMigrator keeps a
     running per-collection index build through it. No statement in this file asks for ACCESS EXCLUSIVE
     (CollectionTupleUniqueIndexLiquibaseTest holds ACCESS SHARE on the registry for a whole walk and requires it to finish).
@@ -97,7 +99,8 @@ REVOKE ALL ON FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() FROM
             <sqlCheck expectedResult="0">SELECT CASE WHEN EXISTS (SELECT 1 FROM nexus.data_moves WHERE label = 'rdr229-reown-repo-stems-from-curator' AND completed_at IS NOT NULL) THEN nexus.catalog_collection_tuple_duplicates_unscoped() ELSE -1 END</sqlCheck>
         </preConditions>
         <comment>Create the partial UNIQUE index catalog_collections_live_tuple_uq on nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model, model_version) WHERE superseded_by = '' AND lifecycle_state is not quarantine (the candidate set of collectionForTuple). Guarded by a preCondition with onFail="CONTINUE" onError="CONTINUE": the nexus.data_moves row labelled rdr229-reown-repo-stems-from-curator has completed_at set (the re-own move of RDR-229 P3), and nexus.catalog_collection_tuple_duplicates_unscoped() is 0 (one sqlCheck: the counter is reached only once the move has completed). Otherwise the changeset is skipped, boot continues, and the changeset is NOT recorded as run (a precondition skip records nothing, and a failed build with failOnError="false" is not recorded either), so it is retried at every boot, never HALT and never MARK_RAN. DATA EFFECT: none; an index is built and no row is read for writing or written.</comment>
-        <sql splitStatements="false" stripComments="false">
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
 CREATE UNIQUE INDEX catalog_collections_live_tuple_uq
     ON nexus.catalog_collections (tenant_id, content_type, owner_id, embedding_model, model_version)
     WHERE superseded_by = '' AND lifecycle_state &lt;&gt; 'quarantine';

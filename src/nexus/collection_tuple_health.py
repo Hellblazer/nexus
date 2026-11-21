@@ -131,9 +131,10 @@ def check_collection_tuples(rows: object = _UNSET, engine_status: object = None)
         fix_suggestions=[
             "The engine builds the unique index (changeset collections-001-2) at the first start where the re-own move "
             f"({REOWN_MOVE_LABEL}) has completed and no live tuple is shared. Until then nothing is lost and nothing fails; "
-            "a second collection can still register on one tuple. Leave one collection per tuple live: supersede or "
-            "delete the extra, or let the re-own move give the repository collection its own owner. Then restart the "
-            "engine; no other step applies the index",
+            "the engine already refuses to register a second live collection on a tuple (a mint, a named registration, an "
+            "import and a restore all refuse it), so only the duplicate named here is left. Leave one collection per tuple "
+            "live: supersede or delete the extra, or let the re-own move give the repository collection its own owner. "
+            "Then restart the engine; no other step applies the index",
         ],
     )]
 
@@ -148,7 +149,8 @@ def _index_wait_row() -> HealthResult:
         fix_suggestions=[
             "Read the engine's boot log for the Liquibase output of changeset collections-001-2 (a precondition that "
             "errored, for example its duplicate counter, is skipped and retried at every boot, never halted), and for "
-            "an index build that was refused. Nothing is lost and nothing fails while it waits: a second collection can "
-            "still register on one tuple. Fix what the log names and restart the engine; no other step applies the index",
+            "an index build that was refused. Nothing is lost and nothing fails while it waits: the engine already refuses to "
+            "register a second live collection on a tuple, with or without the index. Fix what the log names and restart "
+            "the engine; no other step applies the index",
         ],
     )
