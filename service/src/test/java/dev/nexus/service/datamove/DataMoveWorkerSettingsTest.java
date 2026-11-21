@@ -35,7 +35,7 @@ class DataMoveWorkerSettingsTest {
     }
 
     private static DataMove move(String label) {
-        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 0, null, null);
+        return new DataMove(label, "t", "s", "t", 10, 0, 1000, "v", null, null, null, null, 0, null, null, DataMove.DEFAULT_VERIFY_STATEMENT_TIMEOUT_MS);
     }
 
     @Test

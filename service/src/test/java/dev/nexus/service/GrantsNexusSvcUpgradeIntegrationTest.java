@@ -55,6 +55,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
     private static final String GRANTS_FILE = "db/changelog/grants-nexus-svc.xml";
     private static final String OLD_GRANTS_FILE = "db/old-grants/grants-nexus-svc.xml";
     private static final String DATAMOVES_INCLUDE = "<include file=\"db/changelog/datamoves-001-registry.xml\"/>";
+    /** datamoves-002 alters the registry, so the walk "before the registry" leaves it out too. */
+    private static final String DATAMOVES_002_INCLUDE = "<include file=\"db/changelog/datamoves-002-verify-statement-timeout.xml\"/>";
     private static final String REVOKE_MARKER = "-- nexus.data_moves (RDR-246) is admin-connection only: nexus_svc holds NO privilege";
     private static final List<String> DML = List.of("SELECT", "INSERT", "UPDATE", "DELETE");
 
@@ -241,7 +243,8 @@ class GrantsNexusSvcUpgradeIntegrationTest {
     private void writeOldChangelog() throws Exception {
         String master = read("db/changelog/db.changelog-master.xml");
         assertThat(master).as("the master carries the registry include").contains(DATAMOVES_INCLUDE);
-        master = master.replace(DATAMOVES_INCLUDE, "");
+        assertThat(master).as("the master carries the registry's column changeset").contains(DATAMOVES_002_INCLUDE);
+        master = master.replace(DATAMOVES_INCLUDE, "").replace(DATAMOVES_002_INCLUDE, "");
         String grantsInclude = "<include file=\"" + GRANTS_FILE + "\"/>";
         assertThat(master).as("the master includes the service grants file").contains(grantsInclude);
         master = master.replace(grantsInclude, "<include file=\"" + OLD_GRANTS_FILE + "\"/>");

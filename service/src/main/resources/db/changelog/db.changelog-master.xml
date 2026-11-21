@@ -2183,6 +2183,14 @@
     <include file="db/changelog/datamoves-001-registry.xml"/>
 
     <!--
+        RDR-246 amendment (Sam, 2026-11-21): nexus.data_moves.verify_statement_timeout_ms, the bound of the finisher's first,
+        READ ONLY verification pass (default 60000 ms), so the completion transaction keeps the short statement and lock bounds of
+        decision C and re-runs the verification warm. One ALTER TABLE: the column with its CHECK. DATA EFFECT: none (a constant
+        default, no rewrite). After datamoves-001, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/datamoves-002-verify-statement-timeout.xml"/>
+
+    <!--
         Bead nexus-7fku2.1.1 (RDR-134 Step 1): nexus.search_topic_set_384/768/1024, the topic-SET variants of
         search_topic_scoped_<dim>: one collection's nearest live chunks that carry ANY of a set of topic ids, each once, with
         the single-topic function's predicates and sensitivity exclusion. No threshold in SQL (the Java merge applies the

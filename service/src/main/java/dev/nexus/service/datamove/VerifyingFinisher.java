@@ -4,6 +4,7 @@ package dev.nexus.service.datamove;
 
 import dev.nexus.service.db.PciBuilders;
 import dev.nexus.service.db.PgSession;
+import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.Table;
 import org.jooq.exception.DataAccessException;
@@ -28,11 +29,14 @@ import java.util.function.Consumer;
  *   <li>the move's row is read again, and a pause set meanwhile stops the finish here;</li>
  *   <li>the verification query runs once per listed tenant on a dedicated connection that carries that tenant's setting,
  *       then once table-wide on a separate connection after a check that it carries no {@code nexus.tenant}; each in a
- *       READ ONLY transaction under {@code statement_timeout_ms}, and every one is run so a failure names every tenant
- *       that still holds old-shape rows;</li>
- *   <li>if every run returned no rows, the row is read once more (a pause set now still stops it), and {@code on_complete}
- *       (if any) and the UPDATE that sets {@code completed_at} run in one transaction on the pass's admin connection, so
- *       neither takes effect without the other.</li>
+ *       READ ONLY transaction (ACCESS SHARE only) under {@code verify_statement_timeout_ms}, a bound of its own that is
+ *       longer than the completion's because this pass is also the warm-up (a plain scan of what the completion reads
+ *       again), and every one is run so a failure names every tenant that still holds old-shape rows;</li>
+ *   <li>if every run returned no rows, the row is read once more (a pause set now still stops it), and the completion
+ *       transaction runs: the UPDATE that sets {@code completed_at}, then the table-wide verification again, warm now, under
+ *       {@code statement_timeout_ms}, then {@code on_complete} (if any). A write between the two transactions that leaves an
+ *       old-shape row is caught by that second run, which rolls the transaction back, so neither {@code completed_at} nor
+ *       {@code on_complete} takes effect without the other, or past a non-empty verification.</li>
  * </ol>
  *
  * <p>The UPDATE goes first inside that transaction and carries {@code paused_at IS NULL} and no row that supersedes the
@@ -44,11 +48,14 @@ import java.util.function.Consumer;
  *
  * <p>A stop ({@link Context#stopped}) is read before the finish, between tenants, before the table-wide run and before the
  * completion transaction, and ends the finish as {@link Outcome#LEFT_OPEN}; a verification already in flight is not
- * cancelled, it is bounded by {@code statement_timeout_ms}.
+ * cancelled, it is bounded by {@code verify_statement_timeout_ms}.
  *
  * <p>Nothing here decides blocked or failed: a failure goes back as a {@link FailureHandler.Failure} ({@link
  * FailureHandler.Stage#VERIFICATION}, {@link FailureHandler.Stage#VERIFICATION_REFUSED}, {@link
- * FailureHandler.Stage#VERIFICATION_NONEMPTY}, {@link FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}. A verification text the worker
+ * FailureHandler.Stage#VERIFICATION_NONEMPTY}, {@link FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}.
+ * A first pass that timed out or failed is a {@code VERIFICATION} failure (transient on 57014, the existing retry and backoff),
+ * never a completion; the re-check in the completion transaction reports as the first pass does (non-empty:
+ * {@code VERIFICATION_NONEMPTY}; a timeout or a connection that carries a tenant: {@code VERIFICATION}). A verification text the worker
  * refuses to run ({@link MoveSql#refusal}) is a {@code VERIFICATION_REFUSED} failure with {@code raised} null and the rule in
  * {@code detail}.
  */
@@ -207,13 +214,13 @@ final class VerifyingFinisher implements MoveFinisher {
         }
     }
 
-    /** The verification query in a READ ONLY transaction under {@code statement_timeout_ms}; the transaction is always rolled back. */
+    /** The verification query in a READ ONLY transaction under {@code verify_statement_timeout_ms}; the transaction is always rolled back. */
     private static long readOnlyCount(CallConnection conn, DataMove move, String tenant) throws SQLException {
         Connection c = conn.connection();
         c.setAutoCommit(false);
         c.setReadOnly(true);
         try {
-            PgSession.setLocal(conn.ctx(), "statement_timeout", Integer.toString(move.statementTimeoutMs()));
+            PgSession.setLocal(conn.ctx(), "statement_timeout", Integer.toString(move.verifyStatementTimeoutMs()));
             return MoveSql.countRows(c, move.verification(), tenant, COUNT_CAP);
         } finally {
             try {
@@ -254,6 +261,9 @@ final class VerifyingFinisher implements MoveFinisher {
                 if (updated == 0) {
                     return false;
                 }
+                // the verification again, warm now, under the completion's own bound: a write since the first pass cannot slip
+                // past, and a non-empty or failed re-check rolls this transaction back with the UPDATE above
+                tx.connection(c -> recheck(tx, c, move));
                 if (onComplete != null) {
                     if (ChunkFamily.touches(move)) {
                         // only now: the move is known to complete, so no pause or supersede ends a build for nothing
@@ -269,6 +279,8 @@ final class VerifyingFinisher implements MoveFinisher {
                 }
                 return true;
             });
+        } catch (RecheckFailed e) {
+            return Result.report(failure(admin, move, e.stage, null, e.raised, e.detail));
         } catch (DataAccessException e) {
             SQLException raised = e.getCause(SQLException.class);
             return Result.report(failure(admin, move, FailureHandler.Stage.ON_COMPLETE, null, raised,
@@ -285,6 +297,55 @@ final class VerifyingFinisher implements MoveFinisher {
         }
         MoveEvents.completed(move.label(), onComplete != null);
         return Result.completed();
+    }
+
+    /** A re-check that ends the completion transaction: carries what {@link #failure} needs. */
+    private static final class RecheckFailed extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        final transient FailureHandler.Stage stage;
+        final transient SQLException raised;
+        final String detail;
+
+        RecheckFailed(FailureHandler.Stage stage, SQLException raised, String detail) {
+            super(detail, raised);
+            this.stage = stage;
+            this.raised = raised;
+            this.detail = detail;
+        }
+    }
+
+    /**
+     * The table-wide verification, inside the completion transaction after the UPDATE and before {@code on_complete}, under the
+     * transaction's {@code statement_timeout_ms}. The first pass has warmed what it reads, so it fits the short bound. The table-wide
+     * run reads every row of the driving table (a tenant's run is the same query narrowed to the tenant), so it covers what each
+     * per-tenant run covered. It carries no {@code nexus.tenant}, which is checked first as the first pass checks it.
+     *
+     * @throws RecheckFailed when the session carries a tenant, a row of the old shape remains, or the run fails or times out
+     */
+    private static void recheck(DSLContext tx, Connection c, DataMove move) {
+        try {
+            String setting = tx.select(DSL.function("current_setting", SQLDataType.VARCHAR,
+                DSL.val(TenantScope.DEFAULT_TENANT_GUC), DSL.inline(true))).fetchOne(0, String.class);
+            if (setting != null && !setting.isEmpty()) {
+                throw new RecheckFailed(FailureHandler.Stage.VERIFICATION, null,
+                    "the verification in the completion transaction of " + move.label() + " carries nexus.tenant=" + setting
+                        + ", so it would read one tenant's rows and report the table clean");
+            }
+            long rows = MoveSql.countRows(c, move.verification(), null, COUNT_CAP);
+            if (rows > 0) {
+                String found = "table-wide=" + (rows > COUNT_CAP ? COUNT_CAP + "+" : rows);
+                MoveEvents.verificationFailed(move.label(), found);
+                throw new RecheckFailed(FailureHandler.Stage.VERIFICATION_NONEMPTY, null,
+                    "verification of " + move.label() + " in the completion transaction found old-shape rows in "
+                        + move.drivingTableLabel() + ": " + found + " (written after the first pass)");
+            }
+        } catch (RecheckFailed e) {
+            throw e;
+        } catch (SQLException | RuntimeException e) {
+            throw new RecheckFailed(stageOf(e), sqlOf(e),
+                "the verification in the completion transaction of " + move.label() + " could not run: " + describe(e));
+        }
     }
 
     // ── failures ───────────────────────────────────────────────────────────────────────────────────────────
