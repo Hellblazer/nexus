@@ -53,10 +53,15 @@ class CatalogCollectionsLiveLabelIndexTest {
     }
 
     private static void insert(DSLContext dsl, String tenant, String label, String supersededBy) {
+        insert(dsl, tenant, label, supersededBy, "bge-base-en-v15-768");
+    }
+
+    /** The model varies where a row must not also collide on the (tenant_id, name, embedding_model) UNIQUE of vectors-030. */
+    private static void insert(DSLContext dsl, String tenant, String label, String supersededBy, String model) {
         dsl.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, "
             + "model_version, lifecycle_state, superseded_by) VALUES (?, ?, 'knowledge', 'label-notes', "
-            + "'bge-base-en-v15-768', 'v1', 'live', ?)",
-            tenant, label, supersededBy);
+            + "?, 'v1', 'live', ?)",
+            tenant, label, model, supersededBy);
     }
 
     private static String sqlState(Throwable t) {
@@ -103,11 +108,13 @@ class CatalogCollectionsLiveLabelIndexTest {
             dsl.execute("ALTER TABLE nexus.catalog_collections DROP CONSTRAINT IF EXISTS catalog_collections_pk CASCADE");
             String tenant = TENANT + "-index-alone";
 
-            insert(dsl, tenant, "history label", "someone-else");   // superseded: holds no live slot
-            insert(dsl, tenant, "history label", "");                // the live row beside it
-            insert(dsl, tenant, "history label", "another-successor"); // a second superseded row: still allowed
+            // The three models differ, so only the live-label index is in play (the key is dropped, and the
+            // (tenant_id, name, embedding_model) UNIQUE of vectors-030 sees three different triples).
+            insert(dsl, tenant, "history label", "someone-else", "minilm-l6-v2-384");        // superseded: no live slot
+            insert(dsl, tenant, "history label", "", "bge-base-en-v15-768");                  // the live row beside it
+            insert(dsl, tenant, "history label", "another-successor", "voyage-context-3");   // a second superseded row
 
-            assertThatThrownBy(() -> insert(dsl, tenant, "history label", ""))
+            assertThatThrownBy(() -> insert(dsl, tenant, "history label", "", "voyage-code-3"))
                 .isInstanceOf(DataAccessException.class)
                 .satisfies(e -> {
                     assertThat(sqlState(e)).isEqualTo("23505");
