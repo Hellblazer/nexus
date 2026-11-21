@@ -32,7 +32,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
  *
  * <p>The row key is the table's primary key, {@code (tenant_id, doc_id, position)}. A row's payload is every
  * other column the replace wrote, {@link #PAYLOAD_COLUMNS}: chash, chunk_index, the four span columns, collection,
- * embedding_model, the three section labels and labels_written. An UPDATE writes every payload column from the
+ * collection_id (RDR-229 P3.1), embedding_model, the three section labels and labels_written. An UPDATE writes every payload column from the
  * incoming row, NULLs included, exactly as the insert did, so a kept row comes out what a delete and re-insert
  * would have left. {@code ManifestReplaceDiffTest} fails when the table gains or loses a column this class does
  * not list, and changes each payload column of a row to check the diff writes it.
@@ -62,8 +62,8 @@ final class ManifestReplace {
 
     /** The payload columns of a manifest row: every column of the table except its primary key. */
     static final java.util.Set<String> PAYLOAD_COLUMNS = java.util.Set.of("chash", "chunk_index", "line_start",
-        "line_end", "char_start", "char_end", "collection", "embedding_model", "section_title", "section_type",
-        "page_number", "labels_written");
+        "line_end", "char_start", "char_end", "collection", "collection_id", "embedding_model", "section_title",
+        "section_type", "page_number", "labels_written");
 
     /** Test hook: when set, {@link #replace} declines every replace, so a test can run the old path in one JVM. */
     static volatile boolean declineForTests;
@@ -79,7 +79,7 @@ final class ManifestReplace {
 
     /** One stored row of the document. */
     private record Stored(int position, byte[] chash, Integer chunkIndex, Integer lineStart, Integer lineEnd,
-                          Integer charStart, Integer charEnd, String collection, String embeddingModel,
+                          Integer charStart, Integer charEnd, String collection, Long collectionId, String embeddingModel,
                           String sectionTitle, String sectionType, Integer pageNumber, boolean labelsWritten) {
         String hex() {
             return HexFormat.of().formatHex(chash);
@@ -116,13 +116,16 @@ final class ManifestReplace {
         // every row is kept, so a retired collection still refuses the write.
         final String embeddingModel = rows.isEmpty() ? null
             : CollectionRegistry.requireWritable(ctx, tenant, collection).embeddingModel();
+        // RDR-229 P3.1: the registry's id, read in this transaction; a stored row that lacks it (the stamp has not
+        // reached it) differs from the incoming one and is rewritten with it.
+        final Long collectionId = rows.isEmpty() ? null : CollectionIds.require(ctx, tenant, collection);
 
         List<Stored> stored = new ArrayList<>();
         for (Record r : ctx.select(CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
                     CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.LINE_START,
                     CATALOG_DOCUMENT_CHUNKS.LINE_END, CATALOG_DOCUMENT_CHUNKS.CHAR_START,
                     CATALOG_DOCUMENT_CHUNKS.CHAR_END, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
-                    CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE,
                     CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE, CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER,
                     CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)
                 .from(CATALOG_DOCUMENT_CHUNKS)
@@ -134,7 +137,7 @@ final class ManifestReplace {
                 r.get(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX), r.get(CATALOG_DOCUMENT_CHUNKS.LINE_START),
                 r.get(CATALOG_DOCUMENT_CHUNKS.LINE_END), r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_START),
                 r.get(CATALOG_DOCUMENT_CHUNKS.CHAR_END), r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION),
-                r.get(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
+                r.get(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID), r.get(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL), r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TITLE),
                 r.get(CATALOG_DOCUMENT_CHUNKS.SECTION_TYPE), r.get(CATALOG_DOCUMENT_CHUNKS.PAGE_NUMBER),
                 r.get(CATALOG_DOCUMENT_CHUNKS.LABELS_WRITTEN)));
         }
@@ -148,7 +151,7 @@ final class ManifestReplace {
             Incoming in = byPosition.get(old.position());
             if (in == null) {
                 toDelete.add(old);
-            } else if (!same(old, in, collection, embeddingModel)) {
+            } else if (!same(old, in, collection, collectionId, embeddingModel)) {
                 toUpdate.add(in);
                 updatedFrom.add(old);
             }
@@ -190,7 +193,7 @@ final class ManifestReplace {
                 .execute();
         }
         if (!toUpdate.isEmpty()) {
-            update(ctx, tenant, docId, collection, embeddingModel, toUpdate);
+            update(ctx, tenant, docId, collection, collectionId, embeddingModel, toUpdate);
         }
         if (!toInsert.isEmpty()) {
             CatalogRepository.insertManifestChunkRows(ctx, tenant, docId, collection, toInsert,
@@ -214,12 +217,13 @@ final class ManifestReplace {
         return before;
     }
 
-    private static boolean same(Stored old, Incoming in, String collection, String embeddingModel) {
+    private static boolean same(Stored old, Incoming in, String collection, Long collectionId, String embeddingModel) {
         return old.hex().equals(in.chashHex())
             && Objects.equals(old.chunkIndex(), in.chunkIndex())
             && Objects.equals(old.lineStart(), in.lineStart()) && Objects.equals(old.lineEnd(), in.lineEnd())
             && Objects.equals(old.charStart(), in.charStart()) && Objects.equals(old.charEnd(), in.charEnd())
-            && Objects.equals(old.collection(), collection) && Objects.equals(old.embeddingModel(), embeddingModel)
+            && Objects.equals(old.collection(), collection) && Objects.equals(old.collectionId(), collectionId)
+            && Objects.equals(old.embeddingModel(), embeddingModel)
             && Objects.equals(old.sectionTitle(), in.sectionTitle())
             && Objects.equals(old.sectionType(), in.sectionType())
             && Objects.equals(old.pageNumber(), in.pageNumber())
@@ -234,11 +238,8 @@ final class ManifestReplace {
     }
 
     /** One UPDATE ... FROM (VALUES ...): every payload column from the incoming row, so one statement-level trigger run. */
-    private static void update(DSLContext ctx, String tenant, String docId, String collection, String embeddingModel,
-                               List<Incoming> changed) {
-        // RDR-229 P3.1: the registry's id, read in this transaction, for every rewritten row (the CHECK refuses a name
-        // with no id on an updated row version).
-        final Long collectionId = CollectionIds.require(ctx, tenant, collection);
+    private static void update(DSLContext ctx, String tenant, String docId, String collection, Long collectionId,
+                               String embeddingModel, List<Incoming> changed) {
         @SuppressWarnings("unchecked")
         Row14<Integer, byte[], Integer, Integer, Integer, Integer, Integer, String, Long, String, String, String,
             Integer, Boolean>[] values = changed.stream().map(in -> DSL.row(
