@@ -10058,7 +10058,7 @@ public final class CatalogRepository {
      * nexus-kk4ut) since this is exactly the caller-facing single-row read
      * the client's opt-in decision consults; see {@link #collRowWithAspects}.
      * {@link #collectionForTuple} is a routing lookup, not a caller-facing
-     * row read: {@link #collRow}'s 10 keys plus {@code lifecycle_state} (11, RDR-229 P2.5) and {@code collection_id} (12, P3.8).
+     * row read: {@link #collRow}'s 10 keys plus {@code lifecycle_state} (11, RDR-229 P2.5).
      */
     public Map<String, Object> getCollection(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
@@ -10734,9 +10734,10 @@ public final class CatalogRepository {
             if (r == null) return null;
             Map<String, Object> row = collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                               r.value6(), r.value7(), r.value8(), r.value9(), r.value10());
-            // RDR-229 P2.5 (nexus-p2m1x.10): the row says its own state, so the client refuses a quarantine row
-            // from the row (HttpCatalogClient.collection_for), not from a name that fails to parse; the filter above
-            // still keeps quarantine out. P3.8: and its collection_id, for find_collection. Both additive on the wire.
+            // RDR-229 P2.5 (nexus-p2m1x.10): the row says its own state, so the client refuses
+            // a quarantine row from the row (HttpCatalogClient.collection_for), not from a name
+            // that fails to parse. The filter above still keeps quarantine out; this is the
+            // client's second check, and an additive field on the wire.
             row.put("lifecycle_state", nne(r.value11()));
             // RDR-229 P3.5a (nexus-p2m1x.23): the row's surrogate id, read-only. Always a JSON number on
             // an engine that has the column (the identity is NOT NULL, vectors-068-1); a NULL would pass
