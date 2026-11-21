@@ -460,6 +460,23 @@ class _ServiceCatalogWriter:
     def routed(self) -> bool:
         return True
 
+    @property
+    def catalog_registrar(self) -> Any:
+        """The registrar the shared service client's own combined writes register a collection with.
+
+        A registration made through it shares the registration cache partition of those writes (the
+        partition is keyed by the registrar's endpoint scope), so a caller that registers a collection
+        before its first catalog write (RDR-229 P3.1: the engine refuses a document under an
+        unregistered collection) is not registered a second time by the write that follows. Resolved
+        from the shared client itself: reading it through the handle's attribute proxy would wrap it in a
+        plain function and drop its ``scope``. ``None`` when the handle cannot name one.
+        """
+        slot = getattr(self._client, "_slot", None)
+        if slot is None:
+            return getattr(self._client, "_catalog_registrar", None)
+        registrar, _wait = slot.resolve_and_apply(lambda client: getattr(client, "_catalog_registrar", None))
+        return registrar
+
     def close(self) -> None:
         self._client.close()
 
@@ -468,6 +485,17 @@ class _ServiceCatalogWriter:
 
     def __exit__(self, *exc_info: Any) -> None:
         self.close()
+
+
+def writer_collection_registrar(writer: Any) -> Any:
+    """The registrar *writer*'s own combined writes register a collection with, or ``None`` for the ambient one.
+
+    For a caller that registers a collection before it registers a document through *writer* (RDR-229 P3.1:
+    the engine refuses a document under an unregistered collection). The service writer names it
+    (:attr:`_ServiceCatalogWriter.catalog_registrar`), a bare ``HttpCatalogClient`` carries it as
+    ``_catalog_registrar``, and anything else (a test double) has none.
+    """
+    return getattr(writer, "catalog_registrar", None) or getattr(writer, "_catalog_registrar", None)
 
 
 def make_catalog_writer_for_endpoint(

@@ -70,7 +70,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
 from nexus.catalog.rows.resolve import embedding_model_for
 from nexus.embed_window import NO_CATALOG, store_row_resolver
-from nexus.corpus import index_model_for_collection
+from nexus.corpus import ensure_collection_registered, index_model_for_collection
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
@@ -1264,8 +1264,19 @@ class _OwnerImport:
         ids aliased to one document; a literal ``nxexp://<target>/<uri>`` identity beside the original
         that was copied to it): the document's figures are the sums, so it is finished once, when ALL
         of its records have arrived. Resolving here, before anything is written or stamped, is what
-        lets the totals be complete; the writing pass reads the answers back by group key."""
+        lets the totals be complete; the writing pass reads the answers back by group key.
+
+        The target collection is registered first, through the registrar the combined write registers with
+        (so the write finds it registered and does not register it again): since RDR-229 P3.1
+        (nexus-p2m1x.17) the engine refuses ``/doc/register`` for a collection that has no registry row (422
+        ``unregistered_collection``), and this pass registers documents before the combined write would
+        register the collection, so an import into a new target failed on its first document."""
         self._ensure()
+        if pre:
+            from nexus.catalog.factory import writer_collection_registrar  # noqa: PLC0415 — deferred to avoid import cycle
+
+            ensure_collection_registered(
+                self.collection_name, registrar=writer_collection_registrar(self._writer))
         legacy_ids = [g["legacy_doc_id"] for g in pre.values() if g.get("legacy_doc_id")]
         if legacy_ids:
             self._live_legacy = {

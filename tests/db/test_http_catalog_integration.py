@@ -531,8 +531,21 @@ def _seed_chunks(pg: dict, tenant: str, collection: str, chash_hexes: list[str],
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model_for_dim}', 'live') "
         "ON CONFLICT DO NOTHING; "
-        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model) "
-        f"SELECT v.*, '{model_for_dim}' FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
+        # RDR-229 P3.1: each chunk carries the registry's collection_id beside the name.
+        f"INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text, {embed_col}, embedding_model, collection_id) "
+        f"SELECT v.*, '{model_for_dim}', (SELECT collection_id FROM nexus.catalog_collections "
+        f"WHERE tenant_id = '{tenant}' AND name = '{collection}') FROM (VALUES {values}) AS v ON CONFLICT DO NOTHING;"
+    ))
+
+
+def _register_collection_row(pg: dict, tenant: str, collection: str) -> None:
+    """RDR-229 P3.1: the engine refuses a document under a collection with no registry row (422), so a test that
+    registers a document registers its collection first, with the same registry row the chunk seeds above make."""
+    _psql(pg, (
+        "INSERT INTO nexus.catalog_collections "
+        "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
+        f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', 'bge-base-en-v15-768', 'live') "
+        "ON CONFLICT DO NOTHING;"
     ))
 
 
@@ -649,8 +662,9 @@ class TestRegisterAndResolve:
         for d in docs:
             assert str(d.tumbler).startswith("1.1.")
 
-    def test_register_all_fields_round_trip(self, cat) -> None:
+    def test_register_all_fields_round_trip(self, cat, pg_instance) -> None:
         """All Catalog.register() fields survive the HTTP round-trip (no silent data loss)."""
+        _register_collection_row(pg_instance, "default", "knowledge__test__voyage-context-3__v1")
         t = cat.register(
             "1.1",
             "Full Fields Test",
@@ -1451,13 +1465,14 @@ class TestReaderPaths:
             f"Expected 'Reader Path RDR Document' in rdr list; got {titles}"
         )
 
-    def test_catalog_resolve_corpus(self, cat) -> None:
+    def test_catalog_resolve_corpus(self, cat, pg_instance) -> None:
         """catalog_resolve with corpus filter.
 
         Previously called cat._db.execute(...) → AttributeError in service mode.
         Now routes through cat.by_corpus(). Must return physical_collections set.
         """
         # Register a doc with physical_collection to verify corpus→collection resolve
+        _register_collection_row(pg_instance, "default", "knowledge__resolve_test__voyage-context-3__v1")
         cat.register(
             "1.1",
             "Corpus Resolve Test Doc",
@@ -1790,10 +1805,11 @@ def _seed_resolvable_chunk(
         f"VALUES ('{tenant}', '{collection}', 'knowledge', 'test-seed', '{model}', 'live') "
         "ON CONFLICT DO NOTHING; "
         "INSERT INTO nexus.chunks "
-        "(tenant_id, collection, chash, chunk_text, embedding_768, embedding_model, metadata, created_at) "
+        "(tenant_id, collection, chash, chunk_text, embedding_768, embedding_model, metadata, created_at, collection_id) "
         f"VALUES ('{tenant}', '{collection}', decode('{chash_hex}', 'hex'), "
         f"$t${text}$t$, '{vec}'::nexus.vector, '{model}', $m${metadata_json}$m$::jsonb, "
-        f"'{created_at}'::timestamptz);"
+        f"'{created_at}'::timestamptz, (SELECT collection_id FROM nexus.catalog_collections "
+        f"WHERE tenant_id = '{tenant}' AND name = '{collection}'));"
     ))
 
 

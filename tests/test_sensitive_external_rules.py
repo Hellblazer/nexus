@@ -376,7 +376,10 @@ def _register_in(path: Path, collection: str, *, source_uri: str = "") -> str:
     """A live document in *collection*, as an earlier non-sensitive index left it (no chunks: the catalog row
     is what a re-index resolves)."""
     from nexus.catalog.factory import make_catalog_writer
+    from tests._catalog_fixture_ops import register_seed_collections
 
+    # RDR-229 P3.1: a document names a registered collection (the engine refuses one that is not, 422).
+    register_seed_collections(collection)
     reader, writer = _reader(), make_catalog_writer()
     owner = reader.curator_owner_tumbler_by_name("rfvyy-ext") or writer.register_owner("rfvyy-ext", "curator")
     tumbler = writer.register(
