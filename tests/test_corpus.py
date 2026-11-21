@@ -553,46 +553,30 @@ def test_validate_collection_name_accepts(name: str) -> None:
     validate_collection_name(name)  # should not raise
 
 
+# RDR-229 P3.6 (nexus-p2m1x.26): validate_collection_name is the label rule, so each of these names, which the
+# ChromaDB-shape check used to refuse (too short, too long, a charset or boundary character), is a legal label
+# now. The label rule's own table is tests/test_rdr229_label_rule.py; this pins the flip of the old refusals.
 @pytest.mark.parametrize(
-    "name, match",
+    "name",
     [
-        ("ab", "3"),
-        ("a" * 64, "63"),
-        ("bad:name", "alphanumeric"),
-        ("-badstart", "alphanumeric"),
-        ("badend-", "alphanumeric"),
-        ("", "3"),
-        ("a", "3"),
-        ("_badstart", "alphanumeric"),
-        ("badend_", "alphanumeric"),
-        *[
-            (f"bad{char}name", "alphanumeric")
-            for char in [".", " ", "/", "@", "+", "%", "=", "!", "~"]
-        ],
-    ],
-    ids=[
-        "too_short",
-        "too_long",
-        "invalid_chars_colon",
-        "starts_with_hyphen",
-        "ends_with_hyphen",
-        "empty_string",
-        "single_char",
-        "starts_with_underscore",
-        "ends_with_underscore",
-        "special_char_dot",
-        "special_char_space",
-        "special_char_slash",
-        "special_char_at",
-        "special_char_plus",
-        "special_char_percent",
-        "special_char_equals",
-        "special_char_bang",
-        "special_char_tilde",
+        "ab",
+        "a",
+        "a" * 64,
+        "bad:name",
+        "-badstart",
+        "badend-",
+        "_badstart",
+        "badend_",
+        *[f"bad{char}name" for char in [".", " ", "@", "+", "%", "=", "!", "~"]],
     ],
 )
-def test_validate_collection_name_rejects(name: str, match: str) -> None:
-    with pytest.raises(ValueError, match=match):
+def test_validate_collection_name_accepts_what_the_chromadb_shape_refused(name: str) -> None:
+    validate_collection_name(name)
+
+
+@pytest.mark.parametrize("name", ["", "bad/name"])
+def test_validate_collection_name_still_refuses_empty_and_slash(name: str) -> None:
+    with pytest.raises(ValueError):
         validate_collection_name(name)
 
 
