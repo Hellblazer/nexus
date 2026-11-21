@@ -55,11 +55,13 @@ def test_the_dt_default_docs_name_goes_through_the_one_builder_and_refuses():
         _resolve_dt_collection(None, "1-20", ".md")
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_the_dt_pdf_default_is_a_knowledge_papers_name_no_owner_segment_can_collide_with():
     with patch("nexus.corpus.resolve_write_embedding_model", return_value="voyage-context-3"):
         assert _resolve_dt_collection(None, "1-20", ".pdf") == "knowledge__1-20-papers__voyage-context-3__v1"
 
 
+@pytest.mark.usefixtures("cloud_mode")
 def test_the_dt_docs_name_for_a_normal_corpus_is_what_it_was():
     with patch("nexus.corpus.resolve_write_embedding_model", return_value="voyage-context-3"):
         assert _resolve_dt_collection(None, "my_notes", ".md") == "docs__my-notes__voyage-context-3__v1"
