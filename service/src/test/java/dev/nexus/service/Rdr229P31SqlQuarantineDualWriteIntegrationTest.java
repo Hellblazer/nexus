@@ -122,7 +122,7 @@ class Rdr229P31SqlQuarantineDualWriteIntegrationTest {
     void theQuarantineMovesRestoresAndExpiriesAreRefusedBeforeAndCarryTheIdAfter() throws Exception {
         List<Scenario> scenarios = scenarios();
         assertThat(scenarios).as("non-vacuity: the scenario list").hasSize(13);
-        walk(ADMIN_ROLE, scenarios, 7, null);
+        walk(ADMIN_ROLE, su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS), scenarios, 7, null);
     }
 
     private interface MoveCall {

@@ -268,6 +268,14 @@ final class P31SqlDualWriteSupport {
     /** What the walk leaves for a caller that checks more: every nexus function's definition before and after vectors-069. */
     record Walk(Map<String, PgCatalogProbes.FunctionDefinition> before, Map<String, PgCatalogProbes.FunctionDefinition> after) {}
 
+    /**
+     * Creates the walk's migrating role on the container. The caller supplies it, so its role name is a literal the
+     * role census (TestRoleUniquenessScanTest) reads in the caller's own file: it follows a parameter only to callers in the same file.
+     */
+    interface RoleBootstrap {
+        void run(Connection su) throws Exception;
+    }
+
     interface WalkBody {
         void run(PostgreSQLContainer<?> pg, HikariDataSource ds, Walk walk) throws Exception;
     }
@@ -275,13 +283,14 @@ final class P31SqlDualWriteSupport {
     /**
      * Drives {@code scenarios} through the three states of one container: the seeds before vectors-068 (so the rows are unstamped),
      * the refusals with 068 applied and 069 not (at least {@code minRefused} scenarios, each by a collection id CHECK), then the real
-     * calls and verifications with 069 applied. {@code body}, when given, runs last with the container still up.
+     * calls and verifications with 069 applied. {@code bootstrap} creates {@code adminRole} (the caller's own
+     * {@code bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS)}). {@code body}, when given, runs last with the container still up.
      */
-    static void walk(String adminRole, List<Scenario> scenarios, int minRefused, WalkBody body) throws Exception {
+    static void walk(String adminRole, RoleBootstrap bootstrap, List<Scenario> scenarios, int minRefused, WalkBody body) throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.bootstrapNonSuperuserOwner(su, adminRole, ADMIN_PASS);
+                bootstrap.run(su);
             }
             try (HikariDataSource ds = adminPool(pg, adminRole)) {
                 // phase 1: the older layout, so the seeded rows are the unstamped rows of an install the CHECKs reach

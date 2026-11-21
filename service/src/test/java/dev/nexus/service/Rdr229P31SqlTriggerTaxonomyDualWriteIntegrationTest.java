@@ -103,7 +103,7 @@ class Rdr229P31SqlTriggerTaxonomyDualWriteIntegrationTest {
     void theManifestTriggersAndTheTaxonomyWritersAreRefusedBeforeAndCarryTheIdAfter() throws Exception {
         List<Scenario> scenarios = scenarios();
         assertThat(scenarios).as("non-vacuity: the scenario list").hasSize(8);
-        walk(ADMIN_ROLE, scenarios, 8, null);
+        walk(ADMIN_ROLE, su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS), scenarios, 8, null);
     }
 
     /** DELETE of a manifest row: the trigger records the dropped chunk in chunk_orphaned_at with the id. */

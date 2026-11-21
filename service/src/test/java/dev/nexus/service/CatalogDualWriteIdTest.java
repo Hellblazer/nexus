@@ -16,7 +16,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -45,8 +44,6 @@ class CatalogDualWriteIdTest {
     private static final String C2 = "knowledge__dw2__minilm-l6-v2-384__v1";
     private static final String SVC_ROLE = "svc_dw_id";
     private static final String SVC_PASS = "svc_dw_id_pass";
-    private static final String DOC_CHECK = "catalog_documents_physical_collection_id_check";
-    private static final String COLL_CHECK = "catalog_collections_superseded_by_id_check";
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -111,14 +108,6 @@ class CatalogDualWriteIdTest {
             .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID));
     }
 
-    private static void ddl(DSLContext ctx, String statement) {
-        ctx.connection(c -> {
-            try (Statement st = c.createStatement()) {
-                st.execute(statement);
-            }
-        });
-    }
-
     /** Plants a document the stamp has not reached (name set, id NULL): the CHECK is lifted for the insert and put back NOT VALID. */
     private void plantUnstampedDocument(String tumbler, String collection) {
         plantUnstampedDocument(tumbler, collection, false);
@@ -126,7 +115,7 @@ class CatalogDualWriteIdTest {
 
     private void plantUnstampedDocument(String tumbler, String collection, boolean tombstoned) {
         su(ctx -> {
-            ddl(ctx, "ALTER TABLE nexus.catalog_documents DROP CONSTRAINT " + DOC_CHECK);
+            P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
                 .values(T, tumbler, "unstamped " + tumbler, collection).execute();
@@ -134,8 +123,7 @@ class CatalogDualWriteIdTest {
                 ctx.update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, java.time.OffsetDateTime.now())
                     .where(CATALOG_DOCUMENTS.TENANT_ID.eq(T)).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler)).execute();
             }
-            ddl(ctx, "ALTER TABLE nexus.catalog_documents ADD CONSTRAINT " + DOC_CHECK
-                + " CHECK ((NULLIF(physical_collection, '') IS NULL) = (physical_collection_id IS NULL)) NOT VALID");
+            P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
             return null;
         });
         assertThat(docId(tumbler)).as("precondition: " + tumbler + " is unstamped").isNull();
@@ -371,11 +359,10 @@ class CatalogDualWriteIdTest {
         su(ctx -> {
             PgContainerHelper.insertCollection(ctx, T, succ);
             PgContainerHelper.insertCollection(ctx, T, name);
-            ddl(ctx, "ALTER TABLE nexus.catalog_collections DROP CONSTRAINT " + COLL_CHECK);
+            P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, succ)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(name)).execute();
-            ddl(ctx, "ALTER TABLE nexus.catalog_collections ADD CONSTRAINT " + COLL_CHECK
-                + " CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID");
+            P31CheckReplay.restore(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
             return null;
         });
         assertThat(supersededId(name)).as("precondition: unstamped tombstone").isNull();
