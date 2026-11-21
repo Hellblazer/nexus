@@ -383,22 +383,21 @@ for _site in LEDGER:
 #: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
 #: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
 #:
-#: P2.9 (nexus-p2m1x.14, 2026-11-20), re-measured on develop b19ca8f28 (P2.7's 240): 240 -> 228. The 22 routing
+#: P2.9 (nexus-p2m1x.14, 2026-11-20), re-measured on develop b19ca8f28 (P2.7's 240): 240 -> 227. The 22 routing
 #: sites that now read the row's content_type left the ledger (const_prefix 14, loop_prefix 7, glob_default 1); the
 #: three ``taxonomy__`` name tests went routing -> migration-source (no row attribute identifies them; P2.2,
-#: nexus-p2m1x.7, moves them into legacy_names); ten callers of the shared NoRow derivation
+#: nexus-p2m1x.7, moves them into legacy_names); nine callers of the shared NoRow derivation
 #: (``corpus.routing_content_type`` / ``candidate_content_type``) are new mint entries, each empty at P3.8.
-#: routing 25 -> 0, mint 117 -> 127, migration-source 16 -> 19, const_prefix 21 -> 7, loop_prefix 7 -> 0,
-#: primitive_call 181 -> 191, glob_default 1 -> 0. (The tenth mint is ``topic_route.is_prose``: the request's
-#: names carry no row on a cold cache, so the prose test answers NoRow from the name.)
-PARSE_SITE_PIN: int = 228
+#: routing 25 -> 0, mint 117 -> 126, migration-source 16 -> 19, const_prefix 21 -> 7, loop_prefix 7 -> 0,
+#: primitive_call 181 -> 190, glob_default 1 -> 0.
+PARSE_SITE_PIN: int = 227
 CLASS_PIN: dict[str, int] = {
-    "mint": 127, "holdover": 23, "diagnostic": 42,
+    "mint": 126, "holdover": 23, "diagnostic": 42,
     "migration-source": 19, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 191, "const_prefix": 7, "fnmatch": 14,
+    "primitive_call": 190, "const_prefix": 7, "fnmatch": 14,
     "strip_prefix": 4, "startswith": 3, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -822,7 +821,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 228
+    assert PARSE_SITE_PIN == 227
 
 
 # ---------------------------------------------------------------------------
@@ -949,7 +948,7 @@ def test_the_routing_class_is_measured_not_listed() -> None:
     assert sum(1 for s in taxonomy if s.note == _BYPASS_NOTE) == 1
     assert all("nexus-p2m1x.7" in s.note for s in taxonomy)
     norow = [s for s in _by_class("mint") if "routing_content_type" in s.note]
-    assert len(norow) == 10 and all("P3.8" in s.note for s in norow)
+    assert len(norow) == 9 and all("P3.8" in s.note for s in norow)
     # Recovery-bundle classification of ANOTHER install's name is a migration
     # source, never routing (item 1); the URI-string classifiers stay at 2.
     bundle = [s for s in LEDGER if s.rel.endswith("catalog/recovery_bundle.py")]

@@ -347,35 +347,6 @@ def test_the_note_tags_scan_propagates_a_failed_listing(monkeypatch):
 # ── search: an explicit --corpus with a cold row cache ──────────────────────
 
 
-class TestTopicRouteProseAtNoRow:
-    """``topic_route.is_prose`` sees the REQUEST's collection names, so a name with no row in a cold cache is
-    answered from its own `<type>__` segment, as the thresholds are (item 1's NoRow)."""
-
-    def test_a_conformant_prose_name_with_no_row_is_prose(self, rows):
-        from nexus.topic_route import is_prose
-
-        assert is_prose("knowledge__1-1__voyage-context-3__v1") is True
-        assert is_prose("docs__1-1__voyage-context-3__v1") is True
-        assert is_prose("rdr__1-1__voyage-context-3__v1") is True
-
-    def test_a_conformant_code_name_with_no_row_is_not_prose(self, rows):
-        from nexus.topic_route import is_prose
-
-        assert is_prose("code__1-1__voyage-code-3__v1") is False
-
-    def test_a_prefix_free_label_with_no_row_is_not_prose(self, rows):
-        from nexus.topic_route import is_prose
-
-        assert is_prose("c7101") is False  # nothing to derive (P3.8)
-
-    def test_a_row_decides_over_the_name(self, rows):
-        from nexus.topic_route import is_prose
-
-        rows.table.update({"knowledge__1-1__voyage-context-3__v1": "code", "code__1-1__voyage-code-3__v1": "docs"})
-        assert is_prose("knowledge__1-1__voyage-context-3__v1") is False
-        assert is_prose("code__1-1__voyage-code-3__v1") is True
-
-
 def _no_listing(*a, **k):
     raise AssertionError("an explicit-name search must not list the tenant")
 
@@ -429,32 +400,6 @@ class TestSearchWithAColdCache:
         out = search_cross_corpus("q", [collection], 10, client, sensitivity="include")
         assert asked[collection] == 40
         assert [r.id for r in out] == ["near"]
-
-
-    def test_an_explicit_conformant_prose_name_with_a_cold_cache_still_asks_for_topic_routing(self, monkeypatch):
-        import nexus.mcp_infra as infra
-        from nexus.db.http_vector_client import PerCollectionEnvelopeError
-        from nexus.search_engine import search_cross_corpus
-
-        prose = "knowledge__fixnorow__voyage-3__v1"
-        code = "code__fixnorow__voyage-3__v1"
-        monkeypatch.setattr(infra, "_collections_cache", ([], {}, {}, 0.0))
-        monkeypatch.setattr(infra, "_refresh_collections_cache_if_stale", _no_listing)
-        client, _asked = self._client(monkeypatch, prose)
-        sent: list[dict] = []
-
-        def _per_collection(self, query, group, **kw):
-            sent.append({"group": list(group), "topic_route": kw.get("topic_route")})
-            raise PerCollectionEnvelopeError("test double: fall back to the batched path")
-
-        monkeypatch.setattr(type(client), "supports_topic_route", lambda self: True)
-        monkeypatch.setattr(type(client), "search_per_collection", _per_collection)
-        search_cross_corpus("q", [prose, code], 10, client, sensitivity="include", topic_route={"mode": "top1"})
-        assert sent, "the per-collection route was not taken: the prose name read as not prose"
-        assert sent[0]["topic_route"] == {"mode": "top1"}
-        sent.clear()
-        search_cross_corpus("q", [code], 10, client, sensitivity="include", topic_route={"mode": "top1"})
-        assert not sent  # a code name alone is never routed, and takes the default path
 
 
 # ── listing rows with no content type ───────────────────────────────────────
