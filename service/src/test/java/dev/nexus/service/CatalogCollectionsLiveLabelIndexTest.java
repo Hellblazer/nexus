@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * RDR-229 P3.6 (nexus-p2m1x.26): a label names exactly one LIVE collection per tenant, held by the partial UNIQUE
  * index {@code idx_catalog_collections_live_label} on {@code nexus.catalog_collections (tenant_id, name)} over the
- * rows that are not superseded (catalog-052).
+ * rows that are not superseded (catalog-053).
  *
  * <p><b>This test stays in the suite through P4.1</b> (RDR-229 P3.6). Until P4.1 the name is also the primary key
  * ({@code catalog_collections_pk}), so a second live row with one label is refused by the key whether or not the
