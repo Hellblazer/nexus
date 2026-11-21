@@ -32,8 +32,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-229 P3.8 (nexus-p2m1x.28), the engine mint through its routes: {@code POST /v1/catalog/collections/upsert} with
  * no name mints and returns the row; no route accepts a client-supplied {@code collection_id} (the upsert and the ETL
- * import answer 400 and write nothing); an import row on a live tuple another collection already holds is a 409 that
- * names both collections, once the partial UNIQUE index exists; and a mint's refusals (a label of the minted form in
+ * import answer 400 and write nothing); an import row or a named upsert on a live tuple another collection already holds is a 409 that
+ * names both collections, with the partial UNIQUE index present and absent alike; and a mint's refusals (a label of the minted form in
  * the way for every draw, an id taken even after the heal) are 409, not a 500. The restore is
  * {@link CollectionMintRestoreTest}; the mint itself is {@link CollectionMintTest}. Ordered: the last tests move the
  * {@code collection_id} sequence.
@@ -216,18 +216,14 @@ class CollectionMintHttpTest {
     }
 
     @Test @Order(7)
-    void withTheIndexAbsentTheSameImportStillLands_theAcceptedDuplicateOfD4StaysImportable() throws Exception {
+    void withTheIndexAbsentAnImportRowOnAHeldLiveTupleIsRefusedToo_noSecondLiveRowIsEverMade() throws Exception {
         post("/v1/catalog/collections/upsert", "{\"name\":\"held-2-p38\"," + attrsJson("http-held-2", "") + "}");
 
         var resp = post("/v1/catalog/import/collection", "{\"name\":\"intruder-2-p38\"," + attrsJson("http-held-2", "") + "}");
 
-        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
-        assertThat(rowsOwnedBy("http-held-2")).isEqualTo(2);
-        // the duplicate is the test's own: later tests build the index, which a duplicate would refuse
-        su(ctx -> {
-            CollectionMintSupport.deleteRow(ctx, TENANT, "intruder-2-p38");
-            return null;
-        });
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+        assertThat(resp.body()).contains("held-2-p38").contains("intruder-2-p38");
+        assertThat(rowsOwnedBy("http-held-2")).as("the held row only").isEqualTo(1);
     }
 
     @Test @Order(8)
@@ -243,9 +239,54 @@ class CollectionMintHttpTest {
         assertThat(rowsOwnedBy("http-held-3")).isEqualTo(1);
     }
 
+    @Test @Order(11)
+    void withTheIndexAbsentTwoNewImportRowsOnOneTupleAre409NamingBoth() throws Exception {
+        var resp = post("/v1/catalog/import/collection",
+            "{\"rows\":[{\"name\":\"twin-c-p38\"," + attrsJson("http-twins-2", "") + "},"
+                + "{\"name\":\"twin-d-p38\"," + attrsJson("http-twins-2", "") + "}]}");
+
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+        assertThat(resp.body()).contains("twin-c-p38").contains("twin-d-p38");
+        assertThat(rowsOwnedBy("http-twins-2")).as("the batch is refused whole").isZero();
+    }
+
+    @Test @Order(12)
+    void aBatchImportRowOnAHeldLiveTupleIs409NamingBoth_inBothIndexStates() throws Exception {
+        post("/v1/catalog/collections/upsert", "{\"name\":\"held-4-p38\"," + attrsJson("http-held-4", "") + "}");
+        String batch = "{\"rows\":[{\"name\":\"intruder-4-p38\"," + attrsJson("http-held-4", "") + "}]}";
+
+        var absent = post("/v1/catalog/import/collection", batch);
+        createIndex();
+        var present = post("/v1/catalog/import/collection", batch);
+
+        for (var resp : java.util.List.of(absent, present)) {
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+            assertThat(resp.body()).contains("held-4-p38").contains("intruder-4-p38");
+        }
+        assertThat(rowsOwnedBy("http-held-4")).as("the held row only").isEqualTo(1);
+    }
+
+    // ── a named upsert onto a live tuple another collection holds ───────────────────────────────
+
+    @Test @Order(13)
+    void aNamedUpsertOntoAHeldLiveTupleIs409NamingBoth_inBothIndexStates() throws Exception {
+        post("/v1/catalog/collections/upsert", "{\"name\":\"held-5-p38\"," + attrsJson("http-held-5", "") + "}");
+        String body = "{\"name\":\"intruder-5-p38\"," + attrsJson("http-held-5", "") + "}";
+
+        var absent = post("/v1/catalog/collections/upsert", body);
+        createIndex();
+        var present = post("/v1/catalog/collections/upsert", body);
+
+        for (var resp : java.util.List.of(absent, present)) {
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(409);
+            assertThat(resp.body()).as("the refusal names both collections, not a constraint").contains("held-5-p38").contains("intruder-5-p38");
+        }
+        assertThat(rowsOwnedBy("http-held-5")).as("the held row only").isEqualTo(1);
+    }
+
     // ── a mint's refusals are 409 ───────────────────────────────────────────────────────────────
 
-    @Test @Order(9)
+    @Test @Order(30)
     void everyDrawnLabelLiveIs409() throws Exception {
         long next = nextSequenceValue();
         int draws = MintedLabel.MAX_DRAWS;
@@ -265,7 +306,7 @@ class CollectionMintHttpTest {
         assertThat(rowsOwnedBy("http-labels-mint")).isZero();
     }
 
-    @Test @Order(10)
+    @Test @Order(31)
     void aTakenIdAfterTheHealIs409() throws Exception {
         su(ctx -> {
             CollectionMintSupport.cycleOverTheRows(ctx, TENANT, "cycle-anchor-p38", MODEL);

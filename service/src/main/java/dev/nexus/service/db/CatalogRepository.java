@@ -10185,6 +10185,11 @@ public final class CatalogRepository {
         });
     }
 
+    /** {@link #listCollections(String, String, String)}'s rows, each also carrying {@code collection_id}. */
+    public List<Map<String, Object>> listCollectionsWithIds(String tenant, String contentType, String lifecycleState) {
+        return listCollections(tenant, contentType, lifecycleState);
+    }
+
     /**
      * Atomically delete a collection and ALL its derived in-Postgres state in ONE
      * tenant-scoped transaction (RDR-164 P2). Replaces the SQLite-era client-side
