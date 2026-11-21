@@ -43,6 +43,8 @@ import java.util.TreeSet;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class TenantImportFixtureTest {
 
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(TenantImportFixtureTest.class);
+
     static final String RESOURCE = "/fixtures/rdr248-tenant-backup.nxtenant";
     static final String RESOURCE_PATH = "src/test/resources/fixtures/rdr248-tenant-backup.nxtenant";
     /** The property that makes {@link #regenerate} write the file; its value is the reason, printed with the new pins. */
@@ -189,6 +191,12 @@ class TenantImportFixtureTest {
         // the round-trip test audits those, on a source it seeds itself.
         assertThat(CollectionIdSites.unexamined(found)).as("sites with no row; rows examined per site: " + CollectionIdSites.counts(found)).isEmpty();
         assertThat(found).as("the fixture audit covered every exported site").hasSize(CollectionIdSites.exportedSites().size());
+        // the strict history audit: the fixture's history rows must be refilled by name too. Its rows name no registry row (the
+        // file cannot be regenerated, and its history names "c" or nothing), so only a wrong id fails here and the counts are printed;
+        // the round-trip tests are the ones that seed history rows naming real collections.
+        List<CollectionIdSites.HistoryFinding> history = env.su(ctx -> CollectionIdSites.auditHistoryStrict(ctx, tenant));
+        LOG.info("history_strict tenant={} found={}", tenant, history);
+        assertThat(CollectionIdSites.historyProblems(history, false)).as("history rows after the load; counts " + history).isEmpty();
         Integer nullChunkIds = env.su(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")),
             DSL.field(DSL.name("tenant_id"), String.class).eq(tenant).and(DSL.field(DSL.name("collection_id")).isNull())));
         assertThat(nullChunkIds).as("chunks with a null collection_id").isZero();
