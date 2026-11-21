@@ -4,7 +4,10 @@
 The engine's move worker reports each open or failed data move as a ``/v1/status`` ``boot_work`` entry whose id is
 ``data-move:<label>``. The shape has no state field, so ``what`` begins with the state:
 
-* ``blocked:`` (the reason follows) and ``failed:`` (the failure follows): one red row per move.
+* ``blocked:`` (the reason follows) and ``failed:`` (the failure follows): one red row per move, except a ``blocked:``
+  entry whose ``reason_class`` is ``missing_prerequisite`` (an extension or library the move needs is not installed):
+  that one waits for the install and nothing is wrong with the data, so it is a warning. The class is the engine's
+  field, never read from the words; an engine that predates it sends none, and its blocked move stays red.
 * ``stalled:``: a CALL that has completed no chunk for a long time; a warning, since a slow chunk looks the same.
 * ``paused:``: an operator holds the move; a note, never red.
 * ``working:``, ``queued:``, ``runs complete:``: no row of their own; the summary row counts them.
@@ -49,6 +52,8 @@ _ENGINE_STATE_ROWS: dict[str, tuple[str, str, str]] = {
 }
 
 SUMMARY_LABEL = "Data moves"
+#: ``reason_class`` of a ``blocked:`` entry whose move waits for an extension or library to be installed (``MoveReasons.MISSING_PREREQUISITE``).
+MISSING_PREREQUISITE = "missing_prerequisite"
 
 _RETRY_NOW = (
     "UPDATE nexus.data_moves SET transient_retries = 0, last_transient_at = NULL, last_transient = NULL "
@@ -137,7 +142,17 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         tally[state or "unknown"] = tally.get(state or "unknown", 0) + 1
         text = _after_state(what)
         row_label = f"Data move {label}"
-        if state == "blocked":
+        if state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
+            rows.append(HealthResult(
+                label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "The move waits for what it needs to be installed; nothing was changed and nothing is lost, and the "
+                    "engine retries by itself once it is there. The bundled engine carries pg_background: run `nx upgrade`. "
+                    "A self-managed PostgreSQL needs pg_background installed (the full reason is in the engine log, "
+                    "event=data_move_blocked)",
+                ],
+            ))
+        elif state == "blocked":
             rows.append(HealthResult(
                 label=row_label, ok=False, detail=f"blocked: {text}{_counts(entry)}",
                 fix_suggestions=[

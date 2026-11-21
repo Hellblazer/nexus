@@ -700,6 +700,9 @@ public final class StatusHandler implements HttpHandler {
                     .append(",\"unit\":").append(st.unit() == null ? "null" : HttpUtil.jsonString(st.unit()))
                     .append('}');
             }
+            if (e.reasonClass() != null) {   // nexus-f3yqd.2.23, [additive]: absent unless the producer classed the entry
+                body.append(",\"reason_class\":").append(HttpUtil.jsonString(e.reasonClass()));
+            }
             body.append('}');
         }
         body.append(']');

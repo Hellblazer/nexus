@@ -37,6 +37,39 @@ final class MoveReasons {
     private static final Pattern NOT_INSTALLED = Pattern.compile("^([\\w.]+) is not installed\\s*$");
 
     /**
+     * The {@code boot_work} {@code reason_class} of a move blocked because an extension or library it needs is not installed
+     * (nexus-f3yqd.2.23): {@code nx doctor} shows it as a warning, since the move simply waits for the install and nothing
+     * is wrong with the data. A client keys on this value, never on the words of the reason.
+     */
+    static final String MISSING_PREREQUISITE = "missing_prerequisite";
+
+    /** The names whose "is not installed" is a missing prerequisite: the extension and the committing entry point of dml_utils. */
+    private static final java.util.Set<String> PREREQUISITES =
+        java.util.Set.of("pg_background", "dml_utils.run_migration_chunks_committing");
+
+    /**
+     * The class of a blocked reason, or null when it has none: {@link #MISSING_PREREQUISITE} when the reason, behind the retry
+     * prefix and the "needs an operator" suffix, is exactly "{@code <prerequisite>} is not installed". Anchored, so run text
+     * that mentions the phrase is not taken for the install's reason.
+     */
+    static String classOf(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return null;
+        }
+        String body = reason.strip();
+        Matcher retry = RETRY.matcher(body);
+        if (retry.find()) {
+            body = body.substring(retry.end());
+        }
+        Matcher operator = NEEDS_OPERATOR.matcher(body);
+        if (operator.find()) {
+            body = body.substring(0, operator.start());
+        }
+        Matcher missing = NOT_INSTALLED.matcher(body);
+        return missing.find() && PREREQUISITES.contains(missing.group(1)) ? MISSING_PREREQUISITE : null;
+    }
+
+    /**
      * A library install that failed on Liquibase's checksum validation leaves the libraries FAILED on every boot, caught and
      * serving: a re-pin of the library changed a changeset the install had already applied, and library changesets are not
      * {@code runOnChange}. The reason Liquibase gave names the changeset; this says what happened and what to do, so
