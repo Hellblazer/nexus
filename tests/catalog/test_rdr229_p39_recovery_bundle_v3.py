@@ -289,7 +289,7 @@ def test_a_non_live_collection_row_is_skipped_counted_and_named_and_the_rest_imp
 
     skipped = _by_label(summary.collections_skipped_not_live, dead)
     assert len(summary.collections_skipped_not_live) == 1 and len(skipped) == 1, summary.collections_skipped_not_live
-    assert "quarantine" in json.dumps(skipped[0]) and skipped[0]["docs_skipped"] == 2
+    assert skipped[0]["lifecycle_state"] == "quarantine" and skipped[0]["docs_skipped"] == 2
     assert summary.collections_refused_label_clash == []                 # skipped is not refused: they are counted apart
     assert (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
     assert _row(dead) is None                                # never registered, and never registered live
@@ -387,8 +387,8 @@ def test_the_cli_prints_a_new_count_only_when_it_is_nonzero_and_names_each_entry
         if other != field:
             assert entries[0]["label"] not in out, (field, other, out)
     # The count of this class is printed (one entry, so the number 1) on a line that also names the entry's detail.
-    detail = entry.get("docs_skipped", entry.get("to_model"))
-    assert str(detail) in out, out
+    detail = f"notes skipped: {entry['docs_skipped']}" if "docs_skipped" in entry else entry["to_model"]
+    assert detail in out, out
 
 
 # Exit status (linda's ruling). Precedent: ``import_cmd`` exits 1 once any NOTE did not land (docs_failed,
