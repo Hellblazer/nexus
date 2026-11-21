@@ -54,7 +54,8 @@ class CatalogCollectionsLiveLabelIndexTest {
 
     private static void insert(DSLContext dsl, String tenant, String label, String supersededBy) {
         dsl.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, "
-            + "model_version, superseded_by) VALUES (?, ?, 'knowledge', 'label-notes', 'bge-base-en-v15-768', 'v1', ?)",
+            + "model_version, lifecycle_state, superseded_by) VALUES (?, ?, 'knowledge', 'label-notes', "
+            + "'bge-base-en-v15-768', 'v1', 'live', ?)",
             tenant, label, supersededBy);
     }
 
@@ -97,7 +98,9 @@ class CatalogCollectionsLiveLabelIndexTest {
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
             // From P4.1 the name is no longer the key and this is a no-op; until then it removes the other refusal.
-            dsl.execute("ALTER TABLE nexus.catalog_collections DROP CONSTRAINT IF EXISTS catalog_collections_pk");
+            // CASCADE: the key is the target of foreign keys (topic_assignments_collection_fk and others), which this
+            // scratch clone does not need.
+            dsl.execute("ALTER TABLE nexus.catalog_collections DROP CONSTRAINT IF EXISTS catalog_collections_pk CASCADE");
             String tenant = TENANT + "-index-alone";
 
             insert(dsl, tenant, "history label", "someone-else");   // superseded: holds no live slot
