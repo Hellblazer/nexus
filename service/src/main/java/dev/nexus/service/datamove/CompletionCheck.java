@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.datamove;
 
+import dev.nexus.service.db.PgSession;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
@@ -410,12 +411,19 @@ public final class CompletionCheck {
         try {
             return ctx.transactionResult(cfg -> {
                 DSLContext tx = cfg.dsl();
-                tx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("statement_timeout"),
-                    DSL.val(Long.toString(VIOLATOR_TIMEOUT_MS)), DSL.inline(true))).fetch();
+                // PgSession.setLocal binds the matching network timeout with the statement bound (nexus-u9zkn)
+                PgSession.setLocal(tx, "statement_timeout", Long.toString(VIOLATOR_TIMEOUT_MS));
                 return count(tx, row);
             });
         } catch (DataAccessException e) {
             return new Violators(row.table(), row.constraint(), 0L, 0L, false);
+        } finally {
+            // the session outlives this scan (CompletionBootWork keeps it between samples): its short read bound does not
+            try {
+                ctx.connection(c -> PgSession.restoreNetworkTimeout(c, 0));
+            } catch (DataAccessException e) {
+                // a connection that cannot be reached fails its next read on its own
+            }
         }
     }
 
