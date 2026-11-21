@@ -704,8 +704,8 @@ whose ledger note names the P2.n step that moves it (45 at the P1.R re-pin: P2.2
 19, P2.3 11, P2.7 11, P2.4 4; `tests/_collection_name_census_ledger.py`; P2.3
 and P2.7 have since landed and no holdover names either, so the live total is
 23: P2.2 19, P2.4 4).
-Two non-parse labels, `label-pattern` and `file-path` (5), both on `fnmatch`
-sites except one. `label-pattern` is 10 since P2.7: nine `fnmatch` sites and one that is not, the
+Two non-parse labels cover `fnmatch` sites, `label-pattern` and `file-path`
+(5), with one exception. `label-pattern` is 10 since P2.7: nine `fnmatch` sites and one that is not, the
 `resolve_corpus` stage-3 fallback, a prefix match on the label the user typed
 that decomposes nothing; the census accepts a non-`fnmatch` `label-pattern` site
 only with that one note (`LABEL_TYPED`). The client census is a content-anchored per-site ledger pinned by total,
