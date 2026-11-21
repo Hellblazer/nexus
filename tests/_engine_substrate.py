@@ -1010,7 +1010,7 @@ def pg_cluster_parent() -> str | None:
             st = root.lstat()
             if not stat.S_ISDIR(st.st_mode):
                 raise PermissionError(f"{root} is not a real directory")
-            if st.st_uid != int(_current_uid()):
+            if os.name != "nt" and st.st_uid != int(_current_uid()):  # st_uid is 0 on Windows
                 raise PermissionError(f"{root} is owned by uid {st.st_uid}")
             if st.st_mode & 0o077:
                 root.chmod(0o700)
