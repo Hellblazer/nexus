@@ -37,4 +37,10 @@ public final class CollectionLabel {
         }
         return "c" + id;
     }
+
+    /** RED STUB (P3.6): replaced by the real rule in the next commit. */
+    static final boolean REFUSE_SLASH = true;
+
+    public static void validateUserLabel(String label) {
+    }
 }
