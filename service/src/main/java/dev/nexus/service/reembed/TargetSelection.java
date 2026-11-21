@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.reembed;
 
+import dev.nexus.service.db.CollectionRegistration;
+import dev.nexus.service.db.ReembedJobRepository.Job;
+
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
@@ -158,6 +161,116 @@ public final class TargetSelection {
         return candidates.stream().min(order)
             .<Result>map(r -> new Superseded(r.name(), r.supersededBy()))
             .orElseGet(Absent::new);
+    }
+
+    /**
+     * The other collections that hold the source's lookup tuple (content type, owner, embedding model), by name: not
+     * superseded and {@code lifecycle_state} not {@code quarantine}, the source's own row excluded. That is the one
+     * "held" predicate RDR-229 uses everywhere (P3.8's partial UNIQUE, T2 nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21,
+     * and catalog-051-2 and vectors-067), so a dormant or disputed holder counts. The tuple is not unique in the
+     * registry (two sources that share a curator owner hold two rows on it), and the target is chosen by the tuple,
+     * so a second source would be moved into the first source's target (nexus-p2m1x.28).
+     */
+    public static List<String> tupleMates(List<CollectionRow> rows, String source, String contentType,
+                                          String ownerId, String embeddingModel) {
+        return rows.stream()
+            .filter(r -> !source.equals(r.name()))
+            .filter(r -> contentType.equals(r.contentType()))
+            .filter(r -> ownerId.equals(r.ownerId()))
+            .filter(r -> embeddingModel.equals(r.embeddingModel()))
+            .filter(r -> !"quarantine".equals(r.lifecycleState()) && !r.superseded())
+            .map(CollectionRow::name)
+            .sorted()
+            .toList();
+    }
+
+    /**
+     * The 409 reason when {@link #tupleMates} finds any: names the source and its mates, says why, and the exit. Tests pin
+     * fragments of it with {@code contains}, not the whole text, so a sentence may be added; this one points a source the
+     * re-own move skipped at the gc_audit query ({@link #REOWN_SKIPPED_QUERY}), since re-owning is not available for it.
+     */
+    public static String sharedSourceTupleReason(String source, List<String> mates, String contentType,
+                                                 String ownerId, String embeddingModel) {
+        return "source collection " + source + " shares its lookup tuple (content type " + contentType + ", owner "
+            + ownerId + ", model " + embeddingModel + ") with " + String.join(", ", mates)
+            + ": collections with the same owner, content type and model cannot be told apart when the re-embed "
+            + "target is chosen by that tuple, so " + source + " would be moved into a target that "
+            + String.join(", ", mates) + " also uses. " + ownerExit("one of the twins is re-owned or superseded")
+            + " A collection the RDR-229 re-own move skipped, because the tuple it would move to was already held, "
+            + "cannot be re-owned; the move records each skip and its holder: " + REOWN_SKIPPED_QUERY;
+    }
+
+    /**
+     * Where an operator reads the rows the re-own move (vectors-067) skipped, and the collection that held each tuple (live,
+     * dormant or disputed: the move's held predicate is unsuperseded and not in quarantine). The hint appears in the reason of
+     * every twin refusal ({@link #sharedSourceTupleReason}), whether or not the source was skipped by the move.
+     */
+    static final String REOWN_SKIPPED_QUERY =
+        "SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'";
+
+    /** Why a client cannot fix a shared tuple in place, and what can. {@code then} finishes "can start once ...". */
+    private static String ownerExit(String then) {
+        return "A client cannot change a collection's owner in place (the registry keeps the owner a collection was "
+            + "registered with); an owner changes through an engine data move, or a rename that re-homes the "
+            + "collection under another owner (RDR-229 owner-is-source). "
+            + "A re-embed of the source can start once " + then + ".";
+    }
+
+    /**
+     * The job that makes a live target another source's: a job whose target is {@code target}, whose source is not
+     * {@code source}, that <b>moved at least one document</b> ({@code documents_moved}, the job row's count of
+     * documents copied; a job that was aborted or failed before copying one put nothing in the target), and whose
+     * source has this source's embedding MODEL. Only the model is compared: the target itself fixed the content type
+     * and owner the foreign source had when its job ran, and a later re-own of that source does not take its
+     * documents out of the target, so its current owner is never read. The model is the row's {@code embedding_model}
+     * while the row exists (superseded rows are listed), else the model token of the conformant name (a default
+     * cutover deletes the row; a model never changes on a collection); a name that is not conformant reads as an
+     * unknown model, which counts (a refusal, never a merge). The newest such job wins ({@code jobs} is newest
+     * first). The name read is a
+     * migration-source site, declared in {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS}: a re-embed source
+     * row deleted by cutover; retires at RDR-229 P4. When it retires, a job whose source row is gone reads as an
+     * unknown model and refuses, so the sibling narrowing reverts to conservative for a deleted source (a sibling on
+     * another model is refused again once the first source's row has been deleted); one whose row is kept is read
+     * by its row, as now.
+     *
+     * <p><b>Scope:</b> this closes same-model twins only. The target is keyed on content type, owner and the PROFILE
+     * model, while both guards key on the SOURCE model, so two shared-curator sources on different source models
+     * still re-embed into one target and merge. That is an accepted residual, not a pending one: Sam ruled "Accept,
+     * documented" (T2 {@code nexus/sam-ruling-reembed-guard-residual-2026-11-21}).
+     *
+     * <p>A v2 of an already-moved source has the same model and a different name, so it is refused too: a deliberate
+     * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin. The
+     * log persists (a job row is never deleted), and re-owning or superseding the other source does not remove its
+     * documents from the target, so the only exit is to re-own this source: a different owner gives it a different
+     * target tuple.
+     */
+    public static Job foreignOrigin(List<Job> jobs, List<CollectionRow> rows, String target, String source,
+                                    String embeddingModel) {
+        for (Job j : jobs) {
+            if (!target.equals(j.targetCollection()) || source.equals(j.sourceCollection())
+                || j.documentsMoved() <= 0) {
+                continue;
+            }
+            CollectionRow row = rows.stream().filter(r -> r.name().equals(j.sourceCollection())).findFirst()
+                .orElse(null);
+            String model = row != null ? row.embeddingModel()
+                : CollectionRegistration.modelOfConformantName(j.sourceCollection());
+            if (model == null || model.equals(embeddingModel)) {
+                return j;
+            }
+        }
+        return null;
+    }
+
+    /** The 409 reason when {@link #foreignOrigin} finds a job: names the source, the target and the other source. */
+    public static String foreignOriginReason(String source, String target, Job origin) {
+        return "the job log shows another source collection, " + origin.sourceCollection() + ", was re-embedded into "
+            + "target " + target + " (job " + origin.jobId() + ", " + origin.state() + ", "
+            + origin.documentsMoved() + " document(s) moved) from a source with this source's embedding model, so "
+            + source + " would be moved into a target that " + origin.sourceCollection() + " already filled. "
+            + ownerExit(source + " is re-owned, which gives it a different target tuple (re-owning "
+                + origin.sourceCollection() + " does not take its documents out of the target, and "
+                + origin.sourceCollection() + " may be an earlier version of " + source + ")");
     }
 
     /** A job in a lock state whose source is the candidate target: its id and state, to name in a refusal. */

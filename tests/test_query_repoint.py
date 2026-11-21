@@ -656,7 +656,7 @@ class TestQueryNoCatalogParamsCollectionsSorted:
         # care about doesn't raise CollectionNotRegisteredError.
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {
+            lambda name, *, refresh=True, strict=False: {
                 "content_type": "knowledge", "owner_id": name, "embedding_model": "x",
                 "lifecycle_state": "live",
             },

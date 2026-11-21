@@ -371,7 +371,8 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      repo`'s target model (`indexer.py:5408-5409/5496-5498`) and registration
      model (`indexer.py:5649-5650`), taxonomy thresholds by prefix
      (`commands/taxonomy_cmd.py:2862/2871/3142`,
-     `db/t2/http_taxonomy_store.py:2667`), and the next version computed by
+     `db/t2/http_taxonomy_store.py:2667`; the engine's prefix-matched prune is
+     the matching engine site, P2.4's engine half), and the next version computed by
      parsing a name (`catalog/http_catalog_client.py:3875`).
   3. *Client, raw shapes the census cannot match* (43 sites: 33 in
      `src/nexus`, 10 in `scripts/`). In `src/nexus`: `corpus.py:1429` and
@@ -443,7 +444,9 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
 - **✅ Verified** (source search) — For repo collections the row's
   `owner_id` is set from the documents' tumbler and differs from the name's
   owner segment by design (`catalog-044`, nexus-6pbwx). *T2
-  `229-research-9`.*
+  `229-research-9`.* Superseded 2026-11-21 by owner is the source (item 5):
+  an owner set at registration is never re-derived from the documents, and
+  catalog-044's rule now applies only to a legacy name-derived owner.
 - **✅ Verified** (source search) — RDR-225 writes each chunk's
   `embedding_model` from the registry row and keys the chunk foreign key on
   `(tenant_id, name, embedding_model)`; a rename stays inside its partition
@@ -702,8 +705,9 @@ Any other site is a defect the census refuses, except the interim `holdover`
 the census carries until Phase 2 moves it: a site no final class fits yet,
 whose ledger note names the P2.n step that moves it (45 at the P1.R re-pin: P2.2
 19, P2.3 11, P2.7 11, P2.4 4; `tests/_collection_name_census_ledger.py`; P2.3
-and P2.7 have since landed and no holdover names either, so the live total is
-23: P2.2 19, P2.4 4).
+and P2.7 have since landed and no holdover names either, so the live total was
+23: P2.2 19, P2.4 4; at the Phase 2 integration re-pin, 7817cd3251, P2.2 takes
+it 23 -> 4 and P2.4 4 -> 0, so the class is empty).
 Two non-parse labels cover `fnmatch` sites, `label-pattern` and `file-path`
 (5), with one exception. `label-pattern` is 10 since P2.7: nine `fnmatch` sites and one that is not, the
 `resolve_corpus` stage-3 fallback, a prefix match on the label the user typed
@@ -889,6 +893,67 @@ two upserts read the id). The
 name-rendering branch of
 `t3_collection_name` stays only as a migration source for a legacy
 two-segment knowledge name that has no row.
+
+Owner is the source (Sam, 2026-11-21, T2
+`nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`). A collection's
+`owner_id` names its source and is set once, at registration; nothing
+re-derives it from the collection's documents. `catalog-044`'s rule that
+takes the owner from the documents now applies only to a legacy
+name-derived owner (a slug, `''` or a placeholder): a catalog amendment
+removes its curator clause, so a curator owner a registration set stands.
+Its second half (`catalog-051-2`) stops catalog-044's two triggers from
+rewriting a legacy owner onto a tuple (tenant, content type, owner, model,
+model version) that another `code`, `docs` or `rdr` collection already
+holds: the row keeps its old owner and the trigger raises a NOTICE naming
+both collections. A row holds its tuple when it is unsuperseded and not in
+quarantine (`superseded_by = '' AND lifecycle_state <> 'quarantine'`), the
+predicate of P3.8's partial UNIQUE index (T2
+`nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`, Q1), so a dormant
+or disputed holder holds like a live one. The guard compares the stored
+`model_version`; a row whose D2 repair is still pending (`''`) is left to
+the re-own move, which skips it. Before that check each trigger takes a
+transaction advisory lock on the tuple's key,
+`nexus.collection_tuple_lock_key` (`catalog-051-1a`), the SQL function that
+is the key's one derivation (the engine's `CollectionTupleLock` selects it
+and does not re-implement it). A transaction deadlocked on that lock gets
+40P01, and only the paths through `CatalogRepository`'s `DeadlockRetry`
+re-run it (deletes, renames, re-homes, purges, manifest writes and chunk
+imports); a plain document registration, `upsertCollection` and
+`supersedeCollection` surface it to their caller, and the data-move worker
+retries the chunk.
+An import resolves the owner from the collection's existing row, then the
+bundle's optional `owner` header, then a `<slug>-<hash8>` stem, taken as
+the repo's when the collection is itself `code`, or is `docs` or `rdr` and
+the target already holds a repo owner with that hash or a live `code`
+collection of that stem (`nxexp_owner.resolve_import_owner_tumbler`), then
+the corpus curator for a `docs` corpus, then the knowledge curator with a
+warning. A repo's collections that an old bulk import left under a curator
+are re-owned by the registered data move
+`rdr229-reown-repo-stems-from-curator` (`vectors-067`), which skips a row
+whose destination tuple another row holds (the same held predicate) and
+records each skip in `nexus.gc_audit` (operation `rdr229_reown_skipped`; read it
+with `SELECT collection, details FROM nexus.gc_audit WHERE operation =
+'rdr229_reown_skipped'` under the tenant). It compares tuples on the
+effective version, the stored `model_version` or else the name's trailing
+`__vN`, so a row D2 has not yet repaired is seen as its v1 twin's and
+skipped, not moved. It takes the same tuple lock as the triggers, computed
+from the stored version, for only the tuples its chunk moves rows onto, in
+ascending key order (the order `CollectionTupleLock` uses), so a chunk holds
+at most `chunk_size` locks. Two named residuals, both
+accepted by Sam:
+
+- An old export file (from before the `owner` header) of a repo's
+  `docs__` collection, imported before its `code__` sibling onto a target
+  with no repo owner for that hash, takes its corpus curator and keeps it,
+  because an existing owner wins on re-import. The import prints a hint
+  naming the remedy: import the repo's `code__` bundle, then remove the
+  collection and import it again. No new route closes it (T2
+  `nexus/sam-ruling-owner-is-source-old-bundle-residual-2026-11-21`).
+- An install that has not yet applied `catalog-044-3` runs that one-off
+  repair on upgrade before the amendment, under the old rule, so a
+  docs-only curator corpus whose documents carry a repo tumbler is re-owned
+  to that repo. Only installs from before `catalog-044-3` are affected; no
+  heuristic repair (T2 `nexus/sam-ruling-batch-2026-11-21-late`, item 2).
 
 **6. The surrogate key (D3).** `catalog_collections` gains `collection_id
 bigint GENERATED ALWAYS AS IDENTITY`, unique across the installation, with a
@@ -1568,18 +1633,44 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   and `select_config` (`:1024`, `:1039`, `:1041`, `:1073`);
   `scoring.apply_quality_boost`; `search_engine._threshold_for_collection`
   and `_overfetch_multiplier` (`:802`, `:906`);
-  `metadata_schema.chunk_content_type_for_collection` (`:187`);
-  `catalog/manifest_backfill.py:865`; `commands/taxonomy_cmd.py:95`; and
+  `metadata_schema.chunk_content_type_for_collection` (`:187`); and
   the `note_tags_array` rung. `exporter.import_collection` reads through its
-  `db`'s own row resolver.
+  `db`'s own row resolver. A router that writes, or reads for a write, takes
+  item 1's three outcomes through one helper, `corpus.routing_content_type`:
+  a Row answers with its `content_type`; NoRow (after one cache re-read,
+  bounded to one extra listing per interval) and Unreadable answer with the
+  candidate name's content type (`corpus.candidate_content_type`, the one
+  parse, which P2.2 points at `legacy_names`), one mint entry per caller, all
+  empty at P3.8. A prefix-free label with no row derives nothing and stays
+  unrouted until P3.8's writer uses the registering call's row. The
+  `note_tags_array` rung reads strictly, so a failed listing is not "no
+  strings". A read-only router that sees only a search hit's collection
+  (`scoring._is_code_collection`, `scoring.apply_quality_boost`) reads the
+  row alone: a hit's collection holds chunks, which a row always backs (T2
+  `229-research-36`), so its NoRow is a stale cache and answers "not that
+  type" until the next refresh. `topic_route.is_prose`, which sees the
+  request's collections, takes the NoRow fallback.
 - *The `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`.* P2.5 moves the
   `quarantine-` half to `lifecycle_state`, and in doing so routes all 12
   sites through one helper, `nexus.db.rows.lifecycle.bypasses_canonical_schema`
-  (P2.5's client commit). P2.9 therefore moves the `taxonomy__` half at that
-  one site to the row. The client census's routing class went from 36 to
+  (P2.5's client commit). The client census's routing class went from 36 to
   25 in that commit (`tests/test_collection_name_parse_census.py`). No writer in `src/nexus` creates a
   `taxonomy__` collection, so the half only ever meets legacy names (T2
-  `229-research-39`).
+  `229-research-39`), and no row attribute says "taxonomy": a legacy name has
+  no row, and hygiene-002 would give it `content_type='unknown'`. So P2.9 does
+  not move it to the row. That helper's `taxonomy__` test,
+  `catalog/manifest_backfill.py`'s carve-out (`:865`) and
+  `commands/taxonomy_cmd.py:109` are migration-source (a name from an older era
+  with no row), and since P2.2 all three read it through
+  `legacy_names.is_taxonomy_collection_name`; the engine's
+  `ChunkKeyPlan.TAXONOMY_PREFIX` is the same class. P4.3 retires them once a
+  census shows no install holds a `taxonomy__` collection. With them
+  reclassified and the other sites moved, P2.9 measures the routing class at
+  zero (client census 240 -> 229 at develop 0d9e53391 with P2.8). On the
+  Phase 2 integration tree the client census is 217 (7817cd3251, then
+  a92f88c6a0: P2.2 -11, P2.4 -3, owner-is-source +2 migration-source, which
+  was +3 until `owner_stem` moved into `legacy_names`; migration-source 22,
+  `split` 2).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -1846,23 +1937,28 @@ every script and note URI that names one.
   2026-11-08).
 - [ ] Critical Assumptions 1 and 6 measured (P1.2; done 2026-11-20), and
   Critical Assumption 3's residue rows counted there on every install (open: it
-  needs the 0.1.200 route; read on both tenants after that deploy and before
-  Sam's go for the first cloud run of D2 and P2.10's moves).
+  needs the 0.1.200 route; read on both tenants after that deploy, as a
+  post-deploy confirmation and not a move gate: the deploy go is the go for
+  the moves' first cloud run, T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`).
 - [ ] Critical Assumption 5 measured (P3.2) before P3.1's changeset is
   final, and so before the Phase 3 switch changesets: it sets each move's
   `chunk_size`, `sleep_ms` and `statement_timeout_ms`.
-- [ ] RDR-246's data-move mechanism active on the cloud before P2.10's
-  repair moves and Phase 3 run there (the first registered move is D2's
+- [ ] RDR-246's data-move mechanism active on the cloud before the Phase 2
+  moves and Phase 3 run there (the first registered move is D2's
   `model_version` repair, which rides the Phase 2 engine cut: "the first
   registered data move (the unlock for RDR-246 Step 2)", T2
   `nexus/sam-ruling-rdr229-p12-row-decisions-2026-11-20`):
   nexus-f3yqd.2 ("Data moves run as background jobs via dml_utils, never at
   boot") is in progress, with nexus-f3yqd.2.23 ("Phase 2 activation, waiting
   on Sam's go: cloud pg_background install and the first registered move")
-  open (T2 `229-research-32`). It gates the first cloud run of P2.10's
-  repair moves and of P3.1's move, not their registration, so P2.10's can
-  be the first registered moves that .2.23 waits for (T2
-  `229-research-57`). A Phase 3 cut can still reach an install whose moves are
+  open (T2 `229-research-32`). It gates the first cloud run of the Phase 2
+  moves and of P3.1's move, not their registration (T2 `229-research-57`).
+  The first registered moves .2.23 waits for are D2's (`vectors-064`),
+  owner-is-source's re-own (`rdr229-reown-repo-stems-from-curator`,
+  `vectors-067`) and P2.10's three repair moves, all in 0.1.200; the 0.1.200
+  deploy go is the go for their first cloud runs, each named with its
+  measured count (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`,
+  `nexus/engine-cut-0.1.200`). A Phase 3 cut can still reach an install whose moves are
   blocked. There its readers stay on names (item 6, "A blocked move"). A
   BYO or `--no-pg-bundle` PostgreSQL "gets it from its DBA" (RDR-246 lines
   801-802); until then that install is such a case (Cross-Cutting, "BYO
@@ -1877,7 +1973,9 @@ row's model into chunk metadata, `nx search` calibrates with the row's
 model, and a quarantine of one of its chunks registers a sibling whose
 `lifecycle_state` is `quarantine` without the engine reading the prefix. In
 the same run, a recovery bundle recorded under a legacy name restores. Both
-census gates are at their Phase 2 pins. After Phase 3, the same fixture is
+census gates are at their Phase 2 pins: on the client, `holdover` 0, `routing`
+0 and `uri-classifier` 2; on the engine, the collection-split and
+quarantine-literal ceilings 0 (`CollectionParseGateTest`). After Phase 3, the same fixture is
 renamed and searched: the rename touches one registry row, its chunks and
 per-collection index are unchanged, and `store_put` to a new subject
 registers a collection with a minted label that `nx search --corpus
@@ -1971,6 +2069,36 @@ its acceptance is that test green plus the census pin it lowers.
   the row first and parses the name only when that answers nothing
   (`scoring.py:175-182`), item 1's NoRow outcome, which stays (T2
   `229-research-49`).
+  *Amended 2026-11-20 (bead nexus-p2m1x.9; the lead's ruling answered S4 of
+  the client critique, T2 `nexus/critique-p2m1x9-2026-11-20-r1`, and this text
+  comes from S1 of the engine critique, T2
+  `nexus/critique-p2m1x9-engine-2026-11-20-r1`).* With the threshold read
+  from the row, the engine's `POST /v1/taxonomy/assignments/prune_projection`
+  (`TaxonomyRepository.pruneProjectionBelow`, `startsWith` on
+  `source_collection`) over-deletes: pruning `..__v1` at its threshold also
+  reaches `..__v10`, and `docs__art` also reaches `docs__art-x`, each at the
+  wrong threshold. P2.4 therefore owns a small engine half in the Phase 2
+  engine cut, 0.1.200: an optional request field `match` (`"prefix"`, the
+  default when absent or null, keeps `startsWith`; `"exact"` deletes only the
+  named `source_collection`; any other value is a 400 that deletes nothing),
+  a reply that echoes the mode applied (`{"removed": N, "match":
+  "prefix"|"exact"}`), and `taxonomy_prune_exact_supported: true` on
+  `/version`. The client sends `match: "exact"` only when the flag reads true,
+  and then only after one verification prune (`match: "exact"`, for a name no
+  collection has: the fixed prefix `nexus-exact-probe-` and a random 128-bit
+  suffix, so no collection name starts with it except by a collision of
+  negligible chance, and even a prefix match therefore reaches no rows; the
+  guarantee is the name, not the threshold) whose
+  reply echoes `"exact"`; a missing or `"prefix"` echo, or a failed call, runs
+  the whole sweep guarded, and a real reply that stops echoing `"exact"` ends
+  the sweep at once. Without the flag the client keeps its guard (it prunes a
+  prefix name down to its extensions' lowest threshold and prints the skipped
+  count). No client floor bump: the flag and the echo are the gate. The
+  route's field keeps its name, `source_collection_prefix`; the P3 id form
+  (P3.5c) is not part of this change. The cloud leg proves the body field
+  crosses the edge (`match: "bogus"` on a name that matches nothing must
+  answer 400). Tests: a `..__v1`/`..__v10` pair and a `docs__art`/`docs__art-x`
+  pair, each in prefix and in exact mode. [additive] wire entry.
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
   `PgVectorRepository`; the `quarantine-` half of the client's
@@ -1983,7 +2111,9 @@ its acceptance is that test green plus the census pin it lowers.
   columns. Under `PlpgsqlCheckGateTest`.
 - P2.7 Retire `repo_identity.list_sibling_collections`' name matcher (no
   caller in `src`; RDR-210 already finds siblings by row tuple) and move
-  `resolve_corpus` stage 3 to the row tuple.
+  `resolve_corpus` stage 3 to the row tuple. Its fallback, a prefix match on
+  the label the user typed, stays as one `label-pattern` site with the
+  `LABEL_TYPED` note (item 1).
 - P2.8 Subject and repo resolution by attributes (item 5):
   `t3_collection_name` finds a knowledge subject through `find_collection`;
   `collection_for_repo` uses the returned row instead of rendering. Test: a
@@ -1993,7 +2123,7 @@ its acceptance is that test green plus the census pin it lowers.
   sites (23 and `topic_route.is_prose`) and the `taxonomy__` half of the `_BYPASS_SCHEMA_PREFIXES` tests
   (T2 `229-research-39`, listed in item 12; since P2.5 the 12 tests are one
   helper, `nexus.db.rows.lifecycle.bypasses_canonical_schema`, so this half is
-  one site), the shipped `"code__*"` exclude
+  one site, and it is migration-source, not routing: item 12), the shipped `"code__*"` exclude
   default, and the engine's `isFileRoutedCollection`, which tests a live
   collection. The URI-string classifiers (`NoteUri.isNote`, `canonical`,
   `is_note_uri`, `canonical_note_uri`, `_collection_is_file_routed`,
@@ -2072,8 +2202,13 @@ its acceptance is that test green plus the census pin it lowers.
   arm today, are inverted. Test, for the verb: moved
   residue and repaired residue are re-derived to `file://`, not refused.
   Blocks P3.6 and P3.8.
-- P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6, P2.9 and P2.10; client
-  floor bumps in the release that ships P2.3 onward.
+- P2.R Review gate for Phase 2. Engine cut for P2.4 (prune `match`), P2.5, P2.6,
+  P2.9 and P2.10 (and P2.8's filter drop, per its amendment); client
+  floor bumps in the release that ships P2.3 onward. The same cut, 0.1.200,
+  carries D2's move and owner-read policy (`vectors-064`, `vectors-065`),
+  owner-is-source's `catalog-051` and re-own move (`vectors-067`), the
+  re-embed 409 refusals on a shared or foreign-held tuple (`ReembedHandler`),
+  and the RDR-254 aspect upsert deadlock retry (`AspectRepository`).
 
 **Phase 3: the surrogate key and the label**
 
@@ -2399,6 +2534,7 @@ reference the registry's name (P4.1).
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | Census pins (client, engine, SQL) | In scope (the tests print their tables) | In scope | N/A | In scope (`-m lint` and the Java gate tests) | N/A |
+| `nx taxonomy project --prune-below-threshold` | Prints the removed count per collection | Prints "N skipped" when the engine lacks exact mode (cloud, until the conexus edge allowlists the flag), "did not confirm exact matching; using the guarded prune" when the verification prune is not echoed, and "N refused" for a collection whose row cannot be read | N/A | `GET /version` reads `taxonomy_prune_exact_supported` | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
 | `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or id, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (carries the id from P3.1's cut, P3.11) |
 
@@ -2745,7 +2881,10 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts,
+- **Versioning**: P2.4 (the prune `match` field; engine first, and an older engine reads as
+  unsupported, so the client keeps its guard), P2.5, P2.6, P2.9, P2.10 (in 0.1.200 with D2's `vectors-064` and
+  `vectors-065`, `catalog-051`, `vectors-067`, the re-embed 409 refusals and the RDR-254 aspect fix), the Phase 3
+  engine beads and P4.0 ride engine cuts,
   P3.5 and P3.7 one cut together with the rename refusal and the name-key
   drop move's registration (P3.7);
   the client floor bumps in the release that first depends on each, engine
@@ -2921,3 +3060,9 @@ large, and moved under a ratchet.
 - 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
 - 2026-11-20: residual S-5 (nexus-p2m1x.43): the Cross-Cutting BYO paragraph said P3.3b's pass still builds on a blocked install, contradicting gate 1 (item 6), P3.3b and the phase dependencies; it now says the pass does not start, matching the RDR's own gate. The Contradiction Check's S-5 entry is updated; the bead closes when P3.3b is built and tested to gate 1.
 - 2026-11-21: P2.9's engine half landed on develop (c7ace16dd onward): `isFileRoutedCollection` is deleted, and the stale-note repair reads `content_type` in its transaction, admits only `knowledge` rows, and share-locks the collection row under the rewrite (item 12, engine paragraph). This supersedes the 2026-11-19 line that kept `isFileRoutedCollection`. The client half's text follows its reland (grant 3, nexus-p2m1x.14).
+- 2026-11-21: Owner is the source (Sam, T2 `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`) written into item 5 and the `229-research-9` finding, with its two accepted residuals (T2 `nexus/sam-ruling-owner-is-source-old-bundle-residual-2026-11-21`, `nexus/sam-ruling-batch-2026-11-21-late`), matching the reviewed code on `feature/rdr229-owner-is-source` (grant 3).
+- 2026-11-21: the P2.7 step names the `resolve_corpus` stage-3 fallback that item 1 already records (one `label-pattern` site, `LABEL_TYPED`), so the step and item 1 agree (grant 3, nexus-p2m1x.12; P2.R cross-walk F1, nexus-p2m1x.16).
+- 2026-11-21: item 1's holdover total and item 12's `taxonomy__` sites match the Phase 2 integration tree: holdover empty (P2.2 23 -> 4, P2.4 4 -> 0), the three taxonomy tests read through `legacy_names.is_taxonomy_collection_name`, client census 218, all measured at 7817cd3251 (grant 3; P2.R author read, nexus-p2m1x.16).
+- 2026-11-21: recorded late, P2.4's two amendments of 2026-11-20 and 2026-11-21. P2.4 owns a small engine half: the prune route's `match` field (`exact` or `prefix`), echoed in the answer, with `/version`'s `taxonomy_prune_exact_supported` flag, which the client checks before any exact prune; the P2.R step, Versioning, item 1 and Day 2 follow (b7e8f448e3, grant 3, nexus-p2m1x.9); and the verification sentinel is a name no collection has, and the guarantee is the name, not the threshold (20baca2d8f, nexus-p2m1x.9).
+- 2026-11-21: the 0.1.200 contents (P2.R step, Versioning), item 5's stem rule and `catalog-051-2` tuple guard with its lock key, the Prerequisites' first registered moves and their deploy-go gate (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`), and the MVV's numeric Phase 2 pins match the integration tree eb1e4cd42b (grant 3; P2.R critique T2 `nexus/critique-eb1e4cd42b-nexus-p2m1x.16-2026-11-21-r1`, nexus-p2m1x.16).
+- 2026-11-21: item 5's tuple guard and re-own move match a92f88c6a0: one held predicate (unsuperseded and not in quarantine, P3.8's index predicate), the guard on the stored version and the move on the effective one, the move taking the tuple lock for its chunk's tuples in key order, and which paths re-run a 40P01; item 12's client census is 217 with `owner_stem` in `legacy_names` (grant 3; P2.R critique S2, S3, S5, nexus-p2m1x.16).

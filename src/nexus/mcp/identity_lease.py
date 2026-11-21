@@ -193,7 +193,12 @@ class IdentityLease:
         entry = read_registry_entry(self._claude_pid, self._procs.sessions_dir)
         record = read_token_file(self.token_path()) if self.token_path() is not None else None
         start = (record.proc_start if record else None) or normalise_instant(self._procs.os_start(self._claude_pid))
-        return {"host": self._procs.host, "pid": self._claude_pid, "started_at": entry.started_at if entry else None,
+        started_at = entry.started_at if entry else None
+        # The host this process's own binding records speaks for it: its token file is the process's own (its pid and
+        # startedAt name it), written by whichever client bound it, and the engine compares the host as a string on refresh
+        # and fork. Absent a file, the machine's name as of now (Processes.host reads the key probe per call).
+        host = record.host if record is not None and record.host else self._procs.host
+        return {"host": host, "pid": self._claude_pid, "started_at": started_at,
                 "proc_start": start}
 
     # ── one heartbeat ───────────────────────────────────────────────────────

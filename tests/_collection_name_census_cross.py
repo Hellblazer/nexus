@@ -16,8 +16,8 @@ A ROOT is a function whose body holds either
 - a counted site of a NAME-DECOMPOSING shape (:data:`DECOMPOSING`: the shapes
   that take a part out of a name or test a computed ``<x>__`` boundary), after
   the exclusions the census already applies, or
-- a call to ``parse_conformant_collection_name``, the one parser that returns
-  every segment.
+- a call to a full parser (:data:`FULL_PARSERS`: ``parse_conformant_collection_name`` and
+  ``candidate_attributes``), the parsers that return every segment.
 
 Every call site of a root, in any module, is then one ``primitive_call`` site.
 Roots found in ``corpus.py`` join its helper set (so the existing fixpoint and
@@ -71,7 +71,8 @@ DECOMPOSING = frozenset({
     "in", "not_in",
 })
 
-FULL_PARSER = "parse_conformant_collection_name"
+#: The parsers that return every segment of a name (both live in ``legacy_names`` since RDR-229 P2.2).
+FULL_PARSERS = frozenset({"parse_conformant_collection_name", "candidate_attributes"})
 
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -134,8 +135,8 @@ def _root_spans(
     call_lines = {
         n.lineno for n in ast.walk(tree)
         if isinstance(n, ast.Call) and (
-            (isinstance(n.func, ast.Name) and n.func.id == FULL_PARSER)
-            or (isinstance(n.func, ast.Attribute) and n.func.attr == FULL_PARSER)
+            (isinstance(n.func, ast.Name) and n.func.id in FULL_PARSERS)
+            or (isinstance(n.func, ast.Attribute) and n.func.attr in FULL_PARSERS)
         )
     }
     lines = hit_lines | call_lines
@@ -186,7 +187,7 @@ def derive_roots(
     methods: set[tuple[str, str, str]] = set()
     for path in _scan._py_files(src):
         rel = path.relative_to(repo_root).as_posix()
-        if rel == _scan.CORPUS_REL:
+        if rel in (_scan.CORPUS_REL, _scan.LEGACY_NAMES_REL):
             continue
         mod = dotted(rel)
         for cls, name in _root_spans(path, rel, consts, dunders, excluded):

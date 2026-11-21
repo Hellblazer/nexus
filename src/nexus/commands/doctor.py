@@ -1602,7 +1602,7 @@ def _report_fanout_floor_census() -> None:
     round trip, no write, no effect on ``nx doctor``'s exit code —
     informational only, same posture as ``--check-engine-activity``.
     """
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.mcp.core import _fanout_exclusions_for_group  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     try:

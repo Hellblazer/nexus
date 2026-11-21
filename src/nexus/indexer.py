@@ -35,7 +35,7 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.indexed_meta import document_register_meta, fill_only_meta
 from nexus.catalog.reconcile_run import DELIBERATE_SKIP_CAUSES as _DELIBERATE_SKIP
 from nexus.config import DEFAULT_EXTRACTOR
-from nexus.corpus import is_conformant_collection_name
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 from nexus.db.limits import QUOTAS
 from nexus.retry import _vector_with_retry, _voyage_with_retry  # noqa: F401 — re-exported for any existing imports
 from nexus.errors import CredentialsMissingError  # re-exported for backward compatibility
@@ -964,6 +964,7 @@ def _migrate_legacy_collections(
                 from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                     ensure_collection_registered,
                 )
+                from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
                 # nexus-aotql: routed through the registration seam
                 # (ensure_collection_registered) instead of a direct
                 # writer.register_collection call -- gets the seam's early
@@ -3054,6 +3055,7 @@ def _index_pdf_file(
         prepared = _pdf_chunks(
             file, content_hash_hex, target_model, now_iso, collection_name,
             chunk_chars=chunk_chars, collection_name=collection_name,
+            row_model=target_model,
             extraction_stats=_extraction_stats, extractor=extractor,
             **({"sensitive": True} if _sensitive_pdf else {}),
         )
@@ -4906,7 +4908,7 @@ def _run_index(
     # non-conformant value through the path-derived conformant synth, which
     # builds ``code__<owner>__<model>__v1`` without needing a registered
     # owner (model segment self-adjusts to local/cloud mode).
-    from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
     if not is_conformant_collection_name(code_collection):
         code_collection = _repo_collection_or_legacy(repo, "code")
     if not is_conformant_collection_name(docs_collection):

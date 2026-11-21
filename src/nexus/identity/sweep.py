@@ -24,6 +24,7 @@ from typing import Any
 import structlog
 
 from nexus.identity.bind_client import IdentityApiError
+from nexus.identity.hostname import bindings_here
 from nexus.identity.holder import GONE, Processes, check_holder, epoch_seconds, holder_process
 from nexus.identity.pending import remove_stale
 from nexus.identity.token_file import delete_token_file, parse_token_name, read_token_file, token_files, token_path
@@ -71,7 +72,7 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
     (``failed``) and the sweep goes on: one failing row does not stop the rest (RDR-253 Test Plan). An engine that
     cannot be reached at all still ends the sweep, by its own error."""
     report = SweepReport()
-    views = client.bindings_by_host(host)
+    views = bindings_here(client, host, identity_dir=identity_dir)
     report.listed = len(views)
     report.swept = True
     for v in views:

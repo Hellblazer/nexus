@@ -525,6 +525,14 @@ class _ChunkT3:
     def __init__(self, n_chunks: int = 3):
         self.n_chunks = n_chunks
 
+    def _resolve_collection_rows(self, names):
+        """The handle's own catalog rows (RDR-229 P2.9: the content type is the row's): a docs row for each
+        name, carrying the model a conformant name's token names; a model-less legacy name's row has none."""
+        return {
+            n: {"content_type": "docs", **({"embedding_model": n.split("__")[2]} if n.count("__") >= 3 else {})}
+            for n in names
+        }
+
     def get_or_create_collection(self, col):
         n = self.n_chunks
 

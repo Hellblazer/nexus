@@ -425,7 +425,7 @@ class TestClassification:
         # "unclassified", see the earlier not_exempt_wrong_prefix case).
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {"content_type": "knowledge", "owner_id": "x", "embedding_model": "m"},
+            lambda name, *, refresh=True, strict=False: {"content_type": "knowledge", "owner_id": "x", "embedding_model": "m"},
         )
         row_says_knowledge = _FakeEntry(
             "2.1.9", "Row Disagrees", physical_collection="code__x", chunk_count=0,
@@ -436,7 +436,7 @@ class TestClassification:
         # -- the row must win the OTHER way too: unclassified, not exempt.
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {"content_type": "code", "owner_id": "x", "embedding_model": "m"},
+            lambda name, *, refresh=True, strict=False: {"content_type": "code", "owner_id": "x", "embedding_model": "m"},
         )
         row_says_code = _FakeEntry(
             "2.1.10", "Row Disagrees Other Way", physical_collection="knowledge__x", chunk_count=0,
@@ -450,7 +450,7 @@ class TestClassification:
 
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {"content_type": "knowledge", "owner_id": "x", "embedding_model": "m"},
+            lambda name, *, refresh=True, strict=False: {"content_type": "knowledge", "owner_id": "x", "embedding_model": "m"},
         )
         row_says_knowledge = _FakeEntry(
             "3.1.9", "Row Disagrees", physical_collection="code__x", chunk_count=1,

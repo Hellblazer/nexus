@@ -338,6 +338,9 @@ ROUTE_MAP: dict[str, Step] = {
                                                expect_route="/v1/catalog/uri_segment_census"),
     "POST /v1/catalog/collections/upsert": Step("route-collections-upsert", "py", ["-c", _routes.COLLECTION_UPSERT],
                                                 expect_route="/v1/catalog/collections/upsert"),
+    "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
+                                                           expect_route="/v1/taxonomy/assignments/prune_projection",
+                                                           expect_stdout="match=bogus refused 400"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")

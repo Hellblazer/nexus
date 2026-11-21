@@ -62,7 +62,7 @@ and were dropped; corpus.py fell from 16 to 2 (the two helpers' own
 shared internal parse is the accepted floor they leave behind).
 collection_shape.py's 3 sites (188, 191, 195) were LEFT UNFUNNELLED, not
 overlooked, per the coordinator's ruling on nexus-ft04v.21's hand-off:
-``collection_attributes``'s positional 4-field decode of a malformed name
+``shape_of``'s positional 4-field decode of a malformed name
 cannot be reproduced byte-for-byte by the funnel helpers' "owner = whole
 remainder" convention. These stay raw and counted -- nexus-ft04v.26 (THE
 REPOINT) landed the row-based helpers and the fifth pattern class but did
@@ -297,7 +297,7 @@ three callers of ``CollectionName.parse`` (the helpers were derived from
 name-decomposing site, or calls ``parse_conformant_collection_name``, as a root
 across ``src/nexus`` (``tests/_collection_name_census_cross.py``, which also
 lists what it still cannot see), and the same rule found twelve more call sites
-(of ``collection_attributes``, ``_under``, ``target_collection_for``,
+(of ``shape_of``, ``_under``, ``target_collection_for``,
 ``_backfill_papers`` / ``_backfill_knowledge`` and the one-off census's
 ``_parse``). A new ``regex_prefix`` shape counts the one-off census's
 ``_QUARANTINE_RE`` (a diagnostic). The 21 live in
@@ -323,7 +323,7 @@ from collections import Counter
 
 import pytest
 
-import nexus.corpus as corpus_mod
+import nexus.catalog.rows.legacy_names as legacy_names_mod
 from tests import _collection_name_census_scan as _scan
 from tests._collection_name_census_exclusions import EXCLUDED_SITES as _EXCLUDED_SITES
 from tests._collection_name_census_ledger import LEDGER
@@ -382,21 +382,51 @@ for _site in LEDGER:
 #: ``resolve_corpus`` is not a root of its own. It is still a derived helper, because its typed-value split reaches
 #: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
 #: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
-PARSE_SITE_PIN: int = 240
+#:
+#: P2.9 (nexus-p2m1x.14, 2026-11-20), re-measured on develop 303a22d29 with P2.8 (P2.7's 240): 240 -> 228. The 22 routing
+#: sites that now read the row's content_type left the ledger (const_prefix 14, loop_prefix 7, glob_default 1); the
+#: three ``taxonomy__`` name tests went routing -> migration-source (no row attribute identifies them; P2.2,
+#: nexus-p2m1x.7, moves them into legacy_names); ten callers of the shared NoRow derivation
+#: (``corpus.routing_content_type`` / ``candidate_content_type``) are new mint entries, each empty at P3.8.
+#: routing 25 -> 0, mint 117 -> 127, migration-source 16 -> 19, const_prefix 21 -> 7, loop_prefix 7 -> 0,
+#: primitive_call 181 -> 191, glob_default 1 -> 0. (The tenth mint is ``topic_route.is_prose``: the request's
+#: names carry no row on a cold cache, so the prose test answers NoRow from the name.)
+#:
+#: P2.9 reland (nexus-p2m1x.14): 228 -> 229. The import's routing read falls back to the name when the row
+#: resolver fails (``exporter.import_collection``, P2.5's contract that a failed lookup never aborts the import):
+#: one more NoRow mint, empty at P3.8. mint 127 -> 128, primitive_call 191 -> 192.
+#:
+#: PHASE 2 INTEGRATION (2026-11-21), measured on the stacked integration/rdr229-phase2 tree (develop 0701d16d9c
+#: plus D2, P2.4 with gh1680 and gh1679, P2.10, the shared-tuple guards, owner-is-source and P2.2): 229 -> 217,
+#: the moves below being each step's own, taken on its own tree (D2, P2.10, gh1680, gh1679 and the shared-tuple
+#: guards moved nothing); the pins are the one measurement of the sum.
+#:   P2.2 (nexus-p2m1x.7), -11: the parsers moved into ``legacy_names`` (the floor: calls inside it are not
+#:     sites). Of the 19 holdovers it owned, 13 read the row through ``embedding_model_for`` and left the ledger,
+#:     the five ``T3Database`` reads became mint (no catalog: NoRow by construction), ``doctor_search``'s drift
+#:     probe diagnostic. The NoRow derivation is one mint site each in ``rows/resolve.py`` and ``embed_window.py``;
+#:     the two blank-version fallbacks and P2.9's three taxonomy tests are migration-source. holdover 23 -> 4,
+#:     diagnostic +1, mint 128 -> 134, migration-source +1, primitive_call 192 -> 184, const_prefix -2, startswith -1.
+#:   P2.4 (nexus-p2m1x.9), -3: the four taxonomy-threshold holdovers (three calls in ``taxonomy_cmd.py``, one in
+#:     ``http_taxonomy_store.py``, each a caller of ``default_projection_threshold``) read the catalog row now, and
+#:     the one NoRow name derivation they share is a single mint-class entry in ``projection_threshold.py``.
+#:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
+#:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
+#:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
+#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2.
+PARSE_SITE_PIN: int = 217
 CLASS_PIN: dict[str, int] = {
-    "mint": 117, "holdover": 23, "diagnostic": 42, "routing": 25,
-    "migration-source": 16, "label-pattern": 10, "file-path": 5,
-    "uri-classifier": 2,
+    "mint": 135, "diagnostic": 43, "migration-source": 22,
+    "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 181, "const_prefix": 21, "fnmatch": 14,
-    "loop_prefix": 7, "strip_prefix": 4, "startswith": 3, "split": 2,
+    "primitive_call": 183, "const_prefix": 5, "fnmatch": 14,
+    "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
-    "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
+    "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }
 
 #: The three candidate-string PRIMITIVES (RDR-204 Phase 3 repoint,
-#: nexus-ft04v.26; single-sourced in ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES``
+#: nexus-ft04v.26; single-sourced in ``nexus.catalog.rows.legacy_names._CANDIDATE_STRING_PRIMITIVES``
 #: by nexus-ft04v.28 item 6). Since RDR-229 P1.1 they are the NON-VACUITY FLOOR
 #: of the census's derived helper set, not its definition: the counted helpers
 #: are derived from corpus.py's call graph (``_scan.derive_parser_helpers``),
@@ -407,11 +437,11 @@ SHAPE_PIN: dict[str, int] = {
 #: calls are not counted (coordinator ruling 2026-09-09). The tuple is
 #: imported, not retyped, so a rename that forgets it is caught by
 #: ``test_candidate_string_primitives_all_resolve_to_real_functions`` below.
-from nexus.corpus import _CANDIDATE_STRING_PRIMITIVES  # noqa: E402 — import after the module docstring/constants above it, matching this file's existing style
+from nexus.catalog.rows.legacy_names import _CANDIDATE_STRING_PRIMITIVES  # noqa: E402 — import after the module docstring/constants above it, matching this file's existing style
 
 def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
     """Non-vacuity for the single-sourcing itself: every name in
-    ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES`` must be a real,
+    ``nexus.catalog.rows.legacy_names._CANDIDATE_STRING_PRIMITIVES`` must be a real,
     currently-defined function in that module. Catches the failure mode
     this whole repoint exists to prevent -- a rename that updates the
     function but not the tuple would otherwise leave a stale STRING in
@@ -420,9 +450,9 @@ def test_candidate_string_primitives_all_resolve_to_real_functions() -> None:
     with no test noticing."""
     assert _CANDIDATE_STRING_PRIMITIVES, "the primitive tuple must not be empty"
     for name in _CANDIDATE_STRING_PRIMITIVES:
-        obj = getattr(corpus_mod, name, None)
+        obj = getattr(legacy_names_mod, name, None)
         assert obj is not None and inspect.isfunction(obj), (
-            f"{name!r} in nexus.corpus._CANDIDATE_STRING_PRIMITIVES does not "
+            f"{name!r} in legacy_names._CANDIDATE_STRING_PRIMITIVES does not "
             f"resolve to a real function -- renamed or removed without "
             f"updating the tuple."
         )
@@ -809,11 +839,15 @@ def test_pin_matches_documented_total() -> None:
     265 -- 255 at P2.5, nexus-p2m1x.10, when twelve bypass-schema prefix tests
     became one helper; then 255 -- 245 at P2.3, nexus-p2m1x.8, when the repo
     indexer's target models became row reads; then 245 -- 240 at P2.7 part A,
-    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted) is derived
+    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted; then 240 -- 228
+    at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then at P2.4,
+    nexus-p2m1x.9, when the taxonomy threshold became a row read; then at P2.2,
+    nexus-p2m1x.7, when the read-path model reads became row reads and the name
+    parsers moved to ``legacy_names``) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 240
+    assert PARSE_SITE_PIN == 217
 
 
 # ---------------------------------------------------------------------------
@@ -929,18 +963,18 @@ def test_every_fnmatch_is_labelled_by_what_it_matches() -> None:
 
 
 def test_the_routing_class_is_measured_not_listed() -> None:
-    """RDR-229 P2.9 must empty a class the census counted, over every shape
-    the routing census scans. 25 sites since P2.5 (nexus-p2m1x.10): the 23
-    content-type tests, the shipped ``code__*`` default, and the taxonomy__
-    half of the schema-bypass test, which was 12 sites (229-research-39) until
-    P2.5 gathered them into ``db/rows/lifecycle.py``."""
-    routing = _by_class("routing")
-    assert sum(s.n for s in routing) == CLASS_PIN["routing"] == 25
-    assert {s.shape for s in routing} == {
-        "const_prefix", "loop_prefix", "startswith", "glob_default",
-    }
-    assert sum(1 for s in routing if s.note == _BYPASS_NOTE) == 1
-    assert [s.shape for s in routing if s.shape == "glob_default"] == ["glob_default"]
+    """RDR-229 P2.9 emptied the routing class: 22 sites read a row now, and the three ``taxonomy__`` name
+    tests left (the lifecycle bypass, ``manifest_backfill``, ``taxonomy_cmd``) are migration sources (a legacy
+    name no row backs and no row can tell apart; read through ``legacy_names.is_taxonomy_collection_name``, P2.2). Nothing
+    is left to route by name."""
+    assert not _by_class("routing")
+    assert "routing" not in CLASS_PIN  # the class is empty: no pin to keep
+    taxonomy = [s for s in _by_class("migration-source") if "taxonomy__" in s.note and "P2.2" in s.note]
+    assert sum(s.n for s in taxonomy) == 3
+    assert sum(1 for s in taxonomy if s.note == _BYPASS_NOTE) == 1
+    assert all("nexus-p2m1x.7" in s.note for s in taxonomy)
+    norow = [s for s in _by_class("mint") if "routing_content_type" in s.note]
+    assert len(norow) == 11 and all("P3.8" in s.note for s in norow)
     # Recovery-bundle classification of ANOTHER install's name is a migration
     # source, never routing (item 1); the URI-string classifiers stay at 2.
     bundle = [s for s in LEDGER if s.rel.endswith("catalog/recovery_bundle.py")]
@@ -952,15 +986,15 @@ def test_the_routing_class_is_measured_not_listed() -> None:
 def test_only_the_five_rdr_classes_and_the_two_fnmatch_labels_are_final() -> None:
     """``holdover`` is the one provisional label, and it never stands bare:
     each carries a note that names the Phase 2 step (P2.n) that moves it
-    (P2.2 read-path model reads, P2.4 taxonomy threshold; the P2.3 write
-    model and P2.7 name matcher holdovers are gone). No holdover is left
+    (the P2.2 read-path model reads, the P2.3 write model, the P2.4 taxonomy
+    threshold and the P2.7 name matcher holdovers are gone). No holdover is left
     without an owner."""
     assert set(_scan.CLASSES) == {
         "mint", "migration-source", "diagnostic", "routing", "uri-classifier",
         "label-pattern", "file-path", "holdover",
     }
     holdovers = _by_class("holdover")
-    assert sum(s.n for s in holdovers) == CLASS_PIN["holdover"]
+    assert sum(s.n for s in holdovers) == CLASS_PIN.get("holdover", 0)  # the class is empty: no pin to keep
     assert all(re.search(r"\bP2\.[0-9]+\b", s.note) for s in holdovers), (
         "a holdover note must name the Phase 2 step (P2.n) that moves it"
     )

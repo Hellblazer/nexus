@@ -57,7 +57,7 @@ def t3(monkeypatch) -> _CatalogFilteringT3:
 
     rows = {n: _row(n) for n in names}
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row",
-                        lambda name, refresh=False: rows.get(name))
+                        lambda name, refresh=False, strict=False: rows.get(name))
     monkeypatch.setattr("nexus.db.http_vector_client.is_service_backed", lambda db: True)
 
     class _Cat:

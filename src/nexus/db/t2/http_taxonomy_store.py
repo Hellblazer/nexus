@@ -745,25 +745,42 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         rows = self._post("/assignments/details", {"doc_ids": doc_ids}, mutates=False)
         return list(rows or [])
 
-    def prune_projection_below(self, source_collection_prefix: str, min_similarity: float) -> int:
+    def prune_projection_below(
+        self, source_collection_prefix: str, min_similarity: float, *, exact: bool = False,
+    ) -> tuple[int, str | None]:
         """POST /v1/taxonomy/assignments/prune_projection (GH #1528, nexus-4tfxp):
         delete projection assignments under *source_collection_prefix* (a corpus
         prefix like ``code__`` or one full collection name) whose stored raw
-        cosine is below *min_similarity*. Returns the removed count. The
+        cosine is below *min_similarity*. Returns ``(removed, match)``: the removed
+        count and the matching mode the engine says it applied (``"exact"`` or
+        ``"prefix"``), ``None`` from an engine that does not echo it. The
         recovery path for a pass that admitted weak matches: persist is a
-        prefer-higher upsert, so nothing else lowers or removes a row."""
+        prefer-higher upsert, so nothing else lowers or removes a row.
+
+        The engine matches by name PREFIX, so a full name also reaches every
+        longer name it prefixes. ``exact=True`` sends ``match: "exact"``, the
+        engine's exact-name mode (RDR-229 P2.4 follow-up, engine 0.1.200); send
+        it only to an engine that advertises it (``prune_supports_exact``), as
+        an older engine ignores the field and prunes by prefix; a caller that sent
+        it checks the echoed mode, because the flag and the prune can reach
+        different engines."""
         # idempotent=False (nexus-ll31n sibling): a threshold-predicate
         # sweep ("everything below min_similarity") over a discovered
         # population. A retry after a lost response re-evaluates the SAME
         # predicate against the now-already-pruned state and finds fewer
         # (often zero) rows, misreporting a completed prune as having
         # removed little or nothing.
-        r = self._post(
-            "/assignments/prune_projection",
-            {"source_collection_prefix": source_collection_prefix, "min_similarity": float(min_similarity)},
-            idempotent=False,
-        )
-        return int(r.get("removed", 0)) if isinstance(r, dict) else 0
+        body: dict[str, Any] = {
+            "source_collection_prefix": source_collection_prefix,
+            "min_similarity": float(min_similarity),
+        }
+        if exact:
+            body["match"] = "exact"
+        r = self._post("/assignments/prune_projection", body, idempotent=False)
+        if not isinstance(r, dict):
+            return 0, None
+        mode = r.get("match")
+        return int(r.get("removed", 0)), mode if isinstance(mode, str) else None
 
     def purge_assignments_for_doc(self, project: str, title: str) -> int:
         """Remove assignments for a deleted doc."""
@@ -2660,11 +2677,11 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         computes quantiles and stopword matching Python-side for exact parity
         with CatalogTaxonomy.audit_collection.
         """
-        from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        from nexus.projection_threshold import projection_threshold  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
         resolved_threshold = (
             threshold if threshold is not None
-            else default_projection_threshold(collection)
+            else projection_threshold(collection)
         )
 
         r = self._get("/audit", {"collection": collection, "top_n": top_n})

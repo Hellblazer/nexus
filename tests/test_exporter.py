@@ -30,6 +30,8 @@ from nexus.exporter import (
 )
 from tests.conftest import make_vector_test_client
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _EF = DefaultEmbeddingFunction()
 
 
@@ -441,6 +443,7 @@ class TestServiceModeExport:
     def _make_client() -> HttpVectorClient:
         client = HttpVectorClient.__new__(HttpVectorClient)
         client._tenant = "test-tenant"
+        client._row_resolver = lambda name: None  # no catalog: the name decides (a programming error in the reader raises)
         return client
 
     def _fake_service(

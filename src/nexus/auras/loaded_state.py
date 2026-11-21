@@ -164,7 +164,8 @@ def clean_gone(directory: Path, procs: Any, *, identity_dir: Path | None = None)
     cannot judge, stay. *identity_dir* is the token-file directory (``token_file.identity_dir(config dir)``), passed as
     ``sweep.py`` and ``binder.py`` pass it: the registry the check reads is one directory, so a holder whose token file
     names another one is judged by its pid and start time alone, never by a registry file that is not here."""
-    from nexus.identity.holder import check_holder  # noqa: PLC0415 -- deferred: the identity package is a leaf
+    from nexus.identity.holder import check_holder, read_registry_entry  # noqa: PLC0415 -- deferred: the identity package is a leaf
+    from nexus.identity.hostname import is_key  # noqa: PLC0415
 
     removed: list[Path] = []
     for path in state_files(directory):
@@ -173,6 +174,13 @@ def clean_gone(directory: Path, procs: Any, *, identity_dir: Path | None = None)
         holder: dict[str, Any]
         if state is not None:
             holder = {"host": state.host, "pid": state.pid, "started_at": state.started_at, "proc_start": state.proc_start}
+            if state.host != procs.host and not is_key(state.host):
+                # A file written under a hostname this machine has since lost (before the host key existed), by a process
+                # with no token file: this machine's own registry file for that pid and startedAt, live or a crash's
+                # leftover, proves the process was local (nexus.identity.hostname). A clean exit leaves none: that file stays.
+                entry = read_registry_entry(state.pid, procs.sessions_dir)
+                if entry is not None and entry.started_at == state.started_at:
+                    holder["host"] = procs.host
         elif named is not None:  # a torn or foreign file under a state file's name: judged by its name alone
             holder = {"host": procs.host, "pid": named[0], "started_at": named[1], "proc_start": None}
         else:

@@ -51,6 +51,7 @@ _log = structlog.get_logger(__name__)
 
 __all__ = [
     "CHROMA_IDENTITY_FIELD",
+    "FILE_ROUTED_CONTENT_TYPES",
     "FILE_ROUTED_PREFIXES",
     "HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S",
     "HTTPS_ETAG_CAPTURE_TIMEOUT_S",
@@ -72,6 +73,7 @@ __all__ = [
     "StatOk",
     "StatResult",
     "canonical_note_uri",
+    "file_routed_uri",
     "capture_https_etag",
     "is_note_uri",
     "note_uri",
@@ -105,6 +107,26 @@ HTTPS_ETAG_META_KEY = "https_etag"
 #: backfill candidate filter, nexus-r0kum's aspect-writer attribution
 #: guard) cannot silently diverge from each other.
 FILE_ROUTED_PREFIXES: tuple[str, ...] = ("rdr__", "docs__", "code__")
+
+#: RDR-229 P2.9: the content types whose collections are file-routed, read from a collection's ROW by
+#: :func:`is_file_routed_collection`. :data:`FILE_ROUTED_PREFIXES` is no longer a test of a live
+#: collection's name: it is the frozen list the URI-string classifiers (:func:`is_note_uri`) read, because
+#: a note URI's collection segment can name a collection that was renamed or never registered, so no row
+#: answers for it. ``tests/test_rdr229_p29_routing_by_content_type.py`` holds the two lists equal.
+FILE_ROUTED_CONTENT_TYPES: tuple[str, ...] = ("rdr", "docs", "code")
+
+
+def is_file_routed_collection(collection: str, *, db: object = None) -> bool:
+    """True when *collection*'s content type is a file-routed one (``rdr``, ``docs``, ``code``).
+
+    The content type is :func:`nexus.corpus.routing_content_type`'s: the catalog row (``db``'s own resolver,
+    else the client row cache), and, when no row backs a collection a write may be creating or the listing
+    cannot be read, the candidate name's own segment (RDR-229 item 1's NoRow and Unreadable outcomes). A
+    prefix-free label with no row is not file-routed (P3.8).
+    """
+    from nexus.corpus import routing_content_type  # noqa: PLC0415 — deferred: corpus is the heavier module
+
+    return routing_content_type(collection, db=db) in FILE_ROUTED_CONTENT_TYPES
 
 
 #: RDR-231: the stored scheme of a note ``source_uri``. A note is
@@ -197,8 +219,53 @@ def _warn_unanchored_relative_once(collection: str, source_path: str) -> None:
     )
 
 
-def uri_for(
+def file_routed_uri(
     collection: str, source_path: str, *, repo_root: str | None = None,
+) -> str | None:
+    """The ``file://`` identity of ``source_path`` for a collection that routes to ``file://`` (the branch of
+    :func:`uri_for` that a ``rdr__``/``docs__``/``code__`` collection takes). The result never depends on
+    ``collection``, which only names the collection in the one-time warning for an unanchored relative path, so a
+    caller that already knows the collection is file-routed by another test than its name (RDR-229 P2.10:
+    ``nx catalog backfill-source-uri`` on residue under a prefix-free label whose registry row has content type
+    code, docs or rdr) can ask for it directly. Same rule as :func:`uri_for`; see its docstring for the contract.
+    """
+    import os.path  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
+
+    if not source_path:
+        return None
+    # nexus-yg70j defect B / nexus-3e4s: NEVER anchor on the process CWD.
+    #
+    # `os.path.abspath` on a RELATIVE path calls getcwd(), which makes this
+    # identity field a function of where the process happens to be standing.
+    # Two failure modes, both observed:
+    #   * cwd DELETED -> getcwd() raises, and before 7.16.2 that killed the
+    #     aspect-worker permanently and silently (16 batches, ~40 min).
+    #   * cwd VALID BUT UNRELATED -> a plausible file:// URI for a path that
+    #     does not exist. After the 7.16.2 chdir fix the worker stands in
+    #     the config dir, so "docs/rdr/x.md" minted
+    #     file:///Users/<u>/.config/nexus/docs/rdr/x.md. Loud failure became
+    #     quiet wrong answer.
+    #
+    # The catalog stores file_path RELATIVE and the anchor is the OWNER's
+    # repo_root -- exactly what HttpCatalogClient.resolve_path (nexus-5i864)
+    # already does for the link generator, and what the engine's
+    # deriveSourceUri does server-side (returns "" for a relative path with
+    # an empty repoRoot rather than guessing).
+    #
+    # So: absolute is returned as-is; relative is anchored ONLY on an
+    # explicitly supplied repo_root; relative with no root returns None.
+    # None is a missing identity, which is detectable and recoverable. A
+    # cwd-anchored URI is a WRONG identity, which is neither.
+    if os.path.isabs(source_path):
+        return "file://" + os.path.normpath(source_path)
+    if repo_root:
+        return "file://" + os.path.normpath(os.path.join(str(repo_root), source_path))
+    _warn_unanchored_relative_once(collection, source_path)
+    return None
+
+
+def uri_for(
+    collection: str, source_path: str, *, repo_root: str | None = None, db: object = None,
 ) -> str | None:
     """Persistent URI for ``(collection, source_path)``. Single source
     of truth for the going-forward writer in
@@ -210,10 +277,23 @@ def uri_for(
     SQLite ``NULL`` in :class:`AspectRecord` writes and matches the
     migration's NULL-on-empty backfill behavior.
 
-    Filesystem-backed collections (``rdr__/docs__/code__``) get a
-    ``file://`` URI; everything else (``knowledge__`` and any future
-    prefix) gets ``nx-note://`` (via :func:`note_uri`) with the literal
-    source_path as the path component. The note reader handles the title/source_path
+    Filesystem-backed collections get a ``file://`` URI; everything else
+    (``knowledge`` and any future content type) gets ``nx-note://`` (via
+    :func:`note_uri`) with the literal source_path as the path component.
+    The collection's content type is :func:`nexus.corpus.routing_content_type`'s
+    (RDR-229 P2.9, item 1's three outcomes):
+
+    * **Row**: the catalog row's ``content_type`` (``rdr``, ``docs`` and ``code``
+      are filesystem-backed).
+    * **NoRow**: a collection a write is creating holds no chunk and has no row;
+      after one cache invalidate and re-read the candidate name's own ``<type>__``
+      segment answers, so a first write to a new ``docs__`` collection still
+      gets ``file://``, as before.
+    * **Unreadable**: the listing could not be read; the same name derivation,
+      with a warning.
+
+    Only a prefix-free label (``c1234``) with no row stays a note URI, until
+    P3.8: no string rule tells it from a note. The note reader handles the title/source_path
     identity-field fallback for knowledge collections internally
     (research-5, id 1014).
 
@@ -247,40 +327,10 @@ def uri_for(
     ``CatalogRepository.deriveSourceUri`` — three implementations, one
     contract.
     """
-    import os.path  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
-
     if not source_path:
         return None
-    if collection.startswith(FILE_ROUTED_PREFIXES):
-        # nexus-yg70j defect B / nexus-3e4s: NEVER anchor on the process CWD.
-        #
-        # `os.path.abspath` on a RELATIVE path calls getcwd(), which makes this
-        # identity field a function of where the process happens to be standing.
-        # Two failure modes, both observed:
-        #   * cwd DELETED -> getcwd() raises, and before 7.16.2 that killed the
-        #     aspect-worker permanently and silently (16 batches, ~40 min).
-        #   * cwd VALID BUT UNRELATED -> a plausible file:// URI for a path that
-        #     does not exist. After the 7.16.2 chdir fix the worker stands in
-        #     the config dir, so "docs/rdr/x.md" minted
-        #     file:///Users/<u>/.config/nexus/docs/rdr/x.md. Loud failure became
-        #     quiet wrong answer.
-        #
-        # The catalog stores file_path RELATIVE and the anchor is the OWNER's
-        # repo_root -- exactly what HttpCatalogClient.resolve_path (nexus-5i864)
-        # already does for the link generator, and what the engine's
-        # deriveSourceUri does server-side (returns "" for a relative path with
-        # an empty repoRoot rather than guessing).
-        #
-        # So: absolute is returned as-is; relative is anchored ONLY on an
-        # explicitly supplied repo_root; relative with no root returns None.
-        # None is a missing identity, which is detectable and recoverable. A
-        # cwd-anchored URI is a WRONG identity, which is neither.
-        if os.path.isabs(source_path):
-            return "file://" + os.path.normpath(source_path)
-        if repo_root:
-            return "file://" + os.path.normpath(os.path.join(str(repo_root), source_path))
-        _warn_unanchored_relative_once(collection, source_path)
-        return None
+    if is_file_routed_collection(collection, db=db):
+        return file_routed_uri(collection, source_path, repo_root=repo_root)
     return note_uri(collection, source_path)
 
 
@@ -398,10 +448,10 @@ ReadResult = ReadOk | ReadFail
 # below preserves that behavior for back-compat callers; the load-bearing
 # claim post-RDR-101 is the doc_id-keyed path.
 CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
-    "rdr__":       ("doc_id",),
-    "docs__":      ("doc_id",),
-    "code__":      ("doc_id",),
-    "knowledge__": ("doc_id",),
+    "rdr":       ("doc_id",),
+    "docs":      ("doc_id",),
+    "code":      ("doc_id",),
+    "knowledge": ("doc_id",),
 }
 
 
@@ -410,10 +460,10 @@ CHROMA_IDENTITY_FIELD: dict[str, tuple[str, ...]] = {
 # table. Slated for removal once the prune verb (.10.3) lands and chunks
 # uniformly carry ``doc_id`` metadata.
 _LEGACY_IDENTITY_FIELDS: dict[str, tuple[str, ...]] = {
-    "rdr__":       ("source_path",),
-    "docs__":      ("source_path",),
-    "code__":      ("source_path",),
-    "knowledge__": ("source_path", "title"),
+    "rdr":       ("source_path",),
+    "docs":      ("source_path",),
+    "code":      ("source_path",),
+    "knowledge": ("source_path", "title"),
 }
 
 
@@ -423,10 +473,9 @@ def _identity_fields_for(collection: str) -> tuple[str, ...]:
     prefix maps to ``("doc_id",)`` uniformly; the legacy multi-field
     probe lives behind ``_legacy_identity_fields_for`` for back-compat.
     """
-    for prefix, fields in CHROMA_IDENTITY_FIELD.items():
-        if collection.startswith(prefix):
-            return fields
-    return ("doc_id",)
+    from nexus.corpus import routing_content_type  # noqa: PLC0415 — deferred: corpus is the heavier module
+
+    return CHROMA_IDENTITY_FIELD.get(routing_content_type(collection) or "", ("doc_id",))
 
 
 def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
@@ -436,10 +485,9 @@ def _legacy_identity_fields_for(collection: str) -> tuple[str, ...]:
     for ``knowledge__*``. Used by ``_read_chroma_uri`` only when no
     ``doc_id_lookup`` is supplied.
     """
-    for prefix, fields in _LEGACY_IDENTITY_FIELDS.items():
-        if collection.startswith(prefix):
-            return fields
-    return ("source_path",)
+    from nexus.corpus import routing_content_type  # noqa: PLC0415 — deferred: corpus is the heavier module
+
+    return _LEGACY_IDENTITY_FIELDS.get(routing_content_type(collection) or "", ("source_path",))
 
 
 # ── file:// reader ───────────────────────────────────────────────────────────

@@ -770,7 +770,9 @@ itself (the bound tenant in the verification query does this). Any other
 driving table has only the tenant policy (a census of CREATE POLICY in the
 changelogs finds `tenant_isolation` everywhere and the owner-read policy only
 on `nexus.chunks`), so the move adds the same owner-read SELECT policy, named
-`<table>_owner_read`, for
+`<table>_owner_read`, on its driving table and on every tenant-scoped table its
+template or verification joins (a support table; the boot check covers those
+through `DrivingTableIsolationCheck.SUPPORT_TABLES`), for
 the migrating role (`TO CURRENT_USER`, the vectors-029 pattern) in its own
 changeset, ordered after the registering changeset. That changeset carries
 vectors-029's guard: a precondition that skips it (MARK_RAN) when `nexus_svc`,
@@ -1580,3 +1582,4 @@ the first registered move.
 - 2026-11-17: verification and `on_complete` failure classes to the code of nexus-f3yqd.2.15's follow-up and its critique (decided by linda under Sam's "keep things moving" rule, reversible): a verification run is transient for its timeout, a lost connection, a shutdown, a busy host (class 53) or a fault with no SQLSTATE, and an open failure of its connection is a connection failure; any other error it raises is permanent, 42501 and 42883 included; an `on_complete` is also transient for a lost connection, a shutdown, a busy host, a deadlock or a serialization failure, since its transaction rolls back whole.
 - 2026-11-17: verification refusals to the code of nexus-f3yqd.2.19's parity follow-up (grant 3): the gate and `MoveSql` both refuse a blank text, a `/*/` and a `$` directly next to a non-ASCII character, and a standalone `$1` has no word character, `$` or non-ASCII character beside it.
 - 2026-11-21: wording to landed, reviewed code (grant 3), nexus-p2m1x.21, feature/rdr246-split-move-bounds: Sam's split-bounds ruling (T2 `nexus/sam-ruling-split-move-bounds-2026-11-21`, amending decision C `nexus/sam-ruling-rdr229-ask-c-2026-11-20`). The first verification pass runs READ ONLY under the new `verify_statement_timeout_ms` (default 60000, ACCESS SHARE only, the warm-up); the completion transaction keeps `statement_timeout_ms` and `lock_timeout`, and re-checks table-wide and per tenant (tenants re-read from `nexus.service_tokens` and the leaves) under that one budget before `on_complete`; a re-check row is `VERIFICATION_NONEMPTY`, and a re-check lock wait, timeout or deadlock is a transient `RECHECK` failure.
+- 2026-11-20: wording to reviewed code (grant 3), RDR-229 P2.10 (nexus-p2m1x.15, reviews T2 nexus/review-p2m1x15-2026-11-20-r2 and nexus/critique-p2m1x15-2026-11-20-r2): the owner-read policy also covers a tenant-scoped support table a move's template or verification joins (`catalog_collections_owner_read`, which RDR-229 D2's `vectors-065` adds and P2.10 reuses), and the boot check covers it through `DrivingTableIsolationCheck.SUPPORT_TABLES`.

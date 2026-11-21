@@ -24,14 +24,14 @@ file names THIS directory; any other holder (or one with no token file) is judge
 compare alone, which do not depend on a directory: gone if the pid is dead or was reused, else unknown, and unknown is
 never reported gone.
 
-A holder on another host is judged by its lease alone and the check says **other_host**. A crashed process leaves
+A holder on another host is judged by its lease alone and the check says **other_host**. "This host" is the machine's stable key, or a
+pre-key hostname the machine can prove was its own (:func:`nexus.identity.hostname.holder_is_local`). A crashed process leaves
 its registry file behind, so file presence alone never decides: the probe does.
 """
 from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -39,6 +39,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from nexus.identity import hostname as _hostname
+from nexus.identity.hostname import describe_host, holder_is_local
 
 GONE = "gone"
 RUNNING = "running"
@@ -52,8 +55,8 @@ DESKTOP_ENTRYPOINT = "claude-desktop"
 
 
 def this_host() -> str:
-    """The name bindings carry for this machine."""
-    return socket.gethostname()
+    """The name bindings carry for this machine: a key stable across network changes (:mod:`nexus.identity.hostname`)."""
+    return _hostname.this_host()
 
 
 def claude_sessions_dir() -> Path:
@@ -130,9 +133,16 @@ class Processes:
     def __init__(self, *, sessions_dir: Path | None = None, host: str | None = None, platform: str | None = None,
                  win_api: Any = None) -> None:
         self.sessions_dir = sessions_dir if sessions_dir is not None else claude_sessions_dir()
-        self.host = host if host is not None else this_host()
+        self._host = host
         self.platform = platform if platform is not None else sys.platform
         self.win_api = win_api
+
+    @property
+    def host(self) -> str:
+        """The name bindings carry for this machine: the one a caller gave, else :func:`this_host` read NOW, so a key probe
+        that failed when this object was built (and is retried by :mod:`nexus.identity.hostname`) heals for a long-lived
+        holder of it, the MCP lease."""
+        return self._host if self._host is not None else this_host()
 
     def alive(self, pid: int) -> bool:
         from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — the one liveness probe (test_pid_alive_single_probe_lint); deferred, stdlib-heavy module
@@ -228,8 +238,8 @@ def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str
     unknown. A holder that was restarted in place (same pid and start time, a new ``startedAt``) cannot be told
     from a running one without its registry file, so it stays unknown."""
     here = host if host is not None else procs.host
-    if holder.get("host") != here:
-        return Verdict(OTHER_HOST, f"held on {holder.get('host')}, not on {here}")
+    if not holder_is_local(holder, host=here, identity_dir=identity_dir):
+        return Verdict(OTHER_HOST, f"held on {describe_host(holder.get('host'))}, not on {describe_host(here)}")
     pid = _int(holder.get("pid"))
     if pid is None:
         return Verdict(UNKNOWN, "the binding names no pid")

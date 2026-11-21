@@ -223,7 +223,7 @@ def test_collection_names_stable_across_worktrees(tmp_path) -> None:
 def test_resolve_repo_collection_synthesises_conformant_for_rdr() -> None:
     """No-catalog fallback synthesises a conformant 4-segment name for
     each content_type."""
-    from nexus.corpus import is_conformant_collection_name
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name
     from nexus.registry import _resolve_repo_collection
     repo = Path("/some/path/myrepo")
     for ct in ("code", "docs", "rdr"):

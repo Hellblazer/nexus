@@ -20,8 +20,10 @@ from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.types import SearchResult
 from tests.conftest import catalog_row_for_collection_name
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
 
-def _code_row_stub(name: str) -> dict | None:
+
+def _code_row_stub(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
     """RDR-204 Phase 3 class (c) repoint (nexus-ft04v.26, commit
     2cdde2306): ``apply_hybrid_scoring``'s code-detection now reads
     ``nexus.mcp_infra.get_collection_row`` directly, never the collection

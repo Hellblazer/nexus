@@ -235,7 +235,7 @@ def _stamped(collection: str) -> list[str]:
 
     pieces = ["first piece", "second piece"]
     rows = [{"chash": f"{i:064x}"} for i in range(len(pieces))]
-    chunks = _chunk_payload(collection, pieces, rows, content_type="prose")
+    chunks, _known = _chunk_payload(collection, pieces, rows, content_type="prose")
     return [c["metadata"]["embedding_model"] for c in chunks]
 
 

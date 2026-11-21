@@ -623,7 +623,7 @@ def _resolve_tumbler(ref: SourceRef, qualifier: _Qualifier | None, calls: _Calls
 
 # ── Sibling files: which one is the RDR (nexus-xho6c) ────────────────────────────────────
 
-#: The ``extractor_name`` of the deterministic RDR parser (``aspect_extractor._REGISTRY["rdr__"]``); a pin
+#: The ``extractor_name`` of the deterministic RDR parser (``aspect_extractor._REGISTRY["rdr"]``); a pin
 #: in the tests holds the two together. Only a row it wrote says what the file's frontmatter holds.
 RDR_FRONTMATTER_EXTRACTOR = "rdr-frontmatter-v1"
 

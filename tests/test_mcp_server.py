@@ -1670,10 +1670,20 @@ def test_query_corpus_routing_matches_search(corpus_arg, available, expected_in,
 # ── collection_list ──────────────────────────────────────────────────────────
 
 def test_collection_list_returns_names_and_counts():
-    _mock_t3([{"name": "knowledge__test", "count": 42}, {"name": "code__repo", "count": 100}])
+    # The listing row carries the model (the registry row, RDR-229 P2.2): collection_list prints it.
+    _mock_t3([
+        {"name": "knowledge__test", "count": 42, "embedding_model": "voyage-context-3"},
+        {"name": "code__repo", "count": 100, "embedding_model": "voyage-code-3"},
+    ])
     result = collection_list()
     for s in ("knowledge__test", "42", "code__repo", "100", "voyage-context-3", "voyage-code-3"):
         assert s in result
+
+
+def test_collection_list_prints_the_rows_model_not_the_names():
+    """RDR-229 P2.2: a legacy name guesses a model from its prefix; the row says what the engine embeds with."""
+    _mock_t3([{"name": "code__repo", "count": 1, "embedding_model": "bge-base-en-v15-768"}])
+    assert "(bge-base-en-v15-768)" in collection_list()
 
 
 def test_collection_list_empty():

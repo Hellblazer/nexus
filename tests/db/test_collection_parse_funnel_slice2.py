@@ -62,7 +62,7 @@ def _fake_collection_rows(monkeypatch: pytest.MonkeyPatch):
     """
     import nexus.mcp_infra as mi
 
-    def _fake_get_collection_row(name: str) -> dict | None:
+    def _fake_get_collection_row(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
         content_type = name.partition("__")[0] if "__" in name else ""
         # RDR-204 Phase 3 (nexus-ft04v.26) class (b): per_collection_chunk_cap/
         # _upsert_byte_budget now resolve the write model via the row
@@ -104,7 +104,7 @@ class TestWriteModelForCollection:
         # GH #667 came from) disagrees and must win.
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {"embedding_model": "model-ctx"},
+            lambda name, *, refresh=True, strict=False: {"embedding_model": "model-ctx"},
         )
         assert hvc._write_model_for_collection("code__nexus__model-code__v1") == "model-ctx"
 
@@ -112,14 +112,14 @@ class TestWriteModelForCollection:
         import nexus.mcp_infra as mi
         from nexus.db import http_vector_client as hvc
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
         assert hvc._write_model_for_collection("code__nexus__model-code__v1") == "model-code"
 
     def test_none_when_no_row_and_not_conformant(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import nexus.mcp_infra as mi
         from nexus.db import http_vector_client as hvc
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
         assert hvc._write_model_for_collection("docs__legacy-two-segment") is None
 
 
@@ -244,7 +244,7 @@ class TestQuarantineCollectionName:
 
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {
+            lambda name, *, refresh=True, strict=False: {
                 "content_type": "code", "owner_id": "nexus-1-1",
                 "embedding_model": "model-code", "lifecycle_state": "live",
             },
@@ -262,7 +262,7 @@ class TestQuarantineCollectionName:
 
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {
+            lambda name, *, refresh=True, strict=False: {
                 "content_type": "docs", "owner_id": "proj",
                 "embedding_model": "bge-base-en-v15-768", "lifecycle_state": "live",
             },
@@ -276,7 +276,7 @@ class TestQuarantineCollectionName:
     def test_missing_row_falls_to_conformant_name_shape(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import nexus.mcp_infra as mi
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
         from nexus.catalog.chunk_quarantine import quarantine_collection_name
 
         assert quarantine_collection_name("docs__proj__bge-base-en-v15-768__v1") == (
@@ -286,7 +286,7 @@ class TestQuarantineCollectionName:
     def test_missing_row_and_no_double_underscore_falls_back_to_x(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import nexus.mcp_infra as mi
 
-        monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
+        monkeypatch.setattr(mi, "get_collection_row", lambda name, *, refresh=True, strict=False: None)
         from nexus.catalog.chunk_quarantine import quarantine_collection_name
 
         assert quarantine_collection_name("noprefixname") == "quarantine-x__noprefixname"

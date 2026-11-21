@@ -64,6 +64,7 @@ import java.util.function.Supplier;
  *  "tenant_export_format_version":1,
  *  "tenant_import_supported":true,
  *  "vector_topic_route_supported":true,
+ *  "taxonomy_prune_exact_supported":true,
  *  "schema_latest_id":"vectors-002",
  *  "schema_changeset_count":64}</pre>
  *
@@ -795,6 +796,20 @@ public final class VersionHandler implements HttpHandler {
     }
 
     /**
+     * nexus-p2m1x.9 (RDR-229 P2.4) capability advertisement: does {@code POST /v1/taxonomy/assignments/prune_projection}
+     * honour {@code match: "exact"} (delete only the named collection) as well as the default {@code "prefix"}?
+     *
+     * <p>An independent flag, and the only evidence: an engine without the feature ignores the unknown {@code match}
+     * key and prunes by prefix, so a client that wants exact-name pruning must read this flag before it relies on
+     * the field (an outage or an absent flag reads as unsupported, and the client keeps its own prefix-collision
+     * guard). Always present, always {@code true} on an engine carrying the change. Cloud clients see it only once
+     * the public conexus edge allowlists it (the {@code vector_topic_route_supported} precedent).
+     */
+    static void appendTaxonomyPruneExactCapabilityField(StringBuilder body) {
+        body.append(",\"taxonomy_prune_exact_supported\":true");
+    }
+
+    /**
      * RDR-253 amendment capability advertisement (Sam 2026-11-19, "go with option 2, no bridge"): does this engine let
      * the data credential promote the ephemeral identity its own identity token names, create a delegated identity
      * whose parent its token names, and create a seat when it carries a live token?
@@ -1060,6 +1075,8 @@ public final class VersionHandler implements HttpHandler {
         // nexus-7fku2.1.4 (RDR-134 Step 4): topic_route on POST /v1/vectors/search-per-collection.
         appendVectorTopicRouteCapabilityField(body);
         appendIdentitySelfSeatCapabilityField(body);
+        // nexus-p2m1x.9 (RDR-229 P2.4): match=exact on POST /v1/taxonomy/assignments/prune_projection.
+        appendTaxonomyPruneExactCapabilityField(body);
         // nexus-904y8: uptime (predicate) + start instant (correlation).
         appendProcessUptimeFields(body, processStartMillis, System.currentTimeMillis());
         if (embedderRouter != null) {

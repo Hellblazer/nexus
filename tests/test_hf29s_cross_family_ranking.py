@@ -55,13 +55,14 @@ from tests.test_search_cmd_server_rerank import (
 )
 from tests.conftest import catalog_row_for_collection_name
 
+
 BGE = "bge-base-en-v15-768"
 BGE_DOCS = f"docs__bgeowner__{BGE}__v1"
 VOY_RDR = "rdr__voyowner__voyage-context-3__v1"
 BGE_KNOW = f"knowledge__bgeowner__{BGE}__v1"
 
 
-def _row_for(name: str) -> dict:
+def _row_for(name: str, *, refresh: bool = True, strict: bool = False) -> dict:
     """A catalog row whose embedding_model is the name's own token (the
     shared ``catalog_row_for_collection_name`` only knows Voyage tokens)."""
     row = catalog_row_for_collection_name(name)
@@ -620,15 +621,16 @@ def test_threshold_for_collection_model_legacy_name_by_engine_kind() -> None:
     from nexus.search_engine import _threshold_for_collection_model
 
     cfg = {"search": {"distance_threshold": {"docs": 0.65, "default": 0.55}}}
-    # Non-dual (the default): a legacy name keeps the prefix threshold, as before.
-    assert _threshold_for_collection_model(LEGACY, cfg) == pytest.approx(0.65)
-    assert _threshold_for_collection_model(LEGACY, cfg, dual=False) == pytest.approx(0.65)
+    docs = {"content_type_of": lambda name: "docs"}  # RDR-229 P2.9: the content type is the row's
+    # Non-dual (the default): a legacy name keeps the content-type threshold, as before.
+    assert _threshold_for_collection_model(LEGACY, cfg, **docs) == pytest.approx(0.65)
+    assert _threshold_for_collection_model(LEGACY, cfg, dual=False, **docs) == pytest.approx(0.65)
     # Dual: the family is unknown, so no threshold.
-    assert _threshold_for_collection_model(LEGACY, cfg, dual=True) is None
+    assert _threshold_for_collection_model(LEGACY, cfg, dual=True, **docs) is None
     # A named Voyage collection is still filtered on a dual engine; bge still never.
-    assert _threshold_for_collection_model(_ModeT3.VOY, cfg, dual=True) == pytest.approx(0.65)
-    assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=True) is None
-    assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=False) is None
+    assert _threshold_for_collection_model(_ModeT3.VOY, cfg, dual=True, **docs) == pytest.approx(0.65)
+    assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=True, **docs) is None
+    assert _threshold_for_collection_model(_ModeT3.BGE, cfg, dual=False, **docs) is None
 
 
 @pytest.mark.parametrize(
@@ -675,6 +677,11 @@ def test_the_doctor_probe_judges_a_legacy_name_by_the_same_rule(monkeypatch):
 
         def embedding_mode(self):
             return self._mode
+
+        def _resolve_collection_rows(self, names):
+            # the handle's own rows: a docs row for each name, the model its token names (the legacy name has none)
+            return {n: {"content_type": "docs", **({"embedding_model": n.split("__")[2]} if n != LEGACY else {})}
+                    for n in names}
 
     assert _default_threshold_for(LEGACY, _Engine("dual")) is None
     assert _default_threshold_for(LEGACY, _Engine("voyage")) == pytest.approx(0.65)
@@ -1081,7 +1088,7 @@ def test_search_hands_back_the_resolver_it_built_and_it_ranks_the_legacy_row_fir
         _ModeT3.ROWS, _ModeT3.VOY, [{"id": "con", "content": "c", "distance": 0.60}],
     )
     voy_model = _ModeT3.VOY.split("__")[2]
-    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, voy_model)})
+    catalog = _RowCatalog({LEGACY_VOY: _row(LEGACY_VOY, voy_model), _ModeT3.VOY: _row(_ModeT3.VOY, voy_model)})
     t3 = _recording_t3(monkeypatch, "dual", catalog)
     out: list = []
     results = search_cross_corpus("q", [LEGACY_VOY, _ModeT3.VOY], 10, t3, model_of_out=out, sensitivity="include")

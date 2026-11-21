@@ -467,7 +467,6 @@ class ReembedRoutesTest {
             .containsEntry("embedding_model", BGE).containsEntry("superseded_by", t.src());
         assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
     }
-
     // ── start: reviving a superseded target ──────────────────────────────────
 
     /** A to B done (or aborted) with A superseded by B, as a cutover leaves it; then the profile names A's model. */
@@ -537,7 +536,8 @@ class ReembedRoutesTest {
     @Test
     void aTargetSupersededByAnotherNameIsRefusedNamingTheRowAndItsSuccessor() throws Exception {
         Tn t = tenant("revother");
-        String third = name(t, MINI, 2);
+        // A different owner: a v2 on the source's own tuple would be a live twin and refused first (nexus-p2m1x.28).
+        String third = TYPE + "__" + t.owner() + "x__" + MINI + "__v2";
         register(t, third);
         setProfile(t.tenant(), BGE, 768);
         // The bge sibling A is superseded by a third collection, not by the source B of the new job.

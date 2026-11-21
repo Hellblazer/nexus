@@ -37,7 +37,7 @@ pytestmark = pytest.mark.lint
 
 REPO = Path(__file__).resolve().parent.parent
 _SRC = REPO / "src" / "nexus"
-_NAMES = frozenset({"uri_for", "note_uri", "catalog_store_hook", "catalog_store_hook_tracked"})
+_NAMES = frozenset({"uri_for", "note_uri", "file_routed_uri", "catalog_store_hook", "catalog_store_hook_tracked"})
 _MIN_FILES = 300
 
 GUARDED = "guarded-writer"
@@ -55,6 +55,10 @@ _SITES: dict[tuple[str, str, str], tuple[str, int, str]] = {
         GUARDED, 1, "the registration's own title-only identity, reached through put_note and the exporter"),
     ("src/nexus/exporter.py", "uri_for", "call"): (
         GUARDED, 1, "title-only owner synthesis inside import_collection, which checks the floor for a note target"),
+    ("src/nexus/aspect_readers.py", "file_routed_uri", "call"): (
+        DEFINITION, 1, "uri_for's file-routed branch; mints a file:// identity, never a note"),
+    ("src/nexus/commands/catalog_cmds/backfill.py", "file_routed_uri", "call"): (
+        TRANSIENT, 1, "backfill-source-uri re-derives a file:// identity for file-routed residue (RDR-229 P2.10); never a note"),
     ("src/nexus/aspect_readers.py", "note_uri", "call"): (
         DEFINITION, 2, "uri_for's non-file branch, and the https hint's lookup form (a transient mint)"),
     ("src/nexus/aspect_extractor.py", "note_uri", "call"): (
@@ -65,8 +69,6 @@ _SITES: dict[tuple[str, str, str], tuple[str, int, str]] = {
         ASPECT, 1, "re-derives the URI of an aspect row that has none"),
     ("src/nexus/catalog/recovery_bundle.py", "uri_for", "call"): (
         TRANSIENT, 3, "the export's link join key, the import's endpoint re-derivation and its catalog-flag probe: lookups"),
-    ("src/nexus/commands/catalog_cmds/backfill.py", "uri_for", "call"): (
-        TRANSIENT, 1, "re-derives a file:// URI to compare with a stored one (file-routed residue repair)"),
     ("src/nexus/commands/enrich.py", "note_uri", "call"): (
         TRANSIENT, 1, "the enrich dry-run's read of a source"),
     ("src/nexus/db/http_vector_client.py", "uri_for", "call"): (

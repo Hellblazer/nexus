@@ -322,11 +322,17 @@ def _same_start(a: str, b: str) -> bool:
 
 
 def _process_gone(procs: Any, here: str, host: str, pid: int, *, start: str | None, began: float | None) -> tuple[bool, bool]:
-    """``(judged, gone)`` for a process another party recorded. Not judged: the record names another host. Gone: the pid
+    """``(judged, gone)`` for a process another party recorded. Not judged: the record names another host (this one's key, or
+    the short form of the name a hand-written ref gives it: ``lab-remote`` writes ``gethostname()`` up to its first dot).
+    A labrun ref carries only that short hostname, so two machines that share a short name still compare equal here until
+    lab-remote writes the key, and the ref's pid is then judged against this machine's table. Owner records the registrar
+    wrote carry the full host, which is the key from this release on. Gone: the pid
     runs no longer, or it runs but began at another time than recorded (the pid was reused): by *start* (the OS start time
     string) when the record has one, else by *began* (epoch seconds, with :data:`START_SKEW_S` of slack). A start time that
     cannot be read is never gone: a reader that cannot prove it must not say it."""
-    if _short(host) != _short(here):
+    from nexus.identity.hostname import machine_short_names  # noqa: PLC0415 — deferred: leaf import cost
+
+    if _short(host) not in machine_short_names(here):
         return False, False
     if not procs.alive(pid):
         return True, True

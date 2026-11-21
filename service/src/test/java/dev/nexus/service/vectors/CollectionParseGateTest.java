@@ -278,6 +278,11 @@ class CollectionParseGateTest {
      * classification), and {@code ReembedHandler.register}, which reads the version off the target name the client
      * minted. It is the only place the engine reads a version out of a name, and it is retired at P4 with the name
      * parsers.
+     *
+     * <p>The same regex also reads a MODEL out of a name ({@code CollectionRegistration.modelOfConformantName}),
+     * which adds no literal, so this per-file census cannot see it. Its callers are pinned separately by
+     * {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS} (nexus-p2m1x.28): the one caller is {@code TargetSelection.foreignOrigin}, a
+     * MIGRATION-SOURCE read of a re-embed source row deleted by cutover; it retires at P4, with the name parsers.
      */
     private static final Map<String, Integer> COLLECTION_LITERAL_CENSUS = Map.of(
         "dev/nexus/service/db/CollectionRegistration.java", 1,

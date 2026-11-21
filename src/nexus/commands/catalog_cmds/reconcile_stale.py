@@ -265,7 +265,8 @@ def _resolve_provenance(entry: object, owner_roots: dict[str, str]) -> tuple[Pat
     a relative file_path is anchored at ``owner_roots[owner_id]`` or,
     absent that, treated as unresolvable. Never falls back to cwd.
     """
-    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     fp = entry.file_path or ""
     source_uri = getattr(entry, "source_uri", "") or ""
@@ -372,7 +373,8 @@ def _store_put_signature_reason(entry: object) -> str | None:
     # (nexus.corpus.resolve_row_preferred), same reason as this module's
     # other class-(d) site above -- a row that disagrees with the name
     # must win here too.
-    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if entry.file_path:
         return None

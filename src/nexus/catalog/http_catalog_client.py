@@ -92,6 +92,7 @@ import structlog
 
 from nexus._log_safe_url import log_endpoint, scrub_transport_error
 from nexus.catalog.sensitivity_doctor import SensitiveListUnavailable, sensitive_answer
+from nexus.repo_owner_root import backfill_owner_root
 from nexus.catalog.tumbler import Tumbler
 from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
@@ -876,10 +877,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         effective_name = repo_name or name or derived_name
         # Idempotent fast path: an owner already exists for this repo
         # (owner_for_repo returns None on 404).
-        if owner_type == "repo" and repo_hash:
-            existing = self.owner_for_repo(repo_hash)
-            if existing is not None:
-                return existing
+        if owner_type == "repo" and repo_hash and (row := self._owner_row_for_repo(repo_hash)) and row.get("tumbler_prefix"):
+            backfill_owner_root(self, row, repo_hash, main_repo)  # RDR-229: an owner registered without a root gets this call's
+            return Tumbler.parse(row["tumbler_prefix"])
         payload: dict = {
             "name": effective_name,
             "owner_type": owner_type,
@@ -926,16 +926,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         })
         return int(result.get("updated", 0) if result else 0)
 
-    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
+    def _owner_row_for_repo(self, repo_hash: str) -> dict | None:
         try:
             result = self._get("/owners/by_repo", repo_hash=repo_hash)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
             raise
-        if result and result.get("tumbler_prefix"):
-            return Tumbler.parse(result["tumbler_prefix"])
-        return None
+        return result if isinstance(result, dict) and result else None
+
+    def owner_for_repo(self, repo_hash: str) -> Tumbler | None:
+        row = self._owner_row_for_repo(repo_hash)
+        return Tumbler.parse(row["tumbler_prefix"]) if row and row.get("tumbler_prefix") else None
 
     def owner_tumblers_by_name(self, name: str) -> list[Tumbler]:
         result = self._get("/owners/by_name", name=name)
@@ -3547,6 +3549,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         version = flags.get("release_version") or flags.get("app_version") or ""
         return flags.get("catalog_sensitivity_supported") is True, str(version) if flags else ""
 
+    def supports_taxonomy_prune_exact(self) -> bool:  # /version taxonomy_prune_exact_supported (nexus-p2m1x.9): only JSON true counts
+        return self._version_flags().get("taxonomy_prune_exact_supported") is True
+
     def supports_catalog_move(self) -> bool:
         """Does the engine answer ``POST /documents/move`` and ``/owners/move`` (``GET /version``'s
         ``catalog_move_supported``, RDR-254)? Only a JSON ``true`` counts; a failed or edge-trimmed answer reads False."""
@@ -3734,10 +3739,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         hand-fixing each call site. An explicitly-passed non-empty value is
         never overridden.
         """
-        from nexus.corpus import (  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
-            collection_registration_kwargs,
-            is_conformant_collection_name,
-        )
+        from nexus.corpus import collection_registration_kwargs  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — deferred: nexus.corpus imports back into catalog
 
         if legacy_grandfathered is None:
             legacy_grandfathered = not is_conformant_collection_name(name)
@@ -4098,7 +4101,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         except ValueError:
             pass
         if check_model_token:
-            from nexus.corpus import embedding_model_for_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             token = embedding_model_for_collection_name(new)
             if token is not None:

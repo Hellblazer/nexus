@@ -777,7 +777,11 @@ public final class TaxonomyHandler implements HttpHandler {
      * Body: {@code source_collection_prefix} (a corpus prefix like {@code code__}
      * or a full collection name), {@code min_similarity} (0..1). Deletes
      * projection assignments under that prefix whose stored raw cosine is
-     * below the threshold; answers {@code {"removed": N}}.
+     * below the threshold; answers {@code {"removed": N, "match": "prefix"|"exact"}}, {@code match} being the mode
+     * applied. nexus-p2m1x.9 (RDR-229 P2.4): optional request {@code match}: {@code "prefix"} (default when absent
+     * or null; {@code startsWith}) or {@code "exact"} ({@code source_collection} equals the name, so {@code ..__v1}
+     * leaves {@code ..__v10} alone); anything else is a 400. {@code /version}'s
+     * {@code taxonomy_prune_exact_supported} says whether an engine honours the field.
      */
     private void handlePruneProjection(HttpExchange ex, String tenant, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -788,8 +792,19 @@ public final class TaxonomyHandler implements HttpHandler {
             HttpUtil.send(ex, 400, json(Map.of("error", "min_similarity must be a number in [0, 1]")));
             return;
         }
-        int removed = repo.pruneProjectionBelow(tenant, prefix, n.doubleValue());
-        HttpUtil.send(ex, 200, json(Map.of("removed", removed)));
+        boolean exact;
+        Object match = body.get("match");
+        if (match == null || "prefix".equals(match)) {
+            exact = false;
+        } else if ("exact".equals(match)) {
+            exact = true;
+        } else {
+            HttpUtil.send(ex, 400, json(Map.of("error", "match must be \"prefix\" or \"exact\"")));
+            return;
+        }
+        int removed = repo.pruneProjectionBelow(tenant, prefix, n.doubleValue(), exact);
+        // Echo the mode applied: an older engine omits it, so a client that asked for exact can confirm.
+        HttpUtil.send(ex, 200, json(Map.of("removed", removed, "match", exact ? "exact" : "prefix")));
     }
 
     // ── Collection ops ─────────────────────────────────────────────────────────

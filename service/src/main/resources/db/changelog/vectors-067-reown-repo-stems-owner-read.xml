@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.14 (RDR-229, owner is the source; critique S4): the owner-read policies of the two tables that the verification
+    of the registered move rdr229-reown-repo-stems-from-curator (vectors-067-reown-repo-stems-register.xml) reads without driving:
+    nexus.catalog_owners (the curator test nexus.catalog_owner_is_curator, the repo owners) and nexus.gc_audit (the skip reports).
+    Both carry FORCE row level security with only a tenant policy, so the worker's TABLE-WIDE verification (the backstop for a
+    tenant the list missed), which runs as the migrating role with no nexus.tenant, would read both empty and report a table
+    with work left as clean. THE POLICY HALF of RDR-246's owner-read pattern, as catalog-050 carries it for the residue moves:
+    copied from service/src/test/resources/datamove/owner-read-policy/policy.xml with the two tables written as literals and
+    vectors-029's guard word for word, each table in its own changeset so the guard of one never skips the other's policy, after
+    the registering include and never in its changeset.
+
+    vectors-067-2  catalog_owners_owner_read on nexus.catalog_owners
+    vectors-067-3  gc_audit_owner_read on nexus.gc_audit
+
+    nexus.catalog_collections, the driving table, has its policy from vectors-065. DrivingTableIsolationCheck.SUPPORT_TABLES
+    names these two tables under the label prefix rdr229-reown-, so the boot check asks the isolation question of them while the
+    move is registered, in any state. Each policy is FOR SELECT TO CURRENT_USER USING (true), permissive beside tenant_isolation:
+    the migrating role reads every tenant's rows and still writes only the rows of the tenant its session carries. Skipped whole
+    (MARK_RAN) where nexus_svc, or another login role that row-level security binds, is or inherits the migrating role (the
+    single-role posture): the move is then registered and blocked, as the pattern says. DDL only, no row DML. LOCK TIMEOUT, as in
+    vectors-065: CREATE POLICY and DROP POLICY take a lock on the table that waits behind any open transaction on it, and a boot
+    walk that waits forever is a boot that does not serve, so each changeset runs under SET LOCAL lock_timeout = '5s' (not DDL, so
+    no ceiling change); catalog_owners and gc_audit are written on every registration and every sweep. Numbered inside
+    the vectors-067 family on purpose, so it takes no vectors-06x number a concurrent branch may have reserved. After the
+    registering include, before catalog-049, ahead of the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-067-2" author="nexus-p2m1x.14">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>Owner-read SELECT policy catalog_owners_owner_read on nexus.catalog_owners for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
+        <sql splitStatements="false" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+DROP POLICY IF EXISTS catalog_owners_owner_read ON nexus.catalog_owners;
+CREATE POLICY catalog_owners_owner_read ON nexus.catalog_owners
+    FOR SELECT TO CURRENT_USER USING (true);
+
+DO $post$
+DECLARE
+    me            oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    pol_roles     oid[];
+    exposed_roles text;
+BEGIN
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = 'nexus.catalog_owners'::regclass AND pol.polname = 'catalog_owners_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'owner-read policy catalog_owners_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'role(s) % have the privileges of the migrating role %; the owner-read policy would apply to them and let them read every tenant''s rows of nexus.catalog_owners', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql>DROP POLICY IF EXISTS catalog_owners_owner_read ON nexus.catalog_owners</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="vectors-067-3" author="nexus-p2m1x.14">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>Owner-read SELECT policy gc_audit_owner_read on nexus.gc_audit for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
+        <sql splitStatements="false" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+DROP POLICY IF EXISTS gc_audit_owner_read ON nexus.gc_audit;
+CREATE POLICY gc_audit_owner_read ON nexus.gc_audit
+    FOR SELECT TO CURRENT_USER USING (true);
+
+DO $post$
+DECLARE
+    me            oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    pol_roles     oid[];
+    exposed_roles text;
+BEGIN
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = 'nexus.gc_audit'::regclass AND pol.polname = 'gc_audit_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'owner-read policy gc_audit_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'role(s) % have the privileges of the migrating role %; the owner-read policy would apply to them and let them read every tenant''s rows of nexus.gc_audit', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql>DROP POLICY IF EXISTS gc_audit_owner_read ON nexus.gc_audit</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

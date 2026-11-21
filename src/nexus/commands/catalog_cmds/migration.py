@@ -92,9 +92,8 @@ def migrate_fallback_cmd(
       nx catalog migrate-fallback knowledge__knowledge --dry-run
       nx catalog migrate-fallback docs__default --yes
     """
-    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        is_conformant_collection_name, voyage_model_for_collection,
-    )
+    from nexus.corpus import voyage_model_for_collection  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 

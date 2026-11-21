@@ -253,10 +253,10 @@ def test_post_rename_registration_else_branch_still_carries_explicit_kwargs(
             return False
         return real_is_conformant(name)
 
-    import nexus.corpus as corpus_mod
+    import nexus.catalog.rows.legacy_names as legacy_names_mod
 
-    real_is_conformant = corpus_mod.is_conformant_collection_name
-    monkeypatch.setattr(corpus_mod, "is_conformant_collection_name", _force_false)
+    real_is_conformant = legacy_names_mod.is_conformant_collection_name
+    monkeypatch.setattr(legacy_names_mod, "is_conformant_collection_name", _force_false)
 
     result = _migrate_legacy_collections(
         repo_with_owner, cat=catalog, t3_db=t3_db, registry=registry,

@@ -22,15 +22,16 @@ has no ``subtree`` reason: its count at this layer is structurally zero, and a t
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final
 
 import structlog
 
 _log = structlog.get_logger(__name__)
 
-#: Collection-name prefixes that may be routed. Code collections never are.
-PROSE_PREFIXES: Final[tuple[str, ...]] = ("knowledge__", "docs__", "rdr__", "paper__")
+#: Content types, read from the collection's catalog row (RDR-229 P2.9), whose collections may be routed.
+#: Code collections never are.
+PROSE_CONTENT_TYPES: Final[tuple[str, ...]] = ("knowledge", "docs", "rdr", "paper")
 MODES: Final[tuple[str, ...]] = ("top1", "band")
 EVENT: Final = "search_topic_route"
 
@@ -42,8 +43,17 @@ REASON_ROUTE_OFF: Final = "per_collection_route_off"
 REASON_CAPABILITY: Final = "capability_absent"
 
 
-def is_prose(collection: str) -> bool:
-    return collection.startswith(PROSE_PREFIXES)
+def is_prose(collection: str, content_type_of: Callable[[str], str | None] | None = None) -> bool:
+    """Whether *collection* is a prose collection. The callers pass the REQUEST's names, so a name no row backs
+    yet (a cold row cache on an explicit ``--corpus``) is answered from its own ``<type>__`` segment (item 1's
+    NoRow), the same way the search thresholds are. *content_type_of* is the search's own resolver, which reads
+    the handle's rows without listing; without one, the client row cache answers."""
+    if content_type_of is not None:
+        return content_type_of(collection) in PROSE_CONTENT_TYPES
+    from nexus.collection_route import row_content_type  # noqa: PLC0415 — deferred: collection_route reaches mcp_infra
+    from nexus.corpus import candidate_content_type  # noqa: PLC0415 — deferred: corpus imports a wide graph
+
+    return (row_content_type(collection) or candidate_content_type(collection)) in PROSE_CONTENT_TYPES
 
 
 def _parse(topic_route: Mapping[str, Any]) -> tuple[str, float | None, float | None, list[str] | None]:
@@ -92,6 +102,7 @@ def route_field(
     *,
     where: Mapping | None = None,
     chash_allow: Sequence[str] | None = None,
+    content_type_of: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any] | None:
     """The request's ``topic_route`` field, or ``None`` when nothing is to be routed.
 
@@ -107,7 +118,7 @@ def route_field(
             raise ValueError(f"topic_route collections names {unknown[0]!r}, which is not in the request's collections")
     if unrouted_reason(where=where, chash_allow=chash_allow) is not None:
         return None
-    eligible = [c for c in names if is_prose(c) and (listed is None or c in listed)]
+    eligible = [c for c in names if is_prose(c, content_type_of) and (listed is None or c in listed)]
     if not eligible:
         return None
     field: dict[str, Any] = {}
@@ -163,10 +174,11 @@ class TopicRouteTally:
         where: Mapping | None,
         chash_allow: Sequence[str] | None,
         per_collection_route: bool,
+        content_type_of: Callable[[str], str | None] | None = None,
     ) -> None:
         self._mode, self._width, self._min_coverage, _ = _parse(topic_route)
         names = list(dict.fromkeys(collections))
-        self._eligible = [c for c in names if is_prose(c)]
+        self._eligible = [c for c in names if is_prose(c, content_type_of)]
         self._ineligible = len(names) - len(self._eligible)
         self._entries: dict[str, dict[str, Any]] = {}
         reason = unrouted_reason(where=where, chash_allow=chash_allow)

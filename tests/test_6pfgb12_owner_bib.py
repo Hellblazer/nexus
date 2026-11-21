@@ -29,6 +29,8 @@ from nexus.scoring import apply_quality_boost, quality_score
 from nexus.search_engine import _attach_display_paths
 from nexus.types import SearchResult
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 COLL = "knowledge__papers__m__v1"
 A, B = "1.1.1", "1.1.2"
 H_SHARED, H_A, H_B = "5" * 64, "a" * 64, "b" * 64
@@ -217,7 +219,7 @@ def _wire_query(monkeypatch, cat: _Catalog, hits: list[SearchResult]) -> None:
     monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {"content_type": "knowledge", "owner_id": "papers", "embedding_model": "x", "lifecycle_state": "live"},
+        lambda name, *, refresh=True, strict=False: {"content_type": "knowledge", "owner_id": "papers", "embedding_model": "x", "lifecycle_state": "live"},
     )
 
     def fake_cross_corpus(*_a, catalog=None, **_kw):
