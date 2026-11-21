@@ -16,16 +16,15 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -63,10 +62,11 @@ class Rdr229P31ExpandIntegrationTest {
     private static final Path LIST = Path.of("src", "main", "resources", "db", "rdr229", "p31-checks.tsv");
 
     private static final String FIRST = "vectors-068-1";
-    private static final String QUEUE_COLUMN = "vectors-068-18";
-    private static final String QUEUE_CHECK = "vectors-068-19";
+    private static final String QUEUE_CHANGESET = "vectors-068-18";
+    private static final int CHANGESETS = 18;
     private static final String QUEUE = "aspect_extraction_queue";
 
+    private static final String OTHER_OWNER = "p31_expand_other_owner";
     private static final String TENANT = "p31-expand";
     private static final String COLLECTION = "code__p31-expand__voyage-code-3__v1";
 
@@ -123,39 +123,45 @@ class Rdr229P31ExpandIntegrationTest {
                 assertThatCode(() -> SchemaMigrator.migrate(ds)).doesNotThrowAnyException();
             }
             try (Connection su = pg.createConnection("")) {
-                for (int i = 1; i <= 19; i++) {
-                    assertThat(recorded(su, "vectors-068-" + i)).as("vectors-068-%d is recorded", i).isTrue();
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                for (int i = 1; i <= CHANGESETS; i++) {
+                    assertThat(recorded(ctx, "vectors-068-" + i)).as("vectors-068-%d is recorded", i).isTrue();
                 }
-                assertThat(tableExists(su, QUEUE)).as("the retired queue table is absent on a fresh install").isFalse();
+                assertThat(PgCatalogProbes.tableExists(ctx, SCHEMA, QUEUE)).as("the retired queue table is absent on a fresh install").isFalse();
 
+                Map<String, String> defs = constraintDefinitions(ctx);
                 int examined = 0;
                 int skipped = 0;
                 for (Row r : list()) {
-                    if (!tableExists(su, r.table())) {
+                    if (!PgCatalogProbes.tableExists(ctx, SCHEMA, r.table())) {
                         skipped++;
                         assertThat(r.table()).as("only the queue table may be absent").isEqualTo(QUEUE);
                         continue;
                     }
                     examined++;
-                    assertThat(columnType(su, r.table(), r.idColumn())).as("%s.%s", r.table(), r.idColumn()).isEqualTo("bigint");
-                    assertThat(columnNullable(su, r.table(), r.idColumn())).as("%s.%s is nullable", r.table(), r.idColumn()).isTrue();
+                    var info = PgCatalogProbes.columnInfo(ctx, SCHEMA, r.table(), r.idColumn());
+                    assertThat(info).as("%s.%s exists", r.table(), r.idColumn()).isNotNull();
+                    assertThat(info.dataType()).as("%s.%s", r.table(), r.idColumn()).isEqualTo("bigint");
+                    assertThat(info.isNullable()).as("%s.%s is nullable", r.table(), r.idColumn()).isEqualTo("YES");
                     if (r.hasCheck()) {
-                        assertThat(validated(su, r.table(), r.constraint()))
-                            .as("%s on %s exists and is NOT VALID", r.constraint(), r.table()).isEqualTo(Boolean.FALSE);
+                        assertThat(defs.get(r.table() + "." + r.constraint()))
+                            .as("%s on %s: the definition is the ruling's, and NOT VALID", r.constraint(), r.table())
+                            .isEqualTo(expectedDefinition(r));
                     }
                 }
-                System.out.println("p31 expand fresh walk: examined=" + examined + " skipped=" + skipped);
+                System.out.println("p31 expand fresh walk: examined=" + examined + " skipped=" + skipped
+                    + " checks=" + list().stream().filter(Row::hasCheck).count());
                 assertThat(skipped).as("non-vacuity: exactly the queue table was skipped").isEqualTo(1);
                 assertThat(examined).as("non-vacuity: every other table was examined").isEqualTo(list().size() - 1);
 
                 // The registry: an identity column with a sequence the engine can take a label from, and both UNIQUEs.
-                assertThat(scalar(su, "SELECT is_identity FROM information_schema.columns WHERE table_schema = 'nexus' "
-                    + "AND table_name = 'catalog_collections' AND column_name = 'collection_id'")).isEqualTo("YES");
-                assertThat(scalar(su, "SELECT identity_generation FROM information_schema.columns WHERE table_schema = 'nexus' "
-                    + "AND table_name = 'catalog_collections' AND column_name = 'collection_id'")).isEqualTo("BY DEFAULT");
-                assertThat(scalar(su, "SELECT pg_get_serial_sequence('nexus.catalog_collections', 'collection_id')")).isNotNull();
-                assertThat(uniqueKeys(su, "catalog_collections")).contains(
-                    "UNIQUE (tenant_id, collection_id)", "UNIQUE (tenant_id, collection_id, embedding_model)");
+                assertThat(identityColumn(ctx, "is_identity")).isEqualTo("YES");
+                assertThat(identityColumn(ctx, "identity_generation")).isEqualTo("BY DEFAULT");
+                assertThat(ctx.select(DSL.function("pg_get_serial_sequence", String.class,
+                    DSL.val("nexus.catalog_collections"), DSL.val("collection_id"))).fetchOne(0, String.class)).isNotNull();
+                assertThat(defs.entrySet().stream().filter(e -> e.getKey().startsWith("catalog_collections."))
+                    .map(Map.Entry::getValue).toList()).contains(
+                        "UNIQUE (tenant_id, collection_id)", "UNIQUE (tenant_id, collection_id, embedding_model)");
             }
         } finally {
             pg.stop();
@@ -171,7 +177,7 @@ class Rdr229P31ExpandIntegrationTest {
             try (Connection su = pg.createConnection("")) {
                 PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
             }
-            Map<String, String> before = new LinkedHashMap<>();
+            Map<String, List<String>> before;
             try (HikariDataSource ds = adminPool(pg)) {
                 migrateUpTo(ds, FIRST);
                 try (Connection su = pg.createConnection("")) {
@@ -180,28 +186,33 @@ class Rdr229P31ExpandIntegrationTest {
                     PgContainerHelper.insertCollection(ctx, TENANT, "code__p31-expand-b__voyage-code-3__v1");
                     String c1 = "11".repeat(32);
                     String c2 = "22".repeat(32);
-                    PgContainerHelper.insertChunk768(ctx, TENANT, COLLECTION, hex(c1), Vector.of(new float[768]));
-                    PgContainerHelper.insertChunk768(ctx, TENANT, COLLECTION, hex(c2), Vector.of(new float[768]));
+                    PgContainerHelper.insertChunk1024(ctx, TENANT, COLLECTION, hex(c1), Vector.of(new float[1024]));
+                    PgContainerHelper.insertChunk1024(ctx, TENANT, COLLECTION, hex(c2), Vector.of(new float[1024]));
                     PgContainerHelper.ownChunks(ctx, TENANT, COLLECTION, c1, c2);
-                    before = userDataRowState(su);
+                    before = userDataRowState(ctx);
                 }
                 assertThat(before.keySet()).as("non-vacuity: the seeded user-data tables").contains("chunks", "catalog_document_chunks",
                     "catalog_documents");
-                assertThat(before.values()).as("non-vacuity: every seeded table holds a row").allMatch(s -> !s.isEmpty());
+                assertThat(before.values()).as("non-vacuity: every seeded table holds a row").allMatch(l -> !l.isEmpty());
 
                 SchemaMigrator.migrate(ds);
             }
             try (Connection su = pg.createConnection("")) {
-                Map<String, String> after = userDataRowState(su);
-                assertThat(after).as("no row version and no relation file of a user-data table changed: the upgrade boot "
-                    + "wrote none of their rows (xmin and relfilenode per table)").isEqualTo(before);
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(userDataRowState(ctx)).as("no row version and no relation file of a user-data table changed: the upgrade "
+                    + "boot wrote none of their rows (tableoid, xmin and relfilenode per row)").isEqualTo(before);
 
-                assertThat(scalar(su, "SELECT count(*) FROM nexus.catalog_collections WHERE collection_id IS NULL")).isEqualTo("0");
-                assertThat(scalar(su, "SELECT count(DISTINCT collection_id) = count(*) FROM nexus.catalog_collections")).isEqualTo("t");
+                var registry = DSL.table(DSL.name(SCHEMA, "catalog_collections"));
+                var id = DSL.field(DSL.name("collection_id"), Long.class);
+                assertThat(ctx.fetchCount(registry, id.isNull())).as("the changeset filled every registry row").isZero();
+                var counts = ctx.select(DSL.countDistinct(id), DSL.count()).from(registry).fetchOne();
+                assertThat(counts.value1()).as("the filled ids are distinct").isEqualTo(counts.value2());
+                assertThat(counts.value2()).isGreaterThanOrEqualTo(2);
                 // A later insert takes the next id from the column's own sequence.
-                exec(su, "INSERT INTO nexus.catalog_collections (tenant_id, name) VALUES ('" + TENANT + "', 'p31-later')");
-                assertThat(scalar(su, "SELECT collection_id > (SELECT max(collection_id) FROM nexus.catalog_collections "
-                    + "WHERE name <> 'p31-later') FROM nexus.catalog_collections WHERE name = 'p31-later'")).isEqualTo("t");
+                long max = ctx.select(DSL.max(id)).from(registry).fetchOne(0, Long.class);
+                PgContainerHelper.insertCollection(ctx, TENANT, "p31-later");
+                assertThat(ctx.select(id).from(registry).where(DSL.field(DSL.name("name"), String.class).eq("p31-later"))
+                    .fetchOne(0, Long.class)).isGreaterThan(max);
             }
         } finally {
             pg.stop();
@@ -210,31 +221,7 @@ class Rdr229P31ExpandIntegrationTest {
 
     // ---- what the CHECKs mean ----------------------------------------------------------------------------------------
 
-    @Test
-    void everyCheckHasTheRulingsSemantics_nonEmptyNameWithNullIdIsRefused_emptyNameWithNullIdPasses() throws Exception {
-        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
-        try {
-            try (Connection su = pg.createConnection("")) {
-                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
-            }
-            try (HikariDataSource ds = adminPool(pg)) {
-                SchemaMigrator.migrate(ds);
-            }
-            try (Connection su = pg.createConnection("")) {
-                int examined = 0;
-                for (Row r : list()) {
-                    if (!r.hasCheck() || !tableExists(su, r.table())) continue;
-                    examined++;
-                    assertCheckSemantics(su, r);
-                }
-                assertThat(examined).as("non-vacuity: every check but the absent queue's was exercised").isEqualTo(19 - 1);
-            }
-        } finally {
-            pg.stop();
-        }
-    }
-
-    /** The real tables: a carrier row whose name is '' with a NULL id passes; a non-empty name with a NULL id is refused. */
+    /** A carrier row whose name is '' with a NULL id passes; a non-empty name with a NULL id is refused on INSERT and UPDATE. */
     @Test
     void aRowWhoseNameIsEmptyWithANullIdPasses_aNonEmptyNameWithANullIdIsRefusedOnInsertAndUpdate() throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
@@ -247,32 +234,38 @@ class Rdr229P31ExpandIntegrationTest {
             }
             try (Connection su = pg.createConnection("")) {
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                // The production shape found by the P3.2 fork run: a t2:// note whose physical_collection is ''.
-                exec(su, "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                    + "VALUES ('" + TENANT + "', '1.2.1', 'note', '')");
-                assertThat(scalar(su, "SELECT physical_collection_id IS NULL FROM nexus.catalog_documents WHERE tumbler = '1.2.1'"))
-                    .as("a '' name with a NULL id passes the CHECK").isEqualTo("t");
-                // An update of another column of that row passes too.
-                exec(su, "UPDATE nexus.catalog_documents SET title = 'note2' WHERE tumbler = '1.2.1'");
+                var docs = DSL.table(DSL.name(SCHEMA, "catalog_documents"));
+                var tenant = DSL.field(DSL.name("tenant_id"), String.class);
+                var tumbler = DSL.field(DSL.name("tumbler"), String.class);
+                var title = DSL.field(DSL.name("title"), String.class);
+                var name = DSL.field(DSL.name("physical_collection"), String.class);
+                var nameId = DSL.field(DSL.name("physical_collection_id"), Long.class);
 
-                assertThat(sqlState(() -> exec(su, "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                    + "VALUES ('" + TENANT + "', '1.2.2', 'x', 'some-collection')")))
+                // The production shape found by the P3.2 fork run: a t2:// note whose physical_collection is ''.
+                ctx.insertInto(docs).set(tenant, TENANT).set(tumbler, "1.2.1").set(title, "note").set(name, "").execute();
+                assertThat(ctx.select(nameId).from(docs).where(tumbler.eq("1.2.1")).fetchOne(0, Long.class))
+                    .as("a '' name with a NULL id passes the CHECK").isNull();
+                // An update of another column of that row passes too.
+                ctx.update(docs).set(title, "note2").where(tumbler.eq("1.2.1")).execute();
+
+                assertThat(sqlState(() -> ctx.insertInto(docs).set(tenant, TENANT).set(tumbler, "1.2.2").set(title, "x")
+                    .set(name, "some-collection").execute()))
                     .as("a non-empty name with a NULL id is refused on INSERT").isEqualTo("23514");
-                assertThat(sqlState(() -> exec(su, "UPDATE nexus.catalog_documents SET physical_collection = 'some-collection' "
-                    + "WHERE tumbler = '1.2.1'"))).as("and on UPDATE").isEqualTo("23514");
-                // With the id set the same writes pass: the CHECK ties the two, it does not forbid the name.
-                exec(su, "UPDATE nexus.catalog_documents SET physical_collection = 'some-collection', physical_collection_id = 7 "
-                    + "WHERE tumbler = '1.2.1'");
-                assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_documents")))).isEqualTo(1);
+                assertThat(sqlState(() -> ctx.update(docs).set(name, "some-collection").where(tumbler.eq("1.2.1")).execute()))
+                    .as("and on UPDATE").isEqualTo("23514");
+                assertThat(sqlState(() -> ctx.update(docs).set(name, "").set(nameId, 7L).where(tumbler.eq("1.2.1")).execute()))
+                    .as("an empty name with an id is refused: the CHECK ties the two both ways").isEqualTo("23514");
+                // With the id set the same write passes: the CHECK ties the two, it does not forbid the name.
+                assertThat(ctx.update(docs).set(name, "some-collection").set(nameId, 7L).where(tumbler.eq("1.2.1")).execute()).isEqualTo(1);
             }
         } finally {
             pg.stop();
         }
     }
 
-    /** R5: the three write shapes a pre-P3.1 engine makes fail with 23514 once the changesets are in. */
+    /** R5: the three write shapes a pre-P3.1 engine makes fail with 23514 once the changesets are in, each on its own constraint. */
     @Test
-    void thePreP31WriteShapesFailWith23514() throws Exception {
+    void thePreP31WriteShapesFailWith23514_andAnIdSetWritePasses() throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
@@ -283,22 +276,36 @@ class Rdr229P31ExpandIntegrationTest {
             }
             try (Connection su = pg.createConnection("")) {
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                String other = "code__p31-expand-b__voyage-code-3__v1";
                 PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
-                PgContainerHelper.insertCollection(ctx, TENANT, "code__p31-expand-b__voyage-code-3__v1");
+                PgContainerHelper.insertCollection(ctx, TENANT, other);
 
                 // 1. A chunk INSERT with the collection set and collection_id NULL (what a pre-P3.1 engine writes).
-                assertThat(sqlState(() -> PgContainerHelper.insertChunk768(ctx, TENANT, COLLECTION, hex("33".repeat(32)),
-                    Vector.of(new float[768])))).as("chunk INSERT, collection set, collection_id NULL").isEqualTo("23514");
+                assertThat(sqlStateAndMessage(() -> PgContainerHelper.insertChunk1024(ctx, TENANT, COLLECTION, hex("33".repeat(32)),
+                    Vector.of(new float[1024]))))
+                    .as("chunk INSERT, collection set, collection_id NULL").startsWith("23514").contains("chunks_collection_id_check");
 
                 // 2. A catalog_collections UPDATE that sets superseded_by non-empty with superseded_by_id NULL (a pre-P3.1 supersede).
-                assertThat(sqlState(() -> exec(su, "UPDATE nexus.catalog_collections SET superseded_by = "
-                    + "'code__p31-expand-b__voyage-code-3__v1' WHERE tenant_id = '" + TENANT + "' AND name = '" + COLLECTION + "'")))
-                    .as("supersede UPDATE, superseded_by_id NULL").isEqualTo("23514");
+                var registry = DSL.table(DSL.name(SCHEMA, "catalog_collections"));
+                var tenant = DSL.field(DSL.name("tenant_id"), String.class);
+                var name = DSL.field(DSL.name("name"), String.class);
+                var supersededBy = DSL.field(DSL.name("superseded_by"), String.class);
+                var supersededById = DSL.field(DSL.name("superseded_by_id"), Long.class);
+                assertThat(sqlStateAndMessage(() -> ctx.update(registry).set(supersededBy, other)
+                    .where(tenant.eq(TENANT).and(name.eq(COLLECTION))).execute()))
+                    .as("supersede UPDATE, superseded_by_id NULL").startsWith("23514").contains("catalog_collections_superseded_by_id_check");
+                // The same supersede with the successor's id passes.
+                long otherId = ctx.select(DSL.field(DSL.name("collection_id"), Long.class)).from(registry)
+                    .where(tenant.eq(TENANT).and(name.eq(other))).fetchOne(0, Long.class);
+                assertThat(ctx.update(registry).set(supersededBy, other).set(supersededById, otherId)
+                    .where(tenant.eq(TENANT).and(name.eq(COLLECTION))).execute()).isEqualTo(1);
 
-                // 3. A carrier INSERT (a topics row naming the collection, no id).
-                assertThat(sqlState(() -> exec(su, "INSERT INTO nexus.topics (tenant_id, label, collection, created_at) "
-                    + "VALUES ('" + TENANT + "', 'l', '" + COLLECTION + "', now())")))
-                    .as("carrier INSERT naming the collection, id NULL").isEqualTo("23514");
+                // 3. A carrier INSERT: a topics row naming the collection, no id.
+                var topics = DSL.table(DSL.name(SCHEMA, "topics"));
+                assertThat(sqlStateAndMessage(() -> ctx.insertInto(topics).set(tenant, TENANT)
+                    .set(DSL.field(DSL.name("label"), String.class), "l").set(DSL.field(DSL.name("collection"), String.class), other)
+                    .set(DSL.field(DSL.name("created_at"), OffsetDateTime.class), OffsetDateTime.now()).execute()))
+                    .as("carrier INSERT naming the collection, id NULL").startsWith("23514").contains("topics_collection_id_check");
             }
         } finally {
             pg.stop();
@@ -308,7 +315,7 @@ class Rdr229P31ExpandIntegrationTest {
     // ---- R3: the queue changesets -----------------------------------------------------------------------------------
 
     @Test
-    void theQueueChangesetsAreNoOpsWhenTheTableIsAbsent_andApplyWhenAStoreKeptIt() throws Exception {
+    void theQueueChangesetIsANoOpWhenTheTableIsAbsent_andAppliesWhenAStoreKeptIt() throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
@@ -320,37 +327,71 @@ class Rdr229P31ExpandIntegrationTest {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
                 DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-                assertThat(tableExists(su, QUEUE)).isFalse();
+                assertThat(PgCatalogProbes.tableExists(ctx, SCHEMA, QUEUE)).isFalse();
 
-                // (a) Absent: replaying either queue changeset, forward or back, raises nothing and creates nothing.
-                for (String id : List.of(QUEUE_COLUMN, QUEUE_CHECK)) {
-                    assertThatCode(() -> PgContainerHelper.replayChangeset(su, CHANGELOG, id)).doesNotThrowAnyException();
-                    assertThatCode(() -> PgContainerHelper.replayChangesetRollback(su, CHANGELOG, id)).doesNotThrowAnyException();
-                }
-                assertThat(tableExists(su, QUEUE)).as("the guard creates nothing").isFalse();
+                // (a) Absent: replaying the changeset, forward or back, raises nothing and creates nothing.
+                assertThatCode(() -> PgContainerHelper.replayChangeset(su, CHANGELOG, QUEUE_CHANGESET)).doesNotThrowAnyException();
+                assertThatCode(() -> PgContainerHelper.replayChangesetRollback(su, CHANGELOG, QUEUE_CHANGESET)).doesNotThrowAnyException();
+                assertThat(PgCatalogProbes.tableExists(ctx, SCHEMA, QUEUE)).as("the guard creates nothing").isFalse();
 
-                // (b) A store that kept the table (it holds a row): the changesets apply and the row is not touched.
+                // (b) A store that kept the table (it holds a row): the changeset applies and the row is not touched.
                 RetiredAspectQueueTable.restore(ctx);
                 PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
                 PgContainerHelper.insertCatalogDocument(ctx, TENANT, "1.2.9");
                 RetiredAspectQueueTable.seed(ctx, TENANT, COLLECTION, "1.2.9", "a.py", "pending");
-                String xminBefore = scalar(su, "SELECT xmin::text FROM nexus." + QUEUE);
-                String fileBefore = scalar(su, "SELECT pg_relation_filenode('nexus." + QUEUE + "'::regclass)::text");
+                List<String> before = rowState(ctx, QUEUE);
+                assertThat(before).as("non-vacuity: the kept table holds the seeded row").hasSize(1);
 
-                PgContainerHelper.replayChangeset(su, CHANGELOG, QUEUE_COLUMN);
-                assertThat(columnExists(su, QUEUE, "collection_id")).as("the column is added").isTrue();
-                PgContainerHelper.replayChangeset(su, CHANGELOG, QUEUE_CHECK);
-                assertThat(validated(su, QUEUE, "aspect_extraction_queue_collection_id_check")).isEqualTo(Boolean.FALSE);
+                PgContainerHelper.replayChangeset(su, CHANGELOG, QUEUE_CHANGESET);
+                assertThat(PgCatalogProbes.columnExists(ctx, SCHEMA, QUEUE, "collection_id")).as("the column is added").isTrue();
                 Row queueRow = list().stream().filter(r -> r.table().equals(QUEUE)).findFirst().orElseThrow();
-                assertCheckSemantics(su, queueRow);
-                assertThat(scalar(su, "SELECT xmin::text FROM nexus." + QUEUE)).as("the kept row is not rewritten").isEqualTo(xminBefore);
-                assertThat(scalar(su, "SELECT pg_relation_filenode('nexus." + QUEUE + "'::regclass)::text")).isEqualTo(fileBefore);
+                assertThat(constraintDefinitions(ctx).get(QUEUE + "." + queueRow.constraint()))
+                    .as("the CHECK is added NOT VALID").isEqualTo(expectedDefinition(queueRow));
+                assertThat(rowState(ctx, QUEUE)).as("the kept row is not rewritten").isEqualTo(before);
+                // A new row that names the collection with no id is refused; the existing row stays.
+                assertThat(sqlStateAndMessage(() -> RetiredAspectQueueTable.seed(ctx, TENANT, COLLECTION, "1.2.9", "b.py", "pending")))
+                    .startsWith("23514").contains(queueRow.constraint());
 
                 // The rollback removes the CHECK and keeps the column.
-                PgContainerHelper.replayChangesetRollback(su, CHANGELOG, QUEUE_CHECK);
-                assertThat(validated(su, QUEUE, "aspect_extraction_queue_collection_id_check")).isNull();
-                PgContainerHelper.replayChangesetRollback(su, CHANGELOG, QUEUE_COLUMN);
-                assertThat(columnExists(su, QUEUE, "collection_id")).as("the id column stays").isTrue();
+                PgContainerHelper.replayChangesetRollback(su, CHANGELOG, QUEUE_CHANGESET);
+                assertThat(PgCatalogProbes.constraintCount(ctx, queueRow.constraint())).isZero();
+                assertThat(PgCatalogProbes.columnExists(ctx, SCHEMA, QUEUE, "collection_id")).as("the id column stays").isTrue();
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    /** A kept queue table the migration role does not own: the guard cannot ALTER it, and that must not halt the boot. */
+    @Test
+    void aKeptQueueTableTheMigrationRoleDoesNotOwnDoesNotHaltTheBoot_andTheChangesetIsRetriedOnTheNextBoot() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(OTHER_OWNER);
+        try {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+                PgContainerHelper.createLoginRole(su, OTHER_OWNER, "p31_expand_other_owner_pass", false);
+            }
+            var queueTable = DSL.table(DSL.name(SCHEMA, QUEUE));
+            try (HikariDataSource ds = adminPool(pg)) {
+                migrateUpTo(ds, "aspects-005-2");
+                try (Connection su = pg.createConnection("")) {
+                    PgContainerHelper.alterTableOwner(su, queueTable, OTHER_OWNER);
+                }
+                assertThatCode(() -> SchemaMigrator.migrate(ds)).as("a queue table that cannot be altered must not halt the boot")
+                    .doesNotThrowAnyException();
+                try (Connection su = pg.createConnection("")) {
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(PgCatalogProbes.tableExists(ctx, SCHEMA, QUEUE)).as("the kept table is still there").isTrue();
+                    assertThat(recorded(ctx, "vectors-068-17")).as("the walk went on past the queue changeset").isTrue();
+                    assertThat(recorded(ctx, QUEUE_CHANGESET)).as("the queue changeset is not recorded, so the next boot retries it").isFalse();
+                    assertThat(PgCatalogProbes.columnExists(ctx, SCHEMA, QUEUE, "collection_id")).isFalse();
+                    PgContainerHelper.alterTableOwner(su, queueTable, ADMIN_ROLE);
+                }
+                SchemaMigrator.migrate(ds);
+                try (Connection su = pg.createConnection("")) {
+                    assertThat(recorded(DSL.using(su, SQLDialect.POSTGRES), QUEUE_CHANGESET))
+                        .as("retried and recorded once the role owns the table").isTrue();
+                }
             }
         } finally {
             pg.stop();
@@ -371,29 +412,30 @@ class Rdr229P31ExpandIntegrationTest {
                 tag(ds, "before-p31-expand");
                 SchemaMigrator.migrate(ds);
                 try (Connection su = pg.createConnection("")) {
-                    assertThat(listedConstraintsPresent(su)).as("non-vacuity: the constraints exist before the rollback")
-                        .hasSize(19 - 1);
+                    assertThat(listedConstraintsPresent(DSL.using(su, SQLDialect.POSTGRES)))
+                        .as("non-vacuity: the constraints exist before the rollback").hasSize(19);
                 }
 
                 rollbackTo(ds, "before-p31-expand");
 
                 try (Connection su = pg.createConnection("")) {
-                    assertThat(listedConstraintsPresent(su)).as("no listed constraint remains after the rollback").isEmpty();
-                    assertThat(recorded(su, FIRST)).isFalse();
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(listedConstraintsPresent(ctx)).as("no listed constraint remains after the rollback").isEmpty();
+                    assertThat(recorded(ctx, FIRST)).isFalse();
                     for (Row r : list()) {
-                        if (!tableExists(su, r.table())) continue;
-                        assertThat(columnExists(su, r.table(), r.idColumn()))
+                        if (!PgCatalogProbes.tableExists(ctx, SCHEMA, r.table())) continue;
+                        assertThat(PgCatalogProbes.columnExists(ctx, SCHEMA, r.table(), r.idColumn()))
                             .as("%s.%s stays (an old engine ignores it)", r.table(), r.idColumn()).isTrue();
                     }
-                    assertThat(scalar(su, "SELECT is_identity FROM information_schema.columns WHERE table_schema = 'nexus' "
-                        + "AND table_name = 'catalog_collections' AND column_name = 'collection_id'"))
-                        .as("the identity column stays").isEqualTo("YES");
+                    assertThat(identityColumn(ctx, "is_identity")).as("the identity column stays").isEqualTo("YES");
                 }
 
                 assertThatCode(() -> SchemaMigrator.migrate(ds)).as("the walk goes forward again").doesNotThrowAnyException();
                 try (Connection su = pg.createConnection("")) {
-                    assertThat(listedConstraintsPresent(su)).hasSize(19 - 1);
-                    assertThat(scalar(su, "SELECT count(*) FROM nexus.catalog_collections WHERE collection_id IS NULL")).isEqualTo("0");
+                    DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(listedConstraintsPresent(ctx)).hasSize(19);
+                    assertThat(ctx.fetchCount(DSL.table(DSL.name(SCHEMA, "catalog_collections")),
+                        DSL.field(DSL.name("collection_id")).isNull())).isZero();
                 }
             }
         } finally {
@@ -403,53 +445,57 @@ class Rdr229P31ExpandIntegrationTest {
 
     // ---- helpers -----------------------------------------------------------------------------------------------------
 
-    /** Evaluates one listed CHECK, taken from the catalog, on a temp table with the same column names. */
-    private static void assertCheckSemantics(Connection su, Row r) throws Exception {
-        String def = scalar(su, "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c WHERE c.conname = '" + r.constraint()
-            + "' AND c.conrelid = 'nexus." + r.table() + "'::regclass");
-        assertThat(def).as("%s on %s", r.constraint(), r.table()).startsWith("CHECK").endsWith("NOT VALID");
-        String check = def.substring(0, def.length() - " NOT VALID".length());
-        boolean notNull = r.kind().equals("NOT_NULL");
-        String columns = notNull ? r.idColumn() + " bigint" : r.nameColumn() + " text, " + r.idColumn() + " bigint";
-        exec(su, "CREATE TEMP TABLE p31_check_probe (" + columns + ", CONSTRAINT probe " + check + ")");
-        try {
-            if (notNull) {
-                assertThat(sqlState(() -> exec(su, "INSERT INTO p31_check_probe VALUES (NULL)"))).as("%s: NULL id", r.constraint()).isEqualTo("23514");
-                exec(su, "INSERT INTO p31_check_probe VALUES (5)");
-            } else {
-                String n = r.nameColumn();
-                assertThat(sqlState(() -> exec(su, "INSERT INTO p31_check_probe (" + n + ", " + r.idColumn() + ") VALUES ('x', NULL)")))
-                    .as("%s: non-empty name, NULL id", r.constraint()).isEqualTo("23514");
-                assertThat(sqlState(() -> exec(su, "INSERT INTO p31_check_probe (" + n + ", " + r.idColumn() + ") VALUES ('', 1)")))
-                    .as("%s: empty name, id set", r.constraint()).isEqualTo("23514");
-                exec(su, "INSERT INTO p31_check_probe (" + n + ", " + r.idColumn() + ") VALUES ('', NULL)");
-                exec(su, "INSERT INTO p31_check_probe (" + n + ", " + r.idColumn() + ") VALUES ('x', 1)");
-            }
-        } finally {
-            exec(su, "DROP TABLE p31_check_probe");
+    private static final String SCHEMA = "nexus";
+
+    /** What pg_get_constraintdef prints for a listed constraint of this kind. */
+    private static String expectedDefinition(Row r) {
+        return switch (r.kind()) {
+            case "SUPERSEDED" -> "CHECK (((superseded_by = ''::text) = (superseded_by_id IS NULL))) NOT VALID";
+            case "NAME_ID" -> "CHECK (((NULLIF(" + r.nameColumn() + ", ''::text) IS NULL) = (" + r.idColumn() + " IS NULL))) NOT VALID";
+            case "NOT_NULL" -> "CHECK ((" + r.idColumn() + " IS NOT NULL)) NOT VALID";
+            default -> throw new IllegalStateException("no constraint for kind " + r.kind());
+        };
+    }
+
+    /** {@code table.constraint} to its definition, over the nexus schema. */
+    private static Map<String, String> constraintDefinitions(DSLContext ctx) {
+        Map<String, String> out = new LinkedHashMap<>();
+        for (var c : PgCatalogProbes.constraintDefinitionsIn(ctx, List.of(SCHEMA))) {
+            out.put(c.table() + "." + c.conname(), c.definition());
         }
+        return out;
+    }
+
+    private static String identityColumn(DSLContext ctx, String informationSchemaColumn) {
+        var columns = DSL.table(DSL.name("information_schema", "columns"));
+        return ctx.select(DSL.field(DSL.name(informationSchemaColumn), String.class)).from(columns)
+            .where(DSL.field(DSL.name("table_schema"), String.class).eq(SCHEMA))
+            .and(DSL.field(DSL.name("table_name"), String.class).eq("catalog_collections"))
+            .and(DSL.field(DSL.name("column_name"), String.class).eq("collection_id"))
+            .fetchOne(0, String.class);
     }
 
     /** The listed constraint names that exist on any relation (a partition leaf included). */
-    private static List<String> listedConstraintsPresent(Connection su) throws Exception {
+    private static List<String> listedConstraintsPresent(DSLContext ctx) throws Exception {
         List<String> present = new ArrayList<>();
         for (Row r : list()) {
-            if (!r.hasCheck()) continue;
-            if (!scalar(su, "SELECT count(*) FROM pg_constraint WHERE conname = '" + r.constraint() + "'").equals("0")) {
-                present.add(r.constraint());
-            }
+            if (r.hasCheck() && PgCatalogProbes.constraintCount(ctx, r.constraint()) > 0) present.add(r.constraint());
         }
         return present;
     }
 
-    /** xmin and relfilenode of the seeded user-data tables: a rewrite or an UPDATE of a row changes one of them. */
-    private static Map<String, String> userDataRowState(Connection su) throws Exception {
-        Map<String, String> out = new LinkedHashMap<>();
-        for (String t : List.of("chunks", "catalog_document_chunks", "catalog_documents")) {
-            String rows = scalar(su, "SELECT coalesce(string_agg(x.tableoid::regclass || ':' || x.xmin::text || ':'"
-                + " || pg_relation_filenode(x.tableoid), ',' ORDER BY x.xmin::text, x.tableoid::regclass::text), '') FROM nexus." + t + " x");
-            out.put(t, rows);
-        }
+    /** tableoid, xmin and relfilenode of every row of a table: an UPDATE of a row or a rewrite of the relation changes one. */
+    private static List<String> rowState(DSLContext ctx, String table) {
+        var oid = DSL.field(DSL.name("tableoid")).cast(SQLDataType.VARCHAR);
+        var xmin = DSL.field(DSL.name("xmin")).cast(SQLDataType.VARCHAR);
+        var filenode = DSL.function("pg_relation_filenode", Long.class, DSL.field(DSL.name("tableoid")));
+        return ctx.select(oid, xmin, filenode).from(DSL.table(DSL.name(SCHEMA, table)))
+            .orderBy(oid, xmin).fetch(r -> r.value1() + ":" + r.value2() + ":" + r.value3());
+    }
+
+    private static Map<String, List<String>> userDataRowState(DSLContext ctx) {
+        Map<String, List<String>> out = new LinkedHashMap<>();
+        for (String t : List.of("chunks", "catalog_document_chunks", "catalog_documents")) out.put(t, rowState(ctx, t));
         return out;
     }
 
@@ -504,72 +550,29 @@ class Rdr229P31ExpandIntegrationTest {
         }
     }
 
-    private static boolean recorded(Connection su, String id) throws Exception {
-        return !scalar(su, "SELECT count(*) FROM public.databasechangelog WHERE id = '" + id + "'").equals("0");
-    }
-
-    private static boolean tableExists(Connection su, String table) throws Exception {
-        return scalar(su, "SELECT to_regclass('nexus." + table + "') IS NOT NULL").equals("t");
-    }
-
-    private static boolean columnExists(Connection su, String table, String column) throws Exception {
-        return scalar(su, "SELECT count(*) FROM pg_attribute WHERE attrelid = 'nexus." + table + "'::regclass AND attname = '"
-            + column + "' AND NOT attisdropped").equals("1");
-    }
-
-    private static String columnType(Connection su, String table, String column) throws Exception {
-        return scalar(su, "SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'nexus." + table
-            + "'::regclass AND attname = '" + column + "' AND NOT attisdropped");
-    }
-
-    private static boolean columnNullable(Connection su, String table, String column) throws Exception {
-        return scalar(su, "SELECT NOT attnotnull FROM pg_attribute WHERE attrelid = 'nexus." + table
-            + "'::regclass AND attname = '" + column + "' AND NOT attisdropped").equals("t");
-    }
-
-    /** convalidated of the named constraint on the table, or null when there is none. */
-    private static Boolean validated(Connection su, String table, String constraint) throws Exception {
-        String v = scalar(su, "SELECT convalidated FROM pg_constraint WHERE conname = '" + constraint + "' AND conrelid = 'nexus."
-            + table + "'::regclass");
-        return v == null ? null : v.equals("t");
-    }
-
-    private static List<String> uniqueKeys(Connection su, String table) throws Exception {
-        List<String> out = new ArrayList<>();
-        try (Statement st = su.createStatement();
-             ResultSet rs = st.executeQuery("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE contype = 'u' "
-                 + "AND conrelid = 'nexus." + table + "'::regclass")) {
-            while (rs.next()) out.add(rs.getString(1));
-        }
-        return out;
-    }
-
-    private static String scalar(Connection c, String sql) throws Exception {
-        try (PreparedStatement ps = c.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
-            return rs.next() ? rs.getString(1) : null;
-        }
-    }
-
-    private static void exec(Connection c, String sql) throws Exception {
-        try (Statement st = c.createStatement()) {
-            st.execute(sql);
-        }
+    private static boolean recorded(DSLContext ctx, String id) {
+        return ctx.fetchExists(DSL.selectOne().from(DSL.table(DSL.name("public", "databasechangelog")))
+            .where(DSL.field(DSL.name("id"), String.class).eq(id)));
     }
 
     private interface Action {
         void run() throws Exception;
     }
 
-    /** The SQLSTATE the action fails with; fails the test when it does not fail. */
-    private static String sqlState(Action a) {
+    /** The SQLSTATE and the message the action fails with ("state: message"); fails the test when it does not fail. */
+    private static String sqlStateAndMessage(Action a) {
         try {
             a.run();
         } catch (Exception e) {
             for (Throwable t = e; t != null; t = t.getCause()) {
-                if (t instanceof SQLException se && se.getSQLState() != null) return se.getSQLState();
+                if (t instanceof SQLException se && se.getSQLState() != null) return se.getSQLState() + ": " + se.getMessage();
             }
             throw new AssertionError("failed without a SQLSTATE: " + e, e);
         }
         throw new AssertionError("expected the statement to fail");
+    }
+
+    private static String sqlState(Action a) {
+        return sqlStateAndMessage(a).substring(0, 5);
     }
 }

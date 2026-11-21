@@ -2347,6 +2347,16 @@
     <include file="db/changelog/catalog-050-note-uri-residue-owner-read.xml"/>
 
     <!--
+        Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 1, the expand): catalog_collections.collection_id (identity, filled here) with its two UNIQUEs,
+        a nullable id column beside every collection name column, and a NOT VALID CHECK with a stable name on each (the constraint
+        names are one list, db/rdr229/p31-checks.tsv). One changeset per table so the lock footprints do not add up, and the retired
+        aspect_extraction_queue's own, guarded for the table's absence (R3). Writes no row of a user-data table: the stamp is a later
+        registered move; the registry's identity fill is the one rewrite, by ruling. The number follows vectors-064 to -067 on other
+        branches and is provisional until the final rebase. After identity-005, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-068-collection-id-expand.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

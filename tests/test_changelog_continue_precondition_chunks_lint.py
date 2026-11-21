@@ -61,6 +61,10 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # DROP TABLE nexus.aspect_extraction_queue (AEL on it and, for its two FKs, on catalog_documents and
     # catalog_collections) and DROP FUNCTION of its counting helper: no chunk table, leaf or builder object.
     ("aspects-005-retire-aspect-queue-table.xml", "aspects-005-2"): "aspect queue retirement",
+    # ADD COLUMN and a NOT VALID CHECK on nexus.aspect_extraction_queue (AEL on that table only), inside a DO block
+    # that does nothing when the table is absent; skipped while the migration role does not own a kept table. The
+    # body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
+    ("vectors-068-collection-id-expand.xml", "vectors-068-18"): "aspect queue id column",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
