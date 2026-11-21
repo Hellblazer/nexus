@@ -468,6 +468,53 @@ class ReembedRoutesTest {
         assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
     }
 
+    // ── start: two sources on one lookup tuple (nexus-p2m1x.28) ──────────────
+
+    @Test
+    void aSourceSharingItsTupleWithAnotherLiveCollectionIsRefusedByPlanAndStart_namingBoth() throws Exception {
+        Tn t = tenant("sharedtuple");
+        String mate = name(t, BGE, 2);
+        register(t, mate);
+
+        for (String path : List.of("/jobs", "/plan")) {
+            var r = post(t, path, startBody(t.src()));
+            assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(409);
+            assertThat(json(r).get("error").toString()).contains(t.src()).contains(mate).contains("same owner");
+        }
+        assertThat(post(t, "/jobs", startBody(mate)).statusCode()).as("from the other side too").isEqualTo(409);
+        assertThat(jobs.listAll(t.tenant())).as("no job, no registration").isEmpty();
+    }
+
+    @Test
+    void aLiveTargetANotherSourceMovedInIsRefused_andASecondStartFromTheSameSourceIsNot() throws Exception {
+        Tn t = tenant("foreign");
+        UUID first = id(startOk(t, t.src()));
+        advance(t, first, "running", "aborted");
+        // The first source left the tuple (superseded, as a cutover leaves it); a second one arrives on it.
+        assertThat(catalog.supersedeCollection(t.tenant(), t.src(), t.tgt(), null)).isEqualTo(1);
+        String second = name(t, BGE, 2);
+        register(t, second);
+
+        var r = post(t, "/jobs", startBody(second));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+        assertThat(json(r).get("error").toString()).contains(second).contains(t.tgt()).contains(t.src())
+            .contains("another source");
+        assertThat(jobs.listAll(t.tenant())).as("the refused start wrote no job").hasSize(1);
+    }
+
+    @Test
+    void aSourceRestartedIntoItsOwnEarlierTargetIsNotRefused() throws Exception {
+        Tn t = tenant("sameorigin");
+        UUID first = id(startOk(t, t.src()));
+        advance(t, first, "running", "aborted");
+
+        var r = post(t, "/jobs", startBody(t.src()));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        assertThat(json(r)).containsEntry("target_collection", t.tgt()).containsEntry("target_action", "existing");
+    }
+
     // ── start: reviving a superseded target ──────────────────────────────────
 
     /** A to B done (or aborted) with A superseded by B, as a cutover leaves it; then the profile names A's model. */

@@ -160,6 +160,42 @@ public final class TargetSelection {
             .orElseGet(Absent::new);
     }
 
+    /**
+     * The other live collections on the source's lookup tuple (content type, owner, embedding model), by name:
+     * {@code lifecycle_state} live and not superseded, the source's own row excluded. The tuple is not unique in the
+     * registry (two sources that share a curator owner hold two rows on it), and the target is chosen by the tuple,
+     * so a second source would be moved into the first source's target (nexus-p2m1x.28).
+     */
+    public static List<String> tupleMates(List<CollectionRow> rows, String source, String contentType,
+                                          String ownerId, String embeddingModel) {
+        return rows.stream()
+            .filter(r -> !source.equals(r.name()))
+            .filter(r -> contentType.equals(r.contentType()))
+            .filter(r -> ownerId.equals(r.ownerId()))
+            .filter(r -> embeddingModel.equals(r.embeddingModel()))
+            .filter(r -> "live".equals(r.lifecycleState()) && !r.superseded())
+            .map(CollectionRow::name)
+            .sorted()
+            .toList();
+    }
+
+    /** The 409 reason when {@link #tupleMates} finds any: names the source and its mates and says why. */
+    public static String sharedSourceTupleReason(String source, List<String> mates, String contentType,
+                                                 String ownerId, String embeddingModel) {
+        return "source collection " + source + " shares its lookup tuple (content type " + contentType + ", owner "
+            + ownerId + ", model " + embeddingModel + ") with " + String.join(", ", mates)
+            + ": two collections with the same owner, content type and model cannot be told apart when the "
+            + "re-embed target is chosen by that tuple, so " + source + " would be moved into a target that "
+            + String.join(", ", mates) + " also uses. Give the collections distinct owners first";
+    }
+
+    /** The 409 reason when the live target was filled by a job from a different source collection. */
+    public static String foreignOriginReason(String source, String target, String originSource) {
+        return "target " + target + " holds documents re-embedded from " + originSource + ", another source "
+            + "collection, not from this job's source " + source + "; moving " + source + " into it would merge "
+            + "two collections that only share a lookup tuple";
+    }
+
     /** A job in a lock state whose source is the candidate target: its id and state, to name in a refusal. */
     public record LockHolder(UUID jobId, String state) {
     }

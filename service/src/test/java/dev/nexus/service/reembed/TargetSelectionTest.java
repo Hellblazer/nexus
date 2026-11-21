@@ -306,4 +306,42 @@ class TargetSelectionTest {
         assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, failed)).isInstanceOf(Refuse.class);
         assertThat(TargetSelection.decide(new Superseded("t", SOURCE), SOURCE, null)).isEqualTo(new Revive("t"));
     }
+
+    // ---- nexus-p2m1x.28: two sources on one tuple must not meet in one target ----
+
+    private static CollectionRow sourceRow(String name, String version) {
+        return new CollectionRow(name, CT, OWNER, "voyage-context-3", version, false, "", "live");
+    }
+
+    @Test
+    void aSourceAloneOnItsTupleHasNoMates() {
+        assertThat(TargetSelection.tupleMates(List.of(sourceRow(SOURCE, "v1")), SOURCE, CT, OWNER,
+            "voyage-context-3")).isEmpty();
+    }
+
+    @Test
+    void anotherLiveRowOnTheSourcesTupleIsAMate_butASupersededQuarantinedOrForeignRowIsNot() {
+        var mate = sourceRow("docs__wow-addon-dev__voyage-context-3__v1", "");
+        var superseded = new CollectionRow("docs__old__voyage-context-3__v1", CT, OWNER, "voyage-context-3", "v1",
+            false, SOURCE, "live");
+        var quarantined = new CollectionRow("docs__q__voyage-context-3__v1", CT, OWNER, "voyage-context-3", "v1",
+            false, "", "quarantine");
+        var otherOwner = new CollectionRow("docs__o__voyage-context-3__v1", CT, "1-8", "voyage-context-3", "v1",
+            false, "", "live");
+        var otherModel = new CollectionRow("docs__m__bge__v1", CT, OWNER, MODEL, "v1", false, "", "live");
+        assertThat(TargetSelection.tupleMates(
+            List.of(sourceRow(SOURCE, "v1"), mate, superseded, quarantined, otherOwner, otherModel), SOURCE, CT,
+            OWNER, "voyage-context-3")).containsExactly(mate.name());
+    }
+
+    @Test
+    void theRefusalsNameBothCollectionsAndSayWhy() {
+        String shared = TargetSelection.sharedSourceTupleReason(SOURCE, List.of("docs__wow-addon-dev__x__v1"), CT,
+            OWNER, "voyage-context-3");
+        assertThat(shared).contains(SOURCE).contains("docs__wow-addon-dev__x__v1").contains(OWNER)
+            .contains("same owner");
+        String foreign = TargetSelection.foreignOriginReason(SOURCE, "docs__1-7__bge__v1", "docs__other__x__v1");
+        assertThat(foreign).contains(SOURCE).contains("docs__1-7__bge__v1").contains("docs__other__x__v1")
+            .contains("another source");
+    }
 }
