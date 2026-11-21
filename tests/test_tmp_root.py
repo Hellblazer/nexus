@@ -29,6 +29,11 @@ from tests import _engine_substrate as sub
 from tests import _tmp_root as tr
 from tests._module_seam import setattr_in
 
+#: Skips a test that drives the tmpfs root, uid-owned dirs, mode bits, AF_UNIX sockets, signals or a shell-script
+#: fake: decide_tmp_root declines the tmpfs root off Linux, so a Windows run never takes these paths, and on Windows
+#: the simulated Linux renders /dev/shm with backslashes and st_uid is 0.
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="drives the POSIX-only tmpfs root (declined off Linux)")
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _TMPFS_MOUNTS = (
@@ -57,6 +62,7 @@ def _decide(**kw) -> tr.TmpDecision:
 
 
 class TestDecision:
+    @_POSIX_ONLY
     def test_a_linux_grant_with_room_gets_a_per_uid_root_beside_the_cluster_root(self) -> None:
         d = _decide()
         assert d.root == Path("/dev/shm/nexus-tmp-1000") and d.reason is None and not d.forced
@@ -77,6 +83,7 @@ class TestDecision:
         d = _decide(mounts_text=_NO_TMPFS_MOUNTS)
         assert d.root is None and "not tmpfs" in d.reason and d.expected_tmpfs
 
+    @_POSIX_ONLY
     def test_a_noexec_dev_shm_is_refused(self) -> None:
         d = _decide(mounts_text=_NOEXEC_MOUNTS)
         assert d.root is None and "noexec" in d.reason and d.expected_tmpfs
@@ -86,21 +93,26 @@ class TestDecision:
         d = _decide(mounts_text=None)
         assert d.root is None and "/proc/mounts" in d.reason
 
+    @_POSIX_ONLY
     def test_an_unwritable_dev_shm_is_refused(self) -> None:
         d = _decide(writable=lambda _p: False)
         assert d.root is None and "not writable" in d.reason
 
+    @_POSIX_ONLY
     def test_too_little_free_space_is_refused(self) -> None:
         d = _decide(free_bytes=lambda _p: 1 * 1024**3)
         assert d.root is None and "1024 MiB free" in d.reason
 
+    @_POSIX_ONLY
     def test_low_cgroup_headroom_is_refused(self) -> None:
         d = _decide(cgroup_headroom=lambda: 2 * 1024**3)
         assert d.root is None and "cgroup memory headroom is 2048 MiB" in d.reason
 
+    @_POSIX_ONLY
     def test_no_cgroup_limit_is_not_a_refusal(self) -> None:
         assert _decide(cgroup_headroom=lambda: None).root is not None
 
+    @_POSIX_ONLY
     def test_the_floor_is_the_cluster_roots_floor(self) -> None:
         assert tr.MIN_FREE_BYTES == sub._TMPFS_MIN_FREE_BYTES
         assert _decide(cgroup_headroom=lambda: tr.MIN_FREE_BYTES).root is not None
@@ -122,11 +134,13 @@ class TestDecision:
         d = _decide(env={**_GRANT, "NX_TEST_TMP_SHM_DIR": str(tmp_path)}, system="Darwin", mounts_text="")
         assert d.root == tmp_path / "nexus-tmp-1000"
 
+    @_POSIX_ONLY
     def test_the_tmpdir_leaves_room_for_a_cluster_socket_path(self) -> None:
         d = _decide(uid=123456)
         assert d.root is not None
         assert sub._socket_path_fits(d.root / ("r" + "x" * 8) / "t")
 
+    @_POSIX_ONLY
     def test_a_root_whose_socket_paths_would_pass_sun_path_is_refused(self) -> None:
         d = _decide(uid="9" * 100)
         assert d.root is None and "sun_path" in d.reason and d.expected_tmpfs
@@ -151,6 +165,7 @@ class TestEnvSpellings:
 
 
 class TestRunDirs:
+    @_POSIX_ONLY
     def test_layout_privacy_and_owner_record(self, tmp_path) -> None:
         run = tr.make_run_dir(tmp_path / "root")
         assert run.parent == tmp_path / "root" and run.name.startswith("r")
@@ -159,6 +174,7 @@ class TestRunDirs:
         rec = json.loads((run / "owner.json").read_text())
         assert rec["pid"] == os.getpid()
 
+    @_POSIX_ONLY
     def test_a_root_someone_else_owns_is_refused(self, tmp_path, monkeypatch) -> None:
         (tmp_path / "root").mkdir()
         monkeypatch.setattr(sub, "_current_uid", lambda: str(os.getuid() + 1))
@@ -172,6 +188,7 @@ class TestRunDirs:
         with pytest.raises(PermissionError, match="not a real directory"):
             tr.make_run_dir(tmp_path / "root")
 
+    @_POSIX_ONLY
     def test_a_world_readable_root_is_tightened(self, tmp_path) -> None:
         root = tmp_path / "root"
         root.mkdir(mode=0o755)
@@ -269,6 +286,7 @@ class TestSweep:
         (ro / "g").chmod(0)
         ro.chmod(0o500)
 
+    @_POSIX_ONLY
     def test_an_unreadable_tree_is_removed_without_raising(self, tmp_path) -> None:
         root = tmp_path / "root"
         probe_run = tr.make_run_dir(root, probe=False)
@@ -289,6 +307,7 @@ class TestSweep:
         tr._rm_tree(probe_run)
         assert not probe_run.exists()
 
+    @_POSIX_ONLY
     def test_a_tree_it_cannot_fully_remove_does_not_raise(self, tmp_path, monkeypatch) -> None:
         run = tr.make_run_dir(tmp_path / "root", probe=False)
         self._unreadable_tree(run)
@@ -310,6 +329,7 @@ class TestSweep:
 
         assert tr.sweep_stale_runs(root, drain=boom) == [run]
 
+    @_POSIX_ONLY
     def test_a_run_dir_another_user_owns_is_never_touched(self, tmp_path, monkeypatch) -> None:
         """/dev/shm is shared: a dead-looking run dir that is not ours is left alone, drained
         by nobody and removed by nobody."""
@@ -322,6 +342,7 @@ class TestSweep:
         monkeypatch.undo()
         assert tr.sweep_stale_runs(root) == [run], "the same dir IS swept when it is ours"
 
+    @_POSIX_ONLY
     def test_the_conftest_drain_signals_only_daemons_under_the_stale_tree(self, tmp_path, monkeypatch) -> None:
         """The real ``_drain_stale_tmp_run`` of tests/conftest.py, with ``ps`` and the signal
         stubbed: a postmaster rooted in the stale ``p`` tree gets SIGQUIT, one outside it and
@@ -580,6 +601,7 @@ class TestOlderTreesLeaveANewRunDirAlone:
         rec = self._record(tmp_path, _dead_pid(), legacy=True)
         assert _pre_fuz9t_owner_is_live(rec) is False
 
+    @_POSIX_ONLY
     def test_the_older_rule_reads_a_new_record_live_whoever_the_controller_is(self, tmp_path) -> None:
         rec = self._record(tmp_path, _dead_pid(), legacy=False)
         assert _pre_fuz9t_owner_is_live(rec) is True, "an older sweeper keeps the dir, wherever it runs"
@@ -589,6 +611,7 @@ class TestOlderTreesLeaveANewRunDirAlone:
         assert tr._owner_is_live(self._record(tmp_path, os.getpid(), legacy=False)) is True
         assert tr._owner_is_live({"pid": os.getpid(), "starttime": None}) is True, "an older tree's shape still reads"
 
+    @_POSIX_ONLY
     def test_a_free_lock_dir_goes_although_its_record_shows_a_live_pid(self, tmp_path) -> None:
         """The sweep never asks the record for a dir that carries a lock: the lock decides."""
         root = tmp_path / "root"
@@ -669,6 +692,7 @@ def _config(basetemp=None, worker=False, factory_basetemp=None) -> SimpleNamespa
 
 
 class TestPlugin:
+    @_POSIX_ONLY
     def test_the_decision_points_both_pytest_and_tempfile_into_the_run_dir(self, tmp_path) -> None:
         plug, env = _plugin(tmp_path)
         plug.pytest_configure(_config())
@@ -697,6 +721,7 @@ class TestPlugin:
         ).stdout.strip()
         assert out == str(tmp_path / "orig")
 
+    @_POSIX_ONLY
     def test_a_given_basetemp_is_left_alone(self, tmp_path) -> None:
         plug, env = _plugin(tmp_path)
         plug.pytest_configure(_config(basetemp=str(tmp_path / "mine")))
@@ -711,6 +736,7 @@ class TestPlugin:
         plug.pytest_configure(_config())
         assert not plug.decided and env["TMPDIR"] == "/orig/tmp" and plug.summary_line() is None
 
+    @_POSIX_ONLY
     def test_the_end_of_the_run_removes_the_run_and_puts_the_environment_back(self, tmp_path) -> None:
         plug, env = _plugin(tmp_path)
         plug.pytest_configure(_config())
@@ -724,6 +750,7 @@ class TestPlugin:
         assert env["TMPDIR"] == "/orig/tmp" and "PYTEST_DEBUG_TEMPROOT" not in env
         assert tr.SESSION_ENV not in env and sub._TMP_ORIG_ENV not in env
 
+    @_POSIX_ONLY
     def test_the_summary_line_names_the_root_the_size_and_the_report_home(self, tmp_path) -> None:
         plug, _env = _plugin(tmp_path)
         plug.pytest_configure(_config())
@@ -731,6 +758,7 @@ class TestPlugin:
         assert f"basetemp and TMPDIR on tmpfs {plug.run}" in line and "removed at exit" in line
         assert str(Path("/orig/tmp") / f"nexus-test-reports-{sub._current_uid()}" / plug.run.name) in line
 
+    @_POSIX_ONLY
     def test_nx_reports_are_copied_to_disk_before_the_basetemp_goes(self, tmp_path) -> None:
         plug, _env = _plugin(tmp_path)
         plug.pytest_configure(_config())
@@ -750,6 +778,7 @@ class TestPlugin:
         assert (home / "nx-ddl-report.json").read_text() == '{"a": 1}'
         assert not plug.run.exists()
 
+    @_POSIX_ONLY
     def test_a_nested_runs_reports_never_overwrite_the_controllers(self, tmp_path) -> None:
         """A nested pytest inherits PYTEST_DEBUG_TEMPROOT and gets the next numbered
         basetemp; its reports have the same names (nexus-kyujr)."""
@@ -769,6 +798,7 @@ class TestPlugin:
         assert sorted(f.name for f in home.iterdir()) == ["nx-storage-touch-report.json"]
         assert (home / "nx-storage-touch-report.json").read_text() == "controller"
 
+    @_POSIX_ONLY
     def test_a_controller_without_a_basetemp_harvests_nothing(self, tmp_path) -> None:
         plug, _env = _plugin(tmp_path)
         plug.pytest_configure(_config())
@@ -781,6 +811,7 @@ class TestPlugin:
         plug.pytest_unconfigure(_config(factory_basetemp=None))
         assert list(orig.iterdir()) == []
 
+    @_POSIX_ONLY
     def test_reports_are_harvested_when_the_run_root_has_a_symlinked_component(self, tmp_path) -> None:
         """pytest's tmp_path factory hands back a RESOLVED basetemp; the run dir is the
         path the plugin built from the root it was given. With a symlink in that path
@@ -805,6 +836,7 @@ class TestPlugin:
         home = orig / f"nexus-test-reports-{sub._current_uid()}" / plug.run.name
         assert [f.name for f in home.iterdir()] == ["nx-ddl-report.json"]
 
+    @_POSIX_ONLY
     def test_the_harvest_reads_the_basetemp_pytest_itself_hands_out(
         self, tmp_path, request, tmp_path_factory,
     ) -> None:
@@ -820,6 +852,7 @@ class TestPlugin:
         assert plug._basetemp == real_bt
         assert real_bt.is_dir()  # the plugin only read it; the run dir it removed is its own
 
+    @_POSIX_ONLY
     def test_only_the_newest_three_report_runs_are_kept(self, tmp_path) -> None:
         orig = tmp_path / "orig"
         homes = []
@@ -855,6 +888,7 @@ class TestPlugin:
         assert (keep / "p" / "failed-test-dir").is_dir()
         assert env["TMPDIR"] == str(keep / "t") and "forced by NX_TEST_TMP_ROOT" in plug.summary_line()
 
+    @_POSIX_ONLY
     def test_the_start_sweeps_a_crashed_runs_directory(self, tmp_path) -> None:
         root = tmp_path / "shm" / _ROOT
         stale = tr.make_run_dir(root, pid=_dead_pid(), probe=False)
@@ -1186,6 +1220,7 @@ class TestFailureEvidence:
         assert any("nexus-svc-logs-1" in n and "skipped" in n for n in notes)
         assert (dest / "tmp_path" / "pytest-of-u" / "pytest-0" / "test_serial_failure0").is_dir()
 
+    @_POSIX_ONLY
     def test_a_socket_in_a_failed_dir_does_not_stop_the_copy(self, tmp_path, monkeypatch) -> None:
         import socket
 
@@ -1234,6 +1269,7 @@ class TestFailureEvidence:
         plug.pytest_sessionfinish(session, exitstatus)
         return plug, orig
 
+    @_POSIX_ONLY
     def test_a_guard_that_fails_the_session_after_sessionfinish_still_keeps_the_evidence(self, tmp_path) -> None:
         """nexus-ww33u: a conftest guard sets session.exitstatus after this plugin's sessionfinish saw 0;
         unconfigure reads the session's final value, so the guard-flipped run keeps its evidence."""
@@ -1243,6 +1279,7 @@ class TestFailureEvidence:
         plug.pytest_unconfigure(_config())
         assert (plug._report_home() / tr.FAILED_SUBDIR / tr.FAILURE_SUMMARY_FILE).is_file()
 
+    @_POSIX_ONLY
     def test_failed_runs_outlive_newer_clean_runs_and_prune_on_their_own_count(self, tmp_path) -> None:
         """nexus-ww33u: three passing runs used to prune a failure's evidence away. Clean runs keep the
         newest REPORT_KEEP, failed runs the newest FAILED_KEEP, each counted apart."""
@@ -1269,6 +1306,7 @@ class TestFailureEvidence:
             "the current failed run is the newest of FAILED_KEEP, so the oldest earlier one goes")
         assert (plug._report_home() / tr.FAILED_SUBDIR).is_dir()
 
+    @_POSIX_ONLY
     def test_a_failed_run_keeps_its_evidence_under_the_report_home_before_the_run_goes(self, tmp_path) -> None:
         plug, orig = self._finished_plugin(tmp_path, 1)
         assert plug.failed_nodeids == ["t.py::test_boom"]
@@ -1281,6 +1319,7 @@ class TestFailureEvidence:
         assert "t.py::test_boom" in (failed / tr.FAILURE_SUMMARY_FILE).read_text()
         assert not (failed / "fenced-home").exists(), "removed unless NX_KEEP_FENCED_HOME is set"
 
+    @_POSIX_ONLY
     def test_the_controllers_live_substrate_logs_are_kept_before_the_copy(self, tmp_path, monkeypatch) -> None:
         """nexus-ww33u: a substrate the controller booted is still up at unconfigure (its teardown is
         atexit); its logs live in pgdata, outside the run, so the harvest keeps them first."""
@@ -1293,17 +1332,20 @@ class TestFailureEvidence:
         kept = plug._report_home() / tr.FAILED_SUBDIR / "engine-logs" / f"nexus-svc-logs-{os.getpid()}" / "engine.log"
         assert kept.read_text() == "controller engine"
 
+    @_POSIX_ONLY
     def test_keep_fenced_home_copies_the_home_out_of_the_run_dir(self, tmp_path) -> None:
         plug, _orig = self._finished_plugin(tmp_path, 1, env_extra={"NX_KEEP_FENCED_HOME": "1"})
         plug.pytest_unconfigure(_config())
         assert (plug._report_home() / tr.FAILED_SUBDIR / "fenced-home" / "nx-suite-home-q").is_dir()
 
+    @_POSIX_ONLY
     @pytest.mark.parametrize("exitstatus", [0, 5])
     def test_a_clean_run_keeps_no_evidence(self, tmp_path, exitstatus) -> None:
         plug, orig = self._finished_plugin(tmp_path, exitstatus)
         plug.pytest_unconfigure(_config())
         assert list(orig.iterdir()) == [], "nothing is written to disk for a passing run with no reports"
 
+    @_POSIX_ONLY
     def test_the_summary_line_says_a_failed_run_is_kept_and_where(self, tmp_path) -> None:
         plug, _orig = self._finished_plugin(tmp_path, 1)
         line = plug.summary_line()
@@ -1312,6 +1354,7 @@ class TestFailureEvidence:
         ok, _ = self._finished_plugin(tmp_path / "ok", 0)
         assert "FAILED" not in ok.summary_line()
 
+    @_POSIX_ONLY
     def test_the_terminal_summary_hook_learns_the_exit_status_too(self, tmp_path) -> None:
         plug, _env = _plugin(tmp_path)
         plug.pytest_configure(_config())
@@ -1532,6 +1575,7 @@ _PINNED_HEADROOM_MIB = 64 * 1024
 
 
 class TestEndToEnd:
+    @_POSIX_ONLY
     def test_serial_run_scratch_lives_in_the_private_dir_and_is_gone_after(self, tmp_path) -> None:
         r = _run_pytest(tmp_path, "-q", "test_probe.py", **_grant_env(tmp_path))
         assert r.returncode == 0, r.stdout + r.stderr
@@ -1553,6 +1597,7 @@ class TestEndToEnd:
         assert (home / "nx-probe-report.json").is_file()
         assert not (home / tr.FAILED_SUBDIR).exists(), "a passing run keeps no failure evidence"
 
+    @_POSIX_ONLY
     def test_xdist_workers_inherit_the_one_decision(self, tmp_path) -> None:
         pytest.importorskip("xdist")
         (proj := _sandbox_dir(tmp_path)).joinpath("test_second.py").write_text(
@@ -1578,6 +1623,7 @@ class TestEndToEnd:
         assert probe["tmpdir_env"] == str(tmp_path / "orig-tmp")
         assert not (tmp_path / "shm").exists() or list((tmp_path / "shm").iterdir()) == []
 
+    @_POSIX_ONLY
     def test_the_real_headroom_decision_is_self_consistent(self, tmp_path) -> None:
         """The one nested run that reads the real cgroup: its outcome depends on the host's
         memory state, so it asserts that what was reported matches what was done."""
@@ -1611,6 +1657,7 @@ class TestEndToEnd:
         (probe,) = _probes(tmp_path)
         assert probe["tmpdir_env"] == str(tmp_path / "orig-tmp") and probe["session"].startswith("disk=")
 
+    @_POSIX_ONLY
     def test_a_forced_directory_is_used_and_kept(self, tmp_path) -> None:
         keep = tmp_path / "keep"
         r = _run_pytest(tmp_path, "-q", "test_probe.py", NX_TEST_TMP_ROOT=str(keep))
@@ -1619,6 +1666,7 @@ class TestEndToEnd:
         assert probe["tmpdir_env"] == str(keep / "t") and probe["tmp_path"].startswith(str(keep / "p"))
         assert (keep / "p").is_dir() and "forced by NX_TEST_TMP_ROOT" in r.stdout
 
+    @_POSIX_ONLY
     def test_a_killed_run_leaves_one_dir_and_the_next_run_removes_it(self, tmp_path) -> None:
         _sandbox(tmp_path)
         env = _clean_env(tmp_path, PROBE_HANG="1", **_grant_env(tmp_path))
@@ -1650,6 +1698,7 @@ class TestEndToEnd:
         (home,) = list(reports.iterdir())
         return home, home / tr.FAILED_SUBDIR
 
+    @_POSIX_ONLY
     def test_a_failed_serial_run_keeps_the_failed_tests_dir_and_the_engine_log(self, tmp_path) -> None:
         _sandbox(tmp_path).joinpath("test_fail.py").write_text(_SANDBOX_FAILING_TEST)
         r = _run_pytest(tmp_path, "-q", "test_fail.py", **_grant_env(tmp_path))
@@ -1663,6 +1712,7 @@ class TestEndToEnd:
         assert "test_fail.py::test_fail" in (failed / tr.FAILURE_SUMMARY_FILE).read_text()
         assert "this run FAILED" in r.stdout and str(failed) in r.stdout
 
+    @_POSIX_ONLY
     def test_a_failed_xdist_run_keeps_the_workers_tmp_dir(self, tmp_path) -> None:
         pytest.importorskip("xdist")
         proj = _sandbox(tmp_path)

@@ -21,6 +21,11 @@ import pytest
 from tests import _engine_substrate as sub
 from tests._module_seam import setattr_in
 
+#: Skips a test that drives the tmpfs root, uid-owned dirs, mode bits, AF_UNIX sockets, signals or a shell-script
+#: fake: decide_tmp_root declines the tmpfs root off Linux, so a Windows run never takes these paths, and on Windows
+#: the simulated Linux renders /dev/shm with backslashes and st_uid is 0.
+_POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="drives the POSIX-only tmpfs root (declined off Linux)")
+
 _TMPFS_MOUNTS = (
     "proc /proc proc rw 0 0\n"
     "tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"
@@ -94,9 +99,11 @@ def _choose(**kw) -> Path | None:
 
 
 class TestRootChoice:
+    @_POSIX_ONLY
     def test_linux_tmpfs_with_room_gets_a_per_user_dir(self) -> None:
         assert _choose() == Path("/dev/shm/nexus-test-pg-1000")
 
+    @_POSIX_ONLY
     def test_uid_is_part_of_the_name(self) -> None:
         assert _choose(uid=4242) == Path("/dev/shm/nexus-test-pg-4242")
 
@@ -114,6 +121,7 @@ class TestRootChoice:
     def test_tmpfs_too_small_is_refused(self) -> None:
         assert _choose(free_bytes=_tight) is None
 
+    @_POSIX_ONLY
     def test_free_space_boundary_is_two_gib_plus_margin(self) -> None:
         need = sub._TMPFS_MIN_FREE_BYTES
         assert need >= 2 * 1024**3 + 512 * 1024**2
@@ -148,6 +156,7 @@ class TestRootChoice:
         with pytest.raises(ValueError, match="sun_path"):
             _choose(env={"NX_TEST_PG_ROOT": too_long})
 
+    @_POSIX_ONLY
     def test_the_tmpfs_root_keeps_the_socket_path_within_sun_path(self) -> None:
         root = _choose(uid=2**31)
         assert root is not None
@@ -177,6 +186,7 @@ class TestPgClusterParent:
         with pytest.raises(OSError):
             sub.pg_cluster_parent()
 
+    @_POSIX_ONLY
     def test_a_tmpfs_dir_owned_by_someone_else_falls_back(
         self, tmp_path, monkeypatch,
     ) -> None:
@@ -189,6 +199,7 @@ class TestPgClusterParent:
         with pytest.warns(UserWarning, match="falling back"):
             assert sub.pg_cluster_parent() is None
 
+    @_POSIX_ONLY
     def test_a_loose_dir_of_ours_is_tightened_to_0700(self, tmp_path, monkeypatch) -> None:
         root = tmp_path / "nexus-test-pg-me"
         root.mkdir()
@@ -231,11 +242,13 @@ class TestDiskDecisionStaysOffTheRunsTmpfs:
         path = Path(sub.integration_cluster_dir("kyujr_int_"))
         assert path.parent == orig and not list(run_t.iterdir())
 
+    @_POSIX_ONLY
     def test_a_substrate_initdb_dir_lands_under_the_original_tempdir(self, moved_tmpdir, tmp_path) -> None:
         orig, run_t = moved_tmpdir
         path = Path(sub._initdb_cluster(self._fake_initdb(tmp_path), prefix="kyujr_sub_"))
         assert path.parent == orig and not list(run_t.iterdir())
 
+    @_POSIX_ONLY
     def test_a_named_parent_is_still_used_as_given(self, moved_tmpdir, tmp_path) -> None:
         chosen = tmp_path / "chosen"
         chosen.mkdir()
@@ -556,15 +569,18 @@ class TestFreeSpaceGateSeesTheCgroup:
     def test_cgroup_headroom_below_the_threshold_refuses(self) -> None:
         assert _choose(cgroup_headroom=lambda: 1 * 1024**3) is None
 
+    @_POSIX_ONLY
     def test_cgroup_headroom_above_the_threshold_allows(self) -> None:
         assert _choose(cgroup_headroom=lambda: 64 * 1024**3) is not None
 
+    @_POSIX_ONLY
     def test_the_minimum_of_the_two_decides(self) -> None:
         need = sub._TMPFS_MIN_FREE_BYTES
         assert _choose(free_bytes=lambda _p: need, cgroup_headroom=lambda: need - 1) is None
         assert _choose(free_bytes=lambda _p: need - 1, cgroup_headroom=lambda: need) is None
         assert _choose(free_bytes=lambda _p: need, cgroup_headroom=lambda: need) is not None
 
+    @_POSIX_ONLY
     def test_no_cgroup_limit_leaves_only_the_tmpfs_gate(self) -> None:
         assert _choose(cgroup_headroom=lambda: None) is not None
 
@@ -613,16 +629,20 @@ class TestLinuxFallbackIsLoud:
     def test_not_tmpfs_names_the_reason(self) -> None:
         assert "not tmpfs" in self._warns(mounts_text=_NO_TMPFS_MOUNTS)
 
+    @_POSIX_ONLY
     def test_not_writable_names_the_reason(self) -> None:
         assert "not writable" in self._warns(writable=lambda _p: False)
 
+    @_POSIX_ONLY
     def test_low_free_names_the_reason_and_the_numbers(self) -> None:
         msg = self._warns(free_bytes=_tight)
         assert "free" in msg and "1024" in msg
 
+    @_POSIX_ONLY
     def test_low_cgroup_headroom_names_the_cgroup(self) -> None:
         assert "cgroup" in self._warns(cgroup_headroom=lambda: 1)
 
+    @_POSIX_ONLY
     def test_socket_path_too_long_names_the_reason(self, monkeypatch) -> None:
         monkeypatch.setattr(sub, "_SOCKET_PATH_MAX", 20)
         assert "socket" in self._warns()
@@ -635,6 +655,7 @@ class TestLinuxFallbackIsLoud:
         assert _choose(env={"NX_TEST_PG_ROOT": "default"}) is None
         assert not [w for w in recwarn if "tmpfs" in str(w.message)]
 
+    @_POSIX_ONLY
     def test_success_is_silent(self, recwarn) -> None:
         assert _choose() is not None
         assert not [w for w in recwarn if "tmpfs" in str(w.message)]
@@ -704,6 +725,7 @@ class TestRootIsDecidedOncePerRun:
         )
         return sub.session_pg_root(env=env, **{**base, **kw})
 
+    @_POSIX_ONLY
     def test_a_later_squeeze_does_not_move_the_run_to_disk(self) -> None:
         env: dict[str, str] = {}
         first = self._decide(env)
@@ -711,6 +733,7 @@ class TestRootIsDecidedOncePerRun:
         assert first[0] == Path("/dev/shm/nexus-test-pg-1000")
         assert squeezed == first
 
+    @_POSIX_ONLY
     def test_a_refusal_is_just_as_sticky(self, recwarn) -> None:
         env: dict[str, str] = {}
         first = self._decide(env, free_bytes=_tight)
@@ -719,6 +742,7 @@ class TestRootIsDecidedOncePerRun:
         assert first[0] is None and "free" in (first[1] or "")
         assert again == first
 
+    @_POSIX_ONLY
     def test_the_decision_travels_in_the_env_workers_inherit(self) -> None:
         env: dict[str, str] = {}
         self._decide(env)
@@ -737,10 +761,12 @@ class TestRootIsDecidedOncePerRun:
         assert self._decide(env)[2] is True  # explicit
         assert sub._PG_ROOT_SESSION_ENV not in env
 
+    @_POSIX_ONLY
     def test_garbage_in_the_env_is_decided_afresh(self) -> None:
         env = {sub._PG_ROOT_SESSION_ENV: "wat"}
         assert self._decide(env)[0] == Path("/dev/shm/nexus-test-pg-1000")
 
+    @_POSIX_ONLY
     def test_the_controller_decides_before_workers_exist(self, monkeypatch) -> None:
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
         calls: list[int] = []
@@ -957,6 +983,7 @@ class TestStartDecisionCreditsReclaimableCache:
 
         return fn
 
+    @_POSIX_ONLY
     def test_raw_below_the_floor_but_credited_above_picks_tmpfs(self, monkeypatch) -> None:
         monkeypatch.setattr(sub, "_cgroup_headroom", self._headroom(1 * self.GIB, 6 * self.GIB))
         root, refusal = sub.decide_pg_root(
@@ -965,6 +992,7 @@ class TestStartDecisionCreditsReclaimableCache:
         )
         assert root == Path("/dev/shm/nexus-test-pg-1000") and refusal is None
 
+    @_POSIX_ONLY
     def test_credited_below_the_floor_still_refuses_and_names_both(self, monkeypatch) -> None:
         monkeypatch.setattr(sub, "_cgroup_headroom", self._headroom(1 * self.GIB, 2 * self.GIB))
         root, refusal = sub.decide_pg_root(
@@ -974,6 +1002,7 @@ class TestStartDecisionCreditsReclaimableCache:
         assert root is None
         assert "2048 MiB" in refusal and "1024 MiB before crediting" in refusal
 
+    @_POSIX_ONLY
     def test_the_decision_logs_raw_and_credited_headroom(self, monkeypatch, info_logs) -> None:
         import structlog.testing
 
@@ -1148,6 +1177,7 @@ class TestControllerFailureDoesNotLeaveWorkersDecidingAlone:
         finally:
             sub.pg_root_run_summary(finish=True)
 
+    @_POSIX_ONLY
     def test_an_unwritable_cluster_log_does_not_lose_the_decision(self, monkeypatch) -> None:
         monkeypatch.delenv("NX_TEST_PG_ROOT", raising=False)
         monkeypatch.setattr(
@@ -1220,6 +1250,7 @@ class TestCleanupAndTmpfsLogging:
         assert not path.exists()
         assert sub._PG_ROOT_LOG_ENV not in os.environ
 
+    @_POSIX_ONLY
     def test_a_tmpfs_start_logs_cluster_root_at_info_on_tmpfs(self, monkeypatch, info_logs) -> None:
         import structlog.testing
 
@@ -1289,6 +1320,7 @@ class TestTmpfsHardening:
         cause = sub._tmpfs_floor_cause(tmp_path, None, lambda: None)
         assert cause is not None and "64 MiB free for this user" in cause, cause
 
+    @_POSIX_ONLY
     def test_a_small_quota_sends_the_tmp_root_to_disk(self, monkeypatch) -> None:
         from tests import _tmp_root
 
@@ -1307,6 +1339,7 @@ class TestTmpfsHardening:
         assert ctypes.sizeof(dq) == 72
         assert [getattr(dq, f).offset for f in (*sub._DQBLK_FIELDS, "valid")] == [0, 8, 16, 24, 32, 40, 48, 56, 64]
 
+    @_POSIX_ONLY
     def test_a_small_quota_sends_the_cluster_root_to_disk(self, monkeypatch) -> None:
         # A roomy filesystem but a 64 MiB quota: the real default probe (no free_bytes injected) must refuse.
         setattr_in(monkeypatch, sub, "shutil.disk_usage", lambda _p: shutil._ntuple_diskusage(10**13, 0, 10**13))
