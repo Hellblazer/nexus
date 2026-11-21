@@ -150,7 +150,13 @@ public final class StatusHandler implements HttpHandler {
 
     private volatile Supplier<Boolean> collectionTupleIndex;               // nullable — key omitted
 
-    /** STUB (test-first): the key is not rendered yet. */
+    /**
+     * RDR-229 P3.8 (nexus-p2m1x.28), [additive]: {@code collection_tuple_index_present} (bool): whether the partial
+     * UNIQUE index {@code catalog_collections_live_tuple_uq} on the collection registry exists. The changeset that
+     * builds it waits for the re-own data move and for no duplicate live tuple, so {@code false} means it has not been
+     * built yet, not that something failed. Absent = an engine that predates the field, or a probe that could not
+     * run; a client must not read an absent key as false. One boolean, no tenant, collection or tuple text.
+     */
     public StatusHandler collectionTupleIndex(Supplier<Boolean> collectionTupleIndex) {
         this.collectionTupleIndex = collectionTupleIndex;
         return this;
@@ -689,6 +695,15 @@ public final class StatusHandler implements HttpHandler {
                     }
                     body.append('}');
                 }
+            }
+        }
+
+        // RDR-229 P3.8 (nexus-p2m1x.28), [additive]: is the live-tuple unique index built? Absent = cannot tell.
+        Supplier<Boolean> tupleIndex = collectionTupleIndex;
+        if (tupleIndex != null) {
+            Boolean present = tupleIndex.get();
+            if (present != null) {
+                body.append(",\"collection_tuple_index_present\":").append(present);
             }
         }
 
