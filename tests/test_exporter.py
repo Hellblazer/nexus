@@ -637,6 +637,58 @@ class TestEmbeddingModelValidation:
         assert result["imported_count"] == 2
 
 
+class _RowDb:
+    """*db* seen through a client that holds registry rows (``HttpVectorClient._resolve_collection_row``)."""
+
+    def __init__(self, db: T3Database, rows: dict[str, dict]) -> None:
+        self._db = db
+        self._rows = rows
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+    def _resolve_collection_row(self, collection: str, *, strict: bool = False) -> dict | None:
+        return self._rows.get(collection)
+
+
+class TestEmbeddingModelGateOfAMintedLabel:
+    """RDR-229 P3.8: an import into a new subject targets the label the engine minted (``c9``), whose name carries
+    no model. The model gate reads the target's registry row, not a guess from the name."""
+
+    @staticmethod
+    def _run(db: T3Database, tmp_path: Path, monkeypatch, *, row_model: str, export_model: str) -> list[dict]:
+        from structlog.testing import capture_logs
+
+        monkeypatch.setattr("nexus.exporter.is_file_routed_collection", lambda *a, **k: False)
+        monkeypatch.setattr("nexus.db.serving_engine_version.require_note_uri_engine", lambda *a, **k: None)
+        out = tmp_path / "label.nxexp"
+        _write_nxexp_records(out, "knowledge__src__x__v1", [{"id": "a" * 32, "document": "hello", "metadata": {}}],
+                             embedding_model=export_model, dim=768)
+        target = _RowDb(db, {"c9": {"content_type": "knowledge", "owner_id": "wbfpw11-imported",
+                                    "embedding_model": row_model, "lifecycle_state": "live"}})
+        with capture_logs() as cap:
+            try:
+                import_collection(db=target, input_path=out, target_collection="c9")
+            except EmbeddingModelMismatch:
+                raise
+            except Exception:  # noqa: BLE001 — past the gate the in-memory T3 cannot hold a label; only the gate is under test
+                pass
+        return cap
+
+    def test_an_export_in_the_rows_model_passes_the_gate(self, ephemeral_db, tmp_path, monkeypatch) -> None:
+        cap = self._run(ephemeral_db, tmp_path, monkeypatch,
+                        row_model="bge-base-en-v15-768", export_model="bge-base-en-v15-768")
+        assert any(e.get("event") == "import_start" for e in cap), cap
+
+    def test_an_export_in_another_model_than_the_rows_is_refused_naming_the_rows_model(
+        self, ephemeral_db, tmp_path, monkeypatch,
+    ) -> None:
+        with pytest.raises(EmbeddingModelMismatch) as exc_info:
+            self._run(ephemeral_db, tmp_path, monkeypatch,
+                      row_model="voyage-context-3", export_model="voyage-code-3")
+        assert "requires 'voyage-context-3'" in str(exc_info.value) and "'c9'" in str(exc_info.value)
+
+
 # ── Unit: format version validation ──────────────────────────────────────────
 
 
