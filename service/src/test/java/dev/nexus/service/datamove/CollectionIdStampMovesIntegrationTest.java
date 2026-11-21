@@ -5,6 +5,7 @@ package dev.nexus.service.datamove;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgCatalogProbes;
+import dev.nexus.service.PgContainerHelper;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.impl.DSL;
@@ -272,6 +273,49 @@ class CollectionIdStampMovesIntegrationTest extends DataMoveIntegrationBase {
         String failure = failure(table);
         assertThat(failure == null || failure.contains("on_complete")).as("%s: failure is %s", table, failure).isTrue();
         assertThat(failure == null || !failure.contains("old-shape rows")).isTrue();
+    }
+
+    /**
+     * Seam 1 (tamsin, 2026-11-21): an orphan row (a name with no registry row in its tenant) must not fail the move. Its on_complete validates a
+     * table's CHECKs only while the table has no orphan row, so the move COMPLETES with the CHECKs NOT VALID, the completion check says the VALIDATE
+     * waits and counts the orphan, and once the operator deletes the orphan and validates, the label completes.
+     */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("freeNameTables")
+    void anOrphanLetsTheMoveCompleteWithItsChecksNotValid_theLabelWaitsAndCountsIt_thenCompletesOnceTheOperatorValidates(String table) throws Exception {
+        String tenant = tenantFor(table, "orphan-wait");
+        String label = StampMoveSpecs.LABEL_PREFIX + table;
+        var seeded = StampMoveSeeds.seed(ctx(), table, tenant, new StampMoveSeeds.Plan(2, true, false, true));
+        register(table, Map.of());
+
+        assertThat(productionWorker(0).runCycle()).isEqualTo(1);
+
+        assertThat(completedAt(label)).as("%s: the orphan does not fail the move (failure: %s)", table, failure(table)).isNotNull();
+        assertThat(failure(table)).as("%s: no failure is recorded", table).isNull();
+        var after = StampMoveSeeds.rows(ctx(), table, tenant);
+        for (String key : seeded.old()) {
+            assertThat(after.get(key).ids().values()).as("%s: non-vacuity, the resolvable rows are stamped", table).doesNotContainNull();
+        }
+        for (String constraint : StampMoveSpecs.constraintsByTable().get(table)) {
+            assertThat(PgCatalogProbes.constraintValidated(ctx(), constraint)).as("%s: the VALIDATE waits while an orphan is there", constraint).isFalse();
+        }
+        var readSet = new CompletionCheck.ReadSet(List.of(label), List.of());
+        var waiting = CompletionCheck.evaluate(ctx(), readSet, CompletionCheck.Gate3Source.NOT_INSTALLED, CompletionCheck.DIRECT);
+        var state = waiting.labels().get(0);
+        assertThat(state.status()).as("%s: the label shows VALIDATE waits", table).isEqualTo(CompletionCheck.Status.INCOMPLETE);
+        assertThat(state.why()).contains("is NOT VALID");
+        assertThat(waiting.violators().stream().mapToLong(CompletionCheck.Violators::orphans).sum())
+            .as("%s: the check counts exactly the one orphan (the same predicate on_complete guards on)", table).isEqualTo(1);
+
+        // the operator deletes the orphan and validates
+        String firstName = StampMoveSpecs.checks().stream().filter(c -> c.table().equals(table) && c.kind().equals("NAME_ID")).findFirst().orElseThrow().nameColumn();
+        assertThat(ctx().deleteFrom(table("nexus", table)).where(TENANT.eq(tenant)).and(DSL.field(DSL.name(firstName), String.class).eq(seeded.orphan())).execute()).isEqualTo(1);
+        for (String constraint : StampMoveSpecs.constraintsByTable().get(table)) {
+            ctx().connection(c -> PgContainerHelper.validateConstraint(c, table("nexus", table), constraint));
+        }
+        var done = CompletionCheck.evaluate(ctx(), readSet, CompletionCheck.Gate3Source.NOT_INSTALLED, CompletionCheck.DIRECT);
+        assertThat(done.labels().get(0).status()).as("%s: the label completes once validated", table).isEqualTo(CompletionCheck.Status.COMPLETE);
+        assertThat(done.violators()).isEmpty();
     }
 
     @ParameterizedTest(name = "{0}")

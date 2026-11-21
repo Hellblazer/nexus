@@ -145,7 +145,7 @@ class Rdr229P31ExpandIntegrationTest {
                     assertThat(info.isNullable()).as("%s.%s is nullable", r.table(), r.idColumn()).isEqualTo("YES");
                     if (r.hasCheck()) {
                         assertThat(defs.get(r.table() + "." + r.constraint()))
-                            .as("%s on %s: the definition is the ruling's, and NOT VALID", r.constraint(), r.table())
+                            .as("%s on %s: the definition is the ruling's, and NOT VALID (the registry's, validated by its own changeset on an empty registry)", r.constraint(), r.table())
                             .isEqualTo(expectedDefinition(r));
                     }
                 }
@@ -455,7 +455,8 @@ class Rdr229P31ExpandIntegrationTest {
     /** What pg_get_constraintdef prints for a listed constraint of this kind. */
     private static String expectedDefinition(Row r) {
         return switch (r.kind()) {
-            case "SUPERSEDED" -> "CHECK (((superseded_by = ''::text) = (superseded_by_id IS NULL))) NOT VALID";
+            // vectors-068-19 validates it in its own changeset when no registry row violates it (seam 2, 2026-11-21): a fresh walk has none, so no NOT VALID here
+            case "SUPERSEDED" -> "CHECK (((superseded_by = ''::text) = (superseded_by_id IS NULL)))";
             case "NAME_ID" -> "CHECK (((NULLIF(" + r.nameColumn() + ", ''::text) IS NULL) = (" + r.idColumn() + " IS NULL))) NOT VALID";
             case "NOT_NULL" -> "CHECK ((" + r.idColumn() + " IS NOT NULL)) NOT VALID";
             default -> throw new IllegalStateException("no constraint for kind " + r.kind());

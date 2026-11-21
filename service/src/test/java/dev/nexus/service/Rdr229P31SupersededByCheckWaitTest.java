@@ -115,6 +115,92 @@ class Rdr229P31SupersededByCheckWaitTest {
         }
     }
 
+    /**
+     * Seam 2 (tamsin, 2026-11-21): on a skip-upgrade install the CHECK is added on a LATER boot, after the registry stamp move has completed and its
+     * on_complete has run. Nothing else would validate it then, and the completion check's gate 1 could never hold. Its precondition has
+     * cleared the blank-model_version tombstones and the stamp filled the rest, so the changeset validates the CHECK itself.
+     */
+    @Test
+    void theCheckAddedOnALaterBootIsValidatedByItsOwnChangeset_soGate1HoldsOnceTheStampsAreDone() throws Exception {
+        PostgreSQLContainer<?> pg = start();
+        try (HikariDataSource ds = adminPool(pg)) {
+            seedBeforeWalk(pg, ds, "tomb-blank", "");
+            SchemaMigrator.migrate(ds);
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.constraintCount(ctx, CHECK)).as("non-vacuity: the CHECK waits at expand time").isZero();
+                // the stamp runs: the tombstone whose successor is gone takes its own id (R7)
+                ctx.update(DSL.table(DSL.name("nexus", "catalog_collections")))
+                    .set(DSL.field(DSL.name("superseded_by_id"), Long.class), DSL.field(DSL.name("collection_id"), Long.class))
+                    .where(DSL.field(DSL.name("name"), String.class).eq("tomb-blank")).execute();
+            }
+            SchemaMigrator.migrate(ds);   // the later boot adds the CHECK
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.constraintCount(ctx, CHECK)).as("the later boot adds it").isEqualTo(1);
+                assertThat(PgCatalogProbes.constraintValidated(ctx, CHECK)).as("and the same changeset validates it: nothing else would").isTrue();
+
+                // every stamp move is complete and every other CHECK validated, as the moves leave them: gate 1 then holds
+                var moves = DSL.table(DSL.name("nexus", "data_moves"));
+                var label = DSL.field(DSL.name("label"), String.class);
+                var tables = ctx.select(DSL.field(DSL.name("driving_table"), String.class)).from(moves)
+                    .where(label.like("rdr229-stamp-%")).fetch(DSL.field(DSL.name("driving_table"), String.class));
+                assertThat(tables).as("non-vacuity: the walk registered the stamp moves").isNotEmpty();
+                for (var def : PgCatalogProbes.constraintDefinitionsIn(ctx, List.of("nexus"))) {
+                    if (def.definition().endsWith("NOT VALID") && tables.contains(def.table())) {
+                        PgContainerHelper.validateConstraint(su, DSL.table(DSL.name("nexus", def.table())), def.conname());
+                    }
+                }
+                ctx.update(moves).set(DSL.field(DSL.name("completed_at"), java.time.OffsetDateTime.class), java.time.OffsetDateTime.now())
+                    .where(label.like("rdr229-stamp-%")).execute();
+                var result = dev.nexus.service.datamove.CompletionCheck.evaluate(ctx);
+                assertThat(result.supersededByCheckPresent()).isTrue();
+                assertThat(result.incomplete()).as("every label is complete or not applicable").isEmpty();
+                assertThat(result.gate1()).as("gate 1 holds: the CHECKs are present and validated").isTrue();
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    /** The registry holds no violating row at expand time (a live row only): the CHECK is added and validated by its own changeset at once. */
+    @Test
+    void aRegistryWithNoViolatingRow_hasTheCheckAddedAndValidatedAtOnce() throws Exception {
+        PostgreSQLContainer<?> pg = start();
+        try (HikariDataSource ds = adminPool(pg)) {
+            migrateUpTo(ds, FIRST);
+            SchemaMigrator.migrate(ds);
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.constraintCount(ctx, CHECK)).isEqualTo(1);
+                assertThat(PgCatalogProbes.constraintValidated(ctx, CHECK)).isTrue();
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    /**
+     * An ordinary upgrade: a tombstone with a model_version and no superseded_by_id is unstamped when the CHECK is added, so a VALIDATE would raise 23514
+     * and halt the boot. The changeset leaves the CHECK NOT VALID there and the stamp move's on_complete validates it. (The precondition counts only the
+     * blank-model_version tombstones, so it does not guarantee the data is clean.)
+     */
+    @Test
+    void anUnstampedTombstoneWithAModelVersion_leavesTheCheckNotValidAndDoesNotHaltTheBoot() throws Exception {
+        PostgreSQLContainer<?> pg = start();
+        try (HikariDataSource ds = adminPool(pg)) {
+            seedBeforeWalk(pg, ds, "tomb-versioned", "v1");
+            SchemaMigrator.migrate(ds);
+            try (Connection su = pg.createConnection("")) {
+                DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+                assertThat(PgCatalogProbes.constraintCount(ctx, CHECK)).isEqualTo(1);
+                assertThat(PgCatalogProbes.constraintValidated(ctx, CHECK)).as("a violating row: left for the stamp's on_complete").isFalse();
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
     // ---- fixtures ----------------------------------------------------------------------------------------------------
 
     private static PostgreSQLContainer<?> start() throws Exception {
