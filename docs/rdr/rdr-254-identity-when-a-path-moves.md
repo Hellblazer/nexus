@@ -447,14 +447,30 @@ documents trashed. The dry run is therefore the safeguard, and the report's
 list of absorbed tumblers is the record.
 
 **Size and locking.** A move rewrites catalog, aspect and highlight rows
-only, never T3. For a repository the size of nexus (7,197 tracked files), an
-owner move updates on the order of 7,000 document rows, up to as many aspect
-rows, and one owner row; a fold of B absorbs or trashes up to as many of B's
-rows again. That is an estimate of 15,000 to 20,000 row writes, not a
-measurement, in one Postgres transaction that holds row locks on the two
-owners' documents while it runs. It is a user-run command that touches catalog
-rows only, so the rule against boot-time data migrations does not apply, and
-it leaves nothing to resume: the transaction commits whole or not at all.
+only, never T3. Measured on a local engine (gate jar 0.1.199, Postgres 17.5
+with default durability, an Apple M4 Max laptop) for an owner of 7,200
+documents (aspects on half, 20 highlight rows) folding an owner of 3,100
+documents (3,000 with a file_path the first owner also has, 100 without; 1,550
+aspect rows, 20 highlight rows): the move wrote 15,442 rows in one Postgres
+transaction. That is 10,300 `catalog_documents` updates (7,200 re-pointed,
+3,000 absorbed, 100 trashed), 3,600 `document_aspects` updates and 1,500
+deletes, 30 `document_highlights` updates and 10 deletes, and 2
+`catalog_owners` updates, about 22 MB of WAL. It sits inside the earlier
+estimate of 15,000 to 20,000, at its low end; the estimate's upper end assumed
+a second owner as large as the first. The transaction held row locks on every
+document row of both owners (10,300), both owner rows and the 5,100 aspect
+rows it touched, from its first read to its commit, which took 1.7 to 8.4
+seconds over 12 moves (median 4.4) on a laptop that other sessions kept at a
+load average of 22 to 70 on 16 cores; the quiet floor seen was 1.7 to 2.5
+seconds. Reads of either owner's documents never waited (the slowest took
+0.23 seconds). A concurrent write to either owner (a registration into it, an
+update of one of its documents) waited for the commit and then succeeded, with
+no conflict error. The cluster sets no `statement_timeout` or `lock_timeout`,
+so none was hit. Method and per-run figures: T2
+`nexus_rdr/254-owner-fold-measurement`. It is a user-run command that touches
+catalog rows only, so the rule against boot-time data migrations does not
+apply, and it leaves nothing to resume: the transaction commits whole or not
+at all.
 
 #### Move hints
 
@@ -731,8 +747,10 @@ from a deleted file, so the same probe is used only to print a hint.
   close needs an engine-side refusal of a by-name upsert that would change an
   existing owner's non-blank hash and root. That refusal is not built; it is the
   named residual of Gap 4.
-- A large owner move is one transaction of an estimated 15,000 to 20,000 row writes,
-  holding row locks on two owners' documents for seconds. An index run on
+- A large owner move is one transaction of about 15,000 row writes (measured:
+  15,442 for 7,200 and 3,100 documents; see Size and locking), holding row
+  locks on two owners' documents for seconds (1.7 to 8.4 s measured). An index
+  run on
   either owner at the same time waits for it or fails on a conflict and is run
   again. The move is never resumable work: it commits whole or not at all.
 - The aspect upsert's catalog read (A late aspect write, in Technical Design)
@@ -798,10 +816,11 @@ held in flight across it. Both end with one live document at the new path
 holding the old tumbler, the link kept and one search hit. The in-flight
 variant first failed on the aspect race (A late aspect write), pinned as a
 strict xfail until the engine fix, and fed4c979f8 turned it into a plain
-assertion that the old tumbler keeps its aspect row. Not measured: an owner
-fold on a real owner of about 7,000 rows, which the 15,000 to 20,000 row-write
-estimate under Size and locking still rests on. Record: T2
-`nexus_rdr/254-mvv`.
+assertion that the old tumbler keeps its aspect row. The owner fold was
+measured apart from the journey, on an owner of 7,200 documents: 15,442 rows
+written in one transaction, locks held for 1.7 to 8.4 seconds (Size and
+locking). Records: T2 `nexus_rdr/254-mvv` and
+`nexus_rdr/254-owner-fold-measurement`.
 
 ### Phase 1: Engine move routes
 
