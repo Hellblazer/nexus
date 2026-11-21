@@ -11,6 +11,7 @@ import click
 import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
+from nexus.registration_retry import REGISTRATION_RETRY_ACTIVE, reregister_after_unregistered
 from nexus.knowledge_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
 
 _log = structlog.get_logger(__name__)
@@ -2561,7 +2562,21 @@ def write_with_registration_retry(
     catch a collection that sat registered-but-unwritten across an
     intervening restart, never the write this function itself just
     triggered registration for.
+
+    The whole call runs with ``REGISTRATION_RETRY_ACTIVE`` set, so the transport-level retry of
+    :mod:`nexus.registration_retry` (installed in the mutating POST every store shares) passes through
+    here instead of stacking a second retry on this one.
     """
+    token = REGISTRATION_RETRY_ACTIVE.set(True)
+    try:
+        return _write_registering(name, write_fn, registrar)
+    finally:
+        REGISTRATION_RETRY_ACTIVE.reset(token)
+
+
+def _write_registering(
+    name: str, write_fn: "Callable[[], _T]", registrar: "Callable[[], object] | None",
+) -> "_T":
     ensure_collection_registered(name, registrar=registrar)
     try:
         return write_fn()
@@ -2580,38 +2595,7 @@ def write_with_registration_retry(
     except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raised unchanged
         if not _looks_like_stale_registration_error(exc):
             raise
-        if _is_quarantine_sibling(name):
-            # The funnel never registers a sibling (see
-            # ensure_collection_registered), so a retry cannot repair
-            # this; name the reason instead of the engine's bare 422.
-            raise QuarantineSiblingNotRegisteredError(
-                f"{name!r} is not registered and the client never registers "
-                "a quarantine sibling: the engine's GC function registers it "
-                "from the origin collection's row when it first quarantines a "
-                "chunk, so a sibling that does not exist has nothing to "
-                "write into. Check the origin collection and `nx t3 gc`."
-            ) from exc
-        # nexus-wwuzp: the re-registration below is an upsert, which clears
-        # ``superseded_by``. A retired name must be refused, never revived by
-        # a retry. A read failure propagates rather than falling open: the
-        # alternative is reviving a tombstone on a guess.
-        successor = _superseded_successor(_read_collection_row(name, registrar))
-        if successor:
-            # Keep the entry, stale, so the next call takes the revalidation
-            # read and is refused again (and an in-flight read cannot re-stamp
-            # it: expire bumps the generation).
-            with _REGISTERED_COLLECTIONS_LOCK:
-                _registration_cache_set(getattr(registrar, "scope", None)).expire(
-                    _registration_cache_key(getattr(registrar, "scope", None), name),
-                )
-            raise SupersededCollectionWriteError(name, successor) from exc
-        _log.info(
-            "collection_registration_stale_after_boot_sweep_retry",
-            name=name,
-        )
-        with _REGISTERED_COLLECTIONS_LOCK:
-            _registration_cache_discard(getattr(registrar, "scope", None), name)
-        ensure_collection_registered(name, registrar=registrar)
+        reregister_after_unregistered(name, exc, registrar)
         return write_fn()
 
 
