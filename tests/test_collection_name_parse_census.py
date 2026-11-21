@@ -413,11 +413,6 @@ for _site in LEDGER:
 #:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
 #:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
 #:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2. P3.1 (nexus-p2m1x.17), +4 mint, each a registration seam (MINT_REG) that registers the collection BEFORE the first catalog document, since the engine refuses a document under an unregistered one: ``note_write`` (put_note), ``exporter`` (the import pre-pass), ``registration_retry`` (the 422 retry), ``doc_indexer`` (the pre-flight). mint 135 -> 139, primitive_call 183 -> 187, total 217 -> 221. P3.8 (nexus-p2m1x.28), -2: register_collection derives nothing from the name. mint 139 -> 137, primitive_call 187 -> 185, total 221 -> 219.
-#:
-#: P3.6 (nexus-p2m1x.26, 2026-11-21), 219 -> 217: ``validate_collection_name`` is the label rule and reads no part of a name
-#: (the ChromaDB-shape regex and the overflow hint's ``split_candidate_collection_name`` are gone), so it is no longer a
-#: derived helper and its two ``T3Database`` callers (create, and the rename target) left the ledger. mint 137 -> 135,
-#: primitive_call 185 -> 183.
 PARSE_SITE_PIN: int = 217
 CLASS_PIN: dict[str, int] = {
     "mint": 135, "diagnostic": 43, "migration-source": 22,
