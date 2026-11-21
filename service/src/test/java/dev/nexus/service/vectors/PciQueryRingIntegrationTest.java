@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -152,7 +153,7 @@ class PciQueryRingIntegrationTest {
 
     private void insertOldRow(String tenant, String collection, int seed, OffsetDateTime addedAt) {
         scope.withTenant(tenant, ctx -> ctx.insertInto(CANARY_QUERY_RING)
-            .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, collection)
+            .set(CANARY_QUERY_RING.TENANT_ID, tenant).set(CANARY_QUERY_RING.COLLECTION, collection).set(CANARY_QUERY_RING.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CANARY_QUERY_RING.EMBEDDING_MODEL, modelOf(tenant, collection))
             .set(CANARY_QUERY_RING.EMBEDDING_384, Vector.of(vec(seed)))
             .set(CANARY_QUERY_RING.VECTOR_DIGEST, PciQueryRing.digest(vec(seed)))

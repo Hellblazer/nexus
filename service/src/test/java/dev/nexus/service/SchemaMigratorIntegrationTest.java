@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.Field;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -1656,13 +1657,18 @@ class SchemaMigratorIntegrationTest {
                     // collection -- no catalog_collections row for (tenant, name).
                     // RDR-225: a chunk carries a model, and the tenant needs its partition leaves.
                     PgContainerHelper.ensureTenantPartitions(dsl(su), tenant);
-                    dsl(su).insertInto(CHUNKS,
-                            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.EMBEDDING_MODEL,
-                            CHUNKS.CHUNK_TEXT, CHUNKS.EMBEDDING_1024)
-                        .values(tenant, unregCollection, java.util.HexFormat.of().parseHex(chash),
-                            "voyage-context-3", "neg text",
-                            dev.nexus.service.jooq.binding.Vector.parse(
-                                "[" + "0.1,".repeat(1023) + "0.1]"))
+                    // RDR-229 P3.1: a chunk names its collection's registry id too (a NOT VALID CHECK), and an
+                    // unregistered name has none, so the seed gives it an id no registry row holds: the name-keyed
+                    // FK this test adds is still the thing that refuses the unregistered row.
+                    dsl(su).insertInto(CHUNKS)
+                        .set(CHUNKS.TENANT_ID, tenant)
+                        .set(CHUNKS.COLLECTION, unregCollection)
+                        .set(CHUNKS.COLLECTION_ID, Long.MAX_VALUE)
+                        .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(chash))
+                        .set(CHUNKS.EMBEDDING_MODEL, "voyage-context-3")
+                        .set(CHUNKS.CHUNK_TEXT, "neg text")
+                        .set(CHUNKS.EMBEDDING_1024, dev.nexus.service.jooq.binding.Vector.parse(
+                            "[" + "0.1,".repeat(1023) + "0.1]"))
                         .execute();
 
                     // The naive shape: adding the registry FK without fk-004-1-reconcile's

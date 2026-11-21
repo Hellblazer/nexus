@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -88,14 +89,16 @@ class TenantImportSoftReferencesTest {
             insert(ctx, "nx_answer_runs", run, SRC, "r-negative", now, -9L, JSONB.valueOf("{\"run\": {\"plan_id\": -9}}"));
             insert(ctx, "nx_answer_runs", run, SRC, "r-other", now, nullPlan, JSONB.valueOf("{\"other\": 1}"));
             for (String t : List.of("t1", "t2")) {
-                insert(ctx, "topics", List.of("tenant_id", "label", "collection", "created_at"), SRC, t, COLLECTION, now);
+                insert(ctx, "topics", List.of("tenant_id", "label", "collection", "collection_id", "created_at"), SRC, t, COLLECTION,
+                    CollectionIds.require(ctx, SRC, COLLECTION), now);
             }
             long t1 = id(ctx, "topics", "label", "t1");
-            List<Field<?>> centroidColumns = List.of(col("tenant_id"), col("collection"), col("topic_id"), col("label"),
-                col("embedding_model"), VectorSeeds.centroidEmbedding(768));
+            List<Field<?>> centroidColumns = List.of(col("tenant_id"), col("collection"), col("collection_id"), col("topic_id"),
+                col("label"), col("embedding_model"), VectorSeeds.centroidEmbedding(768));
             for (long topic : new long[] {t1, LOST_TOPIC}) {
                 ctx.insertInto(DSL.table(DSL.name("nexus", "taxonomy_centroids")), centroidColumns)
-                    .values(DSL.val(SRC), DSL.val(COLLECTION), DSL.val(topic), DSL.val("centroid " + topic),
+                    .values(DSL.val(SRC), DSL.val(COLLECTION), DSL.val(CollectionIds.require(ctx, SRC, COLLECTION)),
+                        DSL.val(topic), DSL.val("centroid " + topic),
                         DSL.val("bge-base-en-v15-768"), DSL.val(TenantExportBatteryTest.Seed.vector(768, 3), VectorSeeds.centroidEmbedding(768)))
                     .execute();
             }
@@ -242,8 +245,9 @@ class TenantImportSoftReferencesTest {
             OffsetDateTime now = OffsetDateTime.now();
             PgContainerHelper.insertCollection(ctx, src, "knowledge__topicsrc768__bge-base-en-v15-768__v1", "bge-base-en-v15-768");
             for (String t : List.of("child", "root")) {
-                insert(ctx, "topics", List.of("tenant_id", "label", "collection", "created_at"), src,
-                    t, "knowledge__topicsrc768__bge-base-en-v15-768__v1", now);
+                insert(ctx, "topics", List.of("tenant_id", "label", "collection", "collection_id", "created_at"), src,
+                    t, "knowledge__topicsrc768__bge-base-en-v15-768__v1",
+                    CollectionIds.require(ctx, src, "knowledge__topicsrc768__bge-base-en-v15-768__v1"), now);
             }
             long root = ctx.select(DSL.field(DSL.name("id"), Long.class)).from(DSL.table(DSL.name("nexus", "topics")))
                 .where(DSL.field(DSL.name("tenant_id"), String.class).eq(src), DSL.field(DSL.name("label"), String.class).eq("root"))
