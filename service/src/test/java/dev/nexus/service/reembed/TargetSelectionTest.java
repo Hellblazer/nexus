@@ -212,7 +212,7 @@ class TargetSelectionTest {
 
     @Test
     void aHigherVersionStillBeatsAnOlderRow() {
-        var newerV2 = new CollectionRow("n", CT, OWNER, MODEL, "v2", false, "", "live", "2026-05-01 00:00:00+00");
+        var newerV2 = new CollectionRow("n", CT, OWNER, MODEL, "v2", false, "", "live", "2026-05-01 00:00:00+00", null);
         assertThat(select(rowAt("o", "2026-01-01 00:00:00+00"), newerV2)).isEqualTo(new Live("n"));
     }
 
