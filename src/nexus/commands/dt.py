@@ -75,10 +75,13 @@ def _resolve_dt_collection(
     """
     from nexus.corpus import (  # noqa: PLC0415 — command-local import
         catalog_subject_finder,
+        require_corpus_name,
         resolve_write_embedding_model,
         t3_collection_name,
     )
 
+    # nexus-p2m1x.28: the corpus names the docs__ collection below, and is also what the indexers get as the corpus.
+    require_corpus_name(corpus)
     if collection:
         # Measured 2026-09-02 (AgenticScholar re-index): a bare
         # ``--collection knowledge__agentic-scholar`` was passed through
@@ -1104,6 +1107,8 @@ def index_cmd(
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
+    from nexus.corpus import require_corpus_name  # noqa: PLC0415 — command-local import (nexus.corpus)
+    require_corpus_name(corpus)  # nexus-p2m1x.28: before DEVONthink is read
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a record the staleness check "
@@ -2162,6 +2167,8 @@ def capture_cmd(
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
+    from nexus.corpus import require_corpus_name  # noqa: PLC0415 — command-local import (nexus.corpus)
+    require_corpus_name(corpus)  # nexus-p2m1x.28: before DEVONthink creates a record
     if not _is_darwin():
         raise click.ClickException("DEVONthink integration is macOS-only")
 
