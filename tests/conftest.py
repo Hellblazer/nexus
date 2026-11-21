@@ -3071,6 +3071,10 @@ def _identity_kind_lookup_reaches_no_real_engine(monkeypatch):
     reached: list[str] = []
 
     def guarded(identity: str) -> str:
+        with notes._LOCK:
+            cached = notes._KINDS.get(identity)
+        if cached:                                  # a remembered kind asks no engine, so it is not a reach
+            return cached
         if bind_client.IdentityClient.__dict__["from_config"] is original_from_config:
             reached.append(identity)
             return ""
