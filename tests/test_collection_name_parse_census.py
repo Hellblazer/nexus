@@ -413,17 +413,13 @@ for _site in LEDGER:
 #:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
 #:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
 #:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2.
-#:   P3.8 client core (nexus-p2m1x.28), -2: ``HttpCatalogClient.register_collection`` stopped deriving
-#:     ``legacy_grandfathered`` and the three attributes from the name: its two mint sites
-#:     (``is_conformant_collection_name`` and ``collection_registration_kwargs``) are gone. mint 135 -> 133,
-#:     primitive_call 183 -> 181. The new-subject write in ``t3_collection_name`` adds no site.
-PARSE_SITE_PIN: int = 215
+PARSE_SITE_PIN: int = 216
 CLASS_PIN: dict[str, int] = {
-    "mint": 133, "diagnostic": 43, "migration-source": 22,
+    "mint": 134, "diagnostic": 43, "migration-source": 22,
     "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 181, "const_prefix": 5, "fnmatch": 14,
+    "primitive_call": 182, "const_prefix": 5, "fnmatch": 14,
     "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -847,12 +843,11 @@ def test_pin_matches_documented_total() -> None:
     at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then at P2.4,
     nexus-p2m1x.9, when the taxonomy threshold became a row read; then at P2.2,
     nexus-p2m1x.7, when the read-path model reads became row reads and the name
-    parsers moved to ``legacy_names``; then 217 -- 215 at P3.8,
-    nexus-p2m1x.28, when ``register_collection`` stopped deriving from the name) is derived
+    parsers moved to ``legacy_names``; 217 -- 216 at P3.8, nexus-p2m1x.28: -2 mint in register_collection, +1 P3.1 retry) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 215
+    assert PARSE_SITE_PIN == 216
 
 
 # ---------------------------------------------------------------------------

@@ -524,7 +524,6 @@ class TestLegacyGrandfatheredDerivation:
     def test_registering_a_nonconformant_name_does_not_flag_it_legacy(self, cat) -> None:
         from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
-
         name = "docs__i711w-legacy71b"
         assert not is_conformant_collection_name(name)  # non-vacuity guard: the name the old derivation flagged
 

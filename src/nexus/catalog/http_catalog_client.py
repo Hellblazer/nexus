@@ -516,17 +516,12 @@ def _coerce_legacy_grandfathered(d: dict) -> dict:
 
 
 def _coerce_collection_id(d: dict) -> dict:
-    """A collection row's ``collection_id`` as ``int`` or ``None``, the key always present.
+    """A collection row's ``collection_id`` as ``int`` or ``None``, the key always present (RDR-229 P3.5a, nexus-p2m1x.23).
 
-    RDR-229 P3.5a (nexus-p2m1x.23). On an engine that has the column the id is always a
-    number (the registry's identity is NOT NULL, vectors-068-1); an older engine sends no
-    key, and that reads as ``None``. ``null`` is accepted defensively and also reads as
-    ``None``. A value that is neither (a bool, a string, a float, a list) reads as ``None``
-    rather than as an id, with a warning, the same rule
-    ``CollectionAttributes.from_for_tuple`` applies to a ``for_tuple`` row.
-
-    The id is not stable across a rename until P3.7's name-key drop and R6's ``ids_stable``
-    signal: do not cache by it before then.
+    An engine with the column always sends a number (identity NOT NULL, vectors-068-1); an older engine sends no key,
+    read as ``None``, as is ``null``. Any other value (bool, string, float, list) reads as ``None`` with a warning, the
+    rule ``CollectionAttributes.from_for_tuple`` applies. The id is not stable across a rename until P3.7's name-key
+    drop and R6's ``ids_stable`` signal: do not cache by it before then.
     """
     d = dict(d)
     cid = d.get("collection_id")

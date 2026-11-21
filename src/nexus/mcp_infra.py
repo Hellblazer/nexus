@@ -1366,6 +1366,14 @@ def get_collection_row(name: str, *, refresh: bool = True, strict: bool = False)
     return row
 
 
+def _minted_row(name: str) -> dict | None:
+    """RDR-229 P3.8: the engine's listing omits a collection with no chunk yet, so the row this process just
+    registered for *name* (by attributes, its label minted by the engine) answers until the listing names it."""
+    from nexus.collection_mint import minted_row  # noqa: PLC0415 — deferred: collection_mint reaches back into this module
+
+    return minted_row(name)
+
+
 def collections_cache_age() -> float | None:
     """Seconds since the collections cache was last filled, ``None`` when it holds nothing (never filled, or
     invalidated and not refilled). :func:`nexus.corpus.routing_content_type` re-reads a cache that is
