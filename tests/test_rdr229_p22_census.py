@@ -114,11 +114,11 @@ def test_no_ledger_entry_still_waits_on_p22() -> None:
     assert holdover_steps <= {"P2.4"}, holdover_steps
 
 
-def test_the_pin_fell_from_the_p27_count() -> None:
-    """develop pinned 240. P2.2 moves 13 of the 19 holdover sites to the row (they leave the ledger) and reclassifies the other 6 (five
+def test_the_pin_fell_from_the_p29_count() -> None:
+    """P2.9's reland pinned 229. P2.2 moves 13 of the 19 holdover sites to the row (they leave the ledger) and reclassifies the other 6 (five
     ``T3Database`` reads to mint, ``doctor_search``'s drift probe to diagnostic): the pin is
-    exactly the measured 229 (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks the scan)."""
-    assert PARSE_SITE_PIN == 229
+    exactly the measured 218 (``test_pins_are_the_measured_counts_by_total_class_and_shape`` checks the scan)."""
+    assert PARSE_SITE_PIN == 218
 
 
 def test_collection_attributes_is_one_type() -> None:

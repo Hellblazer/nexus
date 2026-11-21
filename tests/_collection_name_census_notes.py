@@ -40,7 +40,7 @@ BYPASS: str = (
     'The taxonomy__ half of the schema-bypass test, one site since P2.5 gathered the twelve into db/rows/lifecycle.py: a legacy name no row backs and no row can tell apart, so a migration source (RDR-229 P2.9 ruling). P2.2 (nexus-p2m1x.7) moves it into legacy_names; the quarantine- half of the same test reads the row (P2.5).'
 )
 TAXONOMY_LEGACY: str = (
-    'A taxonomy__ name test: a legacy name no row backs and no row can tell apart, so a migration source (RDR-229 P2.9 ruling). P2.2 (nexus-p2m1x.7) moves it into legacy_names.'
+    'A taxonomy__ name test: a legacy name no row backs and no row can tell apart, so a migration source (RDR-229 P2.9 ruling). It reads through legacy_names.is_taxonomy_collection_name (RDR-229 P2.2, nexus-p2m1x.7).'
 )
 QUAR_NOROW: str = (
     "The quarantine- half of the schema-bypass test, for a name with no row or a row with no lifecycle_state only: a row's lifecycle_state decides when there is one (P2.5). Goes with the name parsers at P4."

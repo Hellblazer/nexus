@@ -173,3 +173,24 @@ def test_a_for_tuple_row_with_a_blank_version_under_a_non_canonical_model_has_no
         row, content_type="code", owner_id="1-1", embedding_model="stub-code-1024",
     )
     assert got is None
+
+
+# -- P2.9's sites read through legacy_names ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [
+    "taxonomy__x", "taxonomy__", "taxonomy__a__b", "taxonomy", "taxonomy_x", "Taxonomy__x", "docs__taxonomy__x",
+    "", "__taxonomy__", "code__1-1__bge-base-en-v15-768__v1", "quarantine-taxonomy__x",
+])
+def test_the_taxonomy_name_test_is_exactly_the_old_prefix_test(name: str) -> None:
+    assert legacy_names.is_taxonomy_collection_name(name) is name.startswith("taxonomy__")
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("docs__1-1__bge-base-en-v15-768__v1", "docs"), ("code__legacy-abcd1234", "code"),
+    ("knowledge__delos", "knowledge"), ("c1234", None), ("", None), ("docs__", "docs"), ("__x", None),
+])
+def test_the_no_row_content_type_is_the_names_first_segment(name: str, expected: str | None) -> None:
+    """corpus.candidate_content_type, the single NoRow parse every write router calls (RDR-229 P2.9), reads the
+    name through legacy_names and answers what it always did (a ``docs__`` stub still routes as ``docs``)."""
+    assert corpus_mod.candidate_content_type(name) == expected
