@@ -221,6 +221,50 @@ class CollectionRenameConcurrencyTest {
                 DSL.val(owner), DSL.val(MODEL), DSL.val("v1")));
     }
 
+    /**
+     * RDR-229 P3.8 (collections-003-1): with the live-tuple index present the UNIQUE is the arbiter, so a rename, a named
+     * registration and a mint take no tuple lock. Another session holds the stripes of every tuple they touch; each must
+     * finish anyway (knowledge collections: the catalog-051-2 owner triggers, which lock whatever the index state, skip them).
+     */
+    @Test
+    void withTheIndexPresent_aRenameANamedRegistrationAndAMintTakeNoTupleLock() throws Exception {
+        indexState(true);
+        try {
+            register("ip-x", "ip-owner-x");
+            try (Connection holder = pg.createConnection("")) {
+                holder.setAutoCommit(false);
+                DSLContext h = DSL.using(holder, SQLDialect.POSTGRES);
+                for (String owner : List.of("ip-owner-x", "ip-owner-y", "ip-owner-named", "ip-owner-mint")) {
+                    h.select(tupleLock(owner)).fetch();
+                }
+                Future<?> rename = pool.submit(() -> repo.renameCollection(TENANT, "ip-x", "ip-y", null, "knowledge", "ip-owner-y"));
+                Future<?> named = pool.submit(() -> {
+                    register("ip-named", "ip-owner-named");
+                    return null;
+                });
+                Future<?> mint = pool.submit(() -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("content_type", "knowledge");
+                    m.put("owner_id", "ip-owner-mint");
+                    m.put("embedding_model", MODEL);
+                    m.put("model_version", "v1");
+                    return repo.mintCollection(TENANT, m, true);
+                });
+                rename.get(20, TimeUnit.SECONDS);
+                named.get(20, TimeUnit.SECONDS);
+                mint.get(20, TimeUnit.SECONDS);
+                holder.rollback();
+            }
+            assertThat(row("ip-y")).as("the rename landed while the stripes were held").isNotNull();
+            assertThat(row("ip-named")).as("the named registration landed").isNotNull();
+        } finally {
+            su(ctx -> {
+                CollectionMintSupport.dropIndex(ctx);
+                return null;
+            });
+        }
+    }
+
     @Test
     void aRenameTakesTheTupleLocksBeforeItTouchesEitherRow_withTheIndexAbsent() throws Exception {
         indexState(false);
