@@ -64,7 +64,6 @@ def read_row_for_write(name: str, *, db: Any = None) -> str | None:
     is the Unreadable outcome: ``None`` and a warning once per name per interval, never a silent miss.
     """
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
-    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — keep the module import light
     from nexus.mcp_infra import ServiceNotReadyError, invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
 
     try:
@@ -72,9 +71,7 @@ def read_row_for_write(name: str, *, db: Any = None) -> str | None:
         if content_type is None and norow_recheck_due(name):
             invalidate_collections_cache()
             content_type = row_content_type(name, db=db, strict=True)
-    except (ServiceNotReadyError, VectorServiceError, ServiceEndpointUnresolvableError) as exc:
-        # An endpoint that cannot be resolved (no service on this box yet) is a sibling of the two
-        # listing errors, not a subclass: it is the same Unreadable outcome for a write router.
+    except (ServiceNotReadyError, VectorServiceError) as exc:
         if once_per_interval(_unreadable_warned, name):
             _log.warning("routing_content_type_unreadable", collection=name, error=f"{type(exc).__name__}: {exc}")
         return None
