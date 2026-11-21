@@ -17,7 +17,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * tuple, the {@code collection_id} sequence and rows written the way a superuser (a restore, a fixture) writes them. No
  * raw SQL: {@code RawSqlGateTest} ratchets the test tree.
  */
-final class CollectionMintSupport {
+public final class CollectionMintSupport {
 
     static final String INDEX = "catalog_collections_live_tuple_uq";
 
@@ -38,7 +38,7 @@ final class CollectionMintSupport {
         return last == null ? 1L : last + 1;
     }
 
-    static void dropIndex(DSLContext ctx) {
+    public static void dropIndex(DSLContext ctx) {
         // jOOQ renders DROP INDEX with the unqualified index name even when it is given a qualified one, so the name must
         // resolve against this (single-use) connection's schema, or "if exists" quietly drops nothing
         ctx.setSchema("nexus").execute();
