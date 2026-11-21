@@ -2446,6 +2446,31 @@ def _psql_command(
         raise RuntimeError(f"psql failed: {proc.stderr.strip()[-300:]}")
 
 
+#: Opt-in (RDR-229 P2.R, tests/e2e/rdr229-p2r-mvv.sh): give the substrate PG what the engine's data-move worker needs,
+#: so the engine applies the dml_utils library at boot and runs the registered moves. Off by default: every other
+#: test's PG stays as it was (no extension, no library roles, no extra DDL).
+DATA_MOVES_ENV = "NX_TEST_SUBSTRATE_DATA_MOVES"
+
+
+def _bootstrap_data_move_libraries(bin_dir: Path, pg_port: int, pg_user: str) -> None:
+    """With ``NX_TEST_SUBSTRATE_DATA_MOVES=1``, run the product's own dml_utils bootstrap (the ``pg_background``
+    extension, the three library roles, the ``liquibase`` schema) against the substrate database before the engine
+    migrates. The product function names its database as ``NEXUS_DB_NAME``; the substrate's is ``_DBNAME``. A bundle
+    with no pg_background library raises: the caller asked for moves and cannot have them, which is not a skip."""
+    if os.environ.get(DATA_MOVES_ENV) != "1":
+        return
+    from unittest import mock  # noqa: PLC0415 -- only the opt-in path needs it
+
+    from nexus.db import pg_provision  # noqa: PLC0415 -- same
+    from nexus.db.pg_bootstrap import dml_utils  # noqa: PLC0415 -- same
+
+    with mock.patch.object(dml_utils, "NEXUS_DB_NAME", _DBNAME):
+        result = dml_utils.bootstrap_dml_utils(pg_provision.PgBinaries.from_dir(bin_dir), pg_port, pg_user)
+    if not result.applied:
+        raise RuntimeError(f"T2 engine substrate: {DATA_MOVES_ENV}=1 but the data-move libraries cannot be "
+                           f"installed: {result.blocked_reason}")
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -2656,6 +2681,7 @@ def _boot() -> dict:
             raise RuntimeError(
                 f"T2 engine substrate: role bootstrap failed:\n{proc.stderr}"
             )
+        _bootstrap_data_move_libraries(bin_dir, pg_port, pg_user)
         # nexus-sz651: before the engine migrates, so its DDL (and every nested leaf a
         # tenant mint creates) reaches pg.log through the event trigger.
         # NX_DDL_COUNT=0 (nexus-3cwsw) skips the probe and both marks, the logging lines above and the plugin.

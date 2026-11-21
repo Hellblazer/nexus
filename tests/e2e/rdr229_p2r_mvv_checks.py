@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-229 P2.R (nexus-p2m1x.16): the Minimum Viable Validation, Phase 2 half, checks 1 to 4.
+"""RDR-229 P2.R (nexus-p2m1x.16): the Minimum Viable Validation, Phase 2 half, checks 1 to 4 and 6.
 
 Driven by ``tests/e2e/rdr229-p2r-mvv.sh`` and by nothing else: the file is not named ``test_*.py``, so no
 default or integration run collects it, and it refuses to run without ``P2R_RESULTS`` (the gate's results file).
-The gate script builds the stamped service jar, runs this one test on the hermetic engine substrate
-(``t2_service_env``: a throwaway PG and the jar of this checkout, a minted tenant, never production), and adds
-check 5 (the two census gates) itself.
+The gate script builds the stamped service jar, runs these two tests on the hermetic engine substrate
+(``t2_service_env``: a throwaway PG and the jar of this checkout, a minted tenant each, never production), and adds
+check 5 (the two census gates) itself. Check 6 (P2.10, nexus-p2m1x.15) is the second test, in a tenant of its own
+so its ``chroma://`` rows are the only ones the doctor and the backfill verb see.
 
 One fixture tenant, one collection. The collection is named ``knowledge__<name owner>__<name model>__v1`` and its
 catalog row says another owner and the engine's own model, so a reader that parses the name gets both wrong and a
@@ -31,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 import traceback
 import uuid
 from collections import Counter
@@ -88,6 +90,10 @@ def _run_check(n: int, name: str, fn: Callable[[], dict[str, Any]]) -> bool:
         examined = evidence.get("examined", 0)
         if not isinstance(examined, int) or examined <= 0:
             raise AssertionError(f"non-vacuity: the check examined {examined!r} items, it must examine at least one")
+    except _GateError as exc:
+        # the gate could not build the fixture or lacks a dependency: not a finding about the code under test
+        _record(n, name, "ERROR", getattr(exc, "evidence", {}), f"GateError: {exc}")
+        return False
     except Exception as exc:  # noqa: BLE001 -- a check's failure is its result, recorded; the next check still runs
         detail = getattr(exc, "evidence", {})
         _record(n, name, "FAIL", detail if isinstance(detail, dict) else {}, f"{type(exc).__name__}: {exc}\n"
@@ -95,6 +101,15 @@ def _run_check(n: int, name: str, fn: Callable[[], dict[str, Any]]) -> bool:
         return False
     _record(n, name, "PASS", evidence)
     return True
+
+
+class _GateError(RuntimeError):
+    """The gate's own fixture or dependency is wrong (no pg_background, a seed that did not take, a worker that is
+    not running). Recorded as ``ERROR``, which the report turns into exit 2: it says nothing about the code under test."""
+
+    def __init__(self, message: str, evidence: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.evidence = evidence or {}
 
 
 class _CheckFailed(AssertionError):
@@ -381,3 +396,287 @@ def test_rdr229_p2r_mvv_phase2_half(t2_service_env: str, tmp_path: Path, monkeyp
     ]
     passed = [_run_check(n, title, lambda fn=fn: fn(ctx)) for n, title, fn in checks]
     assert all(passed), f"MVV checks failed: {[n for (n, _t, _f), ok in zip(checks, passed, strict=True) if not ok]}"
+
+
+# ── check 6: P2.10 (nexus-p2m1x.15), URI moves leave residue alone and repaired residue is re-derived ───────────
+#
+# Keyed on behaviour and on the registered moves' labels, never on a changeset number. Three parts, each a finding
+# about P2.10 when it trips; a fixture that does not take, a missing dependency or a worker that is not running is a
+# gate ERROR (exit 2), not a FAIL. A surface that develop lacks (no registered repair move, a verb that refuses
+# residue the rule relaxes) is a FAIL that says so and names P2.10.
+
+RESIDUE_PREFIX = "rdr229-residue-"
+RESIDUE_MOVES = (RESIDUE_PREFIX + "catalog-documents", RESIDUE_PREFIX + "document-aspects",
+                 RESIDUE_PREFIX + "document-highlights")
+DOCS_MOVE = RESIDUE_MOVES[0]
+WORKER_DEADLINE_S = 300.0
+BOOT_WORK_DEADLINE_S = 90.0
+WORKER_ENTRY_IDS = ("data-move-worker", "data-move-boot-work")
+
+
+def _json_object(output: str) -> dict[str, Any]:
+    """The JSON object a ``--json`` verb printed, skipping any log line ahead of it."""
+    lines = output.splitlines(keepends=True)
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith("{"))
+        value, _end = json.JSONDecoder().raw_decode("".join(lines[start:]))
+    except (StopIteration, ValueError) as exc:
+        raise _GateError(f"a --json verb printed no JSON object: {output[-300:]!r}") from exc
+    return value
+
+
+def _boot_work() -> list[dict[str, Any]]:
+    resp = httpx.get(os.environ["NX_SERVICE_URL"].rstrip("/") + "/v1/status", timeout=30)
+    if resp.status_code != 200:
+        raise _GateError(f"GET /v1/status answered {resp.status_code}")
+    return list(resp.json().get("boot_work", []))
+
+
+def _seed(what: str, fn: Callable[[], Any]) -> Any:
+    try:
+        return fn()
+    except _GateError:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- any fixture failure is the gate's own error
+        raise _GateError(f"fixture: {what} failed: {type(exc).__name__}: {exc}") from exc
+
+
+def _p210_collection(ctx: dict[str, Any], name: str, content_type: str) -> None:
+    """A registered collection holding one chunk, so its row is visible to a reader that lists collections."""
+    def go() -> None:
+        ensure_collection_registered(name, kwargs={"content_type": content_type, "owner_id": f"own-{name}",
+                                                   "embedding_model": ROW_MODEL, "model_version": "v1"})
+        seed_chunks_direct(name, [hashlib.sha256(f"{name}/chunk".encode()).hexdigest()], [f"p210 chunk of {name}"],
+                           [{"title": name}], tenant=ctx["tenant"])
+    _seed(f"collection {name}", go)
+    mi.invalidate_collections_cache()
+
+
+def _p210_doc(ctx: dict[str, Any], collection: str, uri: str) -> str:
+    """A catalog document filed under *collection* whose source_uri is exactly *uri* (substrate SQL sets it: no
+    client call spells a ``chroma://`` value). Returns the tumbler."""
+    def go() -> str:
+        ctx["n"] += 1
+        n = ctx["n"]
+        tumbler = str(ctx["cat"].register(ctx["owner"], f"p210-doc-{n}", content_type="prose",
+                                          physical_collection=collection, source_uri=f"file:///p2r210/{n}.md",
+                                          file_path=f"p2r210-{n}.md"))
+        _sql(f"UPDATE nexus.catalog_documents SET source_uri = {_lit(uri)} "
+             f"WHERE tenant_id = {_lit(ctx['tenant'])} AND tumbler = {_lit(tumbler)}")
+        if _doc_uri(ctx, tumbler) != uri:
+            raise RuntimeError(f"source_uri of {tumbler} is not {uri!r} after the seed")
+        return tumbler
+    return _seed(f"document under {collection}", go)
+
+
+def _doc_uri(ctx: dict[str, Any], tumbler: str) -> str:
+    return _sql("SELECT source_uri FROM nexus.catalog_documents "
+                f"WHERE tenant_id = {_lit(ctx['tenant'])} AND tumbler = {_lit(tumbler)}")
+
+
+def _aspect_uri(ctx: dict[str, Any], tumbler: str) -> str:
+    return _sql("SELECT source_uri FROM nexus.document_aspects "
+                f"WHERE tenant_id = {_lit(ctx['tenant'])} AND doc_id = {_lit(tumbler)}")
+
+
+def _doctor_documents() -> dict[str, Any]:
+    """The ``catalog_documents`` table's counts from ``nx catalog doctor --uri-residue --json``: the repair moves run
+    per table, so the document table is the one a single seeded row counts in once (the totals add the aspects row)."""
+    res = CliRunner().invoke(main, ["catalog", "doctor", "--uri-residue", "--json"])
+    report = _json_object(res.output).get("uri_residue") or {}
+    if "counts" not in report or report.get("status") == "not_applicable":
+        raise _GateError(f"nx catalog doctor --uri-residue produced no counts: {json.dumps(report)[:300]}")
+    return report["counts"]["catalog_documents"]
+
+
+def _backfill_dry_run() -> dict[str, Any]:
+    res = CliRunner().invoke(main, ["catalog", "backfill-source-uri", "--json"])
+    return _json_object(res.output)
+
+
+def _p210_preflight(ctx: dict[str, Any]) -> None:
+    if _sql("SELECT count(*) FROM pg_available_extensions WHERE name = 'pg_background'") != "1":
+        raise _GateError("pg_background is not in the substrate PG: the data-move worker cannot run, so P2.10's repair "
+                         "moves cannot be exercised. Use a PG bundle that carries it; this is not a pass")
+    if _sql("SELECT count(*) FROM pg_namespace WHERE nspname = 'dml_utils'") != "1":
+        raise _GateError("the engine did not install dml_utils into the substrate PG (no data-move worker); the gate "
+                         "script sets NX_TEST_SUBSTRATE_DATA_MOVES=1 for tests/_engine_substrate.py to bootstrap it")
+    stopped = [e for e in _boot_work() if e.get("id") in WORKER_ENTRY_IDS]
+    if stopped:
+        raise _GateError(f"the data-move worker is not running: {stopped}")
+
+
+def _wait_for_moves(ev: dict[str, Any]) -> None:
+    """Wait on the registry and on /v1/status boot_work, never on a fixed sleep: all three moves have completed_at,
+    then boot_work lists none of them."""
+    deadline = time.monotonic() + WORKER_DEADLINE_S
+    while True:
+        rows = _sql("SELECT label || '|' || (completed_at IS NOT NULL) FROM nexus.data_moves "
+                    f"WHERE label LIKE {_lit(RESIDUE_PREFIX + '%')} ORDER BY label")
+        state = dict(r.split("|") for r in rows.splitlines() if r)
+        work = _boot_work()
+        ev["moves"] = state
+        if [e for e in work if e.get("id") in WORKER_ENTRY_IDS]:
+            raise _GateError(f"the data-move worker stopped while the repair moves ran: {work}")
+        bad = [e for e in work if str(e.get("id", "")).startswith("data-move:" + RESIDUE_PREFIX)
+               and str(e.get("what", "")).startswith(("failed:", "blocked:"))]
+        if bad:
+            raise _CheckFailed(f"a repair move failed or is blocked: {bad}", ev)
+        if set(state) == set(RESIDUE_MOVES) and set(state.values()) == {"true"}:
+            break
+        if time.monotonic() > deadline:
+            raise _CheckFailed(f"the repair moves did not complete in {WORKER_DEADLINE_S:.0f}s: {state}", ev)
+        time.sleep(1)
+    deadline = time.monotonic() + BOOT_WORK_DEADLINE_S
+    while [e["id"] for e in _boot_work() if str(e.get("id", "")).startswith("data-move:" + RESIDUE_PREFIX)]:
+        if time.monotonic() > deadline:
+            raise _CheckFailed("boot_work still lists a repair move after all three completed", ev)
+        time.sleep(1)
+
+
+def _p210_part_repair(ctx: dict[str, Any]) -> dict[str, Any]:
+    """(2) Residue already moved onto a prefix-free segment is repaired by registered data moves."""
+    ev: dict[str, Any] = {}
+    _p210_collection(ctx, "gate-stem", "docs")
+    _p210_collection(ctx, "ctl-know", "knowledge")
+    r = _p210_doc(ctx, "gate-stem", "chroma://gate-stem//abs/path/r.md")
+    ctrl_note = _p210_doc(ctx, "ctl-know", "chroma://ctl-know//abs/note")
+    ctrl_elsewhere = _p210_doc(ctx, "ctl-know", "chroma://elsewhere//abs/z.md")
+    _seed("the aspects row of the repairable document", lambda: _sql(
+        "INSERT INTO nexus.document_aspects (tenant_id, collection, source_path, extracted_at, model_version, "
+        f"extractor_name, source_uri, doc_id) VALUES ({_lit(ctx['tenant'])}, 'gate-stem', 'abs/path/r.md', now(), "
+        "'m', 'e', 'chroma://gate-stem//abs/path/r.md', " + _lit(r) + ")"))
+    ctx["r"] = r
+    before = _doctor_documents()
+    ev["doctor_before"] = {"file_typed": before["chroma_prefix_free"]["file_typed"],
+                           "other": before["chroma_prefix_free"]["other"],
+                           "chroma_file_routed_segment": before["chroma_file_routed_segment"]}
+    ft = before["chroma_prefix_free"]["file_typed"]
+    if not (ft["rows"] == 1 and ft["segment_not_collection"] == 0 and before["chroma_file_routed_segment"] == 0):
+        raise _GateError(f"fixture: the doctor does not see exactly the one repairable row before the moves: "
+                         f"{ev['doctor_before']}", ev)
+
+    labels = _sql(f"SELECT label FROM nexus.data_moves WHERE label LIKE {_lit(RESIDUE_PREFIX + '%')} ORDER BY label")
+    ev["registered_moves"] = labels.splitlines()
+    _require(DOCS_MOVE in labels.splitlines(),
+             f"surface absent: no registered data move {DOCS_MOVE!r} (P2.10 registers the repair of residue already "
+             "moved, one move per table); the engine never repairs it", ev)
+
+    # The substrate engine booted before this fixture existed, so its worker found nothing and completed the moves
+    # over an empty table. Re-open the documents move exactly as the changeset registered it (the satellites it
+    # registers on completion go too: that INSERT has no ON CONFLICT), so the worker meets the fixture.
+    cols = "label, template, driving_schema, driving_table, chunk_size, sleep_ms, statement_timeout_ms, verification, on_complete, changeset_id"
+    _seed("re-opening the repair moves", lambda: _sql(
+        f"CREATE TEMP TABLE p2r_move AS SELECT * FROM nexus.data_moves WHERE label = {_lit(DOCS_MOVE)};\n"
+        "SELECT dml_utils.archive_migration_run(label) FROM dml_utils_data.migration_run "
+        f"WHERE archived_at IS NULL AND label LIKE {_lit(RESIDUE_PREFIX + '%')};\n"
+        f"DELETE FROM nexus.data_moves WHERE label LIKE {_lit(RESIDUE_PREFIX + '%')};\n"
+        f"INSERT INTO nexus.data_moves ({cols}) SELECT {cols} FROM p2r_move;"))
+    _wait_for_moves(ev)
+
+    after = _doctor_documents()
+    ev["doctor_after"] = {"file_typed": after["chroma_prefix_free"]["file_typed"],
+                          "other": after["chroma_prefix_free"]["other"],
+                          "chroma_file_routed_segment": after["chroma_file_routed_segment"]}
+    ev["r_uri"], ev["r_aspect_uri"] = _doc_uri(ctx, r), _aspect_uri(ctx, r)
+    ev["controls"] = {"knowledge_note": _doc_uri(ctx, ctrl_note), "segment_not_collection": _doc_uri(ctx, ctrl_elsewhere)}
+    want = "chroma://docs__gate-stem//abs/path/r.md"
+    _require(ev["r_uri"] == want, f"the repaired document's source_uri is {ev['r_uri']!r}, want {want!r} "
+             "(a chroma:// value with the content type's segment, not file://)", ev)
+    _require(ev["r_aspect_uri"] == want, f"its aspects row is {ev['r_aspect_uri']!r}, want {want!r}", ev)
+    _require(after["chroma_prefix_free"]["file_typed"]["rows"] == 0 and after["chroma_file_routed_segment"] == 1,
+             f"the doctor after the moves: {ev['doctor_after']}", ev)
+    _require(ev["controls"] == {"knowledge_note": "chroma://ctl-know//abs/note",
+                                "segment_not_collection": "chroma://elsewhere//abs/z.md"},
+             f"a control row was touched: {ev['controls']}", ev)
+    return ev
+
+
+def _p210_part_backfill(ctx: dict[str, Any]) -> dict[str, Any]:
+    """(3) The backfill verb re-derives moved and repaired residue to file://, and still refuses a relative path."""
+    ev: dict[str, Any] = {}
+    _p210_collection(ctx, "gate-stem2", "code")
+    _p210_doc(ctx, "gate-stem2", "chroma://gate-stem2//abs/path/s.md")
+    rep = _backfill_dry_run()
+    ev["dry_run"] = {k: rep.get(k) for k in ("candidates", "rederivable", "refused", "total_chroma_rows")}
+    ev["updates_now"] = sorted(u.get("now", "") for u in rep.get("updates", []))
+    ev["refusals"] = [x.get("reason", "") for x in rep.get("refusals", [])]
+    ev["by_collection"] = {k: v for k, v in rep.get("by_collection", {}).items() if k in ("gate-stem", "gate-stem2")}
+    _require(rep.get("candidates") == 2 and rep.get("rederivable") == 2 and rep.get("refused") == 0,
+             f"want candidates=2 rederivable=2 refused=0 over the repaired row and the code-typed prefix-free row, "
+             f"got {ev['dry_run']}", ev)
+    _require(len(ev["updates_now"]) == 2 and all(n.startswith("file://") for n in ev["updates_now"]),
+             f"each update must re-derive to file://, got {ev['updates_now']}", ev)
+    _require(all(ev["by_collection"].get(c, {}).get("candidate") is True for c in ("gate-stem", "gate-stem2")),
+             f"both collections must be candidates in the census: {ev['by_collection']}", ev)
+    _p210_doc(ctx, "gate-stem", "chroma://gate-stem/relative/x.md")
+    ctl = _backfill_dry_run()
+    reasons = [x.get("reason", "") for x in ctl.get("refusals", [])]
+    ev["refusal_control"] = {"refused": ctl.get("refused"), "reasons": reasons}
+    _require(ctl.get("refused") == 1 and reasons and reasons[0].startswith("parsed path is not absolute"),
+             f"a relative path must be refused as 'parsed path is not absolute', got {ev['refusal_control']}", ev)
+    return ev
+
+
+def _p210_part_moves(ctx: dict[str, Any]) -> dict[str, Any]:
+    """(1) URI moves leave chroma:// residue alone and move notes that name the collection."""
+    ev: dict[str, Any] = {}
+    _p210_collection(ctx, "docs__gate-old", "docs")
+    _p210_collection(ctx, "plainstem", "knowledge")
+    a = _p210_doc(ctx, "docs__gate-old", "chroma://docs__gate-old//abs/path/a.md")
+    c = _p210_doc(ctx, "docs__gate-old", "nx-note://docs__x/n2")
+    b = _p210_doc(ctx, "plainstem", "nx-note://plainstem/n1")
+    for old, new in (("docs__gate-old", "docs__gate-new"), ("plainstem", "plainstem2")):
+        res = CliRunner().invoke(main, ["collection", "rename", old, new])
+        if res.exit_code != 0:
+            raise _GateError(f"fixture: nx collection rename {old} {new} exited {res.exit_code}: {res.output[-400:]}", ev)
+
+    def shown(tumbler: str) -> tuple[str, str]:
+        res = CliRunner().invoke(main, ["catalog", "show", tumbler, "--json"])
+        doc = _json_object(res.output)
+        return str(doc.get("source_uri", "")), str(doc.get("physical_collection", ""))
+
+    got = {"chroma_residue": shown(a), "note_of_renamed_label": shown(b), "docs_note": shown(c)}
+    ev["after_rename"] = got
+    _require(got["chroma_residue"][1] == "docs__gate-new" and got["note_of_renamed_label"][1] == "plainstem2",
+             f"fixture: the renames did not move the documents: {got}", ev)
+    _require(got["chroma_residue"][0] == "chroma://docs__gate-old//abs/path/a.md",
+             f"a rename rewrote chroma:// residue: {got['chroma_residue'][0]!r} (it must keep its old segment)", ev)
+    _require(got["note_of_renamed_label"][0] == "nx-note://plainstem2/n1",
+             f"the note of the renamed label is {got['note_of_renamed_label'][0]!r}, want nx-note://plainstem2/n1", ev)
+    _require(got["docs_note"][0] == "nx-note://docs__x/n2",
+             f"a file-routed segment is not a note, yet it was rewritten: {got['docs_note'][0]!r}", ev)
+    return ev
+
+
+def check_p210(ctx: dict[str, Any]) -> dict[str, Any]:
+    """6. P2.10: URI moves leave residue alone, already-moved residue is repaired by registered data moves, and the
+    backfill verb re-derives it. Part (2) runs first (its fixture needs the empty tenant), then (3) over its result,
+    then (1), whose rename leaves a residue row that would change (3)'s census."""
+    _p210_preflight(ctx)
+    ev: dict[str, Any] = {"parts": {}}
+    failures: dict[str, str] = {}
+    for key, part in (("2 repair moves", _p210_part_repair), ("3 backfill verb", _p210_part_backfill),
+                      ("1 URI moves", _p210_part_moves)):
+        try:
+            ev["parts"][key] = part(ctx)
+        except _CheckFailed as exc:
+            ev["parts"][key] = {"status": "FAIL", **exc.evidence}
+            failures[key] = str(exc)
+    ev["examined"] = ctx["n"]
+    if failures:
+        raise _CheckFailed("P2.10 has not landed: " + "; ".join(f"part {k}: {v}" for k, v in failures.items()), ev)
+    return ev
+
+
+def test_rdr229_p2r_mvv_p210(t2_service_env: str) -> None:
+    from nexus.catalog.http_catalog_client import HttpCatalogClient  # noqa: PLC0415 -- only this test needs the catalog client
+
+    _results_path().parent.mkdir(parents=True, exist_ok=True)
+    mi.invalidate_collections_cache()
+    with HttpCatalogClient() as cat:
+        owner = _seed("owner", lambda: cat.register_owner("p2r-p210-owner", owner_type="curator", tumbler_prefix="97.1"))
+        ctx = {"tenant": t2_service_env, "cat": cat, "owner": owner, "n": 0}
+        ok = _run_check(6, "P2.10: URI moves leave residue alone; repaired residue is re-derived; the backfill verb is relaxed",
+                        lambda: check_p210(ctx))
+    assert ok, "check 6 did not pass"

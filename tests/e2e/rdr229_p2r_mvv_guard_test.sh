@@ -70,12 +70,14 @@ case "\$1" in
   pytest)
     junit=""; for a in "\$@"; do case "\$a" in --junitxml=*) junit="\${a#--junitxml=}";; esac; done
     case "\${FAKE_MODE:-}" in
-      skipped)  printf '<testsuites><testsuite tests="1" skipped="1" errors="0" failures="0"/></testsuites>' > "\$junit"; exit 0 ;;
-      errored)  printf '<testsuites><testsuite tests="1" skipped="0" errors="1" failures="0"/></testsuites>' > "\$junit"; exit 1 ;;
-      missing)  printf '<testsuites><testsuite tests="1" skipped="0" errors="0" failures="1"/></testsuites>' > "\$junit"
+      skipped)  printf '<testsuites><testsuite tests="2" skipped="1" errors="0" failures="0"/></testsuites>' > "\$junit"; exit 0 ;;
+      errored)  printf '<testsuites><testsuite tests="2" skipped="0" errors="1" failures="0"/></testsuites>' > "\$junit"; exit 1 ;;
+      missing)  printf '<testsuites><testsuite tests="2" skipped="0" errors="0" failures="1"/></testsuites>' > "\$junit"
                 printf '{"n": 0}\n{"n": 1}\n{"n": 2}\n' >> "\$P2R_RESULTS"; exit 1 ;;
-      *)        printf '<testsuites><testsuite tests="1" skipped="0" errors="0" failures="0"/></testsuites>' > "\$junit"
-                printf '{"n": 0}\n{"n": 1}\n{"n": 2}\n{"n": 3}\n{"n": 4}\n' >> "\$P2R_RESULTS"; exit 0 ;;
+      no6)      printf '<testsuites><testsuite tests="2" skipped="0" errors="0" failures="1"/></testsuites>' > "\$junit"
+                printf '{"n": 0}\n{"n": 1}\n{"n": 2}\n{"n": 3}\n{"n": 4}\n' >> "\$P2R_RESULTS"; exit 1 ;;
+      *)        printf '<testsuites><testsuite tests="2" skipped="0" errors="0" failures="0"/></testsuites>' > "\$junit"
+                printf '{"n": 0}\n{"n": 1}\n{"n": 2}\n{"n": 3}\n{"n": 4}\n{"n": 6}\n' >> "\$P2R_RESULTS"; exit 0 ;;
     esac ;;
 esac
 exit 0
@@ -124,7 +126,7 @@ else
 fi
 
 echo "== 3. the substrate test must have run to the end"
-for mode in skipped errored missing; do
+for mode in skipped errored missing no6; do
   repo="$WORKDIR/repo-$mode"; make_repo "$repo"
   rc="$(run_gate "$repo" "$shims" FAKE_MODE=$mode)"
   if [[ "$rc" == 2 ]] && grep -q "did not run to the end" "$WORKDIR/out" && ! grep -q '^mvnw-leased' "$WORKDIR/shim.log"; then
@@ -160,13 +162,13 @@ echo "== 5. the report"
 mkdir -p "$WORKDIR/rep"
 census_ok='{"client_live": {"holdover": 0}, "client_pin": {}, "client_pin_total": 0, "client_holdover_by_step": {}, "engine_pins": {}, "problems": []}'
 census_bad='{"client_live": {"holdover": 23}, "client_pin": {}, "client_pin_total": 240, "client_holdover_by_step": {"P2.2": 19, "P2.4": 4}, "engine_pins": {}, "problems": [{"what": "client holdover class is 23, Phase 2 leaves 0", "waits_on": "P2.2 (nexus-p2m1x.7), P2.4 (nexus-p2m1x.9)"}]}'
-mk_results() {  # <file> <status of 3> ; the other checks pass
-  "$PY" - "$1" "$2" <<'PYEOF'
+mk_results() {  # <file> <status of 3> [status of 6]; the other checks pass
+  "$PY" - "$1" "$2" "${3:-PASS}" <<'PYEOF'
 import json, sys
-path, three = sys.argv[1:3]
+path, three, six = sys.argv[1:4]
 rows = [{"n": 0, "name": "fixture", "status": "PASS", "error": "", "evidence": {"name": "c", "row": {"owner_id": "o", "embedding_model": "m"}, "name_owner": "n", "name_model": "v"}}]
-for n in (1, 2, 3, 4):
-    st = three if n == 3 else "PASS"
+for n in (1, 2, 3, 4, 6):
+    st = three if n == 3 else (six if n == 6 else "PASS")
     rows.append({"n": n, "name": f"check {n}", "status": st, "error": "boom\nline" if st != "PASS" else "", "evidence": {"examined": 2}})
 open(path, "w").write("\n".join(json.dumps(r) for r in rows) + "\n")
 PYEOF
@@ -176,11 +178,18 @@ mk_results "$WORKDIR/rep/one-fail.jsonl" FAIL
 printf '%s' "$census_ok" > "$WORKDIR/rep/census-ok.json"; printf '%s' "$census_bad" > "$WORKDIR/rep/census-bad.json"
 report() { "$PY" "$REPORT" report "$@" > "$WORKDIR/rep/out" 2>&1; echo $?; }
 rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
-[[ "$rc" == 0 ]] && grep -q "RESULT: PASS" "$WORKDIR/rep/out" && ok "five PASS: exit 0" || bad "all pass gave rc=$rc"
+[[ "$rc" == 0 ]] && grep -q "RESULT: PASS" "$WORKDIR/rep/out" && ok "six PASS: exit 0" || bad "all pass gave rc=$rc"
 rc="$(report "$WORKDIR/rep/one-fail.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
 [[ "$rc" == 1 ]] && grep -q "check 3  FAIL" "$WORKDIR/rep/out" && grep -q "P2.5" "$WORKDIR/rep/out" \
   && ok "a FAIL: exit 1, named, with the step it waits on (P2.5)" || bad "one fail gave rc=$rc"
+mk_results "$WORKDIR/rep/six-fail.jsonl" PASS FAIL
+mk_results "$WORKDIR/rep/six-error.jsonl" PASS ERROR
 head -3 "$WORKDIR/rep/all-pass.jsonl" > "$WORKDIR/rep/short.jsonl"
+rc="$(report "$WORKDIR/rep/six-fail.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
+[[ "$rc" == 1 ]] && grep -q "check 6  FAIL" "$WORKDIR/rep/out" && grep -q "P2.10" "$WORKDIR/rep/out" \
+  && ok "check 6 FAIL: exit 1, naming P2.10" || bad "check 6 fail gave rc=$rc"
+rc="$(report "$WORKDIR/rep/six-error.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
+[[ "$rc" == 2 ]] && grep -q "GATE ERROR" "$WORKDIR/rep/out" && ok "check 6 ERROR (a gate fault): exit 2, not a FAIL" || bad "check 6 error gave rc=$rc"
 rc="$(report "$WORKDIR/rep/short.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
 [[ "$rc" == 1 ]] && grep -q "check 3  NOT RUN" "$WORKDIR/rep/out" && ok "a check that never ran: exit 1" || bad "missing check gave rc=$rc"
 rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-ok.json" 0 0 0 3)"
