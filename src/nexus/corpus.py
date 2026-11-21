@@ -11,6 +11,7 @@ import click
 import structlog
 
 from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
+from nexus.collection_mint import mint_knowledge_subject_label
 from nexus.knowledge_subject import CollectionRegistryUnreadableError, CollectionStoreUnreadableError, SubjectFinder, catalog_subject_finder, knowledge_subject_label  # noqa: F401 — re-exported (RDR-229 P2.8)
 
 _log = structlog.get_logger(__name__)
@@ -1520,6 +1521,8 @@ def t3_collection_name(
             # grandfathered onto without a live probe, so the identity
             # must be the STRICT one: raises loud if local.embed_model
             # is voyage-shaped with no key configured.
+            if ct == "knowledge" and not allow_placeholder:  # RDR-229 P3.8: registered by attributes, the engine mints the label
+                return mint_knowledge_subject_label(owner_segment)
             return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
         return promoted
     if user_arg == promoted:
@@ -1528,7 +1531,8 @@ def t3_collection_name(
         # RDR-229 P3.8: the subject's row is its collection (a minted label), so it is read first.
         if found := knowledge_subject_label(getattr(t3, "find_collection", None), ct, owner_segment, promoted, for_write=for_write):
             return found
-        if not t3.collection_exists(promoted):  # type: ignore[attr-defined]
+        promoted_exists = t3.collection_exists(promoted)  # type: ignore[attr-defined]
+        if not promoted_exists:
             # nexus-9n485 observability: collection_exists() alone can't
             # tell "promoted never had any chunks" from "every chunk under
             # promoted belongs to a trashed document" (HttpVectorClient
@@ -1636,10 +1640,11 @@ def t3_collection_name(
         if for_write:  # a WRITE must not guess the rendered name when it could not look (RDR-229 P2.8)
             raise CollectionStoreUnreadableError.for_probe(user_arg, promoted, exc) from exc
     if for_write:
-        # Nothing pre-existing to grandfather onto: this IS a brand-new
-        # mint. Recompute strictly — raises loud if local.embed_model is
-        # voyage-shaped with no key configured, never silently falls
-        # back to bge.
+        # Nothing pre-existing to grandfather onto: this IS a brand-new mint. RDR-229 P3.8: a new knowledge
+        # subject registers by attributes and writes to the label the engine mints (strict model, raises loud
+        # when local.embed_model is voyage-shaped with no key configured); a restore keeps its name.
+        if ct == "knowledge" and not allow_placeholder and not promoted_exists:
+            return mint_knowledge_subject_label(owner_segment, registrar=getattr(t3, "_collection_registrar", None))
         return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
     return promoted
 
