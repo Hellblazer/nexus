@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionTombstones;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import org.jooq.DSLContext;
@@ -235,5 +236,105 @@ class CollectionSupersedeIdTest {
             .and(CATALOG_COLLECTIONS.NAME.eq(b)))) == 0;
         assertThat(bGone).as("b holds nothing: a ghost, deleted by the sweep").isTrue();
         assertThat(supersededA).as("the tombstone that holds content now reads retired, no successor").isEqualTo(idA);
+    }
+
+    // ── the superseded_by invariant: a row of the named successor exists => its id, else the self id ─────────
+
+    private void assertInvariant(String when) {
+        int violations = su(ctx -> CollectionTombstones.invariantViolations(ctx, T));
+        assertThat(violations)
+            .as("%s: catalog_collections rows that break the superseded_by invariant", when).isZero();
+    }
+
+    private Map<String, Object> reg(String name) {
+        return Map.of("name", name, "content_type", "knowledge", "owner_id", "ss", "embedding_model", "minilm-l6-v2-384",
+            "model_version", "v1");
+    }
+
+    @Test
+    void theParityCheck_countsAnUnstampedTombstone_andAStaleSelfId() {
+        String a = name("p1-a"), b = name("p1-b");
+        register(a, b);
+        su(ctx -> {
+            ddl(ctx, "ALTER TABLE nexus.catalog_collections DROP CONSTRAINT " + COLL_CHECK);
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, b)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute();
+            return null;
+        });
+        int unstamped = su(ctx -> CollectionTombstones.invariantViolations(ctx, T));
+        assertThat(unstamped).as("unstamped tombstone").isEqualTo(1);
+        su(ctx -> {
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute();
+            return null;
+        });
+        int stale = su(ctx -> CollectionTombstones.invariantViolations(ctx, T));
+        assertThat(stale).as("self id while the successor row exists").isEqualTo(1);
+        su(ctx -> {
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, id(b))
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute();
+            ddl(ctx, "ALTER TABLE nexus.catalog_collections ADD CONSTRAINT " + COLL_CHECK
+                + " CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID");
+            return null;
+        });
+        assertInvariant("repaired by hand");
+    }
+
+    @Test
+    void aPlainSuccessorDelete_keepsTheSelfId_untilTheNameIsRegisteredAgain() {
+        String a = name("p2-a"), b = name("p2-b");
+        registerWithDocument(a);
+        register(b);
+        repo.supersedeCollection(T, a, b, "");
+        repo.deleteCollection(T, b);
+        assertThat(supersededId(a)).isEqualTo(id(a));
+        assertInvariant("after a plain successor delete");
+    }
+
+    @Test
+    void aKeepQuarantineReindex_repointsTheTombstoneAtTheReRegisteredRow() {
+        String a = name("p3-a"), b = name("p3-b");
+        register(a, b);
+        repo.supersedeCollection(T, a, b, "");
+        Long oldB = id(b);
+        repo.deleteCollection(T, b, true);
+        assertThat(supersededId(a)).as("(i) the delete gives the survivor its self id").isEqualTo(id(a));
+        repo.upsertCollection(T, reg(b));
+        assertThat(id(b)).as("a new registry row, a new id").isNotEqualTo(oldB);
+        assertThat(supersededId(a)).as("(ii) the registration re-points it").isEqualTo(id(b));
+        assertInvariant("after the reindex");
+    }
+
+    @Test
+    void importingTheNameAgain_repointsTheTombstones_includingOneInAnEarlierChunkOfTheBatch() {
+        String a = name("p4-a"), b = name("p4-b");
+        registerWithDocument(a);
+        register(b);
+        repo.supersedeCollection(T, a, b, "");
+        repo.deleteCollection(T, b);
+        assertThat(supersededId(a)).isEqualTo(id(a));
+        repo.importCollectionsBatch(T, java.util.List.of(reg(b)));
+        assertThat(supersededId(a)).isEqualTo(id(b));
+        String c = name("p4-c"), d = name("p4-d");
+        registerWithDocument(c);
+        register(d);
+        repo.supersedeCollection(T, c, d, "");
+        repo.deleteCollection(T, d);
+        repo.importCollection(T, reg(d));
+        assertThat(supersededId(c)).isEqualTo(id(d));
+        assertInvariant("after the imports");
+    }
+
+    @Test
+    void aRenameOntoANameATombstoneNames_repointsTheTombstoneAtTheNewRow() {
+        String t = name("p5-t"), gone = name("p5-gone"), x = name("p5-x");
+        registerWithDocument(t);
+        register(gone, x);
+        repo.supersedeCollection(T, t, gone, "");
+        repo.deleteCollection(T, gone);
+        assertThat(supersededId(t)).isEqualTo(id(t));
+        repo.renameCollection(T, x, gone);
+        assertThat(supersededId(t)).as("the rename's new row is the name t names").isEqualTo(id(gone));
+        assertInvariant("after the rename");
     }
 }
