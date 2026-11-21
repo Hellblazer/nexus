@@ -66,6 +66,9 @@ LABEL: str = (
 FILEPATH: str = (
     'Matches source file paths, not collection names.'
 )
-P27: str = (
-    'Moves with P2.7 (retire the repo_identity name matcher; resolve_corpus stage 3 reads the row tuple).'
+LABEL_TYPED: str = (
+    'RDR-229 P2.7 (nexus-p2m1x.12): resolve_corpus stage 3b, after the row tuple (stage 3a) finds nothing. '
+    'It matches the label string the user typed (`<value>__` as a name prefix) and decomposes nothing; it stays because a '
+    "repo row's owner_id is the tumbler segment, so code__<slug>-<hash8> matches no tuple. A collection stage 3a "
+    'rejected by lifecycle is not returned by it.'
 )

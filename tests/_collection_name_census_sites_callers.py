@@ -20,9 +20,15 @@ from __future__ import annotations
 from tests._collection_name_census_notes import DIAG_P12
 from tests._collection_name_census_scan import Site as S
 
-RC_P27: str = (
-    "Calls resolve_corpus, whose stage 3 (a string-prefix recovery over the name) is itself a P2.7 holdover; "
-    "moves with P2.7 (resolve_corpus stage 3 reads the row tuple)."
+RC_LABEL: str = (
+    "Passes a user-typed --corpus value to resolve_corpus, which matches it against rows (stage 3a) and then the "
+    "label the user typed (stage 3b, label-pattern); the caller reads no name itself (RDR-229 P2.7, nexus-p2m1x.12). "
+    "A call to resolve_corpus stays a counted site because the function holds the label-pattern site."
+)
+RC_LITERAL: str = (
+    "Calls resolve_corpus with the literal bare content type 'knowledge', which stage 2 fans out by each candidate's "
+    "row (content_type and lifecycle_state); it never reaches stage 3 and reads no name itself (RDR-229 P2.7, "
+    "nexus-p2m1x.12). Counted only because resolve_corpus holds the stage 3b label-pattern site."
 )
 CN_FALLBACK: str = (
     "P1.4 A's temporary empty-model_version fallback in version_from_for_tuple_row: parses the returned name through "
@@ -93,19 +99,19 @@ SITES: tuple[S, ...] = (
       'primitive_call', 'diagnostic', BACKFILL_TITLE),
     S('src/nexus/commands/collection.py',
       ('from nexus.corpus import resolve_corpus  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost', 'candidates = resolve_corpus(name, [c["name"] for c in cols])'),
-      'primitive_call', 'holdover', RC_P27),
+      'primitive_call', 'label-pattern', RC_LABEL),
     S('src/nexus/commands/search_cmd.py',
       ('for c in expanded_corpus:', 'matched = resolve_corpus(c, all_collections)'),
-      'primitive_call', 'holdover', RC_P27),
+      'primitive_call', 'label-pattern', RC_LABEL),
     S('src/nexus/doctor_search.py',
       ('from nexus.corpus import resolve_corpus  # noqa: PLC0415 — deferred import; diagnostic dep only needed in this probe', 'return resolve_corpus(name, all_collections)'),
-      'primitive_call', 'holdover', RC_P27),
+      'primitive_call', 'label-pattern', RC_LABEL),
     S('src/nexus/mcp/core.py',
       ('else:', 'fanned_out = resolve_corpus(part, all_names)'),
-      'primitive_call', 'holdover', RC_P27),
+      'primitive_call', 'label-pattern', RC_LABEL),
     S('src/nexus/mcp/core.py',
       ('return store_read_scope(', 'collection, t3=t3, knowledge_collections=lambda: resolve_corpus("knowledge", _get_collection_names()),'),
-      'primitive_call', 'holdover', RC_P27),
+      'primitive_call', 'label-pattern', RC_LITERAL),
     S('src/nexus/plans/evidence.py',
       ('return collection == self.value', 'return _under(collection, self.value)'),
       'primitive_call', 'mint', UNDER),

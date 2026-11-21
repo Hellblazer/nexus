@@ -373,10 +373,15 @@ for _site in LEDGER:
 #: P2.7 part A (nexus-p2m1x.12, 2026-11-20), re-measured on develop 6341b2ac5: 245 -> 240. ``repo_identity.
 #: list_sibling_collections`` was deleted (no caller in ``src``; RDR-210 finds siblings by row tuple), and with it its
 #: five holdovers: holdover 34 -> 29, primitive_call 182 -> 181, startswith 4 -> 3, hash_suffix 2 -> 0, substring 1 -> 0.
+#:
+#: P2.7 part B (nexus-p2m1x.12, 2026-11-20): 240 -> 240. ``resolve_corpus`` stage 3 matches the row tuple first; its
+#: label-prefix fallback stays as one site, now classed label-pattern (it matches the label the user typed and
+#: decomposes nothing), and its five callers get the same final class (the function still holds that site, so it
+#: stays a root and they stay counted). holdover 29 -> 23, label-pattern 9 -> 15; no shape moves.
 PARSE_SITE_PIN: int = 240
 CLASS_PIN: dict[str, int] = {
-    "mint": 112, "holdover": 29, "diagnostic": 42, "routing": 25,
-    "migration-source": 16, "label-pattern": 9, "file-path": 5,
+    "mint": 112, "holdover": 23, "diagnostic": 42, "routing": 25,
+    "migration-source": 16, "label-pattern": 15, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
@@ -870,6 +875,7 @@ def test_the_census_refuses_a_bad_class_a_bare_holdover_and_a_mislabelled_fnmatc
         site("g", "startswith", "holdover", "needs an owner"),
         site("h", "fnmatch", "label-pattern"),
         site("i", "fnmatch", "file-path"),
+        site("j", "fstring_prefix", "label-pattern", "matches the label the user typed"),
     ])
     assert len(problems) == 6, problems
     assert "class 'parse'" in problems[0]

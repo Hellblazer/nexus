@@ -819,7 +819,9 @@ def ledger_problems(sites: list[Site]) -> list[str]:
     """Structural defects in the ledger itself: an unknown class or shape,
     a holdover whose note names no ``P2.n`` step, an fnmatch labelled as
     something it is not, a non-fnmatch carrying a fnmatch-only label, a
-    duplicate (file, anchor, shape) entry."""
+    duplicate (file, anchor, shape) entry. ``label-pattern`` is an fnmatch label,
+    and also fits a non-fnmatch site that matches a label the user typed (P2.7's
+    ``resolve_corpus`` fallback and its callers) when the site carries a note."""
     problems: list[str] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()
     for s in sites:
@@ -832,8 +834,12 @@ def ledger_problems(sites: list[Site]) -> list[str]:
             problems.append(f"{where}: a holdover's note must name the Phase 2 step (P2.n) that moves it")
         if s.shape == "fnmatch" and s.cls not in (*NON_PARSE_CLASSES, "routing"):
             problems.append(f"{where}: an fnmatch is a label-pattern, a file-path or routing, not {s.cls!r}")
-        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES:
-            problems.append(f"{where}: {s.cls!r} is for an fnmatch; a {s.shape} site is a parse class")
+        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES and not (s.cls == "label-pattern" and s.note):
+            problems.append(
+                f"{where}: {s.cls!r} is for an fnmatch; a {s.shape} site is a parse class "
+                "(a label-pattern may label a non-fnmatch site only with a note saying why: "
+                "it matches the label the user typed and decomposes nothing)"
+            )
         key = (s.rel, s.anchor, s.shape)
         if key in seen:
             problems.append(f"{where}: duplicate ledger entry")
