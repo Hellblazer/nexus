@@ -368,3 +368,18 @@ def test_the_client_lag_ledger_has_an_additive_entry_for_the_completion_status_f
         low = " ".join(e.note.split()).lower()
         assert "old client + new engine" in low and "new client + old engine" in low
         assert "not known" in low
+
+
+def test_the_runbook_says_a_completed_stamp_needs_its_restamp_after_the_pause_is_released():
+    """The registry stamp completes within about a minute; rows the previous engine writes after it stay unstamped and the re-add
+    adds the CHECK back NOT VALID, so the way to finish is the restamp (verified by Rdr229P31RegistryStampRoundTripIntegrationTest)."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    flat = " ".join(text.split())
+    release = text.index("After the re-add, release the pause")
+    restamp = text.index("restamp its table")
+    assert release < restamp < text.index("## If the tag was flipped without the down-step")
+    step = flat[flat.index("restamp its table"):]
+    assert "SELECT nexus.rdr229_restamp('catalog_collections');" in step
+    assert "registered: rdr229-stamp-catalog_collections-rerun-1" in step
+    assert "Rdr229P31RegistryStampRoundTripIntegrationTest" in step
+    assert "blank `model_version`" in step and "run the re-add again" in step

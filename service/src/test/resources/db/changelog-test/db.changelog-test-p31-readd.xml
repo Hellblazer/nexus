@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.1 (nexus-p2m1x.17; Sam's rule nexus-zrcj7: no SQL strings in Java, tests included): runs the operator's generated re-add,
+    docs/runbooks/rdr-229-p31-readd.sql (generated from db/rdr229/p31-checks.tsv by scripts/rdr229_p31_downstep.py), through Liquibase, so the
+    test executes the operator's own file and carries no SQL text. The file is under docs/, not on the classpath: the caller's resource accessor
+    reads it from the repository root (Rdr229P31RegistryStampRoundTripIntegrationTest). runAlways, bookkeeping in its own table; one transaction,
+    as the runbook runs it (psql in single-transaction mode).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="p31-readd" author="nexus-p2m1x.17" runAlways="true">
+        <sqlFile path="docs/runbooks/rdr-229-p31-readd.sql" relativeToChangelogFile="false" splitStatements="false" stripComments="false"/>
+    </changeSet>
+</databaseChangeLog>

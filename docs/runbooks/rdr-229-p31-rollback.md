@@ -358,6 +358,18 @@ UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL
 ```
 <!-- p31-unpause:end -->
 
+9. **If a stamp move had already completed before the down-step, restamp its table.** The window above says the down-step is supported only
+   before a stamp completes; the registry's own stamp (`rdr229-stamp-catalog_collections`) completes first, within about a minute. A
+   stamp that is complete does not run again, so rows the previous engine wrote in the meantime stay unstamped: a collection renamed
+   meanwhile is a tombstone with `superseded_by` set and `superseded_by_id` empty, and step 7 adds its CHECK back `NOT VALID`. After step 8,
+   as the migrating role (`nexus_admin`), run the restamp of each such table (the "Orphan rows" section's step 2), for the registry:
+   `SELECT nexus.rdr229_restamp('catalog_collections');`. It answers `registered: rdr229-stamp-catalog_collections-rerun-1`; that move
+   gives the tombstone its successor's id (a successor that is gone gives the tombstone its own id) and validates the CHECK, and gate 1
+   of the completion check holds for the registry again. `nx doctor`'s "RDR-229 VALIDATE <table>" row names the tables that need it.
+   `Rdr229P31RegistryStampRoundTripIntegrationTest` runs this whole sequence on the registry stamp. One case changes step 7: while a
+   tombstone with a blank `model_version` has no `superseded_by_id`, the re-add skips the `superseded_by` CHECK (it prints a `NOTICE`);
+   run the re-add again once D2's repair move has completed, then the restamp.
+
 ## If the tag was flipped without the down-step
 
 The previous engine starts, serves reads, and fails writes. What an operator sees: **SQLSTATE `23514`** in the engine log and
