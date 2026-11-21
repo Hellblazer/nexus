@@ -147,6 +147,23 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
         });
     }
 
+    /**
+     * The other real state: a tombstone with a blank model_version (D2's repair not yet run) keeps vectors-068-19 from adding the
+     * superseded_by_id CHECK at all, by design, so nothing refuses the old body here; and the new body still stamps the id on the
+     * tombstone it rewrites, because the dual write sets superseded_by_id whether or not the CHECK exists (vectors-068-2).
+     */
+    @Test
+    void aTombstoneWithABlankModelVersion_keepsTheCheckWaiting_andTheDualWriteStampsItAnyway() throws Exception {
+        Scenario blank = ownerToCollection("ow2", false);
+        assertThat(blank.refusedBefore()).as("this state is not refused before vectors-069").isFalse();
+        walk(ADMIN_ROLE + "_b", su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE + "_b", ADMIN_PASS), List.of(blank), 0, (pg, ds, w) -> {
+            try (Connection su = pg.createConnection("")) {
+                assertThat(PgCatalogProbes.constraintCount(DSL.using(su, SQLDialect.POSTGRES), dev.nexus.service.datamove.CompletionCheck.SUPERSEDED_BY_CHECK))
+                    .as("the CHECK waits while a blank-model_version tombstone has no id").isZero();
+            }
+        });
+    }
+
     @Test
     void theChangelogRedefinesEveryCensusFunction_andNoOtherFunctionWritesAGuardedTable() throws Exception {
         Set<String> census = censusFunctions();
@@ -322,12 +339,23 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
      * that row is an unstamped tombstone, the UPDATE must set superseded_by_id: the successor's id, or, residual R7, the row's own id
      * when the successor is gone.
      */
+    /**
+     * The tombstones of this scenario carry the model_version D2's repair writes (the name's trailing version, 'v1'), the state of
+     * an install that has run vectors-064's repair move. vectors-068-19 adds the superseded_by_id CHECK only while no tombstone has
+     * a blank model_version and no id (a repair UPDATE would meet it), so with a blank one (what a bare registry insert leaves) the
+     * CHECK waits, develop's catalog-051-2 body updates the tombstone's owner without refusal, and this scenario's "refused before"
+     * would be false: {@link #aTombstoneWithABlankModelVersion_keepsTheCheckWaiting_andTheDualWriteStampsItAnyway} covers that state.
+     */
     private static Scenario ownerToCollection() {
-        String tenant = "p31sql-ow";
-        String tomb = coll("code", "owtomb", "voyage-code-3").replace("p31sql-owtomb", "arcane-owtomb");
-        String orphan = coll("code", "oworph", "voyage-code-3").replace("p31sql-oworph", "arcane-oworph");
-        String successor = coll("code", "owsucc", "voyage-code-3");
-        return new Scenario("catalog_documents_owner_to_collection", tenant, true,
+        return ownerToCollection("ow", true);
+    }
+
+    private static Scenario ownerToCollection(String tag, boolean repaired) {
+        String tenant = "p31sql-" + tag;
+        String tomb = coll("code", tag + "tomb", "voyage-code-3").replace("p31sql-" + tag + "tomb", "arcane-" + tag + "tomb");
+        String orphan = coll("code", tag + "orph", "voyage-code-3").replace("p31sql-" + tag + "orph", "arcane-" + tag + "orph");
+        String successor = coll("code", tag + "succ", "voyage-code-3");
+        return new Scenario("catalog_documents_owner_to_collection", tenant, repaired,
             e -> {
                 register(e, tenant, tomb);
                 register(e, tenant, orphan);
@@ -336,6 +364,10 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(tomb)).execute();
                 e.ctx().update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "code__gone__voyage-code-3__v1")
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(orphan)).execute();
+                if (repaired) {
+                    e.ctx().update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.MODEL_VERSION, "v1")
+                        .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.in(tomb, orphan)).execute();
+                }
             },
             e -> {
                 // a live document of the collection with a tumbler-shaped owner: the trigger moves the registry row's owner
