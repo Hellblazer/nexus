@@ -44,9 +44,8 @@
     is skipped unrecorded and retried at the next boot, and nx doctor names the duplicate from the catalog's own listing.
 
     THE GUARD CANNOT HALT A BOOT. A sqlCheck that THROWS is an error, not a failed check, and onError="CONTINUE" turns it
-    into the same skip. The body is a single CREATE UNIQUE INDEX with failOnError="false": a duplicate that lands between
-    the precondition and the body, a duplicate the counter could not see, or a migration role that does not own the table
-    makes the index build raise, Liquibase rolls the body back, logs it, and writes NO DATABASECHANGELOG row
+    into the same skip (a migration role with no privilege on the table is refused at the counter this way). The body is a single CREATE UNIQUE INDEX with failOnError="false": a duplicate that lands between
+    the precondition and the body, or a duplicate the counter could not see, makes the index build raise, Liquibase rolls the body back, logs it, and writes NO DATABASECHANGELOG row
     (MarkChangeSetRanGenerator refuses a FAILED changeset), so it is retried at the next boot exactly like a precondition
     skip. The build reads the heap and is not subject to RLS, so it sees every tenant's rows. GET /v1/status reports
     collection_tuple_index_present, and nx doctor names a duplicate that holds the index back, and an index that waits for
