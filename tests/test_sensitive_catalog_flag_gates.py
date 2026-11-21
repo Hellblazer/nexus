@@ -881,7 +881,8 @@ def test_the_reput_refusal_is_worded_for_every_caller_of_the_note_writer(
     assert "bge" in text, "and the way out every caller has"
 
 
-def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path: Path, cloud_mode) -> None:
+@pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: the collection holds no chunk; NoRow derives from its name with no listing
+def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path: Path, cloud_mode, monkeypatch) -> None:
     """Fix round 3 (nexus-rfvyy.6.20): a REAL reconcile branch (``by_source_uri``) stamps ``meta.doc_id`` with the new
     text's first chash before the write; the refusal must put the old value back, or the stamp names a chunk that was
     never written. ``catalog_store_hook_tracked`` is not patched, so ``pre_call`` is filled by the real branch."""
@@ -892,6 +893,12 @@ def test_the_refused_reput_puts_the_identity_stamp_back(t2_service_env, tmp_path
     from nexus.catalog.note_write import put_note
     from nexus.sensitive_write import ExternalEmbedderRefusedError
 
+    def _no_real_client():
+        raise AssertionError("the note write's routing read built a real managed-service client")
+
+    monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_real_client)
+    # A cold collections cache is what CI's unstamped engine meets: the first routing read then builds a client.
+    monkeypatch.setattr("nexus.mcp_infra._collections_cache", ([], {}, {}, 0.0))
     collection = f"knowledge__{CORPUS}__voyage-context-3__v1"
     title = "stamp restore note"
     old_chash = hashlib.sha256(b"the old text of the note").hexdigest()

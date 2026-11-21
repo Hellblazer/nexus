@@ -92,6 +92,7 @@ class TestTheSharedHelper:
             assert routing_content_type(_NEW_DOCS) == "docs"
         assert [e["log_level"] for e in logs if e["event"] == "routing_content_type_unreadable"] == ["warning"]
 
+    @pytest.mark.expects_unresolvable_endpoint
     def test_an_unresolvable_service_endpoint_is_unreadable_too(self, rows, monkeypatch):
         """A box with no resolvable service (Windows CI, a hook before the engine is up) raises
         ServiceEndpointUnresolvableError, a sibling of the two listing errors, not a subclass: it is
