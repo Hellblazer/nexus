@@ -349,7 +349,7 @@ class TargetSelectionTest {
     }
 
     private static Job foreign(List<Job> jobs, List<CollectionRow> rows) {
-        return TargetSelection.foreignOrigin(jobs, rows, TARGET, SOURCE, CT, OWNER, VC3);
+        return TargetSelection.foreignOrigin(jobs, rows, TARGET, SOURCE, VC3);
     }
 
     @Test
@@ -375,9 +375,11 @@ class TargetSelectionTest {
     }
 
     @Test
-    void aForeignSourceNowOwnedElsewhereIsNotATwin() {
+    void aForeignSourceReOwnedSinceItsJobStillCounts_itsDocumentsAreInTheTarget() {
         Job moved = job("docs__wow-addon-dev__voyage-context-3__v1", 3);
-        assertThat(foreign(List.of(moved), List.of(rowOf(moved.sourceCollection(), "1-9", VC3)))).isNull();
+        assertThat(foreign(List.of(moved), List.of(rowOf(moved.sourceCollection(), "1-9", VC3)))).isSameAs(moved);
+        assertThat(foreign(List.of(moved), List.of(new CollectionRow(moved.sourceCollection(), "code", "1-9", VC3,
+            "v1", false, "", "live")))).as("nor does its content type matter: only the model").isSameAs(moved);
     }
 
     @Test
@@ -394,7 +396,7 @@ class TargetSelectionTest {
         Job moved = job("docs__1-7__voyage-context-3__v1", 3);
         // The v1 row is gone and its name carries this source's model; the log is keyed by name, so v2 is another source.
         assertThat(TargetSelection.foreignOrigin(List.of(moved), List.of(), TARGET,
-            "docs__1-7__voyage-context-3__v2", CT, OWNER, VC3)).isSameAs(moved);
+            "docs__1-7__voyage-context-3__v2", VC3)).isSameAs(moved);
     }
 
     @Test
@@ -410,7 +412,8 @@ class TargetSelectionTest {
         assertThat(foreign).contains(SOURCE).contains(TARGET).contains("docs__other__x__v1")
             .contains("the job log shows").contains(origin.jobId().toString()).contains("3 document(s) moved")
             .contains("engine data move").contains("rename that re-homes the collection")
-            .contains(SOURCE + " is re-owned, or docs__other__x__v1 is if its row still exists")
+            .contains(SOURCE + " is re-owned, which gives it a different target tuple")
+            .contains("re-owning docs__other__x__v1 does not take its documents out of the target")
             .contains("earlier version of " + SOURCE).doesNotContain("holds documents")
             .doesNotContain("superseded");
     }
