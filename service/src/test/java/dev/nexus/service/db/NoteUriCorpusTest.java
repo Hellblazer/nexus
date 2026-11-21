@@ -142,21 +142,25 @@ class NoteUriCorpusTest {
      * live-collection test still calls it.
      */
     @Test
-    void onlyTheStaleNoteRepairCallsTheRetiringLiveCollectionTest() throws IOException {
+    void noLiveCodeTestsACollectionNameForAFileRoutedPrefix() throws IOException {
+        // RDR-229 P2.9 retired NoteUri.isFileRoutedCollection (the stale-note repair reads the registry row's content
+        // type); P2.10's URI rules classify a URI SEGMENT (isNote, namesCollection, moveTo), never a collection's name.
         java.nio.file.Path main = java.nio.file.Path.of("src", "main", "java");
         List<String> callers = new ArrayList<>();
+        int scanned = 0;
         try (var files = java.nio.file.Files.walk(main)) {
             for (java.nio.file.Path f : (Iterable<java.nio.file.Path>) files.filter(x -> x.toString().endsWith(".java"))::iterator) {
+                scanned++;
                 int n = 0;
                 for (String line : java.nio.file.Files.readAllLines(f)) {
                     String t = line.strip();
                     boolean prose = t.startsWith("*") || t.startsWith("//") || t.startsWith("/*");
-                    if (!prose && line.contains("isFileRoutedCollection(") && !line.contains("boolean ")) n++;
+                    if (!prose && line.contains("isFileRoutedCollection(")) n++;
                 }
                 if (n > 0) callers.add(f.getFileName() + "=" + n);
             }
         }
-        assertThat(callers).as("non-vacuity: the stale-note repair's call is found").isNotEmpty();
-        assertThat(callers).containsExactly("CatalogRepository.java=1");
+        assertThat(scanned).as("non-vacuity: the scan read the main sources").isGreaterThan(100);
+        assertThat(callers).as("a name-prefix file-routed test in live code").isEmpty();
     }
 }
