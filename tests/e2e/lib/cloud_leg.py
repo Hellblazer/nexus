@@ -336,6 +336,8 @@ ROUTE_MAP: dict[str, Step] = {
                                     expect_route="/v1/tuples/registry"),
     "GET /v1/catalog/uri_segment_census": Step("route-uri-segment-census", "py", ["-c", _routes.URI_SEGMENTS],
                                                expect_route="/v1/catalog/uri_segment_census"),
+    "GET /v1/catalog/rdr229_completion_counts": Step("route-rdr229-completion-counts", "py", ["-c", _routes.COMPLETION_COUNTS],
+                                                     expect_route="/v1/catalog/rdr229_completion_counts"),
     "POST /v1/catalog/collections/upsert": Step("route-collections-upsert", "py", ["-c", _routes.COLLECTION_UPSERT],
                                                 expect_route="/v1/catalog/collections/upsert"),
     # RDR-229 P3.1 (nexus-p2m1x.17): the completion check's report, and the typed 422 of the dual write.

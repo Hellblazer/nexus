@@ -11,14 +11,21 @@ on an engine that predates the check); absent is "not known", never ok. This mod
 * the gate summary: one ok row. The gates wait by design, so the row informs and never warns.
 * ``checks_missing``: a listed CHECK that is missing. A warning. The superseded_by one is held back on purpose by its
   changeset while a registry tombstone with a blank ``model_version`` has no ``superseded_by_id`` (D2's repair UPDATE would
-  hit 23514); the engine says how many rows, and the wait clears by itself.
+  hit 23514); the wait clears by itself, and the row adds how many of THIS tenant's registry rows hold it back.
 * ``validate_waits``: a table whose stamp move is done and whose CHECK is still NOT VALID because rows violate it: orphans,
-  a name with no registry row in its tenant, which the stamp cannot give an id. The engine's own ``what`` text is shown as it
-  sent it; the step is ``nexus.rdr229_restamp``, which registers the stamp move again once no orphan remains.
-* ``dangling_tombstones``: R7's pre-flight, COUNTS by content type of the registry's tombstones whose ``superseded_by`` names
-  no row of their tenant, and of the tombstones the stamp resolved to their own id (retired, no successor). ``/v1/status``
-  is unauthenticated, so the engine sends no name; each row carries the read-only query that lists them by name, to run as
-  ``nexus_admin``.
+  a name with no registry row in its tenant, which the stamp cannot give an id, and rows the stamp has not given one yet. An
+  orphan row is write-frozen (any UPDATE of it fails 23514). With this tenant's orphan count above 0 the row says to register
+  or delete the orphans and then run ``nexus.rdr229_restamp``; with 0 and only unstamped rows left it says the restamp step
+  alone finishes it. Without the counts it shows the engine's text, which states both conditions.
+* ``dangling_tombstones``: R7's pre-flight, COUNTS by content type of this tenant's registry tombstones whose ``superseded_by``
+  names no row of their tenant, and of the tombstones the stamp resolved to their own id (retired, no successor). Each row
+  carries the read-only query that lists them by name, to run as ``nexus_admin``.
+
+``/v1/status`` is unauthenticated, so the engine's ``rdr229_completion`` field carries NO number that describes tenants (review
+N2, linda's ruling). Every number these rows show comes from the authenticated, tenant-scoped
+``GET /v1/catalog/rdr229_completion_counts`` (:mod:`nexus.catalog.engine_reads.rdr229_completion_counts`): the caller's own
+counts, never another tenant's and never a total. An engine without the route, a timeout or a failed read leaves the counts
+unread, and the rows say so; an unread count is never shown as zero.
 
 None of these is red: every waiting state clears by itself or by a step the row names, and a red row on every install
 mid-rollout would hide a real one. Kept out of :mod:`nexus.health` (a file at its size cap); stdlib and
@@ -26,10 +33,13 @@ mid-rollout would hide a real one. Kept out of :mod:`nexus.health` (a file at it
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import structlog
 
+from nexus.catalog.engine_reads import rdr229_completion_counts
+from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable
 from nexus.health import _ENGINE_STATUS_UNSET, HealthResult
 
 _log = structlog.get_logger(__name__)
@@ -99,8 +109,10 @@ def _summary_row(field: dict[str, Any]) -> HealthResult:
     return HealthResult(label=SUMMARY_LABEL, ok=True, detail=detail)
 
 
-def _check_row(constraint: str, what: str) -> HealthResult:
+def _check_row(constraint: str, what: str, counts: dict[str, Any] | None = None) -> HealthResult:
     if constraint == SUPERSEDED_BY_CHECK:
+        if counts is not None:
+            what = f"{what} For this tenant, {_int(counts.get('superseded_by_waiting'))} registry row(s) hold it back."
         fix = [
             "Nothing to run. The CHECK is held back on purpose: a tombstone with a blank model_version and no "
             "superseded_by_id would make D2's repair move (repair-catalog-collection-model-version) fail with 23514. "
@@ -118,46 +130,80 @@ def _check_row(constraint: str, what: str) -> HealthResult:
     return HealthResult(label=f"RDR-229 CHECK {constraint}", ok=False, warn=True, detail=what, fix_suggestions=fix)
 
 
-def _validate_row(table: str, what: str) -> HealthResult:
+_RESTAMP_ANSWERS = (
+    "It registers the move again (<label>-rerun-N, which supersedes the completed one); that stamps the rows that can now resolve and "
+    "validates the CHECK. It answers 'registered: ...' or 'not registered: <reason>' and writes nothing else."
+)
+
+
+def _restamp(table: str) -> str:
+    return f"as nexus_admin (the migrating role): SELECT nexus.rdr229_restamp('{table}'); {_RESTAMP_ANSWERS}"
+
+
+def _validate_row(table: str, what: str, counts: dict[str, Any] | None, why_unread: str = "",
+                  constraint_names: list[str] | None = None) -> HealthResult:
+    """One table whose CHECK waits. With the caller's counts: the orphan shape (orphans above 0) or the restamp-alone shape (none).
+    Without them: the engine's text as sent."""
+    label = f"RDR-229 VALIDATE {table}"
+    if counts is None:
+        return HealthResult(
+            label=label, ok=False, warn=True, detail=f"{what} (counts not read: {why_unread})",
+            fix_suggestions=[
+                "An orphan row names a collection with no registry row in its tenant, so the stamp cannot give it an id and the CHECK "
+                "cannot be validated; an orphan row is write-frozen. Registering the collection alone stamps nothing: the table's "
+                "stamp move is already complete. If there are any orphan rows, register each missing collection or delete the orphan "
+                f"rows; then, {_restamp(table)} With no orphan row, that restamp step alone finishes it."])
+    mine = next((t for t in _dicts(counts.get("tables")) if t.get("table") == table), {})
+    orphans, unstamped = _int(mine.get("orphans")), _int(mine.get("unstamped"))
+    constraints = ", ".join(constraint_names or []) or "its CHECK"
+    if orphans:
+        return HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(f"waits: {orphans} orphan row(s) and {unstamped} unstamped row(s) of this tenant keep {constraints} on {table} "
+                    "NOT VALID. An orphan row is write-frozen: any UPDATE of it fails with SQLSTATE 23514 until its collection is "
+                    "registered or the row is deleted."),
+            fix_suggestions=[
+                "An orphan row names a collection with no registry row in its tenant, so the stamp cannot give it an id and the CHECK "
+                "cannot be validated. Registering the collection alone stamps nothing: the table's stamp move is already complete. "
+                f"Step 1: register each missing collection or delete the orphan rows. Step 2, {_restamp(table)} The engine counts "
+                "what this tenant's session can see; the other tenants' rows are not counted here."])
     return HealthResult(
-        label=f"RDR-229 VALIDATE {table}", ok=False, warn=True, detail=what,
+        label=label, ok=False, warn=True,
+        detail=(f"waits: 0 orphan row(s) and {unstamped} unstamped row(s) of this tenant keep {constraints} on {table} NOT VALID."
+                if unstamped else
+                f"waits: no row of this tenant keeps {constraints} on {table} NOT VALID (0 orphan row(s), 0 unstamped row(s)); "
+                "rows of another tenant do."),
         fix_suggestions=[
-            "An orphan row names a collection with no registry row in its tenant, so the stamp cannot give it an id and the "
-            "CHECK cannot be validated. Registering the collection alone stamps nothing: the table's stamp move is already "
-            "complete. Register each missing collection or delete the orphan rows, then, as nexus_admin (the migrating "
-            f"role): SELECT nexus.rdr229_restamp('{table}'); It registers the move again (<label>-rerun-N, which "
-            "supersedes the completed one); that stamps the rows that can now resolve and validates the CHECK. It answers "
-            "'registered: ...' or 'not registered: <reason>' and writes nothing else. The engine counts what its admin role "
-            "can see, so a table with row-level security and no owner-read policy can show a lower count than it holds",
-        ],
-    )
+            f"This tenant has no orphan row, so there is nothing to look for. Run, {_restamp(table)} That restamp step alone "
+            "finishes it. If it answers 'not registered:' and names an orphan row, the row is another tenant's: run it again once "
+            "that tenant has cleared it."])
 
 
-def _dangling_rows(dangling: object) -> list[HealthResult]:
-    if not isinstance(dangling, dict):
-        return []
-    if dangling.get("read") is not True:
+def _dangling_rows(counts: dict[str, Any] | None, why_unread: str) -> list[HealthResult]:
+    if counts is None:
         return [HealthResult(
             label=DANGLING_LABEL, ok=True,
-            detail="not read: the engine could not read the registry for its dangling-tombstone count")]
-    registry = _int(dangling.get("registry_rows"))
+            detail=f"not read: the dangling-tombstone count is this tenant's own, from GET /v1/catalog{rdr229_completion_counts.ROUTE}; {why_unread}")]
+    dangling = counts.get("dangling_tombstones")
+    dangling = dangling if isinstance(dangling, dict) else {}
+    registry = _int(counts.get("registry_rows"))
     total = _int(dangling.get("total"))
     rows: list[HealthResult] = []
     if total:
         rows.append(HealthResult(
             label=DANGLING_LABEL, ok=True,
-            detail=(f"{total} dangling tombstone(s) of {registry} registry rows (superseded_by names no row of the tenant); "
-                    f"by content type: {_by_type(dangling.get('by_content_type'))}"),
+            detail=(f"{total} dangling tombstone(s) of {registry} registry rows of this tenant (superseded_by names no row of the "
+                    f"tenant); by content type: {_by_type(dangling.get('by_content_type'))}"),
             fix_suggestions=[f"List them by name, as nexus_admin (read only): {DANGLING_QUERY}"]))
     else:
         rows.append(HealthResult(
-            label=DANGLING_LABEL, ok=True, detail=f"no dangling tombstone among {registry} registry rows"))
+            label=DANGLING_LABEL, ok=True, detail=f"no dangling tombstone among {registry} registry rows of this tenant"))
     own = dangling.get("self_id")
     own_total = _int(own.get("total")) if isinstance(own, dict) else 0
     if own_total:
         rows.append(HealthResult(
             label=SELF_ID_LABEL, ok=True,
-            detail=(f"{own_total} tombstone(s) resolved to their own id (retired, no successor); "
+            detail=(f"{own_total} tombstone(s) of this tenant resolved to their own id (retired, no successor); "
                     f"by content type: {_by_type(own.get('by_content_type') if isinstance(own, dict) else None)}"),
             fix_suggestions=[f"List them by name, as nexus_admin (read only): {SELF_ID_QUERY}"]))
     else:
@@ -165,12 +211,39 @@ def _dangling_rows(dangling: object) -> list[HealthResult]:
     return rows
 
 
-def check_rdr229_completion(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
+def _default_counts_reader() -> Callable[[], dict[str, Any]]:
+    """The production reader: the catalog reader's client, asked for the route. Built lazily, so a doctor run on a box with no
+    catalog costs nothing."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to keep CLI startup fast and avoid a cycle
+
+    reader = make_catalog_reader()
+    if reader is None:
+        raise LookupError("there is no catalog")
+    return lambda: rdr229_completion_counts.read_rdr229_completion_counts(reader)
+
+
+def _read_counts(counts_reader: Callable[[], dict[str, Any]] | None) -> tuple[dict[str, Any] | None, str]:
+    """``(body, "")`` or ``(None, why)``: never raises, and an unread count is never an empty one."""
+    try:
+        read = counts_reader if counts_reader is not None else _default_counts_reader()
+        return read(), ""
+    except EngineRouteUnavailable as exc:
+        return None, exc.describe()
+    except Exception as exc:  # noqa: BLE001 — best-effort: a failed read is "cannot say", never "none", and never crashes `nx doctor`
+        _log.debug("doctor_rdr229_completion_counts_failed", error=str(exc))
+        return None, "the catalog could not be asked for the counts"
+
+
+def check_rdr229_completion(
+    engine_status: object = _ENGINE_STATUS_UNSET, *, counts_reader: Callable[[], dict[str, Any]] | None = None,
+) -> list[HealthResult]:
     """The summary row, a warning per missing CHECK and per table whose VALIDATE waits on orphans, and the two count rows.
     Never red.
 
     *engine_status* is the ``GET /v1/status`` body the doctor already fetched (``None`` when that failed); left unset, this
-    fetches its own. Not applicable (ok) when the engine cannot be reached; "not known" (ok, and not "nothing waiting")
+    fetches its own. *counts_reader* returns the authenticated route's body for the caller's tenant (it raises
+    :class:`~nexus.catalog.engine_reads.route_unavailable.EngineRouteUnavailable` when the engine cannot say); left unset, it asks
+    the catalog reader. Not applicable (ok) when the engine cannot be reached; "not known" (ok, and not "nothing waiting")
     when the body has no ``rdr229_completion`` field.
     """
     status: dict[str, Any] | None
@@ -189,14 +262,16 @@ def check_rdr229_completion(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
     field = status.get(FIELD)
     if not isinstance(field, dict):
         return _not_known()
+    counts, why_unread = _read_counts(counts_reader)
     rows = [_summary_row(field)]
     for c in _dicts(field.get("checks_missing")):
         constraint = c.get("constraint")
         if isinstance(constraint, str) and constraint:
-            rows.append(_check_row(constraint, str(c.get("what") or "")))
+            rows.append(_check_row(constraint, str(c.get("what") or ""), counts))
     for w in _dicts(field.get("validate_waits")):
         table = w.get("table")
         if isinstance(table, str) and table:
-            rows.append(_validate_row(table, str(w.get("what") or "")))
-    rows.extend(_dangling_rows(field.get("dangling_tombstones")))
+            names = [c for c in (w.get("constraints") if isinstance(w.get("constraints"), list) else []) if isinstance(c, str)]
+            rows.append(_validate_row(table, str(w.get("what") or ""), counts, why_unread, names))
+    rows.extend(_dangling_rows(counts, why_unread))
     return rows

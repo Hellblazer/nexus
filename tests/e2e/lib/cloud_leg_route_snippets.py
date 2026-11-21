@@ -35,6 +35,14 @@ from nexus.commands.catalog import _get_catalog
 print(json.dumps(_get_catalog().uri_segment_census(limit=10), default=str)[:400])
 """
 
+COMPLETION_COUNTS = r"""
+import json
+from nexus.catalog.engine_reads.rdr229_completion_counts import read_rdr229_completion_counts
+from nexus.commands.catalog import _get_catalog
+# RDR-229 P3.1 review N2: the caller's own completion counts (the doctor's RDR-229 rows), never another tenant's.
+print(json.dumps(read_rdr229_completion_counts(_get_catalog()), default=str)[:400])
+"""
+
 LOCATORS = r"""
 import json
 from nexus.commands.catalog import _get_catalog
