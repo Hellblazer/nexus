@@ -870,11 +870,13 @@ public final class ReembedJobRepository {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     /** RDR-229 P3.1: the ids of the row's own source and target names, set by every UPDATE of a job row (the NOT VALID
-     *  CHECKs look at each updated row, and a row not stamped yet has names and no ids). */
-    private static final Field<Long> SOURCE_OWN_ID =
-        CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.SOURCE_COLLECTION);
-    private static final Field<Long> TARGET_OWN_ID =
-        CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.TARGET_COLLECTION);
+     *  CHECKs look at each updated row, and a row not stamped yet has names and no ids). An id already stored is kept
+     *  (no UPDATE here changes a name), because a cutover deletes the source's registry row and a live subselect would
+     *  then null the id beside a non-empty name. */
+    private static final Field<Long> SOURCE_OWN_ID = DSL.coalesce(REEMBED_JOBS.SOURCE_COLLECTION_ID,
+        CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.SOURCE_COLLECTION));
+    private static final Field<Long> TARGET_OWN_ID = DSL.coalesce(REEMBED_JOBS.TARGET_COLLECTION_ID,
+        CollectionIds.idOf(REEMBED_JOBS.TENANT_ID, REEMBED_JOBS.TARGET_COLLECTION));
 
     private static Field<OffsetDateTime> clock() {
         return DSL.function("clock_timestamp", SQLDataType.TIMESTAMPWITHTIMEZONE);

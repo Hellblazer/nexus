@@ -75,8 +75,8 @@ public final class AspectRepository {
     // OWN_ID is the id of the row's own name, for an UPDATE that does not name the collection (the NOT VALID CHECK
     // looks at every updated row, and a row not stamped yet has a name and no id).
     private static final Field<Long>            EX_COLLECTION_ID          = excluded(DOCUMENT_ASPECTS.COLLECTION_ID);
-    private static final Field<Long>            ASPECT_OWN_ID             =
-        CollectionIds.idOf(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION);
+    private static final Field<Long>            ASPECT_OWN_ID             = coalesce(DOCUMENT_ASPECTS.COLLECTION_ID,
+        CollectionIds.idOf(DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION));
 
     // COALESCE(EXCLUDED.x, table.x) fields for importAspect path
     private static final Field<String>          EX_SOURCE_URI_COALESCE =
