@@ -170,15 +170,26 @@ public final class CollectionMint {
                 nne(CatalogRepository.s(coll, "display_name")), false, "",
                 java.time.OffsetDateTime.now(java.time.ZoneOffset.UTC),
                 model.dimension(), state);
-        int inserted = indexed
-            ? insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                    CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
-                // inlined, not bound: the inference predicate must be provably the index's own, and a bind parameter is
-                // not a constant at parse time (42P10)
-                .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline(""))
-                    .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
-                .doNothing().execute()
-            : insert.execute();
+        int inserted;
+        try {
+            inserted = indexed
+                ? insert.onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
+                    // inlined, not bound: the inference predicate must be provably the index's own, and a bind parameter is
+                    // not a constant at parse time (42P10)
+                    .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(DSL.inline(""))
+                        .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne(DSL.inline("quarantine"))))
+                    .doNothing().execute()
+                : insert.execute();
+        } catch (DataAccessException e) {
+            // another row took the label between the draw and this insert. Name it here: the driver's detail line (the
+            // key) is withheld from a role under row-level security, so the registration's outer catch cannot read it.
+            if (violates(e, "catalog_collections_pk")) {
+                throw new MintedLabel.LabelsTakenException("registering a collection: the label '" + choice.label()
+                    + "' was taken by another registration while this one ran; try again");
+            }
+            throw e;
+        }
         Map<String, Object> row = minted(liveRow(ctx, tenant, contentType, owner, requestedModel, version), inserted,
             contentType, owner, requestedModel, version);
         // a lost race answers the winner's row, which gets the display_name this request carries, as a found row does
@@ -279,6 +290,7 @@ public final class CollectionMint {
 
     // ── the race the pre-check cannot see ───────────────────────────────────────────────────────
 
+    /** The key of a primary-key violation, where the driver reports it (it does not for a role under row-level security). */
     private static final java.util.regex.Pattern PK_KEY =
         java.util.regex.Pattern.compile("Key \\(tenant_id, name\\)=\\([^,]*, (.*?)\\) already exists");
 
