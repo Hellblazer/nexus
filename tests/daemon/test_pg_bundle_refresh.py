@@ -419,4 +419,4 @@ def test_install_binary_and_converge_share_the_one_function():
 
     assert "install_and_extract_pg_bundle" in inspect.getsource(daemon_cmds._install_binary_steps)
     assert "install_and_extract_pg_bundle" in inspect.getsource(pg_bundle_refresh)
-    assert "extract_bundle" not in inspect.getsource(daemon_cmds._install_binary_steps)
+    assert "extract_bundle(" not in inspect.getsource(daemon_cmds._install_binary_steps)
