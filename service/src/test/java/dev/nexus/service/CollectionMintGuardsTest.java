@@ -346,6 +346,39 @@ class CollectionMintGuardsTest {
     }
 
     @Test
+    void aSingleImportThatLosesTheRaceToAConcurrentInsertIsRefusedNamingBoth_withTheIndexPresent() throws Exception {
+        indexState(true);
+        String owner = "guards-race-import-one";
+
+        Throwable thrown = registrationLosingTheRace("race-blocker-import-one", owner,
+            () -> {
+                repo.importCollection(TENANT, named("race-racer-import-one", owner));
+                return null;
+            });
+
+        assertThat(thrown).as("not a bare unique violation, and named as the service role: the driver gives it no key detail")
+            .isInstanceOf(CollectionMint.LiveTupleConflict.class)
+            .hasMessageContaining("race-blocker-import-one").hasMessageContaining("race-racer-import-one");
+        assertThat(row("race-racer-import-one")).as("the loser wrote nothing").isNull();
+    }
+
+    @Test
+    void aRenameThatLosesTheRaceToAConcurrentInsertIsRefusedNamingBoth_withTheIndexPresent() throws Exception {
+        indexState(true);
+        String owner = "guards-race-rename";
+        repo.upsertCollection(TENANT, named("race-source-rename", "guards-race-rename-source"), true);
+
+        Throwable thrown = registrationLosingTheRace("race-blocker-rename", owner,
+            () -> repo.renameCollection(TENANT, "race-source-rename", "race-racer-rename", null, "knowledge", owner));
+
+        assertThat(thrown).as("not a bare unique violation, and named as the service role")
+            .isInstanceOf(CollectionMint.LiveTupleConflict.class)
+            .hasMessageContaining("race-blocker-rename").hasMessageContaining("race-racer-rename");
+        assertThat(row("race-racer-rename")).as("the loser wrote nothing").isNull();
+        assertThat(row("race-source-rename").get(CATALOG_COLLECTIONS.SUPERSEDED_BY)).as("and the source is still live").isEqualTo("");
+    }
+
+    @Test
     void aMintedLabelAnotherRowTakesBetweenTheDrawAndTheInsertIsANamedConflict() throws Exception {
         indexState(false);
         long next = su(CollectionMintSupport::nextSequenceValue);
@@ -366,7 +399,11 @@ class CollectionMintGuardsTest {
             }
             blocker.commit();
             assertThatThrownBy(() -> mint.get(60, TimeUnit.SECONDS)).isInstanceOf(ExecutionException.class)
-                .cause().isInstanceOf(MintedLabel.LabelsTakenException.class).hasMessageContaining(label);
+                .cause().isInstanceOf(MintedLabel.LabelsTakenException.class)
+                // both sides, as the service role (the driver gives no key detail to a role under row-level security): the
+                // label, this request's own tuple, and the row that holds the label, read back from the table
+                .hasMessageContaining("'" + label + "'").hasMessageContaining("guards-label-mint")
+                .hasMessageContaining("guards-label-other");
             assertThat(rowsOfOwner("guards-label-mint")).as("the mint wrote nothing").isZero();
         } finally {
             pool.shutdownNow();
