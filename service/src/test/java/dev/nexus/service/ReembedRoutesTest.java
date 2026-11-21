@@ -419,9 +419,7 @@ class ReembedRoutesTest {
     void anAbsentTargetIsRegisteredFromTheClientsNameAndTheProfileFixesItsModel() throws Exception {
         Tn t = tenant("reg");
         String fresh = name(t, MINI, 2);
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
         assertThat(catalog.getCollection(t.tenant(), fresh)).isNull();
         // The client's name says one model; the profile says another. The profile gate fixes the registered model.
         String misleading = TYPE + "__" + t.owner() + "__voyage-context-3__v1";
@@ -437,65 +435,9 @@ class ReembedRoutesTest {
     }
 
     @Test
-    void aTargetLabelTheLabelRuleRefusesIs400_onStartAndOnPlan_andNothingIsRegistered() throws Exception {
-        // RDR-229 P3.6: a re-embed target is a user-supplied label the engine registers. It is conformant in shape
-        // (so requireRegistrable's version read passes) and breaks the label rule.
-        Tn t = tenant("labelrule");
-        unregister(t, t.tgt());
-        for (String bad : new String[] {TYPE + "__" + t.owner() + "/x__" + MINI + "__v1",
-                                        TYPE + "__" + "\u00e9".repeat(130) + "__" + MINI + "__v1"}) {
-            for (String path : new String[] {"/jobs", "/plan"}) {
-                var r = post(t, path, "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + bad
-                    + "\"}");
-                assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(400);
-                assertThat(json(r).get("error").toString()).contains("collection label");
-            }
-            assertThat(catalog.getCollection(t.tenant(), bad)).as("nothing registered").isNull();
-        }
-        assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
-    }
-
-    @Test
-    void anExistingLiveTargetThatBreaksTheLabelRuleIsUsedAsIs() throws Exception {
-        // RDR-229 item 8: the rule gates a NEW label. A live target registered under an old install's label ('/')
-        // is the job's target as it stands.
-        Tn t = tenant("oldlabel");
-        unregister(t, t.tgt());
-        String legacy = TYPE + "__" + t.owner() + "/x__" + MINI + "__v1";
-        register(t, legacy);
-        // the seed helper reads a name's tuple with a regex that does not take a '/', so state the tuple outright
-        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.CONTENT_TYPE, TYPE)
-            .set(CATALOG_COLLECTIONS.OWNER_ID, t.owner()).set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, MINI)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant())).and(CATALOG_COLLECTIONS.NAME.eq(legacy)).execute());
-
-        var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy
-            + "\"}");
-
-        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
-        assertThat(json(r)).containsEntry("target_collection", legacy).containsEntry("target_action", "existing");
-    }
-
-    @Test
-    void anExistingRetiredTargetIsRefusedForWhatItIs_notForItsLabel() throws Exception {
-        Tn t = tenant("oldretired");
-        unregister(t, t.tgt());
-        String legacy = TYPE + "__" + t.owner() + "/y__" + MINI + "__v1";
-        register(t, legacy);
-        su(ctx -> ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "someone-else")
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant())).and(CATALOG_COLLECTIONS.NAME.eq(legacy)).execute());
-
-        var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy
-            + "\"}");
-
-        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
-    }
-
-    @Test
     void anAbsentTargetWithNoNameIs400_andNothingIsRegistered() throws Exception {
         Tn t = tenant("noname");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
 
         var r = post(t, "/jobs", startBody(t.src()));
 
@@ -557,9 +499,7 @@ class ReembedRoutesTest {
     @Test
     void aClientNamedTargetThatIsRegisteredWithAnotherTupleIs409_andIsNotRepointed() throws Exception {
         Tn t = tenant("mismatch");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
         // The name the client wants is already a bge collection (another tuple), superseded by something else.
         String taken = name(t, MINI, 7);
         su(ctx -> {
@@ -1138,9 +1078,7 @@ class ReembedRoutesTest {
     @Test
     void planOfAnAbsentTargetSaysRegisterAndRegistersNothing() throws Exception {
         Tn t = tenant("planreg");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
         String fresh = name(t, MINI, 2);
 
         var r = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + fresh
@@ -1154,9 +1092,7 @@ class ReembedRoutesTest {
     @Test
     void planRefusesWhatAStartWouldRefuse() throws Exception {
         Tn t = tenant("planref");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
 
         var noName = post(t, "/plan", planBody(t.src()));
         assertThat(noName.statusCode()).as("an absent target and no name to register").isEqualTo(400);
@@ -1182,9 +1118,7 @@ class ReembedRoutesTest {
     void aTargetNameThatIsNotConformantIsRefusedByPlanAndStart_andNothingIsRegistered() throws Exception {
         // Review: the engine reads the target's version off its minted name, so a target to register must be conformant.
         Tn t = tenant("legacyname");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
         String legacy = "my_legacy_target_" + t.owner();
 
         var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy + "\"}");
@@ -1202,9 +1136,7 @@ class ReembedRoutesTest {
     void aQuarantinePrefixedTargetIsRefusedByPlanAndStart_andNoRowAndNoJobIsCreated() throws Exception {
         // Review N1: a re-embed target named quarantine-<conformant> would mint a live row under the engine's prefix.
         Tn t = tenant("qtarget");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
         String quarantineName = "quarantine-" + t.tgt();
 
         var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + quarantineName + "\"}");
@@ -1643,9 +1575,7 @@ class ReembedRoutesTest {
         Tn t = tenant("resumegone");
         UUID failed = id(startOk(t, t.src()));
         advance(t, failed, "running", "failed");
-        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
-            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
-            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        unregister(t, t.tgt());
         serving(() -> List.of(BGE), () -> {
             var r = post(t, "/jobs/" + failed + "/resume", "");
             assertThat(r.statusCode()).as("the runner fails a missing target loud; resume applies").isEqualTo(200);

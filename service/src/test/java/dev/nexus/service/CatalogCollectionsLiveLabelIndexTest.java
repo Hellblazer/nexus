@@ -59,9 +59,11 @@ class CatalogCollectionsLiveLabelIndexTest {
     /** The model varies where a row must not also collide on the (tenant_id, name, embedding_model) UNIQUE of vectors-030. */
     private static void insert(DSLContext dsl, String tenant, String label, String supersededBy, String model) {
         dsl.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, "
-            + "model_version, lifecycle_state, superseded_by) VALUES (?, ?, 'knowledge', 'label-notes', "
-            + "?, 'v1', 'live', ?)",
-            tenant, label, model, supersededBy);
+            + "model_version, lifecycle_state, superseded_by, superseded_by_id) VALUES (?, ?, 'knowledge', "
+            + "'label-notes', ?, 'v1', 'live', ?, CASE WHEN ? = '' THEN NULL ELSE 1 END)",
+            tenant, label, model, supersededBy, supersededBy);
+        // superseded_by_id: RDR-229 P3.1's CHECK (superseded_by = '') = (superseded_by_id IS NULL); any id stands for
+        // the successor here, since this test reads only the label index.
     }
 
     private static String sqlState(Throwable t) {
