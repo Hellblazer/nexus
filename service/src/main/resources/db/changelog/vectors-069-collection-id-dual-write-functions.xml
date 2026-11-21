@@ -7650,7 +7650,7 @@ END;
 $fn$;
 ]]></sql>
         <rollback>
-            <!-- Restores the body of catalog-044-collection-owner-from-documents.xml catalog-044-2 verbatim. -->
+            <!-- Restores the body of catalog-051-curator-owner-not-replaceable.xml catalog-051-2 verbatim (the definition develop carries before this changeset). -->
             <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
     RETURNS TRIGGER
