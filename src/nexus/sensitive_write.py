@@ -157,6 +157,13 @@ def bge_sibling(collection_name: str) -> str | None:
         _log.warning("sensitive_bge_sibling_lookup_failed", collection=collection_name, exc_info=True)
         return None
     if existing is not None and getattr(existing, "label", ""):
+        # A registered sibling with no chunk yet is not in the listing, so the write path's later
+        # is_external_embedder(label) checks would read it as unknown (external) and refuse: note its row.
+        from nexus import collection_mint  # noqa: PLC0415 — deferred: collection_mint imports corpus
+
+        collection_mint.note_registered(existing.label, {
+            "content_type": existing.content_type, "owner_id": existing.owner_id,
+            "embedding_model": existing.embedding_model, "lifecycle_state": existing.lifecycle_state or "live"})
         return existing.label
     return CollectionName(content_type, owner_id, BGE_TOKEN, 1).render()
 
