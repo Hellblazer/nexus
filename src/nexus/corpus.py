@@ -27,8 +27,8 @@ _CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
 
 #: RDR-229 item 7: a label holding ``/`` is refused (Sam's ruling, T2 ``nexus/sam-ruling-rdr229-label-slash-2026-11-21``).
 #: ``NoteUri.collectionOf`` ends a collection at the first ``/``, so such a label would mis-parse
-#: ``nx-note://<label>/...``, and file paths are built from a label (``checkpoint.checkpoint_path``,
-#: ``orphan_backfill.dump_csvs``). One named clause so a later ruling is one line here and one in the engine
+#: ``nx-note://<label>/...``, and some file paths are built from a label (``nexus.label_filename`` makes those safe
+#: for every character but this one). One named clause so a later ruling is one line here and one in the engine
 #: (``CollectionLabel.REFUSE_SLASH``), plus ``test_rdr229_label_rule.py``'s one slash test.
 LABEL_REFUSES_SLASH: bool = True
 
@@ -47,6 +47,55 @@ _LABEL_MAX_BYTES = 255
 _LABEL_REFUSED_CATEGORIES = frozenset({"Cc", "Zl", "Zp"})
 
 
+def _label_not_empty(name: str) -> None:
+    if not name:
+        raise ValueError("a collection label must not be empty")
+
+
+def _label_is_utf8(name: str) -> None:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"collection label {name!r} is not valid UTF-8: {exc.reason}") from exc
+
+
+def _label_within_byte_limit(name: str) -> None:
+    n = len(name.encode("utf-8"))
+    if n > _LABEL_MAX_BYTES:
+        raise ValueError(f"collection label {name[:40]!r}... is {n} bytes in UTF-8; the limit is {_LABEL_MAX_BYTES}")
+
+
+def _label_has_no_control_character(name: str) -> None:
+    for ch in name:
+        if unicodedata.category(ch) in _LABEL_REFUSED_CATEGORIES:
+            raise ValueError(f"collection label {name!r} holds a control character (U+{ord(ch):04X})")
+
+
+def _label_has_no_slash(name: str) -> None:
+    if LABEL_REFUSES_SLASH and "/" in name:
+        raise ValueError(f"collection label {name!r} holds '/', which a label may not hold")
+
+
+def _label_is_not_minted_form(name: str) -> None:
+    if _MINTED_LABEL_RE.fullmatch(name):
+        raise ValueError(
+            f"collection label {name!r} is of the minted form (c followed by digits), which the engine "
+            "reserves for the labels it mints"
+        )
+
+
+#: The label rule's clauses, in the order they are checked. Adding a clause is adding one function above and one
+#: entry here (the engine's twin is ``CollectionLabel.SHAPE_CLAUSES`` and ``requireNotMinted``).
+_LABEL_CLAUSES: tuple[Callable[[str], None], ...] = (
+    _label_not_empty,
+    _label_is_utf8,
+    _label_within_byte_limit,
+    _label_has_no_control_character,
+    _label_has_no_slash,
+    _label_is_not_minted_form,
+)
+
+
 def validate_collection_name(name: str) -> None:
     """Raise ValueError if *name* is not an acceptable collection LABEL (RDR-229 item 7, P3.6).
 
@@ -63,28 +112,14 @@ def validate_collection_name(name: str) -> None:
     :data:`nexus.catalog.rows.legacy_names._OWNER_SEGMENT_RE`, still gates the creation of a NEW collection in
     ``T3Database.get_or_create_collection``, and is not re-derived here.
 
-    The engine enforces the same rule on a registration and a rename target (``CollectionLabel.validateUserLabel``).
+    Callers: the rename target in :func:`nexus.collection_rename.rename_collection_data_plane` (the production
+    path, behind ``nx collection rename`` and ``nx catalog rename-collection``) and ``T3Database``. It is not called
+    on a registration, because the client cannot tell a new label from an existing one there and an existing row
+    keeps its label whatever it is; the engine enforces the same rule on a NEW registration, a rename target, a
+    re-embed target and a new imported row (``CollectionLabel``).
     """
-    if not name:
-        raise ValueError("a collection label must not be empty")
-    try:
-        encoded = name.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"collection label {name!r} is not valid UTF-8: {exc.reason}") from exc
-    if len(encoded) > _LABEL_MAX_BYTES:
-        raise ValueError(
-            f"collection label {name[:40]!r}... is {len(encoded)} bytes in UTF-8; the limit is {_LABEL_MAX_BYTES}"
-        )
-    for ch in name:
-        if unicodedata.category(ch) in _LABEL_REFUSED_CATEGORIES:
-            raise ValueError(f"collection label {name!r} holds a control character (U+{ord(ch):04X})")
-    if LABEL_REFUSES_SLASH and "/" in name:
-        raise ValueError(f"collection label {name!r} holds '/', which a label may not hold")
-    if _MINTED_LABEL_RE.fullmatch(name):
-        raise ValueError(
-            f"collection label {name!r} is of the minted form (c followed by digits), which the engine "
-            "reserves for the labels it mints"
-        )
+    for clause in _LABEL_CLAUSES:
+        clause(name)
 
 
 CONTENT_TYPES: tuple[str, ...] = _CONTENT_TYPES
