@@ -355,7 +355,7 @@ public final class SchemaMigrator {
      */
     public record MigrationOutcome(
             int pendingAtStart, long newChangesets, long reexecutedChangesets,
-            long markRanChangesets) {}
+            long markRanChangesets, long skippedRetryingChangesets) {}
 
     /**
      * Distinct-identity counts of this walk's {@code databasechangelog} rows,
@@ -687,21 +687,26 @@ public final class SchemaMigrator {
                 // row for it -- not the retired dateexecuted-clock-window theory
                 // (fixed) nor row-count duplication (already de-duplicated above
                 // by identity).
-                long accountedFor = newChangesets + reexecuted + markRan;
+                // RDR-229 P3.8 (nexus-p2m1x.28): a changeset that skips itself with onFail="CONTINUE" leaves no row
+                // and stays unrun until its guard passes (RDR-246 "Finishing a move": collections-001-2 waits for a
+                // data move, so it is unrun on every fresh walk until the move completes). It is accounted for, not
+                // an anomaly: counted from the unrun list after the walk.
+                long skippedRetrying = liquibase.listUnrunChangeSets(new Contexts(), new LabelExpression()).stream()
+                    .filter(cs -> !cs.isAlwaysRun() && RetryingChangesets.isSelfRetrying(cs)).count();
+                long accountedFor = newChangesets + reexecuted + markRan + skippedRetrying;
                 if (accountedFor != pending) {
                     log.warn("event=schema_migration_count_anomaly accounted_for={} "
                             + "pending_at_start={} new_changesets={} "
-                            + "reexecuted_changesets={} mark_ran_changesets={} — "
-                            + "new_changesets + reexecuted_changesets + "
-                            + "mark_ran_changesets must equal pending_at_start; this "
+                            + "reexecuted_changesets={} mark_ran_changesets={} "
+                            + "skipped_retrying_changesets={} — new_changesets + "
+                            + "reexecuted_changesets + mark_ran_changesets + "
+                            + "skipped_retrying_changesets must equal pending_at_start; this "
                             + "mismatch means a second writer advanced "
                             + "public.databasechangelog's orderexecuted sequence "
                             + "during this walk, or a changeset failed or was "
                             + "skipped without leaving a databasechangelog row (a precondition "
-                            + "CONTINUE is such a skip: aspects-005-2 on a retired "
-                            + "aspect_extraction_queue table that still holds rows lands here at "
-                            + "every boot; GET /v1/status aspect_queue_rows_retained says whether)",
-                            accountedFor, pending, newChangesets, reexecuted, markRan);
+                            + "CONTINUE skip is counted in skipped_retrying_changesets, not here)",
+                            accountedFor, pending, newChangesets, reexecuted, markRan, skippedRetrying);
                 }
                 // The old line logged the PRE-update pending count as
                 // applied_changesets — a quantity the walk never computed
@@ -711,9 +716,9 @@ public final class SchemaMigrator {
                 // read of the real fields, never silently match new semantics.
                 log.info("event=schema_migration_complete new_changesets={} "
                         + "reexecuted_changesets={} pending_at_start={} "
-                        + "mark_ran_changesets={}",
-                        newChangesets, reexecuted, pending, markRan);
-                return new MigrationOutcome(pending, newChangesets, reexecuted, markRan);
+                        + "mark_ran_changesets={} skipped_retrying_changesets={}",
+                        newChangesets, reexecuted, pending, markRan, skippedRetrying);
+                return new MigrationOutcome(pending, newChangesets, reexecuted, markRan, skippedRetrying);
             }
 
         } catch (SQLException e) {
@@ -1083,7 +1088,8 @@ public final class SchemaMigrator {
                 + "reexecuted_changesets={} pending_at_start={} "
                 + "mark_ran_changesets={} counts_unavailable=true",
                 COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, pending, COUNTS_UNAVAILABLE);
-        return new MigrationOutcome(pending, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE);
+        return new MigrationOutcome(pending, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE, COUNTS_UNAVAILABLE,
+            COUNTS_UNAVAILABLE);
     }
 
     // ── nexus-x0s52 / nexus-jl08t: truthful walk counts ──────────────────────
