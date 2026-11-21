@@ -162,10 +162,6 @@ public final class TenantExport {
      *
      * @param reassignedId      the primary-key column a restore gives new values from the table's own
      *                          sequence (a global serial or identity key), or {@code null}
-     * @param remapped          non-primary-key identity columns a restore gives new values, because the table owns
-     *                          them in the target and a source value means nothing there ({@code
-     *                          catalog_collections.collection_id}, RDR-229 P3.1); empty for every other table.
-     *                          P3.1 only declares them: P3.11's restore reads them, and nothing reads them before
      * @param references        every column that holds another table's key, foreign key or not
      * @param triggers          every non-internal trigger on the table: name to its firing, the timing,
      *                          events and level as {@code pg_get_triggerdef} prints them ({@code BEFORE
@@ -183,14 +179,12 @@ public final class TenantExport {
      * @param seededKeys        rows the engine writes for a tenant before any user write (see {@link SeededKey})
      */
     public record ExportTable(String schema, String table, ExportClass exportClass, String reason,
-                              List<Column> primaryKey, String reassignedId, List<String> remapped,
-                              List<Reference> references,
+                              List<Column> primaryKey, String reassignedId, List<Reference> references,
                               Map<String, String> triggers, Set<String> loadsAfter,
                               Set<String> triggerMaintained, Set<String> notReferences,
                               List<SeededKey> seededKeys) {
         public ExportTable {
             primaryKey = List.copyOf(primaryKey);
-            remapped = List.copyOf(remapped);
             references = List.copyOf(references);
             triggers = Map.copyOf(triggers);
             loadsAfter = Set.copyOf(loadsAfter);
@@ -203,23 +197,13 @@ public final class TenantExport {
             }
         }
 
-        /** An entry with no remapped column. */
-        public ExportTable(String schema, String table, ExportClass exportClass, String reason,
-                           List<Column> primaryKey, String reassignedId, List<Reference> references,
-                           Map<String, String> triggers, Set<String> loadsAfter,
-                           Set<String> triggerMaintained, Set<String> notReferences,
-                           List<SeededKey> seededKeys) {
-            this(schema, table, exportClass, reason, primaryKey, reassignedId, List.of(), references, triggers,
-                loadsAfter, triggerMaintained, notReferences, seededKeys);
-        }
-
-        /** An entry with no remapped column and no seeded rows. */
+        /** An entry with no seeded rows. */
         public ExportTable(String schema, String table, ExportClass exportClass, String reason,
                            List<Column> primaryKey, String reassignedId, List<Reference> references,
                            Map<String, String> triggers, Set<String> loadsAfter,
                            Set<String> triggerMaintained, Set<String> notReferences) {
-            this(schema, table, exportClass, reason, primaryKey, reassignedId, List.of(), references, triggers,
-                loadsAfter, triggerMaintained, notReferences, List.of());
+            this(schema, table, exportClass, reason, primaryKey, reassignedId, references, triggers, loadsAfter,
+                triggerMaintained, notReferences, List.of());
         }
 
         public String name() {
@@ -247,7 +231,6 @@ public final class TenantExport {
             Set<String> named = new LinkedHashSet<>();
             primaryKey.forEach(c -> named.add(c.name()));
             if (reassignedId != null) named.add(reassignedId);
-            named.addAll(remapped);
             references.forEach(r -> named.addAll(r.columns()));
             named.addAll(triggerMaintained);
             named.addAll(notReferences);
@@ -268,7 +251,6 @@ public final class TenantExport {
         private final String reason;
         private final List<Column> pk = new ArrayList<>();
         private String reassigned;
-        private final List<String> remapped = new ArrayList<>();
         private final List<Reference> refs = new ArrayList<>();
         private final Map<String, String> triggers = new java.util.LinkedHashMap<>();
         private final Set<String> loadsAfter = new LinkedHashSet<>();
@@ -296,15 +278,15 @@ public final class TenantExport {
             return this;
         }
 
-        /** A non-key identity column a restore gives new values (see {@link ExportTable#remapped}); a no-op until P3.11. */
-        Entry remapped(String column) {
-            remapped.add(column);
-            return this;
-        }
-
-        /** An id twin: a nullable bigint beside a name column that names a registry row (RDR-229 P3.1). */
-        Entry registryId(String column) {
-            return ref(Reference.soft(column, "catalog_collections", "collection_id"));
+        /**
+         * An id twin (RDR-229 P3.1): a nullable bigint beside a collection name column, or the registry's own
+         * {@code collection_id}. The import never reads it from the file: it computes it from the loaded registry (by name, or
+         * from the registry id's own sequence). So it is declared maintained (a column the load rewrites, which the load's
+         * verification skips) and as an id-shaped column that holds no other row's key.
+         */
+        Entry importComputed(String column) {
+            maintained(column);
+            return notRefs(column);
         }
 
         Entry ref(Reference r) {
@@ -342,8 +324,8 @@ public final class TenantExport {
         }
 
         ExportTable build() {
-            return new ExportTable(schema, table, exportClass, reason, pk, reassigned, remapped, refs,
-                triggers, loadsAfter, maintained, notRefs, seeded);
+            return new ExportTable(schema, table, exportClass, reason, pk, reassigned, refs, triggers,
+                loadsAfter, maintained, notRefs, seeded);
         }
     }
 
@@ -382,9 +364,6 @@ public final class TenantExport {
             .notRefs("next_seq")
             .build(),
         data("catalog_collections").pk("tenant_id text", "name text")
-            // RDR-229 P3.1: the registry's own identity. Not the primary key (that is (tenant_id, name)), so it is
-            // remapped, not reassignedId; P3.11's restore gives it new values and re-points the twins through it.
-            .remapped("collection_id")
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
                 List.of("embedding_model"), true, false, null))
             // catalog-044: owner_id is recomputed from the collection's documents on insert, and again
@@ -394,7 +373,9 @@ public final class TenantExport {
                 "BEFORE INSERT OR UPDATE OF owner_id, content_type FOR EACH ROW")
             .loadsAfter("catalog_owners")
             .maintained("owner_id")
-            .registryId("superseded_by_id")
+            
+            .importComputed("collection_id")
+            .importComputed("superseded_by_id")
             .build(),
         data("embedding_profile").pk("tenant_id text", "content_type text")
             .ref(new Reference(List.of("embedding_model"), "nexus", "embedding_models",
@@ -412,7 +393,8 @@ public final class TenantExport {
                 "AFTER INSERT OR UPDATE OF physical_collection, deleted_at FOR EACH ROW")
             .loadsAfter("catalog_owners", "catalog_collections")
             .notRefs("metadata")
-            .registryId("physical_collection_id")
+            
+            .importComputed("physical_collection_id")
             .build(),
         data("catalog_meta").pk("tenant_id text", "key text")
             // AuthFilter writes it on a tenant's first authenticated request (CatalogRepository#ensureGhostSweepRanOnce).
@@ -423,7 +405,8 @@ public final class TenantExport {
         data("chunks").pk("tenant_id text", "collection text", "chash bytea", "embedding_model text")
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
             .notRefs("metadata")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         data("catalog_document_chunks").pk("tenant_id text", "doc_id text", "position integer")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
@@ -443,11 +426,12 @@ public final class TenantExport {
             .trigger("trg_catalog_chunks_clear_orphan_on_insert",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
-            .registryId("collection_id")
+            .importComputed("collection_id")
             .build(),
         data("catalog_links").pk("tenant_id text", "id bigint").reassigned("id")
             .fk("tenant_id,from_tumbler", "catalog_documents", "tenant_id,tumbler")
@@ -460,12 +444,14 @@ public final class TenantExport {
             // BEFORE UPDATE only: a load inserts, so updated_at keeps the exported value.
             .trigger("trg_document_aspects_updated_at", "BEFORE UPDATE FOR EACH ROW")
             .notRefs("extras", "salient_sentences")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         data("document_highlights").pk("id bigint").reassigned("id")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         // ── T2 ──
         data("memory").pk("id bigint").reassigned("id")
@@ -490,7 +476,8 @@ public final class TenantExport {
             // doc_count is kept by topic_assignments' triggers, and that update restamps updated_at.
             .trigger("trg_topics_updated_at", "BEFORE UPDATE FOR EACH ROW")
             .maintained("updated_at", "doc_count")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         data("topic_assignments").pk("tenant_id text", "doc_id bytea", "topic_id bigint")
             .fk("tenant_id,topic_id", "topics", "tenant_id,id")
@@ -500,7 +487,8 @@ public final class TenantExport {
                 "AFTER DELETE REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT")
             .trigger("trg_topic_assignments_doc_count_ins",
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
-            .registryId("source_collection_id")
+            
+            .importComputed("source_collection_id")
             .build(),
         data("topic_links").pk("tenant_id text", "from_topic_id bigint", "to_topic_id bigint")
             .fk("tenant_id,from_topic_id", "topics", "tenant_id,id")
@@ -509,20 +497,23 @@ public final class TenantExport {
             .build(),
         data("taxonomy_meta").pk("tenant_id text", "collection text")
             .fk("tenant_id,collection", "catalog_collections", "tenant_id,name")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         derived("taxonomy_centroids")
             .pk("tenant_id text", "collection text", "topic_id bigint", "embedding_model text")
             .ref(Reference.soft("topic_id", "topics", "id", SoftRule.DROP_ROW))
-            .registryId("collection_id")
+            .importComputed("collection_id")
             .build(),
         // ── telemetry and consent ──
         derived("search_telemetry")
             .pk("tenant_id text", "ts timestamp with time zone", "query_hash text", "collection text")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         derived("relevance_log").pk("id bigint").reassigned("id")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         data("claude_assisted_remediation_consents").pk("id bigint").reassigned("id")
             .build(),
@@ -561,7 +552,8 @@ public final class TenantExport {
         // ── excluded ──
         excluded("pdf_pipeline", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint")
             .reassigned("pipeline_id")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("pdf_pages", IN_FLIGHT).pk("tenant_id text", "pipeline_id bigint", "page_index integer")
             .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id")
@@ -570,8 +562,9 @@ public final class TenantExport {
             .fk("tenant_id,pipeline_id", "pdf_pipeline", "tenant_id,pipeline_id")
             .build(),
         excluded("reembed_jobs", IN_FLIGHT).pk("tenant_id text", "job_id uuid")
-            .registryId("source_collection_id")
-            .registryId("target_collection_id")
+            
+            .importComputed("source_collection_id")
+            .importComputed("target_collection_id")
             .build(),
         excluded("reembed_job_moves", IN_FLIGHT).pk("tenant_id text", "job_id uuid", "doc_id text")
             .fk("tenant_id,job_id", "reembed_jobs", "tenant_id,job_id")
@@ -594,7 +587,8 @@ public final class TenantExport {
         excluded("canary_query_ring", OPERATIONAL)
             .pk("tenant_id text", "collection text", "vector_digest bytea")
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("capability_census", OPERATIONAL).pk("tenant_id text", "session_id text")
             .build(),
@@ -605,14 +599,17 @@ public final class TenantExport {
             .build(),
         excluded("chash_remap", OPERATIONAL)
             .pk("tenant_id text", "source_collection text", "old_id text")
-            .registryId("source_collection_id")
-            .registryId("target_collection_id")
+            
+            .importComputed("source_collection_id")
+            .importComputed("target_collection_id")
             .build(),
         excluded("gc_audit", OPERATIONAL).pk("id bigint").reassigned("id")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("hook_failures", OPERATIONAL).pk("id bigint").reassigned("id")
-            .registryId("collection_id")
+            
+            .importComputed("collection_id")
             .build(),
         excluded("index_failures", OPERATIONAL).pk("id bigint").reassigned("id")
             .build(),
@@ -637,16 +634,6 @@ public final class TenantExport {
             }
         }
         return Map.copyOf(m);
-    }
-
-    /**
-     * True when {@code r} refers to a column its parent declares {@code remapped} (the id twins' reference to
-     * {@code catalog_collections.collection_id}, RDR-229 P3.1). A file written before the twin existed lacks the column, which
-     * is not an error: the restore fills it by name.
-     */
-    public static boolean refersToRemappedColumn(Reference r) {
-        return entry(r.parentTable()).filter(p -> p.schema().equals(r.parentSchema()))
-            .map(p -> p.remapped().containsAll(r.parentColumns())).orElse(false);
     }
 
     /** The entry for {@code name}, any class. */
