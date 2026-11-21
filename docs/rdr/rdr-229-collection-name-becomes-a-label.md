@@ -1461,15 +1461,32 @@ its own minted label. Labels in different tenants are independent, as
 names are today.
 
 The label rule replaces ChromaDB's limits in `validate_collection_name`:
-non-empty, valid UTF-8 without control characters, at most 255 bytes, and
-not of the minted form (item 8) unless the engine minted it, so a user
-cannot claim a label that a later mint would produce. The rule may drop the
-conformant shape only because, after P2.9, no site in the widened routing
-census (item 4, P1.1) routes by the label's prefix (item 12). P3.6 waits
-for it. Whether the alphabet excludes `/` is still open (Contradiction
-Check), and no audit yet covers where a label meets a file path. P3.6's
-tests exercise one label with a space, `%`, `:` and a non-ASCII character
-on Windows (Cross-Cutting, Windows).
+non-empty, valid UTF-8 without control characters, at most 255 bytes, no
+`/`, and not of the minted form (item 8) unless the engine minted it, so a
+user cannot claim a label that a later mint would produce. Sam ruled out
+`/` on 2026-11-21 (T2 `nexus/sam-ruling-rdr229-label-slash-2026-11-21`),
+because a note URI is `nx-note://<label>/<title>` and
+`NoteUri.collectionOf` ends the label at the first `/`. The rule can be
+relaxed later, behind a URI-encoding design. "Control characters" means
+Unicode category Cc, plus the line and paragraph separators U+2028 and
+U+2029, which break lines in logs and terminals. Format characters (Cf,
+such as ZWJ) are allowed, because scripts and emoji sequences need them.
+Labels are compared as exact strings, with no Unicode normalization, so
+the NFC and NFD spellings of one word are two labels. The engine enforces
+the rule (`CollectionLabel`) on a new collection's registration, on a
+rename target that does not exist yet, on a re-embed target that does not
+exist yet, and on a new row in a catalog import. An existing row keeps its
+label even if the rule refuses it, as item 8 says existing collections keep
+their names. The client checks it at the rename target and leaves
+registration to the engine. The rule may drop the conformant shape only
+because, after P2.9, no site in the widened routing census (item 4, P1.1)
+routes by the label's prefix (item 12). P3.6 waits for it. P3.6's review
+found the sites where a label meets a file path: the export default file
+name, the orphan-backfill output directory and the legacy checkpoint
+file. It now encodes each label as a safe path component
+(`safe_label_filename`), so `.`, `..`, `\`, `:` and Windows device names
+need no rule clause. P3.6's tests exercise one label with a space, `%`,
+`:` and a non-ASCII character on Windows (Cross-Cutting, Windows).
 
 In the registry, a rename becomes `UPDATE catalog_collections SET name =
 <new>` on one row; the note-URI and aspect-task rewrites below still touch
@@ -1695,7 +1712,11 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   Phase 2 integration tree the client census is 217 (7817cd3251, then
   a92f88c6a0: P2.2 -11, P2.4 -3, owner-is-source +2 migration-source, which
   was +3 until `owner_stem` moved into `legacy_names`; migration-source 22,
-  `split` 2).
+  `split` 2). P3.1 (+4 mint) and P3.8 (-2) take it to 219, and P3.6 to
+  217: `validate_collection_name` no longer
+  reads any part of a name, so it left the derived helper set, and its two
+  `T3Database` callers left the ledger (mint 137 -> 135, primitive_call
+  185 -> 183).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -2832,8 +2853,8 @@ To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
 - S-8, a tombstone whose successor was deleted, which the stamp cannot
   give an id.
 
-Still open, for a design call: whether the label alphabet excludes `/`,
-which `NoteUri.collectionOf` treats as the end of the collection; the safe engine downgrade
+Still open, for a design call (Sam settled the `/` question on
+2026-11-21: the rule refuses it, item 7): the safe engine downgrade
 point after P3.3, which matters most from P3.7, when the name columns go
 dead (Approach, item 7; S-6 above); a repair for residue whose segment no
 longer names its collection and for residue `note-uri-001` rewrote to
@@ -2896,8 +2917,7 @@ S-2 to S-8, go to beads at accept (Contradiction Check).
 Still without one: P3.5b's plan measurement of each both-shapes reader
 has no bead of its own beyond P3.5b's acceptance; the history tables' nullable `collection_id` (item 6)
 names no consumer; P1.2 measures the two production tenants, not local
-stores, apart from its residue count, which runs on every install; no audit covers where a
-label meets a file path beyond P3.6's Windows test; and no repair covers
+stores, apart from its residue count, which runs on every install; and no repair covers
 the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
 ### Cross-Cutting Concerns
@@ -2951,8 +2971,8 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   Windows x64. On each, a relocated bundle ran `CREATE EXTENSION` and a
   background worker" (RDR-246 lines 225-227). Inferred, not read: so a
   bundled Windows install runs the moves; RDR-246 verified the extension
-  and a background worker there, not a data move. Where a label meets a file path is not audited yet, and
-  the label alphabet is open (Contradiction Check). P3.6's tests exercise on Windows one
+  and a background worker there, not a data move. The sites where a label meets a file path encode it as a
+  safe path component, and the rule refuses `/` (item 7). P3.6's tests exercise on Windows one
   label holding a space, `%`, `:` and a non-ASCII character.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: Phases 1 and 2 change no schema key and no name.
@@ -3088,3 +3108,4 @@ large, and moved under a ratchet.
 - 2026-11-21: the 0.1.200 contents (P2.R step, Versioning), item 5's stem rule and `catalog-051-2` tuple guard with its lock key, the Prerequisites' first registered moves and their deploy-go gate (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`), and the MVV's numeric Phase 2 pins match the integration tree eb1e4cd42b (grant 3; P2.R critique T2 `nexus/critique-eb1e4cd42b-nexus-p2m1x.16-2026-11-21-r1`, nexus-p2m1x.16).
 - 2026-11-21: item 5's tuple guard and re-own move match a92f88c6a0: one held predicate (unsuperseded and not in quarantine, P3.8's index predicate), the guard on the stored version and the move on the effective one, the move taking the tuple lock for its chunk's tuples in key order, and which paths re-run a 40P01; item 12's client census is 217 with `owner_stem` in `legacy_names` (grant 3; P2.R critique S2, S3, S5, nexus-p2m1x.16).
 - 2026-11-21: P3.8 amendment (grant 3, matching reviewed code, nexus-p2m1x.28): item 8 states the live-tuple UNIQUE and the minted-label collision rule; the two open questions on tuple uniqueness and minted-form collisions (Contradiction Check, Scope Verification) are closed by Sam's ruling T2 `nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`.
+- 2026-11-21: item 7's label rule matches P3.6 as reviewed: no `/` (Sam's ruling), Cc plus U+2028 and U+2029 refused, Cf allowed, no normalization, the engine as the authority with existing rows keeping their labels, and the label-to-file-path sites encoded rather than audited-open; the client census goes 219 -> 217; the `/` question leaves the Contradiction Check (grant 3; P3.6 review r1 and r2, nexus-p2m1x.26).
