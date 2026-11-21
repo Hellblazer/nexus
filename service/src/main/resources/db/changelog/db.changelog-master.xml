@@ -2277,23 +2277,6 @@
     <include file="db/changelog/identity-005-work-kind-agent.xml"/>
 
     <!--
-        Bead nexus-f3yqd.2.23 (RDR-246 Activation Step 2, the first registered data move; RDR-229 Phase 1 decision D2, Sam
-        2026-11-20): registers repair-catalog-collection-model-version, which sets catalog_collections.model_version from the
-        conformant name where it is ''. One INSERT into nexus.data_moves and nothing else; the engine's worker runs the repair
-        after the engine serves, per tenant. DATA EFFECT: one registry row, no existing row changes at boot. After
-        identity-004, before the grants-nexus-svc.xml runAlways block.
-    -->
-    <include file="db/changelog/vectors-064-register-model-version-repair-move.xml"/>
-
-    <!--
-        Bead nexus-f3yqd.2.23: the owner-read SELECT policy catalog_collections_owner_read for the migrating role, so the move
-        above can list the tenants that hold rows and verify them (RDR-246, Row-level security). Its own include after the
-        registering one: its guard skips the whole changeset. DDL only. After vectors-064, before the grants-nexus-svc.xml
-        runAlways block.
-    -->
-    <include file="db/changelog/vectors-065-catalog-collections-owner-read.xml"/>
-
-    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

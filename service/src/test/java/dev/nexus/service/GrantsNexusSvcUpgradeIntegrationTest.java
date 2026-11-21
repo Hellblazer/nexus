@@ -242,14 +242,6 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         String master = read("db/changelog/db.changelog-master.xml");
         assertThat(master).as("the master carries the registry include").contains(DATAMOVES_INCLUDE);
         master = master.replace(DATAMOVES_INCLUDE, "");
-        // a changeset that registers a move writes into the registry, so the includes that register one (and the policy that
-        // follows) are as unborn as the registry itself in the old state; the new boot applies them
-        for (String registering : List.of("vectors-064-register-model-version-repair-move.xml",
-                "vectors-065-catalog-collections-owner-read.xml")) {
-            String include = "<include file=\"db/changelog/" + registering + "\"/>";
-            assertThat(master).as("the master includes " + registering).contains(include);
-            master = master.replace(include, "");
-        }
         String grantsInclude = "<include file=\"" + GRANTS_FILE + "\"/>";
         assertThat(master).as("the master includes the service grants file").contains(grantsInclude);
         master = master.replace(grantsInclude, "<include file=\"" + OLD_GRANTS_FILE + "\"/>");
