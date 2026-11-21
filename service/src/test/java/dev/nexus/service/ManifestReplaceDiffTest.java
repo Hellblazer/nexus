@@ -332,16 +332,14 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
         List<Map<String, Object>> rows = seedDoc(f, 3);
         Long id = snapshotId(f.docId(), 1);
         assertThat(id).as("precondition: the seed stamped the id").isNotNull();
-        String check = "catalog_document_chunks_collection_id_check";
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ddl(ctx, "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT " + check);
+            P31CheckReplay.lift(ctx, P31CheckReplay.MANIFEST);
             ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, (Long) null)
                 .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT)).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(f.docId()))
                 .and(CATALOG_DOCUMENT_CHUNKS.POSITION.eq(1)).execute();
-            ddl(ctx, "ALTER TABLE nexus.catalog_document_chunks ADD CONSTRAINT " + check
-                + " CHECK ((NULLIF(collection, '') IS NULL) = (collection_id IS NULL)) NOT VALID");
+            P31CheckReplay.restore(ctx, P31CheckReplay.MANIFEST);
         }
         assertThat(snapshotId(f.docId(), 1)).as("precondition: row 1 unstamped").isNull();
         var before = snapshot(f.docId());
@@ -352,14 +350,6 @@ class ManifestReplaceDiffTest extends AtomicWriteTestBase {
         assertThat(after.get(1).get("collection_id")).as("the replace stamped the unstamped row").isEqualTo(id);
         assertThat(after.get(1).get("tuple")).as("by rewriting it").isNotEqualTo(before.get(1).get("tuple"));
         for (int p : List.of(0, 2)) assertThat(after.get(p)).as("stamped row %d untouched", p).isEqualTo(before.get(p));
-    }
-
-    private static void ddl(DSLContext ctx, String statement) {
-        ctx.connection(c -> {
-            try (var st = c.createStatement()) {
-                st.execute(statement);
-            }
-        });
     }
 
     private Long snapshotId(String docId, int position) throws Exception {
