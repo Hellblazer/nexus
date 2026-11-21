@@ -522,3 +522,38 @@ def test_a_pdf_registered_in_voyage_refuses_the_same_way(t2_service_env, tmp_pat
         main, ["index", "pdf", str(pdf), "--corpus", "rfvyy-ext", "--extractor", "pymupdf", "--sensitive"])
     assert out.exit_code != 0 and tumbler in out.output, out.output
     assert _entry(tumbler).sensitive is False
+
+
+def test_a_minted_label_whose_row_names_no_embedding_model_reads_as_external(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RDR-229 P3.8: a row that exists but does not say its embedder is "cannot tell", which fails closed."""
+    import nexus.sensitive_write as sw
+
+    monkeypatch.setattr(sw, "_registry_row", lambda name: {"name": name, "content_type": "knowledge"})
+    assert sw.is_external_embedder("c19") is True
+
+
+@pytest.mark.parametrize(("row", "expected"), [
+    ({"embedding_model": "bge-base-en-v15-768"}, None),
+    ({"embedding_model": "voyage-context-3"}, "voyage-context-3"),
+])
+def test_the_sensitivity_doctor_reads_a_minted_labels_embedder_from_its_row(
+    monkeypatch: pytest.MonkeyPatch, row: dict, expected: str | None,
+) -> None:
+    """RDR-229 P3.8: the doctor's WARN row uses the write verbs' rule: a label the engine minted (``c19``) carries no
+    model token, so its row says whether it embeds locally. A minted bge subject is not reported as Voyage."""
+    import nexus.sensitive_write as sw
+    from nexus.catalog import sensitivity_doctor
+
+    monkeypatch.setattr(sw, "_registry_row", lambda name: {"name": name, **row})
+    assert sensitivity_doctor._external_embedder("c19") == expected
+
+
+def test_the_sensitivity_doctor_reports_a_minted_label_with_no_readable_row_as_external(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No row, or an unreadable one: the doctor keeps its conservative answer (an external embedder), never local."""
+    import nexus.sensitive_write as sw
+    from nexus.catalog import sensitivity_doctor
+
+    monkeypatch.setattr(sw, "_registry_row", lambda name: None)
+    assert sensitivity_doctor._external_embedder("c19") is not None
