@@ -113,6 +113,9 @@ def reregister_after_unregistered(
         # the engine refused it. A sibling cache hooks here: P3.8's collection_mint forget(name) goes beside
         # this line (colophon adds it); no other site discards on a refusal.
         corpus._registration_cache_discard(scope, name)
+    from nexus import collection_mint  # noqa: PLC0415 — circular-dep avoidance (collection_mint imports corpus)
+
+    collection_mint.forget(name)  # RDR-229 P3.8: the minted-row cache must not outlive the engine's refusal
     corpus.ensure_collection_registered(name, registrar=registrar)
 
 
