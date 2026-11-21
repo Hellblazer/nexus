@@ -745,7 +745,8 @@ public final class NexusService {
                         .embedPosture(() -> this.embedPosture)
                         .bootWork(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.snapshot(); })
                         .rdr229Completion(() -> { var w = this.bootWork; return w == null ? null : w.rdr229Completion(); })
-                        .aspectQueue(() -> this.aspectQueueDrainResult).testTenantResetRoute(tenantResetRoute));
+                        .aspectQueue(() -> this.aspectQueueDrainResult).collectionTupleIndex(dev.nexus.service.db.CollectionTupleIndexProbe.statusSupplier(dataSource))
+                        .testTenantResetRoute(tenantResetRoute));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
