@@ -439,7 +439,8 @@ RDR-253's own JDR-002 entry.
 **The push record.** On `PUSH_OK`, on every path of `git-push-develop.sh`
 including `--skip-lock`, the script posts to `board/ci/nexus-develop--push`
 on the existing `board/ci/<topic>` template (three days' retention, the
-lifetime of the CI posts it is joined with). Its 5000-row cap counts each
+lifetime of the CI posts it is joined with; only a topic ending `--owner`
+keeps 35 days). Its 5000-row cap counts each
 subspace on its own (`nexus_rdr/252-research-8` F1), so the CI posts on
 `board/ci/nexus-develop` never share a cap with `--push` or `--owner`. The
 script writes with the
@@ -664,7 +665,16 @@ carries `reason=handoff`.
 `board/ci/nexus-develop--owner` with `nx ci ack <sha7>`, the MCP `tuple_out`
 tool or a shell `nx tuple out`; the client sets `from` to the caller's own
 identity id (a typed value is replaced; a caller with no identity is refused).
-The engine never reads `from`: an ack counts when the session index maps its
+The engine also stamps `from` on every `kind=ack` write to a `--owner` topic,
+whatever the client typed, with the identity its sender-session stamp maps to,
+a delegated identity as its parent (`AckIdentity`, `Identities.countedIdentity`:
+"its parent when it is a delegated identity with one, else itself"); it logs
+`board_ack_from_overwritten` when it replaces a non-blank value, refuses
+nothing, and leaves `from` as typed when the stamp maps to no identity
+(`BoardCiGuard.stampAckFrom`: "With no identity (the stamp maps to none) the
+dims pass unchanged, so a `from` that survives is one no counted ack carries").
+The stamp is a label for readers and `nx group ack-times`; the engine never
+reads `from` to decide: an ack counts when the session index maps its
 sender-session stamp to the current owner identity and its `sha` is a red tip
 since the last green, so an ack carries across a refreshed row. An ack from
 an identity the red was handed away from does not count, and neither does one
@@ -959,6 +969,18 @@ then `nx config set auras.ci_develop_red=on` and a restart round.
 - `nx group list` shows the leader and members by alias, each with its RDR-253 state (`unheld`, `live`, `lapsed`, `ended`, or `unleased`).
 - Push records and acknowledgement times give after-the-fact grading: time
   from red to acknowledgement and to fix, as WoW tools grade cooldown use.
+- The calibration follow-up is due 2026-12-20 (the close critique r2's S2,
+  `nexus/critique-rdr252-close-2026-11-20-r2`: "the follow-up (calibration by
+  2026-12-20) must name this fix as its precondition"; Sam's close-out ruling,
+  `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`, lets a measurement trail a
+  close as a dated follow-up). Its precondition is the ack fixes: the client's
+  `nx group ack-times` counting an ack by its sender-session stamp and reporting
+  `ignored_acks` (9f14aa59a, f14d51a0d, on develop) and the engine's stamp of an
+  ack's `from` with `--owner` rows kept 35 days (b308e6dc9, b545859c0, on
+  develop; no engine tag contained b308e6dc9 when this was written, so the read
+  waits for a deployed engine that does, inferred, not read). A read before
+  then miscounts acks the stamp does not map and reports an ack tail that does
+  not exist.
 
 ### New Dependencies
 
@@ -1132,8 +1154,12 @@ RDR-253's fence on `member/*`, against JDR-002's "never a refusal"; Sam's
 revision entry there names it. A Desktop seat is `unleased` and writes on
 RDR-253's exception for its own membership, labelled unattested.
 Release: Steps 1 and 3 need an engine release, Steps 2 and 4 a conexus
-release that pins it. Noise: no wake for everyone else. Data lifetime: push,
-owner and clear rows share the CI posts' three-day retention; group records
+release that pins it. Noise: no wake for everyone else. Data lifetime: the
+base topic and `--push` keep the template's three days (`retention_seconds:
+259200`); a topic ending `--owner`, which holds the owner, clear and ack rows,
+keeps 35 days (`retention_by_suffix: --owner: 3024000`, "the calibration of the
+acknowledgement deadline reads the first 20 reds or 30 days of --owner rows, so
+those keep 35 days", `board-ci.yaml`); group records
 and memberships are permanent rows, a membership removed when its seat
 leaves the group, when the group is disbanded, or when RDR-253's retention
 prunes an ephemeral or delegated identity.
@@ -1212,3 +1238,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-20: wording matched to the reviewed code (nexus-igea9, close critique r2 S1, S3 and observations; grant 3): the restart script's ready check is `claude-restart-sessions --ask-ready --group X` and `--status --group X` (live members here, matched by alias, uncovered members named with a state, the restart takes no group, a group round replaces the round file; v8.5.3), with a Test Plan line; Gap 1 says what was built (membership, the leader, the develop red's owner post; typed assignments cut at gate round 1), the title unchanged; the two Prerequisites ticked with their evidence (push-train formed 2026-11-20, RDR-253 Steps 1 to 3 landed); and the stamp's meaning cites RDR-253 now that it says it.
 - 2026-11-21: wording matched to the reviewed fail-safe fix (nexus-igea9; grant 3): when the fail-safe's identity read fails, a red with an ack row on its tip is retried every 30 seconds without end (the twelfth failure of a topic's hand-off since its last success, cancel or eviction, and every twelfth after, raises the log event `board_ack_deadline_stuck`), and a red with no ack row is escalated at once with `owner` null; Test Plan line added.
 - 2026-11-21: the fail-safe's hold-off narrowed to the owner's stamped ack (nexus-igea9; grant 3): when the liveness read fails, only an ack row with a sender session whose `from` is the row's owner, on the row's tip and at or after the row, holds the escalation off; a non-owner's ack and an ack with no sender session escalate at once with `owner` null. The known transition (pre-0.1.200 ack rows with a typed `from` escalate with `owner` null under the compound fault) and the check's narrowness against the normal deadline count are recorded in the fail-safe text; the Test Plan line is matched.
+- 2026-11-21: close wording matched to the shipped engine ack half and the close critique r2's follow-ups (nexus-igea9; grant 3): the engine stamps an ack's `from` from the sender session's identity (a delegated one as its parent, left as typed when nothing maps) and `--owner` rows keep 35 days while the base topic and `--push` keep three (cited from `board-ci.yaml`, `BoardCiGuard.stampAckFrom` and `Identities.countedIdentity`); the Day 2 calibration follow-up due 2026-12-20 names the ack fixes as its precondition.
