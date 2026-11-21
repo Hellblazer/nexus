@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * RDR-229 P3.8 (bead nexus-p2m1x.28), item 8: the minted label is {@code "c" + collection_id}, and a mint whose
- * label is already live draws the next id rather than reusing or colliding (design gate accepted by Sam 2026-11-21, T2 nexus/sam-ruling-rdr229-p38-design-gate-2026-11-21).
+ * label is already live draws the next id rather than reusing or colliding (design gate accepted by Sam 2026-11-21, T2 nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21).
  * The label's rendering and the minted-form predicate are P3.6's {@code CollectionLabel} (elsinore, tested there);
  * the schema half (the insert, the integration tests) lands on P3.1's branch.
  */
