@@ -1355,7 +1355,7 @@ def t3_collection_name(
             # grandfathered onto without a live probe, so the identity
             # must be the STRICT one: raises loud if local.embed_model
             # is voyage-shaped with no key configured.
-            if ct == "knowledge" and not allow_placeholder:  # RDR-229 P3.8: registered by attributes, the engine mints the label
+            if ct == "knowledge" and not allow_placeholder and subject_finder is not None:  # RDR-229 P3.8: a real write (the writers pass a finder; a dry run passes none) registers by attributes, the engine mints the label
                 return mint_knowledge_subject_label(owner_segment)
             return f"{ct}__{owner_segment}__{effective_embedding_model_for_writes(ct)}__v1"
         return promoted
