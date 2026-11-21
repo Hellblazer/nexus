@@ -18,9 +18,12 @@ from unittest.mock import patch
 
 import pytest
 
+from nexus.catalog.engine_writes.floors import COLLECTION_MINT_MIN_ENGINE_VERSION
 from nexus.catalog.factory import make_catalog_reader
 from nexus.corpus import _resolve_promoted_model_token
+from nexus.db.http_engine_status import fetch_engine_status
 from nexus.db.http_vector_client import HttpVectorClient
+from nexus.engine_version import parse_engine_version
 from nexus.mcp.core import store_put
 
 pytestmark = pytest.mark.integration
@@ -44,6 +47,29 @@ def _row(subject: str):
             close()
 
 
+def _engine_serves_collection_id() -> bool:
+    """Does this engine put ``collection_id`` on a collection row (P3.5a, shipped with the mint, engine-service-v0.1.201)?
+
+    An older engine sends no key and an engine that sends null says the same to the client, so ``None`` cannot tell them
+    apart from a bug: the release says, from the floor the client itself reads for the mint
+    (``COLLECTION_MINT_MIN_ENGINE_VERSION``). The gate jar is stamped with the client's pin (0.1.199), below that floor, though
+    it is built from this tree and serves the column; there the engine's own ``GET /v1/status`` says so, through the additive
+    boolean ``collection_tuple_index_present`` that every engine carrying the mint sends and no older one does.
+    """
+    reader = make_catalog_reader()
+    assert reader is not None
+    try:
+        release = parse_engine_version(reader.engine_release_version())
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
+    if release is not None and release >= COLLECTION_MINT_MIN_ENGINE_VERSION:
+        return True
+    status = fetch_engine_status() or {}
+    return isinstance(status.get("collection_tuple_index_present"), bool)
+
+
 def test_the_first_put_to_a_new_subject_registers_a_minted_label_by_attributes(t2_service_env):
     client = HttpVectorClient(tenant=t2_service_env)
     subject = "p38-mint-first-put"
@@ -56,7 +82,10 @@ def test_the_first_put_to_a_new_subject_registers_a_minted_label_by_attributes(t
     assert _MINTED.match(row.label), f"the engine minted the label, got {row.label!r}"
     assert row.owner_id == subject
     assert row.embedding_model == _resolve_promoted_model_token("knowledge", for_write=False)
-    assert row.collection_id is not None and row.label == f"c{row.collection_id}"
+    if _engine_serves_collection_id():
+        assert row.collection_id is not None and row.label == f"c{row.collection_id}"
+    else:
+        assert row.collection_id is None, "an engine older than the mint sends no id, which the client reads as None"
 
 
 def test_a_second_put_finds_the_minted_collection_through_for_tuple(t2_service_env):
