@@ -515,6 +515,33 @@ def _coerce_legacy_grandfathered(d: dict) -> dict:
     return d
 
 
+def _coerce_collection_id(d: dict) -> dict:
+    """A collection row's ``collection_id`` as ``int`` or ``None``, the key always present.
+
+    RDR-229 P3.5a (nexus-p2m1x.23). On an engine that has the column the id is always a
+    number (the registry's identity is NOT NULL, vectors-068-1); an older engine sends no
+    key, and that reads as ``None``. ``null`` is accepted defensively and also reads as
+    ``None``. A value that is neither (a bool, a string, a float, a list) reads as ``None``
+    rather than as an id, with a warning, the same rule
+    ``CollectionAttributes.from_for_tuple`` applies to a ``for_tuple`` row.
+
+    The id is not stable across a rename until P3.7's name-key drop and R6's ``ids_stable``
+    signal: do not cache by it before then.
+    """
+    d = dict(d)
+    cid = d.get("collection_id")
+    if isinstance(cid, int) and not isinstance(cid, bool):
+        d["collection_id"] = cid
+        return d
+    if cid is not None:
+        _log.warning(
+            "collection_row_collection_id_malformed",
+            collection=d.get("name"), value_type=type(cid).__name__,
+        )
+    d["collection_id"] = None
+    return d
+
+
 def _to_entry(d: dict) -> CatalogEntry:
     """Convert a server response dict to a CatalogEntry.
 
@@ -3789,11 +3816,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "/collections/list", lifecycle_state=lifecycle_state, content_type=content_type,
         )
         return [
-            _coerce_legacy_grandfathered(c)
+            _coerce_collection_id(_coerce_legacy_grandfathered(c))
             for c in (result.get("collections", []) if result else [])
         ]
 
     def get_collection(self, name: str) -> dict | None:
+        """One registry row via ``GET /v1/catalog/collections/get``, or ``None`` when unregistered.
+
+        The row's ``collection_id`` is an ``int`` on an engine that has the column, ``None`` on an
+        older engine (RDR-229 P3.5a); the key is always present.
+        """
         try:
             result = self._get("/collections/get", name=name)
         except httpx.HTTPStatusError as exc:
@@ -3802,7 +3834,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             raise
         if not result or not result.get("name"):
             return None
-        return _coerce_legacy_grandfathered(result)
+        return _coerce_collection_id(_coerce_legacy_grandfathered(result))
 
     def is_legacy_collection(self, name: str) -> bool:
         coll = self.get_collection(name)

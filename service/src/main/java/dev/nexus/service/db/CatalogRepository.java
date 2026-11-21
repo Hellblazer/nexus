@@ -10075,10 +10075,11 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                                CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
-                               CATALOG_COLLECTIONS.ASPECTS_ENABLED)
+                               CATALOG_COLLECTIONS.ASPECTS_ENABLED, CATALOG_COLLECTIONS.COLLECTION_ID)
                        .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).fetchOne();
             return r != null ? collRowWithAspects(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
-                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(), r.value11()) : null;
+                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(), r.value11(),
+                                        r.value12()) : null;
         });
     }
 
@@ -10201,11 +10202,12 @@ public final class CatalogRepository {
             }
             return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
-                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.ASPECTS_ENABLED)
+                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.ASPECTS_ENABLED,
+                           CATALOG_COLLECTIONS.COLLECTION_ID)
                        .from(CATALOG_COLLECTIONS).where(cond).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
                        .map(r -> collRowWithLifecycle(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(),
-                                                       r.value11(), r.value12(), r.value13()));
+                                                       r.value11(), r.value12(), r.value13(), r.value14()));
         });
     }
 
@@ -10691,7 +10693,7 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                                CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
-                               CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                               CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.COLLECTION_ID)
                        .from(CATALOG_COLLECTIONS)
                        .where(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType)
                               .and(CATALOG_COLLECTIONS.OWNER_ID.eq(ownerId))
@@ -10761,6 +10763,12 @@ public final class CatalogRepository {
             // that fails to parse. The filter above still keeps quarantine out; this is the
             // client's second check, and an additive field on the wire.
             row.put("lifecycle_state", nne(r.value11()));
+            // RDR-229 P3.5a (nexus-p2m1x.23): the row's surrogate id, read-only. Always a JSON number on
+            // an engine that has the column (the identity is NOT NULL, vectors-068-1); a NULL would pass
+            // through as an explicit null, defensively. An older engine sends no key, and the client
+            // reads that as None. Not stable across a rename until P3.7's name-key drop and R6's
+            // ids_stable signal.
+            row.put("collection_id", r.value12());
             return row;
         });
     }
@@ -14770,6 +14778,12 @@ public final class CatalogRepository {
      * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
      *                       on any real row since hygiene-002, but {@code nne()}'d
      *                       for defensive consistency with every other string field here
+     * @param collectionId   {@code catalog_collections.collection_id} (RDR-229 P3.5a,
+     *                       nexus-p2m1x.23), read-only: always a number on an engine that has
+     *                       the column (the identity is NOT NULL, vectors-068-1); a NULL would
+     *                       pass through as an explicit {@code null}, defensively, never omitted.
+     *                       Not stable across a rename until P3.7's name-key drop and R6's
+     *                       {@code ids_stable} signal
      * @param aspectsEnabled {@code catalog_collections.aspects_enabled} — {@code BOOLEAN
      *                       NULL}, no default, since catalog-040's round-2 fix (Finding A,
      *                       T2 critique-nexus-l46pu-round2-2026-09-27): {@code null} means
@@ -14784,11 +14798,12 @@ public final class CatalogRepository {
                                                  String embd, String mver, String dname,
                                                  Boolean legcy, String supBy, String supAt, String crAt,
                                                  Integer dimension, String lifecycleState,
-                                                 Boolean aspectsEnabled) {
+                                                 Boolean aspectsEnabled, Long collectionId) {
         Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
         m.put("dimension",       dimension);
         m.put("lifecycle_state", nne(lifecycleState));
         m.put("aspects_enabled", aspectsEnabled);
+        m.put("collection_id",   collectionId);
         return m;
     }
 
@@ -14805,14 +14820,17 @@ public final class CatalogRepository {
      * <p>{@code aspectsEnabled} is passed through AS-IS, {@code null} included
      * (see {@link #collRowWithLifecycle}'s javadoc for why: coercing a
      * {@code null} read to {@code false} was the round-2 ship-blocker, Finding
-     * A, T2 critique-nexus-l46pu-round2-2026-09-27).
+     * A, T2 critique-nexus-l46pu-round2-2026-09-27). {@code collectionId} (RDR-229
+     * P3.5a) is always a number on an engine that has the column (the identity is
+     * NOT NULL, vectors-068-1); see {@link #collRowWithLifecycle}.
      */
     private static Map<String, Object> collRowWithAspects(String name, String ctype, String owner,
                                                  String embd, String mver, String dname,
                                                  Boolean legcy, String supBy, String supAt, String crAt,
-                                                 Boolean aspectsEnabled) {
+                                                 Boolean aspectsEnabled, Long collectionId) {
         Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
         m.put("aspects_enabled", aspectsEnabled);
+        m.put("collection_id",   collectionId);
         return m;
     }
 
