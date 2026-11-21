@@ -1395,10 +1395,14 @@ def _install_binary_steps(
         BinaryVerificationError,
         asset_name,
         install_binary,
-        install_pg_bundle,
         pg_bundle_asset_name,
+        pg_bundle_dest,
     )
+    from nexus.daemon.pg_bundle_refresh import install_and_extract_pg_bundle  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db.pg_bundle import PgBundleSwapRefused  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon.replace_guard import ReplaceBlockedError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    import lzma  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    import tarfile  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
 
     click.echo(f"Resolving {asset_name()} from release {tag}…")
     try:
@@ -1424,11 +1428,28 @@ def _install_binary_steps(
 
     if want_pg_bundle:
         click.echo(f"\nResolving {pg_bundle_asset_name()} from release {tag}…")
+
+        downloaded: list[Path] = []  # the download stage's OSError is not an extraction failure
+
+        def _echo_installed(pg_dest: Path, pg_prov: dict) -> None:
+            downloaded.append(pg_dest)
+            click.echo(f"Installed {pg_prov['asset']} ({tag})")
+            click.echo(f"  -> {pg_dest}")
+            click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
+            click.echo("  signature: verified (keyless Sigstore)")
+
+        # nexus-f9bgu.56: the daemon finds PostgreSQL only in the extracted tree
+        # (pg_bundle.extracted_bin_dir), so an archive that is only placed is
+        # never used: a restart kept the old PostgreSQL, and a box whose
+        # extracted tree was gone stayed unstartable. extract_bundle is a no-op
+        # for an archive with the bytes already extracted; a different one is
+        # staged first and swapped in under the same stop as the engine.
+        # nexus-f3yqd.2.23: engine convergence takes this same call, so the two
+        # paths cannot drift.
         try:
-            pg_dest, pg_prov = install_pg_bundle(
-                tag,
-                config_dir,
-                installed_by=installed_by,
+            _pg_archive, _pg_prov, pg_bin = install_and_extract_pg_bundle(
+                tag, config_dir, installed_by=installed_by,
+                quiesce=shared.guard("pg_bundle"), on_installed=_echo_installed,
             )
         except BinaryVerificationError as exc:
             # The binary already installed and verified; only the PG bundle
@@ -1443,32 +1464,18 @@ def _install_binary_steps(
                 err=True,
             )
             sys.exit(2)
-        click.echo(f"Installed {pg_prov['asset']} ({tag})")
-        click.echo(f"  -> {pg_dest}")
-        click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
-        click.echo("  signature: verified (keyless Sigstore)")
-        # nexus-f9bgu.56: the daemon finds PostgreSQL only in the extracted tree
-        # (pg_bundle.extracted_bin_dir), so an archive that is only placed is
-        # never used: a restart kept the old PostgreSQL, and a box whose
-        # extracted tree was gone stayed unstartable. extract_bundle is a no-op
-        # for an archive with the bytes already extracted; a different one is
-        # staged first and swapped in under the same stop as the engine.
-        import lzma  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-        import tarfile  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-        from nexus.db import pg_bundle as _pg_bundle  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
-
-        try:
-            pg_bin = _pg_bundle.extract_bundle(
-                pg_dest, _pg_bundle.bundle_extract_root(config_dir),
-                quiesce=shared.guard("pg_bundle"),
-            )
         except ReplaceBlockedError as exc:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(2)
+        except PgBundleSwapRefused as exc:
+            # Refused for what the bundles are, not for a failure: repeating the command gives the same answer.
+            click.echo(f"Error: the PostgreSQL bundle archive installed ({pg_bundle_dest(config_dir)}), {exc}", err=True)
+            sys.exit(2)
         except (RuntimeError, OSError, tarfile.TarError, lzma.LZMAError) as exc:
+            if not downloaded:
+                raise  # the download stage, as before: not an extraction failure
             click.echo(
-                f"Error: the PostgreSQL bundle archive installed ({pg_dest}), but "
+                f"Error: the PostgreSQL bundle archive installed ({pg_bundle_dest(config_dir)}), but "
                 f"extracting it failed: {exc}\nRe-run `nx daemon service "
                 "install-binary <tag>` to retry; the installed PostgreSQL in use "
                 "is unchanged.",

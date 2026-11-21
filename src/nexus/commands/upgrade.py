@@ -188,6 +188,10 @@ def _upgrade_steps(
 
         with _standing_consent(assume_yes), unattended_run(auto_mode):
             _run_ladder(dry_run=dry_run, auto_mode=auto_mode, deadline=deadline)
+        if dry_run:
+            # nexus-f3yqd.2.23: the precondition stage does not run on --dry-run, so a PG bundle that
+            # lacks pg_background is reported with the other pending work, read-only.
+            _report_pending_pg_bundle()
         # nexus-g7ijj: an install that converged purely via `nx upgrade`
         # never got install.mode stamped; backfill it on the ladder-succeeded
         # path only. --dry-run writes nothing.
@@ -227,6 +231,21 @@ def _upgrade_steps(
             lambda: _install_beads_prime_best_effort(no_beads_prime=no_beads_prime),
         ))
     return steps
+
+
+def _report_pending_pg_bundle() -> None:
+    """``--dry-run``: say so when this install's PostgreSQL bundle lacks pg_background. Read-only, never raises."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 — deferred, keeps the CLI cold start light
+        from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred, as above
+        from nexus.daemon.pg_bundle_refresh import refresh_when_pg_background_is_missing  # noqa: PLC0415 — deferred, as above
+
+        for line in refresh_when_pg_background_is_missing(
+            PINNED_SERVICE_TAG, _config.nexus_config_dir(), dry_run=True, acquire=True,
+        ):
+            click.echo(line)
+    except Exception:  # noqa: BLE001 — a preview line never fails the command
+        _log.warning("pg_bundle_dry_run_probe_failed", exc_info=True)
 
 
 def _note_failure(failures: list[str] | None, failure: object) -> None:

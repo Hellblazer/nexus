@@ -2183,6 +2183,14 @@
     <include file="db/changelog/datamoves-001-registry.xml"/>
 
     <!--
+        RDR-246 amendment (Sam, 2026-11-21): nexus.data_moves.verify_statement_timeout_ms, the bound of the finisher's first,
+        READ ONLY verification pass (default 60000 ms), so the completion transaction keeps the short statement and lock bounds of
+        decision C and re-runs the verification warm. One ALTER TABLE: the column with its CHECK. DATA EFFECT: none (a constant
+        default, no rewrite). After datamoves-001, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/datamoves-002-verify-statement-timeout.xml"/>
+
+    <!--
         Bead nexus-7fku2.1.1 (RDR-134 Step 1): nexus.search_topic_set_384/768/1024, the topic-SET variants of
         search_topic_scoped_<dim>: one collection's nearest live chunks that carry ANY of a set of topic ids, each once, with
         the single-topic function's predicates and sensitivity exclusion. No threshold in SQL (the Java merge applies the
@@ -2275,6 +2283,16 @@
         before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/identity-005-work-kind-agent.xml"/>
+
+    <!--
+        nexus.drop_tenant_partitions takes the locks its teardown needs up front (the tables around the leaves, the two roots ONLY and
+        the tenant's own partitions; none of another tenant's), after serializing with other drops, in up to five attempts that each
+        share one deadline (half of deadlock_timeout, at most 500 ms), then lock_not_available naming the tenant (the 2026-11-20
+        production deadlock against a search, engine 0.1.199); the included file's header has the reasoning and what the order does
+        and does not promise. DATA EFFECT: none. Function definition only. After identity-005, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/vectors-066-drop-tenant-partitions-lock-order.xml"/>
 
     <!--
         Bead nexus-p2m1x.17 (RDR-229 P3.1 stage 1, the expand): catalog_collections.collection_id (identity, filled here) with its two UNIQUEs,

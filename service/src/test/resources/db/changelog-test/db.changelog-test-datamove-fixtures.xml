@@ -199,6 +199,16 @@ BEGIN
 END
 $f$;
 
+-- on_complete_seen: one row per run of on-complete-record-tenant.sql, the nexus.tenant setting that on_complete saw, so a test can
+-- tell what the session carried into it (nexus datamove split bounds, RDR-246 amendment 2026-11-21).
+CREATE TABLE dm_test.on_complete_seen (setting text);
+
+-- cold_marker: one row a test flips between the finisher's two verification runs. The verification text of
+-- verification-cold.sql sleeps while cold is true, so a test makes a run slow the way a cold scan is slow and fast the way a
+-- warm one is, without a clock or a cache (nexus datamove split bounds, RDR-246 amendment 2026-11-21).
+CREATE TABLE dm_test.cold_marker (cold boolean NOT NULL);
+INSERT INTO dm_test.cold_marker VALUES (false);
+
 DO $$
 DECLARE r record;
 BEGIN

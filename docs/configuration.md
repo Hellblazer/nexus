@@ -472,7 +472,10 @@ run:
    `pg_background` library must be installed on the server (a self-managed
    host: its package or build, with no `shared_preload_libraries` entry). The
    local bundle's provisioning does all of this on every service start
-   (`nexus.db.pg_bootstrap.dml_utils`); a bring-your-own-Postgres DBA runs it
+   (`nexus.db.pg_bootstrap.dml_utils`), provided the extracted bundle has
+   `pg_background`: one first set up on conexus 8.2.0 or earlier has not, and a
+   plain `nx upgrade` replaces it (`nx doctor`'s `PostgreSQL bundle` row warns
+   until it does); a bring-your-own-Postgres DBA runs it
    once, as a superuser, connected to the nexus database:
 
    ```sql

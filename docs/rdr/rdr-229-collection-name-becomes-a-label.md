@@ -1591,10 +1591,16 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
 - *A live collection in the engine's stale-note repair.*
   `NoteUri.isFileRoutedCollection` is called once, at
   `CatalogRepository.java:4399`, with the row's live `physical_collection`,
-  not a URI segment (T2 `229-research-42`). It takes the content type from
-  `CollectionRegistry.require(ctx, tenant, coll)`. Its caller,
+  not a URI segment (T2 `229-research-42`). P2.9 deletes it. Its caller,
   `classifyStaleNotes`, runs inside `tenantScope.withTenant(tenant, ctx ->
-  ...)`, so it holds `ctx` and `tenant`.
+  ...)`, so it holds `ctx` and `tenant`, and reads each candidate
+  collection's `content_type` from `catalog_collections` in that transaction,
+  not through `CollectionRegistry.require`, whose cache an upsert does not
+  evict (nexus-afkjy). Only a `knowledge` row is a rewrite candidate; docs,
+  rdr and code refuse as `file_routed_collection`, a missing row as
+  `unregistered_collection` and any other type as `unproven_content_type`,
+  and the rewrite re-reads the type under a share lock on the collection
+  row, so a retype cannot land between the census and the UPDATE.
 - *A bundle entry from another install.* `catalog/recovery_bundle.py:92,
   121, 212`, and its `is_note_uri` call at `:101`, read a name that may
   have no row here. They are migration sources, not routing: they read the
@@ -2655,7 +2661,9 @@ To beads at accept (DISCOVER-AT-IMPLEMENTATION; critique
   PCI off, and the `changeset_id` of a move registered at run time.
 - S-4, `aspect_extraction_queue` absent on most installs.
 - S-5, the BYO paragraph's "P3.3b's pass ... still builds", which
-  contradicts gate 1; the text still reads so.
+  contradicted gate 1. The paragraph now says the pass does not start on a
+  blocked install (2026-11-20); the bead stays open until P3.3b is built
+  to gate 1 and tested there.
 - S-6, the downgrade boundary, which P3.1's CHECK places at P3.1, not
   after P3.3 as "Still open" below says.
 - S-7, the client's trust in an id, which now starts at the name-key
@@ -2773,9 +2781,11 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
   because each waits for the stamp's `completed_at` (item 6, "A blocked
   move"). P4.0's floor never holds either, so a P4.0 engine would serve
   such an install migration-only; it stays on a release before P4.0 until
-  its moves run (P4.0). Inferred, not read: P3.3b's pass is an engine pass, not a move,
-  so it still builds; P3.6 and P3.8 touch only the registry and still
-  apply. T2 `229-research-47`.
+  its moves run (P4.0). P3.3b's pass does not start either: it is an
+  engine pass, not a move, but it starts only at gate 1, once every stamp
+  move and every P3.3a move is complete (item 6), and on such an install
+  none is. Inferred, not read: P3.6 and P3.8 touch only the registry and
+  still apply. T2 `229-research-47`.
 - **Windows**: RDR-246 verified pg_background on the Windows x64 bundle:
   "built for Linux x86_64 and arm64 (manylinux_2_28), macOS arm64 and
   Windows x64. On each, a relocated bundle ran `CREATE EXTENSION` and a
@@ -2909,3 +2919,5 @@ large, and moved under a ratchet.
 - 2026-11-19: Accept-time fix check (`nexus_rdr/229-fix-check-f58bc168420c`, FAIL) re-fix. P4.1 ordering `107b5dd67`; reconcile path `e2ad1c74b`; gate 3 window `3933d47df`; P4.0 liveness `7ee538cbf`; backfill verb `7341f2511`; P2.10 sizing `25bb765b8`; named single-critic rows `e3a1aebf1`. Contradiction Check and Scope Verification regenerated. T2 `229-research-61` to `-68` added.
 - 2026-11-19: Last residual of `nexus_rdr/229-gate-latest` (the gate-3 rename refusal had no owner before P3.7; accept fix check `3c7aa425d443`) fixed in the text (Sam, ask `baton/rdr229-refusal-owner`, option 1): P3.5 and P3.7 ship in one engine cut with the refusal and the name-key drop move's registration, and the refusal holds until every P3.5b changeset has applied, `9ea4521a4`. Contradiction Check regenerated. T2 `229-research-69` added.
 - 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
+- 2026-11-20: residual S-5 (nexus-p2m1x.43): the Cross-Cutting BYO paragraph said P3.3b's pass still builds on a blocked install, contradicting gate 1 (item 6), P3.3b and the phase dependencies; it now says the pass does not start, matching the RDR's own gate. The Contradiction Check's S-5 entry is updated; the bead closes when P3.3b is built and tested to gate 1.
+- 2026-11-21: P2.9's engine half landed on develop (c7ace16dd onward): `isFileRoutedCollection` is deleted, and the stale-note repair reads `content_type` in its transaction, admits only `knowledge` rows, and share-locks the collection row under the rewrite (item 12, engine paragraph). This supersedes the 2026-11-19 line that kept `isFileRoutedCollection`. The client half's text follows its reland (grant 3, nexus-p2m1x.14).

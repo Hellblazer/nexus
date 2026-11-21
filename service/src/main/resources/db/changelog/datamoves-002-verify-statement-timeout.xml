@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-246 amendment, Sam's ruling of 2026-11-21 (T2 nexus/sam-ruling-split-move-bounds-2026-11-21, which amends decision C of
+    nexus/sam-ruling-rdr229-ask-c-2026-11-21): the finisher's verification gets a statement timeout of its own.
+
+    nexus.data_moves.statement_timeout_ms bounded both the verification and the completion transaction. The completion
+    transaction (the completed_at UPDATE and on_complete) holds locks, so its bound has to be short (decision C: 1400 ms
+    statement, 700 ms lock). A verification read on a cold, freshly stamped table can need far longer than that (P3.2 measured
+    the chunk-key swap's foreign key check at about 13 s on the cloud disk), and it takes ACCESS SHARE only, so it can wait.
+
+    Column:
+      verify_statement_timeout_ms  the bound on the finisher's first, READ ONLY verification pass (per tenant and table-wide);
+                                   positive. That pass is also the warm-up: a plain scan, no pg_prewarm. The completion
+                                   transaction runs the verification again under statement_timeout_ms, now warm, before it
+                                   writes completed_at. NOT NULL DEFAULT 60000, so every registered move (a registering INSERT
+                                   names no such column) takes 60 s.
+
+    One ALTER TABLE statement, so the CHECK is added with the column. DDL only: the default fills the existing rows without a
+    rewrite (a constant default), and no row DML is written. Rollback drops the column, which drops its CHECK.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="datamoves-002-1" author="rdr246-split-move-bounds">
+        <comment>nexus.data_moves.verify_statement_timeout_ms: the finisher's READ ONLY verification pass gets its own bound (default 60000 ms)</comment>
+        <sql splitStatements="false" stripComments="false">
+ALTER TABLE nexus.data_moves
+    ADD COLUMN verify_statement_timeout_ms INTEGER NOT NULL DEFAULT 60000
+    CONSTRAINT data_moves_verify_statement_timeout_ms_check CHECK (verify_statement_timeout_ms &gt; 0);
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.data_moves DROP COLUMN IF EXISTS verify_statement_timeout_ms;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

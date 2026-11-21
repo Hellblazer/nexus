@@ -4240,7 +4240,7 @@ engine's view has `expired`, and when its reads have failed since it started and
 Not applicable when the engine cannot be reached, does not report the object, or reports no leaves with no failed read. It works in local
 and managed mode alike, over HTTP only; it is not the local-only tuples-bloat row.
 
-**Data moves (RDR-246, nexus-f3yqd.2.17).** The engine's move worker reports each open or failed data move (a row move registered in `nexus.data_moves`) as a `data-move:<label>` entry of the `boot_work` list in the same `GET /v1/status` body, and `nx doctor` turns the entries into rows. `Data move <label>` is red for a `blocked:` move (the engine retries it by itself) and for a `failed:` one (not retried; the failure text is in `nexus.data_moves.failure` and the engine log). One `blocked:` case is a warning: a move blocked on `pg_background is not installed` (the engine marks the entry `reason_class: missing_prerequisite`) waits for the extension and shows a warning until the engine's retry cap (about four hours), then red. The engine looks for the extension only at boot, so install it and restart the engine (`nx daemon service install-binary <tag>` does both for a local install's bundled PostgreSQL; a self-managed PostgreSQL needs pg_background installed, then the engine restarted). It is a warning for a `stalled:` move, a CALL with no chunk done for `NX_DATA_MOVE_STALL_MINUTES` (default 15; a slow chunk looks the same), and a note, never red, for a `paused:` one (the fix line gives the `UPDATE` that resumes it). A move that is working, queued or complete has no row of its own. `Data move worker` is red when the engine reports that its move worker is not running (every registered move then waits), and `Data move reporting` is red when the worker runs but nothing reports its moves (a green summary would hide a blocked or failed one). `Data moves` is the summary row, always green: it counts the open or failed moves by state, or says "no data move is open or failed". The status carries only the move's label, a class and an SQLSTATE, so each row's hint says where the full text is. Not applicable (green) when the engine cannot be reached or predates `boot_work`. The state table, with what each state means and what to do, is in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
+**Data moves (RDR-246, nexus-f3yqd.2.17).** The engine's move worker reports each open or failed data move (a row move registered in `nexus.data_moves`) as a `data-move:<label>` entry of the `boot_work` list in the same `GET /v1/status` body, and `nx doctor` turns the entries into rows. `Data move <label>` is red for a `blocked:` move (the engine retries it by itself) and for a `failed:` one (not retried; the failure text is in `nexus.data_moves.failure` and the engine log). One `blocked:` case is a warning: a move blocked on `pg_background is not installed` (the engine marks the entry `reason_class: missing_prerequisite`) waits for the extension and shows a warning until the engine's retry cap (about four hours), then red. The engine looks for the extension only at boot, so install it and restart the engine (`nx upgrade` does both for a local install whose extracted bundle lacks it; a self-managed PostgreSQL needs pg_background installed, then the engine restarted). It is a warning for a `stalled:` move, a CALL with no chunk done for `NX_DATA_MOVE_STALL_MINUTES` (default 15; a slow chunk looks the same), and a note, never red, for a `paused:` one (the fix line gives the `UPDATE` that resumes it). A move that is working, queued or complete has no row of its own. `Data move worker` is red when the engine reports that its move worker is not running (every registered move then waits), and `Data move reporting` is red when the worker runs but nothing reports its moves (a green summary would hide a blocked or failed one). `Data moves` is the summary row, always green: it counts the open or failed moves by state, or says "no data move is open or failed". The status carries only the move's label, a class and an SQLSTATE, so each row's hint says where the full text is. Not applicable (green) when the engine cannot be reached or predates `boot_work`. The state table, with what each state means and what to do, is in [engine-service-release](agents/engine-service-release.md#data-moves-a-changeset-changes-schema-a-move-moves-rows-rdr-246).
 
 **Recall canary (nexus-4lnn1.1.10, RDR-230 Technical Design 7).** `nx doctor`'s "Recall canary" row reads `per_collection_indexes.this_engine.maintenance.canary` from the same `GET /v1/status` body: the counts of this engine's per-collection (`pci_`) indexes whose recall canary reads green, red or unmeasured, and when the canary last ran. The route is unauthenticated, so it carries counts only. The row warns when any index reads red and points to the operator-only `GET /v1/admin/chunks-leaves`, whose `canary_indexes` entry names each red index with its `min_recall`, `trigger` and `red_after_reindex`; the engine log's `event=pci_canary` lines name them too. This row never calls that route. With no red it shows the counts. The counts are this engine's own history: a standby keeps the counts from when it held the builder lock, and the row says so. An engine without the `maintenance` or `canary` key reads not applicable, and a value the row cannot read says "could not read" rather than passing.
 
@@ -4618,7 +4618,11 @@ This runs automatically on the first `nx` invocation after a version change
 "Process freshness" check surfaces the same skew, and its
 "Engine convergence" check reports a pending engine convergence
 (long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
-`nx doctor` or this verb is the path there).
+`nx doctor` or this verb is the path there). On a local install with an extracted
+PostgreSQL bundle the pass also takes the pinned release's bundle, when the engine changes or the bundle has no
+pg_background, but only in an attended run and with the engine idle: the swap restarts PostgreSQL, so the unattended
+first-`nx`-after-upgrade pass installs the engine and leaves the bundle, and `nx upgrade` replaces it (`nx doctor`'s
+`PostgreSQL bundle` row names it). See [nx upgrade](#nx-upgrade).
 
 ### nx daemon t2 — RETIRED
 
@@ -4953,8 +4957,12 @@ but has not answered within 60 seconds (the new engine may be migrating the
 database), the run prints a warning naming `nx daemon service status`, `nx doctor`
 and the engine log, and exits 0; a supervisor that exited, an autostart unit whose
 supervisor reported an error during the start (a crash loop or a halted migration),
-or a start that failed otherwise, exits 2. The bundle is downloaded after the engine is placed, so on a
-run that replaces the engine the service is down during that download. Before this
+or a start that failed otherwise, exits 2. Here the bundle is downloaded after the engine is placed, so on a
+run that replaces the engine the service is down during that download; `nx upgrade`'s engine convergence downloads
+and stages the bundle first, through the same install-and-extract function, and stops the stack once for both
+(a bundle that lacks pg_background on an engine already at the pin is replaced by a plain `nx upgrade`, which is the
+usual way: this verb is the explicit one). A swap that would change the PostgreSQL major version or drop
+pg_background is refused with exit 2 and no stop. Before this
 change the stop applied to Windows only; on macOS and Linux the old engine kept
 serving until a manual `stop` and `start` (nexus-86aaz).
 
@@ -5346,7 +5354,8 @@ Silent and exit 0 on a box with no generation layout.
 The single trigger for the upgrade ladder ([RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md)).
 
 Upgrading nexus is: update the code ([`nx self install`](#nx-self-install)), then run `nx upgrade`. That single trigger
-converges everything else — it brings the package, engine, and process
+converges everything else — it brings the package, engine (and, on a local
+install, the extracted PostgreSQL bundle, when it predates pg_background), and process
 preconditions current, then walks one ordered ladder that auto-applies whichever
 data migrations your install actually needs (the ladder holds five rungs:
 `rdr192-manifest-backfill`, `note-tags-array`, `manifest-section-labels`,
@@ -5372,10 +5381,28 @@ nx upgrade --yes                  # Unattended: pre-approve a billed re-embed (=
 | Flag | Description |
 |------|-------------|
 | `--dry-run` | Report pending ladder rungs without executing — each rung's read-only `detect()`. Nothing is written; a rung's `detect()` may READ the completion ledger (`rdr192-manifest-backfill` does, and takes no census), so an unreachable engine reports the rung pending with the reason. (`--force` was removed with the local T2 migration chain in RDR-158 P4 Stage 4 — there is no version gate left to reset) |
-| `--auto` | Quiet mode for the SessionStart hook. The engine install is skipped (hook timeout budget); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)). On a local engine it can write unattended: the `retire-keys-sweep` rung runs at every session start until the install is swept, and defers, writing nothing, when a precondition stands in its way |
+| `--auto` | Quiet mode for the SessionStart hook. The engine install and the PostgreSQL bundle replacement are skipped (hook timeout budget; a bundle without pg_background is only reported); exit 0 always. Stops starting new work at safe points (between census calls, backfill collections and ladder rungs) after `NX_UPGRADE_AUTO_DEADLINE_SECONDS` seconds (default `900`, minimum `60`); the next session resumes. It does not bound a census call in flight (up to its HTTP timeout), one collection's whole backfill once started (it can run well past the limit on a large collection), the finish pass before the upgrade, or the service restart after the ladder (see [configuration](configuration.md)). On a local engine it can write unattended: the `retire-keys-sweep` rung runs at every session start until the install is swept, and defers, writing nothing, when a precondition stands in its way |
 | `--skip-t3` | Skips the precondition stage's engine install and process cycle (verdicts are still reported), the storage-service restart, the PDF stack carry-forward, the installer rebuild and the collection-name check. The old service keeps running until you run a plain `nx upgrade`. The data steps still run |
 | `--yes` | Pre-approve a billed re-embedding of your collections, for an unattended run (same as `NX_ASSUME_YES=1`). Not a blanket "say yes to everything": a vanished source still defers rather than guessing, and rollback is never automatic. Nothing in `nx upgrade` asks for this today, so the flag currently changes nothing |
 | `--no-beads-prime` | Skip installing/refreshing the user-level beads PRIME.md this run (nexus-cnzei.8) — see [`nx init`](#nx-init). For a standing opt-out use `nx config set beads_prime.manage false` instead |
+
+**The PostgreSQL bundle (nexus-f3yqd.2.23).** A local install keeps the bundle it was first set up with, and
+pg_background first shipped in the bundle at engine-service-v0.1.190 (conexus 8.2.1), so an install first set up
+on 8.2.0 or earlier has none and every registered data move stays blocked. A plain `nx upgrade` now takes the
+pinned release's bundle and swaps it in when the engine version changes, and when the engine is already the
+pinned one but `~/.config/nexus/pg-bundle` has no `pg_background.control`. The bundle is downloaded and staged
+with the service running; the engine and the bundle are then replaced under one stop and one start of PostgreSQL
+and the storage service. The swap moves no data and keeps the PostgreSQL major version: one that would change it
+(read from the data directory's `PG_VERSION`) or drop pg_background is refused before anything stops. The
+swap restarts PostgreSQL, which an engine replacement alone does not and which stops an index build in flight, so
+it runs only in an attended `nx upgrade` and only while the engine is idle (no boot work except a data move that is
+only blocked, failed or paused, and no index build or vacuum). On an engine change an unattended run or a busy
+engine still installs the engine and leaves the bundle for the next attended run; on a converged engine it waits and
+says so, naming `nx daemon service install-binary <tag>` as the explicit route. `--auto`, an unattended lockstep run
+and an MCP start only report it, `--dry-run` lists it as pending, and `nx doctor` warns on a `PostgreSQL bundle` row
+while it holds. A download or extraction failure leaves the old bundle and the running
+stack, and the next `nx upgrade` tries again. An install on its own PostgreSQL has no extracted bundle and cloud
+mode has no local one; neither is touched.
 
 **The storage-service restart.** An upgrade restarts a running storage service on the new version. An interactive run prints a line before the restart and one after it. If the new service is still starting (its first start after an upgrade can migrate the database for several minutes), it says so, points at `nx daemon service status`, and the upgrade still succeeds. If the restart fails, the upgrade ends with what failed, the command to run and what `nx daemon service start` said, and exits 1. `--auto` and the lockstep hook's unattended run (`NX_UPGRADE_UNATTENDED=1`) print nothing for it, log it, and exit 0.
 

@@ -63,17 +63,6 @@ _RETRY_NOW = (
 _RESUME = "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label = '{label}'; (as nexus_admin)"
 
 
-def _install_bundle_command() -> str:
-    """The command that installs the pinned engine with its PostgreSQL bundle; the tag is read now, never hard-coded."""
-    try:
-        from nexus.daemon.binary_install import resolve_service_tag  # noqa: PLC0415 — deferred to keep CLI startup fast
-
-        tag = resolve_service_tag()
-    except Exception:  # noqa: BLE001 — a hint must not crash `nx doctor`
-        tag = None
-    return f"`nx daemon service install-binary {tag or '<engine tag>'}`"
-
-
 def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
     """The data-move entries (moves and the worker's) of ``status['boot_work']``; ``None`` when the engine predates it."""
     work = status.get("boot_work")
@@ -160,9 +149,10 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
                 fix_suggestions=[
                     "The move waits for the pg_background extension; nothing was changed and nothing is lost. The engine "
                     "looks for the extension only when it starts, so installing it is not enough: restart the engine "
-                    "after. A local install's bundled PostgreSQL carries pg_background: "
-                    f"{_install_bundle_command()} installs the bundle and restarts the engine. A self-managed PostgreSQL "
-                    "needs pg_background installed, then the engine restarted. If the move is still blocked after about "
+                    "after. A local install's bundled PostgreSQL carries pg_background, but an install first set up on "
+                    "conexus 8.2.0 or earlier keeps an older bundle without it: `nx upgrade` replaces that bundle and "
+                    "restarts the engine (`nx doctor` has a PostgreSQL bundle row while it is pending). A self-managed "
+                    "PostgreSQL needs pg_background installed, then the engine restarted. If the move is still blocked after about "
                     "four hours of retries the engine drops the class and this row turns red (the full reason is in the "
                     "engine log, event=data_move_blocked)",
                 ],

@@ -521,7 +521,13 @@ version below the candidate (8.0.0 for an 8.1.0 cut), the last published 7.x (7.
 and 7.76.0, the last release before per-collection indexes (PCI), whose upgrade boot
 builds every `pci_` index. The first two are one start when they are the same release
 (an 8.0.0 cut starts from 7.99.0 once), and 7.76.0 is left out when the candidate is
-not newer than it. For each start it:
+not newer than it. A candidate above 8.2.0 also starts from 8.2.0, the last release whose
+PostgreSQL bundle has no pg_background (nexus-f3yqd.2.23), twice: plainly, and as
+`8.2.0+engine-first`, where `install-binary <pin> --no-pg-bundle` puts the candidate's engine
+on the box first so only the bundle leg of `nx upgrade` can fix it. Each must end with
+`pg_background.control` in `~/.config/nexus/pg-bundle`, `pg_background` in `pg_extension`,
+no blocked data move and no `PostgreSQL bundle` row in `nx doctor`; a start whose bundle
+already had it is a finding, not a pass. For each start it:
 
 1. installs that release and builds its local store with the f3yqd.1 seeder
    (`scripts/upgrade_boot_writes.py --prepare-only`: 86,000 knowledge rows, about

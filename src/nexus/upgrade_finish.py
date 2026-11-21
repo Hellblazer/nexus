@@ -2317,6 +2317,13 @@ def converge_engine(
             got_s = f"{got_s} unverified"
 
     if status.converged and integrity is not None and integrity.ok:
+        # nexus-f3yqd.2.23: the engine is right; the PG bundle may predate pg_background.
+        from nexus.daemon.binary_install import PINNED_SERVICE_TAG as _bundle_tag  # noqa: PLC0415 — deferred, CLI startup cost
+        from nexus.daemon.pg_bundle_refresh import refresh_when_pg_background_is_missing  # noqa: PLC0415 — deferred, CLI startup cost
+
+        bundle_actions = refresh_when_pg_background_is_missing(
+            _bundle_tag, config_dir, dry_run=dry_run, acquire=acquire, unattended=unattended,
+        )
         # nexus-4yf4u: the DISK is right — is the PROCESS? A correct on-disk
         # binary with a stale live service needs a RESTART, not a reinstall,
         # and the predecessor returned [] here ("already converged"), which
@@ -2326,7 +2333,7 @@ def converge_engine(
         if running.version is not None and running.version < status.required_version:
             got_run = ".".join(str(p) for p in running.version)
             if unattended or not acquire:
-                return [
+                return bundle_actions + [
                     f"NOTE: the on-disk engine is v{req_s} but the RUNNING "
                     f"service is still v{got_run}. Not restarting it here — "
                     "this is the automatic post-upgrade pass, and cycling the "
@@ -2335,7 +2342,7 @@ def converge_engine(
                     "you and it will converge and verify."
                 ]
             if dry_run:
-                return [
+                return bundle_actions + [
                     f"would restart the storage service: the on-disk engine "
                     f"is v{req_s} but the RUNNING service reports v{got_run}"
                 ]
@@ -2346,7 +2353,7 @@ def converge_engine(
             predrop_actions = _reassign_diag_view_before_restart(config_dir)
             return _restart_and_verify(
                 config_dir,
-                predrop_actions + [
+                bundle_actions + predrop_actions + [
                     f"on-disk engine is already v{req_s} but the RUNNING "
                     f"service reports v{got_run} — restarting to pick it up"
                 ],
@@ -2363,7 +2370,7 @@ def converge_engine(
         # state rather than an alarm), may stay silent.
         if running.version is not None and running.version > status.required_version:
             got_run = ".".join(str(p) for p in running.version)
-            return [
+            return bundle_actions + [
                 f"NOTE: the RUNNING service reports v{got_run}, NEWER than the "
                 f"release dependency v{req_s} on disk. Not converged, and "
                 "deliberately not auto-fixed: restarting would silently "
@@ -2372,14 +2379,14 @@ def converge_engine(
                 "start`)."
             ]
         if running.up and running.version is None:
-            return [
+            return bundle_actions + [
                 f"NOTE: the on-disk engine is v{req_s}, but the RUNNING "
                 "service is not answering /version "
                 f"({running.reason or 'no answer'}), so convergence is "
                 "UNVERIFIED — this reports the disk, not the running system. "
                 "Check `nx doctor` and `nx daemon service status`."
             ]
-        return []
+        return bundle_actions
 
     # nexus-cfgo9 code-review LOW: the poison gate is checked BEFORE the
     # dry-run early-return, never after — a dry-run preview must never
@@ -2503,7 +2510,8 @@ def converge_engine(
         )
         return [
             f"would converge engine ({got_s} -> {req_s}): install the "
-            f"pinned tag and restart the storage service{why}"
+            f"pinned tag (and its PostgreSQL bundle, when one is extracted) "
+            f"and restart the storage service{why}"
         ]
     if not acquire:
         have = ".".join(str(p) for p in status.installed_version) if status.installed_version else "unknown"
@@ -2543,15 +2551,24 @@ def converge_engine(
             "invocation; not retrying)"
         ]
 
+    from nexus.daemon.pg_bundle_refresh import refresh_bundle_alongside_engine  # noqa: PLC0415 — deferred, CLI startup cost
+
     try:
         # restart_after=False: the install stops a running service for the swap on
         # every platform (RDR-224, nexus-f9bgu.20; macOS and Linux nexus-86aaz); the
         # cycle below starts it again AND verifies the version, so the install must
         # not start it first (one stop, one start per upgrade; the cycle's own stop
         # then finds nothing). A failed install still restarts what it stopped.
-        install_binary(
-            tag, config_dir, installed_by="upgrade-finish engine convergence",
-            restart_after=False,
+        # nexus-f3yqd.2.23: the PG bundle of the same tag is downloaded and staged first, then
+        # joins the same single stop; a bundle failure never raises (the old one stays and the
+        # cycle starts it).
+        bundle = refresh_bundle_alongside_engine(
+            tag, config_dir,
+            lambda guard: install_binary(
+                tag, config_dir, installed_by="upgrade-finish engine convergence",
+                restart_after=False, quiesce=guard,
+            ),
+            unattended=unattended,
         )
     except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
         # can raise more than BinaryVerificationError -- _atomic_copy
@@ -2577,7 +2594,7 @@ def converge_engine(
     predrop_actions = _reassign_diag_view_before_restart(config_dir)
     return _restart_and_verify(
         config_dir,
-        predrop_actions + [f"converged engine: installed {tag} (was {got_s})"],
+        predrop_actions + [f"converged engine: installed {tag} (was {got_s})"] + bundle.lines(),
         req_s,
     )
 

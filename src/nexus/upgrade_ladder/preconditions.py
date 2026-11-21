@@ -233,6 +233,33 @@ def _engine_report(status: Any, *, actions: tuple[str, ...] = ()) -> Preconditio
     )
 
 
+def _bundle_gap(config_dir: Path) -> bool:
+    """The extracted PG bundle lacks pg_background (a local install first set up before engine 0.1.190)."""
+    from nexus.daemon.pg_bundle_refresh import bundle_lacks_pg_background  # noqa: PLC0415 — deferred, keeps the cold start light
+
+    try:
+        return bundle_lacks_pg_background(config_dir)
+    except Exception:  # noqa: BLE001 — a probe that cannot run is no axis
+        _log.warning("pg_bundle_probe_failed", exc_info=True)
+        return False
+
+
+def _bundle_report(config_dir: Path, *, actions: tuple[str, ...] = ()) -> PreconditionReport:
+    from nexus.daemon.pg_bundle_refresh import refresh_applicable  # noqa: PLC0415 — deferred, keeps the cold start light
+
+    gap = _bundle_gap(config_dir)
+    return PreconditionReport(
+        name="pg-bundle",
+        applicable=refresh_applicable(config_dir),
+        current=not gap,
+        detail=(
+            "the extracted PostgreSQL bundle lacks pg_background, so data moves stay blocked"
+            if gap else "the PostgreSQL bundle has pg_background (or is not nexus's own)"
+        ),
+        actions=actions,
+    )
+
+
 def _version_key(version: str) -> tuple[int, ...] | None:
     """The leading dotted integers of *version* ("8.0.1.dev3" -> (8, 0, 1)), or None."""
     parts: list[int] = []
@@ -445,6 +472,7 @@ def converge_preconditions(
     in-invocation).
     """
     from nexus.upgrade_finish import converge_engine, detect_engine_convergence  # noqa: PLC0415 — deferred to avoid import cost
+    from nexus.upgrade_ladder.unattended import env_unattended as _env_unattended  # noqa: PLC0415 — deferred, keeps the cold start light
 
     engine_detect = (
         _engine_detect_fn
@@ -454,7 +482,7 @@ def converge_preconditions(
     engine_converge = (
         _engine_converge_fn
         if _engine_converge_fn is not None
-        else (lambda: converge_engine(config_dir))
+        else (lambda: converge_engine(config_dir, unattended=_env_unattended()))
     )
     lease_fn = _lease_fn if _lease_fn is not None else (lambda: _default_lease(config_dir))
     installed_fn = (
@@ -479,11 +507,17 @@ def converge_preconditions(
 
     engine_status = engine_detect()
     engine_actions: tuple[str, ...] = ()
-    if engine_status.applicable and not engine_status.converged and allow_engine_install:
+    # nexus-f3yqd.2.23: an install whose extracted PG bundle lacks pg_background is its own axis. A
+    # converged engine does not make it current, so the engine step runs for it too (converge_engine
+    # replaces the bundle on a pinned engine), and `nx upgrade` reaches it after the --auto pass has
+    # consumed the version stamp.
+    bundle_gap = _bundle_gap(config_dir)
+    if engine_status.applicable and (not engine_status.converged or bundle_gap) and allow_engine_install:
         engine_actions = tuple(engine_converge())
         for line in engine_actions:
             _log.info("precondition_engine_action", action=line)
-    reports.append(_engine_report(engine_status, actions=engine_actions))
+    reports.append(_engine_report(engine_status, actions=() if engine_status.converged else engine_actions))
+    reports.append(_bundle_report(config_dir, actions=engine_actions if engine_status.converged else ()))
 
     # Provisioning: REPORT-ONLY post-P4b — nx init owns acquisition; the
     # upgrade path never provisions (the legacy-footprint acquisition leg
