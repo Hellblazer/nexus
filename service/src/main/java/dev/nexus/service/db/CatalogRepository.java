@@ -2388,6 +2388,7 @@ public final class CatalogRepository {
         // RDR-229 P3.1: the id follows the name. A caller that moves the collection names it (the generic SET above
         // wrote the name); every other update keeps the row's id, stamping a row the move has not reached.
         Object movedColl = fields.get("physical_collection");
+        if (movedColl != null && !CatalogIdStamps.liveDocumentExists(ctx, tenant, target)) return null;   // unknown tumbler: no-op
         more = more.set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, movedColl != null
             ? DSL.val(CollectionIds.require(ctx, tenant, String.valueOf(movedColl)), Long.class) : CatalogIdStamps.keepDocumentId());
         // AND deleted_at IS NULL: refuse to update tombstoned documents
