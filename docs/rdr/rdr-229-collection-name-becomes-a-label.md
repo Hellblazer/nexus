@@ -1600,7 +1600,7 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   `ChunkKeyPlan.TAXONOMY_PREFIX` is the same class. P4.3 retires them once a
   census shows no install holds a `taxonomy__` collection. With them
   reclassified and the other sites moved, P2.9 measures the routing class at
-  zero (client census 240 -> 228 at develop 303a22d29 with P2.8).
+  zero (client census 240 -> 229 at develop 0d9e53391 with P2.8).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
