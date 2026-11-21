@@ -25,7 +25,6 @@ from tests._collection_name_census_notes import (
     ROUTE,
     ROUTE_DEFAULT,
     WM_P22,
-    WM_P23,
     WM_P24,
 )
 from tests._collection_name_census_scan import Site as S
