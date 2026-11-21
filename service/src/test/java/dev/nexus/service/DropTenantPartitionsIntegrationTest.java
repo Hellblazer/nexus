@@ -841,4 +841,54 @@ class DropTenantPartitionsIntegrationTest {
             assertThat(PartitionScratch.dropTenantPartitions(dsl(su), TA)).isPositive();
         }
     }
+
+    /**
+     * One deadline per attempt, not one per lock. Two holders on two up-front tables, each cleared well inside the 500 ms
+     * budget but one after the other: the first table (catalog_document_chunks) is released about 350 ms after the drop
+     * starts waiting on it, the second (chunk_orphaned_at) about 350 ms after that. A budget applied lock by lock waits
+     * 350 ms and 350 ms, each under 500, and takes the locks on attempt 1. One deadline per attempt has spent 350 of its
+     * 500 ms when the second lock comes up, gives up on that attempt at 500 ms (the second holder runs to about 700), and
+     * takes the locks on a later attempt, once both are gone.
+     */
+    @Test
+    void theWaitsOfOneAttemptShareOneDeadline_soTwoShortHoldsInSequenceCostTheFirstAttempt() throws Exception {
+        final String TA = "p225-drop-deadline";
+        try (Connection su = pg.createConnection("")) {
+            seed(dsl(su), TA, 20000L);
+        }
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        StringBuilder notices = new StringBuilder();   // jOOQ drains the connection's warnings, so a listener reads them
+        try (Connection first = admin(); Connection second = admin(); Connection d = admin(); Connection obs = pg.createConnection("")) {
+            int expectedLeaves = modelPartitions(dsl(obs));
+            first.setAutoCommit(false);
+            second.setAutoCommit(false);
+            PgContainerHelper.lockTable(first, CATALOG_DOCUMENT_CHUNKS, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            PgContainerHelper.lockTable(second, CHUNK_ORPHANED_AT, PgContainerHelper.LockMode.ROW_EXCLUSIVE);
+            var cfg = new org.jooq.impl.DefaultConfiguration().set(d).set(SQLDialect.POSTGRES)
+                .set(new org.jooq.impl.DefaultExecuteListenerProvider(new org.jooq.impl.DefaultExecuteListener() {
+                    @Override
+                    public void warning(org.jooq.ExecuteContext c) {
+                        for (SQLWarning w = c.sqlWarning(); w != null; w = w.getNextWarning()) notices.append(w.getMessage()).append('\n');
+                    }
+                }));
+            int dPid = backendPid(d);
+            Future<Integer> drop = pool.submit(() -> PartitionScratch.dropTenantPartitions(DSL.using(cfg), TA));
+            awaitWhileRunning("the drop to queue behind the first holder", drop, () -> waitingForAnyLock(obs, dPid));
+            Thread.sleep(350);
+            first.commit();
+            Thread.sleep(350);
+            second.commit();
+            assertThat(drop.get(30, TimeUnit.SECONDS)).as("the drop completes once both holders are gone").isEqualTo(expectedLeaves);
+            var m = java.util.regex.Pattern.compile("locks taken on attempt (\\d+) of").matcher(notices);
+            assertThat(m.find()).as("the NOTICE names the attempt: %s", notices).isTrue();
+            assertThat(Integer.parseInt(m.group(1)))
+                .as("two sequential waits of 350 ms exceed one 500 ms attempt budget, so attempt 1 cannot take the locks")
+                .isGreaterThanOrEqualTo(2);
+        } finally {
+            pool.shutdownNow();
+        }
+        try (Connection a = admin()) {
+            assertThat(leaves(dsl(a), TA)).isEmpty();
+        }
+    }
 }
