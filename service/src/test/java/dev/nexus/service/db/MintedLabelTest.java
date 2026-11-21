@@ -24,7 +24,7 @@ class MintedLabelTest {
     @Test
     void aFreeLabelTakesTheFirstDraw() {
         AtomicLong seq = new AtomicLong(41);
-        MintedLabel.Choice c = MintedLabel.choose(seq::incrementAndGet, id -> false, label -> false);
+        MintedLabel.Choice c = MintedLabel.choose(seq::incrementAndGet, id -> false, label -> false, MintedLabelTest::noHeal);
         assertThat(c).isEqualTo(new MintedLabel.Choice(42, "c42"));
         assertThat(seq.get()).as("one draw").isEqualTo(42);
     }
@@ -37,7 +37,7 @@ class MintedLabelTest {
         MintedLabel.Choice c = MintedLabel.choose(seq::incrementAndGet, id -> false, label -> {
             asked.add(label);
             return live.contains(label);
-        });
+        }, MintedLabelTest::noHeal);
         assertThat(c).isEqualTo(new MintedLabel.Choice(44, "c44"));
         assertThat(asked).containsExactly("c42", "c43", "c44");
     }
@@ -45,37 +45,52 @@ class MintedLabelTest {
     @Test
     void everyDrawTakenRefusesAfterTheBound() {
         AtomicLong seq = new AtomicLong();
-        assertThatThrownBy(() -> MintedLabel.choose(seq::incrementAndGet, id -> false, label -> true))
+        assertThatThrownBy(() -> MintedLabel.choose(seq::incrementAndGet, id -> false, label -> true, MintedLabelTest::noHeal))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining(String.valueOf(MintedLabel.MAX_DRAWS));
         assertThat(seq.get()).as("exactly the bound's draws").isEqualTo(MintedLabel.MAX_DRAWS);
     }
 
     /**
-     * baton's condition on BY DEFAULT (via linda, 2026-11-21): a restore that wrote explicit ids at or above the
-     * sequence's next value, with no setval after it, leaves the sequence behind the data. The mint must not skip
-     * past that silently (that would hide the missing setval) nor surface a raw unique violation: the first drawn id
-     * that is already a row refuses at once, naming the sequence.
+     * baton's condition on BY DEFAULT, with linda's ruling (2026-11-21): a restore that wrote explicit ids at or above
+     * the sequence's next value with no setval after it leaves the sequence behind the data. The mint neither skips
+     * past it silently nor surfaces a raw unique violation: it heals the sequence ONCE (the caller's setval to
+     * max(collection_id), logged as a WARN) and draws again.
      */
     @Test
-    void aDrawnIdThatIsAlreadARowRefusesAtOnceNamingTheSequence() {
+    void aSequenceBehindTheDataHealsOnceAndMints() {
         AtomicLong seq = new AtomicLong(99);
-        AtomicInteger labelChecks = new AtomicInteger();
-        assertThatThrownBy(() -> MintedLabel.choose(seq::incrementAndGet, id -> id == 100, label -> {
-            labelChecks.incrementAndGet();
-            return false;
-        }))
+        Set<Long> rows = Set.of(100L, 101L, 102L);
+        List<Long> heals = new ArrayList<>();
+        MintedLabel.Choice c = MintedLabel.choose(seq::incrementAndGet, rows::contains, label -> false, colliding -> {
+            heals.add(colliding);
+            seq.set(102); // the caller's setval(seq, max(collection_id))
+        });
+        assertThat(c).isEqualTo(new MintedLabel.Choice(103, "c103"));
+        assertThat(heals).as("one heal, told the colliding id").containsExactly(100L);
+    }
+
+    @Test
+    void aSecondCollisionAfterTheHealRefusesNamingTheSequence() {
+        AtomicLong seq = new AtomicLong(99);
+        AtomicInteger heals = new AtomicInteger();
+        assertThatThrownBy(() -> MintedLabel.choose(seq::incrementAndGet, id -> true, label -> false,
+            colliding -> heals.incrementAndGet()))
             .isInstanceOf(MintedLabel.SequenceBehindDataException.class)
-            .hasMessageContaining("100")
+            .hasMessageContaining("101")
             .hasMessageContaining("setval");
-        assertThat(seq.get()).as("one draw, no skipping").isEqualTo(100);
-        assertThat(labelChecks.get()).as("the label is not consulted for an id that is taken").isZero();
+        assertThat(heals.get()).as("the heal runs once, never twice").isEqualTo(1);
+        assertThat(seq.get()).as("two draws: the colliding one and the one after the heal").isEqualTo(101);
     }
 
     @Test
     void aSequenceAheadOfEveryRowMintsNormally() {
         AtomicLong seq = new AtomicLong(200);
-        assertThat(MintedLabel.choose(seq::incrementAndGet, id -> id <= 150, label -> false))
+        assertThat(MintedLabel.choose(seq::incrementAndGet, id -> id <= 150, label -> false, MintedLabelTest::noHeal))
             .isEqualTo(new MintedLabel.Choice(201, "c201"));
+    }
+
+    private static void noHeal(long collidingId) {
+        throw new AssertionError("no heal expected, got a collision at " + collidingId);
     }
 }
