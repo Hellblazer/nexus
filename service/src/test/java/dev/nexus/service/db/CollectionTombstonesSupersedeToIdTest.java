@@ -86,6 +86,11 @@ class CollectionTombstonesSupersedeToIdTest {
         });
     }
 
+    private int supersedeToId(String from, String to, long toId) {
+        Integer n = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, from, to, toId));
+        return n;
+    }
+
     private String supersededBy(String name) {
         return su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -103,7 +108,7 @@ class CollectionTombstonesSupersedeToIdTest {
         String x = name("id-x"), y = name("id-y");
         register(x);
 
-        int n = scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, y, 910_001L));
+        int n = supersedeToId(x, y, 910_001L);
 
         assertThat(n).isEqualTo(1);
         assertThat(supersededBy(x)).isEqualTo(y);
@@ -126,11 +131,10 @@ class CollectionTombstonesSupersedeToIdTest {
     void supersedeToAnId_keepsTheCas_theSameTargetIsIdempotentAndAnotherTargetMatchesNoRow() {
         String x = name("cas-x"), y = name("cas-y"), z = name("cas-z");
         register(x);
-        assertThat(scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, y, 910_002L))).isEqualTo(1);
+        assertThat(supersedeToId(x, y, 910_002L)).isEqualTo(1);
 
-        assertThat(scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, y, 910_002L)))
-            .as("the same target again").isEqualTo(1);
-        assertThat(scope.withTenant(T, ctx -> CollectionTombstones.supersede(ctx, T, x, z, 910_003L)))
+        assertThat(supersedeToId(x, y, 910_002L)).as("the same target again").isEqualTo(1);
+        assertThat(supersedeToId(x, z, 910_003L))
             .as("a different target is the CAS's zero rows, as for the other overload").isZero();
 
         assertThat(supersededBy(x)).isEqualTo(y);

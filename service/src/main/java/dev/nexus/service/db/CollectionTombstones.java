@@ -36,9 +36,34 @@ public final class CollectionTombstones {
      */
     static int supersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<OffsetDateTime> stampedAt) {
         CollectionIds.require(ctx, tenant, supersededBy);
+        return casSupersede(ctx, tenant, name, supersededBy, CollectionIds.idOf(tenant, supersededBy), stampedAt);
+    }
+
+    /**
+     * Supersede {@code fromName} by {@code toName} with the successor's id given: {@code superseded_by = toName} and
+     * {@code superseded_by_id = toId} in the one CAS statement of {@link #supersede(DSLContext, String, String, String, Field)},
+     * the same load-bearing WHERE conjunct, and no registry lookup of the target.
+     *
+     * <p>For a rename, which draws the new row's id first, retires the source with it, and only then inserts the new row
+     * (the source holds the live tuple the new row takes, and P3.1's CHECK ties {@code superseded_by_id} to
+     * {@code superseded_by}, so the source cannot be retired by name alone). At the retire the successor has no registry
+     * row for the other overload's subselect to read, and that overload refuses an unregistered target.
+     *
+     * <p><b>The caller vouches</b> that {@code toId} comes from the column's own sequence ({@code CollectionMint.drawId}) or is
+     * the id of {@code toName}'s own row, and that the row {@code toName} with that id is inserted (or already exists) in
+     * this transaction. Nothing here checks either, so a caller that cannot say so uses the other overload.
+     *
+     * @return the number of rows updated (0 means no {@code (tenant, fromName)} row, or a different target already set)
+     */
+    static int supersede(DSLContext ctx, String tenant, String fromName, String toName, long toId) {
+        return casSupersede(ctx, tenant, fromName, toName, DSL.val(toId), DSL.currentOffsetDateTime());
+    }
+
+    private static int casSupersede(DSLContext ctx, String tenant, String name, String supersededBy, Field<Long> successorId,
+                                    Field<OffsetDateTime> stampedAt) {
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, supersededBy)
-            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CollectionIds.idOf(tenant, supersededBy))
+            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
             // nexus-0svvu (a): stamp only on the transition OUT OF '' (a genuine first supersede); a row that
             // already carries THIS target keeps whatever instant it already has.
             .set(CATALOG_COLLECTIONS.SUPERSEDED_AT,
