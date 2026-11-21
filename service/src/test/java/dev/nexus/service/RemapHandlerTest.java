@@ -103,8 +103,7 @@ class RemapHandlerTest {
         // still-chunkless collection out from under the write (see
         // BridgeAddressFieldsTest's identical fix). Burn the sweep here
         // first, once, for every @Test method uniformly.
-        var warmup = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        var warmup = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build();
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
@@ -127,8 +126,7 @@ class RemapHandlerTest {
         }
 
         // OTHER_TENANT records facts over h4's names in the RLS test; burn its own ghost sweep first, then register.
-        http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + OTHER_TOKEN)
             .GET().build(), HttpResponse.BodyHandlers.ofString());
         try (Connection su = pg.createConnection("")) {

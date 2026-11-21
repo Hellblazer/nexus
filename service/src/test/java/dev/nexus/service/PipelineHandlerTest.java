@@ -84,8 +84,7 @@ class PipelineHandlerTest {
         // AuthFilter's once-per-process ghost sweep deletes a registered-but-chunkless collection at a tenant's first
         // request: burn it for both tenants before the registrations below.
         for (String token : List.of(TOKEN, OTHER_TOKEN)) {
-            http.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
                 .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
         }
 
