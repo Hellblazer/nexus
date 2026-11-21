@@ -257,6 +257,59 @@ class Rdr229RestoreIdFillTest {
             DSL.field(DSL.name("superseded_by"), String.class).eq("")))).as("no live row takes a successor id").isZero();
     }
 
+    /**
+     * Code review F6: a quarantined chunk's metadata carries the origin collection by name and, since P3.1, by id
+     * ({@code QuarantineOrigin.ORIGIN_ID_KEY}, {@code origin_collection_id}). The id is the SOURCE installation's: a restore
+     * mints new ids, so a foreign one left in the jsonb names another collection or none. The load refills it from the restored
+     * registry row of the tag's name, or strips it when the name has no row (or the tag has none), and keeps every other key.
+     */
+    @Test
+    void aChunksOriginIdTagIsRefilledByNameOrStripped_neverLeftAsTheSourcesId() throws Exception {
+        ImportTestEnv.BackupFile file = fixture();
+        int metadataAt = file.columnIndex("chunks", "metadata");
+        int collectionAt = file.columnIndex("chunks", "collection");
+        List<BinaryCopyTestSupport.Row> chunkRows = allRows(file, "chunks");
+        assertThat(chunkRows.size()).as("non-vacuity: the fixture holds chunks").isGreaterThanOrEqualTo(3);
+        String origin = fieldText(chunkRows.get(0), collectionAt);
+        String[] tags = {
+            "{\"origin_collection\": \"" + origin + "\", \"origin_collection_id\": 9999991, \"keep\": \"yes\"}",
+            "{\"origin_collection\": \"ghost-origin-p31\", \"origin_collection_id\": 9999992, \"keep\": \"yes\"}",
+            "{\"origin_collection_id\": 9999993, \"keep\": \"yes\"}"};
+        int[] seen = {0};
+        ImportTestEnv.BackupFile tagged = editRows(file, "chunks", rows -> rows.stream().map(r -> {
+            int n = seen[0]++;
+            if (n >= tags.length) return r;
+            byte[] json = utf8(tags[n]);
+            byte[] jsonb = new byte[json.length + 1];
+            jsonb[0] = 1;   // the binary format of jsonb: a version byte, then the text
+            System.arraycopy(json, 0, jsonb, 1, json.length);
+            return withField(r, metadataAt, jsonb);
+        }).toList());
+
+        String tenant = "t-p31-fill-origin-tag";
+        JsonNode end = env.restore(env.newTenant(tenant), tagged);
+        assertThat(status(end)).as(end.toString()).isEqualTo("committed");
+
+        Field<org.jooq.JSONB> metadata = DSL.field(DSL.name("c", "metadata"), SQLDataType.JSONB);
+        Field<String> originId = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection_id"));
+        var chunks = DSL.table(DSL.name("nexus", "chunks")).as("c");
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
+            DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("keep")).eq("yes"))))
+            .as("non-vacuity: the three tagged rows restored, with every other key kept").isEqualTo(3);
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
+            originId.in("9999991", "9999992", "9999993"))))
+            .as("no row keeps the backup's foreign origin id").isZero();
+        // the tag whose name resolves is refilled with the restored registry row's id ...
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
+            DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection")).eq(origin),
+            originId.eq(CollectionIds.idOf(text("c", "tenant_id"), DSL.val(origin)).cast(SQLDataType.VARCHAR)))))
+            .as("the origin tag whose name resolves names the restored registry row's id").isEqualTo(1);
+        // ... and the one whose name has no registry row, or no name, carries no id at all
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
+            DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("keep")).eq("yes"),
+            originId.isNull()))).as("the unresolved and the nameless tags lose the id key").isEqualTo(2);
+    }
+
     @Test
     void aBackupTakenOnThisEngineRestoresWithEveryIdTheRestoredRegistryRowsAndNeverTheFiles() throws Exception {
         String source = "t-p31-fill-src";

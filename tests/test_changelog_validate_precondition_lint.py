@@ -544,12 +544,16 @@ class AnalysisResult:
 
 ALLOWLIST: tuple[tuple[str, str, str, str], ...] = (
     # RDR-229 P3.1 (nexus-p2m1x.17). vectors-068-19 adds the CHECK in its own first statement, so the constraint exists when its
-    # VALIDATE runs; the VALIDATE is guarded by a data predicate (no violating row), not by a pg_constraint lookup.
+    # VALIDATE runs; the VALIDATE is guarded by a data predicate (no violating row), not by a pg_constraint lookup. It is the ONLY
+    # boot-time VALIDATE this list exempts (every vectors-070-N row is data the engine runs after it serves), and the table it
+    # scans is the collection registry, which is small (171 rows on nexus, 42 on gate-xr789 at the P3.2 census), so the scan under
+    # the changeset's own lock is milliseconds. The VALIDATE also traps check_violation (a row the guard could not see, B3), so
+    # it can never fail the boot.
     # Every vectors-070-N row below is a VALIDATE inside the string literal of a data_moves.on_complete value: it is data
     # the engine runs after it serves, inside that value's own DO block guarded by pg_constraint conrelid and conname and by
     # "no orphan row", never at the boot walk (the changeset is one INSERT). The lint's guard shape cannot see a doubled-quote
     # literal, and each on_complete value is read back as data by CollectionIdStampMovesShapeTest.
-    ("vectors-068-19", "nexus.catalog_collections", "catalog_collections_superseded_by_id_check", "a data-predicate guard, constraint added in the same changeset"),
+    ("vectors-068-19", "nexus.catalog_collections", "catalog_collections_superseded_by_id_check", "a data-predicate guard, constraint added in the same changeset; the registry is small (171 rows on nexus at the P3.2 census) and this is the only boot-time VALIDATE exempted: every vectors-070-N row is an on_complete the engine runs after boot; the VALIDATE traps check_violation, so it never fails the boot"),
     ("vectors-070-1", "nexus.catalog_collections", "catalog_collections_superseded_by_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
     ("vectors-070-2", "nexus.catalog_documents", "catalog_documents_physical_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
     ("vectors-070-3", "nexus.chash_remap", "chash_remap_source_collection_id_check", "on_complete literal, guarded inside its own DO block, run by the engine after boot"),
@@ -1663,3 +1667,16 @@ def test_real_changelog_walks_all_files():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_the_vectors_068_19_exemption_says_why_it_is_safe_and_that_it_is_the_only_boot_time_one() -> None:
+    """Code review F10: the one boot-time VALIDATE the list exempts must carry its argument in the ledger itself: the table it
+    scans is small, and every other exempted VALIDATE (vectors-070-N) is an on_complete the engine runs after boot."""
+    boot_time = [row for row in ALLOWLIST if not row[0].startswith("vectors-070-")
+                 and row[0] == "vectors-068-19"]
+    assert len(boot_time) == 1
+    reason = boot_time[0][3]
+    assert "registry is small" in reason
+    assert "only boot-time VALIDATE" in reason
+    after_boot = [row for row in ALLOWLIST if row[0].startswith("vectors-070-")]
+    assert after_boot and all("after boot" in row[3] for row in after_boot)

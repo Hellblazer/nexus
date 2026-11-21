@@ -10541,10 +10541,16 @@ public final class CatalogRepository {
      * {@code owner_id}, so the BEFORE INSERT OR UPDATE OF owner_id trigger fires even though the value does not change;
      * it re-derives a replaceable owner from the row's documents, and catalog-051-2's guard now sees whatever tuple
      * has been freed since the documents arrived. A tumbler-shaped, curator or knowledge owner is left alone by the trigger.
+     *
+     * <p>RDR-229 P3.1 (code review F2): the write also keeps {@code superseded_by_id} ({@link CatalogIdStamps#keepSupersededId}),
+     * as every UPDATE of a registry row does. The target can have been retired (and not yet stamped) between a handler's live check
+     * and this write, and a NOT VALID {@code superseded_by_id} CHECK refuses an UPDATE of such a row that leaves the id NULL (23514),
+     * which aborted the whole supersede.
      */
     private static void rederiveOwner(DSLContext ctx, String tenant, String name) {
         ctx.update(CATALOG_COLLECTIONS)
            .set(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.OWNER_ID)
+           .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CatalogIdStamps.keepSupersededId())
            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
            .and(CATALOG_COLLECTIONS.NAME.eq(name))
            .execute();

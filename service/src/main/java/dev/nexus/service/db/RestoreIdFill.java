@@ -9,6 +9,7 @@ import dev.nexus.service.db.TenantImportStaging.Stage;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.Field;
+import org.jooq.JSONB;
 import org.jooq.Record2;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
@@ -61,6 +62,7 @@ final class RestoreIdFill {
     static final String ORPHAN_CODE = "restore_orphan_collection";
 
     private static final String REGISTRY = "catalog_collections";
+    private static final String CHUNKS = "chunks";
     private static final String LIST = "/db/rdr229/p31-checks.tsv";
 
     /** A name column and the id column beside it; {@code history}: a log table's label, with no CHECK. */
@@ -153,6 +155,27 @@ final class RestoreIdFill {
         }
         if (REGISTRY.equals(table.name())) drawRegistryIds(ctx, rows);
         fillByName(ctx, tenant, table, rows);
+        if (CHUNKS.equals(table.name())) refillOriginTag(ctx, tenant, rows);
+    }
+
+    /**
+     * A quarantined chunk's metadata tags its origin by name ({@code origin_collection}) and by id
+     * ({@link QuarantineOrigin#ORIGIN_ID_KEY}). The id is the backup's installation's; a restore mints new ids, so it is refilled
+     * the way the twins are: from the restored registry row of the tag's name, or stripped when that name has no registry row
+     * (or the tag has no name). Every other key of the metadata is kept. A row without the key is not written.
+     */
+    private static void refillOriginTag(DSLContext ctx, String tenant, Stage rows) {
+        if (!stageHasColumn(ctx, rows, "metadata")) return;
+        Field<JSONB> metadata = DSL.field(DSL.name("s", "metadata"), SQLDataType.JSONB);
+        Field<String> originName = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection"));
+        Field<Long> restored = CollectionIds.idOf(DSL.val(tenant), originName);
+        Field<JSONB> refilled = DSL.function("jsonb_set", SQLDataType.JSONB, metadata,
+            DSL.val(new String[] {QuarantineOrigin.ORIGIN_ID_KEY}), DSL.function("to_jsonb", SQLDataType.JSONB, restored));
+        Field<JSONB> stripped = DSL.function("jsonb_delete", SQLDataType.JSONB, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY));
+        ctx.update(TenantImportStaging.stageTable(rows).as("s"))
+            .set(DSL.field(DSL.name("metadata"), SQLDataType.JSONB), DSL.when(restored.isNotNull(), refilled).otherwise(stripped))
+            .where(DSL.function("jsonb_exists", SQLDataType.BOOLEAN, metadata, DSL.val(QuarantineOrigin.ORIGIN_ID_KEY)).isTrue())
+            .execute();
     }
 
     /** The step that follows {@code table}'s insert: after the registry, the tombstones' second pass. */
