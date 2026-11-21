@@ -383,7 +383,7 @@ for _site in LEDGER:
 #: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
 #: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
 #:
-#: P2.9 (nexus-p2m1x.14, 2026-11-20), re-measured on develop 303a22d29 (P2.7's 240): 240 -> 228. The 22 routing
+#: P2.9 (nexus-p2m1x.14, 2026-11-20), re-measured on develop b19ca8f28 (P2.7's 240): 240 -> 228. The 22 routing
 #: sites that now read the row's content_type left the ledger (const_prefix 14, loop_prefix 7, glob_default 1); the
 #: three ``taxonomy__`` name tests went routing -> migration-source (no row attribute identifies them; P2.2,
 #: nexus-p2m1x.7, moves them into legacy_names); ten callers of the shared NoRow derivation
