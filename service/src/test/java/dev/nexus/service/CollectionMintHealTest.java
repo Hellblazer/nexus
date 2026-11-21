@@ -333,6 +333,8 @@ class CollectionMintHealTest {
         // concurrent draw has to cross. A setval-based heal sets the sequence back past an id one of them has just drawn,
         // and the next draw repeats it, possibly in the other tenant: UNIQUE is (tenant_id, collection_id), so nothing else
         // refuses the repeat. Every id either side drew or was assigned must be distinct.
+        // Tenant B's load is 2000 rows because each heal call reads max(collection_id) over every tenant's rows, and
+        // catalog_collections is a few hundred rows in production, so a global max is cheap there.
         String other = "mint-heal-tenant-b";
         int heals = 100_000;
         var start = new CountDownLatch(1);
