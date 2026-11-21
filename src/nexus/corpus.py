@@ -2798,7 +2798,9 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
                 )
                 continue
             matches.append(c)
-        if matches:
+        # A read that failed partway left the later candidates unread: the partial set is not the answer, so
+        # the value resolves by its label below, as it does when the first read fails.
+        if matches and not rows_failed:
             return matches
 
     # Stage 3b: the label pattern. A match on the label the user typed (the

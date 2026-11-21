@@ -200,6 +200,22 @@ def test_a_failing_row_read_degrades_to_the_label_prefix(monkeypatch) -> None:
     assert len(calls) == 1
 
 
+def test_a_row_read_that_fails_partway_through_the_tuple_stage_falls_back_to_the_label(monkeypatch) -> None:
+    """A read that raises on the third candidate must not leave the tuple stage holding the first two: the whole
+    value resolves by its label, as a first-call failure does (confirmation round r2, both reviewers)."""
+    names = [f"knowledge__foo__m{i}__v1" for i in range(6)]
+    calls: list[str] = []
+
+    def flaky(n: str, **_kw) -> dict:
+        calls.append(n)
+        if len(calls) >= 3:
+            raise RuntimeError("t3 unreachable")
+        return _row("knowledge", "foo", n.split("__")[2])
+
+    monkeypatch.setattr(mi, "get_collection_row", flaky)
+    assert resolve_corpus("knowledge__foo", names) == names
+
+
 def test_a_value_that_names_a_row_but_no_tuple_matches_returns_empty(monkeypatch) -> None:
     rows = {"knowledge__foo__voyage-context-3__v1": _row("knowledge", "foo", "voyage-context-3")}
     _stub_rows(monkeypatch, rows)
