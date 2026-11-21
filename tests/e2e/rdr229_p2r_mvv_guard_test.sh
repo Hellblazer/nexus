@@ -38,7 +38,10 @@ fail_loud_and_exit() {
 
 [[ -f "$GATE" ]] || fail_loud_and_exit "tests/e2e/rdr229-p2r-mvv.sh does not exist"
 [[ -f "$REPORT" ]] || fail_loud_and_exit "tests/e2e/lib/rdr229_p2r_report.py does not exist"
-PY="$(command -v python3)" || fail_loud_and_exit "python3 is not on PATH"
+# shellcheck source=lib/python.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/python.sh"
+e2e_python_resolve || fail_loud_and_exit "no Python 3.10+ for the harness (e2e_python_resolve, stderr above)"
+PY="$E2E_PYTHON"
 
 # -- A throwaway repo that holds a copy of the gate, so REPO_ROOT resolves into it ------------------------------------
 make_repo() {  # <dir>
