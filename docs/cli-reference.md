@@ -4619,10 +4619,10 @@ This runs automatically on the first `nx` invocation after a version change
 "Engine convergence" check reports a pending engine convergence
 (long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
 `nx doctor` or this verb is the path there). On a local install with an extracted
-PostgreSQL bundle the pass also takes the pinned release's bundle when the engine changes, and, for an engine already
-at the pin, when the bundle has no pg_background and the run is attended and the engine idle (the unattended
-first-`nx`-after-upgrade pass only reports it; `nx upgrade` replaces it, and `nx doctor`'s `PostgreSQL bundle` row
-names it). See [nx upgrade](#nx-upgrade).
+PostgreSQL bundle the pass also takes the pinned release's bundle, when the engine changes or the bundle has no
+pg_background, but only in an attended run and with the engine idle: the swap restarts PostgreSQL, so the unattended
+first-`nx`-after-upgrade pass installs the engine and leaves the bundle, and `nx upgrade` replaces it (`nx doctor`'s
+`PostgreSQL bundle` row names it). See [nx upgrade](#nx-upgrade).
 
 ### nx daemon t2 — RETIRED
 
@@ -5393,11 +5393,14 @@ pinned release's bundle and swaps it in when the engine version changes, and whe
 pinned one but `~/.config/nexus/pg-bundle` has no `pg_background.control`. The bundle is downloaded and staged
 with the service running; the engine and the bundle are then replaced under one stop and one start of PostgreSQL
 and the storage service. The swap moves no data and keeps the PostgreSQL major version: one that would change it
-(read from the data directory's `PG_VERSION`) or drop pg_background is refused before anything stops. On a
-converged engine the swap restarts PostgreSQL, which stops an index build in flight, so it runs only in an
-attended `nx upgrade` and waits (saying so) while the engine reports boot work or an index build; `--auto`, an
-unattended lockstep run and an MCP start only report it, `--dry-run` lists it as pending, and `nx doctor` warns on
-a `PostgreSQL bundle` row while it holds. A download or extraction failure leaves the old bundle and the running
+(read from the data directory's `PG_VERSION`) or drop pg_background is refused before anything stops. The
+swap restarts PostgreSQL, which an engine replacement alone does not and which stops an index build in flight, so
+it runs only in an attended `nx upgrade` and only while the engine is idle (no boot work except a data move that is
+only blocked, failed or paused, and no index build or vacuum). On an engine change an unattended run or a busy
+engine still installs the engine and leaves the bundle for the next attended run; on a converged engine it waits and
+says so, naming `nx daemon service install-binary <tag>` as the explicit route. `--auto`, an unattended lockstep run
+and an MCP start only report it, `--dry-run` lists it as pending, and `nx doctor` warns on a `PostgreSQL bundle` row
+while it holds. A download or extraction failure leaves the old bundle and the running
 stack, and the next `nx upgrade` tries again. An install on its own PostgreSQL has no extracted bundle and cloud
 mode has no local one; neither is touched.
 
