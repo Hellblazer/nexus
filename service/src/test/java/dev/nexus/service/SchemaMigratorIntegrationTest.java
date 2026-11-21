@@ -2181,8 +2181,13 @@ class SchemaMigratorIntegrationTest {
                     .as("nexus-jl08t: listUnrunChangeSets() before the walk counts "
                         + "the 5 genuinely-pending changesets PLUS the full "
                         + "runAlways set (always considered unrun regardless of "
-                        + "prior execution) -- 5 + 13 = 18 on today's changelog (17 on the v0.1.118 walk)")
-                    .isEqualTo(5L + runAlwaysIds.size());
+                        + "prior execution), PLUS a self-retrying (onFail=CONTINUE) changeset still waiting "
+                        + "(collections-001-2, RDR-229 P3.8: never recorded, so unrun at every start) -- "
+                        + "5 + 13 + 1 = 19 on today's changelog (17 on the v0.1.118 walk)")
+                    .isEqualTo(5L + runAlwaysIds.size() + outcome.skippedRetryingChangesets());
+                assertThat(outcome.skippedRetryingChangesets())
+                    .as("the waiting collections-001-2 is the one skipped self-retrying changeset")
+                    .isEqualTo(1L);
 
                 // ── Assert: every runAlways row's dateexecuted actually moved
                 // during this walk (sanity check the seeded duplicates are
