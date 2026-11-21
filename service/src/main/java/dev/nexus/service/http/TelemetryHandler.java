@@ -1605,7 +1605,9 @@ public final class TelemetryHandler implements HttpHandler {
     }
 
     private Map<String, String> queryParams(HttpExchange ex) {
-        String query = ex.getRequestURI().getQuery();
+        // The RAW query, decoded once per key and value: getQuery() already percent-decodes, so a second URLDecoder
+        // pass turned a label's '%', '+' or an encoded '&' into something else (RDR-229 P3.6 review I1).
+        String query = ex.getRequestURI().getRawQuery();
         if (query == null || query.isBlank()) return Map.of();
         var map = new java.util.HashMap<String, String>();
         for (String pair : query.split("&")) {
