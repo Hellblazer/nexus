@@ -59,6 +59,20 @@
     running per-collection index build through it. No statement in this file asks for ACCESS EXCLUSIVE
     (CollectionTupleUniqueIndexLiquibaseTest holds ACCESS SHARE on the registry for a whole walk and requires it to finish).
 
+    WHEN THE INDEX CAN APPEAR. The index is built by this changeset, and a changeset runs only in a Liquibase walk. The nexus
+    changelog is walked in one place, SchemaMigrator.migrate, whose one caller in the engine is Main.java:285
+    (SchemaMigrator.migrate(migrationDs, dmlUtilsInstaller)); the HTTP service starts at Main.java:620 (service.start()), so
+    the walk, and with it this changeset, finishes before any request is served, and the data-move worker (Main.java:681,
+    after service.start()) never walks the nexus changelog: DmlUtilsInstaller.walk (DmlUtilsInstaller.java:297) walks only the
+    vendored db/vendor/<library> changelogs. A second engine cannot walk while one serves, because the singleton advisory lock
+    is taken before the walk (Main.java:265, EngineSingletonLock). So with the lock held a mint never sees the index appear
+    between its probe and its insert. Two cases are outside that: NX_ENGINE_SINGLETON_LOCK=off or a transaction-mode pooler
+    (the lock is skipped, EngineSingletonLock.Mode.POOLED_SKIP), where a second engine's boot can build the index while the
+    first serves, and an operator who builds an index of this name by hand. The mint covers both: its plain insert runs under
+    a savepoint, and a unique violation on this index is a lost race (CollectionMint.mint): it answers the winner's row, or a
+    named 409 that says to try again, never a bare 23505. The same savepoint makes an index of this name that the mint's
+    ON CONFLICT cannot be inferred onto (42P10) take the advisory-lock path.
+
     DATA EFFECT: none. collections-001-1 creates a function and no row is read or written by a changeset; collections-001-2
     builds an index and writes no row.
 
