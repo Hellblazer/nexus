@@ -898,10 +898,9 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                 .sorted().toList();
             // RDR-225 adds create_tenant_partitions: nexus_svc calls it for a tenant that has no service token
             // yet, and it must create the tenant's partitions as their owner.
-            // RDR-229 P3.8 (collections-002): collection_id_seq_heal and collection_id_taken are definer on purpose. The collection_id
-            // sequence and every tenant's collection_id are read across tenants (nexus_svc, FORCE RLS, sees one), and nexus_svc holds
-            // no UPDATE on the shared sequence. Each answers one number or one boolean, search_path is pinned to pg_catalog, pg_temp,
-            // EXECUTE is revoked from PUBLIC and granted to nexus_svc only, and neither writes a table.
+            // RDR-229 P3.8 (collections-002): collection_id_seq_heal and collection_id_taken are definer on purpose: they read every tenant's
+            // collection_id (nexus_svc sees one under FORCE RLS) and the heal advances the shared sequence (nextval only), which nexus_svc
+            // cannot. Each answers a number or a boolean, search_path is pinned, EXECUTE is nexus_svc's only, and neither writes a table.
             assertThat(definers).containsExactly(
                 "collection_id_seq_heal", "collection_id_taken", "create_tenant_partitions", "ensure_vector_extensions_relocated", "ensure_vector_extensions_unrelocated",
                 "text_gate_probe_1024", "text_gate_probe_384", "text_gate_probe_768",
