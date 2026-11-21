@@ -33,6 +33,10 @@
     for_tuple and the predicate of the partial UNIQUE index (tenant_id, content_type, owner_id, embedding_model,
     model_version) WHERE superseded_by = '' AND lifecycle_state <> 'quarantine' that Sam ruled for P3.8 (T2
     nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21, Q1), so a dormant or disputed holder holds its tuple like a live one.
+    The version compared is the STORED one. A row whose D2 repair (vectors-064) is still pending ('') therefore looks free
+    beside a native v1 twin of the owner its documents name; reading the name's trailing __vN here, as vectors-067 does, would
+    add name-parsing sites to two live bodies, which RDR-229 item 4's census (CollectionNameSqlLiveBodyGateTest, ceiling 0)
+    forbids, so the re-own move skips such a row (vectors-067) and D2's repair, not this guard, closes the gap.
     The rule applies to code, docs and rdr collections only (a quarantine row carries a quarantine-* content_type and is
     outside it). Without the index the rewrite creates a silent duplicate; with it the rewrite raises a bare 23505 from
     inside document registration. So both trigger functions now skip the rewrite when the owner they would write lands a
@@ -50,8 +54,8 @@
     collection row locks and then waits on the tuple lock can in principle deadlock with one that holds the tuple lock
     and waits for one of those rows. Which paths survive that is a fact about the caller, not about this changeset: the
     deadlock victim gets 40P01, and DeadlockRetry (CatalogRepository.manifestWriteTxn) re-runs the transaction only on
-    the paths that go through it: deleteCollection, renameCollection, rehomeCollection, the manifest writes and the
-    chunk imports. A plain document registration (upsertDocument, registerDocument), upsertCollection and
+    the paths that go through it: deleteCollection, renameCollection, rehomeCollection, purgeTrash, purgeManifest, the manifest
+    writes and the chunk imports. A plain document registration (upsertDocument, registerDocument), upsertCollection and
     supersedeCollection are not wrapped, so a victim there surfaces as the 40P01 error to its caller; the data move
     worker classifies 40P01 as transient and retries the chunk (DataMoveFailureClassifier).
     A document registration touches one collection, so the trigger takes one tuple lock in it and cannot deadlock

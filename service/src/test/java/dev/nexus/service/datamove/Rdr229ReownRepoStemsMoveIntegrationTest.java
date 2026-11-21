@@ -875,43 +875,49 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         return keys;
     }
 
+    /** The six tuples (code, docs, rdr) x (1-41, 1-42) that two repo stems of the tenant move onto, in the move's models. */
+    private List<CollectionTupleLock.Tuple> sixDestinationTuples() {
+        List<CollectionTupleLock.Tuple> tuples = new ArrayList<>();
+        for (String owner : new String[] {"1-42", "1-41"}) {                    // not in ascending order on purpose
+            tuples.add(new CollectionTupleLock.Tuple(T, "rdr", owner, "voyage-context-3", "v1"));
+            tuples.add(new CollectionTupleLock.Tuple(T, "docs", owner, "voyage-context-3", "v1"));
+            tuples.add(new CollectionTupleLock.Tuple(T, "code", owner, "voyage-code-3", "v1"));
+        }
+        return tuples;
+    }
+
     /**
-     * A Java holder of the HIGHER of the move's two destination-tuple keys (the one CollectionTupleLock.lock would take
-     * last) makes the move's chunk wait; while it waits, the move already holds the LOWER key and not the higher: the
-     * tuple locks are taken in ascending key order. Released, the move completes.
+     * Six destination tuples, one chunk, a Java holder of the key that is fourth in ascending order: the move's chunk waits on
+     * exactly that key and, while it waits, holds exactly the three lower keys and none of the three higher ones. With three or
+     * more keys, given here in no sorted order, an unordered lock sequence (ORDER BY dropped from tk) cannot pass by luck.
+     * Released, the move completes.
      */
     @Test
     void theMoveTakesTheDestinationTupleLocksInAscendingOrder_andWaitsForAJavaHolderOfOne() throws Exception {
         gateXr789(T);
+        collection(T, "rdr__arcaneum-2ad2825c__voyage-context-3__v1", "1-40");
+        collection(T, "code__beta-deadbeef__voyage-code-3__v1", "1-40");
+        collection(T, "docs__beta-deadbeef__voyage-context-3__v1", "1-40");
+        collection(T, "rdr__beta-deadbeef__voyage-context-3__v1", "1-40");
         register();
-        var codeTuple = new CollectionTupleLock.Tuple(T, "code", "1-41", "voyage-code-3", "v1");
-        var docsTuple = new CollectionTupleLock.Tuple(T, "docs", "1-41", "voyage-context-3", "v1");
-        long codeKey = CollectionTupleLock.key(ctx(), codeTuple);
-        long docsKey = CollectionTupleLock.key(ctx(), docsTuple);
-        assertThat(codeKey).isNotEqualTo(docsKey);
-        var high = codeKey > docsKey ? codeTuple : docsTuple;
-        long highKey = Math.max(codeKey, docsKey);
-        long lowKey = Math.min(codeKey, docsKey);
-        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher());
+        var tuples = sixDestinationTuples();
+        var byKey = new TreeMap<Long, CollectionTupleLock.Tuple>();
+        tuples.forEach(t -> byKey.put(CollectionTupleLock.key(ctx(), t), t));
+        assertThat(byKey).as("six distinct keys").hasSize(6);
+        var sorted = new ArrayList<>(byKey.keySet());
+        long holderKey = sorted.get(3);
+        var held = new TreeSet<>(sorted.subList(0, 3));
+        var worker = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher());
         CompletableFuture<Integer> cycle;
         try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
             holder.setAutoCommit(false);
-            CollectionTupleLock.lockTuple(DSL.using(holder, SQLDialect.POSTGRES), high);
-            cycle = async(w::runCycle);
-
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
-            long[] waiting = null;
-            while (waiting == null && System.nanoTime() < deadline) {
-                assertThat(cycle.isDone()).as("the move must wait for the tuple lock, not finish").isFalse();
-                waiting = waitingAdvisoryLock();
-                if (waiting == null) {
-                    Thread.sleep(50);
-                }
-            }
-            assertThat(waiting).as("the move's chunk is waiting on an advisory lock").isNotNull();
-            assertThat(waiting[0]).as("it waits for the holder's tuple key, the higher one").isEqualTo(highKey);
-            assertThat(grantedAdvisoryKeys((int) waiting[1])).as("having taken the lower key first, and not the higher")
-                .contains(lowKey).doesNotContain(highKey);
+            CollectionTupleLock.lockTuple(DSL.using(holder, SQLDialect.POSTGRES), byKey.get(holderKey));
+            cycle = async(worker::runCycle);
+            long[] waiting = awaitWaitingAdvisoryLock(cycle);
+            assertThat(waiting[0]).as("it waits for the holder's tuple key, the fourth in ascending order").isEqualTo(holderKey);
+            var heldNow = new TreeSet<>(grantedAdvisoryKeys((int) waiting[1]));
+            heldNow.retainAll(byKey.keySet());
+            assertThat(heldNow).as("it already holds the three lower keys, and none of the higher ones").isEqualTo(held);
             assertThat(completedAt(LABEL)).isNull();
             assertThat(ownerOf(T, ARC_CODE)).as("nothing moved while the lock was held").isEqualTo("1-40");
             holder.rollback();
@@ -920,7 +926,89 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
         runToCompletion();
         assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-41");
-        assertThat(ownerOf(T, ARC_DOCS)).isEqualTo("1-41");
+        assertThat(ownerOf(T, "code__beta-deadbeef__voyage-code-3__v1")).isEqualTo("1-42");
+    }
+
+    /** Waits for the cycle to block on an advisory lock; returns the key and the waiting backend's pid. */
+    private long[] awaitWaitingAdvisoryLock(CompletableFuture<Integer> cycle) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+        long[] waiting = null;
+        while (waiting == null && System.nanoTime() < deadline) {
+            assertThat(cycle.isDone()).as("the move must wait for the tuple lock, not finish").isFalse();
+            waiting = waitingAdvisoryLock();
+            if (waiting == null) {
+                Thread.sleep(50);
+            }
+        }
+        assertThat(waiting).as("the move's chunk is waiting on an advisory lock").isNotNull();
+        return waiting;
+    }
+
+    /**
+     * Twelve repo stems, chunk_size 2: a chunk locks only the destination tuples of its own rows, never the tenant's. A Java
+     * holder takes the tuple of the first chunk's two rows whose key is higher, and that key is higher than every one of the other
+     * ten tenant keys (the owner numbering is chosen so, below): an unscoped template would already hold all ten when it blocked.
+     * Observed from a second connection in pg_locks: the blocked chunk holds exactly the other tuple of its own two rows.
+     */
+    @Test
+    void aChunkLocksOnlyItsOwnRowsDestinationTuples_notTheTenantsTwelve() throws Exception {
+        // the move mints 1-<base+1> .. 1-<base+12> in stem order; pick the base whose first two keys' maximum beats the other ten
+        int base = -1;
+        for (int b = 40; b < 1000 && base < 0; b++) {
+            long[] k = new long[12];
+            for (int i = 0; i < 12; i++) {
+                k[i] = CollectionTupleLock.key(ctx(), codeTuple("1-" + (b + 1 + i)));
+            }
+            long chunkMax = Math.max(k[0], k[1]);
+            long others = Long.MIN_VALUE;
+            for (int i = 2; i < 12; i++) {
+                others = Math.max(others, k[i]);
+            }
+            if (chunkMax > others) {
+                base = b;
+            }
+        }
+        assertThat(base).as("a base whose first chunk holds the highest key was found").isPositive();
+        owner(T, "1." + base, "knowledge", "curator", null);
+        var all = new TreeSet<Long>();
+        for (int i = 1; i <= 12; i++) {
+            collection(T, String.format("code__s%02d-%08x__voyage-code-3__v1", i, i), "1-" + base);
+            all.add(CollectionTupleLock.key(ctx(), codeTuple("1-" + (base + i))));
+        }
+        assertThat(all).hasSize(12);
+        register();
+        ctx().update(table("nexus", "data_moves")).set(DSL.field(DSL.name("chunk_size"), Integer.class), 2)
+            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).execute();
+        long firstA = CollectionTupleLock.key(ctx(), codeTuple("1-" + (base + 1)));
+        long firstB = CollectionTupleLock.key(ctx(), codeTuple("1-" + (base + 2)));
+        long holderKey = Math.max(firstA, firstB);
+        long ownLower = Math.min(firstA, firstB);
+        var holderTuple = firstA > firstB ? codeTuple("1-" + (base + 1)) : codeTuple("1-" + (base + 2));
+        var worker = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher());
+        CompletableFuture<Integer> cycle;
+        try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
+            holder.setAutoCommit(false);
+            CollectionTupleLock.lockTuple(DSL.using(holder, SQLDialect.POSTGRES), holderTuple);
+            cycle = async(worker::runCycle);
+            long[] waiting = awaitWaitingAdvisoryLock(cycle);
+            assertThat(waiting[0]).isEqualTo(holderKey);
+            var heldNow = new TreeSet<>(grantedAdvisoryKeys((int) waiting[1]));
+            heldNow.retainAll(all);
+            assertThat(heldNow).as("the blocked chunk holds its own other tuple and not the tenant's ten others")
+                .containsExactly(ownLower);
+            holder.rollback();
+        }
+        cycle.get(2, TimeUnit.MINUTES);
+
+        runToCompletion();
+        assertThat(progress(LABEL).total()).as("non-vacuity: chunks of two rows").isGreaterThanOrEqualTo(6);
+        for (int i = 1; i <= 12; i++) {
+            assertThat(ownerOf(T, String.format("code__s%02d-%08x__voyage-code-3__v1", i, i))).isEqualTo("1-" + (base + i));
+        }
+    }
+
+    private CollectionTupleLock.Tuple codeTuple(String owner) {
+        return new CollectionTupleLock.Tuple(T, "code", owner, "voyage-code-3", "v1");
     }
 
     // ── the owner-registration lock ─────────────────────────────────────────────────────────────────────────

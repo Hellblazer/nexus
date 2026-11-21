@@ -18,7 +18,10 @@
     move is registered, in any state. Each policy is FOR SELECT TO CURRENT_USER USING (true), permissive beside tenant_isolation:
     the migrating role reads every tenant's rows and still writes only the rows of the tenant its session carries. Skipped whole
     (MARK_RAN) where nexus_svc, or another login role that row-level security binds, is or inherits the migrating role (the
-    single-role posture): the move is then registered and blocked, as the pattern says. DDL only, no row DML. Numbered inside
+    single-role posture): the move is then registered and blocked, as the pattern says. DDL only, no row DML. LOCK TIMEOUT, as in
+    vectors-065: CREATE POLICY and DROP POLICY take a lock on the table that waits behind any open transaction on it, and a boot
+    walk that waits forever is a boot that does not serve, so each changeset runs under SET LOCAL lock_timeout = '5s' (not DDL, so
+    no ceiling change); catalog_owners and gc_audit are written on every registration and every sweep. Numbered inside
     the vectors-067 family on purpose, so it takes no vectors-06x number a concurrent branch may have reserved. After the
     registering include, before catalog-049, ahead of the grants-nexus-svc.xml runAlways block.
 -->
@@ -34,6 +37,7 @@
         </preConditions>
         <comment>Owner-read SELECT policy catalog_owners_owner_read on nexus.catalog_owners for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
         <sql splitStatements="false" stripComments="false">
+SET LOCAL lock_timeout = '5s';
 DROP POLICY IF EXISTS catalog_owners_owner_read ON nexus.catalog_owners;
 CREATE POLICY catalog_owners_owner_read ON nexus.catalog_owners
     FOR SELECT TO CURRENT_USER USING (true);
@@ -72,6 +76,7 @@ $post$;
         </preConditions>
         <comment>Owner-read SELECT policy gc_audit_owner_read on nexus.gc_audit for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
         <sql splitStatements="false" stripComments="false">
+SET LOCAL lock_timeout = '5s';
 DROP POLICY IF EXISTS gc_audit_owner_read ON nexus.gc_audit;
 CREATE POLICY gc_audit_owner_read ON nexus.gc_audit
     FOR SELECT TO CURRENT_USER USING (true);
