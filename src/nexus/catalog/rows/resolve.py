@@ -66,13 +66,14 @@ class NoRow:
 
 @dataclass(frozen=True)
 class Unreadable:
-    """The read failed (``reason="listing"``) or the row's version cannot be read (``"model_version"``).
+    """The read failed (``reason="listing"``), the row's version cannot be read (``"model_version"``), or
+    the row carries no embedding model when one was asked for (``"embedding_model"``).
 
     *cause* is the exception that failed the read; a caller that raises on it chains it.
     """
 
     ref: str | int
-    reason: Literal["listing", "model_version"]
+    reason: Literal["listing", "model_version", "embedding_model"]
     cause: BaseException | None = None
 
 

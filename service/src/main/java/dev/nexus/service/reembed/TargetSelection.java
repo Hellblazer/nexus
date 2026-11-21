@@ -164,8 +164,10 @@ public final class TargetSelection {
     }
 
     /**
-     * The other live collections on the source's lookup tuple (content type, owner, embedding model), by name:
-     * {@code lifecycle_state} live and not superseded, the source's own row excluded. The tuple is not unique in the
+     * The other collections that hold the source's lookup tuple (content type, owner, embedding model), by name: not
+     * superseded and {@code lifecycle_state} not {@code quarantine}, the source's own row excluded. That is the one
+     * "held" predicate RDR-229 uses everywhere (P3.8's partial UNIQUE, T2 nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21,
+     * and catalog-051-2 and vectors-067), so a dormant or disputed holder counts. The tuple is not unique in the
      * registry (two sources that share a curator owner hold two rows on it), and the target is chosen by the tuple,
      * so a second source would be moved into the first source's target (nexus-p2m1x.28).
      */
@@ -176,7 +178,7 @@ public final class TargetSelection {
             .filter(r -> contentType.equals(r.contentType()))
             .filter(r -> ownerId.equals(r.ownerId()))
             .filter(r -> embeddingModel.equals(r.embeddingModel()))
-            .filter(r -> "live".equals(r.lifecycleState()) && !r.superseded())
+            .filter(r -> !"quarantine".equals(r.lifecycleState()) && !r.superseded())
             .map(CollectionRow::name)
             .sorted()
             .toList();

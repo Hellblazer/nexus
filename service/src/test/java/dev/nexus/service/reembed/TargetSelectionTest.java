@@ -330,9 +330,12 @@ class TargetSelectionTest {
         var otherOwner = new CollectionRow("docs__o__voyage-context-3__v1", CT, "1-8", "voyage-context-3", "v1",
             false, "", "live");
         var otherModel = new CollectionRow("docs__m__bge__v1", CT, OWNER, MODEL, "v1", false, "", "live");
+        // The one held predicate (not superseded, not quarantine): a dormant holder is a mate too.
+        var dormant = new CollectionRow("docs__d__voyage-context-3__v1", CT, OWNER, "voyage-context-3", "v1",
+            false, "", "dormant");
         assertThat(TargetSelection.tupleMates(
-            List.of(sourceRow(SOURCE, "v1"), mate, superseded, quarantined, otherOwner, otherModel), SOURCE, CT,
-            OWNER, "voyage-context-3")).containsExactly(mate.name());
+            List.of(sourceRow(SOURCE, "v1"), mate, superseded, quarantined, otherOwner, otherModel, dormant), SOURCE,
+            CT, OWNER, "voyage-context-3")).containsExactly(dormant.name(), mate.name());
     }
 
     private static final String VC3 = "voyage-context-3";
