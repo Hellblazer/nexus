@@ -1801,7 +1801,7 @@ class CatalogRepositoryTest {
         repo.upsertCollection(TENANT_A, Map.of(
             "name", "code__nexus__voyage-code-3__v1",
             "content_type", "code",
-            "owner_id", "nexus-1-1",
+            "owner_id", "upsertget-p38",
             "embedding_model", "voyage-code-3",
             "model_version", "v1"
         ));
@@ -1848,14 +1848,14 @@ class CatalogRepositoryTest {
     void collection_upsert_onConflict_keepsRegisteredOwnerId() {
         String name = "code__dbgslug-2ad2825c__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", name, "content_type", "code", "owner_id", "1-1",
+            "name", name, "content_type", "code", "owner_id", "keepowner-p38",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         // What ensure_collection_registered sends on a cache miss: the name's owner segment.
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code", "owner_id", "dbgslug-2ad2825c",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
-            .as("a re-registration never replaces a registered owner_id").isEqualTo("1-1");
+            .as("a re-registration never replaces a registered owner_id").isEqualTo("keepowner-p38");
     }
 
     /**

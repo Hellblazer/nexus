@@ -212,6 +212,9 @@ class CollectionMintHealTest {
     void aSecondTakenIdAfterTheHealIsRefusedAsSequenceBehindData() {
         // The sequence cycles over [1, max]: after the heal (setval to max) the next draw wraps to 1, which is a row too.
         su(ctx -> {
+            // the cycle spans the largest id of every tenant, and a heal only knows its own tenant's: the other tenant of the
+            // test above goes, so this tenant's largest id is the sequence's largest
+            ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.ne(TENANT)).execute();
             CollectionMintSupport.cycleOverTheRows(ctx, TENANT, "cycle-anchor", MODEL);
             return null;
         });
