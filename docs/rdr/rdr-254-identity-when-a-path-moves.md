@@ -210,7 +210,7 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
   (`catalog_owners_unique_name_type`, `catalog-001-baseline.xml:47`), and its
   repo hash is unique among non-blank hashes (`:51`). A repo owner is
   registered at four sites. `ensure_owner_for_repo`
-  (`http_catalog_client.py:885`) is called by `nx index repo` for a path not yet
+  (`http_catalog_client.py:851`) is called by `nx index repo` for a path not yet
   in the local registry (`commands/index.py:107`, `:1145`; errors swallowed),
   on a docs-collection update (`:125`), and by an in-repo `nx index md` or `rdr`
   (`doc_indexer.py:982`; a PDF keeps its curator owner, `:933`). It looks the owner up by repo hash
@@ -218,10 +218,10 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
   engine then matches that name first (`resolveOwnerAddress`), which is where a
   second clone takes the first clone's owner over (Gap 4) and a same-name move
   re-roots the owner row (Gap 3). The indexer's own lookup
-  (`indexer.py:1388`) registers on a miss with `register_owner`
-  (`:1397-1403`), which a registered path whose owner is missing reaches, and
-  `commands/catalog.py:1427` does the same from the registry loop. Both send the
-  base name, so both take a same-name owner over the same way.
+  (`indexer.py:1422`) registers on a miss with `register_owner`
+  (`:1433-1439`), which a registered path whose owner is missing reaches, and
+  `commands/catalog.py:1430` does the same from the registry loop. Both sent the
+  base name before Phase 4, so both took a same-name owner over the same way.
 - **Verified** (source): an aspect row's `source_path` is the catalog
   `file_path` the document was registered with (`_canonicalize_source_path`,
   `aspect_worker.py:1368`; the indexer passes it at `indexer.py:6417`). For a
@@ -552,10 +552,10 @@ documented command repairs it at any time.
 
 #### A second live clone (Gap 4)
 
-The rule lives in one client function that every repo owner registration
-calls before its upsert: `ensure_owner_for_repo` (`http_catalog_client.py:885`)
-and the two direct `register_owner` sites (`indexer.py:1397`,
-`commands/catalog.py:1427`) all call it. The direct sites are not replaced by
+The rule lives in one client function that the repo owner registrations
+call before their upsert: `ensure_owner_for_repo` (`http_catalog_client.py:851`)
+and the two direct `register_owner` sites (`indexer.py:1433`,
+`commands/catalog.py:1430`) all call it. The direct sites are not replaced by
 `ensure_owner_for_repo`, because they carry an explicit repo hash and name
 (tests pass a fixed hash, and `commands/catalog.py` hashes the registry path
 without main-repository resolution); they keep their own arguments and pass
@@ -565,21 +565,36 @@ On an `owner_for_repo` miss, before the upsert, `ensure_owner_for_repo` looks
 up an owner with the same name and owner type (`/owners/by_name`). If one
 exists and its recorded `repo_root` is a git work tree on this machine that is
 not the same directory as this repository (`os.path.samefile`, so a symlinked
-or differently cased path to the same clone is not split), the client
+path to the same clone is not split, and a differently cased one is only on a
+case-insensitive filesystem; some Windows network shares report an `st_ino` of
+0, which would make `samefile` call two directories one), the client
 registers this repository as `<folder>-<repo hash>`. The engine sees a new name
 and a new hash and creates a new owner. If the recorded root cannot be read (a
-permission error), the client also registers a separate owner: a wrong split
+permission error, and only that: any other error reading a root another
+machine recorded, such as `EINVAL` for a path this OS rejects, means the root
+is not a live work tree here), the client also registers a separate owner: a wrong split
 costs one duplicate index, a wrong takeover costs the first clone its owner.
-If the root is gone, registration proceeds as today and the Gap 3 hint picks
-the case up at the end of the run.
+A root that cannot be shown to differ from this repository's own (this run's
+root does not exist) splits too. If the root is gone, registration proceeds as
+today and the Gap 3 hint picks the case up at the end of the run. If
+`<folder>-<repo hash>` is already the name of a repo owner with another hash (an
+owner move keeps the name and changes the hash), the suffix is the full
+SHA-256 of the root, so the engine's name-first match cannot converge on that
+owner. Each split logs `event=repo_owner_split` with the name, the candidate
+and the other root.
 
 The engine's name-first match (`resolveOwnerAddress`) is unchanged, so the
 engine characterization test for Gap 4 stays true; the client stops sending
-the name that triggers it. Owners two clones already share are not split after
-the fact: their documents keep the mixed roots they have. The Gap 3 hint
-reports them; there the remedy is the user's call, not necessarily a move.
-A clone whose hash the shared owner no longer carries gets its own owner on
-its next registration.
+the name that triggers it. An owner two clones already share is not split: its
+documents keep the mixed roots they have, and the Gap 3 hint reports them;
+there the remedy is the user's call, not necessarily a move. The clone whose
+hash the shared owner no longer carries (the owner holds the hash and root of
+the clone that registered last) misses `owner_for_repo` on its next
+registration, finds the other clone live, and registers
+`<folder>-<repo hash>`: a new owner and a new collection, so one full
+re-registration and re-embed of that clone (Voyage cost in cloud mode). The
+shared owner is left as it is
+(`tests/commands/test_index_repo_second_clone.py` pins it over a mock engine).
 
 ## Alternatives Considered
 
@@ -701,9 +716,21 @@ from a deleted file, so the same probe is used only to print a hint.
 ### Risks
 
 - The second clone's owner is named `<folder>-<repo hash>`, and readers that
-  derive from the owner name see that name: the RDR lifecycle project
-  (`<owner name>_rdr`, `plans/lifecycle_stream.py`) and the owner-name scope
-  (`catalog/owner_scope.py`). The first clone keeps the plain name.
+  derive from the owner name see that name: the owner-name scope
+  (`catalog/owner_scope.py`). The first clone keeps the plain name. The RDR
+  lifecycle project (`plans/lifecycle_stream.py`) no longer does: it is
+  `<basename of the owner's recorded root>_rdr`, which is what the RDR tooling
+  writes, and the owner's name only when the owner records no root.
+- Two clones registering their first owner at the same moment can both claim
+  the plain name. The lookup and the upsert are two requests, and the engine
+  converges both upserts on one owner by name, so the later write overwrites
+  its hash and root once (the Gap 4 bug, once). The loser misses
+  `owner_for_repo` on its next run, finds the other clone live and splits itself
+  to `<folder>-<repo hash>`, leaving its first-run documents under the shared
+  owner: the case heals, with one full re-registration of the loser. A full
+  close needs an engine-side refusal of a by-name upsert that would change an
+  existing owner's non-blank hash and root. That refusal is not built; it is the
+  named residual of Gap 4.
 - A large owner move is one transaction of an estimated 15,000 to 20,000 row writes,
   holding row locks on two owners' documents for seconds. An index run on
   either owner at the same time waits for it or fails on a conflict and is run
@@ -732,8 +759,14 @@ from a deleted file, so the same probe is used only to print a hint.
 - The root probe that splits a second clone cannot tell an unmounted volume
   from a deleted folder. A first clone on an unmounted disk reads as gone, so
   the second clone takes the owner over, as it does today, and the run prints
-  the Gap 3 hint. The probe fails toward a separate owner only where it can:
-  a root it cannot read counts as present.
+  the Gap 3 hint. The same holds for a root recorded by another machine and a
+  container path: they read as gone here, so those tenants keep today's
+  single-owner behaviour, and one tenant indexed from several machines keeps
+  flipping the owner between them. After a remount the roles can reverse: the
+  clone that took the owner over is now the one whose root is live, and the
+  first clone, indexing again, becomes `<folder>-<repo hash>`. The probe fails
+  toward a separate owner only where it can: a root it cannot read (a
+  permission error) counts as present.
 - A hint can name the wrong old row or owner (a file deleted on purpose whose
   bytes match the new file, an owner whose root is on another machine). Nothing
   acts on a hint, and the line a hint prints is the dry run, which shows what
@@ -867,7 +900,7 @@ In `ensure_owner_for_repo`, on an `owner_for_repo` miss, register under
 `<folder>-<repo hash>` when a same-name owner's root is another live git work
 tree (not `os.path.samefile` with this one) or cannot be read. Factor the rule
 into one function that `ensure_owner_for_repo` and the two direct repo
-`register_owner` sites (`indexer.py:1397`, `commands/catalog.py:1427`) call
+`register_owner` sites (`indexer.py:1433`, `commands/catalog.py:1430`) call
 with their own name, hash and root, so the explicit-hash callers and tests keep
 their arguments. CLI-level tests through `nx index repo`: two live clones give two
 owners and neither takes the other over; a symlinked path to the same clone is
@@ -881,12 +914,34 @@ the client already has, and looks only at owners of type `repo` whose hash is
 not this repository's. A recorded root counts as a live other clone when
 `<root>/.git` can be read and the root is not `os.path.samefile` with this
 repository; an owner with no root, a root that is gone, and a root that is no
-longer a work tree keep the plain name; a permission error splits. A call that
-passes an explicit `tumbler_prefix` (an ETL migration) is not renamed. The
-two-clone, symlink and gone-root cases run through `nx index repo` over a mock
-engine that imitates the engine's name-first matching
-(`tests/commands/test_index_repo_second_clone.py`) and against the real engine
-(`tests/integration/test_second_clone_real_engine.py`).
+longer a work tree keep the plain name; a permission error splits, and any
+other error reading the recorded root does not. A repo root that does not exist
+splits. A suffix another repo owner already holds grows to the full SHA-256 of
+the root, and each split logs `event=repo_owner_split`. A call that
+passes an explicit `tumbler_prefix` (an ETL migration) is not renamed.
+
+What each test file covers:
+
+- `tests/catalog/test_repo_owner_name.py`: the rule alone, over a duck catalog
+  and real directories (live other clone, symlink both ways, gone root,
+  unreadable root, a root that raises `EINVAL`, a missing repo root, other
+  owner type, no root, no `.git`, `.git` as a file, the taken suffix, the log
+  line, an engine error from the lookup).
+- `tests/commands/test_index_repo_second_clone.py`: `nx index repo` (its own
+  indexing stubbed) over a mock engine that imitates the engine's name-first
+  matching: two clones and reruns, the first clone's plain name, a symlinked
+  path, a gone root, an owner two clones already share (the other clone gets
+  its own owner and the shared one is untouched), a failed `/owners/by_name`
+  and a failed `/owners/show` (nothing is registered). The two direct
+  `register_owner` sites are driven by calling `_catalog_hook` and
+  `_backfill_repos` directly.
+- `tests/integration/test_second_clone_real_engine.py`: the two-clone and the
+  gone-root cases against the real engine, by calling `ensure_owner_for_repo`
+  directly (not `nx index repo`). It has no symlink case and is marked
+  `integration`, so the default selection and develop CI's unit run do not
+  collect it; it runs by hand.
+- `tests/test_rdr232_lifecycle_stream.py`: a second clone's owner reads the
+  `<repo basename>_rdr` project from its recorded root.
 
 ### Day 2 Operations
 
@@ -1005,3 +1060,4 @@ else.
 - 2026-11-20: Move hints wording matched to the reviewed Phase 3 code (grant 3; reviews `nexus_rdr/254-p3-review-r1`, `nexus/confirm-afba69e8d-none-2026-11-20-r3`): alias rows excluded, per-run bounds and the closing note, fail-open and `ClickException` printing, the engine's outside-root rule, the two-hash minimum, the census move line for healthy owners only, and the `nx catalog search` lookup.
 - 2026-11-21: Wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-aspect-race-fix-review`, `nexus/review-2dcd8ae85-none-2026-11-21`, `nexus/review-d26105450-rdr254-aspect-deadlock-retry-2026-11-21-r1`): the move floor is engine 0.1.199 (1274c4ea5f), the aspect-queue race fix covers trashed and alias documents (41a4edd0ae, d26ac3fcc2, 348cef2712), the deadlock edge it opens is accepted by Sam with a retry follow-up that is built as `DeadlockRetry` around the aspect upsert (97a0676f57, 53e1f30709, 44813b9c12), and the minimum viable validation ran (8c70440a7b, fed4c979f8). No decision or criterion changed.
 - 2026-11-21: Phase 4 (Gap 4) landed: a second live clone with the same folder name registers under `<folder>-<repo hash>` through one rule, `repo_owner_name`, called by `ensure_owner_for_repo` and the two direct `register_owner` sites (tests first in 37b6888c9e, the rule and its docs in a25d9eb195); the Phase 4 step records what was built. No decision or criterion changed.
+- 2026-11-21: Phase 4 wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-phase4-review`, `nexus_rdr/254-phase4-critique`): an owner two clones already share gives the other clone its own owner and collection on its next registration; a root another machine recorded, a container path or an unmounted volume reads as gone; first registrations that race can both claim the plain name (named residual, engine refusal not built); only a permission error reads a root as unreadable; a suffix another owner holds grows to the full root hash; the lifecycle project comes from the root basename; `differently cased` holds on a case-insensitive filesystem; the Built step says what each test file covers. No decision or criterion changed.
