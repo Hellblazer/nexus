@@ -393,7 +393,7 @@ class DropTenantPartitionsIntegrationTest {
     /** A model no partition carries: a search for it prunes every partition, so only the root is locked. */
     private static final String NO_SUCH_MODEL = "p225-no-such-model";
 
-    /** The function's bounds (vectors-063): attempts, per-attempt lock_timeout, and the backoff step (0.2 s x attempt). */
+    /** The function's bounds (vectors-066): attempts, per-attempt lock_timeout, and the backoff step (0.2 s x attempt). */
     private static final int ATTEMPTS = 5;
     private static final long ATTEMPT_TIMEOUT_MS = 500;
     private static final long BACKOFF_STEP_MS = 200;
