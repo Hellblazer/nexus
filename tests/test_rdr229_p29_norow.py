@@ -12,10 +12,16 @@ row, which is exactly the thing under test.
 """
 from __future__ import annotations
 
+import sys
+
 import pytest
 from structlog.testing import capture_logs
 
 from nexus.db.http_vector_client import VectorServiceError
+
+#: These fixtures use POSIX absolute paths ("/abs/a.md"), which are not absolute on Windows, so uri_for
+#: mints nothing there; the routing they pin is platform-independent and runs on the POSIX legs.
+_POSIX_PATHS = pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only: the fixture's source paths are POSIX absolute paths")
 
 _NEW_DOCS = "docs__fixnorow__bge-base-en-v15-768__v1"
 _NEW_KNOW = "knowledge__fixnorow__bge-base-en-v15-768__v1"
@@ -121,6 +127,7 @@ class TestTheSharedHelper:
 
 
 class TestRoutersAtNoRow:
+    @_POSIX_PATHS
     def test_uri_for_gives_a_file_uri_for_a_new_docs_collection(self, rows):
         from nexus.aspect_readers import uri_for
 
@@ -129,6 +136,8 @@ class TestRoutersAtNoRow:
         assert uri_for(_NEW_CODE, "/abs/m.py") == "file:///abs/m.py"
         assert uri_for(_NEW_RDR, "/abs/r.md") == "file:///abs/r.md"
         assert uri_for(_NEW_KNOW, "a title") == f"nx-note://{_NEW_KNOW}/a title"
+
+    @_POSIX_PATHS
 
     def test_uri_for_with_an_unreadable_listing_still_gives_a_file_uri(self, rows):
         from nexus.aspect_readers import uri_for
@@ -140,6 +149,8 @@ class TestRoutersAtNoRow:
         from nexus.aspect_readers import uri_for
 
         assert uri_for("c5152", "/abs/a.md") == "nx-note://c5152//abs/a.md"
+
+    @_POSIX_PATHS
 
     def test_uri_for_follows_a_row_for_a_prefix_free_label_found_on_the_re_read(self, rows):
         from nexus.aspect_readers import uri_for
@@ -160,6 +171,8 @@ class TestRoutersAtNoRow:
         assert select_config(_NEW_KNOW).extractor_name == "scholarly-paper-v1"
         assert select_config(_NEW_RDR).extractor_name == "rdr-frontmatter-v1"
         assert select_config(_NEW_CODE) is None
+
+    @_POSIX_PATHS
 
     def test_a_first_write_to_a_new_docs_collection_gets_file_identity_and_the_docs_extractor(self, rows, monkeypatch):
         """Baton's test: no cached row, opted in; the docs collection is routed as docs."""
@@ -217,12 +230,18 @@ def test_a_first_store_put_into_a_new_docs_collection_stores_no_note_uri(rows, m
     assert (doc.source_uri or "") in ("", "file:///abs/first-put.md")
 
 
+@_POSIX_PATHS
+
+
 def test_aspects_backfill_uri_gives_a_file_uri_to_a_docs_collection_with_no_row(rows):
     from nexus.aspect_uri_repair import plan_source_uri_backfill
 
     rec = _record(_NEW_DOCS, source_path="/abs/a.md", doc_id="1.1.1", confidence=0.9)
     plan = plan_source_uri_backfill([rec])
     assert [u for _r, u in plan.updates] == ["file:///abs/a.md"], plan
+
+
+@_POSIX_PATHS
 
 
 def test_the_exporters_first_page_into_a_new_docs_target_keys_its_owner_by_a_file_uri(rows):
@@ -233,6 +252,9 @@ def test_the_exporters_first_page_into_a_new_docs_target_keys_its_owner_by_a_fil
         fallback_source_uri="", fallback_title="", fallback_content_type="docs", target_collection=_NEW_DOCS,
     )
     assert group["source_uri"] == "file:///abs/a.md"
+
+
+@_POSIX_PATHS
 
 
 def test_the_exporters_owner_key_reads_the_row_through_the_import_handle(rows):
@@ -274,6 +296,9 @@ def test_the_exporters_import_floor_check_reads_a_prefix_free_label_through_the_
     with pytest.raises(FormatVersionError, match="embedding_model"):
         import_collection(_Db(), path)
     assert probes == []  # a docs row: file-routed, the floor check does not apply
+
+
+@_POSIX_PATHS
 
 
 def test_the_recovery_bundles_link_re_derivation_finds_a_row_less_docs_target(rows, monkeypatch):
