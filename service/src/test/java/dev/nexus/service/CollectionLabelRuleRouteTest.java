@@ -107,11 +107,16 @@ class CollectionLabelRuleRouteTest {
         return http.send(request(path).GET().build(), HttpResponse.BodyHandlers.ofString());
     }
 
+    /** One owner per label, so no two labels share a live tuple (RDR-229 P3.8's guard answers 409 to that). */
+    private static String ownerFor(String label) {
+        return "label-notes-" + Integer.toHexString(label.hashCode());
+    }
+
     private HttpResponse<String> register(String label) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("name", label);
         body.put("content_type", "knowledge");
-        body.put("owner_id", "label-notes");
+        body.put("owner_id", ownerFor(label));
         body.put("embedding_model", MODEL);
         body.put("model_version", "v1");
         body.put("display_name", "");
@@ -274,7 +279,7 @@ class CollectionLabelRuleRouteTest {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("name", label);
         row.put("content_type", "knowledge");
-        row.put("owner_id", "label-notes");
+        row.put("owner_id", ownerFor(label));
         row.put("embedding_model", MODEL);
         row.put("model_version", "v1");
         return row;

@@ -20,6 +20,14 @@
                    because Liquibase runs a changeset in a transaction; the table holds one row per collection,
                    so the build is brief.
 
+                   NO WEDGE (as collections-001-2, the nexus-lgdel.l1 directive). The build takes SHARE on the registry,
+                   which waits behind every open writer, so it runs under SET LOCAL lock_timeout = '5s'; and the
+                   changeset is failOnError="false". A build that cannot get its lock in time, or that the migration role
+                   may not run (it no longer owns the table), fails, is rolled back and logged, writes NO
+                   DATABASECHANGELOG row, and the walk goes on; the next boot retries it. Skipping it costs nothing
+                   until P4.1, since the primary key keeps the same rows unique (CollectionTupleUniqueIndexLiquibaseTest
+                   holds a writer for a whole walk and moves the table's owner, and requires the walk to finish).
+
     The label rule itself (non-empty, valid UTF-8, no control character, at most 255 bytes, not the minted form) is
     the engine's CollectionLabel.validateUserLabel, called on the registration and rename routes, not a constraint
     here.
@@ -35,9 +43,10 @@
     xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
-    <changeSet id="catalog-052-1" author="nexus-p2m1x.26">
+    <changeSet id="catalog-052-1" author="nexus-p2m1x.26" failOnError="false">
         <comment>Creates idx_catalog_collections_live_label, a partial UNIQUE index on nexus.catalog_collections (tenant_id, name) WHERE superseded_by = '' (RDR-229 P3.6: a label names one live collection per tenant). Additive, over rows the (tenant_id, name) primary key already keeps unique, so no existing row can fail it and none is touched.</comment>
         <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
 CREATE UNIQUE INDEX idx_catalog_collections_live_label
     ON nexus.catalog_collections (tenant_id, name)
     WHERE superseded_by = '';
