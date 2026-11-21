@@ -15,7 +15,13 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import nexus.health as health
-from nexus.collection_tuple_health import LABEL, check_collection_tuples, duplicate_tuples
+from nexus.collection_tuple_health import (
+    INDEX_WAIT_LABEL,
+    LABEL,
+    REOWN_MOVE_LABEL,
+    check_collection_tuples,
+    duplicate_tuples,
+)
 
 _MODEL = "bge-base-en-v15-768"
 
@@ -109,6 +115,80 @@ def test_the_rows_come_from_the_reader_when_none_are_given() -> None:
 
 def test_the_sweep_has_the_row_under_a_check_name_so_a_stubbed_sweep_steps_over_it() -> None:
     assert callable(health._check_collection_tuples)
+    status = {"collection_tuple_index_present": False, "boot_work": []}
     with patch("nexus.collection_tuple_health.check_collection_tuples", return_value=[]) as inner:
-        assert health._check_collection_tuples() == []
-    inner.assert_called_once_with()
+        assert health._check_collection_tuples(status) == []
+    inner.assert_called_once_with(engine_status=status)
+
+
+# ── the index waiting for no reason the data-move rows or the duplicate row give ──────────────────────────────────────
+# GET /v1/status says collection_tuple_index_present (an [additive] boolean). false with no duplicate and no open or
+# failed re-own move means the engine's guard is waiting for something nobody names: for example the counter erroring
+# under onError=CONTINUE. An absent key is an older engine: no row.
+
+_MOVE_ID = "data-move:" + REOWN_MOVE_LABEL
+
+
+def _status(present: object = False, boot_work: object = ()) -> dict:
+    body: dict = {"boot_work": list(boot_work) if isinstance(boot_work, (list, tuple)) else boot_work}
+    if present is not None:
+        body["collection_tuple_index_present"] = present
+    return body
+
+
+def _wait_rows(rows: list[dict], status: object) -> list:
+    return [r for r in check_collection_tuples(rows, engine_status=status) if r.label == INDEX_WAIT_LABEL]
+
+
+def test_index_absent_no_duplicate_no_open_move_is_a_warning_that_points_at_the_boot_log() -> None:
+    (r,) = _wait_rows([_row("docs__a")], _status(False))
+
+    assert r.ok is False and r.warn is True and r.fatal is False
+    joined = " ".join(r.fix_suggestions)
+    assert "boot log" in joined and "collections-001-2" in joined
+    assert "unique index" in r.detail.lower()
+
+
+def test_index_present_is_no_row() -> None:
+    assert _wait_rows([_row("docs__a")], _status(True)) == []
+
+
+def test_an_absent_key_is_an_older_engine_and_no_row() -> None:
+    assert _wait_rows([_row("docs__a")], _status(None)) == []
+    assert _wait_rows([_row("docs__a")], {"boot_work": []}) == []
+
+
+def test_a_key_that_is_not_a_boolean_is_not_read_as_false() -> None:
+    assert _wait_rows([_row("docs__a")], _status("false")) == []
+    assert _wait_rows([_row("docs__a")], _status(0)) == []
+
+
+def test_a_duplicate_is_the_known_reason_so_only_the_duplicate_row_shows() -> None:
+    rows = check_collection_tuples([_row("docs__a"), _row("docs__b")], engine_status=_status(False))
+
+    assert [r.label for r in rows] == [LABEL]
+
+
+def test_an_open_or_failed_reown_move_is_the_known_reason_and_no_row() -> None:
+    for what in ("working: 1 of 3 chunks", "failed: boom", "blocked: waiting", "queued: first"):
+        move = {"id": _MOVE_ID, "what": what}
+        assert _wait_rows([_row("docs__a")], _status(False, [move])) == [], what
+
+
+def test_another_moves_entry_is_not_the_reown_move() -> None:
+    other = {"id": "data-move:some-other-move", "what": "working: 1 of 3 chunks"}
+    assert len(_wait_rows([_row("docs__a")], _status(False, [other]))) == 1
+
+
+def test_a_status_with_no_readable_boot_work_cannot_tell_and_gives_no_row() -> None:
+    assert _wait_rows([_row("docs__a")], _status(False, None)) == []
+    assert _wait_rows([_row("docs__a")], {"collection_tuple_index_present": False}) == []
+
+
+def test_an_unreadable_registry_cannot_rule_a_duplicate_out_so_it_gives_no_wait_row() -> None:
+    assert check_collection_tuples(None, engine_status=_status(False)) == []
+
+
+def test_no_status_is_no_wait_row_and_the_duplicate_row_is_unchanged() -> None:
+    assert check_collection_tuples([_row("docs__a")], engine_status=None) == []
+    assert [r.label for r in check_collection_tuples([_row("docs__a"), _row("docs__b")], engine_status=None)] == [LABEL]
