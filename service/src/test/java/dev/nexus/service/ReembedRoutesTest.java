@@ -452,6 +452,50 @@ class ReembedRoutesTest {
     }
 
     @Test
+    void anExistingLiveTargetThatBreaksTheLabelRuleIsUsedAsIs() throws Exception {
+        // RDR-229 item 8: the rule gates a NEW label. A live target registered under an old install's label ('/')
+        // is the job's target as it stands.
+        Tn t = tenant("oldlabel");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String legacy = TYPE + "__" + t.owner() + "/x__" + MINI + "__v1";
+        register(t, legacy);
+        // the seed helper reads a name's tuple with a regex that does not take a '/', so state the tuple outright
+        su(ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.CONTENT_TYPE, TYPE)
+            .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.OWNER_ID, t.owner())
+            .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.EMBEDDING_MODEL, MINI)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(legacy)).execute());
+
+        var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy
+            + "\"}");
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(201);
+        assertThat(json(r)).containsEntry("target_collection", legacy).containsEntry("target_action", "existing");
+    }
+
+    @Test
+    void anExistingRetiredTargetIsRefusedForWhatItIs_notForItsLabel() throws Exception {
+        Tn t = tenant("oldretired");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String legacy = TYPE + "__" + t.owner() + "/y__" + MINI + "__v1";
+        register(t, legacy);
+        su(ctx -> ctx.update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.SUPERSEDED_BY, "someone-else")
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(legacy)).execute());
+
+        var r = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy
+            + "\"}");
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
+    }
+
+    @Test
     void anAbsentTargetWithNoNameIs400_andNothingIsRegistered() throws Exception {
         Tn t = tenant("noname");
         su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)

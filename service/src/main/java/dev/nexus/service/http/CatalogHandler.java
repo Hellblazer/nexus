@@ -2461,7 +2461,13 @@ public final class CatalogHandler implements HttpHandler {
         // RDR-229 P3.6: a refused label writes nothing, so it is judged before the lazy profile seed below, which
         // commits on its own. A NEW label gets the whole rule; an existing row keeps its label whatever it is (the
         // repository applies the same rule inside the registration, this only moves the refusal ahead of the seed).
-        if (body.get("name") instanceof String label && !label.isBlank()) {  // blank: P3.8 mints
+        // A name that is present but not a string is a 400 here, as on the other collection routes (before r2 it reached
+        // the INSERT). A missing or blank name is P3.8's mint branch and falls through to the repository.
+        Object rawName = body.get("name");
+        if (rawName != null && !(rawName instanceof String)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name must be a string\"}"); return;
+        }
+        if (rawName instanceof String label && !label.isBlank()) {
             CollectionLabel.requireStorable(label);
             if (!repo.collectionExists(tenant, label)) {
                 CollectionLabel.validateUserLabel(label);
@@ -2832,11 +2838,15 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
-        // RDR-229 P3.6: the rename target is a user-supplied label, so the label rule applies (a 400 through the
-        // route's IllegalArgumentException arm). First of all, before the first read: a NUL bound into the
-        // quarantine lookup below would be a database error, not a 400. A quarantine- label is a legal label, so
-        // the quarantine refusal that follows still answers for it.
-        CollectionLabel.validateUserLabel(newName);
+        // RDR-229 P3.6: a NEW rename target is a user-supplied label, so the label rule applies (a 400 through the
+        // route's IllegalArgumentException arm). A target row that already exists, a tombstone a past rename left,
+        // keeps its label whatever it is, so renaming back onto it (the undo) is not refused. A NUL is refused first
+        // of all, before the first read: bound into a lookup it would be a database error, not a 400. A quarantine-
+        // label is a legal label, so the quarantine refusal that follows still answers for it.
+        CollectionLabel.requireStorable(newName);
+        if (!repo.collectionExists(tenant, newName)) {
+            CollectionLabel.validateUserLabel(newName);
+        }
         // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
         // answer with a different status. CatalogRepository.renameCollection carries the same guard.
         repo.requireNotQuarantine(tenant, "rename", oldName);
