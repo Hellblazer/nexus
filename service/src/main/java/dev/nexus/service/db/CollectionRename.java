@@ -29,7 +29,9 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *     its row, so a rename that held X's row and then waited for a tuple's lock could meet it head on.</li>
  * <li>Y's id: the id of Y's own tombstone when Y is being revived (a rename back keeps the row and its id), else a fresh draw
  *     from the column's sequence ({@link CollectionMint#drawId}: taken-id check, one forward heal).</li>
- * <li>X is retired: {@code superseded_by = Y's name}, {@code superseded_by_id = that id}.</li>
+ * <li>X is retired through {@link CollectionTombstones#supersede(DSLContext, String, String, String, long)}, the one writer
+ *     of {@code superseded_by_id} and the one that takes the id from the caller: {@code superseded_by = Y's name},
+ *     {@code superseded_by_id = that id}, under the supersede CAS (an X another writer retired for a third collection refuses).</li>
  * <li>When the caller names another content type or owner, so Y's tuple is not X's, it is checked against every other live
  *     collection ({@link CollectionMint#refuseHeldTuple}, a named 409 in both index states). When Y takes X's own tuple it
  *     replaces X there and nothing is checked.</li>
@@ -68,7 +70,13 @@ final class CollectionRename {
                 CollectionMint.tupleKey(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
         }
         long successorId = successorId(ctx, tenant, newName);
-        counts.put("catalog_collections_superseded", retireSource(ctx, tenant, oldName, newName, successorId));
+        int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId);
+        if (retired == 0 && own != null) {
+            // the CAS matched no row of an X that exists: another writer retired it for a third target while this rename ran
+            throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": " + oldName
+                + " was retired for another collection while this one ran; nothing was renamed, so try again");
+        }
+        counts.put("catalog_collections_superseded", retired);
         if (source != null && own != null && !(source.value1().equals(own.value1()) && source.value2().equals(own.value2()))) {
             checkSuccessorTuple(ctx, tenant, newName, source, tuple);
         }
@@ -106,16 +114,6 @@ final class CollectionRename {
                 CATALOG_COLLECTIONS.LIFECYCLE_STATE)
             .from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName))).fetchOne();
-    }
-
-    /** Retire X, naming Y and Y's id (P3.1's CHECK ties the id to the name). Answers the rows updated. */
-    static int retireSource(DSLContext ctx, String tenant, String oldName, String newName, long successorId) {
-        return ctx.update(CATALOG_COLLECTIONS)
-            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
-            .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, successorId)
-            .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, DSL.currentOffsetDateTime())
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName)))
-            .execute();
     }
 
     /**
