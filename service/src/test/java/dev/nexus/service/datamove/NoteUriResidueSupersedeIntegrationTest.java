@@ -263,7 +263,7 @@ class NoteUriResidueSupersedeIntegrationTest extends DataMoveIntegrationBase {
     }
 
     @Test
-    void aPausedOpenDocumentsMove_getsAPausedReplacement_andItsSatellitesStartPausedToo() {
+    void aPausedOpenDocumentsMove_getsAPausedReplacement_andResumingTheReplacementLeavesItsSatellitesUnpaused() {
         registerOld();
         pause(DOCS_OLD);
         legacyRows(false);
@@ -277,16 +277,37 @@ class NoteUriResidueSupersedeIntegrationTest extends DataMoveIntegrationBase {
         workUntilIdle(finishingWorker(seen));
         assertThat(completedAt(DOCS_NEW)).as("a paused move is not worked").isNull();
         assertThat(uri("d1")).as("nothing was rewritten").isEqualTo("chroma://plain-docs/a.md");
+        assertThat(pausedAt(DOCS_OLD)).as("non-vacuity: the superseded move keeps its own pause, the stale one the satellites used to copy").isEqualTo(PAUSED_AT.toInstant());
 
-        // the operator resumes the replacement; its satellites are registered paused, as the old move was
+        // the operator resumes the replacement, the only move that runs; its satellites take ITS pause at that moment (none), not the superseded row's
         ctx().update(MOVES).set(PAUSED_AT_F, (OffsetDateTime) null).set(PAUSED_BY_F, (String) null).where(LABEL_F.eq(DOCS_NEW)).execute();
         workUntilIdle(finishingWorker(seen));
         assertThat(seen).isEmpty();
         assertThat(completedAt(DOCS_NEW)).isNotNull();
         for (String satellite : List.of(ASPECTS_NEW, HIGHLIGHTS_NEW)) {
-            assertThat(pausedAt(satellite)).as(satellite + " paused_at").isEqualTo(PAUSED_AT.toInstant());
+            assertThat(rowExists(satellite)).as(satellite + " was registered by the replacement's on_complete").isTrue();
+            assertThat(pausedAt(satellite)).as(satellite + " paused_at: the superseded row's pause is not carried over").isNull();
+            assertThat(pausedBy(satellite)).isNull();
+            assertThat(completedAt(satellite)).as(satellite + " is worked, with no second resume").isNotNull();
+        }
+    }
+
+    /** If the replacement's on_complete somehow runs while the replacement is paused, its satellites take that pause: they arrive held. */
+    @Test
+    void ifTheReplacementIsPausedWhenItsOnCompleteRuns_theSatellitesArriveHeld() throws Exception {
+        registerOld();
+        legacyRows(false);
+        bootAgain();
+        String onComplete = ctx().select(DSL.field(DSL.name("on_complete"), String.class)).from(MOVES).where(LABEL_F.eq(DOCS_NEW))
+            .fetchOne(DSL.field(DSL.name("on_complete"), String.class));
+        assertThat(onComplete).as("non-vacuity: the replacement carries the registration of its satellites").contains(ASPECTS_NEW);
+        ctx().update(MOVES).set(PAUSED_AT_F, PAUSED_AT).set(PAUSED_BY_F, PAUSED_BY).where(LABEL_F.eq(DOCS_NEW)).execute();
+
+        MoveSql.runOnComplete(su, onComplete);
+
+        for (String satellite : List.of(ASPECTS_NEW, HIGHLIGHTS_NEW)) {
+            assertThat(pausedAt(satellite)).as(satellite + " arrives held, with the replacement's pause").isEqualTo(PAUSED_AT.toInstant());
             assertThat(pausedBy(satellite)).isEqualTo(PAUSED_BY);
-            assertThat(completedAt(satellite)).as(satellite + " is held, not worked").isNull();
         }
     }
 
