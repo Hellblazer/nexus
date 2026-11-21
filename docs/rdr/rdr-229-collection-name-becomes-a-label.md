@@ -371,7 +371,8 @@ still hold (`-9`, `-12`, `-13`) are noted in T2
      repo`'s target model (`indexer.py:5408-5409/5496-5498`) and registration
      model (`indexer.py:5649-5650`), taxonomy thresholds by prefix
      (`commands/taxonomy_cmd.py:2862/2871/3142`,
-     `db/t2/http_taxonomy_store.py:2667`), and the next version computed by
+     `db/t2/http_taxonomy_store.py:2667`; the engine's prefix-matched prune is
+     the matching engine site, P2.4's engine half), and the next version computed by
      parsing a name (`catalog/http_catalog_client.py:3875`).
   3. *Client, raw shapes the census cannot match* (43 sites: 33 in
      `src/nexus`, 10 in `scripts/`). In `src/nexus`: `corpus.py:1429` and
@@ -1992,6 +1993,32 @@ its acceptance is that test green plus the census pin it lowers.
   the row first and parses the name only when that answers nothing
   (`scoring.py:175-182`), item 1's NoRow outcome, which stays (T2
   `229-research-49`).
+  *Amended 2026-11-20 (lead ruling on critique S4, bead nexus-p2m1x.9; T2
+  `nexus/critique-p2m1x9-2026-11-20-r1` and
+  `nexus/critique-p2m1x9-engine-2026-11-20-r1`).* With the threshold read
+  from the row, the engine's `POST /v1/taxonomy/assignments/prune_projection`
+  (`TaxonomyRepository.pruneProjectionBelow`, `startsWith` on
+  `source_collection`) over-deletes: pruning `..__v1` at its threshold also
+  reaches `..__v10`, and `docs__art` also reaches `docs__art-x`, each at the
+  wrong threshold. P2.4 therefore owns a small engine half in the Phase 2
+  engine cut, 0.1.200: an optional request field `match` (`"prefix"`, the
+  default when absent or null, keeps `startsWith`; `"exact"` deletes only the
+  named `source_collection`; any other value is a 400 that deletes nothing),
+  a reply that echoes the mode applied (`{"removed": N, "match":
+  "prefix"|"exact"}`), and `taxonomy_prune_exact_supported: true` on
+  `/version`. The client sends `match: "exact"` only when the flag reads true,
+  and then only after one verification prune (`match: "exact"`, threshold 0.0,
+  a name no collection can have, so even a prefix match deletes nothing) whose
+  reply echoes `"exact"`; a missing or `"prefix"` echo, or a failed call, runs
+  the whole sweep guarded, and a real reply that stops echoing `"exact"` ends
+  the sweep at once. Without the flag the client keeps its guard (it prunes a
+  prefix name down to its extensions' lowest threshold and prints the skipped
+  count). No client floor bump: the flag and the echo are the gate. The
+  route's field keeps its name, `source_collection_prefix`; the P3 id form
+  (P3.5c) is not part of this change. The cloud leg proves the body field
+  crosses the edge (`match: "bogus"` on a name that matches nothing must
+  answer 400). Tests: a `..__v1`/`..__v10` pair and a `docs__art`/`docs__art-x`
+  pair, each in prefix and in exact mode. [additive] wire entry.
 - P2.5 Engine: explicit `lifecycle_state` at registration; lifecycle reads
   from the row in `QuarantineOrigin`, `ChunkReaper`, `VectorHandler`,
   `PgVectorRepository`; the `quarantine-` half of the client's
@@ -2093,7 +2120,8 @@ its acceptance is that test green plus the census pin it lowers.
   arm today, are inverted. Test, for the verb: moved
   residue and repaired residue are re-derived to `file://`, not refused.
   Blocks P3.6 and P3.8.
-- P2.R Review gate for Phase 2. Engine cut for P2.5, P2.6, P2.9 and P2.10; client
+- P2.R Review gate for Phase 2. Engine cut for P2.4 (prune `match`), P2.5, P2.6,
+  P2.9 and P2.10 (and P2.8's filter drop, per its amendment); client
   floor bumps in the release that ships P2.3 onward.
 
 **Phase 3: the surrogate key and the label**
@@ -2420,6 +2448,7 @@ reference the registry's name (P4.1).
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
 | Census pins (client, engine, SQL) | In scope (the tests print their tables) | In scope | N/A | In scope (`-m lint` and the Java gate tests) | N/A |
+| `nx taxonomy project --prune-below-threshold` | Prints the removed count per collection | Prints "N skipped" when the engine lacks exact mode (cloud, until the conexus edge allowlists the flag), "did not confirm exact matching; using the guarded prune" when the verification prune is not echoed, and "N refused" for a collection whose row cannot be read | N/A | `GET /version` reads `taxonomy_prune_exact_supported` | N/A |
 | `lifecycle_state` at registration | `nx collection list` | `nx catalog show` | Existing lifecycle verbs | `nx doctor` row versus name diagnostic | Recovery bundle |
 | `collection_id` and label | `nx collection list` (id, label, attributes; the id column is P3.12's) | `nx catalog show` | `nx collection delete` (by label or id, P3.12) | `nx doctor` null-id and label-clash census (P3.12) | Recovery bundle (carries the row from P3.9); tenant backup, `nx backup` (carries the id from P3.1's cut, P3.11) |
 
@@ -2766,7 +2795,8 @@ the two residue shapes item 12 leaves unrepaired (P1.2 counts them).
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts,
+- **Versioning**: P2.4 (the prune `match` field; engine first, and an older engine reads as
+  unsupported, so the client keeps its guard), P2.5, P2.6, P2.9, P2.10, the Phase 3 engine beads and P4.0 ride engine cuts,
   P3.5 and P3.7 one cut together with the rename refusal and the name-key
   drop move's registration (P3.7);
   the client floor bumps in the release that first depends on each, engine
