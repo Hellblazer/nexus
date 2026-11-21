@@ -382,14 +382,19 @@ for _site in LEDGER:
 #: ``resolve_corpus`` is not a root of its own. It is still a derived helper, because its typed-value split reaches
 #: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
 #: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
-PARSE_SITE_PIN: int = 240
+#:
+#: P2.4 (nexus-p2m1x.9, 2026-11-20), measured on develop 8c70440a7: 240 -> 237. The four taxonomy-threshold holdovers
+#: (three calls in ``taxonomy_cmd.py``, one in ``http_taxonomy_store.py``, each a caller of the derived helper
+#: ``default_projection_threshold``) read the row now, and the one NoRow name derivation they shared is a single
+#: mint-class entry in ``projection_threshold.py``: holdover 23 -> 19, mint 117 -> 118, primitive_call 181 -> 178.
+PARSE_SITE_PIN: int = 237
 CLASS_PIN: dict[str, int] = {
-    "mint": 117, "holdover": 23, "diagnostic": 42, "routing": 25,
+    "mint": 118, "holdover": 19, "diagnostic": 42, "routing": 25,
     "migration-source": 16, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 181, "const_prefix": 21, "fnmatch": 14,
+    "primitive_call": 178, "const_prefix": 21, "fnmatch": 14,
     "loop_prefix": 7, "strip_prefix": 4, "startswith": 3, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -813,7 +818,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 240
+    assert PARSE_SITE_PIN == 237
 
 
 # ---------------------------------------------------------------------------
