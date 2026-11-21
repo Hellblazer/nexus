@@ -391,14 +391,19 @@ for _site in LEDGER:
 #: routing 25 -> 0, mint 117 -> 127, migration-source 16 -> 19, const_prefix 21 -> 7, loop_prefix 7 -> 0,
 #: primitive_call 181 -> 191, glob_default 1 -> 0. (The tenth mint is ``topic_route.is_prose``: the request's
 #: names carry no row on a cold cache, so the prose test answers NoRow from the name.)
-PARSE_SITE_PIN: int = 228
+#:
+#: P2.4 (nexus-p2m1x.9, 2026-11-21), measured on develop 6eb9958b5: 228 -> 225. The four taxonomy-threshold holdovers
+#: (three calls in ``taxonomy_cmd.py``, one in ``http_taxonomy_store.py``, each a caller of the derived helper
+#: ``default_projection_threshold``) read the row now, and the one NoRow name derivation they shared is a single
+#: mint-class entry in ``projection_threshold.py``: holdover 23 -> 19, mint 127 -> 128, primitive_call 191 -> 188.
+PARSE_SITE_PIN: int = 225
 CLASS_PIN: dict[str, int] = {
-    "mint": 127, "holdover": 23, "diagnostic": 42,
+    "mint": 128, "holdover": 19, "diagnostic": 42,
     "migration-source": 19, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 191, "const_prefix": 7, "fnmatch": 14,
+    "primitive_call": 188, "const_prefix": 7, "fnmatch": 14,
     "strip_prefix": 4, "startswith": 3, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -822,7 +827,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 228
+    assert PARSE_SITE_PIN == 225
 
 
 # ---------------------------------------------------------------------------
