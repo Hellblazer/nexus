@@ -2449,6 +2449,15 @@ public final class CatalogHandler implements HttpHandler {
     private void handleCollectionUpsert(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
+        // RDR-229 P3.6: a refused label writes nothing, so it is judged before the lazy profile seed below, which
+        // commits on its own. A NEW label gets the whole rule; an existing row keeps its label whatever it is (the
+        // repository applies the same rule inside the registration, this only moves the refusal ahead of the seed).
+        if (body.get("name") instanceof String label) {
+            CollectionLabel.requireStorable(label);
+            if (!repo.collectionExists(tenant, label)) {
+                CollectionLabel.validateUserLabel(label);
+            }
+        }
         // RDR-204 Phase 1 (bead nexus-ft04v.6/.8): this IS the single choke
         // point for "register a collection" (the client's
         // register_collection() -> POST /v1/catalog/collections/upsert ->

@@ -4,7 +4,9 @@ package dev.nexus.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantConstants;
+import dev.nexus.service.db.TenantScope;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -53,6 +55,7 @@ class CollectionLabelRuleRouteTest {
     HttpClient http;
     com.zaxxer.hikari.HikariDataSource svcDs;
     ObjectMapper mapper;
+    CatalogRepository repo;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -72,6 +75,7 @@ class CollectionLabelRuleRouteTest {
         cfg.setMaximumPoolSize(4);
         cfg.setAutoCommit(true);
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
+        repo = new CatalogRepository(new TenantScope(svcDs));
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
         http = TestHttp.client();
@@ -203,6 +207,80 @@ class CollectionLabelRuleRouteTest {
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
         // while a NEW minted-form label is refused
         assertThat(register("c8").statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void anExistingRowThatBreaksTheRuleStillReRegisters_theShapeClausesGateANewLabelOnly() throws Exception {
+        // RDR-229 item 8: existing collections keep their names. Rows seeded directly, as an old install holds them.
+        for (String legacy : List.of("legacy/slash/label", "é".repeat(130), "legacy\u0001control")) {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, legacy);
+            }
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("name", legacy);
+            body.put("content_type", "unknown");
+            body.put("owner_id", TENANT);
+            body.put("embedding_model", "bge-base-en-v15-768");
+            body.put("model_version", "v1");
+            var resp = post("/v1/catalog/collections/upsert", body);
+            assertThat(resp.statusCode()).as(legacy + ": " + resp.body()).isEqualTo(200);
+        }
+    }
+
+    @Test
+    void aNulIsA400BeforeAnyRead_noDatabaseError() throws Exception {
+        // the clause that stands before the first database read: the database cannot store a NUL. (A lone surrogate
+        // cannot be sent: Jackson writes it as '?'. CollectionLabelTest.requireStorable covers it.)
+        var resp = register("a\u0000b");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
+        assertThat(resp.body()).doesNotContain("database");
+    }
+
+    // ── import (ETL): a new row's shape, never its minted form, never an existing row ───────────────────────
+
+    private Map<String, Object> importRow(String label) {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("name", label);
+        row.put("content_type", "knowledge");
+        row.put("owner_id", "label-notes");
+        row.put("embedding_model", MODEL);
+        row.put("model_version", "v1");
+        return row;
+    }
+
+    @Test
+    void importRefusesABatchHoldingANewRowThatBreaksTheShape_andLandsNothing() throws Exception {
+        var resp = post("/v1/catalog/import/collection",
+            Map.of("rows", List.of(importRow("import good first"), importRow("import/bad"))));
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
+        assertThat(resp.body()).contains("/");
+        assertThat(isRegistered("import good first")).as("the batch is atomic").isFalse();
+        assertThat(isRegistered("import/bad")).isFalse();
+        assertThat(post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow("é".repeat(130))))).statusCode())
+            .isEqualTo(400);
+    }
+
+    @Test
+    void importKeepsAMintedFormRowAndAnExistingRowThatBreaksTheRule() throws Exception {
+        // another install's engine-minted label imports as it is (the minted-form clause is for a user's own label)
+        var minted = post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow("c4242"))));
+        assertThat(minted.statusCode()).as(minted.body()).isEqualTo(200);
+        assertThat(isRegistered("c4242")).isTrue();
+        // an existing row is skipped (ON CONFLICT DO NOTHING), whatever its label
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "import/existing");
+        }
+        var existing = post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow("import/existing"))));
+        assertThat(existing.statusCode()).as(existing.body()).isEqualTo(200);
+    }
+
+    @Test
+    void importOfASingleRowAtTheRepositoryRefusesTheShapeToo() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.importCollection(TENANT, importRow("single/bad")))
+            .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> repo.importCollection(TENANT, importRow("single\u0000bad")))
+            .isInstanceOf(IllegalArgumentException.class);
+        repo.importCollection(TENANT, importRow("c5151"));
     }
 
     // ── rename ──────────────────────────────────────────────────────────────────────────────────────────────

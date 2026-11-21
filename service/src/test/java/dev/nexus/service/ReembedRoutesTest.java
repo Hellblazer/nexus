@@ -431,6 +431,27 @@ class ReembedRoutesTest {
     }
 
     @Test
+    void aTargetLabelTheLabelRuleRefusesIs400_onStartAndOnPlan_andNothingIsRegistered() throws Exception {
+        // RDR-229 P3.6: a re-embed target is a user-supplied label the engine registers. It is conformant in shape
+        // (so requireRegistrable's version read passes) and breaks the label rule.
+        Tn t = tenant("labelrule");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        for (String bad : new String[] {TYPE + "__" + t.owner() + "/x__" + MINI + "__v1",
+                                        TYPE + "__" + "\u00e9".repeat(130) + "__" + MINI + "__v1"}) {
+            for (String path : new String[] {"/jobs", "/plan"}) {
+                var r = post(t, path, "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + bad
+                    + "\"}");
+                assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(400);
+                assertThat(json(r).get("error").toString()).contains("collection label");
+            }
+            assertThat(catalog.getCollection(t.tenant(), bad)).as("nothing registered").isNull();
+        }
+        assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
+    }
+
+    @Test
     void anAbsentTargetWithNoNameIs400_andNothingIsRegistered() throws Exception {
         Tn t = tenant("noname");
         su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)

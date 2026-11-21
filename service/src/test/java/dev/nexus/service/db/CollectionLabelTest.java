@@ -135,4 +135,27 @@ class CollectionLabelTest {
         assertThat(CollectionLabel.isMintedForm(minted)).isTrue();
         assertThatThrownBy(() -> CollectionLabel.validateUserLabel(minted)).isInstanceOf(IllegalArgumentException.class);
     }
+
+    // ── the two-stage use: what must stand before a read, and the shape without the minted form ──
+
+    @Test
+    void requireStorableRefusesOnlyWhatTheDatabaseCannotStore() {
+        CollectionLabel.requireStorable(null);
+        CollectionLabel.requireStorable("a/b");
+        CollectionLabel.requireStorable(repeat("é", 200));
+        CollectionLabel.requireStorable("a\u0001b");
+        CollectionLabel.requireStorable("c1");
+        assertThatThrownBy(() -> CollectionLabel.requireStorable("a\u0000b")).isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("control");
+        assertThatThrownBy(() -> CollectionLabel.requireStorable("a\ud800b")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void validateShapeRefusesTheShapeAndLetsTheMintedFormThrough() {
+        CollectionLabel.validateShape("c42");
+        CollectionLabel.validateShape("My Notes");
+        assertThatThrownBy(() -> CollectionLabel.validateShape("a/b")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> CollectionLabel.validateShape(repeat("é", 128))).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> CollectionLabel.validateShape("")).isInstanceOf(IllegalArgumentException.class);
+    }
 }
