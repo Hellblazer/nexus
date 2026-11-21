@@ -201,6 +201,32 @@ class CollectionSupersedeIdTest {
         assertThat(supersededId(a)).isEqualTo(id(a));
     }
 
+    /**
+     * Code review F2: supersedeCollection's guard 3 reads the target outside the transaction, so the target can be retired between the
+     * handler's live check and the write. The write then re-derives the owner of the retired target with a no-op UPDATE of its row, which a
+     * NOT VALID superseded_by_id CHECK refuses (23514) while the row is unstamped, aborting the supersede. The no-op write carries
+     * {@code CatalogIdStamps.keepSupersededId}, as every other registry UPDATE does, so the row stays valid.
+     */
+    @Test
+    void supersedingToATargetRetiredAndNotYetStamped_isNotAbortedByTheOwnerRederivation() {
+        String a = name("rd-a"), b = name("rd-b");
+        register(a, b);
+        su(ctx -> {
+            P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "gone-successor-rd")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(b)).execute();
+            P31CheckReplay.restore(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
+            return null;
+        });
+        assertThat(supersededId(b)).as("precondition: b was retired by a writer that has not stamped it").isNull();
+
+        int updated = repo.supersedeCollection(T, a, b, "");   // before the fix: 23514 from rederiveOwner(b)
+
+        assertThat(updated).isEqualTo(1);
+        assertThat(supersededId(a)).as("a names b").isEqualTo(id(b));
+        assertThat(supersededId(b)).as("b's row was rewritten by the no-op owner write and read 'retired, no successor'").isEqualTo(id(b));
+    }
+
     @Test
     void theGhostSweep_deletingAGhostSuccessor_repairsTheTombstoneThatNamesIt() {
         // its own tenant: the sweep walks every registry row of the tenant it is given
