@@ -29,8 +29,8 @@ import static dev.nexus.service.jooq.nexus.Tables.DOCUMENT_ASPECTS;
  * {@code document_aspects} before {@code catalog_documents}), so an UNFENCED upsert running during a rename or delete
  * of the same collection can deadlock, and PostgreSQL aborts one of the two. Both sides run their whole transaction
  * under {@link DeadlockRetry} (the upsert in {@link AspectRepository#upsertAspect}, the rename and the delete through
- * {@code CatalogRepository.manifestWriteTxn}), so the aborted one reruns and neither answers a deadlock error. A fenced
- * (worker) upsert takes the claim's tuples row lock first, which serializes it with the rename's task rewrite before
+ * {@code CatalogRepository.manifestWriteTxn}), so the aborted one reruns, up to four attempts, after which the 40P01
+ * propagates. A fenced (worker) upsert usually takes the claim's tuples row lock first, which serializes it with the rename's task rewrite before
  * either reaches these tables.
  */
 final class AspectDocIdAttribution {
