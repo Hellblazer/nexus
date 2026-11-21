@@ -3592,8 +3592,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return flags.get("catalog_move_supported") is True, str(version) if flags else ""
 
     def engine_release_version(self) -> str:
-        """The engine's ``release_version`` from ONE cached ``GET /version`` read, or ``""`` when it names none
-        (a tree-built engine carries ``null``) or the probe failed."""
+        """The engine's ``release_version`` from the cached ``GET /version`` read; ``""`` when null (a tree-built engine) or unread."""
         value = self._version_flags().get("release_version")
         return value if isinstance(value, str) else ""
 
@@ -3730,28 +3729,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         model_version: str,
         display_name: str = "",
     ) -> "CollectionAttributes":
-        """Register (upsert) a collection row by its attributes and answer the row (RDR-229 P3.8).
+        """Register (upsert) a collection by its attributes and answer the row (RDR-229 P3.8).
 
-        ``content_type``, ``owner_id``, ``embedding_model`` and ``model_version`` are required and never derived
-        from a name; a blank one raises ``ValueError`` before anything is sent. ``legacy_grandfathered`` is no
-        longer sent (RDR-229 item 11).
-
-        With no *name* (``None`` or blank) the engine mints the collection's id and its label ``c<id>`` and answers
-        the registered row, or the live row the tuple already has: the answer carries ``collection_id`` and the
-        label, and a writer uses that label (the engine's listing omits a collection with no chunk yet). An engine
-        older than :data:`~nexus.catalog.engine_writes.floors.COLLECTION_MINT_MIN_ENGINE_VERSION` answers 409, which
-        raises :class:`~nexus.catalog.engine_writes.floors.CollectionMintUnsupportedError` naming both versions.
-
-        With a *name* (a re-registration of an existing label, the migration and rename callers) the engine
-        answers ``{"ok": true}`` and no row, so the answer is what was asked: the label and attributes sent, with
-        no ``collection_id`` and no ``lifecycle_state``, since the engine keeps an existing row's own values.
+        The four attributes are required, never derived from a name (a blank one raises ``ValueError`` before anything
+        is sent). With no *name* the engine mints ``collection_id`` and the label ``c<id>`` and answers the registered
+        row or the tuple's live one; an engine below ``COLLECTION_MINT_MIN_ENGINE_VERSION`` answers 409, raised as
+        ``CollectionMintUnsupportedError``. With a *name* (a re-registration of a label) the answer is what was asked.
         """
         from nexus.catalog.collection_name import CollectionAttributes  # noqa: PLC0415 — deferred: module-load cycle
 
-        attrs = {
-            "content_type": content_type, "owner_id": owner_id,
-            "embedding_model": embedding_model, "model_version": model_version,
-        }
+        attrs = {"content_type": content_type, "owner_id": owner_id, "embedding_model": embedding_model, "model_version": model_version}
         if blank := [k for k, v in attrs.items() if not v]:
             raise ValueError(f"register_collection: {', '.join(blank)} required, never derived from a name")
         body: dict = {**attrs, "display_name": display_name}
@@ -3762,16 +3749,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             except httpx.HTTPStatusError as exc:
                 if exc.response is not None and exc.response.status_code == 409:
                     from nexus.catalog.engine_writes.floors import explain_mint_refusal  # noqa: PLC0415 — deferred: engine_writes imports back into catalog
-
                     explain_mint_refusal(self, exc)  # an engine older than the mint names itself; any other 409 stands
                 raise
             return CollectionAttributes.from_for_tuple(answer or {}, **tuple_of)
         self._post("/collections/upsert", {"name": name, **body})
         digits = model_version[1:] if model_version[:1] == "v" else ""
-        return CollectionAttributes(  # what was asked: the engine answered no row, and keeps an existing row's own values
+        return CollectionAttributes(  # what was asked: the engine answered no row
             collection_id=None, label=name, **tuple_of, dimension=None, lifecycle_state=None,
-            model_version=int(digits) if digits.isascii() and digits.isdigit() and int(digits) >= 1 else None,
-        )
+            model_version=int(digits) if digits.isascii() and digits.isdigit() and int(digits) >= 1 else None)
 
     def delete_collection_projection(self, name: str, *, reason: str = "") -> bool:
         # No hard-delete route in initial service; guard+track for bead nexus-gmiaf.24
