@@ -63,14 +63,34 @@ def forget_all() -> None:
 
 
 def _remember(row: CollectionAttributes) -> None:
+    _hold(row.label, {
+        "content_type": row.content_type, "owner_id": row.owner_id,
+        "embedding_model": row.embedding_model, "lifecycle_state": row.lifecycle_state or "live",
+    })
+
+
+def _hold(label: str, row: dict) -> None:
     now = time.monotonic()
     with _lock:
         for stale in [n for n, (expires, _) in _rows.items() if expires <= now]:
             del _rows[stale]
-        _rows[row.label] = (now + _ROW_TTL_SECONDS, {
-            "content_type": row.content_type, "owner_id": row.owner_id,
-            "embedding_model": row.embedding_model, "lifecycle_state": row.lifecycle_state or "live",
-        })
+        _rows[label] = (now + _ROW_TTL_SECONDS, row)
+
+
+def note_registered(label: str, row: dict) -> None:
+    """A label registered or found BY NAME (a recovery-bundle import keeps the bundle's label, RDR-229 P3.9), whose
+    catalog *row* (the registry read: ``content_type``, ``owner_id``, ``embedding_model``, ``lifecycle_state``) has
+    no chunk yet. The same two facts :func:`register_by_attributes` leaves behind: the row answers
+    :func:`nexus.mcp_infra.get_collection_row` until the listing names the label, so the first note's chunks carry
+    the row's model and not the label's own token; and the label is registered in this process, so the write path's
+    ``ensure_collection_registered`` is a hit and never derives attributes from a label that may carry none."""
+    from nexus.corpus import _registration_cache_add  # noqa: PLC0415 — deferred: nexus.corpus imports back into the catalog
+    from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415 — deferred: mcp_infra imports this module's reader
+
+    _hold(label, {k: row.get(k) or "" for k in ("content_type", "owner_id", "embedding_model")}
+          | {"lifecycle_state": row.get("lifecycle_state") or "live"})
+    _registration_cache_add(None, label)
+    invalidate_collections_cache()
 
 
 def register_by_attributes(
