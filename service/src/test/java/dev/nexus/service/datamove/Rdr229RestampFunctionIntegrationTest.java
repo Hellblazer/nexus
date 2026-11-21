@@ -198,6 +198,67 @@ class Rdr229RestampFunctionIntegrationTest {
         assertThat(move(BASE + "-rerun-2").get(text("supersedes"))).isEqualTo(BASE + "-rerun-1");
     }
 
+    /**
+     * Review N3. The orphan probe reads a table's rows with no index, so it carries its own time bound. (A SET statement_timeout INSIDE the
+     * function would not bound it: PostgreSQL arms that timer when the top-level statement starts, and a plpgsql function is one statement.
+     * So the probe reads the table in block ranges and stops between ranges once nexus.rdr229_restamp_probe_ms has passed.) On timeout the
+     * operator gets text, nothing is registered, and the same call can be run again.
+     */
+    @Test
+    void theOrphanProbeStopsAtItsBound_saysSo_andRegistersNothing() {
+        register(BASE, "catalog_documents", true, null);
+        ctx.execute("SET nexus.rdr229_restamp_probe_ms = 0");
+        try {
+            String answer = restamp("catalog_documents");
+            assertThat(answer).startsWith("not registered:").contains("did not finish").contains("nothing was registered").contains("nexus.rdr229_restamp_probe_ms");
+        } finally {
+            ctx.execute("RESET nexus.rdr229_restamp_probe_ms");
+        }
+        assertThat(ctx.fetchCount(MOVES)).as("nothing was registered").isEqualTo(1);
+        assertThat(restamp("catalog_documents")).as("the same call, within its default bound, registers").isEqualTo("registered: " + BASE + "-rerun-1");
+    }
+
+    /** The block-range reading finds an orphan in a later range, not only in the first: one block a range, rows over several blocks, the orphan last. */
+    @Test
+    void theOrphanProbeReadsEveryBlockRange_soAnOrphanInALaterBlockIsFound() {
+        register(BASE, "catalog_documents", true, null);
+        P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+        try {
+            ctx.execute("INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                + "SELECT ?, '2.' || g, repeat('x', 200), ? FROM generate_series(1, 400) g", TENANT, LIVE);
+        } finally {
+            P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+        }
+        orphanDoc();   // written after the 400: a later block
+        long blocks = ctx.fetchOne("SELECT pg_relation_size('nexus.catalog_documents') / current_setting('block_size')::bigint").get(0, Long.class);
+        assertThat(blocks).as("non-vacuity: the table spans several blocks, so one block a range is several ranges").isGreaterThan(3);
+        ctx.execute("SET nexus.rdr229_restamp_probe_blocks = 1");
+        try {
+            assertThat(restamp("catalog_documents")).startsWith("not registered:").contains("orphan").contains("physical_collection");
+        } finally {
+            ctx.execute("RESET nexus.rdr229_restamp_probe_blocks");
+        }
+        ctx.deleteFrom(DOCS).where(text("tenant_id").eq(TENANT)).execute();
+    }
+
+    /** Review N3: the function is the migrating role's alone. REVOKE ... FROM PUBLIC is written into its ACL and the service role cannot call it. */
+    @Test
+    void executeIsRevokedFromPublic_andTheServiceRoleCannotCallIt() throws Exception {
+        assertThat(ctx.fetchOne("SELECT p.proacl IS NOT NULL FROM pg_proc p WHERE p.oid = 'nexus.rdr229_restamp(text)'::regprocedure").get(0, Boolean.class))
+            .as("non-vacuity: the REVOKE wrote an ACL (a function with the default ACL has none)").isTrue();
+        assertThat(ctx.fetchOne("SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = 'nexus.rdr229_restamp(text)'::regprocedure AND a.grantee = 0")
+            .get(0, Integer.class)).as("no EXECUTE for PUBLIC (grantee 0)").isZero();
+        assertThat(ctx.fetchOne("SELECT has_function_privilege('" + PgContainerHelper.SVC_USERNAME + "', 'nexus.rdr229_restamp(text)', 'EXECUTE')").get(0, Boolean.class))
+            .as("nexus_svc holds no EXECUTE").isFalse();
+        ctx.execute("SET ROLE " + PgContainerHelper.SVC_USERNAME);
+        try {
+            assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> restamp("catalog_documents")))
+                .as("a call as nexus_svc is refused by the function's ACL").hasMessageContaining("permission denied for function rdr229_restamp");
+        } finally {
+            ctx.execute("RESET ROLE");
+        }
+    }
+
     /** The function carries its own copy of the list (the name and id columns and the constraints per table): the TSV is the one list, this pins them equal. */
     @Test
     void theFunctionsListIsTheSameAsP31ChecksTsv() throws IOException {
