@@ -254,7 +254,10 @@ public final class TenantImportPlan {
         Set<String> names = new LinkedHashSet<>();
         for (Column c : e.primaryKey()) names.add(c.name());
         if (e.reassignedId() != null) names.add(e.reassignedId());
-        for (Reference r : e.references()) names.addAll(r.columns());
+        for (Reference r : e.references()) {
+            // an id twin (RDR-229 P3.1): a file older than the column lacks it, and the load fills it by name
+            if (!TenantExport.refersToRemappedColumn(r)) names.addAll(r.columns());
+        }
         names.remove("tenant_id");
         return names;
     }

@@ -79,5 +79,12 @@ final class TenantExportKeyedStateTable {
             notKeyed.put(f, "the tenant export's schema registry (nexus-csayy.6): rows the engine writes for every "
                 + "tenant, fixed at class load; not keyed by tenant");
         }
+        // RDR-229 P3.1 (nexus-p2m1x.17): the columns a restore remaps, and the restore's own id map
+        for (String f : List.of("TenantExport.ExportTable.remapped", "TenantExport.Entry.remapped")) {
+            notKeyed.put(f, "the tenant export's schema registry (RDR-229 P3.1): the columns a restore remaps, fixed at "
+                + "class load; not keyed by tenant");
+        }
+        notKeyed.put("CollectionIdMap.sourceToTarget", "one restore's map from the backup's collection ids to the restored "
+            + "ones (RDR-229 P3.11), built per load and dropped with it; P3.1 always passes it empty");
     }
 }
