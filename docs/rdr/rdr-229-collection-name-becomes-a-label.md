@@ -913,9 +913,14 @@ or disputed holder holds like a live one. The guard compares the stored
 `model_version`; a row whose D2 repair is still pending (`''`) is left to
 the re-own move, which skips it. Before that check each trigger takes a
 transaction advisory lock on the tuple's key,
-`nexus.collection_tuple_lock_key` (`catalog-051-1a`), the SQL function that
-is the key's one derivation (the engine's `CollectionTupleLock` selects it
-and does not re-implement it). A transaction deadlocked on that lock gets
+`nexus.collection_tuple_lock_key` (`catalog-051-1a`, made a striped key by
+`collections-003-1`), the SQL function that is the key's one derivation (the
+engine's `CollectionTupleLock` selects it and does not re-implement it). The
+key is one of 256 stripes in one fixed namespace (the high 56 bits of
+`md5('18:catalog_tuple_lock')`; the stripe is the low 8 bits of the tuple's
+md5), so a batch takes at most 256 locks, deduplicated and sorted before it
+locks; unrelated tuples that share a stripe wait on each other briefly, which
+is accepted by design. A transaction deadlocked on that lock gets
 40P01, and only the paths through `CatalogRepository`'s `DeadlockRetry`
 re-run it (deletes, renames, re-homes, purges, manifest writes and chunk
 imports); a plain document registration, `upsertCollection` and
@@ -1553,7 +1558,8 @@ embedding_model, model_version)` over `collectionForTuple`'s candidates
 precondition, for the re-own move and for no duplicate to remain, and
 `nx doctor` names a duplicate it waits on. A mint is `INSERT ... ON
 CONFLICT DO NOTHING` and a re-read, or, before the index exists, a
-per-tuple advisory lock and a re-read; a conflicting import, restore,
+striped advisory lock on the tuple (`nexus.collection_tuple_lock_key`, one
+of 256 stripes; `collections-003-1`) and a re-read; a conflicting import, restore,
 rename or named registration is a 409 naming both collections. A minted
 label that is already live takes the next id, bounded at 16 draws, then
 409, so `label == "c" + collection_id` holds for every minted row. The id
