@@ -1265,7 +1265,7 @@ class TestETLFidelity:
             coll_name,
             content_type="knowledge",
             owner_id="1.1",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )
         colls = cat.list_collections()
         names = [c["name"] for c in colls]
@@ -1283,7 +1283,7 @@ class TestETLFidelity:
         label = "p213-notes-from-2024"
         cat.register_collection(
             label, content_type="knowledge", owner_id="p213-field-notes",
-            embedding_model="bge-base-en-v15-768",
+            embedding_model="bge-base-en-v15-768", model_version="v1",
         )  # legacy_grandfathered is derived: True for a non-conformant name
         assert cat.get_collection(label)["legacy_grandfathered"] is True, "guard: the row is flagged"
 
@@ -1334,7 +1334,7 @@ class TestETLFidelity:
         model = "bge-base-en-v15-768"
         old = f"code__rename_test__{model}__v1"
         new = f"code__rename_test__{model}__v2"
-        cat.register_collection(old, content_type="code", embedding_model=model)
+        cat.register_collection(old, content_type="code", owner_id="rename-test", embedding_model=model, model_version="v1")
         n = cat.rename_collection(old, new)
         assert n >= 0  # 0 = no documents moved; collection row itself was renamed
         assert cat.get_collection(new) is not None

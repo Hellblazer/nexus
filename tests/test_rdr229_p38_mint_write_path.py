@@ -292,3 +292,14 @@ def test_a_writer_with_no_store_finds_the_row_first(monkeypatch: pytest.MonkeyPa
 
     assert label == "c7"
     assert writer.calls == []
+
+
+def test_a_writer_with_no_store_and_no_finder_is_a_dry_run_and_registers_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``nx index pdf --dry-run`` passes no finder: it writes nothing, so it renders and registers nothing."""
+    writer = _Writer()
+    monkeypatch.setattr(factory, "make_catalog_writer", lambda *a, **k: writer)
+
+    label = t3_collection_name(_SUBJECT, for_write=True)
+
+    assert label == f"knowledge__{_SUBJECT}__{_model()}__v1"
+    assert writer.calls == []
