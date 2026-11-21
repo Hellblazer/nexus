@@ -48,8 +48,9 @@ A write that names one of those placeholders as its subject is refused
 put`, the MCP `store_put` tool, `nx memory promote`, `nx index pdf` and
 `nx index md`, and `nx dt index`. `nx store put` and `store_put` have no
 default collection for the same reason. An existing placeholder collection
-stays readable, its full four-segment name is still accepted for writes,
-and a recovery-bundle import restores it under its recorded name.
+stays readable, and today its full four-segment name is still accepted for
+writes (what a write by label does once labels ship is the open point in
+Rule 3); a recovery-bundle import restores it under its recorded name.
 
 Fine distinctions go on the document, not in a new collection. Use `--tags`
 and `--category` for "postmortem", "draft", "from DEVONthink", "week 36".
@@ -111,7 +112,8 @@ fixed list of prefixes.
 **The unique key.** Two live collections cannot share the same **unique
 key**: content type, owner, embedding model and model version. A live
 collection is one that is neither superseded (replaced by a successor) nor
-quarantined (its chunks moved aside by the engine). A conflicting import or
+a quarantine collection (one named `quarantine-...` that holds chunks the
+garbage collector or a client set aside from another collection, Rule 6). A conflicting import or
 restore is refused with a 409 (HTTP conflict) error. The engine enforces this
 only after the move that re-owns existing collections has completed and no
 duplicate remains. From the release that adds the check, `nx doctor` names
@@ -155,9 +157,10 @@ the collection is registered and never re-derived from its documents. For a
 repo's `code`, `docs` and `rdr` collections it is the first two segments of
 the repo owner's tumbler, joined by a hyphen (`1-15`); a tumbler is the
 catalog's dotted address for an owner or a document. For a doc corpus it is
-the curator, the catalog owner that holds documents imported without a repo.
+the curator, the catalog owner for documents that do not belong to a repo,
+such as papers and notes.
 A doc corpus here is an older `docs` collection that did not come from a
-repo, owned by the curator who imported it; new ones are not created. For a
+repo, owned by the curator who imported it; Rule 5 steers new work to `knowledge`. For a
 `knowledge` collection the owner is the subject, whatever tumbler its
 documents live under, which is why a subject finds its collection. This
 holds from the release that amends catalog-044; until then the engine may
