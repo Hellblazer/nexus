@@ -74,6 +74,14 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
     /** Registers the move by the shipped changeset, as the migrating role, exactly as a boot does. */
     private void register() throws Exception {
+        // The dml_utils runs (<label>/<tenant>) outlive the data_moves row: a later test with the same label and tenant
+        // would resume a run that already completed, execute no chunk, and fail verification on its fresh rows. Archive
+        // them, as a tenant removal does, so every test starts with no run.
+        for (String label : new String[] {LABEL, "again"}) {
+            for (String run : DataMoveRuns.activeRunLabels(ctx(), label)) {
+                DataMoveRuns.archive(ctx(), run);
+            }
+        }
         ctx().deleteFrom(table("nexus", "data_moves")).execute();
         try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
             PgContainerHelper.runSuperuserTestChangelog(c, REGISTER, "databasechangelog_test_reown_register_" + (++runs),
@@ -200,8 +208,7 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
     @Test
     void anExistingRepoOwnerWithThatHash_isReusedNotDuplicated() throws Exception {
-        owner(T, "1.40", "knowledge", "curator", null);
-        owner(T, "1.7", "arcaneum-checkout", "repo", "2ad2825c");
+        owner(T, "1.7", "arcaneum-checkout", "repo", "2ad2825c");   // gateXr789 seeds the curator 1.40
         gateXr789(T);
         register();
 
