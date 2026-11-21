@@ -21,8 +21,11 @@
     its own id if it has one, else the successor's id by (tenant, name), else its own collection_id (a tombstone whose successor is
     gone, residual R7). The id column of a row a statement leaves alone is kept; one that has none takes the registry's.
 
-    NOT DONE HERE, on purpose: the quarantine tag's origin_collection_id (metadata key beside origin_collection). Adding a metadata key
-    needs a row in src/nexus/tables/chunk-metadata-keys.toml and its engine allow-list; that is not SQL-function work.
+    THE QUARANTINE TAG. The three functions that write the origin_collection tag into a moved chunk's metadata (gc_quarantine_orphans,
+    gc_quarantine_orphans_bounded, reaper_quarantine_chunks; the floored wrapper and the restores write or strip no tag of their own)
+    also write origin_collection_id, the origin's registry id as a JSON number, beside it (RDR item 6; the Java retag,
+    QuarantineOrigin.ORIGIN_ID_KEY, writes the same key). The key is left out when the origin has no registry row (jsonb_strip_nulls);
+    each function already refuses an unregistered origin, so that case is a guard, not a path.
 
     REBASE NOTE. The number 069 is provisional (tamsin renumbers at the final rebase). The base of this branch already carries
     vectors-063-live-functions-read-collection-row (P2.6), the last definer of quarantine_restore_chunks and
@@ -41,7 +44,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-069-1" author="nexus-p2m1x.17">
-        <comment>RDR-229 P3.1 stage 2b: nexus.gc_quarantine_orphans sets the collection id beside the name on the quarantine sibling's chunk rows (collection_id, also on the ON CONFLICT update), the sibling's registry upsert (superseded_by_id on the conflict update) and the gc_audit row (collection_id of the origin). Replaces the definition in vectors-040-gc-audit-labels-by-text-and-manifest.xml, changeset vectors-040-1 (line 48), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.1 stage 2b: nexus.gc_quarantine_orphans sets the collection id beside the name on the quarantine sibling's chunk rows (collection_id, also on the ON CONFLICT update), the sibling's registry upsert (superseded_by_id on the conflict update), the quarantine tag's origin_collection_id and the gc_audit row (collection_id of the origin). Replaces the definition in vectors-040-gc-audit-labels-by-text-and-manifest.xml, changeset vectors-040-1 (line 48), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer)
  RETURNS TABLE(moved bigint, sample jsonb)
@@ -216,7 +219,10 @@ BEGIN
            c.embedding_384, c.embedding_768, c.embedding_1024,
            COALESCE(c.metadata, '{}'::jsonb)
              || jsonb_build_object('quarantined_at', p_quarantined_at,
-                                    'origin_collection', p_collection),
+                                    'origin_collection', p_collection)
+             || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                 (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                   WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
            c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
       FROM nexus.chunks c
       JOIN _wbfpw16_victim v ON v.chash = c.chash
@@ -540,7 +546,7 @@ $function$;
     </changeSet>
 
     <changeSet id="vectors-069-2" author="nexus-p2m1x.17">
-        <comment>RDR-229 P3.1 stage 2b: nexus.gc_quarantine_orphans_bounded sets the collection id beside the name on the quarantine sibling's chunk rows (collection_id, also on the ON CONFLICT update), the sibling's registry upsert (superseded_by_id on the conflict update) and the gc_audit row (collection_id of the origin). Replaces the definition in vectors-040-gc-audit-labels-by-text-and-manifest.xml, changeset vectors-040-1 (line 290), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.1 stage 2b: nexus.gc_quarantine_orphans_bounded sets the collection id beside the name on the quarantine sibling's chunk rows (collection_id, also on the ON CONFLICT update), the sibling's registry upsert (superseded_by_id on the conflict update), the quarantine tag's origin_collection_id and the gc_audit row (collection_id of the origin). Replaces the definition in vectors-040-gc-audit-labels-by-text-and-manifest.xml, changeset vectors-040-1 (line 290), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans_bounded(dim integer, p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_sample_limit integer, p_row_limit integer)
  RETURNS TABLE(moved bigint, sample jsonb, remaining bigint)
@@ -698,7 +704,10 @@ BEGIN
            c.embedding_384, c.embedding_768, c.embedding_1024,
            COALESCE(c.metadata, '{}'::jsonb)
              || jsonb_build_object('quarantined_at', p_quarantined_at,
-                                    'origin_collection', p_collection),
+                                    'origin_collection', p_collection)
+             || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                 (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                   WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
            c.created_at, c.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
       FROM nexus.chunks c
       JOIN _a6mon_victim v ON v.chash = c.chash
@@ -1327,7 +1336,7 @@ $$;
     </changeSet>
 
     <changeSet id="vectors-069-4" author="nexus-p2m1x.17">
-        <comment>RDR-229 P3.1 stage 2b: nexus.reaper_quarantine_chunks sets the collection id beside the name on the quarantine sibling's chunk rows (collection_id, also on the ON CONFLICT update), the sibling's registry upsert (superseded_by_id on the conflict update) and the gc_audit row (collection_id of the origin). Replaces the definition in vectors-030-model-tenant-partition-functions.xml, changeset vectors-030-1 (line 1953), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
+        <comment>RDR-229 P3.1 stage 2b: nexus.reaper_quarantine_chunks sets the collection id beside the name on the quarantine sibling's chunk rows (collection_id, also on the ON CONFLICT update), the sibling's registry upsert (superseded_by_id on the conflict update), the quarantine tag's origin_collection_id and the gc_audit row (collection_id of the origin). Replaces the definition in vectors-030-model-tenant-partition-functions.xml, changeset vectors-030-1 (line 1953), the last definer; the signature, attributes and grants are kept. DATA EFFECT: none, a function definition only.</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.reaper_quarantine_chunks(p_tenant_id text, p_collection text, p_quarantine_collection text, p_quarantined_at text, p_row_limit integer, p_grace interval, p_floor_fraction double precision, p_floor_min_chunks integer, p_dry_run boolean)
  RETURNS TABLE(moved bigint, reapable_count bigint, total_count bigint, refused boolean, remaining bigint)
@@ -1503,7 +1512,10 @@ BEGIN
                  || jsonb_build_object('quarantined_at', p_quarantined_at,
                                         'origin_collection', p_collection,
                                         'quarantined_by', 'engine-reaper',
-                                        'reaper_quarantined_at', p_quarantined_at),
+                                        'reaper_quarantined_at', p_quarantined_at)
+                 || jsonb_strip_nulls(jsonb_build_object('origin_collection_id',
+                 (SELECT oc.collection_id FROM nexus.catalog_collections oc
+                   WHERE oc.tenant_id = p_tenant_id AND oc.name = p_collection))),
                d.created_at, d.embedding_model, (SELECT cc.collection_id FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection)
           FROM del d
         ON CONFLICT (tenant_id, collection, chash, embedding_model) DO UPDATE

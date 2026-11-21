@@ -369,6 +369,10 @@ class Rdr229P31SqlDualWriteIntegrationTest {
                         .fetchOne(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID))
                     .as("the sibling is live, so its superseded_by_id is NULL").isNull();
                 assertAuditId(e, T, auditOp, origin, origin);
+                assertThat(e.ctx().select(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection_id")).from(CHUNKS)
+                        .where(CHUNKS.TENANT_ID.eq(T)).and(CHUNKS.COLLECTION.eq(sibling)).and(CHUNKS.CHASH.eq(hash[0]))
+                        .fetchOne(0, String.class))
+                    .as("the quarantine tag carries the origin's registry id beside origin_collection").isEqualTo(Long.toString(e.id(T, origin)));
                 if (extra != null) extra.run(e, sibling, hash[0]);
             });
     }
