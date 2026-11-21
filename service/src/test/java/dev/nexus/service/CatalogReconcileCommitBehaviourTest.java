@@ -26,6 +26,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class CatalogReconcileCommitBehaviourTest extends CatalogReconcileTestBase {
 
+    /** RDR-229 P3.1: a document names its collection by registry id, so every collection this class stages is registered for each fresh tenant. */
+    @Override
+    String newTenant() {
+        String t = super.newTenant();
+        try (java.sql.Connection su = pg.createConnection("")) {
+            for (String name : java.util.List.of("code__seed", "code__elsewhere", "code__old", "code__theirs")) {
+                PgContainerHelper.insertCollection(org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), t, name);
+            }
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+        return t;
+    }
+
     @BeforeAll
     void boot() throws Exception {
         migrate();

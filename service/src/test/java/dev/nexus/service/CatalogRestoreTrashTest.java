@@ -95,6 +95,7 @@ class CatalogRestoreTrashTest {
         // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, COLLECTION);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_B, COLLECTION);
         }
     }
 
