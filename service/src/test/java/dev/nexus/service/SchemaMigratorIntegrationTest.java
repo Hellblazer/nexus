@@ -238,9 +238,14 @@ class SchemaMigratorIntegrationTest {
         assertThat(first.newChangesets())
             .as("fresh walk: new_changesets == every changelog row")
             .isEqualTo(changelogRows);
+        // RDR-229 P3.8 (nexus-p2m1x.28): a changeset that skips itself with onFail="CONTINUE" (collections-001-2,
+        // waiting for a data move that a fresh install has not completed) leaves no row and is counted apart.
         assertThat(first.pendingAtStart())
-            .as("fresh walk: the plan and the landing agree")
-            .isEqualTo(first.newChangesets());
+            .as("fresh walk: the plan and the landing agree, a self-retrying skip counted apart")
+            .isEqualTo(first.newChangesets() + first.skippedRetryingChangesets());
+        assertThat(first.skippedRetryingChangesets())
+            .as("fresh walk: collections-001-2 waits for its data move")
+            .isEqualTo(1);
         assertThat(first.reexecutedChangesets())
             .as("fresh walk re-stamps nothing")
             .isZero();
@@ -2060,9 +2065,17 @@ class SchemaMigratorIntegrationTest {
                             database)) {
                         for (ChangeSet cs : liquibase.listUnrunChangeSets(
                                 new Contexts(), new LabelExpression())) {
+                            // RDR-229 P3.8: a self-retrying (onFail="CONTINUE") changeset whose guard has not
+                            // passed is unrun too (RDR-246 "Finishing a move"); it re-executes nothing.
+                            if (!cs.isAlwaysRun()
+                                    && cs.getPreconditions() != null
+                                    && cs.getPreconditions().getOnFail()
+                                        == liquibase.precondition.core.PreconditionContainer.FailOption.CONTINUE) {
+                                continue;
+                            }
                             assertThat(cs.isAlwaysRun())
                                 .as("on a fully-migrated database, every unrun "
-                                    + "changeset must be runAlways: " + cs.getId())
+                                    + "changeset must be runAlways or self-retrying: " + cs.getId())
                                 .isTrue();
                             runAlwaysIds.add(cs.getId());
                         }
