@@ -20,7 +20,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
@@ -316,14 +315,6 @@ class CollectionRenameIdTest {
 
     // ── the curator moves, on rows the stamp has not reached ──────────────────
 
-    private static void ddl(DSLContext ctx, String statement) {
-        ctx.connection(c -> {
-            try (Statement st = c.createStatement()) {
-                st.execute(statement);
-            }
-        });
-    }
-
     @Test
     void documentMove_stampsTheUnstampedRowsItRewrites() {
         String coll = "knowledge__mv-x__minilm-l6-v2-384__v1";
@@ -331,9 +322,9 @@ class CollectionRenameIdTest {
             "repo_hash", "", "description", "", "repo_root", ""));
         su(ctx -> {
             PgContainerHelper.insertCollection(ctx, T, coll);
-            ddl(ctx, "ALTER TABLE nexus.catalog_documents DROP CONSTRAINT catalog_documents_physical_collection_id_check");
-            ddl(ctx, "ALTER TABLE nexus.document_aspects DROP CONSTRAINT document_aspects_collection_id_check");
-            ddl(ctx, "ALTER TABLE nexus.document_highlights DROP CONSTRAINT document_highlights_collection_id_check");
+            P31CheckReplay.lift(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+            P31CheckReplay.lift(ctx, P31CheckReplay.DOCUMENT_ASPECTS);
+            P31CheckReplay.lift(ctx, P31CheckReplay.DOCUMENT_HIGHLIGHTS);
             ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
                     CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.SOURCE_URI,
                     CATALOG_DOCUMENTS.FILE_PATH)
@@ -346,12 +337,9 @@ class CollectionRenameIdTest {
                     DOCUMENT_HIGHLIGHTS.COLLECTION, DOCUMENT_HIGHLIGHTS.SOURCE_URI, DOCUMENT_HIGHLIGHTS.HIGHLIGHTS_MD,
                     DOCUMENT_HIGHLIGHTS.INGESTED_AT)
                 .values(T, "1.9.1", coll, "file:///old/a.md", "hi", OffsetDateTime.now()).execute();
-            ddl(ctx, "ALTER TABLE nexus.catalog_documents ADD CONSTRAINT catalog_documents_physical_collection_id_check"
-                + " CHECK ((NULLIF(physical_collection, '') IS NULL) = (physical_collection_id IS NULL)) NOT VALID");
-            ddl(ctx, "ALTER TABLE nexus.document_aspects ADD CONSTRAINT document_aspects_collection_id_check"
-                + " CHECK ((NULLIF(collection, '') IS NULL) = (collection_id IS NULL)) NOT VALID");
-            ddl(ctx, "ALTER TABLE nexus.document_highlights ADD CONSTRAINT document_highlights_collection_id_check"
-                + " CHECK ((NULLIF(collection, '') IS NULL) = (collection_id IS NULL)) NOT VALID");
+            P31CheckReplay.restore(ctx, P31CheckReplay.CATALOG_DOCUMENTS);
+            P31CheckReplay.restore(ctx, P31CheckReplay.DOCUMENT_ASPECTS);
+            P31CheckReplay.restore(ctx, P31CheckReplay.DOCUMENT_HIGHLIGHTS);
             return null;
         });
         new CatalogMoves(repo).moveDocument(T, "1.9.1", "file:///new/a.md", "/new/a.md", false);

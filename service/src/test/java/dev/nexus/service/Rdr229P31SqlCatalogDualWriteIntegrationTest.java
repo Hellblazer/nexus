@@ -99,7 +99,7 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
     void theCatalogAndRingWritersAreRefusedBeforeAndCarryTheIdAfter_everyFunctionKeepsItsAttributes_andTheRollbackRestoresTheBodies() throws Exception {
         List<Scenario> scenarios = scenarios();
         assertThat(scenarios).as("non-vacuity: the scenario list").hasSize(5);
-        walk(ADMIN_ROLE, scenarios, 5, (pg, ds, w) -> {
+        walk(ADMIN_ROLE, su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS), scenarios, 5, (pg, ds, w) -> {
             var before = w.before();
             var after = w.after();
             assertThat(after.keySet()).as("no function appeared or went").isEqualTo(before.keySet());
