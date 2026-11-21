@@ -136,7 +136,12 @@ the import summary. A name whose owner segment is a tumbler, not a corpus
 name, has no corpus curator and takes the knowledge curator. A repo's
 collections that an old bulk import left under a curator are re-owned to the
 repo owner by the registered data move `rdr229-reown-repo-stems-from-curator`,
-not by later documents.
+not by later documents. The move leaves a collection with its curator when
+another live collection of the same type, repo owner, embedding model and
+version already exists, and records each such collection in `nexus.gc_audit`
+(operation `rdr229_reown_skipped`, the reason in `details`). A name whose stem
+is all digits, such as `docs__2024__...`, is read as a tumbler too, so it
+takes the knowledge curator rather than a corpus curator.
 
 ## Rule 4: a collection holds many documents
 

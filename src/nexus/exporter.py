@@ -35,8 +35,8 @@ deletes it outright.
 RDR-229: the header MAY carry an ``owner`` key -- ``{"name": str, "repo_hash": str, "repo_root": str}`` --
 written only when the collection's row names a repo owner (a curator has none). It is the header's own key,
 not the per-record ``owner`` key above, and the two are unrelated. An importer predating it ignores it, so
-``FORMAT_VERSION`` is unchanged. An importer that knows it registers the documents under the repo owner
-with that ``repo_hash``; ``repo_root`` is the source machine's path, kept as information only (the
+``FORMAT_VERSION`` is unchanged. An importer that knows it registers the documents of a collection that has no owner yet (no owner on
+its row and no live document) under the repo owner with that ``repo_hash``; ``repo_root`` is the source machine's path, kept as information only (the
 importer registers a new owner with an empty root, which ``nx index repo`` fills in).
 
 RDR-223 (nexus-z0o2p.19): ``import_collection`` registers (or finds) the

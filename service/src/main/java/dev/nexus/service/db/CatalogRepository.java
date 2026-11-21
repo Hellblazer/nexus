@@ -9755,7 +9755,7 @@ public final class CatalogRepository {
      * <p>That SET arm is not the last word for a {@code code}/{@code docs}/{@code rdr}
      * collection (nexus-6pbwx, {@code catalog-044-collection-owner-from-documents.xml}):
      * a BEFORE trigger on {@code catalog_collections} replaces an owner that is not
-     * tumbler-shaped, or that names a curator, with the owner segment of the collection's
+     * tumbler-shaped (since catalog-049 a curator owner stands) with the owner segment of the collection's
      * live documents, and an AFTER trigger on {@code catalog_documents} does the same when
      * a document lands. So the value this method returns for such a collection can differ
      * from the one written here; a knowledge collection is never touched.
@@ -11406,11 +11406,11 @@ public final class CatalogRepository {
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
             // unconditionally left a renamed knowledge collection carrying X's subject as its
             // owner. embedding_model, dimension and the rest stay X's.
-            // nexus-6pbwx: for code/docs/rdr, a name-derived value that is a slug or a curator's
-            // segment is replaced. The insert below fires catalog-044's BEFORE trigger (Y has no
+            // nexus-6pbwx: for code/docs/rdr, a name-derived value that is a slug is replaced (since
+            // catalog-049 a curator's segment stands). The insert below fires catalog-044's BEFORE trigger (Y has no
             // documents yet, so nothing changes), and the documents re-home step further down
-            // fires its AFTER trigger, which replaces THAT kind of owner (not tumbler-shaped, or a
-            // curator's) with the documents'. A tumbler-shaped repo owner written here stands, and
+            // fires its AFTER trigger, which replaces THAT kind of owner (not tumbler-shaped) with
+            // the documents'. A tumbler-shaped repo owner written here stands, and
             // a knowledge collection is outside the rule and keeps exactly what is written here.
             Field<String> newContentType = newContentTypeOrNull != null
                 ? DSL.val(newContentTypeOrNull, CATALOG_COLLECTIONS.CONTENT_TYPE)
