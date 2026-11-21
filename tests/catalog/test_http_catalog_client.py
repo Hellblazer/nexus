@@ -504,6 +504,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 # an unset row ("nobody has set this yet"), never coerced to
                 # False (round-2 fix, Finding A).
                 "aspects_enabled": None,
+                # RDR-229 P3.5a (nexus-p2m1x.23): the registry's identity, a number on
+                # an engine that has the column.
+                "collection_id": 41,
             }]})
         elif op == "/collections/get":
             # nexus-8y1tm: echo the requested name; full collRow shape.
@@ -532,6 +535,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     # mirrors an unset row, never coerced to False (round-2
                     # fix, Finding A).
                     "aspects_enabled": None,
+                    # RDR-229 P3.5a (nexus-p2m1x.23): the registry's identity.
+                    "collection_id": 41,
                 })
         elif op == "/embedding_profile":
             # RDR-204 (nexus-ft04v.33): mirror CatalogHandler.handleEmbeddingProfile
@@ -553,6 +558,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                 "content_type": params.get("content_type", "code"),
                 "owner_id": params.get("owner_id", "test"),
                 "embedding_model": params.get("embedding_model", "voyage-code-3"),
+                # RDR-229 P3.5a (nexus-p2m1x.23): the registry's identity.
+                "collection_id": 41,
             })
         elif op == "/collections/owner-root":
             params = self._query_params()
