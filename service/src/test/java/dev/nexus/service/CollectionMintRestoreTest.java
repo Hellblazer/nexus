@@ -126,7 +126,8 @@ class CollectionMintRestoreTest {
             }
             return null;
         });
-        assertThat(env.su(CollectionMintSupport::indexPresent)).as("guard: the index state under test").isEqualTo(indexed);
+        boolean present = env.su(CollectionMintSupport::indexPresent);
+        assertThat(present).as("guard: the index state under test").isEqualTo(indexed);
         String dstToken = env.newTenant(dst);
 
         JsonNode end = env.restore(dstToken, file);
