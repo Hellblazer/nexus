@@ -33,8 +33,9 @@ import java.util.function.Consumer;
  *       longer than the completion's because this pass is also the warm-up (a plain scan of what the completion reads
  *       again), and every one is run so a failure names every tenant that still holds old-shape rows;</li>
  *   <li>if every run returned no rows, the row is read once more (a pause set now still stops it), and the completion
- *       transaction runs: the UPDATE that sets {@code completed_at}, then the table-wide verification again, warm now, under
- *       {@code statement_timeout_ms}, then {@code on_complete} (if any). A write between the two transactions that leaves an
+ *       transaction runs: the UPDATE that sets {@code completed_at}, then the verification again, warm now, table-wide and once per
+ *       listed tenant (under {@code SET LOCAL nexus.tenant}; a verification that reads a row-security-scoped table is empty
+ *       without a tenant, so the tenants' runs are the check), all sharing {@code statement_timeout_ms}, then {@code on_complete} (if any). A write between the two transactions that leaves an
  *       old-shape row is caught by that second run, which rolls the transaction back, so neither {@code completed_at} nor
  *       {@code on_complete} takes effect without the other, or past a non-empty verification.</li>
  * </ol>
@@ -55,7 +56,7 @@ import java.util.function.Consumer;
  * FailureHandler.Stage#VERIFICATION_NONEMPTY}, {@link FailureHandler.Stage#ON_COMPLETE}) for the worker to hand to the {@link FailureHandler}.
  * A first pass that timed out or failed is a {@code VERIFICATION} failure (transient on 57014, the existing retry and backoff),
  * never a completion; the re-check in the completion transaction reports as the first pass does (non-empty:
- * {@code VERIFICATION_NONEMPTY}; a timeout or a connection that carries a tenant: {@code VERIFICATION}). A verification text the worker
+ * {@code VERIFICATION_NONEMPTY}, naming each tenant; a timeout or a session that carries a tenant: {@code VERIFICATION}). A verification text the worker
  * refuses to run ({@link MoveSql#refusal}) is a {@code VERIFICATION_REFUSED} failure with {@code raised} null and the rule in
  * {@code detail}.
  */
@@ -122,7 +123,7 @@ final class VerifyingFinisher implements MoveFinisher {
         if (context.stopped().getAsBoolean()) {
             return Result.leftOpen();
         }
-        return complete(admin, move);
+        return complete(admin, move, context.tenants());
     }
 
     // ── verification ───────────────────────────────────────────────────────────────────────────────────────
@@ -236,7 +237,7 @@ final class VerifyingFinisher implements MoveFinisher {
 
     // ── completion ─────────────────────────────────────────────────────────────────────────────────────────
 
-    private Result complete(DSLContext admin, DataMove move) {
+    private Result complete(DSLContext admin, DataMove move, List<String> tenants) {
         String onComplete = move.onComplete();
         int statementMs = move.statementTimeoutMs();
         int lockMs = lockTimeoutMs(statementMs);
@@ -263,7 +264,7 @@ final class VerifyingFinisher implements MoveFinisher {
                 }
                 // the verification again, warm now, under the completion's own bound: a write since the first pass cannot slip
                 // past, and a non-empty or failed re-check rolls this transaction back with the UPDATE above
-                tx.connection(c -> recheck(tx, c, move));
+                tx.connection(c -> recheck(tx, c, move, tenants));
                 if (onComplete != null) {
                     if (ChunkFamily.touches(move)) {
                         // only now: the move is known to complete, so no pause or supersede ends a build for nothing
@@ -316,35 +317,89 @@ final class VerifyingFinisher implements MoveFinisher {
     }
 
     /**
-     * The table-wide verification, inside the completion transaction after the UPDATE and before {@code on_complete}, under the
-     * transaction's {@code statement_timeout_ms}. The first pass has warmed what it reads, so it fits the short bound. The table-wide
-     * run reads every row of the driving table (a tenant's run is the same query narrowed to the tenant), so it covers what each
-     * per-tenant run covered. It carries no {@code nexus.tenant}, which is checked first as the first pass checks it.
+     * The verification, inside the completion transaction after the UPDATE and before {@code on_complete}: once table-wide with no
+     * {@code nexus.tenant}, then once per listed tenant, in the first pass's order, each under {@code SET LOCAL nexus.tenant}. The
+     * per-tenant runs are not redundant: a verification that reads a row-security-scoped table or helper sees nothing without a
+     * tenant, so the table-wide run is empty whatever the table holds and the tenant's own run is the check; a write between the
+     * two transactions in one tenant is caught only there. The whole re-check shares {@code statement_timeout_ms}: each run gets
+     * what is left of it, and the move's own statement and lock bounds are set again for {@code on_complete} when it ends. The first
+     * pass has warmed what the runs read.
      *
-     * @throws RecheckFailed when the session carries a tenant, a row of the old shape remains, or the run fails or times out
+     * <p><b>Why one shared budget, not one bound per tenant.</b> The completion transaction holds the row lock of the move's
+     * registry row (and the transaction its snapshot) from the UPDATE to commit, and the number of tenants is the user count, which
+     * the registry does not bound. With a bound per tenant the hold grows as tenants times {@code statement_timeout_ms} (1.4 s for
+     * Phase 3: ten tenants could hold it 14 s); with one shared budget it is at most the re-check's {@code statement_timeout_ms} plus
+     * {@code on_complete}'s own. The price is that a move with many tenants whose warm runs add up past the bound times out (57014,
+     * {@code VERIFICATION}, transient: the first pass runs again, and the re-check with it), so a registrant sets
+     * {@code statement_timeout_ms} for the sum of the tenants' warm runs; {@code DataMoveSplitBoundsIntegrationTest} pins both
+     * sides (runs whose sum fits complete; runs each under the bound whose sum is over it time out and complete nothing).
+     *
+     * <p>The session is shown to carry no tenant before the first run, and again after the last tenant's setting is cleared, so a
+     * tenant that leaked in (or out) never reaches {@code on_complete}. Every failing run is reported, as the first pass reports.
+     *
+     * @throws RecheckFailed when the session carries a tenant, a row of the old shape remains, or a run fails or times out
      */
-    private static void recheck(DSLContext tx, Connection c, DataMove move) {
+    private static void recheck(DSLContext tx, Connection c, DataMove move, List<String> tenants) {
         try {
-            String setting = tx.select(DSL.function("current_setting", SQLDataType.VARCHAR,
-                DSL.val(TenantScope.DEFAULT_TENANT_GUC), DSL.inline(true))).fetchOne(0, String.class);
-            if (setting != null && !setting.isEmpty()) {
-                throw new RecheckFailed(FailureHandler.Stage.VERIFICATION, null,
-                    "the verification in the completion transaction of " + move.label() + " carries nexus.tenant=" + setting
-                        + ", so it would read one tenant's rows and report the table clean");
+            requireNoTenant(tx, move, "before the re-check");
+            long deadline = System.nanoTime() + move.statementTimeoutMs() * 1_000_000L;
+            Map<String, Long> found = new LinkedHashMap<>();
+            runWithinBudget(tx, c, move, null, deadline, found);
+            for (String tenant : tenants) {
+                setTenant(tx, tenant);
+                runWithinBudget(tx, c, move, tenant, deadline, found);
             }
-            long rows = MoveSql.countRows(c, move.verification(), null, COUNT_CAP);
-            if (rows > 0) {
-                String found = "table-wide=" + (rows > COUNT_CAP ? COUNT_CAP + "+" : rows);
-                MoveEvents.verificationFailed(move.label(), found);
+            if (!tenants.isEmpty()) {
+                setTenant(tx, "");
+            }
+            requireNoTenant(tx, move, "after the re-check");
+            PgSession.setStatementAndLockBounds(tx, move.statementTimeoutMs(), lockTimeoutMs(move.statementTimeoutMs()));
+            if (!found.isEmpty()) {
+                List<String> parts = new ArrayList<>();
+                found.forEach((who, n) -> parts.add(who + "=" + (n > COUNT_CAP ? COUNT_CAP + "+" : n)));
+                String shown = String.join(", ", parts);
+                MoveEvents.verificationFailed(move.label(), shown);
                 throw new RecheckFailed(FailureHandler.Stage.VERIFICATION_NONEMPTY, null,
                     "verification of " + move.label() + " in the completion transaction found old-shape rows in "
-                        + move.drivingTableLabel() + ": " + found + " (written after the first pass)");
+                        + move.drivingTableLabel() + ": " + shown + " (written after the first pass)");
             }
         } catch (RecheckFailed e) {
             throw e;
         } catch (SQLException | RuntimeException e) {
             throw new RecheckFailed(stageOf(e), sqlOf(e),
                 "the verification in the completion transaction of " + move.label() + " could not run: " + describe(e));
+        }
+    }
+
+    /** One re-check run, under what is left of the budget; a tenant of {@code null} is the table-wide run. */
+    private static void runWithinBudget(DSLContext tx, Connection c, DataMove move, String tenant, long deadline,
+                                        Map<String, Long> found) throws SQLException {
+        long leftMs = (deadline - System.nanoTime()) / 1_000_000L;
+        if (leftMs <= 0) {
+            throw new RecheckFailed(FailureHandler.Stage.VERIFICATION, new SQLException("statement_timeout_ms spent", "57014"),
+                "the verification in the completion transaction of " + move.label() + " used all of statement_timeout_ms="
+                    + move.statementTimeoutMs() + " before " + (tenant == null ? "the table-wide run" : "tenant " + tenant));
+        }
+        PgSession.setLocal(tx, "statement_timeout", Long.toString(leftMs));
+        long rows = MoveSql.countRows(c, move.verification(), tenant, COUNT_CAP);
+        if (rows > 0) {
+            found.put(tenant == null ? "table-wide" : "tenant " + tenant, rows);
+        }
+    }
+
+    /** {@code SET LOCAL nexus.tenant} (as {@code set_config(..., true)}), so the setting ends with the transaction at the latest. */
+    private static void setTenant(DSLContext tx, String tenant) {
+        tx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val(TenantScope.DEFAULT_TENANT_GUC),
+            DSL.val(tenant, SQLDataType.VARCHAR), DSL.inline(true))).fetchOne();
+    }
+
+    private static void requireNoTenant(DSLContext tx, DataMove move, String when) {
+        String setting = tx.select(DSL.function("current_setting", SQLDataType.VARCHAR,
+            DSL.val(TenantScope.DEFAULT_TENANT_GUC), DSL.inline(true))).fetchOne(0, String.class);
+        if (setting != null && !setting.isEmpty()) {
+            throw new RecheckFailed(FailureHandler.Stage.VERIFICATION, null,
+                "the completion transaction of " + move.label() + " carries nexus.tenant=" + setting + " " + when
+                    + ", so a run would read one tenant's rows and report the table clean, or on_complete would run as that tenant");
         }
     }
 

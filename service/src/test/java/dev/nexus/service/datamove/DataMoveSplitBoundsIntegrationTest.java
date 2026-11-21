@@ -166,6 +166,97 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         assertThat(DataMoveRegistry.reload(ctx(), "sb-slip")).as("the move is still open for the failure handler").isPresent();
     }
 
+    // ── (c2) a write that only a tenant's own session can see ───────────────────────────────────────────
+
+    /**
+     * {@code dm_test.forced_noread} is FORCE row-level security with no policy for the migrating role: a session with no
+     * {@code nexus.tenant} reads none of its rows (as with a verification that reads an RLS-scoped helper), so the table-wide run
+     * is empty whatever the table holds and only a per-tenant run is a check. The runs are done by marking every row moved.
+     */
+    private void registerForcedNoRead(String label) {
+        DataMoveTestFixtures.register(ctx(), label, "forced_noread", 50, 0, null, "stamp-template.sql",
+            "verification-forced-noread.sql", 60_000, "on-complete-add-marker.sql");
+        ctx().update(table("dm_test", "forced_noread")).set(N, 1).execute();   // the superuser's session reads every row
+    }
+
+    @Test
+    void aWriteOnlyATenantsOwnSessionCanSee_isCaughtByTheRecheck_perTenant() {
+        registerForcedNoRead("sb-tenant-slip");
+        var finisher = new VerifyingFinisher();
+        finisher.beforeCompletionHook = () ->
+            ctx().insertInto(table("dm_test", "forced_noread")).columns(TENANT_ID, ID, N).values("acme", 9_000L, 0).execute();
+
+        var result = finish(finisher, "sb-tenant-slip", "forced_noread", List.of("acme", "globex"));
+
+        assertThat(result.outcome()).as("the table-wide run reads no row without a tenant, so only acme's own run can see it")
+            .isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION_NONEMPTY);
+        assertThat(result.reason()).contains("completion transaction").contains("tenant acme=1").doesNotContain("tenant globex");
+        assertThat(completedAt("sb-tenant-slip")).isNull();
+        assertThat(columnExists("marker")).as("on_complete did not run").isFalse();
+    }
+
+    @Test
+    void theForcedFixture_isInvisibleWithoutATenant_soTheFirstPassAloneCannotSeeALateRow() {
+        // control (non-vacuity): the same late row, present before the finish, is found by the first pass's per-tenant run
+        // and by nothing else
+        registerForcedNoRead("sb-tenant-control");
+        ctx().insertInto(table("dm_test", "forced_noread")).columns(TENANT_ID, ID, N).values("acme", 9_000L, 0).execute();
+
+        var result = finish("sb-tenant-control", "forced_noread", List.of("acme", "globex"));
+
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION_NONEMPTY);
+        assertThat(result.reason()).contains("tenant acme=1").doesNotContain("table-wide");
+        // and with no tenant listed, the first pass is the table-wide run alone, which sees nothing: the move completes
+        // although a row of the old shape is there (the registrant's duty to list the tenants of a tenant-scoped move)
+        assertThat(finish("sb-tenant-control", "forced_noread", List.of()).outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+    }
+
+    // ── (c3) the re-check's runs share statement_timeout_ms ─────────────────────────────────────────────
+
+    /**
+     * The choice (see {@code VerifyingFinisher#recheck}): the table-wide run and every listed tenant's run share ONE
+     * {@code statement_timeout_ms}, each getting what is left of it, rather than each its own. Four runs of 0.4 s (the table-wide
+     * run and three tenants; {@code verification-slow-run.sql} sleeps that long on every run, the first pass's included, which has
+     * 10 s) are each far under any single bound, so the sum is what these two tests tell apart.
+     */
+    private void registerSlowRuns(String label, int statementMs) {
+        DataMoveTestFixtures.register(ctx(), label, "tenant_plain", 50, 0, null, "stamp-template.sql",
+            "verification-slow-run.sql", statementMs, "on-complete-add-marker.sql");
+        DataMoveTestFixtures.setVerifyStatementTimeout(ctx(), label, 10_000);
+        runsOnly(label);
+    }
+
+    @Test
+    void theRechecksOfNTenants_whoseSumFitsStatementTimeoutMs_completeTheMove() {
+        registerSlowRuns("sb-sum-fits", 3_000);   // 4 x 0.4 s = 1.6 s inside 3 s
+
+        var result = finish("sb-sum-fits", "tenant_plain", List.of("default", "acme", "globex"));
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.COMPLETED);
+        assertThat(columnExists("marker")).as("on_complete ran after the re-check, with its own bounds restored").isTrue();
+    }
+
+    @Test
+    void theRechecksOfNTenants_eachUnderStatementTimeoutMs_butTogetherOverIt_areATransientTimeout_andCompleteNothing() {
+        registerSlowRuns("sb-sum-over", 1_000);   // 4 x 0.4 s = 1.6 s over 1 s; no single run is over it
+
+        long started = System.nanoTime();
+        var result = finish("sb-sum-over", "tenant_plain", List.of("default", "acme", "globex"));
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage()).isEqualTo(FailureHandler.Stage.VERIFICATION);
+        assertThat(result.failure().raised().getSQLState()).as("the shared budget ran out: query_canceled").isEqualTo("57014");
+        assertThat(result.failure().detail()).contains("completion transaction");
+        assertThat(DataMoveFailureClassifier.classify(result.failure().stage(), result.failure().raised(), List.of(),
+            result.failure().detail()).permanent()).as("retried under the existing backoff").isFalse();
+        assertThat(completedAt("sb-sum-over")).isNull();
+        assertThat(columnExists("marker")).as("on_complete did not run").isFalse();
+        // the first pass takes 4 x 0.4 s; the completion transaction is cut at about 1 s, not run to the 1.6 s the runs need
+        assertThat(elapsedMs).as("first pass ~1.6 s plus a re-check cut near 1 s").isLessThan(4_500L);
+    }
+
     // ── (d) the first pass takes ACCESS SHARE only ──────────────────────────────────────────────────────
 
     @Test
