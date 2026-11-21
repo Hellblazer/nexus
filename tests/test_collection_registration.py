@@ -282,6 +282,7 @@ def test_409_is_treated_as_already_registered(
         "conflict", request=MagicMock(), response=response,
     )
     name = "knowledge__ensure-409-test"
+    writer.get_collection.return_value = {"name": name}   # the race's winner registered it: the row reads back
 
     ensure_collection_registered(name, registrar=lambda: writer)  # must not raise
 
@@ -1177,6 +1178,7 @@ class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
             "already registered", request=MagicMock(), response=response,
         )
         name = "knowledge__cache-invalidation-409-test"
+        writer.get_collection.return_value = {"name": name}   # the race's winner registered it: the row reads back
 
         ensure_collection_registered(name, registrar=lambda: writer)
 
