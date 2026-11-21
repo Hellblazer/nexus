@@ -29,11 +29,14 @@ import json
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 
 from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-from nexus.catalog.recovery_bundle import export_bundle, import_bundle, read_bundle
-from nexus.corpus import parse_conformant_collection_name, t3_collection_name
+from nexus.catalog.recovery_bundle import ImportSummary, export_bundle, import_bundle, read_bundle
+from nexus.catalog.rows.legacy_names import parse_conformant_collection_name  # moved out of nexus.corpus by P2.2
+from nexus.cli import main
+from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.mcp.core import store_put
 
@@ -117,7 +120,10 @@ def test_a_live_label_with_other_attributes_is_refused_naming_both_and_the_other
     bundle = tmp_path / "b.jsonl"
     _write_bundle(
         bundle,
-        [_coll(clash, _SRC + 1, model=model), _coll(b, _SRC + 2, model=model), _coll(c, _SRC + 3, model=model)],
+        # b and c carry their own owners: the engine refuses a second live collection on one
+        # (content_type, owner_id, embedding_model, model_version) tuple, so a bundle that held two would not import whole.
+        [_coll(clash, _SRC + 1, model=model), _coll(b, _SRC + 2, owner_id="p39b", model=model),
+         _coll(c, _SRC + 3, owner_id="p39c", model=model)],
         [_doc(clash, _SRC + 1, "a1"), _doc(clash, _SRC + 1, "a2"), _doc(b, _SRC + 2, "b1"), _doc(c, _SRC + 3, "c1")],
     )
 
@@ -213,7 +219,10 @@ def _seed(client, subjects: tuple[str, ...]) -> dict[str, str]:
         for subject in subjects:
             for n in (1, 2):
                 store_put(content=f"p39 {subject} note {n} body", collection=subject, title=f"{subject}-{n}")
-    return {s: t3_collection_name(s, t3=client) for s in subjects}
+    # Since P3.8 the engine mints the label (c<id>) of a collection a put creates, so the label is read from the
+    # registry by the attributes the put registered, not derived from the subject.
+    rows = make_catalog_reader().list_collections()
+    return {s: next(r["name"] for r in rows if (r["content_type"], r["owner_id"]) == ("knowledge", s)) for s in subjects}
 
 
 @pytest.mark.integration
@@ -247,7 +256,7 @@ def test_reimporting_a_bundle_onto_its_own_source_maps_every_collection_and_crea
     export_bundle(reader, client, bundle)
     before = {r["name"]: r["collection_id"] for r in reader.list_collections()}
     assert set(labels.values()) <= set(before)
-    tumblers = {t: str(reader.by_source_uri(uri_for(c, f"{t}-{n}")).tumbler)
+    tumblers = {(t, n): str(reader.by_source_uri(uri_for(c, f"{t}-{n}")).tumbler)
                 for t, c in labels.items() for n in (1, 2)}
 
     summary = _import(client, bundle)
@@ -257,7 +266,7 @@ def test_reimporting_a_bundle_onto_its_own_source_maps_every_collection_and_crea
     assert {r["name"]: r["collection_id"] for r in reader.list_collections()} == before   # no row, no new id
     for subject, label in labels.items():
         for n in (1, 2):
-            assert str(reader.by_source_uri(uri_for(label, f"{subject}-{n}")).tumbler) == tumblers[subject]
+            assert str(reader.by_source_uri(uri_for(label, f"{subject}-{n}")).tumbler) == tumblers[(subject, n)]
 
 
 # ── (4) a non-live collection row is skipped, counted and named ──────────────────────────────────────────────
@@ -346,10 +355,6 @@ _NEW_FIELDS = {
 
 def _invoke_cli_import(tmp_path, monkeypatch, summary):
     """The seam test of ``tests/test_catalog_export_import_cli.py``: the CLI renders a given ImportSummary."""
-    from click.testing import CliRunner
-
-    from nexus.cli import main
-
     bundle = tmp_path / "recovery.jsonl"
     bundle.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 3}) + "\n")
     monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
@@ -360,8 +365,6 @@ def _invoke_cli_import(tmp_path, monkeypatch, summary):
 
 
 def test_the_cli_prints_nothing_for_the_new_counts_when_all_are_zero(tmp_path, monkeypatch):
-    from nexus.catalog.recovery_bundle import ImportSummary
-
     summary = ImportSummary(docs_imported=3)
     assert all(getattr(summary, f) == [] for f in _NEW_FIELDS), "each new field defaults to empty"
 
@@ -374,8 +377,6 @@ def test_the_cli_prints_nothing_for_the_new_counts_when_all_are_zero(tmp_path, m
 
 @pytest.mark.parametrize("field", sorted(_NEW_FIELDS))
 def test_the_cli_prints_a_new_count_only_when_it_is_nonzero_and_names_each_entry(tmp_path, monkeypatch, field):
-    from nexus.catalog.recovery_bundle import ImportSummary
-
     summary = ImportSummary(docs_imported=3, **{field: _NEW_FIELDS[field]})
 
     out = _invoke_cli_import(tmp_path, monkeypatch, summary).output
@@ -402,8 +403,6 @@ def test_the_cli_prints_a_new_count_only_when_it_is_nonzero_and_names_each_entry
 
 
 def test_a_refused_collection_exits_1_and_the_full_summary_still_prints(tmp_path, monkeypatch):
-    from nexus.catalog.recovery_bundle import ImportSummary
-
     summary = ImportSummary(
         docs_imported=3, links_created=1, **_NEW_FIELDS,
         unresolvable_links=[{"from_source_uri": "nx-note://k/a", "to_source_uri": "nx-note://k/b",
@@ -422,8 +421,6 @@ def test_a_refused_collection_exits_1_and_the_full_summary_still_prints(tmp_path
 
 
 def test_a_refused_collection_alone_exits_1(tmp_path, monkeypatch):
-    from nexus.catalog.recovery_bundle import ImportSummary
-
     summary = ImportSummary(
         docs_imported=3, collections_refused_label_clash=_NEW_FIELDS["collections_refused_label_clash"])
 
@@ -431,8 +428,6 @@ def test_a_refused_collection_alone_exits_1(tmp_path, monkeypatch):
 
 
 def test_skipped_not_live_and_changed_model_alone_exit_0_and_print(tmp_path, monkeypatch):
-    from nexus.catalog.recovery_bundle import ImportSummary
-
     summary = ImportSummary(
         docs_imported=3, collections_skipped_not_live=_NEW_FIELDS["collections_skipped_not_live"],
         collections_changed_model=_NEW_FIELDS["collections_changed_model"])
