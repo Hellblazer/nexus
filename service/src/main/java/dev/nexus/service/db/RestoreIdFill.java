@@ -34,8 +34,10 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * RDR-229 P3.1 (nexus-p2m1x.17): the ids a restore writes beside the collection names. P3.1's NOT VALID CHECKs refuse every
  * row with a non-empty name and a NULL id, and a backup written before the id columns existed holds exactly such rows, so
  * the load fills each id from the RESTORED registry row on {@code (tenant_id, name)}, on the stage, before the table's
- * insert. {@code ''} means unset and stays NULL. History tables ({@code relevance_log}, {@code search_telemetry}) have no
- * CHECK and no stamp: their ids stay NULL.
+ * insert. A file's own ids, where it has any, are another installation's and are never trusted: every twin is overwritten, so
+ * the result is the same for a file whose twins are NULL and one whose twins are not. {@code ''} means unset and gives NULL.
+ * History tables ({@code relevance_log}, {@code search_telemetry}) are refilled the same way but an unresolved name is not
+ * refused: they have no CHECK and keep a label.
  *
  * <p><b>The registry.</b> {@code catalog_collections.collection_id} is never taken from a file: the engine draws every
  * restored row's id from the column's own sequence ({@code nextval(pg_get_serial_sequence(...))}), so a later mint cannot
@@ -61,8 +63,8 @@ final class RestoreIdFill {
     private static final String REGISTRY = "catalog_collections";
     private static final String LIST = "/db/rdr229/p31-checks.tsv";
 
-    /** A name column and the id column beside it. */
-    private record Pair(String nameColumn, String idColumn) {
+    /** A name column and the id column beside it; {@code history}: a log table's label, with no CHECK. */
+    private record Pair(String nameColumn, String idColumn, boolean history) {
     }
 
     /** The exported tables' NAME_ID rows of the expand's list, by table, in list order. */
@@ -80,8 +82,9 @@ final class RestoreIdFill {
                 if (line.isBlank() || line.startsWith("#") || line.startsWith("table\t")) continue;
                 String[] f = line.split("\t");
                 if (f.length != 5) throw new IllegalStateException("a row of " + LIST + " has " + f.length + " columns: " + line);
-                if (!"NAME_ID".equals(f[4]) || TenantExport.exportable(f[0]).isEmpty()) continue;
-                byTable.computeIfAbsent(f[0], k -> new LinkedHashSet<>()).add(new Pair(f[1], f[2]));
+                boolean history = "HISTORY".equals(f[4]);
+                if (!("NAME_ID".equals(f[4]) || history) || TenantExport.exportable(f[0]).isEmpty()) continue;
+                byTable.computeIfAbsent(f[0], k -> new LinkedHashSet<>()).add(new Pair(f[1], f[2], history));
             }
         } catch (IOException e) {
             throw new IllegalStateException("could not read " + LIST, e);
@@ -112,7 +115,7 @@ final class RestoreIdFill {
             Stage st = stages.get(e.name());
             if (tp == null || st == null || !tp.loads()) continue;
             for (Pair p : PAIRS.getOrDefault(e.name(), List.of())) {
-                if (!stageHasColumn(ctx, st, p.nameColumn())) continue;
+                if (p.history() || !stageHasColumn(ctx, st, p.nameColumn())) continue;
                 Table<?> rows = TenantImportStaging.stageTable(st).as("s");
                 Field<String> name = DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR);
                 Condition orphan = name.isNotNull().and(name.ne(""));
@@ -157,7 +160,10 @@ final class RestoreIdFill {
         if (REGISTRY.equals(table.name())) repointTombstones(ctx, tenant);
     }
 
-    /** Each staged row with a non-empty name and a NULL id takes the id of the restored registry row on (tenant, name). */
+    /**
+     * Every staged row takes the id of the restored registry row on (tenant, name), whatever the file's own value was (a file's
+     * ids are another installation's and are never trusted); an empty or unresolved name gives NULL.
+     */
     private static void fillByName(DSLContext ctx, String tenant, ExportTable table, Stage rows) {
         for (Pair p : PAIRS.getOrDefault(table.name(), List.of())) {
             if (!stageHasColumn(ctx, rows, p.nameColumn())) continue;
@@ -166,7 +172,6 @@ final class RestoreIdFill {
             Field<String> name = DSL.field(DSL.name("s", p.nameColumn()), SQLDataType.VARCHAR);
             ctx.update(TenantImportStaging.stageTable(rows).as("s"))
                 .set(id, CollectionIds.idOf(DSL.val(tenant), name))
-                .where(DSL.field(DSL.name("s", p.idColumn()), SQLDataType.BIGINT).isNull(), name.isNotNull(), name.ne(""))
                 .execute();
         }
     }
