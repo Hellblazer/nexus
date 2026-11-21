@@ -225,69 +225,130 @@ class AckDeadlineTimerTest {
         assertThat(timer.armedAt("t1", "b")).isEqualTo(EPISODE.plus(Duration.ofMinutes(40)));
     }
 
-    @Test
-    void aHandoffThatKeepsFailingRaisesAnErrorEventEveryTwelfthAttemptAndKeepsRetryingAndASuccessResetsTheCount() {
-        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AckDeadlineTimer.class);
-        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
-        logs.start();
-        logger.addAppender(logs);
-        try {
-            ManualScheduler sched = new ManualScheduler();
-            boolean[] failing = {true};
-            AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> {
-                if (failing[0]) {
-                    throw new IllegalStateException("boom");
+    // ── the stuck event and the failure count ────────────────────────────────
+
+    /** The timer's log events for one test, and the retries it schedules run a round at a time. */
+    private static final class Failing implements AutoCloseable {
+        final ManualScheduler sched = new ManualScheduler();
+        final boolean[] failing = {true};
+        final AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> {
+            if (failing[0]) {
+                throw new IllegalStateException("boom " + t);
+            }
+        });
+        final ch.qos.logback.classic.Logger logger =
+            (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AckDeadlineTimer.class);
+        final ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+            new ch.qos.logback.core.read.ListAppender<>();
+        private final java.util.Set<ManualScheduler.Task> ran = new java.util.HashSet<>();
+
+        Failing() {
+            logs.start();
+            logger.addAppender(logs);
+        }
+
+        /** Runs every scheduled task that is not cancelled and has not run, once: a round over all armed topics. */
+        void round() {
+            for (ManualScheduler.Task t : List.copyOf(sched.tasks)) {
+                if (!t.cancelled()[0] && ran.add(t)) {
+                    t.task().run();
                 }
-            });
-            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
-
-            for (int i = 0; i < 24; i++) {
-                sched.tasks.getLast().task().run();
             }
+        }
 
-            var errors = logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR).toList();
-            assertThat(errors).as("attempts 12 and 24").hasSize(2);
-            assertThat(errors.getFirst().getFormattedMessage()).contains("board_ack_deadline_stuck", "attempt=12");
-            assertThat(errors.getLast().getFormattedMessage()).contains("attempt=24");
-            assertThat(timer.armedAt("t1", "b")).as("the retry is never abandoned: a lost deadline is the worse failure").isNotNull();
-
-            failing[0] = false;
-            sched.tasks.getLast().task().run();
-            failing[0] = true;
-            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
-            for (int i = 0; i < 11; i++) {
-                sched.tasks.getLast().task().run();
+        void rounds(int n) {
+            for (int i = 0; i < n; i++) {
+                round();
             }
-            assertThat(logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR).count())
-                .as("a success reset the count: 11 fresh failures raise nothing").isEqualTo(2);
-        } finally {
+        }
+
+        List<ch.qos.logback.classic.spi.ILoggingEvent> errors() {
+            return logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR).toList();
+        }
+
+        @Override
+        public void close() {
             logger.detachAppender(logs);
         }
     }
 
+    private static Instant due() {
+        return EPISODE.plus(Duration.ofMinutes(20));
+    }
+
     @Test
-    void evictingATenantAlsoClearsItsFailureCount() {
-        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(AckDeadlineTimer.class);
-        var logs = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
-        logs.start();
-        logger.addAppender(logs);
-        try {
-            ManualScheduler sched = new ManualScheduler();
-            AckDeadlineTimer timer = new AckDeadlineTimer(sched, Clock.fixed(EPISODE, ZoneOffset.UTC), (t, b) -> {
-                throw new IllegalStateException("boom");
-            });
-            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
-            for (int i = 0; i < 11; i++) {
-                sched.tasks.getLast().task().run();
-            }
+    void aHandoffThatKeepsFailingRaisesAnErrorEventEveryTwelfthAttemptAndKeepsRetrying() {
+        try (Failing f = new Failing()) {
+            f.timer.arm("t1", "b", due());
 
-            timer.evictTenant("t1");
-            timer.arm("t1", "b", EPISODE.plus(Duration.ofMinutes(20)));
-            sched.tasks.getLast().task().run();   // the 12th failure overall, but the first since the eviction
+            f.rounds(24);
 
-            assertThat(logs.list.stream().filter(e -> e.getLevel() == ch.qos.logback.classic.Level.ERROR)).isEmpty();
-        } finally {
-            logger.detachAppender(logs);
+            assertThat(f.errors()).as("attempts 12 and 24").hasSize(2);
+            assertThat(f.errors().getFirst().getFormattedMessage()).contains("board_ack_deadline_stuck", "attempt=12");
+            assertThat(f.errors().getLast().getFormattedMessage()).contains("attempt=24");
+            assertThat(f.timer.armedAt("t1", "b")).as("the retry is never abandoned").isNotNull();
+        }
+    }
+
+    @Test
+    void aSuccessBetweenFailuresResetsTheCount() {
+        try (Failing f = new Failing()) {
+            f.timer.arm("t1", "b", due());
+            f.rounds(6);
+            f.failing[0] = false;
+            f.round();   // the hand-off succeeds
+            f.failing[0] = true;
+            f.timer.arm("t1", "b", due());
+
+            f.rounds(6);   // 12 failures in all, but only 6 in a row
+
+            assertThat(f.errors()).as("without the reset the count reaches 12 and raises the event").isEmpty();
+        }
+    }
+
+    @Test
+    void anArmThatCancelsTheTopicResetsItsCount() {
+        try (Failing f = new Failing()) {
+            f.timer.arm("t1", "b", due());
+            f.rounds(11);
+            f.timer.arm("t1", "b", null);   // nothing is owed any more
+            f.timer.arm("t1", "b", due());
+
+            f.round();   // the 12th failure overall, the first since the cancel
+
+            assertThat(f.errors()).as("without the reset this is the 12th in a row").isEmpty();
+        }
+    }
+
+    @Test
+    void evictingATenantClearsItsFailureCountAndLeavesAnotherTenantsCount() {
+        try (Failing f = new Failing()) {
+            f.timer.arm("t1", "b", due());
+            f.timer.arm("t2", "b", due());
+            f.rounds(11);   // 11 failures of each
+
+            f.timer.evictTenant("t1");
+            f.timer.arm("t1", "b", due());
+            f.round();   // t1: its first failure since the eviction; t2: its 12th
+
+            assertThat(f.errors()).as("only t2 reaches 12: a cleared map would hide it, an uncleared t1 would add one")
+                .hasSize(1);
+            assertThat(f.errors().getFirst().getFormattedMessage()).contains("tenant=t2", "attempt=12");
+        }
+    }
+
+    @Test
+    void onlyTheFirstFailedAttemptOfARunLogsItsStack() {
+        try (Failing f = new Failing()) {
+            f.timer.arm("t1", "b", due());
+
+            f.rounds(3);
+
+            var warns = f.logs.list.stream().filter(e -> e.getFormattedMessage().contains("board_ack_deadline_failed")).toList();
+            assertThat(warns).hasSize(3);
+            assertThat(warns.get(0).getThrowableProxy()).as("the first attempt carries the stack").isNotNull();
+            assertThat(warns.get(1).getThrowableProxy()).as("a repeat carries the message only").isNull();
+            assertThat(warns.get(2).getThrowableProxy()).isNull();
         }
     }
 
