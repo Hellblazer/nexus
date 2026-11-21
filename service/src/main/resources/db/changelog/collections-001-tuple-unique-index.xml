@@ -25,33 +25,41 @@
     The move is named by its LABEL, not by a changeset id: the move is registered by an engine boot, not by this
     file. A fresh install therefore takes two boots: boot 1's migration runs before the move exists (skipped), the
     engine then registers it and its worker completes it (nothing to move), and boot 2 applies the index.
-    The two conditions are ONE sqlCheck on purpose: the CASE reaches the counter only when the move has completed.
-    The counter takes ACCESS EXCLUSIVE on the registry for the length of one count (below), so a boot that is still
-    waiting for the move must not call it; nothing in Liquibase promises the order of two nested checks.
+    The two conditions are ONE sqlCheck on purpose: the CASE reaches the counter only when the move has completed, so a
+    boot that is still waiting for the move reads no row of the registry at all; nothing in Liquibase promises the order
+    of two nested checks.
 
-    THE COUNTER IS NOT A PLAIN count(*). nexus.catalog_collections is FORCE ROW LEVEL SECURITY with the policy
-    `tenant_id = current_setting('nexus.tenant', true)` (catalog-001-5), and the migration role owns the table with
-    no BYPASSRLS (the nexus-1wjmq class, catalog-013-1b's header). With no tenant GUC set, a count by that role sees
-    ZERO rows on every tenant, so a naive guard would read "no duplicate" on a registry that holds one. The helper
-    (collections-001-1) lifts FORCE for the length of one count and puts back what it found, the pattern and the
-    reasoning of aspects-005-1's aspect_queue_rows_unscoped(). It counts TUPLES (the key and the predicate above)
-    held by more than one row, across all tenants.
+    THE COUNTER IS A PLAIN, READ-ONLY SQL FUNCTION AND TAKES NO TABLE LOCK BEYOND A READ. nexus.catalog_collections is
+    FORCE ROW LEVEL SECURITY with the policy `tenant_id = current_setting('nexus.tenant', true)` (catalog-001-5), and the
+    migration role owns the table with no BYPASSRLS (the nexus-1wjmq class, catalog-013-1b's header). With no tenant GUC
+    set, a count by that role sees ZERO rows on every tenant unless a policy lets it read them. RDR-229 D2 ships that
+    policy as catalog_collections_owner_read (FOR SELECT TO CURRENT_USER USING (true), changeset
+    vectors-065-catalog-collections-owner-read, with the guard that skips it where a role subject to row-level security
+    would inherit it). The counter (collections-001-1) is a SECURITY INVOKER function that runs as the migration role and
+    reads every tenant's rows through that policy. THIS FILE CREATES NO POLICY AND CHANGES NO TABLE SETTING: lifting the
+    table's FORCE flag for a count would take a lock that blocks every reader of the registry for the length of a count,
+    on every boot, and a boot in the cloud must never do that.
+    Where the policy is absent (D2 not yet applied, or its guard skipped it in a single-role install) the counter reads
+    no row and answers 0. That is safe, not silent: the index build below then refuses on a real duplicate, the changeset
+    is skipped unrecorded and retried at the next boot, and nx doctor names the duplicate from the catalog's own listing.
 
-    THE GUARD CANNOT HALT A BOOT. A sqlCheck that THROWS (the migration role does not own the table, so the ALTER TABLE
-    is refused) is an error, not a failed check, and onError="CONTINUE" turns it into the same skip. The body is a
-    single CREATE UNIQUE INDEX with failOnError="false": a duplicate that lands between the precondition and the body
-    (Liquibase ends the precondition's transaction first) makes the index build raise, Liquibase rolls the body back,
-    logs it, and writes NO DATABASECHANGELOG row (MarkChangeSetRanGenerator refuses a FAILED changeset), so it is
-    retried at the next boot exactly like a precondition skip. The build reads the heap and is not subject to RLS, so
-    it sees every tenant's rows. nx doctor names any duplicate tuple that holds the index back.
+    THE GUARD CANNOT HALT A BOOT. A sqlCheck that THROWS is an error, not a failed check, and onError="CONTINUE" turns it
+    into the same skip. The body is a single CREATE UNIQUE INDEX with failOnError="false": a duplicate that lands between
+    the precondition and the body, a duplicate the counter could not see, or a migration role that does not own the table
+    makes the index build raise, Liquibase rolls the body back, logs it, and writes NO DATABASECHANGELOG row
+    (MarkChangeSetRanGenerator refuses a FAILED changeset), so it is retried at the next boot exactly like a precondition
+    skip. The build reads the heap and is not subject to RLS, so it sees every tenant's rows. GET /v1/status reports
+    collection_tuple_index_present, and nx doctor names a duplicate that holds the index back, and an index that waits for
+    no reason it can name.
 
-    LOCKS. The counter's ALTER TABLE and the index build lock nexus.catalog_collections only (ACCESS EXCLUSIVE for one
-    count; SHARE for one build of a registry of hundreds of rows). Neither names a chunk table, a chunk leaf or the
-    index builder, so tests/test_changelog_continue_precondition_chunks_lint.py allows the CONTINUE changeset and
-    SchemaMigrator keeps a running per-collection index build through it.
+    LOCKS. The counter reads (ACCESS SHARE). The index build takes SHARE on nexus.catalog_collections only, for one build
+    of a registry of hundreds of rows. Neither names a chunk table, a chunk leaf or the index builder, so
+    tests/test_changelog_continue_precondition_chunks_lint.py allows the CONTINUE changeset and SchemaMigrator keeps a
+    running per-collection index build through it. No statement in this file asks for ACCESS EXCLUSIVE
+    (CollectionTupleUniqueIndexLiquibaseTest holds ACCESS SHARE on the registry for a whole walk and requires it to finish).
 
-    DATA EFFECT: none. collections-001-1 creates a function and no row is read or written by a changeset; the counter
-    reads rows, and restores the table's FORCE flag. collections-001-2 builds an index and writes no row.
+    DATA EFFECT: none. collections-001-1 creates a function and no row is read or written by a changeset; collections-001-2
+    builds an index and writes no row.
 
     Placed after identity-005 and before the runAlways grants blocks (the D0.1 late-append convention).
 -->
@@ -63,34 +71,18 @@
 
     <!-- ── Changeset 1: the guard's duplicate counter ───────────────────────────────────────────────── -->
     <changeSet id="collections-001-1" author="nexus-p2m1x.28">
-        <comment>Create nexus.catalog_collection_tuple_duplicates_unscoped(): the number of live tuples (tenant_id, content_type, owner_id, embedding_model, model_version, over rows with superseded_by = '' and lifecycle_state other than quarantine, the candidate set of collectionForTuple) that more than one row of nexus.catalog_collections holds, across ALL tenants, counted with FORCE ROW LEVEL SECURITY lifted for the length of the count and put back as it was found (the migration role owns the table with no BYPASSRLS, so a count under FORCE sees zero rows on every tenant). Returns 0 when the table is gone. Used by collections-001-2's precondition. DATA EFFECT: none (a function is created; no row is read or written by the changeset).</comment>
+        <comment>Create nexus.catalog_collection_tuple_duplicates_unscoped(): the number of live tuples (tenant_id, content_type, owner_id, embedding_model, model_version, over rows with superseded_by = '' and lifecycle_state other than quarantine, the candidate set of collectionForTuple) that more than one row of nexus.catalog_collections holds. A plain read-only SECURITY INVOKER SQL function: it runs as the migration role and reads every tenant's rows through RDR-229 D2's owner-read policy catalog_collections_owner_read (changeset vectors-065); it changes no table setting and takes no lock beyond a read. Where that policy is absent it reads no row and answers 0. Used by collections-001-2's precondition. DATA EFFECT: none (a function is created; no row is read or written by the changeset).</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() RETURNS bigint
-LANGUAGE plpgsql
+LANGUAGE sql STABLE SECURITY INVOKER
 AS $fn$
-DECLARE
-    v_forced boolean;
-    v_dups   bigint;
-BEGIN
-    SELECT c.relforcerowsecurity INTO v_forced
-      FROM pg_class c
-     WHERE c.oid = to_regclass('nexus.catalog_collections');
-    IF NOT FOUND THEN
-        RETURN 0;
-    END IF;
-    ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
-    SELECT count(*) INTO v_dups FROM (
+    SELECT count(*) FROM (
         SELECT 1
           FROM nexus.catalog_collections
          WHERE superseded_by = '' AND lifecycle_state &lt;&gt; 'quarantine'
          GROUP BY tenant_id, content_type, owner_id, embedding_model, model_version
         HAVING count(*) &gt; 1
-    ) d;
-    IF v_forced THEN
-        ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
-    END IF;
-    RETURN v_dups;
-END
+    ) d
 $fn$;
 
 REVOKE ALL ON FUNCTION nexus.catalog_collection_tuple_duplicates_unscoped() FROM PUBLIC;
