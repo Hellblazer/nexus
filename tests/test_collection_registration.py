@@ -314,6 +314,46 @@ def test_a_409_whose_name_did_not_register_is_raised_not_cached(
     assert name not in corpus._REGISTERED_COLLECTIONS
 
 
+class _WriteOnlyWriter:
+    """The ambient catalog writer's shape (``nexus.catalog.factory._ServiceCatalogWriter``): writes only, no
+    ``get_collection``, so a read-back must go through the catalog reader."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def register_collection(self, name: str, **_kw: object) -> None:
+        raise self._exc
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.t2_tenant
+@pytest.mark.parametrize("read_back", [None, {"name": "knowledge__ensure-409-ambient", "superseded_by": "knowledge__x"}],
+                         ids=["no-row", "superseded-row"])
+def test_a_409_on_the_ambient_writer_reads_back_through_the_reader_and_a_missing_or_retired_row_is_raised(
+    monkeypatch: pytest.MonkeyPatch, read_back: object,
+) -> None:
+    """The default registrar hands back a write-only writer with no ``get_collection``: the 409 read-back must not be
+    skipped for it. A row that is absent, or retired (superseded), is not a won race."""
+    import nexus.catalog.factory as factory
+
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
+    reader = MagicMock()
+    reader.get_collection.return_value = read_back
+    monkeypatch.setattr(factory, "make_catalog_reader", lambda: reader)
+    exc = httpx.HTTPStatusError("collections 'a' and 'b' are both live for the tuple", request=MagicMock(),
+                                response=MagicMock(status_code=409))
+    name = "knowledge__ensure-409-ambient"
+
+    with pytest.raises(httpx.HTTPStatusError):
+        ensure_collection_registered(name, registrar=lambda: _WriteOnlyWriter(exc))
+
+    assert name not in corpus._REGISTERED_COLLECTIONS
+    reader.get_collection.assert_called_with(name)
+
+
 @pytest.mark.t2_tenant
 def test_non_409_http_error_propagates_and_is_not_cached(
     monkeypatch: pytest.MonkeyPatch,
