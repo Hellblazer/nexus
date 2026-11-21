@@ -148,6 +148,14 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<Boolean> collectionTupleIndex;               // nullable — key omitted
+
+    /** STUB (test-first): the key is not rendered yet. */
+    public StatusHandler collectionTupleIndex(Supplier<Boolean> collectionTupleIndex) {
+        this.collectionTupleIndex = collectionTupleIndex;
+        return this;
+    }
+
     private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork;   // null: always []
 
     /**
