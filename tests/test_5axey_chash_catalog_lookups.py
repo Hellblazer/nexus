@@ -63,7 +63,9 @@ def _populate_knowledge_doc(cat: ActiveCatalog, *, title: str, chash: str,
     Returns the tumbler string.
     """
     from nexus.catalog.store_hook import catalog_store_hook_tracked
+    from tests._catalog_fixture_ops import register_seed_collections
 
+    register_seed_collections(collection)
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=collection,
     )
@@ -105,7 +107,7 @@ class TestDedupA1:
         intent (title does not block dedup) without asserting the
         now-corrected-away cross-collection behavior.
         """
-        from nexus.catalog.store_hook import catalog_store_hook_tracked
+        from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked
 
         cat = _make_catalog(tmp_path)
         chash = _chash("same-content")
@@ -141,7 +143,7 @@ class TestDedupA1:
         minting a duplicate. (nexus-6pfgb.31: under another title it is a
         second document, see the next test.)"""
         from nexus.aspect_readers import uri_for
-        from nexus.catalog.store_hook import catalog_store_hook_tracked
+        from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked
 
         cat = _make_catalog(tmp_path)
         chash = _chash("legacy-no-uri-content")
@@ -169,7 +171,7 @@ class TestDedupA1:
     def test_same_chash_legacy_row_under_another_title_is_a_second_document(self, tmp_path, monkeypatch):
         """nexus-6pfgb.31: this used to reconcile onto the legacy note, rewrite its source_uri and stamp
         the put's keys (a ttl_days) on it. A note's identity is (collection, title)."""
-        from nexus.catalog.store_hook import catalog_store_hook_tracked
+        from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked
 
         cat = _make_catalog(tmp_path)
         chash = _chash("legacy-no-uri-content-2")
@@ -200,7 +202,7 @@ class TestDedupA1:
         happened to byte-match a document already manifested under a
         different collection, silently reconciling onto it and leaving
         its physical_collection/source_uri stuck on the OLD collection."""
-        from nexus.catalog.store_hook import catalog_store_hook_tracked
+        from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked
 
         cat = _make_catalog(tmp_path)
         chash = _chash("same-content-cross-collection")
@@ -225,7 +227,7 @@ class TestDedupA1:
 
     def test_different_chash_does_not_dedup(self, tmp_path, monkeypatch):
         """Sanity: distinct content must still register distinct documents."""
-        from nexus.catalog.store_hook import catalog_store_hook_tracked
+        from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked
 
         cat = _make_catalog(tmp_path)
         _populate_knowledge_doc(

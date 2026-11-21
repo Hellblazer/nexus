@@ -48,6 +48,9 @@ class _Graph:
     """A few live documents under one owner, with a unique title prefix per test."""
 
     def __init__(self, cat: HttpCatalogClient) -> None:
+        from tests._catalog_fixture_ops import register_seed_collections
+
+        register_seed_collections("knowledge__rdr147pins")
         self.cat = cat
         self.tag = f"rdr147-pin-{next(_counter)}"
         self.owner = cat.register_owner(

@@ -26,12 +26,19 @@ from collections.abc import Iterable
 from contextlib import contextmanager
 from typing import Any
 
+import pytest
+
 from nexus.catalog.catalog_protocol import CATALOG_WRITE_OPS
 
 __all__ = [
     "ActiveCatalog",
     "active_reader",
     "bypass_fk_seed_chunk",
+    "catalog_hook_seeded",
+    "catalog_markdown_hook_seeded",
+    "catalog_pdf_hook_seeded",
+    "catalog_store_hook_seeded",
+    "catalog_store_hook_tracked_seeded",
     "count_documents",
     "documents_by_file_path",
     "documents_by_title",
@@ -40,7 +47,9 @@ __all__ = [
     "only_document",
     "register_real_doc_id",
     "register_seed_collections",
+    "registered_or_seeded",
     "restore_fk_after_dangling_seeds",
+    "seed_row_when_profile_refuses",
     "seed_manifest_chunks",
     "seed_note_manifest",
     "unroutable_write_target",
@@ -61,7 +70,8 @@ def register_seed_collections(*names: str) -> None:
     A name that carries a model the substrate's engine will not register (a ``voyage-context-3`` name on the
     bge-profile substrate: a test of the external-embedder rules needs a collection registered under that model)
     is refused by the registration. It then gets the registry row a superuser would write, with the model its name
-    carries, so the seed still names a registered collection.
+    carries (a name that carries none: the substrate's bge-768 profile), so the seed still names a registered
+    collection.
     """
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.corpus import ensure_collection_registered
@@ -78,13 +88,101 @@ def register_seed_collections(*names: str) -> None:
             _register_collection_row(name)
 
 
+@pytest.fixture(autouse=True)
+def seed_row_when_profile_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The doc_indexer pre-flight's collection registration, on a substrate whose engine profile refuses the model
+    the collection's name carries.
+
+    RDR-229 P3.1 (nexus-p2m1x.17): the pre-flight registers the document's collection first
+    (``nexus.doc_indexer.ensure_collection_registered``). A test that indexes into a collection named for a model
+    other than the substrate's bge profile (a ``voyage-context-3`` or ``minilm-l6-v2-384`` name, derived from its
+    ``corpus``) meets the engine's refusal of that registration. This fixture gives that collection the registry
+    row a superuser writes, with the model its name carries, so the document registers under it as it does where the
+    profile and the name agree. Every other outcome of the registration is the real one.
+
+    Autouse, so a module opts in by importing it by name (``from tests._catalog_fixture_ops import
+    seed_row_when_profile_refuses  # noqa: F401``); a module that does not import it is unaffected.
+    """
+    import nexus.doc_indexer as doc_indexer
+
+    monkeypatch.setattr(doc_indexer, "ensure_collection_registered", registered_or_seeded(doc_indexer.ensure_collection_registered))
+
+
+def registered_or_seeded(real: Any) -> Any:
+    """*real* (``ensure_collection_registered``) with a registry row seeded for a name whose registration fails.
+
+    For a test that must run a registration against a substrate whose engine profile refuses the model the
+    collection's name carries: every other outcome of the registration is the real one."""
+
+    def wrapper(name: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return real(name, *args, **kwargs)
+        except Exception:  # noqa: BLE001 — the substrate's profile refused the model the name carries; seed the row directly
+            _register_collection_row(name)
+            return None
+
+    return wrapper
+
+
+def catalog_markdown_hook_seeded(*args: Any, **kwargs: Any) -> Any:
+    """``nexus.doc_indexer._catalog_markdown_hook`` with its collection registered first (RDR-229 P3.1, as
+    :func:`catalog_pdf_hook_seeded`): the markdown run's hook fires after the run's own registration."""
+    from nexus.doc_indexer import _catalog_markdown_hook
+
+    register_seed_collections(kwargs["collection_name"] if "collection_name" in kwargs else args[1])
+    return _catalog_markdown_hook(*args, **kwargs)
+
+
+def catalog_pdf_hook_seeded(*args: Any, **kwargs: Any) -> Any:
+    """``nexus.pipeline_stages._catalog_pdf_hook`` with its collection registered first (RDR-229 P3.1, as
+    :func:`catalog_hook_seeded`): the PDF run's hook fires after the run's own registration of the collection."""
+    from nexus.pipeline_stages import _catalog_pdf_hook
+
+    register_seed_collections(kwargs["collection_name"] if "collection_name" in kwargs else args[1])
+    return _catalog_pdf_hook(*args, **kwargs)
+
+
+def catalog_store_hook_tracked_seeded(*args: Any, **kwargs: Any) -> Any:
+    """``nexus.catalog.store_hook.catalog_store_hook_tracked`` with its collection registered first (RDR-229 P3.1):
+    ``put_note`` registers the collection before it calls the hook, so a test calling the hook does the same."""
+    from nexus.catalog.store_hook import catalog_store_hook_tracked
+
+    register_seed_collections(kwargs["collection_name"] if "collection_name" in kwargs else args[2])
+    return catalog_store_hook_tracked(*args, **kwargs)
+
+
+def catalog_store_hook_seeded(*args: Any, **kwargs: Any) -> Any:
+    """:func:`catalog_store_hook_tracked_seeded`'s back-compat form: the tumbler only."""
+    tumbler, _created = catalog_store_hook_tracked_seeded(*args, **kwargs)
+    return tumbler
+
+
+def catalog_hook_seeded(*args: Any, **kwargs: Any) -> dict:
+    """``nexus.indexer._catalog_hook`` with the collections of its ``indexed_files`` registered first.
+
+    RDR-229 P3.1 (nexus-p2m1x.17): the engine refuses a document under an unregistered collection, and
+    ``_run_index`` registers every collection it indexes into before it calls the hook, so a test that calls the
+    hook directly does what the run does: registers them first. ``indexed_files`` is the hook's fifth parameter,
+    ``(path, content_type, collection)`` rows.
+    """
+    from nexus.indexer import _catalog_hook
+
+    indexed = kwargs["indexed_files"] if "indexed_files" in kwargs else (args[4] if len(args) > 4 else [])
+    register_seed_collections(*{row[2] for row in indexed})
+    return _catalog_hook(*args, **kwargs)
+
+
 def _register_collection_row(name: str) -> None:
     """The registry row for *name* as a superuser writes it, with the embedding model the name carries."""
-    from nexus.corpus import collection_registration_kwargs, embedding_model_for_collection_name
+    from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
+    from nexus.corpus import collection_registration_kwargs
     from tests._chunk_seed import _lit, ambient_tenant
 
     fields = collection_registration_kwargs(name)
-    model = embedding_model_for_collection_name(name) or fields["embedding_model"]
+    # The model the name carries; a name that carries none (a legacy two-segment name) gets the substrate's own bge-768
+    # profile, the model the engine registers every such collection under here and the one ``bypass_fk_seed_chunk``
+    # gives a collection it makes (the name-derived write intent would be voyage, which this engine refuses).
+    model = embedding_model_for_collection_name(name) or "bge-base-en-v15-768"
     _run_psql(
         "INSERT INTO nexus.catalog_collections "
         "(tenant_id, name, content_type, owner_id, embedding_model, lifecycle_state) "
@@ -121,11 +219,13 @@ def register_real_doc_id(
     """
     from nexus.catalog.http_catalog_client import HttpCatalogClient
 
-    register_seed_collections(physical_collection)
     with HttpCatalogClient() as cat:
         owner = cat.register_owner(
             owner_name, "repo", repo_hash="test-aspect-fixture-hash",
         )
+        # After the owner write: a seed run outside tests/ is refused by the production-write guard at its first
+        # write, and the registration's own read must not meet a dead endpoint before that.
+        register_seed_collections(physical_collection)
         tumbler = cat.register(
             owner, title,
             content_type="paper",

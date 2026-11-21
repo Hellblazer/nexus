@@ -291,6 +291,7 @@ def test_has_shebang_read_failed_logs_debug():
 
 # ── Site 15: mcp/core.py store_put catalog hook failure (GH #253) ─────────────
 
+@pytest.mark.t2_tenant  # RDR-229 P3.1: store_put registers the collection with the catalog before the (patched) hook runs
 def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
     """Site 15: _catalog_store_hook exception in MCP store_put emits warning-level log.
 

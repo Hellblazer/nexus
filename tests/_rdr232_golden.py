@@ -292,6 +292,7 @@ def build_rdr084_fixture() -> Fixture:
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import note_content_hash, note_manifest_metadata
+    from tests._catalog_fixture_ops import register_seed_collections
 
     fx_chunks: dict[str, tuple[str, str, frozenset[str]]] = {}
     fx_collection: dict[str, str] = {}
@@ -306,6 +307,7 @@ def build_rdr084_fixture() -> Fixture:
                 source: str, facets: list[frozenset[str]]) -> str:
             collection = _owner_collection(kind, owner)
             ctype = "rdr" if kind == "rdr" else "code"
+            register_seed_collections(collection)  # RDR-229 P3.1: a document names a registered collection
             tumbler = str(cat.register(
                 owner, title, content_type=ctype, file_path=file_path,
                 physical_collection=collection, chunk_count=len(pieces),

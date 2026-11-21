@@ -312,6 +312,9 @@ def importer(cat, monkeypatch) -> list[Tumbler]:
     monkeypatch.setattr(
         exporter_mod, "_resolve_owner_document",
         lambda group, collection, owner, *a, **kw: handed.append(owner) or "1.1.1")
+    # RDR-229 P3.1: ``plan`` registers the target collection before the first document, which reads the engine's embedding
+    # profile; this fake catalog is the owner derivation's, and registering a collection is not what these cases are about.
+    monkeypatch.setattr(exporter_mod, "ensure_collection_registered", lambda *a, **kw: None)
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, **kw: cat.get_collection(name))
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **kw: cat)
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", lambda *a, **kw: cat)
