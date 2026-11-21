@@ -117,12 +117,13 @@ class CollectionLabelTest {
     }
 
     /**
-     * The '/' clause is PENDING Sam's ruling (board ask rdr229-label-slash): NoteUri.collectionOf ends a collection
-     * at the first '/'. If he allows '/', flip CollectionLabel.REFUSE_SLASH (and the client's LABEL_REFUSES_SLASH),
-     * and change this one test and "a/b" and "/" in refusedLabels.
+     * The '/' clause is Sam's ruling (T2 nexus/sam-ruling-rdr229-label-slash-2026-11-21): NoteUri.collectionOf ends a
+     * collection at the first '/', and file paths are built from a label. A later ruling flips
+     * CollectionLabel.REFUSE_SLASH (and the client's LABEL_REFUSES_SLASH) and changes this test and "a/b" and "/" in
+     * refusedLabels.
      */
     @Test
-    void aSlashIsRefusedUntilSamRulesOnIt() {
+    void aLabelHoldingASlashIsRefused() {
         assertThat(CollectionLabel.REFUSE_SLASH).isTrue();
         assertThatThrownBy(() -> CollectionLabel.validateUserLabel("a/b")).hasMessageContaining("/");
     }

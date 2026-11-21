@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-229 P3.6 (nexus-p2m1x.26), the label rule at the wire: a collection registration and a rename target are
  * refused with a 400 when the label is of the minted form, holds a control character, runs over 255 UTF-8 bytes or
- * holds a slash (pending Sam's ruling, board ask rdr229-label-slash), and a label the ChromaDB shape used to refuse
+ * holds a slash (Sam's ruling, T2 nexus/sam-ruling-rdr229-label-slash-2026-11-21), and a label the ChromaDB shape used to refuse
  * (100 characters, a space, a percent sign, a colon, a non-ASCII letter) registers, lists and renames. The rule's own
  * table is {@code CollectionLabelTest}; this is the mapping that test cannot reach (a refusal that reached the
  * generic catch would read as a 500) and the engine half of the Windows label test (Cross-Cutting, Windows).
@@ -164,7 +164,7 @@ class CollectionLabelRuleRouteTest {
     }
 
     @Test
-    void registerRefusesASlash_untilSamRules() throws Exception {
+    void registerRefusesASlash() throws Exception {
         var resp = register("a/b");
         assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
     }

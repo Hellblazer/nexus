@@ -39,11 +39,11 @@ public final class CollectionLabel {
     }
 
     /**
-     * RDR-229 item 7, the label rule's one pending clause: a label holding {@code '/'} is refused. PENDING Sam's
-     * ruling (board ask {@code rdr229-label-slash}): {@code NoteUri.collectionOf} ends a collection at the first
-     * {@code '/'}, so such a label would mis-parse {@code nx-note://<label>/...}, and no audit yet covers where a
-     * label meets a file path. If he allows {@code '/'}, set this {@code false} (and the client's
-     * {@code LABEL_REFUSES_SLASH}) and change {@code CollectionLabelTest.aSlashIsRefusedUntilSamRulesOnIt}.
+     * RDR-229 item 7: a label holding {@code '/'} is refused (Sam's ruling, T2
+     * {@code nexus/sam-ruling-rdr229-label-slash-2026-11-21}). {@code NoteUri.collectionOf} ends a collection at the
+     * first {@code '/'}, so such a label would mis-parse {@code nx-note://<label>/...}, and file paths are built from
+     * a label. One named clause: a later ruling flips this (and the client's {@code LABEL_REFUSES_SLASH}) and changes
+     * {@code CollectionLabelTest.aLabelHoldingASlashIsRefused}.
      */
     static final boolean REFUSE_SLASH = true;
 
