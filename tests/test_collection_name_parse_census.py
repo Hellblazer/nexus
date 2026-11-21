@@ -392,19 +392,22 @@ for _site in LEDGER:
 #: primitive_call 181 -> 191, glob_default 1 -> 0. (The tenth mint is ``topic_route.is_prose``: the request's
 #: names carry no row on a cold cache, so the prose test answers NoRow from the name.)
 #:
-#: RDR-229 owner-is-source (the .nxexp import's owner derivation, ``nexus.nxexp_owner``), 228 -> 231: three mint sites
-#: for the one case that still reads the name, a no-row collection whose owner stem is ``<slug>-<hash8>`` (the repo
-#: owner's repo_hash): two splits in ``resolve_import_owner_tumbler`` and the call from ``exporter``'s wrapper. They
-#: empty with the importer's no-row case at P3.8. mint 127 -> 130, split 2 -> 4, primitive_call 191 -> 192.
+#: RDR-229 owner-is-source (the .nxexp import's owner derivation, ``nexus.nxexp_owner``), 228 -> 231: the one helper
+#: ``owner_stem`` that reads a collection name's owner segment and its ``<slug>-<hash8>`` (the repo owner's
+#: repo_hash) is one split, and its two callers in ``resolve_import_owner_tumbler`` are two primitive_calls. All
+#: three are migration-source: the name is read from another install's bundle and no row of this catalog backs it
+#: (item 1). P2.2 (nexus-p2m1x.7) moves them into legacy_names; P4.3 deletes them. migration-source 19 -> 22,
+#: split 2 -> 3, primitive_call 191 -> 193 (the exporter's wrapper call is not a site: it calls the resolver, which
+#: holds no raw parse any more).
 PARSE_SITE_PIN: int = 231
 CLASS_PIN: dict[str, int] = {
-    "mint": 130, "holdover": 23, "diagnostic": 42,
-    "migration-source": 19, "label-pattern": 10, "file-path": 5,
+    "mint": 127, "holdover": 23, "diagnostic": 42,
+    "migration-source": 22, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 192, "const_prefix": 7, "fnmatch": 14,
-    "strip_prefix": 4, "startswith": 3, "split": 4,
+    "primitive_call": 193, "const_prefix": 7, "fnmatch": 14,
+    "strip_prefix": 4, "startswith": 3, "split": 3,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }

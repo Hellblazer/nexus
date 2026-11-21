@@ -16,11 +16,14 @@ derive the source, in this order, never refusing a collection (stranding user da
 1. the bundle's ``owner`` header (an export since RDR-229 records the repo owner's ``repo_hash`` and
    ``repo_root``): the existing owner with that ``repo_hash``, else a new repo owner;
 2. a collection name of the repo-synth stem shape ``<slug>-<hash8>`` (``code__arcaneum-2ad2825c__...``)
-   whose collection is a ``code`` one, or a ``docs``/``rdr`` one with a ``code`` collection of the same
-   stem in the target catalog: the repo owner with ``repo_hash`` ``<hash8>``, existing or registered
-   (empty ``repo_root``: the source machine's path is not this one's);
-3. a ``docs`` corpus with no ``code`` sibling: its corpus curator, named the way the doc indexer names it
-   (the stem is the corpus);
+   whose collection is a ``code`` one, or a ``docs``/``rdr`` one when the target catalog already holds
+   that repo's owner (a repo owner with ``repo_hash`` ``<hash8>``, from an earlier ``nx index repo`` or a
+   ``code`` import) or a ``code`` collection of the same stem: the repo owner with ``repo_hash``
+   ``<hash8>``, existing or registered (empty ``repo_root``: the source machine's path is not this one's);
+3. a ``docs`` corpus with neither: its corpus curator, named the way the doc indexer names it (the stem
+   is the corpus). A hash-suffixed stem here looks like a repo's collection that came before its ``code``
+   one, so the import says so once (``on_hint``, the structlog warning) and the collection stays with the
+   curator, because an existing owner is never moved by a later import;
 4. the knowledge curator, with a loud warning naming the collection and the reason, and the caller's
    *on_fallback* hook told so the import summary can count it.
 
@@ -40,6 +43,18 @@ _log = structlog.get_logger(__name__)
 #: A repo-synth owner stem: ``<name>-<hash8>`` (``nexus.repo_identity._safe_collection``), the hash being
 #: the first 8 hex characters of the main repo path's sha256, which is the repo owner's ``repo_hash``.
 _REPO_STEM = re.compile(r"^(?P<slug>.+)-(?P<hash>[0-9a-f]{8})$")
+
+
+def owner_stem(collection_name: str) -> tuple[str, tuple[str, str] | None]:
+    """``(stem, repo)`` of *collection_name*: its owner segment (``<type>__<stem>__...``, ``""`` when there
+    is none) and, when that segment is ``<slug>-<hash8>``, ``(slug, hash8)``, else ``None``. The name is
+    read here because it comes from another install's bundle and no row of this catalog backs it (RDR-229
+    item 1, migration source): P2.2 moves this into ``legacy_names`` and P4.3 deletes it. The one place the
+    stem and its hash are read; every caller goes through it."""
+    parts = collection_name.split("__")
+    stem = parts[1] if len(parts) > 1 else ""
+    m = _REPO_STEM.match(stem)
+    return stem, ((m["slug"], m["hash"]) if m else None)
 
 
 def _repo_owner(reader: Any, writer: Any, repo_hash: str, *, root: str, name: str) -> Tumbler:
@@ -78,12 +93,14 @@ def resolve_import_owner_tumbler(
     bundle_owner: dict | None = None,
     content_type: str = "",
     on_fallback: Callable[[str], None] | None = None,
+    on_hint: Callable[[str], None] | None = None,
 ) -> Tumbler:
     """The owner an import-minted document of *collection_name* is registered under (module docstring).
 
     *bundle_owner* is the export header's ``owner`` (``{"repo_hash", "repo_root", "name"}``), or ``None``.
     *content_type* is the type the bundle declares, used only when the collection has no catalog row.
-    *on_fallback* receives the reason when the knowledge curator is taken because nothing else applied."""
+    *on_fallback* receives the reason when the knowledge curator is taken because nothing else applied.
+    *on_hint* receives the hint when a hash-suffixed ``docs`` stem stays with its corpus curator."""
     row = reader.get_collection(collection_name) or {}
     ctype = str(row.get("content_type") or content_type or "")
     if ctype == "knowledge":
@@ -91,25 +108,33 @@ def resolve_import_owner_tumbler(
     current = _row_owner(collection_name, row, reader)
     if current is not None:
         return current
-    parts = collection_name.split("__")                     # the owner segment: ``<type>__<stem>__...``
-    stem = parts[1] if len(parts) > 1 else ""
+    stem, stem_parts = owner_stem(collection_name)
     repo_hash = str((bundle_owner or {}).get("repo_hash") or "")
     if repo_hash:                                                           # (1) the bundle's owner
-        slug = str((bundle_owner or {}).get("name") or "") or stem
+        slug = str((bundle_owner or {}).get("name") or "") or (stem_parts[0] if stem_parts else "")
         return _repo_owner(
             reader, writer, repo_hash, root=str((bundle_owner or {}).get("repo_root") or ""), name=slug)
-    m = _REPO_STEM.match(stem)
-    if m and (ctype == "code" or (ctype in ("docs", "rdr") and any(    # a code collection of this stem in the target catalog
-        str(c.get("name") or "").split("__")[1:2] == [stem]
-        for c in reader.list_collections(lifecycle_state="live", content_type="code")
-    ))):
-        return _repo_owner(reader, writer, m["hash"], root="", name=m["slug"])   # (2) the stem
-    if ctype == "docs" and stem:                                            # (3) the corpus curator
-        owner_t = reader.curator_owner_tumbler_by_name(stem)
-        return owner_t if owner_t is not None else writer.register_owner(stem, "curator")
+    if stem_parts is not None and (ctype == "code" or (
+        ctype in ("docs", "rdr") and (                                      # the repo is already known here
+            reader.owner_for_repo(stem_parts[1]) is not None
+            or any(owner_stem(str(c.get("name") or ""))[1] == stem_parts
+                   for c in reader.list_collections(lifecycle_state="live", content_type="code"))
+        )
+    )):
+        return _repo_owner(reader, writer, stem_parts[1], root="", name=stem_parts[0])   # (2) the stem
+    if ctype == "docs":                                                     # (3) the corpus curator
+        if stem:
+            if stem_parts is not None:
+                hint = (f"{stem} looks like a repo's collection; import its code__ bundle first, and this "
+                        f"collection stays with its corpus curator otherwise")
+                _log.warning("import_docs_stem_looks_like_a_repo", collection=collection_name, hint=hint)
+                if on_hint is not None:
+                    on_hint(hint)
+            owner_t = reader.curator_owner_tumbler_by_name(stem)
+            return owner_t if owner_t is not None else writer.register_owner(stem, "curator")
     reason = (
         f"no registered owner on its row, no live document, no bundle owner, and "
-        f"{'no repo stem' if not m else 'a repo stem but no code collection of it'} "
+        f"{'no repo stem' if stem_parts is None else 'a repo stem but no repo owner or code collection of it'} "
         f"(content type {ctype or 'unknown'})"
     )
     _log.warning("import_owner_fell_back_to_knowledge_curator", collection=collection_name, reason=reason)

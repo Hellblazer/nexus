@@ -1142,6 +1142,8 @@ class _OwnerImport:
         self.content_type = content_type
         #: why the knowledge curator was taken for want of any source, else ``None`` (RDR-229)
         self.owner_fallback_reason: str | None = None
+        #: the hint when a hash-suffixed docs stem stayed with its corpus curator, else ``None``
+        self.owner_hint: str | None = None
         #: owner groups met so far by the writing pass (rows are never kept: the import streams)
         self.groups: dict[str, dict] = {}
         self.imported_count = 0
@@ -1241,6 +1243,9 @@ class _OwnerImport:
     def _note_owner_fallback(self, reason: str) -> None:
         self.owner_fallback_reason = reason
 
+    def _note_owner_hint(self, hint: str) -> None:
+        self.owner_hint = hint
+
     # ── prepass ───────────────────────────────────────────────────────────────
 
     def plan(self, pre: dict[str, dict]) -> None:
@@ -1262,7 +1267,7 @@ class _OwnerImport:
             self._owner_tumbler = _resolve_import_owner_tumbler(
                 self.collection_name, self._reader, self._writer,
                 bundle_owner=self.bundle_owner, content_type=self.content_type,
-                on_fallback=self._note_owner_fallback)
+                on_fallback=self._note_owner_fallback, on_hint=self._note_owner_hint)
         for key, g in pre.items():
             # One group's failure must not strand every later group: record it, carry on, report all
             # at the end.
@@ -2011,6 +2016,7 @@ def import_collection(
     vector_mismatches = 0
     sweep_skipped = 0
     owner_fallback_reason: str | None = None
+    owner_hint: str | None = None
     failures: list[tuple[str, str]] = []
     unowned_documents: list[dict[str, Any]] = []
     # A first read of the file, for counts only: each document's record count says which page is its
@@ -2155,6 +2161,7 @@ def import_collection(
             vector_mismatches = owner_import.vector_mismatches
             failures = owner_import.failures
             owner_fallback_reason = owner_import.owner_fallback_reason
+            owner_hint = owner_import.owner_hint
             _log.info(
                 "import_owners_reconciled",
                 collection=collection_name,
@@ -2230,5 +2237,7 @@ def import_collection(
         # so a caller importing many collections can total the ones whose owner was not their source.
         "owner_fallback_count": 1 if owner_fallback_reason else 0,
         "owner_fallback_reason": owner_fallback_reason or "",
+        # RDR-229: set when a hash-suffixed docs stem stayed with its corpus curator (it looks like a repo's)
+        "owner_hint": owner_hint or "",
         "elapsed_seconds": round(elapsed, 2),
     }

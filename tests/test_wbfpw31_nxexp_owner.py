@@ -513,17 +513,18 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     assert doc.physical_collection == dst
     assert doc.tumbler.owner_address() == stem_owner
 
-    # The mixed state (nexus-6pbwx): the import's curator document came first, a real repo
-    # document joins afterwards (nx index repo into the restored collection). The curator's
-    # segment was only provisional, so the repo owner replaces it and the next resolve
-    # returns the repo owner, not the curator.
+    # The mixed state (nexus-6pbwx), under owner-is-source (RDR-229, Sam 2026-11-21, T2
+    # nexus/sam-ruling-rdr229-owner-is-source-2026-11-21): the owner a collection was registered
+    # under is its source and is set once. A real repo document of ANOTHER repo owner joining
+    # afterwards does NOT move the collection's owner: the repo owner the import chose stays
+    # (before the ruling the owner was only provisional and the first real document replaced it).
     existing = writer.register(
         owner=owner, title="wbfpw33 existing", content_type="code",
         physical_collection=dst, source_uri=f"file:///wbfpw33/{dst}/existing.py",
     )
     assert existing is not None
-    assert reader.get_collection(dst)["owner_id"] == owner_segment_for_tumbler(str(owner))
-    assert _resolve_import_owner_tumbler(dst, reader, writer) == owner
+    assert reader.get_collection(dst)["owner_id"] == owner_segment_for_tumbler(str(stem_owner))
+    assert _resolve_import_owner_tumbler(dst, reader, writer) == stem_owner
 
     # A slug-owned collection that ALREADY holds a live document resolves to that
     # document's owner: the document gave the row the owner segment when it landed.
