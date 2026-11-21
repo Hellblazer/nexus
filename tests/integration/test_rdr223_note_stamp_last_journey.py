@@ -134,7 +134,10 @@ def _assert_killed_before_the_stamp(run: _Run, title: str, content: str, vec) ->
     assert run.write_bodies[0]["docs"][0]["rows"], "and it carried the note's owner row"
     assert _doc(title).index_state == "indexing", "nothing has stamped the note"
     assert _manifest(title) == [_chash(content)], "the owner row landed"
-    collection = t3_collection_name(_SUBJECT, for_write=True)
+    # RDR-229 P3.8: the note went to the subject's minted c<id> label; a read resolves it by attributes.
+    from nexus.knowledge_subject import catalog_subject_finder
+
+    collection = t3_collection_name(_SUBJECT, subject_finder=catalog_subject_finder())
     assert _present(vec, collection, [_chash(content)]) == {_chash(content)}, "and so did the chunk"
     return collection
 
