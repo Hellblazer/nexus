@@ -744,7 +744,7 @@ public final class NexusService {
                         this::perCollectionIndexesStatus, this::chunksLeafBloatStatus)
                         .embedPosture(() -> this.embedPosture)
                         .bootWork(() -> { var w = this.bootWork; return w == null ? java.util.List.of() : w.snapshot(); })
-                        .aspectQueue(() -> this.aspectQueueDrainResult)
+                        .aspectQueue(() -> this.aspectQueueDrainResult).collectionTupleIndex(dev.nexus.service.db.CollectionTupleIndexProbe.statusSupplier(dataSource))
                         .testTenantResetRoute(tenantResetRoute));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
