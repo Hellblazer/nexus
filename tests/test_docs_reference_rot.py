@@ -146,6 +146,7 @@ BEAD_ALLOWLIST: dict[str, str] = {
     "nexus-audit": "prose: 'nexus-audit-loop' (RDR-067's name for the loop)",
     "nexus-inode": "prose: 'nexus-inode-*' (a pathname fragment)",
     "nexus-shkww": "post-mortem 175: bead deleted; the record narrates its own misfiling",
+    "nexus-exact": "prose: 'nexus-exact-probe-' (the fixed prefix of the taxonomy prune verification sentinel)",
 }
 
 #: RDR numbers with no file in docs/rdr/. Value -> reason.

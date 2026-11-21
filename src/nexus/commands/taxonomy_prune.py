@@ -42,8 +42,11 @@ def exact_prune_confirmed(taxonomy: Any) -> bool:
     The ``/version`` flag and the prune can reach different engines (a rollback inside the flag's
     cache window, two instances), and an engine that ignores ``match`` prunes by name prefix, so the
     first REAL exact prune could already over-delete. One prune with ``match=exact`` for a name no
-    collection can have (``nexus-exact-probe-`` and a random hex; no collection name starts with it
-    or is a prefix of it) at threshold 0.0 settles it first: even a prefix match deletes nothing.
+    collection has (the fixed prefix ``nexus-exact-probe-`` and a random 128-bit suffix, so no
+    collection name starts with it except by a collision of negligible chance) settles it first:
+    even a prefix match therefore reaches no rows. The guarantee is the name, not the threshold
+    (0.0 is only a conventional floor: a stored similarity can be negative, and the schema coalesces
+    a missing one to -1.0, so no threshold guarantees an empty match).
     Only an echoed ``"exact"`` confirms; a missing or ``"prefix"`` echo, or a failed call, does not,
     and the caller then runs the guarded plan, which is safe on any engine.
     """
