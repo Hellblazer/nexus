@@ -194,6 +194,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("MoveBootWork.Snapshot.open", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.failed", DATA_MOVE_REPORT);
         notKeyed.put("MoveBootWork.Snapshot.progress", DATA_MOVE_REPORT);
+        fillCompletionCheck(notKeyed);   // RDR-229 P3.1 (nexus-p2m1x.17): the boot-time completion check is engine-wide
         // nexus-f3yqd.2.18: the engine's own database passwords, set once at startup; the engine's, so no tenant's
         notKeyed.put("SecretMask.SECRETS", "the engine's own database passwords (the admin and the application role), added once "
             + "at startup; process-wide credentials of the engine, never a tenant's, and nothing a tenant's reset has to clear");
@@ -816,4 +817,53 @@ final class TenantKeyedStateTables {
             + "failed), held in the list one scheduled rebuild attempt hands to the next; the list ends with the census "
             + "and keeps no tenant's state: a re-arm of an evicted tenant finds no rows and succeeds");
     }
+
+    private static final String COMPLETION_ENGINE_WIDE = "the RDR-229 boot-time completion check is engine-wide, never a "
+        + "tenant's: it reads nexus.data_moves (a global registry with no tenant column), pg_catalog and the registry's "
+        + "row counts on the engine's admin connection, and a Result holds labels, table and constraint names and counts "
+        + "summed over every tenant, no tenant id (its one slot that can name a collection, gate3Uncovered, is empty "
+        + "while Gate3Source is NOT_INSTALLED, which is what this engine wires); ";
+
+    /** RDR-229 P3.1 (nexus-p2m1x.17): the completion check, its reporter and the two callbacks that wake it. */
+    private static void fillCompletionCheck(Map<String, String> notKeyed) {
+        String bookkeeping = COMPLETION_ENGINE_WIDE + "this is the reporter's own bookkeeping, nothing a tenant's reset has to clear";
+        notKeyed.put("CompletionBootWork.published", COMPLETION_ENGINE_WIDE + "the boot_work ids (the summary, a missing "
+            + "CHECK, a VALIDATE waiting on a table) it has registered, kept so a vanished one is finished");
+        notKeyed.put("CompletionBootWork.eventExecutor", "the executor an event's read runs on (the reporter's own "
+            + "single thread, or a test's direct executor); holds no data");
+        notKeyed.put("CompletionBootWork.readOwed", bookkeeping + " (a flag: an event asked for a read)");
+        notKeyed.put("CompletionBootWork.lastSampleAt", bookkeeping + " (when the last read began)");
+        notKeyed.put("CompletionBootWork.safetyPoll", "the interval of the slow poll behind the two events; "
+            + "configuration, not keyed by tenant");
+        notKeyed.put("CompletionBootWork.latest", COMPLETION_ENGINE_WIDE + "it is the last read, replaced whole by every "
+            + "sample (at most one safety poll apart) and re-derived from the database, so a tenant a reset removed drops "
+            + "out of the counts at the next sample");
+        notKeyed.put("CompletionBootWork.DbReader.readSet", "the labels the check reads, fixed at construction "
+            + "(CompletionCheck.ReadSet.p31()); configuration, not keyed by tenant");
+        notKeyed.put("CompletionBootWork.DbReader.session", DATA_MOVE_REPORT_SESSION_COMPLETION);
+        notKeyed.put("CompletionBootWork.CachedCounter.kept", COMPLETION_ENGINE_WIDE + "this cache holds one violating-row "
+            + "count per CHECK constraint name for ten minutes; the counts are summed over every tenant and carry no "
+            + "tenant identity, and a reset only makes a count stale until it expires");
+        notKeyed.put("CompletionCheck.ReadSet.gate1Labels", "the move labels gate 1 reads, fixed at construction; "
+            + "global registry labels, not keyed by tenant");
+        notKeyed.put("CompletionCheck.ReadSet.gate2Labels", "the move labels gate 2 reads, fixed at construction; "
+            + "global registry labels, not keyed by tenant");
+        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; it exists only once P3.4 supplies a "
+            + "Gate3Source, and the one this engine wires is NOT_INSTALLED");
+        notKeyed.put("CompletionCheck.IdIndexCoverage.validIdIndexed", RESULT + "; as planned");
+        notKeyed.put("CompletionCheck.IdIndexCoverage.invalidIdIndexed", RESULT + "; as planned");
+        notKeyed.put("CompletionCheck.Result.labels", RESULT + "; it holds registry labels and their state, no tenant's");
+        notKeyed.put("CompletionCheck.Result.checks", RESULT + "; it holds constraint names and whether each is validated");
+        notKeyed.put("CompletionCheck.Result.violators", RESULT + "; it holds table and constraint names and counts");
+        notKeyed.put("CompletionCheck.Result.gate3Uncovered", RESULT + "; empty while Gate3Source is NOT_INSTALLED, and "
+            + "replaced whole by the next sample once P3.4 supplies one");
+        notKeyed.put("DataMoveWorker.onMoveCompleted", "the listener the engine hands the worker at boot "
+            + "(CompletionBootWork::onMoveCompleted), run when a move records completed_at; a callback, no data");
+        notKeyed.put("PciReconciler.passEnded", "the listener the engine hands the reconciler at boot "
+            + "(CompletionBootWork::onReconcilerPassEnded), run when a pass ends; a callback, no data");
+    }
+
+    private static final String DATA_MOVE_REPORT_SESSION_COMPLETION = "the completion check's own read-only admin "
+        + "connection (default_transaction_read_only on), kept between samples and replaced after a failure; it reads the "
+        + "global registry and the catalog and carries no tenant setting";
 }
