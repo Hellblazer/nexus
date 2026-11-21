@@ -2219,6 +2219,12 @@ def ensure_collection_registered(
                 except httpx.HTTPStatusError as exc:
                     if exc.response is None or exc.response.status_code != 409:
                         raise
+                    # RDR-229 P3.8: a 409 is also a refusal (a new row on a live tuple another collection holds,
+                    # every minted label taken, a sequence behind the data). It is a won race only when the name
+                    # reads back registered; otherwise caching it would turn the refusal into a later 422.
+                    read_back = getattr(writer, "get_collection", None)
+                    if read_back is not None and read_back(name) is None:
+                        raise
                     _log.debug(
                         "collection_already_registered_race",
                         name=name,
