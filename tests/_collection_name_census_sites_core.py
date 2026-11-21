@@ -80,7 +80,7 @@ SITES: tuple[S, ...] = (
       ('for c in live_collection_rows(t3, routing=True)', 'if c["name"].startswith(f"{user_arg}__")'),
       'fstring_prefix', 'mint', MINT_T3),
     S('src/nexus/corpus.py',
-      ('c for c in all_collections', 'if c.startswith(prefix) and c not in lifecycle_rejected'),
+      ('for c in all_collections:', 'if not c.startswith(prefix):'),
       'fstring_prefix', 'label-pattern', LABEL_TYPED),
     S('src/nexus/db/http_vector_client.py',
       ('def _name_fallback(n: str) -> str | None:', 'content_type_probe, owner_probe = split_candidate_collection_name(n)'),

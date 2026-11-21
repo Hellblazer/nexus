@@ -2672,20 +2672,25 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
           content type, is matched against each candidate's catalog row
           (:func:`nexus.mcp_infra.get_collection_row`): ``content_type`` and
           ``owner_id`` must equal the typed ones, ``embedding_model`` must
-          equal the typed one when the value gives one, and
-          ``lifecycle_state`` must be ``"live"`` (a row that matches the
-          tuple but is not live is excluded, and step b cannot bring it
-          back). A candidate with no row never matches here.
+          equal the typed one when the value gives one, and the row must be
+          live (``is_live_collection_row``: a lifecycle other than ``live``,
+          or ``superseded_by`` set, excludes it). A candidate with no row
+          never matches here.
        b. LABEL PATTERN, when step a finds nothing: the collection name
           starts with ``{corpus}__``. This is a match on the label string
           the user typed and decomposes nothing, and it stays because a
           repo collection's row ``owner_id`` is the tumbler segment
           (``1-15``, nexus-6pbwx), so ``code__<slug>-<hash8>`` matches no
           tuple and has always resolved by its label. It is also how a
-          bare word or a name no row backs resolves. Three of this
-          function's callers (``nx collection verify``'s legacy-name
-          recovery, the CLI ``--corpus`` resolver, the doctor corpus
-          probe) depend on it.
+          bare word or a name no row backs resolves. Each prefix match is
+          checked against its own row: one whose row exists and is not live
+          is dropped, one with no row is kept. Three of this function's
+          callers (``nx collection verify``'s legacy-name recovery, the CLI
+          ``--corpus`` resolver, the doctor corpus probe) depend on it.
+
+       A row read that raises (a cache refresh, ``get_t3``) ends the row
+       reads for the call and the value resolves by its label, as it did
+       before stage 3 read rows.
 
     The structlog debug record reports which stage matched, useful when
     tracing why a corpus argument resolved to a particular collection.
@@ -2754,28 +2759,43 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
             _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="content_type_fanout")
         return matches
 
+    # Stage 3: the row tuple, then the label pattern. Rows are read through one
+    # guarded accessor: stage 3 was a pure string match before RDR-229 P2.7, so a
+    # failing row read (cache refresh, get_t3) must end the reads, never escape.
+    from nexus.db.http_vector_client import is_live_collection_row  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+    rows_failed = False
+
+    def _row_of(c: str) -> dict | None:
+        nonlocal rows_failed
+        if rows_failed:
+            return None
+        try:
+            return get_collection_row(c)
+        except Exception:  # noqa: BLE001 — a failed row read must degrade to the label match, never turn a string match into a hard failure
+            rows_failed = True
+            _log.warning("resolve_corpus_row_read_failed", corpus=corpus, exc_info=True)
+            return None
+
     # Stage 3a: the row tuple, for a typed <content_type>__<owner>[__<model>].
     typed = _typed_corpus_tuple(corpus)
-    lifecycle_rejected: set[str] = set()
     if typed is not None:
-        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-
         content_type, owner_id, embedding_model = typed
         matches = []
         for c in all_collections:
-            row = get_collection_row(c)
+            row = _row_of(c)
             if row is None:
                 continue
-            if row["content_type"] != content_type or row["owner_id"] != owner_id:
+            if row.get("content_type") != content_type or row.get("owner_id") != owner_id:
                 continue
             if embedding_model is not None and row.get("embedding_model") != embedding_model:
                 continue
-            if row.get("lifecycle_state") != "live":
+            if not is_live_collection_row(row):
                 _log.debug(
                     "resolve_corpus_candidate_excluded_lifecycle",
                     corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
                 )
-                lifecycle_rejected.add(c)
                 continue
             matches.append(c)
         if matches:
@@ -2783,13 +2803,21 @@ def resolve_corpus(corpus: str, all_collections: list[str]) -> list[str]:
 
     # Stage 3b: the label pattern. A match on the label the user typed (the
     # conformant name shape always introduces ``__`` between segments, so
-    # ``{corpus}__`` is the invariant boundary); it decomposes nothing. A
-    # collection stage 3a rejected by lifecycle stays rejected.
+    # ``{corpus}__`` is the invariant boundary); it decomposes nothing. A match
+    # whose own row is not live is dropped; one with no row is kept.
     prefix = f"{corpus}__"
-    matches = [
-        c for c in all_collections
-        if c.startswith(prefix) and c not in lifecycle_rejected
-    ]
+    matches = []
+    for c in all_collections:
+        if not c.startswith(prefix):
+            continue
+        row = _row_of(c)
+        if row is not None and not is_live_collection_row(row):
+            _log.debug(
+                "resolve_corpus_candidate_excluded_lifecycle",
+                corpus=corpus, collection=c, lifecycle_state=row.get("lifecycle_state"),
+            )
+            continue
+        matches.append(c)
     if not matches:
         _log.debug("resolve_corpus_no_collections_matched", corpus=corpus, stage="label_pattern")
     return matches

@@ -69,6 +69,6 @@ FILEPATH: str = (
 LABEL_TYPED: str = (
     'RDR-229 P2.7 (nexus-p2m1x.12): resolve_corpus stage 3b, after the row tuple (stage 3a) finds nothing. '
     'It matches the label string the user typed (`<value>__` as a name prefix) and decomposes nothing; it stays because a '
-    "repo row's owner_id is the tumbler segment, so code__<slug>-<hash8> matches no tuple. A collection stage 3a "
-    'rejected by lifecycle is not returned by it.'
+    "repo row's owner_id is the tumbler segment, so code__<slug>-<hash8> matches no tuple. A prefix match "
+    'whose own row is not live (or superseded) is dropped by it; a name with no row is kept.'
 )
