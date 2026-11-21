@@ -47,6 +47,7 @@ from nexus.bounded_subprocess import run_bounded
 from nexus.catalog.link_generator import _pdf_content_hash
 from nexus.catalog.rows.legacy_names import split_candidate_collection_name
 from nexus.db.limits import QUOTAS
+from nexus.label_filename import safe_label_filename
 
 if TYPE_CHECKING:
     from nexus.catalog.catalog_protocol import CatalogReader
@@ -578,7 +579,7 @@ def dump_csvs(
     Operators edit ``low_confidence.csv`` and ``unmatched.csv`` then feed
     them back via :func:`apply_csv`.
     """
-    target = out_dir / collection
+    target = out_dir / safe_label_filename(collection)  # a label may hold '..', ':', '\\' (RDR-229 P3.6)
     target.mkdir(parents=True, exist_ok=True)
     matched_path = target / "matched.csv"
     low_path = target / "low_confidence.csv"
