@@ -93,11 +93,13 @@ def _by_session(client: Any, source: str, session_id: str) -> Answer | None:
 def _by_registry(client: Any, session_id: str, claude_pid: int, sessions_dir: Path | None, host: str | None) -> Answer | None:
     """An id the index does not know, from the live registry entry that names it: the identity that process holds."""
     from nexus.identity.holder import read_registry_entry, this_host  # noqa: PLC0415 — deferred: hook import cost
+    from nexus.identity.hostname import bindings_here  # noqa: PLC0415
 
     entry = read_registry_entry(claude_pid, sessions_dir)
     if entry is None or entry.started_at is None or entry.session_id != session_id:
         return None
-    for view in client.bindings_by_host(host if host is not None else this_host(), claude_pid):
+    here = host if host is not None else this_host()
+    for view in bindings_here(client, None, here, claude_pid):
         holder = view.get("holder") or {}
         if holder.get("pid") == claude_pid and holder.get("started_at") == entry.started_at:
             identity = view.get("id")

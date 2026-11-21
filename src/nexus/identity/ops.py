@@ -41,6 +41,7 @@ from nexus.identity.holder import (
     GONE, INTERACTIVE_ENTRYPOINTS, OTHER_HOST, RUNNING, Processes, Verdict, check_holder, holder_process,
     normalise_instant, read_registry_entry,
 )
+from nexus.identity.hostname import bindings_here, is_local, local_names
 from nexus.identity.sweep import sweep_host
 from nexus.identity.token_file import TokenFile, read_token_file, token_path, update_token_file
 
@@ -324,7 +325,7 @@ def own_identity(env: IdentityEnv) -> dict[str, Any] | None:
     entry = read_registry_entry(claude_pid, env.procs.sessions_dir)
     if entry is None:
         return None
-    for view in _call(env.client.bindings_by_host, env.host, claude_pid):
+    for view in _call(bindings_here, env.client, env.procs, env.host, claude_pid):
         holder = view.get("holder") or {}
         if holder.get("pid") == claude_pid and holder.get("started_at") == entry.started_at:
             return dict(view)
@@ -400,7 +401,7 @@ def show_all_lines(env: IdentityEnv) -> list[str]:
     """The bindings held on this host and the live Claude processes here that have none (Phase 2's gate reads this:
     every live process must have a binding at the Step 5 release or later). The engine has no route that lists unheld
     seats, so only identities with a holder on this host appear."""
-    views = _call(env.client.bindings_by_host, env.host)
+    views = _call(bindings_here, env.client, env.procs, env.host)
     lines = [f"bindings on {env.host}:"]
     bound: set[tuple[Any, Any]] = set()
     for view in views:
@@ -463,7 +464,7 @@ def alive_lines(env: IdentityEnv, ref: str | None) -> list[str]:
     if ref is None:
         return _sweep_lines(env)
     if ref.isdigit():
-        views = _call(env.client.bindings_by_host, env.host, int(ref))
+        views = _call(bindings_here, env.client, env.procs, env.host, int(ref))
         if not views:
             raise IdentityCommandError(f"no binding for pid {ref} on {env.host}")
     else:
@@ -530,7 +531,7 @@ def release(env: IdentityEnv, ref: str) -> list[str]:
         return [f"{name} is not held ({view.get('state')}); nothing to release"]
     holder = view.get("holder") or {}
     evidence: dict[str, Any] = {"host": env.host}
-    if holder.get("host") == env.host:
+    if is_local(holder.get("host"), local_names(env.procs, env.host)):
         verdict = judge(env, view)
         if verdict is None or verdict.state != GONE:
             why = verdict.reason if verdict else "it names no process"
@@ -598,7 +599,7 @@ def claim(env: IdentityEnv, ref: str) -> list[str]:
             raise IdentityCommandError(f"{view['id']} is {view.get('kind')}, not a seat: only a seat is claimed")
         holder = view.get("holder") or {}
         holder_pid = holder.get("pid")
-        if (view.get("state") in ("live", "lapsed") and holder.get("host") == env.host
+        if (view.get("state") in ("live", "lapsed") and is_local(holder.get("host"), local_names(env.procs, env.host))
                 and holder_pid != facts.claude_pid and holder_pid in facts.ancestors):
             raise IdentityCommandError(
                 f"{name} is held by pid {holder_pid}, an ancestor of this process: a child cannot take its parent's seat")
@@ -621,7 +622,7 @@ def claim(env: IdentityEnv, ref: str) -> list[str]:
 
 
 def _previous(env: IdentityEnv, claude_pid: int, started_at: int) -> dict[str, Any] | None:
-    for view in _call(env.client.bindings_by_host, env.host, claude_pid):
+    for view in _call(bindings_here, env.client, env.procs, env.host, claude_pid):
         holder = view.get("holder") or {}
         if view.get("kind") != "delegated" and holder.get("pid") == claude_pid and holder.get("started_at") == started_at:
             return dict(view)
@@ -631,8 +632,12 @@ def _previous(env: IdentityEnv, claude_pid: int, started_at: int) -> dict[str, A
 def _close_previous(env: IdentityEnv, previous: Mapping[str, Any], evidence: Mapping[str, Any]) -> str:
     """An ephemeral identity the caller held ends; a seat it held is released and left unheld."""
     event = "end" if previous.get("kind") == "ephemeral" else "release"
+    body = dict(evidence)
+    recorded = (previous.get("holder") or {}).get("host")
+    if recorded and is_local(recorded, local_names(env.procs, env.host)):
+        body["host"] = recorded   # a self-release names the holder row's own host, which may predate the stable host key
     try:
-        env.client.bind(previous["id"], event, int(previous["generation"]), dict(evidence) if event == "release" else None)
+        env.client.bind(previous["id"], event, int(previous["generation"]), body if event == "release" else None)
     except IdentityApiError as exc:
         return f"note: the caller's previous identity {previous['id']} was not closed ({exc.code or exc.status}: {exc.message})"
     return f"closed the previous identity {previous['id']} ({event})"

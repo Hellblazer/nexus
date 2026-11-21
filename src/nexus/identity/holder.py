@@ -24,14 +24,15 @@ file names THIS directory; any other holder (or one with no token file) is judge
 compare alone, which do not depend on a directory: gone if the pid is dead or was reused, else unknown, and unknown is
 never reported gone.
 
-A holder on another host is judged by its lease alone and the check says **other_host**. A crashed process leaves
+A holder on another host is judged by its lease alone and the check says **other_host**. "This host" is every name the
+machine answers to (:func:`nexus.identity.hostname.local_names`): its stable key and, for a binding written before the key
+existed, its ``gethostname()``. A crashed process leaves
 its registry file behind, so file presence alone never decides: the probe does.
 """
 from __future__ import annotations
 
 import json
 import os
-import socket
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -39,6 +40,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from nexus.identity import hostname as _hostname
+from nexus.identity.hostname import is_local, local_names
 
 GONE = "gone"
 RUNNING = "running"
@@ -52,8 +56,8 @@ DESKTOP_ENTRYPOINT = "claude-desktop"
 
 
 def this_host() -> str:
-    """The name bindings carry for this machine."""
-    return socket.gethostname()
+    """The name bindings carry for this machine: a key stable across network changes (:mod:`nexus.identity.hostname`)."""
+    return _hostname.this_host()
 
 
 def claude_sessions_dir() -> Path:
@@ -228,7 +232,7 @@ def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str
     unknown. A holder that was restarted in place (same pid and start time, a new ``startedAt``) cannot be told
     from a running one without its registry file, so it stays unknown."""
     here = host if host is not None else procs.host
-    if holder.get("host") != here:
+    if not is_local(holder.get("host"), local_names(procs, here)):
         return Verdict(OTHER_HOST, f"held on {holder.get('host')}, not on {here}")
     pid = _int(holder.get("pid"))
     if pid is None:
