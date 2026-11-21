@@ -330,6 +330,30 @@ class TaxonomyPruneExactRouteTest {
         assertThat(rows(art)).as("a refused request deletes nothing").isEqualTo(2);
     }
 
+    /**
+     * The client's verification prune, sent before it trusts exact mode: a sentinel name that no collection carries,
+     * exact, at 0.0. The route puts no collection-name grammar on {@code source_collection_prefix}, so the sentinel
+     * is accepted; it answers removed 0 with the echo, and deletes nothing even with rows present.
+     */
+    @Test
+    void theClientsSentinelProbe_isAcceptedAnswersRemovedZeroWithTheEcho_andDeletesNothing() throws Exception {
+        String art = stem("docs__art");
+        collection(art);
+        String sentinel = "nexus-exact-probe-" + java.util.UUID.randomUUID().toString().replace("-", "");
+        var body = new java.util.LinkedHashMap<String, Object>();
+        body.put("source_collection_prefix", sentinel);
+        body.put("min_similarity", 0.0);
+        body.put("match", "exact");
+
+        var resp = prune(body);
+
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+        JsonNode reply = MAPPER.readTree(resp.body());
+        assertThat(reply.get("removed").asInt()).isZero();
+        assertThat(reply.get("match").asText()).isEqualTo("exact");
+        assertThat(rows(art)).as("rows exist and none was touched").isEqualTo(2);
+    }
+
     // ── the capability flag ───────────────────────────────────────────────────
 
     @Test
