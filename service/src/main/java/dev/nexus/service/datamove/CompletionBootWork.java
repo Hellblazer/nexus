@@ -293,8 +293,9 @@ public final class CompletionBootWork implements AutoCloseable {
 
     static String missing(CompletionCheck.CheckState c, CompletionCheck.Result r) {
         if (CompletionCheck.SUPERSEDED_BY_CHECK.equals(c.constraint())) {
-            return "waits: " + c.constraint() + " is not on " + c.table() + " yet; " + r.supersededByWaiting()
-                + " registry row(s) with a blank model_version and no superseded_by_id hold its changeset back "
+            // no count: the text goes out on the unauthenticated /v1/status (the caller's own count is on the counts route)
+            return "waits: " + c.constraint() + " is not on " + c.table() + " yet; registry rows with a blank model_version and no "
+                + "superseded_by_id hold its changeset back "
                 + "(D2's repair move or the superseded_by stamp clears them, then the next boot adds it); the switch is refused until then";
         }
         return "missing: " + c.constraint() + " is not on " + c.table() + "; the switch is refused until it is restored "
@@ -302,19 +303,22 @@ public final class CompletionBootWork implements AutoCloseable {
     }
 
     /**
-     * The operator text of a table whose stamp move is done and whose CHECK stays NOT VALID. The move does not run again on its own
-     * (it is complete), so registering the missing collection does not stamp the rows: the step is {@code nexus.rdr229_restamp}
-     * (vectors-071), which registers the table's stamp move once more, guarded to run only when the table's stamp move is complete,
-     * a CHECK of the table is NOT VALID and no orphan row remains. The new move stamps the rows and validates the CHECK(s).
+     * The operator text of a table whose stamp move is done and whose CHECK stays NOT VALID. It carries no count and no name: it goes out
+     * on the unauthenticated {@code /v1/status}, so a number of orphan or unstamped rows (which describes tenants) is not in it; a caller
+     * reads its own counts from {@code GET /v1/catalog/rdr229_completion_counts} ({@link CompletionTenantCounts}) and says which of the
+     * two shapes applies. The move does not run again on its own (it is complete), so registering the missing collection does not
+     * stamp the rows: the step is {@code nexus.rdr229_restamp} (vectors-071), which registers the table's stamp move once more,
+     * guarded to run only when the table's stamp move is complete, a CHECK of the table is NOT VALID and no orphan row remains. The
+     * new move stamps the rows and validates the CHECK(s). An orphan row (name set, id NULL, no registry row) is write-frozen: the
+     * CHECK refuses any UPDATE of it, whatever the update sets, until its collection is registered or the row is deleted.
      */
     static String validateWaits(TableWait w) {
-        String counts = w.counted()
-            ? w.orphans() + " orphan row(s) (a name with no registry row in its tenant) and " + w.unstamped() + " unstamped row(s)"
-            : "rows that could not be counted";
-        return "waits: " + counts + " keep " + String.join(", ", w.constraints()) + " on " + w.table()
-            + " NOT VALID. To finish: register each missing collection or delete the orphan rows, then run  SELECT nexus.rdr229_restamp('"
+        return "waits: " + String.join(", ", w.constraints()) + " on " + w.table() + " is NOT VALID while rows remain that it refuses: "
+            + "orphan rows (a collection name no registry row of their tenant carries) and rows the stamp has not given an id yet. "
+            + "An orphan row is write-frozen: any UPDATE of it fails with SQLSTATE 23514 until its collection is registered or the row is deleted. "
+            + "To finish: register each missing collection or delete the orphan rows, if there are any, then run  SELECT nexus.rdr229_restamp('"
             + w.table() + "');  as the migrating role. It re-registers this table's stamp move once no orphan remains; the move stamps "
-            + "the rows and validates the CHECK.";
+            + "the rows and validates the CHECK. With no orphan row, that restamp step alone finishes it.";
     }
 
     /** The reader of a running engine: its own read-only admin session, kept between samples and replaced after a failure. */

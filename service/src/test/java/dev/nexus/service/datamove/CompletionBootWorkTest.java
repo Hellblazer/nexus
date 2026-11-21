@@ -220,7 +220,7 @@ class CompletionBootWorkTest {
                 assertThat(what).startsWith("waits: catalog_documents_physical_collection_id_check on catalog_documents is NOT VALID")
                     .contains("An orphan row is write-frozen: any UPDATE of it fails with SQLSTATE 23514 until its collection is registered or the row is deleted")
                     .contains("register each missing collection or delete the orphan rows, if there are any")
-                    .contains("SELECT nexus.rdr229_restamp('catalog_documents');  as the migrating role")
+                    .contains("nexus.rdr229_restamp('catalog_documents')").contains("as the migrating role")
                     .contains("With no orphan row, that restamp step alone finishes it")
                     .doesNotMatch("(?s).*\\d+\\s+(orphan|unstamped).*");
             });

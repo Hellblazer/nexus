@@ -103,6 +103,9 @@ class Rdr229CompletionTenantCountsRouteTest {
         service = new NexusService(0, TOKEN_A, svcDs);
         service.start();
         http = TestHttp.client();
+        // Burn the per-tenant ghost sweep (nexus-ft04v.3), which drops registry rows no data uses, on a request that registers nothing.
+        get(TOKEN_A, TENANT_A, "/v1/catalog/collections/list");
+        get(TOKEN_B, TENANT_B, "/v1/catalog/collections/list");
         seed();
     }
 
@@ -277,7 +280,7 @@ class Rdr229CompletionTenantCountsRouteTest {
 
         assertThat(a.get("registry_rows")).as("A's registry rows, not A + B").isEqualTo((int) registryRows(TENANT_A));
         assertThat(b.get("registry_rows")).isEqualTo((int) registryRows(TENANT_B));
-        assertThat(a.get("live_collections")).isEqualTo(2);
+        assertThat(a.get("live_collections")).as("A: %s", a).isEqualTo(2);
         assertThat(b.get("live_collections")).isEqualTo(1);
 
         var danglingA = map(a.get("dangling_tombstones"));

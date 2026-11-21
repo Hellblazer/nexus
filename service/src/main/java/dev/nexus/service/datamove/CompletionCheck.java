@@ -227,7 +227,7 @@ public final class CompletionCheck {
             }
         }
         boolean supersededByPresent = checkValidated.containsKey(SUPERSEDED_BY_CHECK);
-        long waiting = supersededByPresent ? 0L : supersededByWaiting(ctx, tables);
+        long waiting = supersededByPresent ? 0L : supersededByWaiting(ctx, tables, null);
 
         List<Violators> violators = new ArrayList<>();
         Set<String> labelsRead = new LinkedHashSet<>(readSet.gate1Labels());
@@ -250,23 +250,21 @@ public final class CompletionCheck {
             Optional<IdIndexCoverage> coverage = gate3.read(ctx);
             if (coverage.isEmpty()) {
                 why = "this release builds no id-predicate index (P3.4), so no collection has a valid one";
-            } else if (coverage.get().planned().isEmpty() && liveCollections(ctx, tables) > 0) {
+            } else if (coverage.get().planned().isEmpty() && liveCollections(ctx, tables, null) > 0) {
                 // Review F5: an empty plan over a populated registry is a planner that found nothing, or failed quietly; it
                 // is a pass only when there is nothing to plan.
-                long live = liveCollections(ctx, tables);
-                why = "the planner plans no collection while " + live + " live collection(s) are registered, so there is nothing "
-                    + "to say they are covered";
+                // no count: the text goes out on the unauthenticated /v1/status, and a count of collections describes tenants
+                why = "the planner plans no collection while live collections are registered, so there is nothing to say they are covered";
             } else {
                 uncovered = new ArrayList<>(coverage.get().uncovered());
                 gate3Holds = uncovered.isEmpty();
                 if (!gate3Holds) {
-                    why = uncovered.size() + " collection(s) the planner would index have no VALID id-predicate index ("
-                        + coverage.get().invalidIdIndexed().stream().filter(uncovered::contains).count() + " INVALID)";
+                    why = "collections the planner would index have no VALID id-predicate index (missing or INVALID)";
                 }
             }
         }
         return new Result(gate1, gate2, gate3Holds, List.copyOf(states.values()), List.copyOf(checks), supersededByPresent,
-            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables));
+            waiting, List.copyOf(violators), List.copyOf(uncovered), why, danglingTombstones(ctx, tables, null));
     }
 
     // ---- one label ---------------------------------------------------------------------------------------------------
@@ -312,12 +310,9 @@ public final class CompletionCheck {
             return new LabelState(label, table, Status.COMPLETE, "");
         }
         violators.addAll(waiting);
-        boolean counted = waiting.stream().allMatch(Violators::counted);
+        // no count in the text: it goes out on the unauthenticated /v1/status (GET /v1/catalog/rdr229_completion_counts has the caller's own)
         return new LabelState(label, table, Status.INCOMPLETE, "CHECK "
-            + waiting.stream().map(Violators::constraint).collect(java.util.stream.Collectors.joining(", "))
-            + " is NOT VALID: " + (counted ? waiting.stream().mapToLong(Violators::orphans).sum() + " orphan row(s), "
-                + waiting.stream().mapToLong(Violators::unstamped).sum() + " unstamped"
-                : "the violating rows could not be counted"));
+            + waiting.stream().map(Violators::constraint).collect(java.util.stream.Collectors.joining(", ")) + " is NOT VALID");
     }
 
     /** A move row, as far as the check reads it. */
@@ -368,7 +363,7 @@ public final class CompletionCheck {
 
     // ---- catalog reads -----------------------------------------------------------------------------------------------
 
-    private static Set<String> tablesPresent(DSLContext ctx) {
+    static Set<String> tablesPresent(DSLContext ctx) {
         var c = DSL.table(DSL.name("pg_catalog", "pg_class")).as("c");
         var n = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
         Field<String> relname = DSL.field(DSL.name("c", "relname"), String.class);
@@ -380,7 +375,7 @@ public final class CompletionCheck {
     }
 
     /** constraint name to {@code convalidated}, for the listed CHECKs found on their own (parent) table. */
-    private static Map<String, Boolean> readChecks(DSLContext ctx, Map<String, List<P31Checks.Row>> byTable, Set<String> tables) {
+    static Map<String, Boolean> readChecks(DSLContext ctx, Map<String, List<P31Checks.Row>> byTable, Set<String> tables) {
         Set<String> names = new HashSet<>();
         Set<String> owners = new HashSet<>();
         for (var e : byTable.entrySet()) {
@@ -427,8 +422,11 @@ public final class CompletionCheck {
             .and(DSL.field(DSL.name("a", "attisdropped"), Boolean.class).isFalse()));
     }
 
-    /** Registry rows vectors-068-19's precondition waits on, counted the way the precondition counts them. */
-    private static long supersededByWaiting(DSLContext ctx, Set<String> tables) {
+    /**
+     * Registry rows vectors-068-19's precondition waits on, counted the way the precondition counts them; of one tenant when
+     * {@code tenant} is given (the authenticated counts route), of every tenant otherwise (the in-memory result only).
+     */
+    static long supersededByWaiting(DSLContext ctx, Set<String> tables, String tenant) {
         if (!tables.contains("catalog_collections") || !columnExists(ctx, "catalog_collections", "superseded_by_id")) {
             return 0L;
         }
@@ -436,11 +434,16 @@ public final class CompletionCheck {
         Field<String> supersededBy = DSL.field(DSL.name("superseded_by"), String.class);
         Field<Long> supersededById = DSL.field(DSL.name("superseded_by_id"), Long.class);
         Field<String> modelVersion = DSL.field(DSL.name("model_version"), String.class);
-        return ctx.fetchCount(c, supersededBy.ne("").and(supersededById.isNull()).and(modelVersion.eq("")));
+        return ctx.fetchCount(c, supersededBy.ne("").and(supersededById.isNull()).and(modelVersion.eq("")).and(tenantScope(tenant, "tenant_id")));
     }
 
-    /** Live registry rows (not a tombstone, not a quarantine): what the planner could index. */
-    private static long liveCollections(DSLContext ctx, Set<String> tables) {
+    /** The condition that scopes a read to {@code tenant} (none when null), on the column {@code column} of the alias-free or aliased table. */
+    private static Condition tenantScope(String tenant, String... column) {
+        return tenant == null ? DSL.noCondition() : DSL.field(DSL.name(column), String.class).eq(tenant);
+    }
+
+    /** Live registry rows (not a tombstone, not a quarantine): what the planner could index; one tenant's when {@code tenant} is given. */
+    static long liveCollections(DSLContext ctx, Set<String> tables, String tenant) {
         if (!tables.contains("catalog_collections")) {
             return 0L;
         }
@@ -449,11 +452,11 @@ public final class CompletionCheck {
         if (columnExists(ctx, "catalog_collections", "lifecycle_state")) {
             live = live.and(DSL.field(DSL.name("lifecycle_state"), String.class).eq("live"));
         }
-        return ctx.fetchCount(c, live);
+        return ctx.fetchCount(c, live.and(tenantScope(tenant, "tenant_id")));
     }
 
-    /** R7's pre-flight: see {@link Dangling}. A read, bounded by the registry's size (hundreds of rows). */
-    private static Dangling danglingTombstones(DSLContext ctx, Set<String> tables) {
+    /** R7's pre-flight: see {@link Dangling}. A read, bounded by the registry's size (hundreds of rows); one tenant's when {@code tenant} is given. */
+    static Dangling danglingTombstones(DSLContext ctx, Set<String> tables, String tenant) {
         if (!tables.contains("catalog_collections")) {
             return Dangling.UNREAD;
         }
@@ -464,13 +467,15 @@ public final class CompletionCheck {
         Condition dangling = supersededBy.ne("").andNotExists(DSL.selectOne().from(s)
             .where(DSL.field(DSL.name("s", "tenant_id"), String.class).eq(DSL.field(DSL.name("c", "tenant_id"), String.class)))
             .and(DSL.field(DSL.name("s", "name"), String.class).eq(supersededBy)));
+        Condition scope = tenantScope(tenant, "c", "tenant_id");
+        dangling = dangling.and(scope);
         Map<String, Long> byType = countsByType(ctx, c, contentType, dangling);
         Map<String, Long> selfByType = Map.of();
         if (columnExists(ctx, "catalog_collections", "superseded_by_id")) {
             selfByType = countsByType(ctx, c, contentType, supersededBy.ne("").and(
-                DSL.field(DSL.name("c", "superseded_by_id"), Long.class).eq(DSL.field(DSL.name("c", "collection_id"), Long.class))));
+                DSL.field(DSL.name("c", "superseded_by_id"), Long.class).eq(DSL.field(DSL.name("c", "collection_id"), Long.class))).and(scope));
         }
-        return new Dangling(ctx.fetchCount(c), byType.values().stream().mapToLong(Long::longValue).sum(), byType,
+        return new Dangling(ctx.fetchCount(c, scope), byType.values().stream().mapToLong(Long::longValue).sum(), byType,
             selfByType.values().stream().mapToLong(Long::longValue).sum(), selfByType, true);
     }
 
@@ -490,7 +495,7 @@ public final class CompletionCheck {
                 DSLContext tx = cfg.dsl();
                 // PgSession.setLocal binds the matching network timeout with the statement bound (nexus-u9zkn)
                 PgSession.setLocal(tx, "statement_timeout", Long.toString(VIOLATOR_TIMEOUT_MS));
-                return count(tx, row);
+                return count(tx, row, null);
             });
         } catch (DataAccessException e) {
             return new Violators(row.table(), row.constraint(), 0L, 0L, false);
@@ -504,19 +509,22 @@ public final class CompletionCheck {
         }
     }
 
-    private static Violators count(DSLContext tx, P31Checks.Row row) {
+    /** The violating rows of one CHECK; of one tenant when {@code tenant} is given (the authenticated counts route), of all otherwise. */
+    static Violators count(DSLContext tx, P31Checks.Row row, String tenant) {
         Table<?> t = DSL.table(DSL.name("nexus", row.table())).as("t");
         Field<Long> id = DSL.field(DSL.name("t", row.idColumn()), Long.class);
+        // every listed table has a tenant_id column; the explicit equality is on top of the row-level security a tenant-scoped session has
+        Condition scope = tenantScope(tenant, "t", "tenant_id");
         if ("NOT_NULL".equals(row.kind())) {
-            long n = tx.fetchCount(t, id.isNull());
+            long n = tx.fetchCount(t, id.isNull().and(scope));
             return new Violators(row.table(), row.constraint(), 0L, n, true);
         }
         Field<String> name = DSL.field(DSL.name("t", row.nameColumn()), String.class);
         if ("SUPERSEDED".equals(row.kind())) {
             // a tombstone that names no registry row takes its own id (R7): never an orphan, always still to stamp
-            return new Violators(row.table(), row.constraint(), 0L, tx.fetchCount(t, name.ne("").and(id.isNull())), true);
+            return new Violators(row.table(), row.constraint(), 0L, tx.fetchCount(t, name.ne("").and(id.isNull()).and(scope)), true);
         }
-        Condition violating = DSL.nullif(name, "").isNotNull().and(id.isNull());
+        Condition violating = DSL.nullif(name, "").isNotNull().and(id.isNull()).and(scope);
         Table<?> r = DSL.table(DSL.name("nexus", "catalog_collections")).as("r");
         Field<String> registryName = DSL.field(DSL.name("r", "name"), String.class);
         Condition join = registryName.eq(name);

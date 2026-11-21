@@ -4,29 +4,26 @@ package dev.nexus.service.datamove;
 
 import dev.nexus.service.http.HttpUtil;
 
-import java.util.Map;
-
 /**
  * The {@code rdr229_completion} field of {@code GET /v1/status}: RDR-229 P3.1's completion check ({@link CompletionCheck.Result})
  * as the wire shape {@code nx doctor} reads ({@code nexus/rdr229_completion_health.py}). [additive] Absent = an engine that predates
  * the check, or one that has not read it yet; a client must not read an absent field as "every gate holds".
  *
  * <p>It is a status field and not a {@code boot_work} entry because it is not work in progress (fix round A, critique B1; see
- * {@link CompletionBootWork}). It names no collection or tenant: the route is unauthenticated. Keys, in order:
+ * {@link CompletionBootWork}). <b>{@code /v1/status} is unauthenticated, so the field carries no number that describes tenants</b>
+ * (confirmation review N2, linda's ruling): no registry row count, no tombstone count, no per-table orphan or unstamped count, and
+ * no count in its text. Those are served on the authenticated {@code GET /v1/catalog/rdr229_completion_counts}, scoped to the
+ * caller's tenant ({@link CompletionTenantCounts}). Keys, in order:
  * <pre>
  * {"gate1":bool,"gate2":bool,"gate3":bool,"gates_holding":0..3,"gates_total":3,"summary":text,
  *  "gate3_why":text ("" when gate 3 holds),
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
- *  "checks_missing":[{"table","constraint","what"}],"superseded_by_waiting":n,
- *  "validate_waits":[{"table","constraints":[names],"orphans":n,"unstamped":n,"counted":bool,"what":operator text}],
- *  "dangling_tombstones":{"read":bool,"registry_rows":n,"total":n,"by_content_type":{type:n},
- *                         "self_id":{"total":n,"by_content_type":{type:n}}}}
+ *  "checks_missing":[{"table","constraint","what"}],
+ *  "validate_waits":[{"table","constraints":[names],"what":operator text}]}
  * </pre>
- * {@code labels_incomplete} lists each stamp label whose move is not complete (a label the queue allowlist marks not applicable is
- * not listed). {@code validate_waits[].what} is the operator text: it names the {@code nexus.rdr229_restamp} step.
- * {@code dangling_tombstones} is R7's pre-flight: tombstones whose {@code superseded_by} names no row of their tenant, by content type,
- * and those the stamp resolved to its own id ({@code self_id}); {@code registry_rows} is what was read, so a zero is not a registry that
- * was not read.
+ * {@code labels_total} and {@code gates_holding} count the engine's own moves and gates, not any tenant's data. {@code labels_incomplete}
+ * lists each stamp label whose move is not complete (a label the queue allowlist marks not applicable is not listed).
+ * {@code validate_waits[].what} is the operator text: it names the {@code nexus.rdr229_restamp} step.
  */
 final class CompletionStatusJson {
 
@@ -59,35 +56,16 @@ final class CompletionStatusJson {
                 .append(",\"what\":").append(HttpUtil.jsonString(CompletionBootWork.missing(c, r))).append('}');
             first = false;
         }
-        b.append("],\"superseded_by_waiting\":").append(r.supersededByWaiting()).append(",\"validate_waits\":[");
+        b.append("],\"validate_waits\":[");
         first = true;
         for (CompletionBootWork.TableWait w : CompletionBootWork.byTable(r.violators())) {
             b.append(first ? "" : ",").append("{\"table\":").append(HttpUtil.jsonString(w.table())).append(",\"constraints\":[");
             for (int i = 0; i < w.constraints().size(); i++) {
                 b.append(i == 0 ? "" : ",").append(HttpUtil.jsonString(w.constraints().get(i)));
             }
-            b.append("],\"orphans\":").append(w.orphans()).append(",\"unstamped\":").append(w.unstamped())
-                .append(",\"counted\":").append(w.counted())
-                .append(",\"what\":").append(HttpUtil.jsonString(CompletionBootWork.validateWaits(w))).append('}');
+            b.append("],\"what\":").append(HttpUtil.jsonString(CompletionBootWork.validateWaits(w))).append('}');
             first = false;
         }
-        CompletionCheck.Dangling d = r.dangling();
-        b.append("],\"dangling_tombstones\":{\"read\":").append(d.read()).append(",\"registry_rows\":").append(d.registryRows())
-            .append(",\"total\":").append(d.total()).append(",\"by_content_type\":");
-        counts(b, d.byContentType());
-        b.append(",\"self_id\":{\"total\":").append(d.selfIdTotal()).append(",\"by_content_type\":");
-        counts(b, d.selfIdByContentType());
-        b.append("}}}");
-        return b.toString();
-    }
-
-    private static void counts(StringBuilder b, Map<String, Long> byType) {
-        b.append('{');
-        boolean first = true;
-        for (var e : new java.util.TreeMap<>(byType).entrySet()) {
-            b.append(first ? "" : ",").append(HttpUtil.jsonString(e.getKey())).append(':').append(e.getValue());
-            first = false;
-        }
-        b.append('}');
+        return b.append("]}").toString();
     }
 }

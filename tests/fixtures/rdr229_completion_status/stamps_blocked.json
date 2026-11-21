@@ -82,17 +82,6 @@
       "why" : "open"
     } ],
     "checks_missing" : [ ],
-    "superseded_by_waiting" : 0,
-    "validate_waits" : [ ],
-    "dangling_tombstones" : {
-      "read" : true,
-      "registry_rows" : 0,
-      "total" : 0,
-      "by_content_type" : { },
-      "self_id" : {
-        "total" : 0,
-        "by_content_type" : { }
-      }
-    }
+    "validate_waits" : [ ]
   }
 }

@@ -73,21 +73,8 @@
     "checks_missing" : [ {
       "table" : "catalog_collections",
       "constraint" : "catalog_collections_superseded_by_id_check",
-      "what" : "waits: catalog_collections_superseded_by_id_check is not on catalog_collections yet; 1 registry row(s) with a blank model_version and no superseded_by_id hold its changeset back (D2's repair move or the superseded_by stamp clears them, then the next boot adds it); the switch is refused until then"
+      "what" : "waits: catalog_collections_superseded_by_id_check is not on catalog_collections yet; registry rows with a blank model_version and no superseded_by_id hold its changeset back (D2's repair move or the superseded_by stamp clears them, then the next boot adds it); the switch is refused until then"
     } ],
-    "superseded_by_waiting" : 1,
-    "validate_waits" : [ ],
-    "dangling_tombstones" : {
-      "read" : true,
-      "registry_rows" : 1,
-      "total" : 1,
-      "by_content_type" : {
-        "unknown" : 1
-      },
-      "self_id" : {
-        "total" : 0,
-        "by_content_type" : { }
-      }
-    }
+    "validate_waits" : [ ]
   }
 }
