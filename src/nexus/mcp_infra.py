@@ -1362,6 +1362,15 @@ def get_collection_row(name: str, *, refresh: bool = True, strict: bool = False)
     return row
 
 
+def collections_cache_age() -> float | None:
+    """Seconds since the collections cache was last filled, ``None`` when it holds nothing (never filled, or
+    invalidated and not refilled). :func:`nexus.corpus.routing_content_type` re-reads a cache that is
+    older than its interval and leaves a younger one alone, so a scan over many rowless names pays for at
+    most one extra listing per interval (RDR-229 P2.9)."""
+    ts = _collections_cache[3]
+    return None if ts == 0.0 else _now() - ts
+
+
 def get_cached_collection_rows() -> list[dict]:
     """Every cached collection row, each carrying its ``name``: the same
     ``_COLLECTIONS_CACHE_TTL``-windowed listing :func:`get_collection_row`
@@ -2572,8 +2581,13 @@ def taxonomy_assign_batch_hook(
         # needed at all; the nexus-reskd/h8rf6.11 empty-placeholder-embedding
         # dance this replaced no longer applies (``embeddings`` is unread).
         if is_local_mode():
-            exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-            if any(fnmatch(collection, pat) for pat in exclude):
+            from nexus.collection_route import content_type_excluded  # noqa: PLC0415 — deferred: collection_route reaches this module
+
+            tax_cfg = load_config().get("taxonomy", {})
+            exclude = tax_cfg.get("local_exclude_collections", [])
+            if any(fnmatch(collection, pat) for pat in exclude) or content_type_excluded(
+                collection, tax_cfg.get("local_exclude_content_types", []),
+            ):
                 return
         # NO FALLBACK (nexus-yu9w5, mirrors the nexus-sghyo precedent): an
         # engine below REQUIRED_ENGINE_VERSION that lacks this route 404s;

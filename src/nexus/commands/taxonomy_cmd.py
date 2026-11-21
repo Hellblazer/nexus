@@ -7,6 +7,7 @@ import contextvars
 import hashlib
 import json
 import re
+from collections.abc import Collection
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -67,8 +68,13 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 
-def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str]:
+def _enumerate_discoverable_collections(
+    t3: Any, exclude: list[str], exclude_content_types: Collection[str] = (),
+) -> list[str]:
     """Return collection names with >=5 chunks, skipping excludes + taxonomy__.
+
+    ``exclude`` holds glob patterns that name labels; ``exclude_content_types`` holds content types read
+    from the listing row (RDR-229 P2.9), or from the client row cache for a handle whose listing carries none.
 
     Backend-uniform: raw T3 exposes ``_client.list_collections()`` (Chroma
     Collection objects); service T3 exposes ``list_collections()`` (list of
@@ -78,22 +84,25 @@ def _enumerate_discoverable_collections(t3: Any, exclude: list[str]) -> list[str
 
     from nexus.db.http_vector_client import is_service_backed, live_collection_rows  # noqa: PLC0415 - deferred to avoid circular import at module load
 
-    names: list[tuple[str, int]] = []
+    from nexus.collection_route import content_type_excluded, listing_content_type  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+    names: list[tuple[str, int, str | None]] = []
     if is_service_backed(t3):
         # nexus-bc7ps: discovery is a ROUTING consumer. A quarantine-<name>
         # collection listed here reached canonical_embedding_model and died on
         # an unknown content type (2026-09-16T01:14:11Z); live rows only.
         for c in live_collection_rows(t3):
-            names.append((c.get("name", ""), int(c.get("count", 0) or 0)))
+            names.append((c.get("name", ""), int(c.get("count", 0) or 0), listing_content_type(c)))
     else:
         for c in t3._client.list_collections():
-            names.append((c.name, c.count()))
+            names.append((c.name, c.count(), None))
     return [
-        name for name, count in names
+        name for name, count, content_type in names
         if count >= MIN_DISCOVER_CHUNKS
         and name
         and not name.startswith("taxonomy__")
         and not any(fnmatch(name, pat) for pat in exclude)
+        and not content_type_excluded(name, exclude_content_types, content_type=content_type)
     ]
 
 
@@ -747,26 +756,32 @@ def discover_cmd(collection: str, discover_all: bool, force: bool) -> None:
         click.echo("Specify --collection <name> or --all.")
         return
 
+    from nexus.collection_route import content_type_excluded, taxonomy_local_exclude_types  # noqa: PLC0415 - deferred to avoid circular import at module load
+
     cfg = load_config()
     exclude = (
         cfg.get("taxonomy", {}).get("local_exclude_collections", [])
         if is_local_mode() else []
     )
+    exclude_types = taxonomy_local_exclude_types()
     t3 = make_t3()
 
     if discover_all:
         # Backend-support is checked per-collection inside the loop below
         # (authoritative); enumeration itself needs no taxonomy handle.
-        targets = _enumerate_discoverable_collections(t3, exclude)
+        targets = _enumerate_discoverable_collections(t3, exclude, exclude_types)
         if not targets:
             click.echo("No eligible collections found.")
             return
         click.echo(f"Discovering topics for {len(targets)} collections...")
     else:
-        if is_local_mode() and any(fnmatch(collection, pat) for pat in exclude):
+        if is_local_mode() and (
+            any(fnmatch(collection, pat) for pat in exclude) or content_type_excluded(collection, exclude_types)
+        ):
             click.echo(
                 f"Warning: {collection!r} matches taxonomy.local_exclude_collections "
-                f"({exclude}); locally embedded code clusters poorly. Discovering anyway; "
+                f"({exclude}) or taxonomy.local_exclude_content_types ({exclude_types}); "
+                "locally embedded code clusters poorly. Discovering anyway; "
                 "a 'skipped' line below means discovery itself found nothing to persist, "
                 "not this exclusion."
             )
@@ -1243,14 +1258,21 @@ def drain_cmd(collections: tuple[str, ...], all_collections: bool, max_chunks: i
     if all_collections:
         names = sorted(get_live_collection_names())
         # Same exclusion the per-flush hook honours in local mode
-        # (taxonomy.local_exclude_collections; code__* by default, since
-        # general-purpose local embeddings cluster code poorly).
+        # (taxonomy.local_exclude_collections label patterns, and
+        # taxonomy.local_exclude_content_types, ``code`` by default, read from
+        # each collection's row, since general-purpose local embeddings cluster
+        # code poorly).
         from fnmatch import fnmatch  # noqa: PLC0415 - stdlib, only this branch needs it
 
+        from nexus.collection_route import content_type_excluded, taxonomy_local_exclude_types  # noqa: PLC0415 - deferred to avoid circular import at module load
         from nexus.config import is_local_mode, load_config  # noqa: PLC0415 - deferred to avoid circular import at module load
         if is_local_mode():
             exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-            names = [n for n in names if not any(fnmatch(n, pat) for pat in exclude)]
+            exclude_types = taxonomy_local_exclude_types()
+            names = [
+                n for n in names
+                if not any(fnmatch(n, pat) for pat in exclude) and not content_type_excluded(n, exclude_types)
+            ]
     budget = max_chunks or _DRAIN_MAX_CHUNKS
     any_lost = False
     for name in names:

@@ -40,6 +40,7 @@ from nexus.commands.catalog_cmds.doctor import (
 )
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from tests.conftest import catalog_row_for_collection_name
 from nexus.mcp.core import store_put
 
 KNOWLEDGE = "knowledge__wbfpw26__bge-base-en-v1.5__v1"
@@ -80,7 +81,7 @@ class _FakeT3:
         self.census_error: Exception | None = None
 
     def list_collections(self):
-        return [{"name": n, "count": 0, "stored_count": 0} for n in self.collections]
+        return [{"name": n, "count": 0, "stored_count": 0, **catalog_row_for_collection_name(n)} for n in self.collections]
 
     def get_or_create_collection(self, name):
         return _FakeCollection(self, name)

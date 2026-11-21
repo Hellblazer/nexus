@@ -350,7 +350,7 @@ def _arm_name_grouping(monkeypatch: pytest.MonkeyPatch) -> None:
     that builds its own client is grouped the same way."""
     import nexus.search_engine as se  # noqa: PLC0415 - after the substrate is pinned
 
-    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections: se._model_token)
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections, rows=None: se._model_token)
 
 
 def _arm_pool_probe(monkeypatch: pytest.MonkeyPatch) -> _PoolProbe:
