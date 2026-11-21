@@ -3069,9 +3069,13 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
 
     expected_collection = target_collection
     if not expected_collection and corpus:
-        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
+        from nexus.corpus import TumblerShapedCorpusError, docs_leaf_fallback_collection_name  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
 
-        expected_collection = docs_leaf_fallback_collection_name(corpus)
+        try:
+            expected_collection = docs_leaf_fallback_collection_name(corpus)
+        except TumblerShapedCorpusError:
+            # A corpus the indexers refuse names no collection to compare against; this renders an error already.
+            expected_collection = ""
     if not expected_collection:
         return base
 
@@ -3253,7 +3257,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     _log = structlog.get_logger(__name__)
 
     from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
-    from nexus.corpus import candidate_knowledge_subject, catalog_subject_finder, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import candidate_knowledge_subject, catalog_subject_finder, require_corpus_name, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,
@@ -3270,6 +3274,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
     from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
+    if corpus is not None:
+        require_corpus_name(corpus)  # nexus-p2m1x.28: an explicit --corpus only; the derived one is a knowledge subject
     # GH #1611 gap 4: the corpus is also the curator owner a PDF registers under, so with only --collection it is
     # that collection's subject (knowledge__delos -> delos), never the literal "default". Only a knowledge collection
     # has a subject there: a docs__/code__ name's owner segment is a tumbler-derived id (``1-48``), not a subject.
@@ -3934,6 +3940,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         EmbeddingProfileMismatchError,
         LocalVoyageCredentialMissingError,
         catalog_subject_finder,
+        require_corpus_name,
         t3_collection_name,
     )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
@@ -3948,6 +3955,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     )
     from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
+    require_corpus_name(corpus)  # nexus-p2m1x.28
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a file the staleness check "
