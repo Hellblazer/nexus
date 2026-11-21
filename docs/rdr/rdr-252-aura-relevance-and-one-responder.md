@@ -2,7 +2,8 @@
 title: "Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment"
 id: RDR-252
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-21
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
