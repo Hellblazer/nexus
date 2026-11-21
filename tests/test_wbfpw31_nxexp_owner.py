@@ -454,7 +454,15 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     curator = writer.register_owner("knowledge", "curator")
     seg = owner_segment_for_tumbler(str(owner_tumbler))
     unregistered = f"code__{seg}__{_MODEL}__v1-unregistered"
-    assert _resolve_import_owner_tumbler(unregistered, reader, writer) == curator
+    # RDR-229: an owner id with no row, no document and no source is the one case that still lands under
+    # the curator, and it says so; the same collection with a bundle owner lands under that repo owner.
+    fell_back: list[str] = []
+    assert _resolve_import_owner_tumbler(
+        unregistered, reader, writer, content_type="code", on_fallback=fell_back.append) == curator
+    assert len(fell_back) == 1
+    assert _resolve_import_owner_tumbler(
+        unregistered, reader, writer, content_type="code",
+        bundle_owner={"repo_hash": "wbfpw33deadbeefcafe"}) == owner_tumbler
     # A name that does not even parse (non-canonical model segment) resolves too.
     odd = "knowledge__wbfpw33-seam__all-minilm-l6-v2-384__v1"
     assert _resolve_import_owner_tumbler(odd, reader, writer) == curator
@@ -491,16 +499,19 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     assert result["owned_count"] == 2
 
     # The chunk write kept the slug (nexus-7tys2), so the import found no owner on
-    # the row and no document in the collection and landed under the curator. That
-    # minted document is now what names the collection's owner (nexus-6pbwx): the
-    # curator's segment replaced the slug, and a later resolve reads it from the row.
-    curator = writer.register_owner("knowledge", "curator")
-    assert reader.get_collection(dst)["owner_id"] == owner_segment_for_tumbler(str(curator))
-    assert _resolve_import_owner_tumbler(dst, reader, writer) == curator
+    # the row and no document in the collection. RDR-229: the slug ends in an 8-hex repo hash,
+    # so the owner is the repo owner of that hash (registered, no root), not the knowledge
+    # curator. That minted document is now what names the collection's owner (nexus-6pbwx): the
+    # repo owner's segment replaced the slug, and a later resolve reads it from the row.
+    stem_owner = reader.owner_for_repo("2ad2825c")
+    assert stem_owner is not None
+    assert reader.get_owner_by_prefix(str(stem_owner))["owner_type"] == "repo"
+    assert reader.get_collection(dst)["owner_id"] == owner_segment_for_tumbler(str(stem_owner))
+    assert _resolve_import_owner_tumbler(dst, reader, writer) == stem_owner
     doc = reader.by_source_uri(f"nxexp://{dst}/{f.name}")
     assert doc is not None
     assert doc.physical_collection == dst
-    assert doc.tumbler.owner_address() == curator
+    assert doc.tumbler.owner_address() == stem_owner
 
     # The mixed state (nexus-6pbwx): the import's curator document came first, a real repo
     # document joins afterwards (nx index repo into the restored collection). The curator's
