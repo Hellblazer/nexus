@@ -24,7 +24,26 @@
     NO DATA EFFECT. A function body only; no row is read or written. Rows a curator owner already lost to
     catalog-044-3 are re-owned by the registered data move vectors-067 (rdr229-reown-repo-stems-from-curator), not here.
 
-    ROLLBACK restores catalog-044-1's body.
+    ROLLBACK of catalog-049-1 restores catalog-044-1's body.
+
+    SECOND AMENDMENT, catalog-049-2 (the tuple guard). The rule above leaves slug, dotted and '' owners replaceable,
+    so catalog-044's triggers can still rewrite such a legacy owner onto a tuple another collection already holds.
+    The tuple is (tenant_id, content_type, owner_id, embedding_model, model_version), counted over rows that are
+    live (lifecycle_state = 'live'), unsuperseded (superseded_by = '') and of a code, docs or rdr content type (a
+    quarantine row carries a quarantine-* content_type and is outside the rule). Without a unique index on that
+    tuple the rewrite creates a silent duplicate; with the partial UNIQUE index on it that RDR-229 plans for P3.8 it raises a
+    bare 23505 from inside document registration. So both trigger functions now skip the rewrite when the owner
+    they would write lands a live, unsuperseded row on a tuple a different live, unsuperseded collection already
+    holds: the row keeps its old owner and the trigger RAISEs a NOTICE naming both collections and the owner it did
+    not take (the collection already holding the tuple is the lowest-named one). A row that is itself not live or
+    is superseded never counts toward the tuple, so its rewrite is unchanged. Functions replaced, same signatures,
+    SECURITY INVOKER, no new function and no new trigger: nexus.catalog_collections_owner_from_docs() (the BEFORE
+    trigger on catalog_collections) and nexus.catalog_documents_owner_to_collection() (the AFTER trigger on
+    catalog_documents). The check is a read, so a concurrent registration can still slip past it; the unique
+    index is the backstop for that race, as it is for any other writer.
+    A collection that keeps its slug owner because of the guard stays replaceable, so each later document insert
+    into it runs the owner aggregate again and repeats the NOTICE until the tuple frees or the owner is set by hand.
+    NO DATA EFFECT: function bodies only. ROLLBACK of catalog-049-2 restores catalog-044-2's two bodies verbatim.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -54,6 +73,194 @@ CREATE OR REPLACE FUNCTION nexus.catalog_collection_owner_replaceable(p_tenant t
 AS $fn$
     SELECT COALESCE(p_owner !~ '^[0-9]+(-[0-9]+)*$', true)
         OR nexus.catalog_owner_is_curator(p_tenant, p_owner)
+$fn$;
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-049-2" author="nexus-p2m1x.14">
+        <comment>catalog-044's two owner-from-documents trigger functions skip the rewrite when the new owner would land a live, unsuperseded code/docs/rdr collection on a (tenant_id, content_type, owner_id, embedding_model, model_version) tuple another live, unsuperseded collection already holds: the old owner stays and a NOTICE names both collections and the owner not taken. Same signatures and SECURITY INVOKER; no data effect.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_owner  text;
+    v_holder text;
+BEGIN
+    IF NEW.content_type IN ('code', 'docs', 'rdr')
+       AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
+        v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
+        IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
+            -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds.
+            SELECT h.name INTO v_holder
+              FROM nexus.catalog_collections h
+             WHERE NEW.lifecycle_state = 'live' AND NEW.superseded_by = ''
+               AND h.tenant_id = NEW.tenant_id
+               AND h.content_type = NEW.content_type
+               AND h.owner_id = v_owner
+               AND h.embedding_model = NEW.embedding_model
+               AND h.model_version = NEW.model_version
+               AND h.lifecycle_state = 'live' AND h.superseded_by = ''
+               AND h.name &lt;&gt; NEW.name
+             ORDER BY h.name
+             LIMIT 1;
+            IF FOUND THEN
+                RAISE NOTICE 'catalog-049: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                    NEW.name, NEW.owner_id, v_owner, v_holder;
+            ELSE
+                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                    NEW.name, NEW.owner_id, v_owner;
+                NEW.owner_id := v_owner;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_seg    text;
+    v_cur    text;
+    v_ct     text;
+    v_em     text;
+    v_mv     text;
+    v_ls     text;
+    v_sb     text;
+    v_new    text;
+    v_holder text;
+BEGIN
+    IF NEW.deleted_at IS NULL
+       AND NEW.physical_collection &lt;&gt; ''
+       AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
+        v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
+        SELECT c.owner_id, c.content_type, c.embedding_model, c.model_version, c.lifecycle_state, c.superseded_by
+          INTO v_cur, v_ct, v_em, v_mv, v_ls, v_sb
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = NEW.tenant_id
+           AND c.name = NEW.physical_collection
+           AND c.content_type IN ('code', 'docs', 'rdr');
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped owner) or one already
+        -- owned by this very document's owner costs a primary-key read, never the aggregate over
+        -- the collection's documents.
+        IF FOUND
+           AND v_cur IS DISTINCT FROM v_seg
+           AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
+            v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
+            IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
+                -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds.
+                SELECT h.name INTO v_holder
+                  FROM nexus.catalog_collections h
+                 WHERE v_ls = 'live' AND v_sb = ''
+                   AND h.tenant_id = NEW.tenant_id
+                   AND h.content_type = v_ct
+                   AND h.owner_id = v_new
+                   AND h.embedding_model = v_em
+                   AND h.model_version = v_mv
+                   AND h.lifecycle_state = 'live' AND h.superseded_by = ''
+                   AND h.name &lt;&gt; NEW.physical_collection
+                 ORDER BY h.name
+                 LIMIT 1;
+                IF FOUND THEN
+                    RAISE NOTICE 'catalog-049: collection % keeps owner_id % (its documents name %, which collection % already holds for this content type, model and version)',
+                        NEW.physical_collection, v_cur, v_new, v_holder;
+                ELSE
+                    RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                        NEW.physical_collection, v_cur, v_new;
+                    UPDATE nexus.catalog_collections c
+                       SET owner_id = v_new
+                     WHERE c.tenant_id = NEW.tenant_id
+                       AND c.name = NEW.physical_collection
+                       AND c.content_type IN ('code', 'docs', 'rdr')
+                       AND c.owner_id IS DISTINCT FROM v_new
+                       -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                       -- transaction may have committed a repo owner since the SELECT above, and
+                       -- this predicate is re-evaluated against that new row version, so a curator
+                       -- (or slug) derivation cannot overwrite it.
+                       AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+    RETURN NULL;
+END;
+$fn$;
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_owner text;
+BEGIN
+    IF NEW.content_type IN ('code', 'docs', 'rdr')
+       AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
+        v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
+        IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
+            RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                NEW.name, NEW.owner_id, v_owner;
+            NEW.owner_id := v_owner;
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+AS $fn$
+DECLARE
+    v_seg text;
+    v_cur text;
+    v_new text;
+BEGIN
+    IF NEW.deleted_at IS NULL
+       AND NEW.physical_collection &lt;&gt; ''
+       AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
+        v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
+        SELECT c.owner_id INTO v_cur
+          FROM nexus.catalog_collections c
+         WHERE c.tenant_id = NEW.tenant_id
+           AND c.name = NEW.physical_collection
+           AND c.content_type IN ('code', 'docs', 'rdr');
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped, non-curator
+        -- owner) or one already owned by this very document's owner costs a primary-key
+        -- read and an owner-row read, never the aggregate over the collection's documents.
+        IF FOUND
+           AND v_cur IS DISTINCT FROM v_seg
+           AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
+            v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
+            IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
+                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                    NEW.physical_collection, v_cur, v_new;
+                UPDATE nexus.catalog_collections c
+                   SET owner_id = v_new
+                 WHERE c.tenant_id = NEW.tenant_id
+                   AND c.name = NEW.physical_collection
+                   AND c.content_type IN ('code', 'docs', 'rdr')
+                   AND c.owner_id IS DISTINCT FROM v_new
+                   -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                   -- transaction may have committed a repo owner since the SELECT above, and
+                   -- this predicate is re-evaluated against that new row version, so a curator
+                   -- (or slug) derivation cannot overwrite it.
+                   AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
+            END IF;
+        END IF;
+    END IF;
+    RETURN NULL;
+END;
 $fn$;
             </sql>
         </rollback>

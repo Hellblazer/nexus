@@ -2216,6 +2216,9 @@ class CatalogRepositoryTest {
      * {@code conformantNameBeatsARepairedSlugAtEqualVersion} while the lower name decided; it
      * passes under either order, since the conformant row is both older and lower-named; the
      * flip, tie and parity tests are what catch a revert to name order.)
+     * catalog-049-2 (RDR-229): documents no longer carry a slug row onto a tuple a live collection holds, so the
+     * slug row here keeps its owner at equal version; the tie that remains is the one the direct-registration tests cover,
+     * and the higher-version case below still shares nothing and still wins.
      */
     @Test @Order(60)
     void collectionForTuple_aSlugRegisteredAfterTheConformantCollectionDoesNotWinAtEqualVersion() {
@@ -2225,7 +2228,8 @@ class CatalogRepositoryTest {
         registerColl(tenant, conformant, "code", "1-27");
         registerColl(tenant, slug, "code", "zslug-6pbwx");
         putDoc(tenant, "1.27.1", "code", slug);
-        assertThat(ownerOf(tenant, slug)).as("guard: the slug row now shares the tuple").isEqualTo("1-27");
+        assertThat(ownerOf(tenant, slug)).as("catalog-049-2: the conformant row holds the tuple, so the slug row keeps its owner")
+            .isEqualTo("zslug-6pbwx");
 
         assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
             .as("equal version: the first registered, conformant collection wins").isEqualTo(conformant);
