@@ -16,7 +16,11 @@ import java.util.function.Function;
  */
 public final class ImportLabelRefusals {
 
-    /** One refused label: the label as sent, the rule it broke (a {@code CollectionLabel} rule name) and why. */
+    /**
+     * One refused label: the label as sent, the rule it broke (a {@code CollectionLabel} rule name) and why. A lone
+     * surrogate in the label or the reason is written as its {@code \\uXXXX} escape, because the response cannot carry
+     * it (it would encode as {@code ?}, and two different labels would read alike).
+     */
     public record Refusal(String name, String rule, String reason) {
     }
 
@@ -44,10 +48,28 @@ public final class ImportLabelRefusals {
             if (breach.isEmpty()) {
                 kept.add(row);
             } else {
-                byName.put(label, new Refusal(label == null ? "" : label, breach.get().rule(), breach.get().reason()));
+                byName.put(label, new Refusal(printable(label == null ? "" : label), breach.get().rule(),
+                    printable(breach.get().reason())));
             }
         }
         return kept;
+    }
+
+    private static String printable(String text) {
+        var out = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            boolean paired = Character.isHighSurrogate(ch) && i + 1 < text.length()
+                && Character.isLowSurrogate(text.charAt(i + 1));
+            if (paired) {
+                out.append(ch).append(text.charAt(++i));
+            } else if (Character.isSurrogate(ch)) {
+                out.append(String.format("\\u%04X", (int) ch));
+            } else {
+                out.append(ch);
+            }
+        }
+        return out.toString();
     }
 
     /** Whether a row sent under {@code label} was refused. */
