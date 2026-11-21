@@ -371,9 +371,9 @@ def test_prune_stops_at_once_when_the_engine_did_not_apply_exact_matching(monkey
 
 
 def test_a_verification_prune_precedes_the_first_real_exact_prune(monkeypatch) -> None:
-    """Before any real prune with exact=True, one prune with match=exact goes to a name no collection can
-    match, at threshold 0.0: even a prefix match deletes nothing, so an engine that ignores exact is found
-    out without a real collection being touched."""
+    """Before any real prune with exact=True, one prune with match=exact goes to a name no collection has (a
+    fixed prefix and a random 128-bit suffix): even a prefix match reaches no rows, so an engine that ignores
+    exact is found out without a real collection being touched. The guarantee is the name, not the threshold."""
     pruned: list[tuple[str, float]] = []
     probes: list = []
     rows = {"code__1-1__m__v1": "code", "code__1-1__m__v10": "knowledge"}
