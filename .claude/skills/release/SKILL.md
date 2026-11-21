@@ -197,7 +197,7 @@ tests/e2e/release-battery.sh --skip-preflight   # Step 0c passed on this HEAD (i
 # The lines below are WHAT THE BATTERY RUNS, for reading and for rerunning one red leg alone. Do not run them as well.
 env NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh   # leg lsg: the throwaway service as shipped boots and serves (14 smoke probes + the engine log); the integration pytest family runs in PR CI
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
-tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
+tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs), and the formula-PDF check through MinerU on the CANDIDATE wheel with an empty model cache (F34, nexus-7t3w1): its row in the verdict table names that check's status; a skip needs NX_MVV_FORMULA_PDF_CHECK=0 plus NX_MVV_FORMULA_PDF_SKIP_REASON and reads as SKIPPED there — see below
 tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
 tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs run from a project outside any nexus checkout (nexus-z7ddd): the static pass plus a canary (a fixture plugin with random nonces that measures what Claude Code substitutes, judged on events not prose; five live runs, so UNVERIFIED is red: rerun, never waive); no per-target model sweep; where claude is absent the leg is --static-only, and its row AND the battery's closing line say "static pass only": run it again on the laptop; offline self-test tests/e2e/plugin_out_of_repo_gate_test.sh
 tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
@@ -263,6 +263,19 @@ bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG
 registration asserted, semantic search returns both sentinels, doctor with
 zero ✗ and warnings checked against the script's allowlist. Must end
 `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
+Before the tag it also runs the formula-PDF check on the candidate wheel
+(F34, nexus-7t3w1; Sam 2026-11-21, T2 `nexus/sam-ruling-855-go-2026-11-21`):
+the wheel is installed with the `pdf` extra, `tests/fixtures/bft-to-smr.pdf` is
+indexed through MinerU in the virgin HOME with an empty model cache, the index
+must fetch MinerU's pipeline weights as its own step before the first page, and
+the added chunk's extraction method must be `mineru`. Until 8.5.5 this check ran
+only post-publish (Step 11c, `--published`), so the battery never parsed a PDF
+through MinerU and a first-run MinerU defect shipped in 8.5.4. The mvv row of the
+verdict table carries `formula-PDF check (MinerU, candidate wheel, local layer): ran`;
+anything else there (SKIPPED with its reason, or no status line) is not a release
+pass unless the skip was recorded on purpose. It adds the MinerU stack install and
+the weight download (about 1.2 GB) to the leg, so its work tree is several GB larger
+than the 2.5 GB above.
 `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
 runs. The work tree (about 2.5 GB) is created under `$TMPDIR` and removed on
 exit. On failure the script prints `FAILURE EVIDENCE PRESERVED: <dir>`, a small

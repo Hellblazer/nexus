@@ -89,9 +89,11 @@
 # cannot: that lint proves the LOCAL checkout's uv.lock is bounded, not
 # that a fresh --published resolve actually landed there.
 #
-# The formula-PDF check (--published mode only; nexus-gqrg0 / GH #1533;
-# default-on since nexus-tr1rj.20, RDR-237): indexes tests/fixtures/bft-to-smr.pdf
-# through the real MinerU path against the PUBLISHED dependency resolution, BEFORE
+# The formula-PDF check (both modes since F34, nexus-7t3w1: the local mode runs it on the
+# candidate wheel before the tag, --published on the published bytes after it; nexus-gqrg0 /
+# GH #1533; default-on since nexus-tr1rj.20, RDR-237): indexes tests/fixtures/bft-to-smr.pdf
+# through the real MinerU path in the virgin HOME with an empty model cache, asserts the index
+# fetched MinerU's pipeline weights as its own step first (F34), BEFORE
 # leg 9 replaces the uv-tool shim with a generation, and asserts the ADDED chunk's
 # extraction_method is literally mineru (the nexus-jy4hd chunk-id-set-diff shape,
 # not a LaTeX-content grep). It pays a MinerU pipeline model download (~2-3 GB).
@@ -193,6 +195,24 @@ _leg_log_is_substantive() {
 # with its own unconditional `case "$MODE" in ... esac` dispatch at the
 # bottom, not a library; `source`ing it here would have run THAT dispatch
 # inside this script's own shell and aborted the journey.
+# F34 (nexus-7t3w1): the first index on a virgin HOME must fetch MinerU's pipeline weights as its own
+# step, before any page budget starts, and finish it. stdin: that index's log -> "OK" or "FAIL|<cause>".
+# The two lines are nx's own (src/nexus/mineru_weights.py); a page that timed out while MinerU
+# downloaded (the defect) shows as mineru_server_timeout, which also fails.
+_f34_weights_fetch_verdict() {
+    local log
+    log="$(cat)"
+    if ! grep -q "MinerU's pipeline weights are not on this machine yet. Fetching them now" <<<"$log"; then
+        echo "FAIL|the first MinerU index on a virgin HOME did not fetch the pipeline weights as its own step"
+    elif ! grep -q "MinerU pipeline weights are ready." <<<"$log"; then
+        echo "FAIL|the MinerU weight fetch began but never reported ready"
+    elif grep -q "mineru_server_timeout" <<<"$log"; then
+        echo "FAIL|a MinerU page timed out (mineru_server_timeout) after the weight fetch"
+    else
+        echo "OK"
+    fi
+}
+
 _mineru_doctor_verdict() {
     # stdin: `nx doctor --check-mineru` output → "OK" or "FAIL|<cause>"
     "$E2E_PYTHON" -c '
@@ -331,6 +351,17 @@ _self_test() {
     out=$(printf 'unrelated doctor chatter\n' | _mineru_doctor_verdict)
     _assert_prefix "RED: no MinerU line at all -> FAIL, never a silent pass" "$out" "FAIL|doctor output carries no MinerU line"
 
+    echo "== self-test: _f34_weights_fetch_verdict (F34, nexus-7t3w1) =="
+    _f34_fetch="nx: MinerU's pipeline weights are not on this machine yet. Fetching them now, before any page is parsed"
+    out=$(printf '%s\nnx:   pp_doclayout_v2\nnx: MinerU pipeline weights are ready.\nIndexed 12 chunks\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
+    _assert_eq "fetch step ran and finished -> OK" "$out" "OK"
+    out=$(printf 'Indexed 12 chunks\n' | _f34_weights_fetch_verdict)
+    _assert_prefix "RED: no fetch step on a virgin HOME (the F34 fix reverted) -> FAIL" "$out" "FAIL|the first MinerU index on a virgin HOME did not fetch"
+    out=$(printf '%s\nnx:   pp_doclayout_v2\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
+    _assert_prefix "RED: fetch began, never ready -> FAIL" "$out" "FAIL|the MinerU weight fetch began but never reported ready"
+    out=$(printf '%s\nnx: MinerU pipeline weights are ready.\nmineru_server_timeout pages=1\n' "$_f34_fetch" | _f34_weights_fetch_verdict)
+    _assert_prefix "RED: a page still timed out -> FAIL" "$out" "FAIL|a MinerU page timed out"
+
     echo "== self-test: _new_chunk_ids + _extractor_identity_verdict (nexus-gqrg0 round 2) =="
     printf '%s\n' "$(printf '0a%.0s' $(seq 32))" > "$t/before-ids"
     printf '%s\n%s\n' "$(printf '0a%.0s' $(seq 32))" "$(printf 'ff%.0s' $(seq 32))" > "$t/after-ids"
@@ -398,24 +429,30 @@ if [ "$SELF_TEST" = 1 ]; then
     exit $?
 fi
 
-# nexus-tr1rj.20: the formula-PDF check is default-on in --published mode. FORMULA_PDF_CHECK_ON
-# is the one switch every later site reads (1 = run it). Turning it off takes
-# NX_MVV_FORMULA_PDF_CHECK=0 AND a non-empty NX_MVV_FORMULA_PDF_SKIP_REASON; a skip with no
-# reason is refused here, before any work, so it can never be a silent pass.
+# nexus-tr1rj.20: the formula-PDF check is default-on. FORMULA_PDF_CHECK_ON is the one switch
+# every later site reads (1 = run it). Turning it off takes NX_MVV_FORMULA_PDF_CHECK=0 AND a
+# non-empty NX_MVV_FORMULA_PDF_SKIP_REASON; a skip with no reason is refused here, before any
+# work, so it can never be a silent pass. F34 (nexus-7t3w1; Sam 2026-11-21, T2
+# nexus/sam-ruling-855-go-2026-11-21): it runs in BOTH modes. Until then it ran with
+# --published only, so the pre-tag battery's mvv leg (local wheel) never parsed a PDF through
+# MinerU, and a first-run MinerU defect shipped; the local mode now runs the same block on the
+# candidate wheel, in the virgin HOME with an empty model cache, before the tag.
 FORMULA_PDF_CHECK_ON=0
-FORMULA_PDF_STATUS="not applicable (local-wheel layer)"
 if [ "$PUBLISHED_MODE" = 1 ]; then
-    if [ "${NX_MVV_FORMULA_PDF_CHECK:-1}" = "0" ]; then
-        if [ -z "${NX_MVV_FORMULA_PDF_SKIP_REASON:-}" ]; then
-            echo "refusing to skip the formula-PDF check without a reason: set NX_MVV_FORMULA_PDF_SKIP_REASON='<why>' alongside NX_MVV_FORMULA_PDF_CHECK=0 (nexus-tr1rj.20). It is the release's only end-to-end MinerU check." >&2
-            exit 2
-        fi
-        FORMULA_PDF_STATUS="SKIPPED (reason: $NX_MVV_FORMULA_PDF_SKIP_REASON)"
-    else
-        FORMULA_PDF_CHECK_ON=1
-        # "ran" is set at the summary, from FORMULA_PDF_CHECK_RAN, so it names what happened.
-        FORMULA_PDF_STATUS="did not run (check on, block not reached)"
+    FORMULA_PDF_LAYER="published bytes, uv-tool layer"
+else
+    FORMULA_PDF_LAYER="candidate wheel, local layer"
+fi
+if [ "${NX_MVV_FORMULA_PDF_CHECK:-1}" = "0" ]; then
+    if [ -z "${NX_MVV_FORMULA_PDF_SKIP_REASON:-}" ]; then
+        echo "refusing to skip the formula-PDF check without a reason: set NX_MVV_FORMULA_PDF_SKIP_REASON='<why>' alongside NX_MVV_FORMULA_PDF_CHECK=0 (nexus-tr1rj.20). It is the release's only end-to-end MinerU check." >&2
+        exit 2
     fi
+    FORMULA_PDF_STATUS="SKIPPED (reason: $NX_MVV_FORMULA_PDF_SKIP_REASON)"
+else
+    FORMULA_PDF_CHECK_ON=1
+    # "ran" is set at the summary, from FORMULA_PDF_CHECK_RAN, so it names what happened.
+    FORMULA_PDF_STATUS="did not run (check on, block not reached)"
 fi
 
 if [ "$PUBLISHED_MODE" = 1 ]; then
@@ -953,7 +990,29 @@ if not data.strip():
 open(out, "wb").write(data)
 ' "$WHEEL" "$OVERRIDES_FILE" \
         || _fail "wheel under test carries no usable nexus/_install/overrides.txt"
-    _uv_sandboxed pip install -q --python "$VENV/bin/python" --overrides "$OVERRIDES_FILE" "$WHEEL"
+    # F34: the formula-PDF check parses through MinerU, so its run installs the candidate wheel WITH the
+    # `pdf` extra (a skip with a reason stays slim), and on Linux with the cpu torch the install page names.
+    _LOCAL_SPEC="$WHEEL"
+    _local_torch_flag=()
+    if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
+        _LOCAL_SPEC="conexus[pdf] @ file://$WHEEL"
+        [ "$(uname -s)" = "Linux" ] && _local_torch_flag=(--torch-backend cpu)
+    fi
+    # The release's constraints too, from the wheel under test, so the candidate resolves the way users'
+    # installs do (install_generation.sh and the published layer apply both files).
+    CONSTRAINTS_FILE="$WORK/wheel-constraints.txt"
+    "$E2E_PYTHON" -I -c '
+import sys, zipfile
+wheel, out = sys.argv[1:3]
+with zipfile.ZipFile(wheel) as z:
+    data = z.read("nexus/_install/constraints.txt")
+if not data.strip():
+    sys.exit("wheel carries an empty nexus/_install/constraints.txt")
+open(out, "wb").write(data)
+' "$WHEEL" "$CONSTRAINTS_FILE" \
+        || _fail "wheel under test carries no usable nexus/_install/constraints.txt"
+    _uv_sandboxed pip install -q --python "$VENV/bin/python" --overrides "$OVERRIDES_FILE" \
+        --constraints "$CONSTRAINTS_FILE" "$_LOCAL_SPEC" "${_local_torch_flag[@]+"${_local_torch_flag[@]}"}"
     BIN_DIR="$VENV/bin"
     PROBE_PYTHON="$VENV/bin/python"
     _nx --version
@@ -1283,9 +1342,8 @@ if [ "$RESOLVER_BOUND_RC" -ne 0 ]; then
     _fail "the PDF-stack resolver leg failed in $PROBE_PYTHON (pdftext/pypdfium2 above the GH #1533 bound, a partial stack, or a missing expected pdf extra) -- $RESOLVER_BOUND_OUT"
 fi
 
-# ── formula-PDF index (--published mode only; nexus-gqrg0 / GH #1533; default-on, nexus-tr1rj.20) ──
-# Not part of the fixed 10-leg count above (it applies to the published layer only,
-# and a recorded skip turns it off) -- see the usage comment at the top
+# ── formula-PDF index (both modes since F34; nexus-gqrg0 / GH #1533; default-on, nexus-tr1rj.20) ──
+# Not part of the fixed 10-leg count above (a recorded skip turns it off) -- see the usage comment at the top
 # of this file. GH #1533: mineru's unbounded `pdftext>=0.6.3` let a fresh resolve
 # install pdftext 0.7.x, whose PageChars dropped __iter__ while mineru's own
 # span_pre_proc.py still iterates it as a list -- import succeeded, `nx
@@ -1303,10 +1361,8 @@ fi
 # means to prove.
 FORMULA_PDF_CHECK_RAN=0
 if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
-    if [ "$PUBLISHED_MODE" != 1 ]; then
-        echo "  (the formula-PDF check applies to --published only; not run on the local-wheel layer)"
-    else
-        echo "── formula-PDF index via MinerU (published bytes, uv-tool layer) ──"
+    if true; then  # both modes since F34 (nexus-7t3w1); the block keeps its indentation
+        echo "── formula-PDF index via MinerU ($FORMULA_PDF_LAYER) ──"
         FORMULA_PDF_CHECK_RAN=1
         FIXTURE_PDF="$REPO_ROOT/tests/fixtures/bft-to-smr.pdf"
         [ -f "$FIXTURE_PDF" ] || _fail "fixture missing: $FIXTURE_PDF (nexus-gqrg0 formula-pdf check)"
@@ -1347,11 +1403,18 @@ if [ "$FORMULA_PDF_CHECK_ON" = "1" ]; then
         # snapshot lines' own exit status.
         _nx store list --collection "$FORMULA_COLLECTION" 2>/dev/null \
             | grep -oE '\b[0-9a-f]{64}\b' > "$FORMULA_IDS_DIR/before" || true
+        # F34 (nexus-7t3w1): _nx runs `env -i` with the virgin HOME, so MinerU's weight cache must be
+        # empty here, and the index below must fetch the weights as its own step before any page.
+        [ ! -e "$HOME_DIR/.cache/huggingface/hub/models--opendatalab--PDF-Extract-Kit-1.0" ] \
+            || _fail "the virgin HOME already holds MinerU's pipeline weights before the first index, so the F34 weight-fetch step cannot be proven (F34)"
         if ! _nx index pdf "$FIXTURE_PDF" --extractor mineru --collection "$FORMULA_COLLECTION" \
                 >"$LOGS/index-formula-pdf.log" 2>&1; then
             tail -20 "$LOGS/index-formula-pdf.log" >&2
             _fail "nx index pdf (MinerU path, published bytes) exited non-zero — see $LOGS/index-formula-pdf.log (GH #1533 class)"
         fi
+        F34_VERDICT="$(_f34_weights_fetch_verdict < "$LOGS/index-formula-pdf.log")"
+        [ "$F34_VERDICT" = "OK" ] || _fail "${F34_VERDICT#FAIL|} — see $LOGS/index-formula-pdf.log (F34)"
+        echo "  [ok] MinerU pipeline weights fetched as their own step before the first page (F34)"
         _nx store list --collection "$FORMULA_COLLECTION" 2>/dev/null \
             | grep -oE '\b[0-9a-f]{64}\b' > "$FORMULA_IDS_DIR/after" || true
         NEW_FORMULA_IDS="$(_new_chunk_ids "$FORMULA_IDS_DIR/before" "$FORMULA_IDS_DIR/after" || true)"
@@ -1523,7 +1586,7 @@ VERSION_STRING="${VERSION_ALL%%$'\n'*}"
 PROPAGATION_WAIT_SUFFIX=""
 [ -n "$PROPAGATION_WAIT_S" ] && PROPAGATION_WAIT_SUFFIX=" [PROPAGATION_WAIT_S=$PROPAGATION_WAIT_S]"
 [ "$FORMULA_PDF_CHECK_RAN" = 1 ] && FORMULA_PDF_STATUS="ran"
-echo "FRESH-INSTALL MVV formula-PDF check (MinerU, published bytes): $FORMULA_PDF_STATUS"
+echo "FRESH-INSTALL MVV formula-PDF check (MinerU, $FORMULA_PDF_LAYER): $FORMULA_PDF_STATUS"
 echo "FRESH-INSTALL MVV leg 9b (slim generation): $SLIM_LEG"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     echo "FRESH-INSTALL MVV PASSED — conexus $VERSION_STRING (PUBLISHED artifact, uv-tool resolution layer)$PROPAGATION_WAIT_SUFFIX"

@@ -2990,6 +2990,21 @@ def _correlation_id_reset():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_mineru_weights_fetch(request, monkeypatch):
+    """F34: ``pdf_stack.ensure_or_exit`` fetches MinerU's pipeline weights (about 1.2 GB) when the stack is
+    present and they are not, so a test that reaches the gate on a dev venv without the weights would start
+    a real download. Stub the fetch to "nothing needed" for every test. A module that exercises it sets
+    ``REAL_MINERU_WEIGHTS_FETCH = True`` (tests/test_f34_mineru_weights_prefetch.py drives it with a stub
+    download)."""
+    if getattr(request.module, "REAL_MINERU_WEIGHTS_FETCH", False):
+        return
+    import nexus.mineru_weights as mineru_weights  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    monkeypatch.setattr(mineru_weights, "ensure_pipeline_weights", lambda say, *, download=None, allow_fetch=True: False)
+    monkeypatch.setenv(mineru_weights.SKIP_ENV, "1")  # an ``nx`` child of the test fetches nothing either
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_version_probe(request, monkeypatch):
     """nexus-jypmj.21: the "Answer-kind extraction" doctor row runs ``claude --version`` when the ``cli`` backend is
     chosen, so any test that reaches ``run_health_checks()`` (the doctor tests, the console health panel) on a box
