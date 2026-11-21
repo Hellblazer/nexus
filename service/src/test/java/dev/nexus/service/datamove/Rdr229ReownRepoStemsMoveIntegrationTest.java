@@ -8,14 +8,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
+import org.jooq.DSLContext;
+import org.jooq.Record;
+import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.TreeMap;
@@ -492,13 +494,18 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
             c.setAutoCommit(false);
             c.setReadOnly(true);
-            try (Statement st = c.createStatement()) {
-                st.execute("SET LOCAL nexus.tenant = '" + tenant + "'");
-                st.execute("SET LOCAL statement_timeout = '60s'");
-                try (ResultSet rs = st.executeQuery(countSql())) {
-                    while (rs.next()) {
-                        out.add(new Pred(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)));
-                    }
+            try {
+                DSLContext d = DSL.using(c, SQLDialect.POSTGRES);
+                // set_config(.., true) is SET LOCAL: scoped to this transaction
+                d.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("nexus.tenant"), DSL.val(tenant),
+                    DSL.inline(true))).fetch();
+                d.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("statement_timeout"), DSL.val("60s"),
+                    DSL.inline(true))).fetch();
+                // The shipped dry-count file, passed by name (the established shape for a published statement, as
+                // PgVectorRepository's MANIFEST_LESS_CENSUS_SQL and ChashRepository.PROBE_SQL are).
+                for (Record r : d.resultQuery(countSql()).fetch()) {
+                    out.add(new Pred(r.get(0, String.class), r.get(1, String.class), r.get(2, String.class),
+                        r.get(3, String.class), r.get(4, String.class)));
                 }
             } finally {
                 c.rollback();
@@ -523,7 +530,7 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
     private Map<String, String> skipReasons(String tenant) {
         Map<String, String> m = new TreeMap<>();
-        ctx().select(DSL.field(DSL.name("collection"), String.class), DSL.field("details->>'reason'", String.class))
+        ctx().select(DSL.field(DSL.name("collection"), String.class), DSL.jsonbGetAttributeAsText(DSL.field(DSL.name("details"), SQLDataType.JSONB), "reason"))
             .from(table("nexus", "gc_audit"))
             .where(DSL.field(DSL.name("tenant_id"), String.class).eq(tenant))
             .and(DSL.field(DSL.name("operation"), String.class).eq("rdr229_reown_skipped"))
@@ -722,10 +729,8 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         CompletableFuture<Integer> cycle;
         try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
             holder.setAutoCommit(false);
-            try (var st = holder.prepareStatement("SELECT pg_advisory_xact_lock(hashtext('catalog_owners/' || CAST(? AS text)))")) {
-                st.setString(1, T);
-                st.execute();
-            }
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock", SQLDataType.VARCHAR,
+                DSL.function("hashtext", SQLDataType.INTEGER, DSL.inline("catalog_owners/").concat(DSL.val(T))))).fetch();
             cycle = async(w::runCycle);
 
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
