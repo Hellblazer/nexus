@@ -11,6 +11,7 @@ import org.jooq.impl.DefaultDataType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,10 +43,14 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * <p><b>No route takes a {@code collection_id}.</b> {@link #refuseSuppliedId} is the one check every registering route
  * calls; the id of every row comes from the sequence.
  *
- * <p><b>A conflicting import row</b> ({@link #refuseLiveTupleConflicts}): once the index exists an import row on a live
- * tuple another collection holds (or another row of the same batch) is refused naming both collections, instead of
- * surfacing as a bare unique violation. Before the index exists it is not checked: an install that predates the
- * re-own move holds an accepted duplicate (D4) and must stay importable.
+ * <p><b>A row that would hold a live tuple another collection holds</b> ({@link #refuseLiveTupleConflicts}, an import;
+ * {@link #refuseHeldTuple}, a named upsert; the restore load's own check): refused naming both collections, in BOTH
+ * index states. With the partial UNIQUE index present the refusal replaces its bare unique violation. Before it exists
+ * the same check runs under the per-tuple advisory lock the nameless mint takes ({@link #lockTuple}), locks taken in
+ * one sorted order so two batches cannot deadlock, and then re-reads the tuple: an import, a restore or a named
+ * registration never creates a second live row on a tuple, and one racing a mint of that tuple leaves one row. (An
+ * install that predates the re-own move may already hold D4's accepted duplicate; this refuses to make another, it does
+ * not touch the old one.)
  */
 public final class CollectionMint {
 
@@ -132,9 +137,7 @@ public final class CollectionMint {
         if (!indexed) {
             // The partial index is not built yet (the engine booted before the re-own move completed): ON CONFLICT on it
             // would raise 42P10. Serialize the first mints of this tuple, then look again.
-            String key = String.join("\u0001", tenant, contentType, owner, requestedModel, version);
-            Field<Long> hashed = DSL.function("hashtextextended", Long.class, DSL.val(key), DSL.val(0L));
-            ctx.select(DSL.function("pg_advisory_xact_lock", Object.class, hashed)).fetch();
+            lockTuple(ctx, tenant, contentType, owner, requestedModel, version);
             live = liveRow(ctx, tenant, contentType, owner, requestedModel, version);
             if (live != null) {
                 return live;
@@ -176,19 +179,57 @@ public final class CollectionMint {
     }
 
     /**
-     * Heal the sequence once: set it to the largest {@code collection_id} this tenant can see (or the colliding id, or
-     * its own last value, whichever is greatest, so it never moves backward). The engine role holds UPDATE on this one
-     * sequence by changeset {@code collections-002}.
+     * Heal the sequence once, forward only. The sequence is shared by every tenant and this tenant sees only its own rows,
+     * so the floor is the largest of this tenant's ids and the colliding id; the definer function
+     * {@code nexus.collection_id_seq_heal} (changeset {@code collections-002}, the only way the engine role moves the
+     * sequence: it holds no UPDATE on it) raises the sequence to that floor and leaves it alone when it is already past it.
      */
     private static void healSequence(DSLContext ctx, String tenant, long colliding) {
         Long visibleMax = ctx.select(DSL.max(CATALOG_COLLECTIONS.COLLECTION_ID)).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).fetchOne(0, Long.class);
-        Long lastValue = ctx.fetchValue(DSL.function("pg_sequence_last_value", Long.class, SEQUENCE));
-        long last = lastValue == null ? 0L : lastValue;
-        long set = Math.max(Math.max(colliding, visibleMax == null ? 0L : visibleMax), last);
-        ctx.fetchValue(DSL.function("setval", Long.class, SEQUENCE, DSL.val(set)));
+        Long was = ctx.fetchValue(DSL.function("pg_sequence_last_value", Long.class, SEQUENCE));
+        long floor = Math.max(colliding, visibleMax == null ? 0L : visibleMax);
+        Long now = ctx.fetchValue(DSL.function(DSL.name("nexus", "collection_id_seq_heal"), Long.class, DSL.val(floor)));
         log.warn("event=collection_id_sequence_behind_data tenant={} colliding_id={} sequence_was={} sequence_now={}",
-            tenant, colliding, last, set);
+            tenant, colliding, was, now);
+    }
+
+    /**
+     * The per-tuple advisory lock of the paths that run before the partial UNIQUE index exists (a mint, an import, a
+     * restore): {@code pg_advisory_xact_lock} on a hash of the tuple, held to the end of the caller's transaction.
+     */
+    static void lockTuple(DSLContext ctx, String tenant, String contentType, String owner, String model, String version) {
+        lockKey(ctx, tupleKey(tenant, contentType, owner, model, version));
+    }
+
+    static String tupleKey(String tenant, String contentType, String owner, String model, String version) {
+        return String.join("\u0001", tenant, contentType, owner, model, version);
+    }
+
+    static void lockKey(DSLContext ctx, String key) {
+        Field<Long> hashed = DSL.function("hashtextextended", Long.class, DSL.val(key), DSL.val(0L));
+        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class, hashed)).fetch();
+    }
+
+    /** Every collection's {@code collection_id} by name, for one tenant. */
+    static Map<String, Long> idsByName(DSLContext ctx, String tenant) {
+        return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).fetchMap(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID);
+    }
+
+    /** The name of another live collection of this tuple (the lowest {@code collection_id}), or null. */
+    static String heldBy(DSLContext ctx, String tenant, String contentType, String owner, String model, String version,
+                         String exceptName) {
+        return ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
+                .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner))
+                .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
+                .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq(version))
+                .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+                .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine"))
+                .and(CATALOG_COLLECTIONS.NAME.ne(exceptName)))
+            .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID.asc()).limit(1).fetchOne(CATALOG_COLLECTIONS.NAME);
     }
 
     private static Map<String, Object> liveRow(DSLContext ctx, String tenant, String contentType, String owner,
@@ -223,44 +264,59 @@ public final class CollectionMint {
         return row;
     }
 
-    // ── a conflicting import row ────────────────────────────────────────────────────────────────
+    // ── a registering row on a live tuple another collection holds ──────────────────────────────
 
     /**
-     * When the partial UNIQUE index exists, refuse the NEW import rows ({@code fresh}: names not yet registered) that
-     * would take a live tuple already held by another collection or by an earlier row of the batch, naming both
-     * collections. Nothing is written (a {@link LiveTupleConflict}, a 409). Without the index the rows are not checked.
+     * Refuse the NEW import rows ({@code fresh}: names not yet registered) that would take a live tuple already held by
+     * another collection or by an earlier row of the batch, naming both collections. Nothing is written (a
+     * {@link LiveTupleConflict}, a 409). With the partial UNIQUE index absent the tuples are locked first (sorted), then
+     * re-read, so a concurrent mint, import or named registration of a tuple cannot slip a second row past the check.
      */
     static void refuseLiveTupleConflicts(DSLContext ctx, String tenant, List<Map<String, Object>> fresh) {
-        if (fresh.isEmpty() || !tupleIndexExists(ctx)) {
+        List<String[]> live = new ArrayList<>();   // {name, content_type, owner_id, embedding_model, model_version}
+        for (Map<String, Object> coll : fresh) {
+            if ("".equals(nne(CatalogRepository.s(coll, "superseded_by")))
+                    && !"quarantine".equals(CollectionRegistration.lifecycleStateForImport(coll))) {
+                live.add(new String[] {CatalogRepository.s(coll, "name"), nne(CatalogRepository.s(coll, "content_type")),
+                    nne(CatalogRepository.s(coll, "owner_id")), nne(CatalogRepository.s(coll, "embedding_model")),
+                    CollectionRegistration.importModelVersion(coll)});
+            }
+        }
+        if (live.isEmpty()) {
             return;
         }
+        if (!tupleIndexExists(ctx)) {
+            live.stream().map(r -> tupleKey(tenant, r[1], r[2], r[3], r[4])).distinct().sorted().forEach(k -> lockKey(ctx, k));
+        }
         Map<List<String>, String> seen = new HashMap<>();
-        for (Map<String, Object> coll : fresh) {
-            if (!"".equals(nne(CatalogRepository.s(coll, "superseded_by")))
-                    || "quarantine".equals(CollectionRegistration.lifecycleStateForImport(coll))) {
-                continue;
-            }
-            String name = CatalogRepository.s(coll, "name");
-            String contentType = nne(CatalogRepository.s(coll, "content_type"));
-            String owner = nne(CatalogRepository.s(coll, "owner_id"));
-            String model = nne(CatalogRepository.s(coll, "embedding_model"));
-            String version = CollectionRegistration.importModelVersion(coll);
-            String earlier = seen.putIfAbsent(List.of(contentType, owner, model, version), name);
+        for (String[] r : live) {
+            String earlier = seen.putIfAbsent(List.of(r[1], r[2], r[3], r[4]), r[0]);
             if (earlier != null) {
-                throw conflict(name, earlier, contentType, owner, model, version);
+                throw conflict(r[0], earlier, r[1], r[2], r[3], r[4]);
             }
-            String held = ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
-                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
-                    .and(CATALOG_COLLECTIONS.CONTENT_TYPE.eq(contentType))
-                    .and(CATALOG_COLLECTIONS.OWNER_ID.eq(owner))
-                    .and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(model))
-                    .and(CATALOG_COLLECTIONS.MODEL_VERSION.eq(version))
-                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
-                    .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
-                .orderBy(CATALOG_COLLECTIONS.COLLECTION_ID.asc()).limit(1).fetchOne(CATALOG_COLLECTIONS.NAME);
+            String held = heldBy(ctx, tenant, r[1], r[2], r[3], r[4], r[0]);
             if (held != null) {
-                throw conflict(name, held, contentType, owner, model, version);
+                throw conflict(r[0], held, r[1], r[2], r[3], r[4]);
             }
+        }
+    }
+
+    /**
+     * A NAMED registration of a new live row: refuse it, naming both collections, when another live collection already
+     * holds its tuple. With the index absent the tuple is locked first and then re-read. A row that is itself
+     * superseded or quarantined holds no live tuple and is not checked.
+     */
+    static void refuseHeldTuple(DSLContext ctx, String tenant, String name, String contentType, String owner, String model,
+                                String version, String lifecycleState, String supersededBy) {
+        if (!"".equals(supersededBy) || "quarantine".equals(lifecycleState)) {
+            return;
+        }
+        if (!tupleIndexExists(ctx)) {
+            lockTuple(ctx, tenant, contentType, owner, model, version);
+        }
+        String held = heldBy(ctx, tenant, contentType, owner, model, version, name);
+        if (held != null) {
+            throw conflict(name, held, contentType, owner, model, version);
         }
     }
 

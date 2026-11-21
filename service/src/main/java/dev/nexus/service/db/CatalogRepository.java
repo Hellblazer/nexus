@@ -9916,6 +9916,7 @@ public final class CatalogRepository {
                 effectiveModel     = newModel.model();
                 effectiveDimension = newModel.dimension();
                 lifecycleState = requestedState != null ? requestedState : "live";
+                CollectionMint.refuseHeldTuple(ctx, tenant, name, contentType, nne(s(coll, "owner_id")), effectiveModel, modelVersion, lifecycleState, nne(s(coll, "superseded_by")));
             }
 
             // nexus-xtmtf: superseded_at / created_at are timestamptz NULL columns after
@@ -10187,7 +10188,12 @@ public final class CatalogRepository {
 
     /** {@link #listCollections(String, String, String)}'s rows, each also carrying {@code collection_id}. */
     public List<Map<String, Object>> listCollectionsWithIds(String tenant, String contentType, String lifecycleState) {
-        return listCollections(tenant, contentType, lifecycleState);
+        Map<String, Long> ids = tenantScope.withTenant(tenant, ctx -> CollectionMint.idsByName(ctx, tenant));
+        return listCollections(tenant, contentType, lifecycleState).stream().map(m -> {
+            Map<String, Object> row = new LinkedHashMap<>(m);
+            row.put("collection_id", ids.get((String) m.get("name")));
+            return row;
+        }).toList();
     }
 
     /**
@@ -10671,7 +10677,8 @@ public final class CatalogRepository {
      * {@code legacy_grandfathered = false} used to drop it, so a knowledge collection
      * registered under a label that is not of the conformant shape, or a legacy slug,
      * answered 404 and the client could not find it by its tuple. The supersession and
-     * quarantine filters stay; ordering is untouched.
+     * quarantine filters stay. Ordering: highest version, then the lowest {@code collection_id} (RDR-229 P3.8), then
+     * {@code created_at}, then the name.
      */
     public Map<String, Object> collectionForTuple(String tenant, String contentType,
                                                     String ownerId, String embeddingModel) {
@@ -10704,41 +10711,17 @@ public final class CatalogRepository {
                               // CatalogRepositoryTest's "a quarantine sibling never
                               // wins a tuple", not this predicate.
                               .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
-                       // nexus-6pbwx: catalog-044 gives a legacy slug-named repo collection the
-                       // documents' owner segment, so it can share a (content_type, owner_id,
-                       // embedding_model) tuple with the conformant collection of the same owner.
-                       // Version dominates (a slug at v2 beats a conformant v1). At equal version
-                       // the tie goes to the collection REGISTERED FIRST: created_at ascending, then
-                       // the name only so the order is total (unique within a tenant, the only such
-                       // column until P3.1; equal stamps fall to it). nexus-p2m1x.4 (RDR-229 P1.4;
-                       // Sam 2026-11-20, T2 nexus/sam-ruling-rdr229-p14-tie-2026-11-20, whose condition
-                       // is met: P1.2's production census read created_at_winner_differs 0 on both
-                       // tenants, T2 nexus_rdr/229-p1.2-census-2026-11-20):
-                       // this was name ASC, a proxy that picked a '0'-leading slug over the conformant
-                       // name and made the winner depend on how a collection is NAMED. created_at is
-                       // a timestamptz stamped on insert and never rewritten by a re-registration. It
-                       // is first registration, except that a row backfilled by hygiene-001-6 carries
-                       // its first document's indexed_at, or the migration time, and a rename copies it
-                       // onto the successor, so it is the age of the collection's lineage. At an equal
-                       // version a later sibling cannot change what an existing tuple resolves to,
-                       // whatever it is called (a higher version still can), unless the registration
-                       // carries its own created_at: upsertCollection, importCollectionsBatch and
-                       // doImportCollection take it from the request body on a fresh insert, so an
-                       // import can land an older row. A legacy_grandfathered row is a candidate like
-                       // any other (RDR-229 P2.8, engine 0.1.200, dropped that filter here and in
-                       // TargetSelection), so it ties and wins by the same order. P3.1's collection_id (identity) replaces created_at here with the
-                       // same meaning, and TargetSelection (reembed) orders the same way.
-                       // An ordering, not a parse of the name (RDR-204, CollectionParseGateTest).
-                       // Consumers read the returned row's model_version (HttpCatalogClient.collection_for,
-                       // since P1.4; an OLDER client parses the NAME's version instead, and a name that
-                       // does not parse, a legacy slug, raises there) or only its existence
-                       // (_tuple_registered). Both rows at a tie carry the same model_version, and the
-                       // names' versions agree at the census's only real tie (gate-xr789 docs owner
-                       // 1-40, both v1); the client re-renders the name from owner_id itself. A row
-                       // with an empty model_version orders as 0 and is read from its name by both
-                       // the old and the new client.
-                       // CatalogRepositoryTest pins the tie, the flip, the total order and the D5 case.
-                       .orderBy(COL_VERSION_NUM.desc(), F_COL_CRTAT.asc(), CATALOG_COLLECTIONS.NAME.asc())
+                       // Version dominates; at equal version the LOWEST collection_id wins (RDR-229 P3.8, lead
+                       // ruling 2026-11-21; was created_at, nexus-p2m1x.4), then created_at, then the name, so the
+                       // order is total. NULLS LAST keeps a row without an id in the old order. The id is the registry's own
+                       // identity, so the winner does not depend on how a collection is named or stamped. Two live
+                       // rows can share a tuple until the partial UNIQUE index exists (D4's accepted duplicate), so
+                       // this holds with or without it. TargetSelection (reembed) orders the same way;
+                       // CollectionForTupleTieBreakTest pins both. An ordering, not a parse of the name (RDR-204,
+                       // CollectionParseGateTest). Consumers read the returned row's model_version
+                       // (HttpCatalogClient.collection_for; an OLDER client parses the NAME's version instead) or only
+                       // its existence; both rows of a tie carry the same version, and an empty one orders as 0.
+                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.COLLECTION_ID.asc().nullsLast(), F_COL_CRTAT.asc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
             if (r == null) return null;
             Map<String, Object> row = collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),

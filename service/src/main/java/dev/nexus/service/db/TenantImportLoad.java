@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_META;
 
 /**
@@ -184,18 +185,22 @@ final class TenantImportLoad {
     // ── one table ───────────────────────────────────────────────────────────────────────────────
 
     /**
-     * RDR-229 P3.8: a file holding two live rows of one tuple fails the load, naming both collections, once the partial
-     * UNIQUE index of the live tuple exists (it would refuse the INSERT with a bare unique violation). Without the
-     * index the rows load as before: an install that predates the re-own move keeps its accepted duplicate (D4).
+     * RDR-229 P3.8: the load never creates a second live row on a tuple, with the partial UNIQUE index of the live tuple
+     * present or absent. A file holding two live rows of one tuple, or a live row on a tuple the tenant already holds under
+     * another name (a mint that landed since the tenant was found empty), fails the load naming both collections. Without
+     * the index the file's live tuples are locked first, in one sorted order, under the advisory lock the mint takes
+     * ({@link CollectionMint#lockTuple}), and then re-read; with it, this replaces its bare unique violation.
      */
-    private static void refuseLiveTupleConflicts(DSLContext ctx, TablePlan tp, Stage st) {
+    private static void refuseLiveTupleConflicts(DSLContext ctx, String tenant, TablePlan tp, Stage st) {
         List<String> needed = List.of("name", "content_type", "owner_id", "embedding_model", "model_version",
             "superseded_by", "lifecycle_state");
-        if (!tp.loadColumns().containsAll(needed) || !CollectionMint.tupleIndexExists(ctx)) return;
+        if (!tp.loadColumns().containsAll(needed)) return;
         Table<?> a = TenantImportStaging.stageTable(st).as("a");
         Table<?> b = TenantImportStaging.stageTable(st).as("b");
+        List<Field<String>> tupleOfA = new ArrayList<>();
         Condition sameTuple = DSL.trueCondition();
         for (String column : List.of("content_type", "owner_id", "embedding_model", "model_version")) {
+            tupleOfA.add(DSL.field(DSL.name("a", column), String.class));
             sameTuple = sameTuple.and(DSL.field(DSL.name("a", column), String.class).eq(DSL.field(DSL.name("b", column), String.class)));
         }
         Field<String> aName = DSL.field(DSL.name("a", "name"), String.class);
@@ -205,13 +210,31 @@ final class TenantImportLoad {
             bothLive = bothLive.and(DSL.field(DSL.name(alias, "superseded_by"), String.class).eq(""))
                 .and(DSL.field(DSL.name(alias, "lifecycle_state"), String.class).ne("quarantine"));
         }
-        Record twin = ctx.select(aName, bName, DSL.field(DSL.name("a", "content_type"), String.class),
-                DSL.field(DSL.name("a", "owner_id"), String.class), DSL.field(DSL.name("a", "embedding_model"), String.class),
-                DSL.field(DSL.name("a", "model_version"), String.class))
+        Condition aLive = DSL.field(DSL.name("a", "superseded_by"), String.class).eq("")
+            .and(DSL.field(DSL.name("a", "lifecycle_state"), String.class).ne("quarantine"));
+        if (!CollectionMint.tupleIndexExists(ctx)) {
+            ctx.selectDistinct(tupleOfA).from(a).where(aLive).fetch().stream()
+                .map(r -> CollectionMint.tupleKey(tenant, r.get(0, String.class), r.get(1, String.class),
+                    r.get(2, String.class), r.get(3, String.class)))
+                .sorted().forEach(k -> CollectionMint.lockKey(ctx, k));
+        }
+        Record twin = ctx.select(aName, bName, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
             .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).limit(1).fetchOne();
         if (twin != null) {
             throw new LoadFailedException(CollectionMint.conflict(twin.get(1, String.class), twin.get(0, String.class),
                 twin.get(2, String.class), twin.get(3, String.class), twin.get(4, String.class), twin.get(5, String.class))
+                .getMessage());
+        }
+        var t = CATALOG_COLLECTIONS.as("t");
+        Record held = ctx.select(aName, t.NAME, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
+            .from(a).join(t).on(t.TENANT_ID.eq(tenant)
+                .and(t.CONTENT_TYPE.eq(tupleOfA.get(0))).and(t.OWNER_ID.eq(tupleOfA.get(1)))
+                .and(t.EMBEDDING_MODEL.eq(tupleOfA.get(2))).and(t.MODEL_VERSION.eq(tupleOfA.get(3)))
+                .and(t.SUPERSEDED_BY.eq("")).and(t.LIFECYCLE_STATE.ne("quarantine")).and(t.NAME.ne(aName)))
+            .where(aLive).limit(1).fetchOne();
+        if (held != null) {
+            throw new LoadFailedException(CollectionMint.conflict(held.get(0, String.class), held.get(1, String.class),
+                held.get(2, String.class), held.get(3, String.class), held.get(4, String.class), held.get(5, String.class))
                 .getMessage());
         }
     }
@@ -250,7 +273,7 @@ final class TenantImportLoad {
             }
         }
         checkSeededRowsMatch(ctx, tenant, tp, st);
-        if ("catalog_collections".equals(e.name())) refuseLiveTupleConflicts(ctx, tp, st);
+        if ("catalog_collections".equals(e.name())) refuseLiveTupleConflicts(ctx, tenant, tp, st);
 
         List<String> columns = new ArrayList<>(tp.loadColumns());
         for (String filled : RestoreIdFill.filledColumns(ctx, e, st)) {
