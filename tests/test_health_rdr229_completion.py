@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 import nexus.health as health
+import nexus.rdr229_completion_health as rdr229_completion_health
 from nexus.catalog.engine_reads.route_unavailable import EngineRouteUnavailable
 from nexus.health import HealthResult
 from nexus.rdr229_completion_health import (
@@ -289,9 +290,7 @@ def test_a_field_with_a_malformed_part_still_gives_the_rows_it_can():
 
 
 def test_the_sweep_has_the_row_and_hands_it_the_status_it_already_fetched(monkeypatch: pytest.MonkeyPatch):
-    import nexus.rdr229_completion_health as mod
-
-    monkeypatch.setattr(mod, "_default_counts_reader", lambda: _reader(NO_COUNTS))
+    monkeypatch.setattr(rdr229_completion_health, "_default_counts_reader", lambda: _reader(NO_COUNTS))
     rows = health._check_rdr229_completion(_fixture("all_stamps_done_gate3_waiting"))
 
     assert SUMMARY_LABEL in [r.label for r in rows]
