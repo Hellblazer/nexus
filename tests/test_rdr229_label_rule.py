@@ -31,7 +31,7 @@ from nexus.corpus import validate_collection_name
         "trailing_",
         "a.b",
         "code__myrepo",
-        "docs__1-1__voyage-context-3__v1",
+        "docs__1-1__model-docs__v1",
         "c",
         "C1",
         "c1a",
