@@ -242,7 +242,7 @@ final class TenantImportLoad {
 
     /** The staged column of {@code alias}, or, when the file lacks it, the column's default as a constant. */
     private static Field<String> stagedOrDefault(TablePlan tp, String alias, String column, String fallback) {
-        return tp.loadColumns().contains(column) ? DSL.field(DSL.name(alias, column), String.class) : DSL.inline(fallback);
+        return tp.loadColumns().contains(column) ? DSL.field(DSL.name(alias, column), String.class) : DSL.val(fallback);
     }
 
     private static TableResult loadTable(DSLContext ctx, String tenant, TablePlan tp, Map<String, Stage> stages,
