@@ -1,0 +1,240 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.nexus.service.db.TenantConstants;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
+import org.testcontainers.containers.PostgreSQLContainer;
+
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * RDR-229 P3.6 (nexus-p2m1x.26), the label rule at the wire: a collection registration and a rename target are
+ * refused with a 400 when the label is of the minted form, holds a control character, runs over 255 UTF-8 bytes or
+ * holds a slash (pending Sam's ruling, board ask rdr229-label-slash), and a label the ChromaDB shape used to refuse
+ * (100 characters, a space, a percent sign, a colon, a non-ASCII letter) registers, lists and renames. The rule's own
+ * table is {@code CollectionLabelTest}; this is the mapping that test cannot reach (a refusal that reached the
+ * generic catch would read as a 500) and the engine half of the Windows label test (Cross-Cutting, Windows).
+ * Rows are registered the way {@code HttpCatalogClient.register_collection} registers a non-conformant name.
+ */
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+class CollectionLabelRuleRouteTest {
+
+    private static final String TOKEN = "collection-label-rule-token-p36";
+    private static final String SVC_ROLE = "svc_label_rule";
+    private static final String SVC_PASS = "svc_label_rule_pass";
+    private static final String TENANT = TenantConstants.DEFAULT_TENANT;
+    private static final String MODEL = "voyage-context-3";
+    private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
+    private static final TypeReference<List<Map<String, Object>>> LIST_T = new TypeReference<>() {};
+
+    /** The label of the Windows test: a space, '%', ':' and a non-ASCII character. */
+    private static final String WINDOWS_LABEL = "notes 50%: café";
+    private static final String WINDOWS_LABEL_RENAMED = "notes 60%: café";
+
+    PostgreSQLContainer<?> pg;
+    NexusService service;
+    HttpClient http;
+    com.zaxxer.hikari.HikariDataSource svcDs;
+    ObjectMapper mapper;
+
+    @BeforeAll
+    void startAll() throws Exception {
+        mapper = new ObjectMapper();
+        pg = PgContainerHelper.start();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.applyProductSchema(su);
+        }
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
+            PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "test-bound");
+        }
+        var cfg = new com.zaxxer.hikari.HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
+        cfg.setMaximumPoolSize(4);
+        cfg.setAutoCommit(true);
+        svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
+        service = new NexusService(0, TOKEN, svcDs);
+        service.start();
+        http = TestHttp.client();
+        // Burn the once-per-process ghost sweep (it deletes registered but chunkless collections) before registering
+        // anything, as CatalogHandlerForTupleTest does.
+        http.send(request("/v1/catalog/collections/list").GET().build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @AfterAll
+    void stopAll() throws Exception {
+        if (service != null) service.stop();
+        if (svcDs != null) svcDs.close();
+        if (pg != null) pg.stop();
+    }
+
+    private HttpRequest.Builder request(String path) {
+        return TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("X-Nexus-Tenant", TENANT);
+    }
+
+    private HttpResponse<String> post(String path, Map<String, Object> body) throws Exception {
+        return http.send(request(path).header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body))).build(),
+            HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> get(String path) throws Exception {
+        return http.send(request(path).GET().build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> register(String label) throws Exception {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("name", label);
+        body.put("content_type", "knowledge");
+        body.put("owner_id", "label-notes");
+        body.put("embedding_model", MODEL);
+        body.put("model_version", "v1");
+        body.put("display_name", "");
+        body.put("legacy_grandfathered", true);
+        return post("/v1/catalog/collections/upsert", body);
+    }
+
+    private HttpResponse<String> rename(String from, String to) throws Exception {
+        return post("/v1/catalog/collections/rename", Map.of("old_name", from, "new_name", to));
+    }
+
+    private List<String> listedNames() throws Exception {
+        var resp = get("/v1/catalog/collections/list");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        return mapper.readValue(resp.body(), LIST_T).stream().map(r -> (String) r.get("name")).toList();
+    }
+
+    private boolean isRegistered(String label) throws Exception {
+        var resp = get("/v1/catalog/collections/get?name=" + URLEncoder.encode(label, StandardCharsets.UTF_8));
+        return resp.statusCode() == 200;
+    }
+
+    // ── registration ────────────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void registerRefusesAMintedFormLabel_with400_andWritesNothing() throws Exception {
+        for (String label : List.of("c1", "c007", "c12345")) {
+            var resp = register(label);
+            assertThat(resp.statusCode()).as(label + ": " + resp.body()).isEqualTo(400);
+            assertThat(resp.body()).contains("minted");
+            assertThat(isRegistered(label)).as(label + " was written").isFalse();
+        }
+    }
+
+    @Test
+    void registerRefusesAControlCharacterLabel_with400() throws Exception {
+        for (String label : List.of("a\u0000b", "a\nb", "a\u001fb", "a\u007fb", "a b")) {
+            var resp = register(label);
+            assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
+            assertThat(resp.body()).contains("control");
+        }
+    }
+
+    @Test
+    void registerRefusesALabelOver255Bytes_andAcceptsExactly255MultiByte() throws Exception {
+        assertThat(register("é".repeat(128)).statusCode()).isEqualTo(400);
+        assertThat(register("a".repeat(256)).statusCode()).isEqualTo(400);
+        String exactly255 = "é".repeat(127) + "a";
+        var ok = register(exactly255);
+        assertThat(ok.statusCode()).as(ok.body()).isEqualTo(200);
+        assertThat(isRegistered(exactly255)).isTrue();
+    }
+
+    @Test
+    void registerRefusesASlash_untilSamRules() throws Exception {
+        var resp = register("a/b");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
+    }
+
+    @Test
+    void registerAcceptsA100CharacterLabelAndANonConformantOne() throws Exception {
+        for (String label : List.of("l".repeat(100), "My Notes", "c", "C1", "c1a")) {
+            var resp = register(label);
+            assertThat(resp.statusCode()).as(label + ": " + resp.body()).isEqualTo(200);
+            assertThat(listedNames()).contains(label);
+        }
+    }
+
+    @Test
+    void reRegisteringAnExistingRowIsNotARegistrationOfANewLabel() throws Exception {
+        // The rule gates the creation of a label. An existing row re-registers (the upsert's idempotent arm) whatever
+        // its label, so a row the engine minted (P3.8) is never locked out of its own re-registration.
+        assertThat(register("idempotent label").statusCode()).isEqualTo(200);
+        assertThat(register("idempotent label").statusCode()).isEqualTo(200);
+    }
+
+    // ── rename ──────────────────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void renameRefusesAMintedFormTarget_with400_andLeavesTheSourceLive() throws Exception {
+        assertThat(register("rename source minted").statusCode()).isEqualTo(200);
+        var resp = rename("rename source minted", "c9");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
+        assertThat(resp.body()).contains("minted");
+        assertThat(isRegistered("c9")).isFalse();
+        assertThat(isRegistered("rename source minted")).isTrue();
+    }
+
+    @Test
+    void renameRefusesAControlCharacterTarget_with400() throws Exception {
+        assertThat(register("rename source control").statusCode()).isEqualTo(200);
+        var resp = rename("rename source control", "new\u0000label");
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
+        assertThat(resp.body()).contains("control");
+    }
+
+    @Test
+    void renameRefusesAnOverlongAndASlashTarget_with400() throws Exception {
+        assertThat(register("rename source long").statusCode()).isEqualTo(200);
+        assertThat(rename("rename source long", "é".repeat(128)).statusCode()).isEqualTo(400);
+        assertThat(rename("rename source long", "a/b").statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void renameToANonConformantLabelOver63Characters_succeeds() throws Exception {
+        assertThat(register("rename source ok").statusCode()).isEqualTo(200);
+        String target = "Renamed Notes " + "r".repeat(100);
+        var resp = rename("rename source ok", target);
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        assertThat(isRegistered(target)).isTrue();
+    }
+
+    // ── the Windows label (Cross-Cutting, Windows), engine half ─────────────────────────────────────────────
+
+    @Test
+    void aLabelHoldingASpacePercentColonAndNonAscii_registersListsAndRenames() throws Exception {
+        var reg = register(WINDOWS_LABEL);
+        assertThat(reg.statusCode()).as(reg.body()).isEqualTo(200);
+        assertThat(listedNames()).contains(WINDOWS_LABEL);
+        var got = get("/v1/catalog/collections/get?name=" + URLEncoder.encode(WINDOWS_LABEL, StandardCharsets.UTF_8));
+        assertThat(got.statusCode()).as(got.body()).isEqualTo(200);
+        assertThat(mapper.readValue(got.body(), MAP_T).get("name")).isEqualTo(WINDOWS_LABEL);
+
+        var ren = rename(WINDOWS_LABEL, WINDOWS_LABEL_RENAMED);
+        assertThat(ren.statusCode()).as(ren.body()).isEqualTo(200);
+        assertThat(listedNames()).contains(WINDOWS_LABEL_RENAMED);
+        assertThat(isRegistered(WINDOWS_LABEL_RENAMED)).isTrue();
+    }
+}
