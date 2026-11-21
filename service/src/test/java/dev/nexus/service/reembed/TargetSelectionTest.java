@@ -420,6 +420,7 @@ class TargetSelectionTest {
             .contains("re-owning docs__other__x__v1 does not take its documents out of the target")
             .contains("earlier version of " + SOURCE).doesNotContain("holds documents")
             .doesNotContain("superseded");
+    }
 
     // ---- selection: the registry id breaks a tie at one version (RDR-229 P3.8) ----
 
