@@ -242,6 +242,86 @@ class NoteUriResidueSupersedeIntegrationTest extends DataMoveIntegrationBase {
         assertThat(rowExists(HIGHLIGHTS_NEW)).isFalse();
     }
 
+    // ── a pause travels with the move ────────────────────────────────────────────────────────────────────
+
+    private static final OffsetDateTime PAUSED_AT = OffsetDateTime.parse("2026-11-21T08:00:00Z");
+    private static final String PAUSED_BY = "sam: down-step window";
+    private static final Field<OffsetDateTime> PAUSED_AT_F = DSL.field(DSL.name("paused_at"), OffsetDateTime.class);
+    private static final Field<String> PAUSED_BY_F = DSL.field(DSL.name("paused_by"), String.class);
+
+    private void pause(String label) {
+        ctx().update(MOVES).set(PAUSED_AT_F, PAUSED_AT).set(PAUSED_BY_F, PAUSED_BY).where(LABEL_F.eq(label)).execute();
+    }
+
+    private java.time.Instant pausedAt(String label) {
+        OffsetDateTime at = ctx().select(PAUSED_AT_F).from(MOVES).where(LABEL_F.eq(label)).fetchOne(PAUSED_AT_F);
+        return at == null ? null : at.toInstant();
+    }
+
+    private String pausedBy(String label) {
+        return ctx().select(PAUSED_BY_F).from(MOVES).where(LABEL_F.eq(label)).fetchOne(PAUSED_BY_F);
+    }
+
+    @Test
+    void aPausedOpenDocumentsMove_getsAPausedReplacement_andItsSatellitesStartPausedToo() {
+        registerOld();
+        pause(DOCS_OLD);
+        legacyRows(false);
+
+        bootAgain();
+
+        assertThat(supersededBy(DOCS_OLD)).isEqualTo(DOCS_NEW);
+        assertThat(pausedAt(DOCS_NEW)).as("the replacement starts paused, with the same paused_at").isEqualTo(PAUSED_AT.toInstant());
+        assertThat(pausedBy(DOCS_NEW)).isEqualTo(PAUSED_BY);
+        var seen = new CopyOnWriteArrayList<FailureHandler.Failure>();
+        workUntilIdle(finishingWorker(seen));
+        assertThat(completedAt(DOCS_NEW)).as("a paused move is not worked").isNull();
+        assertThat(uri("d1")).as("nothing was rewritten").isEqualTo("chroma://plain-docs/a.md");
+
+        // the operator resumes the replacement; its satellites are registered paused, as the old move was
+        ctx().update(MOVES).set(PAUSED_AT_F, (OffsetDateTime) null).set(PAUSED_BY_F, (String) null).where(LABEL_F.eq(DOCS_NEW)).execute();
+        workUntilIdle(finishingWorker(seen));
+        assertThat(seen).isEmpty();
+        assertThat(completedAt(DOCS_NEW)).isNotNull();
+        for (String satellite : List.of(ASPECTS_NEW, HIGHLIGHTS_NEW)) {
+            assertThat(pausedAt(satellite)).as(satellite + " paused_at").isEqualTo(PAUSED_AT.toInstant());
+            assertThat(pausedBy(satellite)).isEqualTo(PAUSED_BY);
+            assertThat(completedAt(satellite)).as(satellite + " is held, not worked").isNull();
+        }
+    }
+
+    @Test
+    void anUnpausedOpenDocumentsMove_getsAnUnpausedReplacement_andUnpausedSatellites() {
+        registerOld();
+        legacyRows(false);
+
+        bootAgain();
+        workUntilIdle(finishingWorker(new CopyOnWriteArrayList<>()));
+
+        for (String m : List.of(DOCS_NEW, ASPECTS_NEW, HIGHLIGHTS_NEW)) {
+            assertThat(pausedAt(m)).as(m + " paused_at").isNull();
+            assertThat(pausedBy(m)).as(m + " paused_by").isNull();
+            assertThat(completedAt(m)).isNotNull();
+        }
+    }
+
+    @Test
+    void aPausedSatellite_getsAPausedReplacement_andAnUnpausedOneGetsAnUnpausedReplacement() {
+        completeOldDocumentsMoveOnEmptyTables();
+        pause(ASPECTS_OLD);
+        legacyRows(true);
+
+        bootAgain();
+
+        assertThat(pausedAt(ASPECTS_NEW)).isEqualTo(PAUSED_AT.toInstant());
+        assertThat(pausedBy(ASPECTS_NEW)).isEqualTo(PAUSED_BY);
+        assertThat(pausedAt(HIGHLIGHTS_NEW)).isNull();
+        assertThat(pausedBy(HIGHLIGHTS_NEW)).isNull();
+        workUntilIdle(finishingWorker(new CopyOnWriteArrayList<>()));
+        assertThat(completedAt(ASPECTS_NEW)).as("held").isNull();
+        assertThat(completedAt(HIGHLIGHTS_NEW)).isNotNull();
+    }
+
     // ── state C: all done ────────────────────────────────────────────────────────────────────────────────
 
     @Test
