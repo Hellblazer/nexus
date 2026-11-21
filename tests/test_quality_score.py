@@ -8,6 +8,8 @@ from nexus.context_annotations import OWNER_QUALITY_KEY
 from nexus.scoring import quality_score, apply_quality_boost
 from nexus.types import SearchResult
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 def _qr(dist: float = 0.3, coll: str = "knowledge__papers",
         bib_count: int = 0, **meta: object) -> SearchResult:

@@ -16,6 +16,8 @@ from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import RUNG_NOTE_TAGS_ARRAY, RUNG_ORDER, default_registry
 from nexus.upgrade_ladder.rungs.note_tags_array import NoteTagsArrayRung
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 NOTES = "knowledge__art__bge-base-en-v15-768__v1"
 OTHER = "knowledge__other__bge-base-en-v15-768__v1"
 CODE = "code__repo__bge-base-en-v15-768__v1"
