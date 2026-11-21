@@ -49,6 +49,7 @@ DataMovesSchemaLiquibaseTest	startEmptyDatabase	OWNERSHIP	a non-superuser owner 
 GrantsNexusSvcUpgradeIntegrationTest	startEmptyDatabase	WALK	walks the changelog as it stood before nexus.data_moves (a derived old grants-nexus-svc-1 text), then boots the current one on that database and asserts the registry and the absence of a nexus_svc grant
 TextGateProbeSingleRoleGuardIntegrationTest	startEmptyDatabase	OWNERSHIP	walks the schema as each of several migrator roles (nexus_svc, a superuser, a BYPASSRLS login) and asserts vectors-029's precondition
 TextGateProbeSingleRoleGuardIntegrationTest	startDedicated	CLUSTER_STATE	grants role membership edges on nexus_svc, which would leak into every later class on a shared cluster
+Rdr229P31SingleRoleSupersededByCheckTest	startDedicated	CLUSTER_STATE	migrates as nexus_svc itself (the single-role posture: vectors-065 owner-read skip names that role), which the shared cluster already holds from the template migration and cannot drop; role state is cluster-wide
 ServiceIntegrationTest	startEmptyDatabase	SKELETON	a hand-made RLS harness with no product schema; pins that /version reports a missing public.databasechangelog, so the database must be unmigrated
 VersionHandlerSchemaChangesetCountTest	startEmptyDatabase	SKELETON	builds a minimal public.databasechangelog-shaped table itself; a migrated database already has the real one
 SharedClusterEmptyDatabaseTest	startEmptyDatabase	INFRA	tests acquireEmptyDatabase itself: isolation, exclusive roles, cleanup

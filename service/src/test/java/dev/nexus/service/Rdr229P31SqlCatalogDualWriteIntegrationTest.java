@@ -102,7 +102,15 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
         walk(ADMIN_ROLE, su -> PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS), scenarios, 5, (pg, ds, w) -> {
             var before = w.before();
             var after = w.after();
-            assertThat(after.keySet()).as("no function appeared or went").isEqualTo(before.keySet());
+            // "after" is the whole migration, so it also holds what a changeset AFTER vectors-069 adds (vectors-071-1); each such function
+            // is named in ADDED_AFTER_DUAL_WRITE with the reason it writes no guarded table. Anything else that appeared or went still
+            // fails here.
+            Set<String> addedAfter = new TreeSet<>();
+            for (String key : after.keySet()) {
+                if (!before.containsKey(key)) addedAfter.add(key.substring(0, key.indexOf('(')));
+            }
+            assertThat(addedAfter).as("the functions that appeared after vectors-069 are exactly the named ones").isEqualTo(ADDED_AFTER_DUAL_WRITE);
+            assertThat(before.keySet().stream().filter(k -> !after.containsKey(k)).toList()).as("no function went").isEmpty();
             Set<String> redefined = redefinedFunctions();
             int same = 0;
             int changed = 0;
@@ -215,6 +223,14 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
      * check it against the scan: an addition here is a decision, not a default.
      */
     private static final Set<String> KNOWN_OTHER_WRITERS = new TreeSet<>(Set.of());
+
+    /**
+     * Functions that exist only after vectors-069: nexus.rdr229_restamp(text), added by vectors-071-1 (RDR-229 P3.1 fix round A). It
+     * writes one table, nexus.data_moves (the stamp move's re-registration), which is not a CHECK-guarded collection-name table; it
+     * only READS the tables whose CHECKs it finishes (an EXISTS for an orphan row) and the registry. The live scan below flags a
+     * writer of a guarded table, and does not flag it.
+     */
+    private static final Set<String> ADDED_AFTER_DUAL_WRITE = new TreeSet<>(Set.of("rdr229_restamp"));
 
     /** catalog_reconcile_commit, one complete walk that reaches all six of its guarded statements, plus the trash of the renamed row. */
     private static Scenario reconcile() {
