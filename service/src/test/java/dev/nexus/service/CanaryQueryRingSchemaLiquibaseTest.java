@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.SqlConstraints;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.jooq.nexus.Routines;
@@ -356,25 +357,25 @@ class CanaryQueryRingSchemaLiquibaseTest {
     }
 
     @Test
-    void upsert_anEntryWhoseCollectionWasDeleted_isSkipped_andTheRestOfTheBatchIsWritten() throws Exception {
-        // Gate S6: the collection was deleted between enqueue and flush. The function skips the entry on its
-        // foreign-key failure (a sub-block per entry), so the batch's other entries, before AND after it, land.
+    void upsert_anEntryWhoseCollectionHasNoRegistryRow_raisesTheForeignKeyCode_andTheWholeCallWritesNothing() throws Exception {
+        // RDR-229 P3.1 (linda's ruling): an entry whose collection does not resolve is no longer skipped (the id CHECK would
+        // refuse a NULL id; a silent skip hid the defect). The function raises SQLSTATE 23503, the code the other registry
+        // guards in SQL (assign_from_chashes) use for the same refusal, and the transaction rolls back: the entries before AND
+        // after it are not written either. PciQueryRing's writer retries a failed batch entry by entry (its own test).
         String tenant = "ring054-s6";
         seedCollection(tenant, COLL_384);
         seedCollection(tenant, COLL_384_OTHER);
 
-        int written = upsert(tenant,
+        assertThatThrownBy(() -> upsert(tenant,
             entry(COLL_384, "s6-before", 384),
             entry(COLL_GONE, "s6-gone", 384),
-            entry(COLL_384_OTHER, "s6-after", 384),
-            entry(COLL_384, "s6-last", 384));
-
-        assertThat(written).as("three of four written: the shortfall is the skipped entry").isEqualTo(3);
-        assertThat(ring(tenant, COLL_384)).extracting(RingRow::digestHex)
-            .containsExactlyInAnyOrder(hex(digest("s6-before")), hex(digest("s6-last")));
-        assertThat(ring(tenant, COLL_384_OTHER)).extracting(RingRow::digestHex)
-            .containsExactly(hex(digest("s6-after")));
-        assertThat(ring(tenant, COLL_GONE)).as("nothing was written for the deleted collection").isEmpty();
+            entry(COLL_384_OTHER, "s6-after", 384)))
+            .as("an unregistered same-tenant name")
+            .satisfies(t -> assertThat(SqlConstraints.isForeignKeyViolation(t)).as("SQLSTATE 23503 in %s", t).isTrue())
+            .hasMessageContaining("is not registered for tenant");
+        assertThat(ring(tenant, COLL_384)).as("rolled back with the call").isEmpty();
+        assertThat(ring(tenant, COLL_384_OTHER)).isEmpty();
+        assertThat(ring(tenant, COLL_GONE)).isEmpty();
     }
 
     @Test
@@ -492,8 +493,10 @@ class CanaryQueryRingSchemaLiquibaseTest {
         assertThatThrownBy(() -> scope.withTenant(b, ctx -> Routines.canaryQueryRingUpsert(ctx.configuration(),
                 a, new String[] {COLL_384}, new String[] {modelOf(a, COLL_384)},
                 new String[] {vector(384, 7).toString()}, new byte[][] {digest("iso-cross")})))
-            .as("a session of tenant B naming tenant A: the WITH CHECK refuses the row")
-            .hasMessageContaining("row-level security");
+            .as("a session of tenant B naming tenant A: the name does not resolve under its row-level security, so it is the"
+                + " unregistered refusal (SQLSTATE 23503), not a policy failure on the insert")
+            .satisfies(t -> assertThat(SqlConstraints.isForeignKeyViolation(t)).as("SQLSTATE 23503 in %s", t).isTrue())
+            .hasMessageContaining("is not registered for tenant");
         assertThat(ring(a, COLL_384)).as("and tenant A's ring is unchanged").hasSize(1);
     }
 
