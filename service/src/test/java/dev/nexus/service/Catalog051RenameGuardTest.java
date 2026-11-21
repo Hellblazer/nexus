@@ -20,7 +20,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * RDR-229 (bead nexus-p2m1x.14), catalog-049-2 meets rename: renaming a legacy slug collection whose documents name an
+ * RDR-229 (bead nexus-p2m1x.14), catalog-051-2 meets rename: renaming a legacy slug collection whose documents name an
  * owner that a THIRD live collection already holds (same content type, model and version) keeps the new row's slug and
  * raises no error, whether or not the partial UNIQUE index on the tuple exists. The source is not the holder here, so the
  * rename-side re-derivation (renameCollectionTxn, after the source is retired) finds the tuple still held and the guard
@@ -31,7 +31,7 @@ import java.util.Map;
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class Catalog049RenameGuardTest {
+class Catalog051RenameGuardTest {
 
     private static final String SVC_ROLE = "svc_catalog049r_test";
     private static final String SVC_PASS = "svc_catalog049r_test_pass";

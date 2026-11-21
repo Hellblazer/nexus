@@ -9755,7 +9755,7 @@ public final class CatalogRepository {
      * <p>That SET arm is not the last word for a {@code code}/{@code docs}/{@code rdr}
      * collection (nexus-6pbwx, {@code catalog-044-collection-owner-from-documents.xml}):
      * a BEFORE trigger on {@code catalog_collections} replaces an owner that is not
-     * tumbler-shaped (since catalog-049 a curator owner stands) with the owner segment of the collection's
+     * tumbler-shaped (since catalog-051 a curator owner stands) with the owner segment of the collection's
      * live documents, and an AFTER trigger on {@code catalog_documents} does the same when
      * a document lands. So the value this method returns for such a collection can differ
      * from the one written here; a knowledge collection is never touched.
@@ -10409,7 +10409,7 @@ public final class CatalogRepository {
             // Java step here could reach.
             counts.put("catalog_documents", ctx.deleteFrom(CATALOG_DOCUMENTS).where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(name)).execute());
             // 7. registry row LAST (RESTRICT children are now gone).
-            //    catalog-049-2 (RDR-229): a live, unsuperseded code/docs/rdr row holds a tuple that may have kept a slug
+            //    catalog-051-2 (RDR-229): a live, unsuperseded code/docs/rdr row holds a tuple that may have kept a slug
             //    collection's owner off it; read the row before it goes and re-derive those slug rows after.
             var freed = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                     CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION)
@@ -10469,9 +10469,9 @@ public final class CatalogRepository {
     private static final String TUMBLER_SHAPED_OWNER = "^[0-9]+(-[0-9]+)*$";
 
     /**
-     * catalog-049-2 (RDR-229): re-run catalog-044's owner derivation for one row with a no-op write. The write names
+     * catalog-051-2 (RDR-229): re-run catalog-044's owner derivation for one row with a no-op write. The write names
      * {@code owner_id}, so the BEFORE INSERT OR UPDATE OF owner_id trigger fires even though the value does not change;
-     * it re-derives a replaceable owner from the row's documents, and catalog-049-2's guard now sees whatever tuple
+     * it re-derives a replaceable owner from the row's documents, and catalog-051-2's guard now sees whatever tuple
      * has been freed since the documents arrived. A tumbler-shaped, curator or knowledge owner is left alone by the trigger.
      */
     private static void rederiveOwner(DSLContext ctx, String tenant, String name) {
@@ -10483,7 +10483,7 @@ public final class CatalogRepository {
     }
 
     /**
-     * catalog-049-2 (RDR-229): a collection holding the tuple {@code (contentType, ownerId, model, version)} has just
+     * catalog-051-2 (RDR-229): a collection holding the tuple {@code (contentType, ownerId, model, version)} has just
      * gone (deleted). The rows its tuple may have held back are the live, unsuperseded slug-owned ones of the same
      * content type, model and version that have a live document under {@code ownerId}'s tumbler prefix; re-derive each.
      * Bounded by the slug-owned rows of one (content type, model, version), which are the legacy rows only.
@@ -10576,7 +10576,7 @@ public final class CatalogRepository {
                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
                        .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
                .execute();
-            // catalog-049-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
+            // catalog-051-2 (RDR-229): the retired row no longer holds its tuple, so a slug-owned successor whose documents
             // name that owner (a re-home moves them while the source stays live) can take it now. The same no-op write
             // as renameCollectionTxn's: it fires catalog-044's BEFORE trigger on UPDATE OF owner_id.
             if (n > 0 && supersededBy != null && !supersededBy.isEmpty()) {
@@ -11471,7 +11471,7 @@ public final class CatalogRepository {
             // unconditionally left a renamed knowledge collection carrying X's subject as its
             // owner. embedding_model, dimension and the rest stay X's.
             // nexus-6pbwx: for code/docs/rdr, a name-derived value that is a slug is replaced (since
-            // catalog-049 a curator's segment stands). The insert below fires catalog-044's BEFORE trigger (Y has no
+            // catalog-051 a curator's segment stands). The insert below fires catalog-044's BEFORE trigger (Y has no
             // documents yet, so nothing changes), and the documents re-home step further down
             // fires its AFTER trigger, which replaces THAT kind of owner (not tumbler-shaped) with
             // the documents'. A tumbler-shaped repo owner written here stands, and
@@ -11669,7 +11669,7 @@ public final class CatalogRepository {
                    .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, DSL.currentOffsetDateTime())
                    .where(CATALOG_COLLECTIONS.NAME.eq(oldName))
                    .execute());
-            // catalog-049-2 (RDR-229): step 2 re-homed the documents while X was still live and held the
+            // catalog-051-2 (RDR-229): step 2 re-homed the documents while X was still live and held the
             // (content_type, owner_id, embedding_model, model_version) tuple the documents' owner names, so its
             // AFTER trigger's guard kept Y's slug owner. X is retired now; this no-op write names owner_id, which
             // fires catalog-044's BEFORE trigger (UPDATE OF owner_id) again, and the guard now sees a free tuple

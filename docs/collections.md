@@ -114,13 +114,13 @@ registration: the repo owner for a repo's `code`, `docs` and `rdr`
 collections, the corpus curator for a docs corpus, the knowledge curator
 for knowledge. An owner that a registration set stands: a collection
 registered under a curator keeps it, and documents that arrive later do not
-replace it (`catalog-049` amends `catalog-044`). Only a non-tumbler owner (a
+replace it (`catalog-051` amends `catalog-044`). Only a non-tumbler owner (a
 slug such as `arcaneum-2ad2825c`, an empty value or a placeholder) is still
 derived from the collection's documents, hyphenated (`1-15`, what
 `owner_segment_for_tumbler` gives), when the first document lands, unless
 another live collection already holds that owner for the same content
 type, embedding model and version: then the collection keeps its slug and
-the engine logs a notice naming both (`catalog-049`). It takes the
+the engine logs a notice naming both (`catalog-051`). It takes the
 documents' owner once that place frees, as when a rename or a supersede
 retires the other collection. A collection with no documents keeps the
 value it was registered with. A

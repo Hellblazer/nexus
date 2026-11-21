@@ -32,7 +32,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * RDR-229 (bead nexus-p2m1x.14), catalog-049-2: catalog-044's two owner-from-documents triggers skip the rewrite of a
+ * RDR-229 (bead nexus-p2m1x.14), catalog-051-2: catalog-044's two owner-from-documents triggers skip the rewrite of a
  * replaceable (slug, dotted, '') owner when the owner the documents name would land the collection on a
  * (tenant_id, content_type, owner_id, embedding_model, model_version) tuple that another live, unsuperseded collection
  * already holds. The old owner stays and a NOTICE names both collections and the owner not taken.
@@ -41,10 +41,10 @@ import java.util.concurrent.TimeUnit;
  * the partial UNIQUE index RDR-229 plans for P3.8 (created here by the test): without the guard the rewrite raises a bare
  * 23505 from inside document registration. Both states keep the slug owner with the guard.
  *
- * <p>Falsifier, by hand: restore the catalog-049 file to its catalog-049-1-only form and (a) reads a duplicate tuple,
+ * <p>Falsifier, by hand: restore the catalog-051 file to its catalog-051-1-only form and (a) reads a duplicate tuple,
  * (b) throws 23505.
  */
-class Catalog049OwnerGuardTest {
+class Catalog051OwnerGuardTest {
 
     private static final String MASTER_CHANGELOG = "db/changelog/db.changelog-master.xml";
     private static final String TENANT = "catalog049-guard-tenant";
@@ -78,7 +78,7 @@ class Catalog049OwnerGuardTest {
             List<String> notices = insertDocument(su, "1.33.1", SLUG_DOCS);
             assertThat(ownerOf(ctx, SLUG_DOCS)).as("the slug owner stays").isEqualTo("legacy-ab12cd34");
             assertThat(notices).as("a notice names both collections and the owner not taken")
-                .anySatisfy(n -> assertThat(n).contains("catalog-049").contains(SLUG_DOCS).contains(HOLDER).contains("1-33"));
+                .anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_DOCS).contains(HOLDER).contains("1-33"));
             assertThat(liveTupleCount(ctx, "docs", "1-33", DOCS_MODEL, "v1")).as("no duplicate tuple").isEqualTo(1);
 
             // (2) BEFORE trigger on INSERT: the documents exist first, then the collection registers
@@ -87,7 +87,7 @@ class Catalog049OwnerGuardTest {
             assertThat(ownerOf(ctx, SLUG_LATE)).as("a registration over existing documents keeps the slug")
                 .isEqualTo("late-ef56ab78");
             assertThat(beforeNotices).as("the BEFORE-trigger notice names both collections and the owner not taken")
-                .anySatisfy(n -> assertThat(n).contains("catalog-049").contains(SLUG_LATE).contains(HOLDER).contains("1-33"));
+                .anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE).contains(HOLDER).contains("1-33"));
             assertThat(liveTupleCount(ctx, "docs", "1-33", DOCS_MODEL, "v1")).isEqualTo(1);
 
             // controls: a free tuple is still rewritten
@@ -119,14 +119,14 @@ class Catalog049OwnerGuardTest {
 
             List<String> notices = insertDocument(su, "1.33.1", SLUG_DOCS);
             assertThat(ownerOf(ctx, SLUG_DOCS)).as("the slug owner stays").isEqualTo("legacy-ab12cd34");
-            assertThat(notices).anySatisfy(n -> assertThat(n).contains("catalog-049").contains(SLUG_DOCS).contains(HOLDER)
+            assertThat(notices).anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_DOCS).contains(HOLDER)
                 .contains("1-33"));
             assertThat(liveTupleCount(ctx, "docs", "1-33", DOCS_MODEL, "v1")).isEqualTo(1);
 
             insertDocument(su, "1.33.2", SLUG_LATE);
             List<String> beforeNotices = registerCollectionOn(su, SLUG_LATE, "docs", "late-ef56ab78", DOCS_MODEL, "v1");
             assertThat(ownerOf(ctx, SLUG_LATE)).isEqualTo("late-ef56ab78");
-            assertThat(beforeNotices).anySatisfy(n -> assertThat(n).contains("catalog-049").contains(SLUG_LATE)
+            assertThat(beforeNotices).anySatisfy(n -> assertThat(n).contains("catalog-051").contains(SLUG_LATE)
                 .contains(HOLDER).contains("1-33"));
 
             insertDocument(su, "1.34.1", SLUG_FREE_CODE);
@@ -214,7 +214,7 @@ class Catalog049OwnerGuardTest {
                 b.commit();
                 assertThat(ownerOf(ctx, s1)).as("the first writer took the tuple").isEqualTo("1-70");
                 assertThat(ownerOf(ctx, s2)).as("the second writer keeps its slug").isEqualTo("race-bb000002");
-                assertThat(bNotices).anySatisfy(n -> assertThat(n).contains("catalog-049").contains(s2).contains(s1)
+                assertThat(bNotices).anySatisfy(n -> assertThat(n).contains("catalog-051").contains(s2).contains(s1)
                     .contains("1-70"));
             }
         });

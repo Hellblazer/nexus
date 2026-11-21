@@ -17,13 +17,13 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * RDR-229 (bead nexus-p2m1x.14), catalog-049-2 and the writes that free a tuple. The guard keeps a slug collection's owner
+ * RDR-229 (bead nexus-p2m1x.14), catalog-051-2 and the writes that free a tuple. The guard keeps a slug collection's owner
  * off a tuple a live collection holds; when that holder is superseded or deleted the tuple is free, and the slug row must
  * take the documents' owner then, or it keeps its slug for good. {@code supersedeCollection} re-derives its successor and
  * {@code deleteCollection} re-derives the slug rows the deleted row's tuple held back.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class Catalog049RederiveTest {
+class Catalog051RederiveTest {
 
     private static final String SVC_ROLE = "svc_catalog049d_test";
     private static final String SVC_PASS = "svc_catalog049d_test_pass";
