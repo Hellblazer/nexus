@@ -210,7 +210,12 @@ def _converge(world: _World, *, engine: str = "converged", local: bool = True, *
 
 
 def _service_starts(cycle: MagicMock) -> int:
-    return sum(1 for c in cycle.call_args_list if c.args and c.args[0][:4] == ["nx", "daemon", "service", "start"])
+    """The ``daemon service start`` calls; the argv head is ``nx`` or this host's launcher (``nx_argv``)."""
+    verb = ["daemon", "service", "start"]
+    return sum(
+        1 for c in cycle.call_args_list
+        if c.args and any(list(c.args[0][i:i + 3]) == verb for i in range(len(c.args[0])))
+    )
 
 
 # -- the control file the check reads ---------------------------------------------------
