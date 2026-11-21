@@ -54,7 +54,7 @@ public final class CollectionRegistration {
      *
      * <p><b>Census:</b> a migration-source name-read site ("a re-embed source row deleted by cutover; retires at
      * P4"). The engine's parse census counts string literals per file, not call sites, and this reuses the version
-     * regex, so it adds no literal; {@code CollectionParseGateTest.NAME_MODEL_READ_CALLS} pins its callers instead.
+     * regex, so it adds no literal; {@code NameModelReadCensusTest.NAME_MODEL_READ_CALLS} pins its callers instead.
      * P4.3: delete the call, then that pin.
      */
     public static String modelOfConformantName(String name) {
