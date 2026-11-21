@@ -80,12 +80,6 @@ name = t3_collection_name("cloud-leg-probe", t3=make_t3(), for_write=True)
 row = _get_catalog().get_collection(name)
 print(name, None if row is None else row.get("collection_id"))
 """
-ENGINE_STATUS = r"""
-from nexus.db.http_engine_status import fetch_engine_status
-# RDR-229 P3.8: /v1/status names collection_tuple_index_present (absent on an older engine; the doctor reads it).
-status = fetch_engine_status() or {}
-print("collection_tuple_index_present", status.get("collection_tuple_index_present", "absent"))
-"""
 IMPORT_COLLECTION_REFUSES_AN_ID = r"""
 import httpx
 from nexus.commands.catalog import _get_catalog
@@ -140,6 +134,10 @@ assert isinstance(status, dict), "GET /v1/status did not answer a JSON object"
 completion = status.get("rdr229_completion")
 assert completion is None or isinstance(completion, dict), "rdr229_completion is not an object"
 print("status keys:", len(status), "rdr229_completion:", "present" if completion is not None else "absent")
+# RDR-229 P3.8: /v1/status names collection_tuple_index_present (absent on an older engine; the doctor reads it).
+index = status.get("collection_tuple_index_present")
+assert index is None or isinstance(index, bool), "collection_tuple_index_present is not a boolean"
+print("collection_tuple_index_present:", "absent" if index is None else index)
 """
 
 DOC_REGISTER_UNREGISTERED = r"""
