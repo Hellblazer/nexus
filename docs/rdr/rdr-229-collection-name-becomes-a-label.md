@@ -1983,7 +1983,9 @@ its acceptance is that test green plus the census pin it lowers.
   columns. Under `PlpgsqlCheckGateTest`.
 - P2.7 Retire `repo_identity.list_sibling_collections`' name matcher (no
   caller in `src`; RDR-210 already finds siblings by row tuple) and move
-  `resolve_corpus` stage 3 to the row tuple.
+  `resolve_corpus` stage 3 to the row tuple. Its fallback, a prefix match on
+  the label the user typed, stays as one `label-pattern` site with the
+  `LABEL_TYPED` note (item 1).
 - P2.8 Subject and repo resolution by attributes (item 5):
   `t3_collection_name` finds a knowledge subject through `find_collection`;
   `collection_for_repo` uses the returned row instead of rendering. Test: a
@@ -2921,3 +2923,4 @@ large, and moved under a ratchet.
 - 2026-11-19: Accepted (Sam, "accept RDR-229", T2 `nexus/sam-ruling-rdr229-accept-2026-11-19`); epic nexus-p2m1x. Residual dispositions: the five BLOCKS-PLANNING residuals of `229-gate-latest` fixed in 00f6de8fe..55f50376b; the rename-refusal-owner residual fixed in 9ea4521a4 (confirming check `229-fix-check-50164fafab10`); S-2 to S-8 to beads nexus-p2m1x.40 to .46; the accept-check DISCOVER rows to nexus-p2m1x.47 (P3.5 and P3.7 close together) and .48 (fresh-install rename refusal until a second boot).
 - 2026-11-20: residual S-5 (nexus-p2m1x.43): the Cross-Cutting BYO paragraph said P3.3b's pass still builds on a blocked install, contradicting gate 1 (item 6), P3.3b and the phase dependencies; it now says the pass does not start, matching the RDR's own gate. The Contradiction Check's S-5 entry is updated; the bead closes when P3.3b is built and tested to gate 1.
 - 2026-11-21: P2.9's engine half landed on develop (c7ace16dd onward): `isFileRoutedCollection` is deleted, and the stale-note repair reads `content_type` in its transaction, admits only `knowledge` rows, and share-locks the collection row under the rewrite (item 12, engine paragraph). This supersedes the 2026-11-19 line that kept `isFileRoutedCollection`. The client half's text follows its reland (grant 3, nexus-p2m1x.14).
+- 2026-11-21: the P2.7 step names the `resolve_corpus` stage-3 fallback that item 1 already records (one `label-pattern` site, `LABEL_TYPED`), so the step and item 1 agree (grant 3, nexus-p2m1x.12; P2.R cross-walk F1, nexus-p2m1x.16).
