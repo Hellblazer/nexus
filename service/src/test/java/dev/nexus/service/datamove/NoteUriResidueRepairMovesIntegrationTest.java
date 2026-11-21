@@ -340,7 +340,7 @@ class NoteUriResidueRepairMovesIntegrationTest extends DataMoveIntegrationBase {
     /**
      * The worker's table-wide verification runs as the admin role with no nexus.tenant, bound by FORCE row-level security:
      * it must SEE planted residue, for every move. It joins nexus.catalog_collections, so that table needs the same
-     * owner-read policy as the three driving tables (catalog-050-4); without it the join is empty and the backstop
+     * owner-read policy as the three driving tables (vectors-065's, RDR-229 D2); without it the join is empty and the backstop
      * reports a table with residue clean.
      */
     @Test

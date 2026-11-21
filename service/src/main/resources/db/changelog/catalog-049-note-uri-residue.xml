@@ -54,8 +54,8 @@
     and the other rows are Liquibase's or, for a satellite, a parent's on_complete.
 
     THE OWNER-READ POLICIES are the next include (catalog-050-note-uri-residue-owner-read.xml): the three driving tables
-    carry only tenant_isolation, and the worker's verification needs the migrating role to read every tenant's rows. A
-    fourth, nexus.catalog_collections (catalog-050-4), is not a driving table but every verification joins it for the
+    carry only tenant_isolation, and the worker's verification needs the migrating role to read every tenant's rows. The
+    policy of nexus.catalog_collections is vectors-065's (RDR-229 D2): that table is not a driving table but every verification joins it for the
     content type, and the table-wide verification runs as the migrating role with no tenant: without the policy the join is
     empty and the backstop reads a table with residue as clean. DrivingTableIsolationCheck asks the isolation question of
     that table too while a rdr229-residue-* move is registered.

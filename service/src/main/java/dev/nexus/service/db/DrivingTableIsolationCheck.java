@@ -115,7 +115,7 @@ public final class DrivingTableIsolationCheck {
 
     /**
      * Tables that carry an owner-read policy for a move's VERIFICATION and drive no move, keyed by the label prefix of the
-     * moves that read them. RDR-229 P2.10 ({@code catalog-050-4}): the three residue-repair verifications join
+     * moves that read them. RDR-229 P2.10 (the policy is {@code vectors-065}'s, RDR-229 D2): the three residue-repair verifications join
      * {@code nexus.catalog_collections} for the content type, and the table-wide verification (the backstop for a tenant
      * the list missed) runs as the migrating role with no tenant, which under FORCE row level security sees no
      * collection without it. The policy is as exposed as a driving table's, so it gets the same boot question while any
