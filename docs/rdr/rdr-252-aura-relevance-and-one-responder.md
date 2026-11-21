@@ -497,7 +497,7 @@ whose develop push runs start concluding skipped or neutral would therefore
 hold every red open until escalation, so any future job-level `if:` that skips
 a whole workflow on push has to be weighed against it; none of the last 100
 completed develop push runs concluded skipped or neutral in any workflow
-(measured 2026-11-20). Nothing watches that assumption. The engine logs
+(measured 2026-11-20). Nothing in this repository watches that assumption. The engine logs
 `board_done_no_verdict ... reason=carried_not_green` at info for a sha row that
 leaves no verdict (`OwnerStamper.afterOut`), and no lint, test or alert in this
 repository reads it; `scripts/check_release_ci_evidence.py` and `tests/test_ci_wait.py`
@@ -507,8 +507,9 @@ carried list. The adapter that writes `carried` is not in this repository (a
 `docs/agents/worktrees.md`, `board-ci.yaml` and `DoneVerdict.java` comments), so
 its metrics were not read here; the close critique r3 reads its `FoldCarryFailed`
 metric as counting read failures, not carried non-success (the critique's
-reading, not read here). The board's maintainers decide, at the 2026-12-20
-review: a lint or an adapter metric on carried non-success conclusions, or the
+reading, not read here). The decision is taken at the 2026-12-20 review, which
+the threads-board thread "RDR-252 calibration and attribution read" carries
+(due 2026-12-20, with the suspect-dropping question below): a lint or an adapter metric on carried non-success conclusions, or the
 one-time measurement stands. The engine does not tell workflows apart: it reads
 each carried entry's conclusion (`DoneVerdict.carryProblem`), and
 `board-ci.yaml` says the fold covers "each workflow that has a push run on the
