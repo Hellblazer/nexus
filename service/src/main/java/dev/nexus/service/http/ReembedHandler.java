@@ -716,9 +716,8 @@ public final class ReembedHandler implements HttpHandler {
             throw new IllegalArgumentException("no registered collection has " + need
                 + "; send target_collection to register one");
         }
-        // RDR-229 P3.6: the target is a label the engine registers on the user's say-so, so the label rule applies
-        // (before any read of the name, and ahead of the shape read below).
-        dev.nexus.service.db.CollectionLabel.validateUserLabel(requested);
+        // RDR-229 P3.6: a NUL cannot be bound into the lookups below (a database error, not a 400).
+        dev.nexus.service.db.CollectionLabel.requireStorable(requested);
         if (dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested) == null) {
             // The version of a new row is read off the target's minted name (D1), so a name to register must have one.
             // This applies only when a NEW row would be registered: an existing live target is used as-is.
@@ -743,6 +742,10 @@ public final class ReembedHandler implements HttpHandler {
                     + existing.get("embedding_model") + ", which is not a live collection of " + need,
                 "collection", requested)));
         }
+        // RDR-229 P3.6: the target is a NEW label the engine registers on the user's say-so, so the label rule applies.
+        // After the existing-row lookup: a row that exists keeps its label whatever it is (a live one is used as-is
+        // and never reaches here; a retired one is refused above for what it is).
+        dev.nexus.service.db.CollectionLabel.validateUserLabel(requested);
     }
 
     /**

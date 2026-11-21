@@ -236,6 +236,38 @@ class CollectionLabelRuleRouteTest {
         assertThat(resp.body()).doesNotContain("database");
     }
 
+    @Test
+    void registerWithANonStringName_is400() throws Exception {
+        // Before r2 these reached the INSERT. A missing, null or blank name is P3.8's mint branch (CollectionMint), so
+        // only a present non-string name is refused here.
+        for (Object bad : new Object[] {5, true, List.of("a")}) {
+            Map<String, Object> body = new LinkedHashMap<>(Map.of("content_type", "knowledge", "model_version", "v1"));
+            body.put("name", bad);
+            var resp = post("/v1/catalog/collections/upsert", body);
+            assertThat(resp.statusCode()).as(body + " -> " + resp.body()).isEqualTo(400);
+            assertThat(resp.body()).contains("name must be a string");
+        }
+    }
+
+    @Test
+    void renamingBackOntoATombstoneWhoseLabelBreaksTheRule_isNotRefused() throws Exception {
+        // RDR-229 item 8: an existing row keeps its label. The undo of a rename names the tombstone the rename left;
+        // that label is an old install's ('/'), and the rule must not block the way back.
+        String legacy = "legacy/undo/label";
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, legacy);
+        }
+        var forward = rename(legacy, "undo forward label");
+        assertThat(forward.statusCode()).as(forward.body()).isEqualTo(200);
+
+        var back = rename("undo forward label", legacy);
+
+        assertThat(back.statusCode()).as(back.body()).isEqualTo(200);
+        assertThat(isRegistered(legacy)).isTrue();
+        // while a NEW target that breaks the rule is still refused
+        assertThat(rename(legacy, "new/slash").statusCode()).isEqualTo(400);
+    }
+
     // ── import (ETL): a new row's shape, never its minted form, never an existing row ───────────────────────
 
     private Map<String, Object> importRow(String label) {
