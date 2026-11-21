@@ -98,6 +98,10 @@ import java.util.function.Supplier;
  *       or mark failed is healed by the retry;</li>
  *   <li>otherwise 409 naming the row, its successor, or the job that holds it.</li>
  * </ul>
+ * Two refusals come before any of those (nexus-p2m1x.28), because the lookup tuple (content type, owner, model) is not
+ * unique when two sources share a curator owner: a source with another live collection on its own tuple is 409, and
+ * so is a live target that a job from a different source collection was moved into (read from the job log). Both
+ * name the collections involved.
  * The refusals that need no write all run before the first write. The source lock is taken by the start itself; a
  * start that loses it to a concurrent start after a registration or a revive leaves that in place and answers 409
  * naming the winner.
@@ -379,7 +383,17 @@ public final class ReembedHandler implements HttpHandler {
         // too, so it refuses what the start would.
         requireServed(profileModel);
 
-        Result found = TargetSelection.select(rows(tenant, contentType), contentType, owner, profileModel);
+        List<CollectionRow> tenantRows = rows(tenant, contentType);
+        // nexus-p2m1x.28: the tuple is not unique when two sources share a curator owner, and the target is chosen by
+        // it. A source with a live twin on its tuple is refused before any target is looked at or registered.
+        List<String> mates = TargetSelection.tupleMates(tenantRows, source, contentType, owner, sourceModel);
+        if (!mates.isEmpty()) {
+            throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
+                "error", TargetSelection.sharedSourceTupleReason(source, mates, contentType, owner, sourceModel),
+                "collection", source, "tuple_mates", mates)));
+        }
+
+        Result found = TargetSelection.select(tenantRows, contentType, owner, profileModel);
         String candidate = switch (found) {
             case Live l -> l.name();
             case Superseded s -> s.name();
@@ -397,6 +411,18 @@ public final class ReembedHandler implements HttpHandler {
                 refusal.put("state", holder.state());
             }
             throw new Reply(409, MAPPER.writeValueAsString(refusal));
+        }
+        if (decision instanceof UseLive u) {
+            // The job log is the record of where a target's documents came from: a live target another source was
+            // moved into is not this source's to join (a Revive names this source as its successor, so it is exempt).
+            Job foreign = firstMatch(jobs.listAll(tenant),
+                j -> j.targetCollection().equals(u.name()) && !j.sourceCollection().equals(source));
+            if (foreign != null) {
+                throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
+                    "error", TargetSelection.foreignOriginReason(source, u.name(), foreign.sourceCollection()),
+                    "collection", u.name(), "origin_source", foreign.sourceCollection(),
+                    "job_id", foreign.jobId().toString(), "state", foreign.state())));
+            }
         }
         if (!(decision instanceof UseLive) && !(decision instanceof Revive)) {
             requireRegistrable(tenant, requestedTarget, contentType, owner, profileModel, locked);
