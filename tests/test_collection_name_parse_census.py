@@ -843,8 +843,7 @@ def test_pin_matches_documented_total() -> None:
     at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then at P2.4,
     nexus-p2m1x.9, when the taxonomy threshold became a row read; then at P2.2,
     nexus-p2m1x.7, when the read-path model reads became row reads and the name
-    parsers moved to ``legacy_names``; then 217 -- 215 at P3.8,
-    nexus-p2m1x.28, when ``register_collection`` stopped deriving from the name) is derived
+    parsers moved to ``legacy_names``; 217 -- 216 at P3.8, nexus-p2m1x.28: -2 mint in register_collection, +1 P3.1 retry) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
