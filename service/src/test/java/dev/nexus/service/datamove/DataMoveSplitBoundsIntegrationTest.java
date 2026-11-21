@@ -256,6 +256,51 @@ class DataMoveSplitBoundsIntegrationTest extends DataMoveIntegrationBase {
         assertThat(completedAt("sb-recheck-lock")).isNotNull();
     }
 
+    // ── (b3) what a re-check failure is, by cause ───────────────────────────────────────────────────────
+
+    @Test
+    void aNonSqlExceptionInTheRecheck_isAPermanentPassFailure_notATransientRetryLoop() {
+        DataMoveTestFixtures.register(ctx(), "sb-bug", "tenant_plain", 50, 0, null, "stamp-template.sql",
+            "verification-tenant-plain.sql", 60_000, "on-complete-add-marker.sql");
+        runsOnly("sb-bug");
+        var finisher = new VerifyingFinisher();
+        finisher.recheckHook = tx -> {
+            throw new IllegalStateException("a defect of the worker's own");
+        };
+
+        var result = finish(finisher, "sb-bug", "tenant_plain", List.of());
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage()).as("not RECHECK: nothing the host did, and no retry changes it")
+            .isEqualTo(FailureHandler.Stage.PASS);
+        assertThat((Throwable) result.failure().raised()).isNull();
+        assertThat(DataMoveFailureClassifier.classify(result.failure().stage(), result.failure().raised(), List.of(),
+            result.failure().detail()).permanent()).isTrue();
+        assertThat(result.failure().detail()).contains("completion transaction").contains("a defect of the worker's own");
+        assertThat(completedAt("sb-bug")).isNull();
+        assertThat(columnExists("marker")).as("on_complete did not run").isFalse();
+    }
+
+    @Test
+    void aSessionThatCarriesATenantIntoTheRecheck_isTheOneTransientRecheckWithNothingRaised() {
+        DataMoveTestFixtures.register(ctx(), "sb-leak", "tenant_plain", 50, 0, null, "stamp-template.sql",
+            "verification-tenant-plain.sql", 60_000, "on-complete-add-marker.sql");
+        runsOnly("sb-leak");
+        var finisher = new VerifyingFinisher();
+        finisher.recheckHook = tx -> tx.select(DSL.function("set_config", String.class, DSL.val("nexus.tenant"),
+            DSL.val("acme"), DSL.inline(true))).fetch();
+
+        var result = finish(finisher, "sb-leak", "tenant_plain", List.of());
+
+        assertThat(result.outcome()).isEqualTo(MoveFinisher.Outcome.REPORT);
+        assertThat(result.failure().stage().name()).isEqualTo("RECHECK");
+        assertThat((Throwable) result.failure().raised()).isNull();
+        assertThat(result.failure().detail()).contains("carries nexus.tenant=acme");
+        assertThat(DataMoveFailureClassifier.classify(result.failure().stage(), result.failure().raised(), List.of(),
+            result.failure().detail()).permanent()).as("the connection's state: retried").isFalse();
+        assertThat(completedAt("sb-leak")).isNull();
+    }
+
     // ── (c1) the tenant list is read again for the re-check ─────────────────────────────────────────────
 
     @Test

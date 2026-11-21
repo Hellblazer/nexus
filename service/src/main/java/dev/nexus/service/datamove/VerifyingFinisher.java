@@ -83,6 +83,9 @@ final class VerifyingFinisher implements MoveFinisher {
     /** Test seam: runs with the verification connection after each reset, so a test can read what the session carries. */
     Consumer<CallConnection> afterResetHook;
 
+    /** Test seam: runs with the completion transaction's context at the start of the re-check, before its first check of the session. */
+    Consumer<DSLContext> recheckHook;
+
     @Override
     public Result finish(Context context) {
         if (context.stopped().getAsBoolean()) {
@@ -322,7 +325,7 @@ final class VerifyingFinisher implements MoveFinisher {
      * then table-wide; the order here does not matter, every run is made). The per-tenant runs are not redundant: a verification that
      * reads a row-security-scoped table or helper sees nothing without a tenant, so the table-wide run is empty whatever the table
      * holds and the tenant's own run is the check. The whole re-check shares {@code statement_timeout_ms}: each run gets what is left
-     * of it, and the move's own statement and lock bounds are set again for {@code on_complete}, which gets a fresh
+     * of it (so do the catalog reads of the tenant re-read, each bounded by what is left when it starts), and the move's own statement and lock bounds are set again for {@code on_complete}, which gets a fresh
      * {@code statement_timeout_ms} (so the transaction can run up to twice that, plus the UPDATE). The first pass has warmed what
      * the runs read, but only what the verification itself reads: the registrant writes the verification to read what
      * {@code on_complete} reads (the table, and the index or foreign-key side it will scan), or the first pass warms nothing for it.
@@ -348,18 +351,26 @@ final class VerifyingFinisher implements MoveFinisher {
      * <p><b>Errors.</b> The re-check runs under the transaction's {@code lock_timeout}, so a wait behind an ACCESS EXCLUSIVE holder
      * raises 55P03, and a deadlock or a serialization failure is possible: these are stage {@code RECHECK}, classified as
      * {@code on_complete}'s are (transient), never {@code VERIFICATION}, where they would be permanent. A row it finds is
-     * {@code VERIFICATION_NONEMPTY}, permanent, as in the first pass.
+     * {@code VERIFICATION_NONEMPTY}, permanent, as in the first pass. An exception that is not the database's (a defect of the
+     * worker's own) is stage {@code PASS}, which the classifier treats as permanent with nothing raised: only the check that the
+     * session carries no tenant is a {@code RECHECK} with nothing raised, and transient.
      *
      * <p>The session is shown to carry no tenant before the first run, and again after the last tenant's setting is cleared, so a
      * tenant that leaked in (or out) never reaches {@code on_complete}. Every failing run is reported, as the first pass reports.
      *
      * @throws RecheckFailed when the session carries a tenant, a row of the old shape remains, or a run fails or times out
      */
-    private static void recheck(DSLContext tx, Connection c, DataMove move, List<String> tenants) {
+    private void recheck(DSLContext tx, Connection c, DataMove move, List<String> tenants) {
         try {
+            Consumer<DSLContext> seam = recheckHook;
+            if (seam != null) {
+                seam.accept(tx);
+            }
             requireNoTenant(tx, move, "before the re-check");
             long deadline = System.nanoTime() + move.statementTimeoutMs() * 1_000_000L;
-            // a move over a table that is not tenant-scoped has no tenant list, and keeps none
+            // a move over a table that is not tenant-scoped has no tenant list, and keeps none; the catalog reads of the re-read
+            // are bounded by what is left of the budget when they start
+            clampToBudget(tx, deadline);
             List<String> listed = tenants.isEmpty() ? tenants
                 : MoveTenants.reread(tx, move.drivingSchema(), move.drivingTable(), tenants);
             Map<String, Long> found = new LinkedHashMap<>();
@@ -385,10 +396,19 @@ final class VerifyingFinisher implements MoveFinisher {
         } catch (RecheckFailed e) {
             throw e;
         } catch (SQLException | RuntimeException e) {
-            throw new RecheckFailed(e instanceof MoveSql.Refused ? FailureHandler.Stage.VERIFICATION_REFUSED
-                : FailureHandler.Stage.RECHECK, sqlOf(e),
+            // an error from the database is the re-check's (RECHECK); anything else, an NPE or another bug of the worker's own, is
+            // not the host's and no retry changes it: PASS, which the classifier treats as permanent when nothing was raised. Only
+            // the tenant-leak guard (requireNoTenant, above) is a RECHECK with nothing raised, and transient.
+            FailureHandler.Stage stage = e instanceof MoveSql.Refused ? FailureHandler.Stage.VERIFICATION_REFUSED
+                : sqlOf(e) != null ? FailureHandler.Stage.RECHECK : FailureHandler.Stage.PASS;
+            throw new RecheckFailed(stage, sqlOf(e),
                 "the verification in the completion transaction of " + move.label() + " could not run: " + describe(e));
         }
+    }
+
+    /** The statement timeout for what follows, the budget that is left (at least 1 ms). */
+    private static void clampToBudget(DSLContext tx, long deadline) {
+        PgSession.setLocal(tx, "statement_timeout", Long.toString(Math.max(1L, (deadline - System.nanoTime()) / 1_000_000L)));
     }
 
     /** One re-check run, under what is left of the budget; a tenant of {@code null} is the table-wide run. */
