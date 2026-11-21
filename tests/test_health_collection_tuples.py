@@ -18,6 +18,7 @@ import nexus.health as health
 from nexus.collection_tuple_health import (
     INDEX_WAIT_LABEL,
     LABEL,
+    REOWN_MOVE_ID,
     REOWN_MOVE_LABEL,
     check_collection_tuples,
     duplicate_tuples,
@@ -192,3 +193,62 @@ def test_an_unreadable_registry_cannot_rule_a_duplicate_out_so_it_gives_no_wait_
 def test_no_status_is_no_wait_row_and_the_duplicate_row_is_unchanged() -> None:
     assert check_collection_tuples([_row("docs__a")], engine_status=None) == []
     assert [r.label for r in check_collection_tuples([_row("docs__a"), _row("docs__b")], engine_status=None)] == [LABEL]
+
+
+# ── the prose says what the engine does today ─────────────────────────────────────────────────────────────────────────
+# Since P3.8 the engine refuses to put a second live collection on a tuple in BOTH index states (a mint, a named
+# registration, an import, a restore). Only a duplicate that already exists is left, and it is what holds the index back.
+
+
+def _both_fix_texts() -> list[str]:
+    dup = check_collection_tuples([_row("docs__a"), _row("docs__b")])
+    wait = check_collection_tuples([_row("docs__a")], engine_status=_status(False))
+    assert len(dup) == 1 and len(wait) == 1  # non-vacuity: both rows were produced
+    return [" ".join(dup[0].fix_suggestions), " ".join(wait[0].fix_suggestions)]
+
+
+def test_the_fix_text_never_says_a_second_collection_can_still_register_on_a_tuple() -> None:
+    for text in _both_fix_texts():
+        assert "can still register" not in text
+        assert "still register on one tuple" not in text
+
+
+def test_the_fix_text_says_the_engine_already_refuses_a_second_live_collection_on_a_tuple() -> None:
+    for text in _both_fix_texts():
+        assert "refuses" in text and "second live collection" in text
+
+
+# ── the re-own move's label is one string in three places ─────────────────────────────────────────────────────────────
+# The index changeset waits for the nexus.data_moves row with this label; the doctor names it; the Java test registers it.
+# marlowe's registration of the move is not on this branch: when a changeset or move file that registers it lands, it is read
+# here too, so a label that drifts in any place fails this test and not a boot that waits forever.
+
+_REPO = __import__("pathlib").Path(__file__).resolve().parent.parent
+_INDEX_XML = _REPO / "service/src/main/resources/db/changelog/collections-001-tuple-unique-index.xml"
+_JAVA_TEST = _REPO / "service/src/test/java/dev/nexus/service/CollectionTupleUniqueIndexLiquibaseTest.java"
+
+
+def test_the_reown_move_label_is_the_same_in_the_changeset_the_doctor_and_the_java_test() -> None:
+    import re
+
+    xml_labels = set(re.findall(r"label = '([^']+)'", _INDEX_XML.read_text()))
+    java_labels = set(re.findall(r'MOVE = "([^"]+)"', _JAVA_TEST.read_text()))
+
+    assert xml_labels == {REOWN_MOVE_LABEL}, f"changeset waits for {xml_labels}, the doctor names {REOWN_MOVE_LABEL}"
+    assert java_labels == {REOWN_MOVE_LABEL}, f"the Java test registers {java_labels}, the doctor names {REOWN_MOVE_LABEL}"
+    assert REOWN_MOVE_ID == "data-move:" + REOWN_MOVE_LABEL
+
+
+def test_every_other_place_that_names_the_move_agrees_with_the_label() -> None:
+    import re
+
+    resources = _REPO / "service/src/main/resources"
+    stem = re.compile(r"rdr229-reown-[a-z0-9-]+")
+    seen: dict[str, set[str]] = {}
+    for path in resources.rglob("*.xml"):
+        found = set(stem.findall(path.read_text(errors="ignore")))
+        if found:
+            seen[str(path.relative_to(resources))] = found
+    assert seen, "non-vacuity: the changeset that waits for the move names it"
+    for path, labels in seen.items():
+        assert labels == {REOWN_MOVE_LABEL}, f"{path} names {labels}, the doctor names {REOWN_MOVE_LABEL}"
