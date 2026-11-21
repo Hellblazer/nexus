@@ -25,6 +25,8 @@ from nexus.catalog.store_hook import ManifestVerifyUncertainError, note_content_
 from nexus.errors import CombinedWriteEmbedTimeoutError
 from tests._module_seam import module_time
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _COLLECTION = "knowledge__z0o2p12-note__bge-base-en-v15-768__v1"
 _OTHER = "knowledge__z0o2p12-other__bge-base-en-v15-768__v1"
 

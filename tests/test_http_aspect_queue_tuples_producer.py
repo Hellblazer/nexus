@@ -55,6 +55,8 @@ from nexus.db.t2.http_tuple_store import (
     UnknownSubspaceError,
 )
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _KEYS = {"queue": "aspects"}
 _BODY_CAP = 4096
 

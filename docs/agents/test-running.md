@@ -74,8 +74,13 @@ Measured on a 16-core box: one substrate cluster is one 56-byte SysV segment, an
 `/dev/shm` mounted tmpfs, writable and with 3 GiB free (and 3 GiB of cgroup memory
 headroom), each worker's Postgres cluster is created under
 `/dev/shm/nexus-test-pg-<uid>` with `pg_wal` capped at 64 MB and dynamic shared
-memory kept inside the cluster dir; otherwise (macOS, no tmpfs, low room) it stays
-under the tempdir, and a Linux fallback warns with its reason. **The choice is made
+memory kept inside the cluster dir; otherwise (no tmpfs, low room) it stays under
+the tempdir, and a Linux fallback warns with its reason. On macOS it stays under
+the tempdir too, unless that tempdir is too long for a unix socket path (macOS's
+`sun_path` is 104 bytes; `lab-remote` on hellmini ran under one and errored every
+test at setup): then each cluster goes to `/tmp/nexus-test-pg-<uid>` (a disk root,
+created 0700, no WAL cap). An explicit `NX_TEST_PG_ROOT` that is too long still
+refuses loud. **The choice is made
 once per run, never per cluster**: the xdist controller takes it before it spawns
 workers (a serial run, at its first cluster) and persists it in
 `NX_TEST_PG_ROOT_SESSION`, which every worker inherits. A run that chose tmpfs
@@ -88,12 +93,15 @@ looks once and raises at once instead of waiting again (nexus-gsjzh) (see "If `S
 decision uses the same page-cache-credited headroom, so a grant warmed by a build or
 `uv sync` still picks tmpfs; `nexus_t2_substrate.root_decision_headroom` logs the raw
 and the credited figure. Every cluster start
-logs `nexus_t2_substrate.cluster_root` (root, `on=tmpfs|disk`, and the refusal reason;
-a disk start with a reason is a warning), and the pytest summary ends with
-`clusters on tmpfs N, on disk M`. `NX_TEST_PG_ROOT=<dir>` picks a root,
+logs `nexus_t2_substrate.cluster_root` (root, `on=tmpfs|disk`, the refusal reason, and a
+`note` when the clusters moved to the `/tmp` root; a disk start with a refusal reason is
+a warning, the note is info), and the pytest summary ends with
+`clusters on tmpfs N, on disk M`, followed by the refusal reason or the move note. `NX_TEST_PG_ROOT=<dir>` picks a root,
 `NX_TEST_PG_ROOT=default` forces the tempdir for new clusters. The stray-cluster
-sweep and `scripts/sweep-test-substrates.sh` always look in the tmpfs root too,
-so a crash-orphaned cluster in RAM is reaped. A nested pytest whose test globs
+sweep and `scripts/sweep-test-substrates.sh` always look in the tmpfs root too
+(and, on macOS, the `/tmp` root), so a crash-orphaned cluster in RAM is reaped; a
+root that is not a real directory owned by this user is skipped and logged
+(`nexus_t2_substrate.sweep_root_skipped`). A nested pytest whose test globs
 its own `TMPDIR` for clusters must set `NX_TEST_PG_ROOT=default`. A test that
 drives the decision itself starts from a cleared `NX_TEST_PG_ROOT_SESSION`
 (`tests/test_engine_substrate_pg_root.py` has the fixture).

@@ -3191,7 +3191,7 @@ class TestUpsertChunksPaging:
         # this class is testing. Stubbing "no row" short-circuits that
         # chain entirely; _is_cce_collection still falls to (correct)
         # name-based content-type derivation.
-        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)
         # ALSO pin _vector_client_instance to None: this file's OTHER
         # tests legitimately construct real-ish clients earlier in the
         # SAME process and nothing resets this module-level global

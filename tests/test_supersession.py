@@ -95,7 +95,7 @@ def test_a_chunk_a_current_document_still_holds_is_not_superseded() -> None:
 
 @pytest.mark.parametrize("hybrid", [False, True])
 def test_the_superseded_hit_ranks_below_an_equal_current_one(hybrid: bool, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)  # no code collections here
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)  # no code collections here
     cat = _Catalog(LINKS, TITLES)
     old, cur, far = _hit("old", ["1.1.10"], 0.30), _hit("cur", ["1.1.99"], 0.30), _hit("far", ["1.1.98"], 0.60)
     ranked = apply_hybrid_scoring(mark_superseded([old, cur, far], cat, owners_of=_owners, clock=lambda: 0.0),

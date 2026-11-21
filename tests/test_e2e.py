@@ -17,6 +17,8 @@ from click.testing import CliRunner
 from nexus.cli import main
 from nexus.db.t3 import T3Database
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -53,7 +53,10 @@ if not string.match(reason, "^[a-z][a-z_]*$") or #reason > 32 then
 end
 
 local head = "Develop is red at " .. string.sub(sha, 1, 7)
-local acknowledge = " Ack: post kind=ack sha=" .. sha .. " to board/ci/nexus-develop--owner."
+-- The owner acknowledges with `nx ci ack <sha7>`, which posts the row with the caller's own identity id in `from`
+-- (nexus-igea9). The engine counts the row's sender-session stamp, not `from`, and `nx group ack-times` counts by the
+-- stamp too; `from` is a label people read. The hint is a fixed short form, so it always fits whole.
+local acknowledge = " Ack: nx ci ack " .. string.sub(sha, 1, 7) .. "."
 local escalated = reason == "escalated"
 
 local text
@@ -70,10 +73,8 @@ if owner == me or (escalated and owner == nil) then
     else
       text = head .. "; the leader takes it (" .. reason .. "). Diagnose it."
     end
-    -- The state line holds 200 characters: the acknowledgement hint goes on only whole.
-    if #text + #acknowledge <= 200 then
-      text = text .. acknowledge
-    end
+    -- The longest owner text with the hint is under 120 characters, inside the state line's 200 (a test pins it).
+    text = text .. acknowledge
   end
   wake = not args.refresh
 elseif owner == nil then

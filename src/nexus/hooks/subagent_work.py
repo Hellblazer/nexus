@@ -4,7 +4,7 @@
 
 SubagentStart registers ``kind=agent`` with ref ``agent:<agent id>`` (:func:`register_start`, called by
 :mod:`nexus.hooks.subagent_start`); SubagentStop removes the row (:func:`register_stop`, called by
-:mod:`nexus.hooks.subagent_stop_t1_nudge` when the agent is really finished). Register and remove only, once each: no write
+:mod:`nexus.hooks.subagent_stop_t1_nudge` on every stop, nudged or not). Register and remove only, once each: no write
 per step. The row is what the restart's ready check and the compaction checkpoint read, so a session that dispatched agents
 and is asked to restart is told they would be cut off.
 

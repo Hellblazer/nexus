@@ -62,7 +62,9 @@ leader (halcyon, set up by Sam on 2026-11-07) and rules in a T2 memo
 order), review pairs, a release crew (Sam and halcyon) and RDR co-authors. A
 session is often in several at once. None of these exists in the system:
 membership, leader and assignments live in messages and prose, so no tool and
-no aura can ask "who is in this, who leads it, who owns this task". Some
+no aura can ask "who is in this, who leads it, who owns this task" (built here:
+membership and the leader; for a develop red, the owner post; typed assignments
+cut at gate round 1). Some
 raid mechanics already run without the name: the restart script's "ready
 file written" exchange is a ready check, a CI post is a raid-wide warning,
 and halcyon's queue line is an assignment note.
@@ -168,8 +170,10 @@ found, with how sure it is:
 - `scripts/git-push-develop.sh` claims `lock/ci-develop-push` with a claimant
   naming the session, and prints `PUSH_OK n=<count> tip=<sha>`.
 - The CI post on `board/ci/nexus-develop--done` carries `kind=sha`, the sha,
-  `outcome` and the run (RDR-220). Posts are unattested: the engine records no
-  session for the GitHub adapter's writes.
+  `outcome` (the tip's own), `branch_outcome` once the adapter's switch is on
+  (the tip's runs plus carried-forward results, read first by the stamper) and
+  the run (RDR-220). Posts are unattested: the engine records no session for
+  the GitHub adapter's writes.
 
 ## Research Findings
 
@@ -250,11 +254,13 @@ such as `board/ci/nexus-develop--done`; a **template** is the engine's schema
 for a family of subspaces, naming its fields (**dims**, short typed fields
 the engine can match on) and its free-text **body**. The **stamp**,
 `sender_session`, is the session id the engine records on a write made with a
-session token. For an identity-token write, accepted RDR-253 does not yet
-say what the stamp holds; its Step 2 bead recommends the current session id
-from the latest binding row (`nexus_rdr/252-research-5` F7). This RDR needs
-a session id the engine's session index (`session/<session id>`) maps to an
-identity and generation, and states that as a requirement on RDR-253 Step 2. A **wake** is a channel notice that interrupts an idle
+session token. For an identity-token write, RDR-253 now says what the stamp
+holds ("With an identity token, a tuple's `sender_session` is the session id of
+the identity's newest binding row under the token's generation, so a send after
+`/clear` carries the new session id", `rdr-253-session-identity.md:743`), which
+is the session id this RDR needs, one the engine's session index
+(`session/<session id>`) maps to an identity and generation. This RDR stated
+that as a requirement on RDR-253 Step 2 (`nexus_rdr/252-research-5` F7). A **wake** is a channel notice that interrupts an idle
 session. A **lease** is a claim on a tuple that lapses unless renewed.
 
 ### Technical Design
@@ -358,8 +364,16 @@ group's one role.
 
 First groups, made explicit from what runs today: `push-train` (leader
 halcyon), and ad hoc push windows, review pairs and the release crew as
-needed. The restart script's ready check becomes a group operation: "every
-member of group X, report ready".
+needed. The restart script's ready check becomes a group operation:
+`claude-restart-sessions --ask-ready --group X` asks, and `--status --group X`
+reports, only the live sessions whose names are the aliases of X's live
+members, read from the engine roster (`nx group list X --json`). It prints how
+many members it covers and names each one it does not, with its state and why
+(no alias, no live session here, a Desktop binding or session, left out by
+`--skip` or `--only`, or not on this tmux server), so a ready exit cannot hide
+who was never asked. The restart itself never takes a group, and a group round
+replaces the round file, so a restart after it still refuses for every session
+the group round never asked (shipped in v8.5.3).
 
 **Liveness.** The stamper asks RDR-253's liveness read, which applies the
 300-second rule to the last renewal rather than trusting a stored `live`
@@ -425,7 +439,8 @@ RDR-253's own JDR-002 entry.
 **The push record.** On `PUSH_OK`, on every path of `git-push-develop.sh`
 including `--skip-lock`, the script posts to `board/ci/nexus-develop--push`
 on the existing `board/ci/<topic>` template (three days' retention, the
-lifetime of the CI posts it is joined with). Its 5000-row cap counts each
+lifetime of the CI posts it is joined with; only a topic ending `--owner`
+keeps 35 days). Its 5000-row cap counts each
 subspace on its own (`nexus_rdr/252-research-8` F1), so the CI posts on
 `board/ci/nexus-develop` never share a cap with `--push` or `--owner`. The
 script writes with the
@@ -463,7 +478,47 @@ tip need not have a run of its own: develop CI runs in concurrency slots
 where "a newer push replaces only that slot's pending run"
 (`.github/workflows/ci.yml:20-40`; `nexus_rdr/252-research-3`), and a
 replaced run posts `outcome=cancelled`. So the stamper treats only
-`success` and `failure` as verdicts, and a verdict counts only if its tip is
+`success` and `failure` as verdicts, and a tip's verdict is develop's state at
+that tip, not only the tip's own runs: the `--done` row's `branch_outcome` dim
+(the tip's outcome folded with the latest earlier result of each workflow that
+did not run on the tip, such as the path-filtered Service CI; the adapter's
+FOLD_BRANCH_OUTCOME switch) is read ahead of `outcome`, so a clear needs every
+workflow's latest result green. A per-sha failure stays a failure whatever
+`branch_outcome` says, and a `branch_outcome` outside success, failure and
+cancelled is no verdict. A row without `branch_outcome` whose body carries a
+null `carried` (the carry read failed), a `carried` list with an entry whose
+conclusion is not `success` or cannot be read, or a `carried_n` above the
+list's length (entries trimmed; an absent list counts as empty) has no verdict
+when its per-sha result is success; a body with neither `carried` nor
+`carried_n` reads as before. A carried entry passes only on `success`: a
+skipped or neutral latest run of a workflow must not clear an earlier red,
+while the sha's own runs keep `success`, `neutral` and `skipped`. A workflow
+whose develop push runs start concluding skipped or neutral would therefore
+hold every red open until escalation, so any future job-level `if:` that skips
+a whole workflow on push has to be weighed against it; none of the last 100
+completed develop push runs concluded skipped or neutral in any workflow
+(measured 2026-11-20). Nothing watches that assumption. The engine logs
+`board_done_no_verdict ... reason=carried_not_green` at info for a sha row that
+leaves no verdict (`OwnerStamper.afterOut`), and no lint, test or alert in this
+repository reads it; `scripts/check_release_ci_evidence.py` and `tests/test_ci_wait.py`
+handle skipped and neutral conclusions for other jobs and do not touch the
+carried list. The adapter that writes `carried` is not in this repository (a
+`git grep` for `FOLD_BRANCH_OUTCOME` finds only this RDR,
+`docs/agents/worktrees.md`, `board-ci.yaml` and `DoneVerdict.java` comments), so
+its metrics were not read here; the close critique r3 reads its `FoldCarryFailed`
+metric as counting read failures, not carried non-success (the critique's
+reading, not read here). The board's maintainers decide, at the 2026-12-20
+review: a lint or an adapter metric on carried non-success conclusions, or the
+one-time measurement stands. The engine does not tell workflows apart: it reads
+each carried entry's conclusion (`DoneVerdict.carryProblem`), and
+`board-ci.yaml` says the fold covers "each workflow that has a push run on the
+branch but none on this sha", Service CI as its example. The plugin drift ledger
+and `windows-pg-bundle-rehearsal` both run on a develop push under a `paths:`
+filter and neither sets `continue-on-error`, so by that wording they count in
+develop's state, and a red from either would hold an open red or raise one
+(`aBranchOutcomeOfFailureWinsOverAPerShaSuccess`); whether the adapter includes
+them is inferred, not read. This RDR does not decide whether they should hold
+pushes; that is the same review's call. `outcome` stays the tip's own result. A verdict counts only if its tip is
 the newest tip in the chain with a verdict. A late red for an older tip is
 history, not a block; a late green for an older tip does not clear a block a
 newer red raised. When a push's `base` matches no recorded tip (a hand push, a
@@ -627,12 +682,25 @@ is unchanged posts a refreshed row: the new sha, the current row's owner,
 refresh after an `escalated` row carries `reason=escalated`. A hand-off row
 carries `reason=handoff`.
 
-**Acknowledgement.** The owner writes `from=<identity id> kind=ack sha=<sha>`
-(stamped) to `board/ci/nexus-develop--owner` with an ordinary tool, MCP or a
-shell `nx`; either carries the identity. An ack counts when the session index
-maps its stamp to the current owner identity and its `sha` is any red tip
+**Acknowledgement.** The owner posts `kind=ack sha=<sha>` to
+`board/ci/nexus-develop--owner` with `nx ci ack <sha7>`, the MCP `tuple_out`
+tool or a shell `nx tuple out`; the client sets `from` to the caller's own
+identity id (a typed value is replaced; a caller with no identity is refused).
+The engine also stamps `from` on every `kind=ack` write to a `--owner` topic,
+whatever the client typed, with the identity its sender-session stamp maps to,
+a delegated identity as its parent (`AckIdentity`, `Identities.countedIdentity`:
+"its parent when it is a delegated identity with one, else itself"); it logs
+`board_ack_from_overwritten` when it replaces a non-blank value, refuses
+nothing, and leaves `from` as typed when the stamp maps to no identity
+(`BoardCiGuard.stampAckFrom`: "With no identity (the stamp maps to none) the
+dims pass unchanged, so a `from` that survives is one no counted ack carries").
+The stamp is a label for readers and `nx group ack-times`; the engine never
+reads `from` to decide: an ack counts when the session index maps its
+sender-session stamp to the current owner identity and its `sha` is a red tip
 since the last green, so an ack carries across a refreshed row. An ack from
-an identity the red was handed away from does not count. The deadline is a timer in the
+an identity the red was handed away from does not count, and neither does one
+whose stamp is null (a tenant credential holds no session) or maps to no
+identity, whatever its `from` says; `nx group ack-times` maps an ack's stamp to its poster the same way (a client read of the identity service, not the engine's count). The deadline is a timer in the
 stamper, in the engine: if no such ack arrives by the deadline counted from
 the row's `episode_at`, the stamper posts a new owner row naming the next-up identity.
 After an engine restart the timer is rebuilt from the latest owner row of
@@ -668,6 +736,26 @@ second `escalated` row after an
 `escalated` row from the current owner row alone: the leader if live, else the
 first live member, else no one, with `handoffs` one higher, the row's suspects
 and no deadline; an ack from the row's owner on the row's own tip ends it.
+Matching that ack and finding who is live both read the identity service. If
+that read fails and the owner's stamped ack, on the row's own tip and posted at
+or after the row, exists (an ack row with a sender session whose `from` is the
+row's owner; the engine stamps `from` with the identity of the sender session
+when it writes the ack), the red may be acknowledged and cannot be matched
+without the read, so the stamper posts nothing and the deadline timer retries after 30
+seconds, without end; the twelfth failure of a topic's hand-off since its last success, cancel or eviction, and
+every twelfth after it, raises the error-level event `board_ack_deadline_stuck`
+(a log event; it posts no row). If that read fails and no such ack row exists,
+the owner has not acknowledged, so the `escalated` row is posted at once with
+`owner` null, as for nobody live. A non-owner's ack, or an ack with no sender
+session, does not hold the escalation off. The remaining residual is a minted
+session with no identity that hand-types the owner's id. Known transition: a
+pre-0.1.200 ack row has a typed `from` (perhaps an alias) and does not match,
+so under the compound fault (the evaluation and the liveness read both down) an
+open red acknowledged before the deploy escalates with `owner` null, a bounded
+false wake. This check is narrower than the normal deadline count: an owner's
+ack posted before its owner row (the bound at or after the row is kept), or on
+an older tip, makes the fail-safe escalate where the normal path would count
+it, the safe direction, a false wake and never a suppression.
 Unvalidated: the research found no protocol to copy.
 
 **Claims.** Only for work no owner post names, such as rerunning a flaky shard;
@@ -792,8 +880,15 @@ A written rule: the pusher or halcyon diagnoses, everyone else holds pushes.
 - [x] Sam accepts the model (groups, stamped owner, three states and the escalated one, local
   actions) and answers the open questions (2026-11-16; gate round 1 answers
   the same day).
-- [ ] The `push-train` group's shape agreed with halcyon.
-- [ ] RDR-253 Phase 1 Steps 1 to 3 landed: identity records and the session
+- [x] The `push-train` group's shape agreed with halcyon. Evidence: halcyon
+  formed it on 2026-11-20 (`nx group list push-train --json` read 2026-11-20:
+  `"formed_at": "2026-11-20T05:19:53.537938Z"`, `"leader": "i12"` (halcyon),
+  `"serves": ["nexus-develop"]`, `"ack_deadline": 20`, `"live": true`; the
+  members joined by 05:20:31Z; plan in T2 `nexus/rdr252-activation-plan-852-2026-11-20`).
+- [x] RDR-253 Phase 1 Steps 1 to 3 landed (evidence: RDR-253's Revision History
+  of 2026-11-17, "wording amended to match the reviewed Step 1 code" (nexus-hczdo.1.1),
+  "Step 2 code" (nexus-hczdo.1.2) and "Step 3 code" (nexus-hczdo.1.4), each a
+  grant 3 amendment): identity records and the session
   index, the membership table with its routes and check, identity tokens, and the client resolver
   with Bash-child token files. Requirements on them, passed to those steps:
   memberships in a permanent table listed by identity and by group (Step 1);
@@ -895,6 +990,26 @@ then `nx config set auras.ci_develop_red=on` and a restart round.
 - `nx group list` shows the leader and members by alias, each with its RDR-253 state (`unheld`, `live`, `lapsed`, `ended`, or `unleased`).
 - Push records and acknowledgement times give after-the-fact grading: time
   from red to acknowledgement and to fix, as WoW tools grade cooldown use.
+- The calibration follow-up is due 2026-12-20 (the close critique r2's S2,
+  `nexus/critique-rdr252-close-2026-11-20-r2`: "the follow-up (calibration by
+  2026-12-20) must name this fix as its precondition"; Sam's close-out ruling,
+  `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`, lets a measurement trail a
+  close as a dated follow-up). Its precondition is the ack fixes: the client's
+  `nx group ack-times` counting an ack by its sender-session stamp and reporting
+  `ignored_acks` (9f14aa59a, f14d51a0d, on develop) and the engine's stamp of an
+  ack's `from` with `--owner` rows kept 35 days (b308e6dc9, b545859c0, on
+  develop; no engine tag contained b308e6dc9 when this was written, so the read
+  waits for a deployed engine that does, inferred, not read). A read before
+  then miscounts acks the stamp does not map and reports an ack tail that does
+  not exist.
+  The follow-up reads attribution quality as well as ack time (close critique
+  r3, S2, `nexus/critique-rdr252-close-2026-11-21-r3`): for each red, whether
+  the first owner row named the pusher whose commit caused it or a suspect that
+  was green on rerun or fixed by someone else (the misattribution case under
+  Known limits), and how often a non-owner fixer had to have the owner ack for
+  them. Owner rows expire after three days until the 35-day `--owner` retention
+  deploys, so reds from before then exist only as T2 snapshots (the critique's
+  observation).
 
 ### New Dependencies
 
@@ -914,6 +1029,12 @@ None.
   throws on every trigger; a restart over such a row re-arms from the row; the
   restart census retries only failed topics and visits tenants without a token
   row.
+- A failing liveness read in the fail-safe: a red with the owner's stamped ack
+  on its tip (a sender session, `from` the row's owner) is retried every 30
+  seconds and never escalated, and is escalated once the read recovers if the
+  ack does not match; a red with no such ack, a non-owner's stamped ack or an
+  ack with no sender session included, is escalated at once with `owner` null; a deadline that is not yet due, or an escalated or absent row,
+  makes no liveness read.
 - A client `out` or `ack` reply with `from=engine` is refused with 403
   `reserved_dim`, the claim kept; the stamper's owner and clear rows have a null
   sender session.
@@ -998,6 +1119,42 @@ None.
   subspace.
 - The engine refuses a client write with `from=engine` to a `board/ci` topic, on
   `out`, `mode=replace` and an `ack` reply.
+- Carry-forward and `branch_outcome`: a failed `branch_outcome` wins over a
+  per-sha success and a per-sha failure is kept over any value; a carried
+  entry that is not `success` (a skipped or neutral one included), an
+  unreadable entry or a trimmed list leaves a per-sha success no verdict with
+  its reason; a carried red keeps the episode open and a green `branch_outcome`
+  clears it (`DoneVerdictBranchOutcomeTest`, for example
+  `aBranchOutcomeOfFailureWinsOverAPerShaSuccess` and
+  `aCarriedSkippedOrNeutralEntryIsNotPassingButThePerShaRunsKeepTheirSet`;
+  `OwnerStamperBranchOutcomeTest`, for example
+  `aCarriedRedKeepsTheEpisodeOpenAndALaterGreenBranchOutcomeClearsIt` and
+  `aShaRowWithNoCountingVerdictLogsOneLineNamingTheReason`).
+- The engine's ack-from stamp: an alias, another seat's id, an absent or blank
+  `from` on an ack to a `--owner` subspace is overwritten with the sender
+  session's identity, a delegated child's ack is stamped with its parent, a
+  `mode=replace` write and an ack reply are stamped alike, and a subspace under
+  another template or another kind is untouched
+  (`service/src/test/java/dev/nexus/service/OwnerAckFromTest.java`, for example
+  `anAliasInFromIsOverwrittenWithTheTokensIdentityAndTheWriteIsAccepted` and
+  `aDelegatedChildsAckIsStampedWithItsParentBecauseThatIsWhoIsCounted`).
+- `nx ci ack`: writes the ack row from the caller's identity id, resolves a
+  sha prefix against the open red's tips and refuses a sha that is no tip; a
+  hand-typed alias in an ack is restamped and a caller with no identity is
+  refused (`tests/test_ci_ack_identity.py`, for example
+  `test_nx_ci_ack_writes_the_ack_row_from_the_callers_identity_id` and
+  `test_a_caller_with_no_identity_is_refused_and_nothing_is_written`).
+- `nx group ack-times` `ignored_acks`: an ack with a null or unmapped stamp is
+  counted per red, noted once on stderr and never counted in minutes
+  (`tests/test_group_ack_times.py::test_ignored_acks_are_counted_per_red_and_noted_on_stderr_and_never_count_in_minutes`).
+- The group ready check: `--ask-ready --group` asks only a group's live
+  members and `--status --group` reports only them; each member it did not
+  cover is named with its state and why; a blank, unknown, disbanded or
+  member-less group refuses in one line; the restart takes no group and a
+  restart after a group round still refuses
+  (`tests/scripts/test_claude_restart_sessions_group.py`, for example
+  `test_ask_ready_with_a_group_names_the_members_it_did_not_cover` and
+  `test_a_restart_after_a_group_round_still_wants_every_session_asked`).
 
 ## Validation
 
@@ -1037,6 +1194,31 @@ here.
 Unvalidated by design and said so: escalation and the 20-minute deadline
 (calibrated after use).
 
+Known limits, seen live and not designed away here. Sam's owner rule stands
+(the earliest suspect owns the red); this records where it misses.
+
+- Misattribution. The develop red at 9f14aa59a, 2026-11-20 20:48Z: the owner
+  row posted at 20:48:09 named i3 (linda) with reason `earliest_suspect` and suspects
+  11da32740 and 9f14aa59a. 11da32740 (linda's P1.R) "was green after a rerun";
+  the cause was 9f14aa59a (marginalia's ack-identity change). Linda's ack
+  arrived at 1.75 minutes and said the red was not hers; it "counted" and "no
+  handoff" followed the 21:08:09 deadline. The engine re-seated ownership onto i5
+  (marginalia) at 21:27:58, about 40 minutes later, as a new episode with "no
+  clear row in between" (T2 `nexus/rdr252-owner-rows-snapshot-2026-11-20b`,
+  notes 1 and 2; `bd show nexus-igea9.4`, the A6 calibration note).
+- A next-up who is the real fixer cannot stop the deadline: "a next-up who is
+  the actual fixer cannot stop the deadline" (the same bead note; snapshot note
+  2). The engine counts an ack by its sender-session stamp "mapped through the
+  session index to the owner's identity" (`tests/test_ci_ack_identity.py`
+  docstring), so the fixer waits for the hand-off or has the owner ack for
+  them, as happened here; the timer path itself was not re-read for this line,
+  inferred.
+
+The open design question, whether the stamper should drop a suspect as soon as
+that suspect's own run is green instead of waiting for the next red tip to
+re-seat, is not decided here; it sits in the same bead note. Nothing in this
+section changes Sam's rule.
+
 ### Scope Verification
 
 In scope: groups and members, push records, the stamper with its deadline
@@ -1054,8 +1236,12 @@ RDR-253's fence on `member/*`, against JDR-002's "never a refusal"; Sam's
 revision entry there names it. A Desktop seat is `unleased` and writes on
 RDR-253's exception for its own membership, labelled unattested.
 Release: Steps 1 and 3 need an engine release, Steps 2 and 4 a conexus
-release that pins it. Noise: no wake for everyone else. Data lifetime: push,
-owner and clear rows share the CI posts' three-day retention; group records
+release that pins it. Noise: no wake for everyone else. Data lifetime: the
+base topic and `--push` keep the template's three days (`retention_seconds:
+259200`); a topic ending `--owner`, which holds the owner, clear and ack rows,
+keeps 35 days (`retention_by_suffix: --owner: 3024000`, "the calibration of the
+acknowledgement deadline reads the first 20 reds or 30 days of --owner rows, so
+those keep 35 days", `board-ci.yaml`); group records
 and memberships are permanent rows, a membership removed when its seat
 leaves the group, when the group is disbanded, or when RDR-253's retention
 prunes an ephemeral or delegated identity.
@@ -1128,3 +1314,11 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-19: wording matched to the reviewed Step 4 code (nexus-igea9.7): a server that loaded with no identity gates its group-gated auras once more when the identity lease adopts its first identity; every other change waits for a reconnect; Test Plan line added.
 - 2026-11-19: wording matched to the reviewed engine 0.1.198 code (nexus-igea9, b300a8550, 76bbd34d4; grant 3): the owner row carries `owner_alias` and `next_alias`, read at stamp time, absent for an identity with none or on a failed read; the notice shows the alias, else the id; the aliases count inside the 1024-byte cap, suspects cut first.
 - 2026-11-20: engine fixes for the close critique's S2 and S3 (nexus-igea9; grant 3): the deadline rebuild retries failed pairs until a full census, a stamper error arms its deadline and escalates at it, a failing evaluation falls back to the current owner row, and `from=engine` is engine-only (client writes refused with `reserved_dim`; a prior row counts as state only with a null sender session). `board-ci.yaml` `from.engine` documents the refusal.
+- 2026-11-20: `nx ci ack` and the client stamp of `from` on an ack (nexus-igea9; grant 3): `nx group ack-times` resolves an ack's poster by the sender-session stamp through the session index, a delegated child to its parent (read from the child's identity record, and noted as unresolved when the credential cannot read it), and never reads `from` (see the 2026-11-20 line below for the null stamp); it counts red tips and the engine's own owner and clear rows as the engine does, but it is a client read of the identity service, not the engine's count. The engine counts the sender stamp; a hand ack with a session alias stopped the hand-off on red ae619ef56 and only ack-times missed it.
+- 2026-11-20: `nx group ack-times` counts an ack only when its sender-session stamp maps (nexus-igea9; grant 3, wording matched to the engine's confirmed ack half): an ack with a null stamp, or one that maps to no identity (404 `unknown_session`), counts for nobody whatever its `from` says, and is counted as ignored (`ignored_acks` per red in `--json`, one note on standard error, never in `minutes`) when it is on a red tip inside the red; a stamp that is not a session id, a host with no session route to ask, and a failed or refused lookup are noted as unresolved (counts may be low) and never remembered; the ack counts for nobody in each case. The `from` fallback (an identity id as written, a name through `owner_alias`/`next_alias`, then the identity service's name route) is removed, so a hand-typed `from=<owner id>` no longer counts in ack-times where the engine counts nothing.
+- 2026-11-20: wording matched to the reviewed carry-forward engine code (conexus-lru2; grant 3): a tip's verdict reads the `--done` row's `branch_outcome` (the tip's outcome folded with the latest earlier result of a path-filtered workflow such as Service CI) ahead of `outcome`, so a Service CI red a later sha never re-ran keeps the red episode open; a per-sha failure is never overridden, an unrecognised `branch_outcome` is no verdict, and a row without it whose body carries a null, trimmed or not-all-`success` `carried` list has no verdict for a per-sha success (a carried skipped or neutral does not pass; a body with neither `carried` nor `carried_n` reads as before); the stamper logs `board_done_no_verdict` with the reason `carry_failed`, `carried_not_green`, `cancelled` or `unknown`.
+- 2026-11-20: wording matched to the reviewed code (nexus-igea9, close critique r2 S1, S3 and observations; grant 3): the restart script's ready check is `claude-restart-sessions --ask-ready --group X` and `--status --group X` (live members here, matched by alias, uncovered members named with a state, the restart takes no group, a group round replaces the round file; v8.5.3), with a Test Plan line; Gap 1 says what was built (membership, the leader, the develop red's owner post; typed assignments cut at gate round 1), the title unchanged; the two Prerequisites ticked with their evidence (push-train formed 2026-11-20, RDR-253 Steps 1 to 3 landed); and the stamp's meaning cites RDR-253 now that it says it.
+- 2026-11-21: wording matched to the reviewed fail-safe fix (nexus-igea9; grant 3): when the fail-safe's identity read fails, a red with an ack row on its tip is retried every 30 seconds without end (the twelfth failure of a topic's hand-off since its last success, cancel or eviction, and every twelfth after, raises the log event `board_ack_deadline_stuck`), and a red with no ack row is escalated at once with `owner` null; Test Plan line added.
+- 2026-11-21: the fail-safe's hold-off narrowed to the owner's stamped ack (nexus-igea9; grant 3): when the liveness read fails, only an ack row with a sender session whose `from` is the row's owner, on the row's tip and at or after the row, holds the escalation off; a non-owner's ack and an ack with no sender session escalate at once with `owner` null. The known transition (pre-0.1.200 ack rows with a typed `from` escalate with `owner` null under the compound fault) and the check's narrowness against the normal deadline count are recorded in the fail-safe text; the Test Plan line is matched.
+- 2026-11-21: close wording matched to the shipped engine ack half and the close critique r2's follow-ups (nexus-igea9; grant 3): the engine stamps an ack's `from` from the sender session's identity (a delegated one as its parent, left as typed when nothing maps) and `--owner` rows keep 35 days while the base topic and `--push` keep three (cited from `board-ci.yaml`, `BoardCiGuard.stampAckFrom` and `Identities.countedIdentity`); the Day 2 calibration follow-up due 2026-12-20 names the ack fixes as its precondition.
+- 2026-11-21: known limits and Test Plan matched to the close critique r3 (nexus-igea9, nexus-igea9.4; grant 3): a Known limits clause beside "Unvalidated by design" records the live earliest-suspect misattribution at 9f14aa59a and the next-up fixer who cannot stop the deadline, leaves the suspect-dropping question open and Sam's rule standing; the Day 2 calibration read covers attribution quality as well as ack time; the skipped or neutral workflow assumption says what watches it (nothing) and who decides (the board's maintainers, 2026-12-20), with the path-filtered workflows named; four Test Plan lines (carry-forward and `branch_outcome`, the engine's ack-from stamp, `nx ci ack`, `ignored_acks`).

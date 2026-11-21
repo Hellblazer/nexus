@@ -93,11 +93,11 @@ def is_quarantine_sibling_name(name: str) -> bool:
     on ``quarantine-code__1-41__voyage-code-3__v1`` refused with
     ``unknown content_type 'quarantine-code'``).
     """
-    from nexus.collection_shape import collection_attributes  # noqa: PLC0415 — deferred, keeps this module import-light
+    from nexus.collection_shape import shape_of  # noqa: PLC0415 — deferred, keeps this module import-light
 
     # The one sanctioned name parser for the quarantine flag (RDR-204: no
     # new raw parse sites; tests/test_collection_name_parse_census.py).
-    return collection_attributes({"name": name}).quarantine
+    return shape_of({"name": name}).quarantine
 
 
 def quarantine_collection_name(origin: str) -> str:
@@ -137,7 +137,7 @@ def quarantine_collection_name(origin: str) -> str:
     # exactly (the docstring's C3 note: model/version must survive intact
     # for a conformant name, which the whole-remainder convention already
     # guarantees without decomposing further).
-    from nexus.corpus import (  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid import cycle (nexus.corpus)
         model_version_for_collection_name,
         split_candidate_collection_name,
     )

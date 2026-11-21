@@ -17,6 +17,7 @@ from typing import Any
 import structlog
 
 from nexus import call_deadline
+from nexus.collection_route import listing_content_type, row_content_type
 from nexus.config import TuningConfig, get_telemetry_config, is_local_mode, load_config
 from nexus.sensitive_output import tumbler_order_key
 from nexus.sensitivity import ReadSensitivity
@@ -34,9 +35,10 @@ from nexus.context_annotations import (  # noqa: F401 — owner_titles is re-exp
     entry_facts,
     owner_titles,
 )
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
 from nexus.corpus import (
     LOCAL_EMBEDDING_MODELS,
-    embedding_model_for_collection_name,
+    candidate_content_type,
     resolve_row_preferred,
 )
 from nexus.db.http_vector_client import (
@@ -786,23 +788,25 @@ _OWNER_TITLE_RESOLVE_CAP: int = OWNER_RESOLVE_CAP
 # Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.
 _MAX_PREFILTER_IDS = 500
 
-# Known collection prefixes mapped to their threshold config key.
-_PREFIX_TO_KEY: list[tuple[str, str]] = [
-    ("code__", "code"),
-    ("knowledge__", "knowledge"),
-    ("docs__", "docs"),
-    ("rdr__", "rdr"),
-]
+# Content types that have their own threshold config key (the key is the content type), read from
+# the collection's catalog row (RDR-229 P2.9); every other collection takes the "default" key.
+_THRESHOLD_CONTENT_TYPES: tuple[str, ...] = ("code", "knowledge", "docs", "rdr")
 
 
-def _threshold_for_collection(name: str, cfg: dict) -> float | None:
-    """Return the distance threshold for *name*, or ``None`` if unconfigured."""
+def _threshold_for_collection(
+    name: str, cfg: dict, content_type_of: "Callable[[str], str | None] | None" = None,
+) -> float | None:
+    """Return the distance threshold for *name*, or ``None`` if unconfigured.
+
+    The content type is the catalog row's, from *content_type_of*
+    (:func:`_collection_content_type_resolver`) or, when none is passed, the client row cache.
+    """
     thresholds = cfg.get("search", {}).get("distance_threshold")
     if not thresholds:
         return None
-    for prefix, key in _PREFIX_TO_KEY:
-        if name.startswith(prefix):
-            return thresholds.get(key)
+    content_type = (content_type_of or row_content_type)(name)
+    if content_type in _THRESHOLD_CONTENT_TYPES:
+        return thresholds.get(content_type)
     return thresholds.get("default")
 
 
@@ -825,6 +829,7 @@ def _engine_is_dual(t3: Any) -> bool:
 def _threshold_for_collection_model(
     name: str, cfg: dict, *, dual: bool = False,
     model_of: "Callable[[str], str | None] | None" = None,
+    content_type_of: "Callable[[str], str | None] | None" = None,
 ) -> float | None:
     """:func:`_threshold_for_collection`, withheld from a collection whose
     own embedding model is a local one (bge, MiniLM).
@@ -854,7 +859,7 @@ def _threshold_for_collection_model(
         return None
     if model is None and dual:
         return None
-    return _threshold_for_collection(name, cfg)
+    return _threshold_for_collection(name, cfg, content_type_of)
 
 
 def _is_local_model(model: str) -> bool:
@@ -898,16 +903,15 @@ def _voyage_thresholds_active(t3: Any) -> bool:
     return t3.embedding_mode() in _THRESHOLD_ENGINE_MODES
 
 
-def _overfetch_multiplier(collection_name: str) -> int:
+def _overfetch_multiplier(
+    collection_name: str, content_type_of: "Callable[[str], str | None] | None" = None,
+) -> int:
     """Return the over-fetch multiplier for *collection_name*.
 
     4x for knowledge/docs/rdr (high noise ratio that benefits from a larger
     candidate pool before threshold filtering); 2x for code and everything else.
     """
-    for prefix in ("knowledge__", "docs__", "rdr__"):
-        if collection_name.startswith(prefix):
-            return 4
-    return 2
+    return 4 if (content_type_of or row_content_type)(collection_name) in ("knowledge", "docs", "rdr") else 2
 
 
 def _model_token(name: str) -> str | None:
@@ -918,8 +922,39 @@ def _model_token(name: str) -> str | None:
     return embedding_model_for_collection_name(name)
 
 
+def _catalog_rows(t3: Any, collections: "Iterable[str]") -> dict[str, dict | None]:
+    """The catalog row of each of *collections* through *t3*'s own batched resolver, fetched once;
+    ``{}`` for a handle with no such resolver (a test fake), or when the lookup cannot complete."""
+    fetch = getattr(t3, "_resolve_collection_rows", None)
+    if not callable(fetch):
+        return {}
+    try:
+        return dict(fetch(list(dict.fromkeys(collections))))
+    except Exception:  # noqa: BLE001 — a row lookup that cannot complete degrades to the name derivation, as resolve_row_preferred does per name; search must not fail on it
+        _log.warning("collection_model_rows_unavailable", exc_info=True)
+        return {}
+
+
+def _collection_content_type_resolver(
+    t3: Any, collections: "Iterable[str]", rows: dict[str, dict | None] | None = None,
+) -> "Callable[[str], str | None]":
+    """A ``name -> content type`` function reading the collection's catalog row (RDR-229 P2.9).
+
+    The same rows :func:`_collection_model_resolver` reads: the handle's own batched resolver, so
+    a client working for another tenant is never answered from this process's cache. A handle with
+    no such resolver (a test fake, an injected stub) has no catalog, and never reaches the
+    process-wide row cache (as :func:`_collection_model_resolver`). A name no row backs, or a row
+    lookup that failed, answers from the candidate name's own segment (item 1's NoRow outcome, as the
+    model resolver falls back to the name's token), so a failed lookup never defaults every collection;
+    a prefix-free label with no row has none (P3.8).
+    """
+    if rows is None:
+        rows = _catalog_rows(t3, collections)
+    return lambda name: listing_content_type(rows.get(name)) or candidate_content_type(name)
+
+
 def _collection_model_resolver(
-    t3: Any, collections: "Iterable[str]",
+    t3: Any, collections: "Iterable[str]", rows: dict[str, dict | None] | None = None,
 ) -> "Callable[[str], str | None]":
     """A ``name -> embedding model`` function, row-preferred (nexus-noayy).
 
@@ -936,14 +971,12 @@ def _collection_model_resolver(
     other), never one request per collection per use. A handle with no such
     resolver (a test fake, an injected stub) has no catalog and resolves by name
     exactly as before; it never reaches the process-wide row cache.
+
+    *rows* is the result of :func:`_catalog_rows` when the caller already fetched it, so the
+    model and the content type share one fetch.
     """
-    rows: dict[str, dict | None] = {}
-    fetch = getattr(t3, "_resolve_collection_rows", None)
-    if callable(fetch):
-        try:
-            rows = dict(fetch(list(dict.fromkeys(collections))))
-        except Exception:  # noqa: BLE001 — a row lookup that cannot complete degrades to the name derivation, as resolve_row_preferred does per name; search must not fail on it
-            _log.warning("collection_model_rows_unavailable", exc_info=True)
+    if rows is None:
+        rows = _catalog_rows(t3, collections)
     unresolved: set[str] = set()
 
     def model_of(name: str) -> str | None:
@@ -1242,6 +1275,7 @@ def _is_mixed_model_error(exc: VectorServiceError) -> bool:
 
 def _desired_candidate_count(
     cols: list[str], n_results: int, *, deep: bool = False,
+    content_type_of: "Callable[[str], str | None] | None" = None,
 ) -> int:
     """Uncapped per-batch candidate-count target for *cols* (nexus-d9xt2
     review/critique fold-in, T2 code-review-nexus-d9xt2 / critique-nexus-d9xt2).
@@ -1308,7 +1342,7 @@ def _desired_candidate_count(
     ``tests/test_search_fanout_recall_parity.py`` holds split corpora to an
     evidence-based floor for that reason.
     """
-    mult = max((_overfetch_multiplier(c) for c in cols), default=2)
+    mult = max((_overfetch_multiplier(c, content_type_of) for c in cols), default=2)
     return max(
         n_results * mult,
         len(cols) * _per_collection_floor(n_results, mult, deep=deep),
@@ -1744,7 +1778,10 @@ def search_cross_corpus(
     # nexus-noayy: each collection's embedding model, read from its catalog row
     # (the name's token only when no row backs it), once for this search. Grouping
     # and the per-family thresholds below share it.
-    model_of = _collection_model_resolver(t3, collections)
+    catalog_rows = _catalog_rows(t3, collections)
+    model_of = _collection_model_resolver(t3, collections, catalog_rows)
+    # RDR-229 P2.9: the content type routes the threshold and the over-fetch; it is the row's, from the same fetch.
+    content_type_of = _collection_content_type_resolver(t3, collections, catalog_rows)
     if model_of_out is not None:
         model_of_out.append(model_of)
 
@@ -1758,7 +1795,7 @@ def search_cross_corpus(
         if threshold_override is not None:
             return threshold_override
         return _threshold_for_collection_model(
-            col, cfg, dual=dual_engine, model_of=model_of,
+            col, cfg, dual=dual_engine, model_of=model_of, content_type_of=content_type_of,
         )
 
     def _to_result(r: dict, col: str) -> SearchResult:
@@ -1857,7 +1894,7 @@ def search_cross_corpus(
         # upstream, multiplied by up to 4x, must not punch through the
         # service quota.
         per_k = min(
-            _desired_candidate_count(cols, n_results, deep=deep_pool),
+            _desired_candidate_count(cols, n_results, deep=deep_pool, content_type_of=content_type_of),
             QUOTAS.MAX_QUERY_RESULTS,
         )
         rerank_meta: dict = {}
@@ -2024,7 +2061,7 @@ def search_cross_corpus(
     _probe = getattr(t3, "supports_topic_route", None)
     routable = (
         topic_route is not None
-        and any(is_prose(c) for c in collections)
+        and any(is_prose(c, content_type_of) for c in collections)
         and unrouted_reason(where=effective_where, chash_allow=_allow) is None
         and callable(_probe)
         and _probe() is True
@@ -2037,7 +2074,7 @@ def search_cross_corpus(
     route_tally = (
         TopicRouteTally(
             topic_route, collections, where=effective_where, chash_allow=_allow,
-            per_collection_route=per_collection_route,
+            per_collection_route=per_collection_route, content_type_of=content_type_of,
         )
         if topic_route is not None else None
     )
@@ -2138,7 +2175,7 @@ def search_cross_corpus(
         if allow_split and len(group) > 1 and _group_is_known_mixed(group):
             return _split_per_collection()
 
-        mult = max((_overfetch_multiplier(c) for c in group), default=2)
+        mult = max((_overfetch_multiplier(c, content_type_of) for c in group), default=2)
         per_collection_k, limit = _per_collection_request_sizes(
             n_results, mult, rerank=bool(server_rerank),
         )
@@ -2290,7 +2327,7 @@ def search_cross_corpus(
             })
 
         if hybrid_cols:
-            desired = _desired_candidate_count(hybrid_cols, n_results, deep=True)
+            desired = _desired_candidate_count(hybrid_cols, n_results, deep=True, content_type_of=content_type_of)
             if desired > QUOTAS.MAX_QUERY_RESULTS and len(hybrid_cols) > 1:
                 n_batches = min(len(hybrid_cols), -(-desired // QUOTAS.MAX_QUERY_RESULTS))
                 lex_batches = _chunked_collections(hybrid_cols, n_batches)
@@ -2298,7 +2335,7 @@ def search_cross_corpus(
                 lex_batches = [hybrid_cols]
 
             def _lex_batch(cols: list[str]) -> tuple[list[str], list[dict]]:
-                per_k = min(_desired_candidate_count(cols, n_results, deep=True),
+                per_k = min(_desired_candidate_count(cols, n_results, deep=True, content_type_of=content_type_of),
                             QUOTAS.MAX_QUERY_RESULTS)
                 return cols, _lexical_rows(cols, per_k, rerank_meta)
 
@@ -2392,7 +2429,7 @@ def search_cross_corpus(
         # _desired_candidate_count's docstring -- scaled by len(group) as
         # well as n_results*mult, so a large group is no longer starved
         # to a handful of total candidates shared across every member.
-        desired = _desired_candidate_count(group, n_results, deep=deep_pool)
+        desired = _desired_candidate_count(group, n_results, deep=deep_pool, content_type_of=content_type_of)
         if desired > QUOTAS.MAX_QUERY_RESULTS and len(group) > 1:
             # The group would need more than the service cap to give
             # every collection a fair shot -- split into as few calls as

@@ -484,6 +484,68 @@ def row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start(worl
     assert world.identity(alpha)["state"] == "unheld"
 
 
+def _under_name(world: World, name: str) -> str:
+    """Make *world* name its machine *name* (a hostname the network later changed), returning the name it had."""
+    before = world.host
+    world.host = world.procs.host = name
+    return before
+
+
+def row_a_vanished_hostname_this_machine_bound_under_is_found_gone_and_a_stranger_is_not(world: World) -> None:
+    """GitHub issue 1679. A binding written before the stable host key carries ``gethostname()``, a name the machine no
+    longer has; the hook's own token file for the holder records it, which is the proof the row is this machine's. The
+    holder's pid is dead, so a ``startup`` of the seat and a ``resume`` of the ephemeral both rebind the SAME identity and
+    the real engine takes the verdict (its ``holder_gone`` names the host as the row records it). A row under the same
+    name that nothing local wrote is another machine's: its live lease refuses the seat, though no such process exists here."""
+    legacy, stranger = world.q("legacy-102"), world.q("stranger")
+    alpha, beta, gamma = world.seat("alpha"), world.seat("beta"), world.seat("gamma")
+    key = _under_name(world, legacy)
+    world.process(100)
+    world.hook(100, "startup", "sid-a", seat="alpha")
+    world.process(110)
+    ephemeral = world.hook(110, "startup", "sid-e")
+    assert ephemeral.action == "ephemeral"
+    _under_name(world, key)                                  # the network moved on; the machine's name is its key now
+    world.procs.stop(100, keep_registry=True)
+    world.procs.stop(110, keep_registry=True)
+    _held_by(world, beta, 200, host=stranger)
+    _held_by(world, gamma, 300, host=legacy)                 # the same name, and nothing local wrote it
+    world.process(101, os_start=T1)
+    mine = world.hook(101, "startup", "sid-b", seat="alpha")
+    assert (mine.action, mine.identity, mine.generation) == ("bound", alpha, 2)
+    row = world.log(alpha)[-1]
+    assert row["event"] == "start" and row["holder_gone"]["host"] == legacy and row["holder_gone"]["pid"] == 100
+    assert world.identity(alpha)["holder"]["host"] == key, "the new holder is recorded under the machine's key"
+    world.process(111, os_start=T1)
+    resumed = world.hook(111, "resume", "sid-e")
+    assert (resumed.action, resumed.identity) == ("bound", ephemeral.identity), resumed.notices
+    world.process(102, os_start=T2)
+    assert world.hook(102, "startup", "sid-c", seat="beta").action == "ephemeral"
+    world.process(103, os_start=T2)
+    assert world.hook(103, "startup", "sid-d", seat="gamma").action == "ephemeral"
+    assert world.identity(gamma)["holder"]["pid"] == 300 and world.identity(beta)["holder"]["pid"] == 200
+
+
+def row_a_process_bound_before_the_host_key_keeps_its_identity_across_a_clear(world: World) -> None:
+    """GitHub issue 1679, upgrade path: a Claude bound under a hostname the network has since changed is still running
+    when the new client handles its ``/clear``. The engine compares ``host`` as a string on ``clear``, so the client speaks
+    under the host the holder row records (proved by the hook's token file); sent under the key it would be 409
+    ``holder_mismatch``, and the process would leave its identity for a new ephemeral."""
+    legacy = world.q("legacy-102")
+    world.process(100)
+    key = _under_name(world, legacy)                          # the process bound under the old name
+    first = world.hook(100, "startup", "sid-a")
+    _under_name(world, key)                                   # the upgraded client now names the machine by its key
+    cleared = world.hook(100, "clear", "sid-b")
+    assert (cleared.action, cleared.row, cleared.identity, cleared.generation) == ("bound", "clear_in_process", first.identity, 1)
+    assert world.identity(first.identity)["holder"]["host"] == legacy
+    assert world.events(first.identity) == ["start", "clear"]
+    assert read_token_file(token_path(world.identity_dir, 100, 100_000)).host == legacy
+    forked = world.hook(100, "fork", "sid-c")                 # /branch: the same rule for a fork
+    assert (forked.action, forked.row, forked.identity, forked.generation) == ("bound", "fork_in_process", first.identity, 1)
+    assert world.events(first.identity) == ["start", "clear", "fork"] and world.identity(first.identity)["holder"]["host"] == legacy
+
+
 # ── the table ───────────────────────────────────────────────────────────────
 
 ROWS = (
@@ -513,4 +575,6 @@ ROWS = (
     row_a_data_credential_hook_forks_for_a_clear_keeps_its_seat_on_a_forbidden_switch_and_sweeps_quietly,
     row_a_resume_of_an_unindexed_id_in_a_process_that_holds_an_identity_reuses_it_or_closes_it_for_the_named_seat,
     row_a_cross_seat_switch_honours_the_other_host_reservation_like_a_start,
+    row_a_vanished_hostname_this_machine_bound_under_is_found_gone_and_a_stranger_is_not,
+    row_a_process_bound_before_the_host_key_keeps_its_identity_across_a_clear,
 )

@@ -78,8 +78,10 @@ import java.util.stream.Stream;
  *
  * <p>Non-vacuity: the gate must read as many changesets as the files hold {@code <changeSet>} elements and more than zero, the
  * frozen list must be non-empty, and the shipped tree must show each kind of rule 1 and 2 finding at least once (a rule that
- * stopped matching would otherwise freeze nothing and pass). Rule 3 sees no registered move in the shipped tree (none is
- * registered yet), so its cases are the fixture scenarios under {@code src/test/resources/data-move-gate/scenarios}. SQL for
+ * stopped matching would otherwise freeze nothing and pass). Rule 3 sees three registered moves in the shipped tree (vectors-064,
+ * nexus-f3yqd.2.23, the first; {@code rdr229-reown-repo-stems-from-curator}, vectors-067; and
+ * {@code rdr229-residue-catalog-documents}, catalog-049-2), and its cases are the fixture scenarios under
+ * {@code src/test/resources/data-move-gate/scenarios}. SQL for
  * the cases lives there, as XML, not in this file.
  */
 class DataMoveChangesetGateTest {

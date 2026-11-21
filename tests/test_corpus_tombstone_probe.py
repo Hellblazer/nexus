@@ -63,6 +63,9 @@ def test_tombstoned_promoted_candidate_logs_debug_and_falls_through_to_legacy(
         stats_names={legacy}, raw_names={legacy, promoted},
     )
     client = HttpVectorClient()
+    # RDR-229 P2.8: with promoted holding nothing, the subject's catalog row is read before
+    # the legacy fallback; this test is about the tombstone log, so the registry has no row.
+    monkeypatch.setattr(client, "find_collection", lambda *_a: None)
 
     # Bump structlog so the DEBUG event fires under capture_logs (matches
     # tests/test_catalog_path.py's pattern; default filter level is WARNING).

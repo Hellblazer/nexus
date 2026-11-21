@@ -34,6 +34,7 @@ from nexus.mcp_infra import DrainResult, drain_unassigned_chunks
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._chunk_seed import seed_chunks_direct
 
+
 _COLL = "knowledge__iygza-drain__bge-base-en-v15-768__v1"
 _BARE = "knowledge__iygza-bare__bge-base-en-v15-768__v1"
 _TWIN = "knowledge__iygza-twin__bge-base-en-v15-768__v1"
@@ -247,9 +248,14 @@ def _index_repo(tmp_path, monkeypatch):
     repo.mkdir()
     (repo / ".git").mkdir()
     reg = MagicMock()
-    # docs_collection too: local mode excludes code__* from taxonomy work.
+    # docs_collection too: local mode excludes the code collection (its row says code) from taxonomy work.
     reg.get.return_value = {"collection": "code__myrepo", "docs_collection": "docs__myrepo"}
     mcp_infra.reset_taxonomy_assign_run_stats()
+    # RDR-229 P2.9: local mode excludes the code collection by its ROW's content type, which the mocked
+    # indexer never wrote; give the registry's collections the rows a registered pair would have.
+    from tests.conftest import catalog_row_for_collection_name
+
+    monkeypatch.setattr(mcp_infra, "get_collection_row", lambda name, **kw: catalog_row_for_collection_name(name))
     # No uptime evidence, so nexus-tawfg does not defer: the substrate
     # engine really did start seconds ago, which would defer the drain
     # these tests exercise. (Deferral itself: tests/test_tawfg_*.)

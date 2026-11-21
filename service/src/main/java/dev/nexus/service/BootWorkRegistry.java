@@ -41,9 +41,18 @@ public final class BootWorkRegistry {
      * @param startedAt  when {@link #register} was called
      * @param safeToStop whether stopping the engine now loses nothing that cannot be redone
      * @param onStop     what stopping the engine does to this work
+     * @param reasonClass nexus-f3yqd.2.23, [additive]: a fixed class of why the work is held ({@code "missing_prerequisite"}:
+     *                   a data move blocked because an extension or library it needs is not installed), for a client that
+     *                   must tell it from other blocks without reading {@code what}; null for every other entry, and then
+     *                   absent from the wire
      */
     public record Entry(String id, String what, Instant startedAt, Long done, Long total, String unit,
-                        boolean safeToStop, String onStop, Step step) { }
+                        boolean safeToStop, String onStop, Step step, String reasonClass) {
+        public Entry(String id, String what, Instant startedAt, Long done, Long total, String unit, boolean safeToStop,
+                     String onStop, Step step) {
+            this(id, what, startedAt, done, total, unit, safeToStop, onStop, step, null);
+        }
+    }
 
     private final Clock clock;
     private final Object lock = new Object();
@@ -62,7 +71,7 @@ public final class BootWorkRegistry {
                          String onStop) {
         Objects.requireNonNull(id, "id");
         Entry entry = new Entry(id, Objects.requireNonNull(what, "what"), clock.instant(), done, total, unit,
-            safeToStop, Objects.requireNonNull(onStop, "onStop"), null);
+            safeToStop, Objects.requireNonNull(onStop, "onStop"), null, null);
         synchronized (lock) {
             entries.put(id, entry);
         }
@@ -74,7 +83,7 @@ public final class BootWorkRegistry {
             Entry old = entries.get(id);
             if (old != null) {
                 entries.put(id, new Entry(old.id(), old.what(), old.startedAt(), done, total, old.unit(),
-                    old.safeToStop(), old.onStop(), old.step()));
+                    old.safeToStop(), old.onStop(), old.step(), old.reasonClass()));
             }
         }
     }
@@ -85,7 +94,7 @@ public final class BootWorkRegistry {
             Entry old = entries.get(id);
             if (old != null) {
                 entries.put(id, new Entry(old.id(), old.what(), old.startedAt(), old.done(), old.total(),
-                    old.unit(), old.safeToStop(), old.onStop(), step));
+                    old.unit(), old.safeToStop(), old.onStop(), step, old.reasonClass()));
             }
         }
     }
@@ -97,12 +106,17 @@ public final class BootWorkRegistry {
      * is not registered.
      */
     public void update(String id, String what, Long done, Long total, Step step) {
+        update(id, what, done, total, step, null);
+    }
+
+    /** As {@link #update(String, String, Long, Long, Step)}, and sets the entry's {@code reasonClass} (null clears it). */
+    public void update(String id, String what, Long done, Long total, Step step, String reasonClass) {
         Objects.requireNonNull(what, "what");
         synchronized (lock) {
             Entry old = entries.get(id);
             if (old != null) {
                 entries.put(id, new Entry(old.id(), what, old.startedAt(), done, total, old.unit(), old.safeToStop(),
-                    old.onStop(), step));
+                    old.onStop(), step, reasonClass));
             }
         }
     }

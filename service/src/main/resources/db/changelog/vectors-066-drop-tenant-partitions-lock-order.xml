@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus.drop_tenant_partitions takes the locks its teardown needs up front, under one deadline per attempt
+    (production deadlock, engine 0.1.199, 2026-11-20 ~17:08Z).
+
+    THE DEADLOCK. The function (vectors-030-1) DETACHed and DROPped one leaf at a time, ordered by name, each
+    ALTER TABLE holding its ACCESS EXCLUSIVE lock to commit. A search (nexus.plain_search_1024 and the other search
+    functions) enters through the ROOT nexus.chunks, then locks model partitions and leaves in the planner's order. A
+    search holding the root and one partition, wanting the partition the drop held; the drop holding that partition,
+    wanting one the search held: "deadlock detected", the drop's DETACH PARTITION the victim (drop_tenant_partitions
+    line 43), process A waiting for AccessExclusiveLock on relation 17263 blocked by the search, the search waiting
+    for AccessShareLock on relation 17059 blocked by A.
+
+    THE FIX. Same function, same deletes, same advisory lock and tenant scoping; what changes is when and how it locks.
+      A. Before any lock it reads the tenant's model partitions and leaves from the catalog. A tenant with none returns
+         0 without locking (and without the deletes: the foreign keys leave no row of a leafless tenant to delete).
+      B. It serializes with every other drop (one global advisory lock, held to commit) before its deletes. Two drops
+         of different tenants would otherwise each hold RowExclusive on the manifest tables from their deletes and then
+         each want ACCESS EXCLUSIVE on them, each waiting for the other.
+      C. After the three DELETEs, in one attempt, it takes ACCESS EXCLUSIVE, one LOCK TABLE per relation, on, in this
+         order:
+           1. the tables around the leaves (found from pg_constraint: those with a foreign key to the tenant's
+              partitions, the manifest, topic assignments and orphaned-at records, and those the partitions have one
+              to, the collection registry). DETACH and DROP take ACCESS EXCLUSIVE on exactly these (pg_locks,
+              measured; DropTenantPartitionsIntegrationTest pins the complete set);
+           2. the two roots, ONLY: nexus.chunks, nexus.taxonomy_centroids;
+           3. the tenant's own model partitions and leaves, ONLY, in the order the loop detaches them.
+         It takes no lock of any mode on another tenant's partition or leaf (the exclusions in step 1 are by catalog row,
+         never pg_partition_tree, which would lock every partition), so an index build, a REINDEX CONCURRENTLY or a
+         vacuum on one (SHARE UPDATE EXCLUSIVE on a leaf, for minutes) does not make the drop fail. (It does not stop
+         a build on THIS tenant's leaves, or a search of anyone, from making it give up: see D.)
+      D. THE BUDGET. Every lock of an attempt shares ONE deadline: before each LOCK the function sets lock_timeout to what
+         is left of the attempt's budget (at least 1 ms), where the budget is half of deadlock_timeout, at most 500 ms
+         (500 ms at the default deadlock_timeout of 1 s; 50 ms at 100 ms; a deadlock_timeout of 1 or 2 ms gives 1 ms and
+         the guarantee below does not hold, so SHOW deadlock_timeout before a removal). A failed attempt
+         (lock_not_available) rolls its subtransaction back, which releases the table locks it took, then sleeps 0.2 s x
+         attempt and tries again, five attempts. The fifth failure raises lock_not_available (55P03) naming the tenant:
+         "a search, a manifest write, an index build or a vacuum on this tenant's partitions held a lock it needs;
+         rerun, after index builds finish if one is running". 55P03 is retryable: the call is one transaction, so a
+         failed call changes nothing, and the function is idempotent. A retry redoes the DELETEs, which on a populated
+         tenant can take minutes.
+      E. lock_timeout is the budget again for the detach and drop loop. Every lock the loop needs is already held, so if
+         one is not, the call aborts (lock_not_available, "a lock the detach needs beyond those taken up front") instead
+         of holding the roots for the function's 10 s. The function's own SET lock_timeout = '10s' governs the global
+         advisory lock and the three DELETEs and is restored to the caller's value at return.
+      F. A NOTICE gives the attempt that took the locks, the hold time and the leaves dropped. The hold is measured to
+         function return; the locks are held until the caller's COMMIT, so inside a longer transaction the stall is
+         longer than the NOTICE says. Run the drop as one autocommit statement (the runbook does).
+
+    WHAT THIS PROMISES, AND WHAT IT DOES NOT. A search takes the root, then (in the sensitivity subquery)
+    catalog_document_chunks; a manifest writer takes catalog_document_chunks, then the root for its foreign-key check.
+    No single order for the drop matches both, so some interleavings still form a cycle with one or the other. They are
+    made harmless by the budget, not by the order: a request that waits behind a lock the drop holds waits at most the
+    budget (the drop releases everything of the attempt at its deadline), and the drop itself never waits longer than
+    the budget on any lock, both below deadlock_timeout, so PostgreSQL's deadlock detector (which runs after
+    deadlock_timeout) does not get to choose a search or a writer as its victim. This relies on deadlock_timeout being
+    above the budget, which it is by construction down to 2 ms. The referencing tables are first (step 1) so a writer
+    that holds one of them is waited for before the roots are taken: the drop then holds nothing the writer needs.
+    What it costs: while the drop is in an attempt, a search on nexus.chunks and a read or write of the manifest,
+    topic-assignment, orphaned-at or collection tables that arrives after the drop holds the lock waits, up to the
+    budget, per attempt (five attempts, so up to five times in all, with the drop sleeping in between). Once the locks
+    are held, every such request waits for the drop until the caller commits; uncontended that is milliseconds
+    (below); under contention the budget makes the call fail cleanly instead. Held through the sleeps and the retries
+    and not released by the subtransaction: the three DELETEs' RowExclusive locks, the RowShare locks their triggers
+    take on the chunks, and the advisory locks.
+
+    GIVE-UP TIME. Five attempts of at most the budget each, plus the sleeps 0.2 + 0.4 + 0.6 + 0.8 s: 4.5 s at the
+    default budget (DropTenantPartitionsIntegrationTest bounds it above and below), plus the deletes.
+
+    HOLD TIME. Measured on a freshly migrated local Docker PG17 (three tenants of 8 leaves each, four model partitions
+    under each of the two roots, no rows): locks taken on attempt 1, held 20.7, 22.1 and 23.8 ms to function return
+    (before the per-relation LOCK statements, which add a few ms). It is roughly constant per leaf (one DETACH and one
+    DROP each); the walk rehearsal or the runbook reads the real figure from the NOTICE, and the client-side statement
+    time is the stall a search sees.
+
+    POSTURE UNCHANGED. Not SECURITY DEFINER, EXECUTE revoked from PUBLIC and granted to nobody (CREATE OR REPLACE keeps
+    the ACL vectors-030 set), the nexus.tenant scoping of the deletes, the per-tenant advisory lock, the 'default'
+    refusal, the idempotent rerun. vectors-030 itself is not edited (its checksum is locked).
+    DATA EFFECT: none. A function redefinition; no row is read or changed by the changeset.
+    ROLLBACK restores the vectors-030-1 body.
+-->
+
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-066-1" author="folio-droplock">
+        <comment>nexus.drop_tenant_partitions looks the tenant's leaves up first (none: returns 0, locks nothing), serializes with other drops, then after its deletes takes ACCESS EXCLUSIVE on the tables around the leaves, the two roots (ONLY) and the tenant's own partitions and leaves, one lock per relation under one deadline per attempt (half of deadlock_timeout, at most 500 ms), repeated up to five times with a 0.2 s x attempt backoff, then lock_not_available (55P03) naming the tenant; the detach loop runs under the same budget. It locks no other tenant's partition or leaf. The locks are held to the caller's COMMIT; a NOTICE reports the attempt and the hold to function return. SECURITY INVOKER, EXECUTE revoked from PUBLIC (kept by CREATE OR REPLACE), no grant. DATA EFFECT: none. A function redefinition only; no row is changed by this changeset.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.drop_tenant_partitions(p_tenant text) RETURNS integer
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '10s'
+AS $fn$
+DECLARE
+    c_attempts   CONSTANT integer := 5;
+    c_max_budget CONSTANT integer := 500;
+    v_budget_ms  integer;
+    v_dropped    integer := 0;
+    v_prev       text;
+    v_attempt    integer := 0;
+    v_locked     boolean := false;
+    v_started    timestamptz;
+    v_locked_at  timestamptz;
+    v_item       text;
+    v_oids       oid[] := ARRAY[]::oid[];
+    v_targets    text[] := ARRAY[]::text[];
+    v_deps       text[];
+    v_order      text[];
+    r            record;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions: a tenant is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    IF p_tenant = 'default' THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions: the default tenant is never dropped'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The same advisory lock create_tenant_partitions takes: a creation and a drop for one tenant serialize.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('nexus.create_tenant_partitions:' || p_tenant, 0));
+
+    -- The tenant's model partitions and leaves, found by partition bound and read from the catalog alone, BEFORE any
+    -- table lock: a tenant with none (a typo, or a repeat) is answered here, locking nothing. The loop below takes
+    -- them in this order, and so does the lock step.
+    FOR r IN
+        SELECT mn.nspname::text AS mp_ns, mp.relname::text AS mp_name, mp.oid AS mp_oid,
+               ln.nspname::text AS leaf_ns, lc.relname::text AS leaf_name, lc.oid AS leaf_oid
+          FROM pg_catalog.pg_class par
+          JOIN pg_catalog.pg_namespace pn ON pn.oid = par.relnamespace AND pn.nspname = 'nexus'
+          JOIN pg_catalog.pg_inherits i1 ON i1.inhparent = par.oid
+          JOIN pg_catalog.pg_class mp ON mp.oid = i1.inhrelid
+          JOIN pg_catalog.pg_namespace mn ON mn.oid = mp.relnamespace
+          JOIN pg_catalog.pg_inherits i2 ON i2.inhparent = mp.oid
+          JOIN pg_catalog.pg_class lc ON lc.oid = i2.inhrelid
+          JOIN pg_catalog.pg_namespace ln ON ln.oid = lc.relnamespace
+         WHERE par.relname IN ('chunks', 'taxonomy_centroids')
+           AND nexus.partition_bound_value(lc.oid) = p_tenant
+         ORDER BY par.relname, mp.relname
+    LOOP
+        v_oids := v_oids || ARRAY[r.mp_oid, r.leaf_oid];
+        v_targets := v_targets || ARRAY[pg_catalog.format('ONLY %I.%I', r.mp_ns, r.mp_name),
+                                        pg_catalog.format('ONLY %I.%I', r.leaf_ns, r.leaf_name)];
+    END LOOP;
+    IF pg_catalog.cardinality(v_oids) = 0 THEN
+        RETURN 0;
+    END IF;
+
+    -- Every other table a DETACH or DROP of those partitions takes ACCESS EXCLUSIVE on: the tables that have a foreign
+    -- key to them (the manifest, topic assignments, orphaned-at records) and the tables they have one to (the
+    -- collection registry), found from pg_constraint so a foreign key added later is covered without editing this.
+    -- The two roots and every partition are excluded by their catalog rows (relispartition, the root names), never by
+    -- pg_partition_tree, which would take an AccessShare lock on every tenant's partitions and leaves and hold it to
+    -- commit.
+    SELECT COALESCE(pg_catalog.array_agg(q.name ORDER BY q.name), ARRAY[]::text[]) INTO v_deps
+      FROM (SELECT DISTINCT pg_catalog.format('%I.%I', dn.nspname, d.relname) AS name
+              FROM pg_catalog.pg_constraint con
+              JOIN pg_catalog.pg_class d
+                ON d.oid = CASE WHEN con.conrelid = ANY (v_oids) THEN con.confrelid ELSE con.conrelid END
+              JOIN pg_catalog.pg_namespace dn ON dn.oid = d.relnamespace
+             WHERE con.contype = 'f'
+               AND (con.conrelid = ANY (v_oids) OR con.confrelid = ANY (v_oids))
+               AND NOT d.oid = ANY (v_oids)
+               AND NOT d.relispartition
+               AND NOT (dn.nspname = 'nexus' AND d.relname IN ('chunks', 'taxonomy_centroids'))) q;
+    v_order := v_deps || ARRAY['ONLY nexus.chunks', 'ONLY nexus.taxonomy_centroids'] || v_targets;
+
+    -- The per-attempt budget: half of deadlock_timeout, at most 500 ms. Every lock of an attempt shares ONE deadline of
+    -- that length, so the drop gives up and releases before PostgreSQL's deadlock detector (which runs after
+    -- deadlock_timeout) can choose a search or a writer as the victim.
+    SELECT LEAST(c_max_budget, GREATEST(1, s.setting::integer / 2)) INTO v_budget_ms
+      FROM pg_catalog.pg_settings s WHERE s.name = 'deadlock_timeout';
+
+    -- Two drops of different tenants would each hold RowExclusive on the manifest tables from their deletes and then
+    -- each want ACCESS EXCLUSIVE on them, waiting for the other's: serialize the drops, whole, here (held to commit).
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('nexus.drop_tenant_partitions', 0));
+
+    v_prev := pg_catalog.current_setting('nexus.tenant', true);
+    PERFORM pg_catalog.set_config('nexus.tenant', p_tenant, true);
+    -- Manifest rows first: their foreign key to the chunks does not cascade, and deleting them stamps
+    -- chunk_orphaned_at for the chunks it releases, which is why that table is cleared last.
+    DELETE FROM nexus.catalog_document_chunks WHERE tenant_id = p_tenant;
+    DELETE FROM nexus.topic_assignments WHERE tenant_id = p_tenant;
+    DELETE FROM nexus.chunk_orphaned_at WHERE tenant_id = p_tenant;
+    PERFORM pg_catalog.set_config('nexus.tenant', COALESCE(v_prev, ''), true);
+
+    -- Every lock the teardown needs, ACCESS EXCLUSIVE, in one attempt, one LOCK TABLE per relation so each can be given
+    -- the attempt's remaining budget: (1) the tables around the leaves, (2) the two roots, ONLY (no recursion into
+    -- other tenants' leaves, whose index builds and vacuums would make the drop fail for nothing), (3) this tenant's own
+    -- model partitions and leaves, ONLY, in the order the loop takes them. A search takes the root, then the manifest
+    -- tables; a writer takes a manifest table, then the root; no one order matches both. What keeps either safe is the
+    -- shared deadline above. A failed attempt rolls its subtransaction back, which releases the table locks it took;
+    -- what stays held through the backoff sleeps and the retries is the three DELETEs' RowExclusive locks, the
+    -- RowShare locks their triggers took on the chunks, and the advisory locks. The drop sleeps 0.2 s x attempt
+    -- between attempts and gives up after five.
+    WHILE NOT v_locked LOOP
+        v_attempt := v_attempt + 1;
+        v_started := pg_catalog.clock_timestamp();
+        BEGIN
+            FOREACH v_item IN ARRAY v_order LOOP
+                PERFORM pg_catalog.set_config('lock_timeout',
+                    GREATEST(1, CEIL(v_budget_ms - 1000 * EXTRACT(epoch FROM pg_catalog.clock_timestamp() - v_started)))::integer::text || 'ms',
+                    true);
+                EXECUTE 'LOCK TABLE ' || v_item || ' IN ACCESS EXCLUSIVE MODE';
+            END LOOP;
+            v_locked := true;
+        EXCEPTION WHEN lock_not_available THEN
+            IF v_attempt >= c_attempts THEN
+                RAISE EXCEPTION 'nexus.drop_tenant_partitions(%): gave up after % attempts: a search, a manifest write, an index build or a vacuum on this tenant''s partitions held a lock it needs; rerun, after index builds finish if one is running',
+                    p_tenant, c_attempts
+                    USING ERRCODE = 'lock_not_available';
+            END IF;
+            PERFORM pg_catalog.pg_sleep(0.2 * v_attempt);
+        END;
+    END LOOP;
+    v_locked_at := pg_catalog.clock_timestamp();
+
+    -- Everything the loop touches is already held, so lock_timeout goes back to the budget: a lock that was somehow
+    -- missed aborts the call instead of holding the roots for the function's 10 s.
+    PERFORM pg_catalog.set_config('lock_timeout', v_budget_ms::text || 'ms', true);
+    BEGIN
+        FOR r IN
+            SELECT mn.nspname::text AS mp_ns, mp.relname::text AS mp_name,
+                   ln.nspname::text AS leaf_ns, lc.relname::text AS leaf_name
+              FROM pg_catalog.pg_class par
+              JOIN pg_catalog.pg_namespace pn ON pn.oid = par.relnamespace AND pn.nspname = 'nexus'
+              JOIN pg_catalog.pg_inherits i1 ON i1.inhparent = par.oid
+              JOIN pg_catalog.pg_class mp ON mp.oid = i1.inhrelid
+              JOIN pg_catalog.pg_namespace mn ON mn.oid = mp.relnamespace
+              JOIN pg_catalog.pg_inherits i2 ON i2.inhparent = mp.oid
+              JOIN pg_catalog.pg_class lc ON lc.oid = i2.inhrelid
+              JOIN pg_catalog.pg_namespace ln ON ln.oid = lc.relnamespace
+             WHERE par.relname IN ('chunks', 'taxonomy_centroids')
+               AND nexus.partition_bound_value(lc.oid) = p_tenant
+             ORDER BY par.relname, mp.relname
+        LOOP
+            EXECUTE pg_catalog.format('ALTER TABLE %I.%I DETACH PARTITION %I.%I',
+                                      r.mp_ns, r.mp_name, r.leaf_ns, r.leaf_name);
+            EXECUTE pg_catalog.format('DROP TABLE %I.%I', r.leaf_ns, r.leaf_name);
+            v_dropped := v_dropped + 1;
+        END LOOP;
+    EXCEPTION WHEN lock_not_available THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions(%): a lock the detach needs beyond those taken up front was held; nothing was dropped; rerun, after index builds finish if one is running',
+            p_tenant
+            USING ERRCODE = 'lock_not_available';
+    END;
+    -- The hold is measured to this point; the locks are held until the caller's COMMIT, so inside a longer
+    -- transaction the stall is longer than reported.
+    RAISE NOTICE 'nexus.drop_tenant_partitions(%): locks taken on attempt % of %, held % ms to function return (they stay held until the caller''s COMMIT), % leaves dropped',
+        p_tenant, v_attempt, c_attempts,
+        pg_catalog.round(1000 * EXTRACT(epoch FROM pg_catalog.clock_timestamp() - v_locked_at)::numeric, 1),
+        v_dropped;
+    RETURN v_dropped;
+END
+$fn$;
+]]></sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.drop_tenant_partitions(p_tenant text) RETURNS integer
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+SET lock_timeout = '10s'
+AS $fn$
+DECLARE
+    v_dropped integer := 0;
+    v_prev    text;
+    r         record;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions: a tenant is required'
+            USING ERRCODE = 'null_value_not_allowed';
+    END IF;
+    IF p_tenant = 'default' THEN
+        RAISE EXCEPTION 'nexus.drop_tenant_partitions: the default tenant is never dropped'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    -- The same advisory lock create_tenant_partitions takes: a creation and a drop for one tenant serialize.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended('nexus.create_tenant_partitions:' || p_tenant, 0));
+
+    v_prev := pg_catalog.current_setting('nexus.tenant', true);
+    PERFORM pg_catalog.set_config('nexus.tenant', p_tenant, true);
+    -- Manifest rows first: their foreign key to the chunks does not cascade, and deleting them stamps
+    -- chunk_orphaned_at for the chunks it releases, which is why that table is cleared last.
+    DELETE FROM nexus.catalog_document_chunks WHERE tenant_id = p_tenant;
+    DELETE FROM nexus.topic_assignments WHERE tenant_id = p_tenant;
+    DELETE FROM nexus.chunk_orphaned_at WHERE tenant_id = p_tenant;
+    PERFORM pg_catalog.set_config('nexus.tenant', COALESCE(v_prev, ''), true);
+
+    FOR r IN
+        SELECT mn.nspname::text AS mp_ns, mp.relname::text AS mp_name,
+               ln.nspname::text AS leaf_ns, lc.relname::text AS leaf_name
+          FROM pg_catalog.pg_class par
+          JOIN pg_catalog.pg_namespace pn ON pn.oid = par.relnamespace AND pn.nspname = 'nexus'
+          JOIN pg_catalog.pg_inherits i1 ON i1.inhparent = par.oid
+          JOIN pg_catalog.pg_class mp ON mp.oid = i1.inhrelid
+          JOIN pg_catalog.pg_namespace mn ON mn.oid = mp.relnamespace
+          JOIN pg_catalog.pg_inherits i2 ON i2.inhparent = mp.oid
+          JOIN pg_catalog.pg_class lc ON lc.oid = i2.inhrelid
+          JOIN pg_catalog.pg_namespace ln ON ln.oid = lc.relnamespace
+         WHERE par.relname IN ('chunks', 'taxonomy_centroids')
+           AND nexus.partition_bound_value(lc.oid) = p_tenant
+         ORDER BY par.relname, mp.relname
+    LOOP
+        EXECUTE pg_catalog.format('ALTER TABLE %I.%I DETACH PARTITION %I.%I',
+                                  r.mp_ns, r.mp_name, r.leaf_ns, r.leaf_name);
+        EXECUTE pg_catalog.format('DROP TABLE %I.%I', r.leaf_ns, r.leaf_name);
+        v_dropped := v_dropped + 1;
+    END LOOP;
+    RETURN v_dropped;
+END
+$fn$;
+]]></sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

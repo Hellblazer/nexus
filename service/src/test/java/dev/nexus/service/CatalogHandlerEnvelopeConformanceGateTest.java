@@ -345,6 +345,8 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         collectionExempt("/sensitive/locators", "handleSensitiveLocators", BOUNDED_READ_DELEGATE),
         // GH #1611: same delegate shape as /sensitive; ManifestForeignCollectionRouteTest pins count/limit/capped, the 400 and the 503.
         collectionExempt("/manifest/foreign_collection", "handleManifestForeignCollection", BOUNDED_READ_DELEGATE),
+        // RDR-229 P1.2: {count, limit, capped, groups}, the /sensitive envelope under a different list key; UriSegmentCensusRouteTest pins count/limit/capped, the 400, the 405 and the 503.
+        collectionExempt("/uri_segment_census", "handleUriSegmentCensus", BOUNDED_READ_DELEGATE),
         // nexus-f3yqd: a scalar {kind, fillable, limit, capped, rule, stamp} bounded count, not a JSON array.
         neither("/manifest/fillable", "handleManifestFillable"),
         // nexus-f3yqd: {collections:[{collection, stub_chunks, capped, examples} | {collection, timed_out}], limit}: a top-level
@@ -432,7 +434,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/import/document", "handleImportDocument"),
         neither("/import/link", "handleImportLink"),
         neither("/import/chunk", "handleImportChunk"),
-        neither("/import/collection", "handleImportCollection"),
+        // RDR-229 P2.5: answers {"imported": N, "state_corrected": [...]}, a named array that
+        // reports which rows the import corrected; it gates no destructive decision.
+        collectionExempt("/import/collection", "handleImportCollection", REPORT_ONLY),
 
         // ── Coverage analytics ───────────────────────────────────────────
         collectionExempt("/coverage", "handleCoverage", SMALL_FIXED_CARDINALITY),

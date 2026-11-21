@@ -18,6 +18,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 import pytest
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 InvalidArgumentError = ValueError  # RDR-155 P4b P3: the substrate-neutral bad-argument type (was chromadb.errors.InvalidArgumentError)
 
 from nexus.db.t3 import T3Database

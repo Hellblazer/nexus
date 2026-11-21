@@ -32,6 +32,13 @@ chunks with a live owner, so a manifest-less imported chunk is invisible
 to search once its liveness grace window lapses, and the RDR-192 reaper
 deletes it outright.
 
+RDR-229: the header MAY carry an ``owner`` key -- ``{"name": str, "repo_hash": str, "repo_root": str}`` --
+written only when the collection's row names a repo owner (a curator has none). It is the header's own key,
+not the per-record ``owner`` key above, and the two are unrelated. An importer predating it ignores it, so
+``FORMAT_VERSION`` is unchanged. An importer that knows it registers the documents of a collection that has no owner yet (no owner on
+its row and no live document) under the repo owner with that ``repo_hash``; ``repo_root`` is the source machine's path, kept as information only (the
+importer registers a new owner with an empty root, which ``nx index repo`` fills in).
+
 RDR-223 (nexus-z0o2p.19): ``import_collection`` registers (or finds) the
 catalog document per distinct owner identity in the file as each page of
 records arrives, and writes every chunk together with its owner row through
@@ -58,16 +65,16 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.aspect_readers import FILE_ROUTED_PREFIXES, canonical_note_uri, is_note_uri, uri_for
+from nexus.aspect_readers import canonical_note_uri, is_file_routed_collection, is_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
-from nexus.corpus import (
-    embedding_model_for_collection_name,
-    index_model_for_collection,
-)
+from nexus.catalog.rows.legacy_names import embedding_model_for_collection_name
+from nexus.catalog.rows.resolve import embedding_model_for
+from nexus.embed_window import NO_CATALOG, store_row_resolver
+from nexus.corpus import index_model_for_collection
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
-from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — same cross-module reuse pattern as commands/catalog_cmds/doctor.py
+from nexus.db.rows.lifecycle import bypasses_canonical_schema
 from nexus.errors import (
     BatchWriteFailedError,
     EmbeddingDimensionMismatch,
@@ -494,7 +501,9 @@ def export_collection(
     col = db.get_collection(collection_name)
     total_count = _vector_with_retry(col.count)
 
-    embedding_model = index_model_for_collection(collection_name)
+    embedding_model = embedding_model_for(
+        collection_name, row_resolver=store_row_resolver(db) or NO_CATALOG,
+    )
 
     _log.info(
         "export_start",
@@ -548,6 +557,13 @@ def export_collection(
     if _owners_apply(db):
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
         reader = make_catalog_reader()
+        # RDR-229: the repo owner rides the header, so an import registers the collection's documents
+        # under its source (nexus.nxexp_owner).
+        from nexus.nxexp_owner import export_owner_header  # noqa: PLC0415 — deferred: keeps the import graph as it was
+
+        if (owner_header := export_owner_header(collection_name, reader)) is not None:
+            header["owner"] = owner_header
+            header_line = json.dumps(header).encode() + b"\n"
 
     with open(output_path, "wb") as f:
         f.write(header_line)
@@ -650,48 +666,14 @@ def export_collection(
     }
 
 
-def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any) -> Tumbler:
-    """The owner an import-minted document is registered under
-    (nexus-wbfpw.31, nexus-wbfpw.33). Read from the collection's CATALOG
-    ROW, never from its name (RDR-204): an owner segment is not always
-    tumbler-derived (``code__arcaneum-2ad2825c__...``), and a name with a
-    non-canonical model segment does not even parse.
+def _resolve_import_owner_tumbler(
+    collection_name: str, reader: Any, writer: Any, **kwargs: Any,
+) -> Tumbler:
+    """The owner an import-minted document is registered under: the collection's source (RDR-229,
+    nexus-wbfpw.31, nexus-wbfpw.33). The derivation lives in :mod:`nexus.nxexp_owner`."""
+    from nexus.nxexp_owner import resolve_import_owner_tumbler  # noqa: PLC0415 — deferred: keeps the import graph as it was
 
-    * A non-knowledge collection whose row's ``owner_id`` is a registered
-      owner: that owner. Writers store it in the name's hyphenated form
-      (``1-1``), and before nexus-7tys2 ``upsertCollection`` overwrote it
-      from the name on every chunk write. The fixed engine no longer does,
-      but nothing backfills a row that was already overwritten, so those
-      still hold the name's segment. Both the stored value and its
-      hyphens-as-dots form are tried, and either is used only when the
-      catalog confirms it is a registered owner. A slug
-      (``arcaneum-2ad2825c``) matches no owner and falls through.
-    * Otherwise, for a non-knowledge collection, the owner of a live
-      document already in it.
-    * Everything else (a knowledge collection, or a collection with no
-      usable row and no documents, such as gate-xr789's): the
-      ``knowledge`` curator, the owner ``catalog_store_hook_tracked``
-      registers every note under. Liveness needs a live owning document,
-      not a particular owner.
-    """
-    row = reader.get_collection(collection_name) or {}
-    if row.get("content_type") != "knowledge":
-        owner_id = str(row.get("owner_id") or "")
-        for candidate in dict.fromkeys((owner_id, owner_id.replace("-", "."))):
-            if candidate and reader.get_owner_by_prefix(candidate) is not None:
-                try:
-                    return Tumbler.parse(candidate)
-                except Exception:  # noqa: BLE001 — an unparseable owner id falls through
-                    _log.warning(
-                        "import_owner_row_unparseable", collection=collection_name, owner_id=candidate,
-                    )
-        existing = reader.list_by_collection(collection_name, limit=1)
-        if existing:
-            return existing[0].tumbler.owner_address()
-    owner_t = reader.curator_owner_tumbler_by_name("knowledge")
-    if owner_t is not None:
-        return owner_t
-    return writer.register_owner("knowledge", "curator")
+    return resolve_import_owner_tumbler(collection_name, reader, writer, **kwargs)
 
 
 def _locate_owner_group(
@@ -702,6 +684,7 @@ def _locate_owner_group(
     fallback_title: str,
     fallback_content_type: str,
     target_collection: str,
+    db: Any = None,
 ) -> tuple[dict, int]:
     """Find (or open) the owner group a record belongs to and return it with the record's
     position (nexus-wbfpw.31), accumulated across the WHOLE import file rather than per
@@ -749,7 +732,7 @@ def _locate_owner_group(
         title = owner_meta.get("title") or ""
         content_type = owner_meta.get("content_type") or fallback_content_type
         if not source_uri:
-            source_uri = uri_for(target_collection, title)
+            source_uri = uri_for(target_collection, title, db=db)
         raw_position = owner_meta.get("position")
         if isinstance(raw_position, int) and not isinstance(raw_position, bool):
             position = raw_position
@@ -958,6 +941,7 @@ def _prepass_groups(
     fallback_title: str,
     fallback_content_type: str,
     target_collection: str,
+    db: Any = None,
 ) -> dict[str, dict]:
     """Read the file once and return its owner groups with their record counts (``seen``) and
     highest position (``maxpos``), never the records: memory is one small dict per group, plus the
@@ -982,7 +966,7 @@ def _prepass_groups(
                     group, position = _locate_owner_group(
                         groups, record.get("owner"), fallback_source_uri=fallback_source_uri,
                         fallback_title=fallback_title, fallback_content_type=fallback_content_type,
-                        target_collection=target_collection)
+                        target_collection=target_collection, db=db)
                 group["maxpos"] = max(group.get("maxpos", -1), position)
                 _note_source_evidence(group, meta, position)
     return groups
@@ -1095,8 +1079,8 @@ def _wire_embedding_model(
     checks every vector's dimension against the collection's."""
     if name_carries_model:
         return effective_model
-    resolver = getattr(db, "_resolve_collection_row", None)
-    row = resolver(collection_name) if callable(resolver) else None
+    resolver = store_row_resolver(db)
+    row = resolver(collection_name) if resolver is not None else None
     model = (row or {}).get("embedding_model")
     if model:
         return str(model)
@@ -1152,6 +1136,8 @@ class _OwnerImport:
         embedding_model: str,
         file_hash: str,
         skip_existing: bool,
+        bundle_owner: dict | None = None,
+        content_type: str = "",
     ) -> None:
         self.db = db
         self.collection_name = collection_name
@@ -1159,6 +1145,14 @@ class _OwnerImport:
         self.embedding_model = embedding_model
         self.file_hash = file_hash
         self.skip_existing = skip_existing
+        #: the export header's ``owner`` and declared content type: what the owner derivation reads
+        #: when the collection has no row and no live document (:mod:`nexus.nxexp_owner`)
+        self.bundle_owner = bundle_owner
+        self.content_type = content_type
+        #: why the knowledge curator was taken for want of any source, else ``None`` (RDR-229)
+        self.owner_fallback_reason: str | None = None
+        #: the hint when a hash-suffixed docs stem stayed with its corpus curator, else ``None``
+        self.owner_hint: str | None = None
         #: owner groups met so far by the writing pass (rows are never kept: the import streams)
         self.groups: dict[str, dict] = {}
         self.imported_count = 0
@@ -1255,6 +1249,12 @@ class _OwnerImport:
                 minted=len(self._minted))
         return removed
 
+    def _note_owner_fallback(self, reason: str) -> None:
+        self.owner_fallback_reason = reason
+
+    def _note_owner_hint(self, hint: str) -> None:
+        self.owner_hint = hint
+
     # ── prepass ───────────────────────────────────────────────────────────────
 
     def plan(self, pre: dict[str, dict]) -> None:
@@ -1274,7 +1274,9 @@ class _OwnerImport:
             }
         if pre and self._owner_tumbler is None:
             self._owner_tumbler = _resolve_import_owner_tumbler(
-                self.collection_name, self._reader, self._writer)
+                self.collection_name, self._reader, self._writer,
+                bundle_owner=self.bundle_owner, content_type=self.content_type,
+                on_fallback=self._note_owner_fallback, on_hint=self._note_owner_hint)
         for key, g in pre.items():
             # One group's failure must not strand every later group: record it, carry on, report all
             # at the end.
@@ -1411,7 +1413,7 @@ class _OwnerImport:
         out a file-backed document without a catalog read)."""
         from nexus.catalog.store_hook import imported_note_meta  # noqa: PLC0415 — deferred to avoid import cycle
 
-        if self.collection_name.startswith(FILE_ROUTED_PREFIXES):
+        if is_file_routed_collection(self.collection_name, db=self.db):
             return list(landed)
         entries = None
         error: Exception | None = None
@@ -1837,14 +1839,36 @@ def import_collection(
     collection_name: str = target_collection or source_collection
     # RDR-231 (nexus-bivz3.13/.15): a note import registers owner documents (a title-only owner
     # synthesizes an nx-note:// URI), so it is refused when the serving engine cannot hold one: after the
-    # header names the target, before any register and before any T3 upsert. A file-routed target
-    # (docs__, code__, rdr__) mints file:// URIs and no note URI, so the check does not apply to it.
+    # header names the target, before any register and before any T3 upsert. A file-routed target mints
+    # file:// URIs and no note URI, so the check does not apply to it. RDR-229 P2.9: file-routed is the
+    # row's content type (docs, code or rdr), and for a conformant target no row backs yet (a new import
+    # target holds no chunk) item 1's NoRow derivation reads it from the name's own segment, so it skips
+    # the check as it always did. Only a prefix-free label with no row runs the check (P3.8).
     # Aspect and highlight upserts and the reads are not covered (no unique key on source_uri).
-    if not collection_name.startswith(FILE_ROUTED_PREFIXES):
+    try:
+        file_routed = is_file_routed_collection(collection_name, db=db)
+    except Exception as exc:  # noqa: BLE001 — P2.5's contract: any resolver failure falls back to the name, as the row read below does
+        from nexus.aspect_readers import FILE_ROUTED_CONTENT_TYPES  # noqa: PLC0415 — deferred: this branch is the rare failure path
+        from nexus.corpus import candidate_content_type  # noqa: PLC0415 — deferred: corpus imports a wide graph
+
+        _log.warning("import_target_routing_unresolved", collection=collection_name, error=str(exc))
+        file_routed = candidate_content_type(collection_name) in FILE_ROUTED_CONTENT_TYPES
+    if not file_routed:
         from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
 
         require_note_uri_engine()
-    bypass_schema = collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    # RDR-229 P2.5: a quarantine sibling is the target's row saying so, read through the db's own row
+    # resolver (the cached listing a service-backed client already holds), not its `quarantine-` label.
+    # A failed lookup is not a reason to abort the import: with no row the label decides, as it did
+    # before P2.5 (review round 2, M1).
+    row_resolver = getattr(db, "_resolve_collection_row", None)
+    target_row = None
+    if callable(row_resolver):
+        try:
+            target_row = row_resolver(collection_name)
+        except Exception as exc:  # noqa: BLE001 — any resolver failure falls back to the label rule
+            _log.warning("import_target_row_unresolved", collection=collection_name, error=str(exc))
+    bypass_schema = bypasses_canonical_schema(collection_name, target_row)
     if _owners_apply(db) and bypass_schema:
         # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs
         # can be written with an owner row, and the engine refuses an ownerless write. Say so now,
@@ -1937,6 +1961,8 @@ def import_collection(
             embedding_model=_wire_embedding_model(
                 db, collection_name, effective_model, name_carries_model=name_carries_model),
             file_hash=_file_sha256(input_path), skip_existing=skip_existing,
+            bundle_owner=header.get("owner") if isinstance(header.get("owner"), dict) else None,
+            content_type=str(header.get("database_type") or ""),
         )
     else:
         # A non-service handle (the InMemoryVectorClient unit-test substrate).
@@ -2006,6 +2032,8 @@ def import_collection(
     unowned_count = 0
     vector_mismatches = 0
     sweep_skipped = 0
+    owner_fallback_reason: str | None = None
+    owner_hint: str | None = None
     failures: list[tuple[str, str]] = []
     unowned_documents: list[dict[str, Any]] = []
     # A first read of the file, for counts only: each document's record count says which page is its
@@ -2016,7 +2044,7 @@ def import_collection(
     prepass = _prepass_groups(
         input_path, fallback_source_uri=file_fallback_source_uri,
         fallback_title=file_fallback_title, fallback_content_type=default_content_type,
-        target_collection=collection_name)
+        target_collection=collection_name, db=db)
     from nexus.sensitive_write import gate_sensitive_import  # noqa: PLC0415 — deferred: sensitive_write is a leaf, read only here
 
     from nexus.sensitive_write import flagged_for_import  # noqa: PLC0415 — deferred: as above
@@ -2110,6 +2138,7 @@ def import_collection(
                                 fallback_title=file_fallback_title,
                                 fallback_content_type=default_content_type,
                                 target_collection=collection_name,
+                                db=db,
                             )
                         page.append(_PageRec(rec_id, doc, meta, emb, group, position))
                         if len(page) >= page_size:
@@ -2148,6 +2177,8 @@ def import_collection(
             sweep_skipped = summary["sweep_skipped"]
             vector_mismatches = owner_import.vector_mismatches
             failures = owner_import.failures
+            owner_fallback_reason = owner_import.owner_fallback_reason
+            owner_hint = owner_import.owner_hint
             _log.info(
                 "import_owners_reconciled",
                 collection=collection_name,
@@ -2219,5 +2250,11 @@ def import_collection(
         "unowned_documents": unowned_documents,
         "vector_mismatches": vector_mismatches,
         "sweep_skipped": sweep_skipped,
+        # RDR-229: 1 when the knowledge curator was taken for want of any source (the reason follows),
+        # so a caller importing many collections can total the ones whose owner was not their source.
+        "owner_fallback_count": 1 if owner_fallback_reason else 0,
+        "owner_fallback_reason": owner_fallback_reason or "",
+        # RDR-229: set when a hash-suffixed docs stem stayed with its corpus curator (it looks like a repo's)
+        "owner_hint": owner_hint or "",
         "elapsed_seconds": round(elapsed, 2),
     }

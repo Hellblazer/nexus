@@ -47,7 +47,7 @@ def test_discover_reports_a_persist_conflict_per_collection_and_fails_the_run(mo
     _stub_command_wiring(monkeypatch)
     monkeypatch.setattr(
         "nexus.commands.taxonomy_cmd._enumerate_discoverable_collections",
-        lambda t3, exclude: ["rdr__1-3__bge-base-en-v15-768__v1", "docs__1-18__bge-base-en-v15-768__v1"],
+        lambda t3, exclude, exclude_types=(): ["rdr__1-3__bge-base-en-v15-768__v1", "docs__1-18__bge-base-en-v15-768__v1"],
     )
 
     def _discover(col_name, store, t3, *, force=False):
@@ -86,7 +86,7 @@ def test_discover_still_prints_skipped_for_a_zero_topic_collection(monkeypatch) 
     _stub_command_wiring(monkeypatch)
     monkeypatch.setattr(
         "nexus.commands.taxonomy_cmd._enumerate_discoverable_collections",
-        lambda t3, exclude: ["docs__1-18__bge-base-en-v15-768__v1"],
+        lambda t3, exclude, exclude_types=(): ["docs__1-18__bge-base-en-v15-768__v1"],
     )
     monkeypatch.setattr(
         "nexus.commands.taxonomy_cmd.discover_for_collection", lambda *a, **k: 0,

@@ -993,6 +993,10 @@ def _collections_cache_tuple_from_rows(
                 # nexus-50uw6: a renamed or re-embedded source keeps lifecycle 'live' and
                 # names its successor here; the sibling resolver must not read it twice.
                 "superseded_by",
+                # RDR-229 P2.2: the rest of the registry row's attributes, kept when the listing
+                # sends them (collection_id is the surrogate key, P3.1's to send), so
+                # resolve_collection answers a Row with them and get_collection_row_by_id can match.
+                "collection_id", "model_version", "dimension",
             )
             if key in row
         }
@@ -1360,6 +1364,39 @@ def get_collection_row(name: str, *, refresh: bool = True, strict: bool = False)
     if not row or "content_type" not in row:
         return None
     return row
+
+
+def collections_cache_age() -> float | None:
+    """Seconds since the collections cache was last filled, ``None`` when it holds nothing (never filled, or
+    invalidated and not refilled). :func:`nexus.corpus.routing_content_type` re-reads a cache that is
+    older than its interval and leaves a younger one alone, so a scan over many rowless names pays for at
+    most one extra listing per interval (RDR-229 P2.9)."""
+    ts = _collections_cache[3]
+    return None if ts == 0.0 else _now() - ts
+
+
+def get_collection_row_by_id(collection_id: int, *, strict: bool = False) -> dict | None:
+    """The cached row whose ``collection_id`` is *collection_id*, carrying its ``name``, or ``None``.
+
+    RDR-229 item 1 (P2.2): :func:`nexus.catalog.rows.resolve.resolve_collection` takes a label or a
+    collection id. The cache holds a ``collection_id`` for a row only once the listing sends one
+    (the surrogate key, P3.1), so until then this finds nothing and the id read answers ``None``.
+    ``strict`` re-raises a listing that failed, as :func:`get_collection_row` does.
+    """
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client imports this module)
+
+    try:
+        _refresh_collections_cache_if_stale()
+    except (ServiceNotReadyError, VectorServiceError):
+        if strict:
+            raise
+        return None
+    with _collections_cache_lock:
+        rows = dict(_collections_cache[2])
+    for name, row in rows.items():
+        if row.get("collection_id") == collection_id and "content_type" in row:
+            return {"name": name, **row}
+    return None
 
 
 def get_cached_collection_rows() -> list[dict]:
@@ -2572,8 +2609,13 @@ def taxonomy_assign_batch_hook(
         # needed at all; the nexus-reskd/h8rf6.11 empty-placeholder-embedding
         # dance this replaced no longer applies (``embeddings`` is unread).
         if is_local_mode():
-            exclude = load_config().get("taxonomy", {}).get("local_exclude_collections", [])
-            if any(fnmatch(collection, pat) for pat in exclude):
+            from nexus.collection_route import content_type_excluded  # noqa: PLC0415 — deferred: collection_route reaches this module
+
+            tax_cfg = load_config().get("taxonomy", {})
+            exclude = tax_cfg.get("local_exclude_collections", [])
+            if any(fnmatch(collection, pat) for pat in exclude) or content_type_excluded(
+                collection, tax_cfg.get("local_exclude_content_types", []),
+            ):
                 return
         # NO FALLBACK (nexus-yu9w5, mirrors the nexus-sghyo precedent): an
         # engine below REQUIRED_ENGINE_VERSION that lacks this route 404s;

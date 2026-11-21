@@ -73,6 +73,16 @@ def test_refusal_names_the_floor_once_it_is_set(monkeypatch) -> None:
     assert "0.1.199" in str(exc.value) and "not yet released" not in str(exc.value)
 
 
+def test_the_move_floor_is_the_engine_release_that_carries_the_routes() -> None:
+    """254-P5-S1: engine-service-v0.1.199 carries both move routes and the catalog_move_supported flag (P1,
+    5476be38d..60f7d84da), so an older engine's refusal names it."""
+    assert floors.CATALOG_MOVE_MIN_ENGINE_VERSION == (0, 1, 199)
+    cat = _client(lambda r: httpx.Response(200, json={"release_version": "0.1.150"}))
+    with pytest.raises(CatalogMoveUnsupportedError) as exc:
+        require_catalog_move(cat)
+    assert "minimum engine version: 0.1.199" in str(exc.value)
+
+
 def test_the_helper_passes_when_the_engine_advertises_the_flag() -> None:
     require_catalog_move(_client(lambda r: httpx.Response(200, json={"catalog_move_supported": True})))
 

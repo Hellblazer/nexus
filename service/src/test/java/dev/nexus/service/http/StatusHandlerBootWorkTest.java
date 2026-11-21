@@ -109,6 +109,21 @@ class StatusHandlerBootWorkTest {
     }
 
     @Test
+    void anEntryWithAReasonClassCarriesItAfterStep_andAnEntryWithoutOneCarriesNoSuchField() throws Exception {
+        registry.register("data-move:m", "queued: m", 0L, 4L, "chunks", true, "kept");
+        registry.update("data-move:m", "blocked: m: pg_background is not installed", 0L, 4L, null, "missing_prerequisite");
+        registry.register("data-move:n", "blocked: n: waiting for a background worker slot", 0L, 4L, "chunks", true, "kept");
+        start(new StatusHandler(null, null).bootWork(registry::snapshot));
+
+        JsonNode list = get().get("boot_work");
+
+        assertThat(fieldNames(list.get(0))).containsExactly("id", "what", "started_at", "done", "total", "unit",
+            "safe_to_stop", "on_stop", "step", "reason_class");
+        assertThat(list.get(0).get("reason_class").asText()).isEqualTo("missing_prerequisite");
+        assertThat(fieldNames(list.get(1))).doesNotContain("reason_class");
+    }
+
+    @Test
     void anEntryWithAStepNestsExactlyTheAgreedStepFields() throws Exception {
         registry.register("pci-reconcile", "building search indexes", 0L, 2L, "indexes", true, "kept");
         registry.step("pci-reconcile", new Step("c: building index", 120L, 4000L, "blocks"));

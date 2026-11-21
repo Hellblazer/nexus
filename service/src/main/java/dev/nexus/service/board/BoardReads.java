@@ -102,7 +102,7 @@ final class BoardReads {
         Map<String, String> identityOfStamp = new LinkedHashMap<>();
         rawIdentity.forEach((stamp, id) -> {
             IdentityRepository.Liveness l = read.get(id);
-            identityOfStamp.put(stamp, l != null && "delegated".equals(l.kind()) && l.parent() != null ? l.parent() : id);
+            identityOfStamp.put(stamp, Identities.parentIfDelegated(id, l));
         });
         Map<String, Identities.Presence> presence = new LinkedHashMap<>();
         read.forEach((id, l) -> presence.put(id, new Identities.Presence(l.state(), l.lease(), l.kind())));

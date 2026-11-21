@@ -15,6 +15,8 @@ from click.testing import CliRunner
 
 from nexus.cli import main
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 @pytest.fixture
 def runner() -> CliRunner:

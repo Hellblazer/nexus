@@ -13,6 +13,11 @@ import click
 import structlog
 from tqdm import tqdm
 
+from nexus.catalog.engine_writes.hints import (  # RDR-254: move hints, printed after the run's own output
+    echo_hints as _echo_hints, fail_open as _fail_open,
+    prints_hints as _prints_hints,
+    repo_hints as _repo_hints,
+)
 from nexus.commands._help_links import COLLECTIONS_RULES_EPILOG
 from nexus.bounded_subprocess import run_bounded
 from nexus.config import EXTRACTOR_CHOICES
@@ -120,7 +125,7 @@ class _CatalogBackedRegistry:
         if "docs_collection" in fields and self._writer is not None:
             new_name = fields["docs_collection"]
             if new_name:
-                from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
+                from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — circular-dep avoidance (corpus)
 
                 owner = self._writer.ensure_owner_for_repo(repo)
                 owner_id = str(owner).replace(".", "-")
@@ -1193,7 +1198,7 @@ def index_repo_cmd(
             # registered") are candidate strings that may have no catalog
             # row -- split_candidate_collection_name, not the row-based
             # collection_content_type.
-            from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
             info = reg.get(path) or {}
             existing_docs = info.get("docs_collection", "")
@@ -1876,6 +1881,8 @@ def index_repo_cmd(
         # Retry summary now emitted from the `finally` block around
         # index_repository (see `emit_retry_summary`) so it fires on both
         # success and exception paths — Reviewer A/I-2.
+        if not frecency_only:
+            _echo_hints(_fail_open("repo", _repo_hints, path, default=[]))  # RDR-254 Gaps 2 and 3: read-only, never fails the run
         click.echo("Done.")
 
         # nexus-tp8yk D2b: a manifest write failure / identity drop /
@@ -2442,7 +2449,7 @@ def _discover_subset(
     # indexed THIS run, whose row may not have propagated to the
     # stats-backed row cache yet. split_candidate_collection_name, not
     # the row-based collection_content_type.
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if not isinstance(files_changed_by_kind, dict):
         return list(collections)
@@ -2464,7 +2471,8 @@ def _discover_subset(
 def _collections_from_registry_info(info: dict) -> list[str]:
     """Return the registry's tracked collection names for taxonomy +
     projection post-processing, filtered by
-    ``taxonomy.local_exclude_collections``. Empty list when
+    ``taxonomy.local_exclude_collections`` (label patterns) and
+    ``taxonomy.local_exclude_content_types`` (the collection's row). Empty list when
     *info* is ``{}`` or carries no collection keys.
 
     nexus-cxg9: prefer the conformant ``code_collection`` /
@@ -2482,11 +2490,14 @@ def _collections_from_registry_info(info: dict) -> list[str]:
 
     from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
+    from nexus.collection_route import content_type_excluded, taxonomy_local_exclude_types  # noqa: PLC0415 — deliberate function-local import (nexus.collection_route reaches mcp_infra)
+
     cfg = _load_cfg()
     exclude_patterns = (
         cfg.get("taxonomy", {}).get("local_exclude_collections", [])
         if is_local_mode() else []
     )
+    exclude_types = taxonomy_local_exclude_types()
     code_col = info.get("code_collection") or info.get("collection")
     candidates = [
         code_col,
@@ -2498,7 +2509,7 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     for col in candidates:
         if not col or col in seen:
             continue
-        if any(fnmatch(col, pat) for pat in exclude_patterns):
+        if any(fnmatch(col, pat) for pat in exclude_patterns) or content_type_excluded(col, exclude_types):
             continue
         seen.add(col)
         collections.append(col)
@@ -2681,10 +2692,12 @@ def _spawn_deferred_labeling() -> bool:
             **isolation_popen_kwargs(),
             # nexus-x3m8e: not the caller's cwd (a session worktree deleted
             # mid-run broke every getcwd() the run makes). The run does read
-            # the per-repo ``.nexus.yml`` (``nx taxonomy label`` calls
-            # ``load_config()`` for ``taxonomy.local_exclude_collections``), so
-            # the caller's directory is handed over as NEXUS_REPO_ROOT, which
-            # load_config reads where it used to read the cwd.
+            # the per-repo ``.nexus.yml`` (``nx taxonomy label`` reads its LLM
+            # backend settings through ``load_config()``; it does not read the
+            # taxonomy exclusion keys, which this process applied before
+            # spawning it), so the caller's directory is handed over as
+            # NEXUS_REPO_ROOT, which load_config reads where it used to read
+            # the cwd.
             **detached_spawn_kwargs(project_root=current_project_root()),
         )
         from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME  # noqa: PLC0415 — spawn-only branch
@@ -3056,9 +3069,13 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
 
     expected_collection = target_collection
     if not expected_collection and corpus:
-        from nexus.corpus import docs_leaf_fallback_collection_name  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
+        from nexus.corpus import TumblerShapedCorpusError, docs_leaf_fallback_collection_name  # noqa: PLC0415 — deliberate function-local import (rare error-rendering path)
 
-        expected_collection = docs_leaf_fallback_collection_name(corpus)
+        try:
+            expected_collection = docs_leaf_fallback_collection_name(corpus)
+        except TumblerShapedCorpusError:
+            # A corpus the indexers refuse names no collection to compare against; this renders an error already.
+            expected_collection = ""
     if not expected_collection:
         return base
 
@@ -3230,6 +3247,7 @@ def _index_run_refused_message(exc, *, target_collection: str = "", corpus: str 
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+@_prints_hints
 def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, collection: str | None, dry_run: bool, force: bool, re_embed: bool, monitor: bool, enrich: bool, extractor: str | None, on_formula_oom: str | None, streaming: str, source_uri: str | None, allow_degraded_extraction: bool, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a PDF document into T3 docs__CORPUS (or --collection)."""
     import time as _time  # noqa: PLC0415 — deliberate function-local import (stdlib, command-local alias)
@@ -3239,7 +3257,12 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     _log = structlog.get_logger(__name__)
 
     from nexus.config import get_pdf_extractor, note_formula_oom_ignored, resolve_extractor  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
-    from nexus.corpus import candidate_knowledge_subject, t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+    from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
+        catalog_subject_finder,
+        require_corpus_name,
+        t3_collection_name,
+    )
+    from nexus.catalog.rows.legacy_names import candidate_knowledge_subject  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         CredentialsMissingError,
@@ -3256,6 +3279,8 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     from nexus.pdf_extractor import MINERU_RUN_STOPPING, mineru_stop_reason  # noqa: PLC0415 — deliberate function-local import (heavy extractor dep deferred; startup-cost)
     from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
+    if corpus is not None and collection is None:
+        require_corpus_name(corpus)  # nexus-p2m1x.28: only when docs__<corpus> is what is built; --collection names the target
     # GH #1611 gap 4: the corpus is also the curator owner a PDF registers under, so with only --collection it is
     # that collection's subject (knowledge__delos -> delos), never the literal "default". Only a knowledge collection
     # has a subject there: a docs__/code__ name's owner segment is a tumbler-derived id (``1-48``), not a subject.
@@ -3379,7 +3404,9 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
 
         if collection is not None:
             # nexus-hmxi note: this call site intentionally does NOT
-            # probe T3 (no ``t3=`` kwarg). Bulk index targets land on
+            # probe T3 (no ``t3=`` kwarg); ``subject_finder`` reads only the
+            # catalog row of a knowledge subject (RDR-229 P2.8), never a T3
+            # name. Bulk index targets land on
             # the auto-promoted conformant shape so a fresh ``nx index
             # pdf --dir`` does not add a network round-trip and a
             # credential dependency just to grandfather a legacy
@@ -3389,7 +3416,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
             # for_write=True (nexus-35ok4): indexing WRITES new content —
             # raises loud if local.embed_model is voyage-shaped with no
             # key configured, never silently mints a bge collection.
-            collection = t3_collection_name(collection, for_write=True)
+            collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
         if sensitive:
             collection = _route_sensitive_index(
                 collection, corpus, ack=ack_external_embedder, what="nx index pdf --dir --sensitive")
@@ -3602,7 +3629,10 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
     # for_write=True (nexus-35ok4): indexing WRITES new content — raises
     # loud if local.embed_model is voyage-shaped with no key configured.
     if collection is not None:
-        collection = t3_collection_name(collection, for_write=True)
+        # A dry run writes nothing, so it needs no readable registry (no row read).
+        collection = t3_collection_name(
+            collection, for_write=True, subject_finder=None if dry_run else catalog_subject_finder(),
+        )
     if sensitive and not dry_run:
         # RDR-243 Q3: a Voyage target needs --ack-external-embedder; without it the bge sibling of the subject.
         collection = _route_sensitive_index(
@@ -3908,11 +3938,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str | None, 
 )
 @click.option("--sensitive", is_flag=True, default=False, help=sensitive_help())
 @click.option("--ack-external-embedder", "ack_external_embedder", is_flag=True, default=False, help=ack_help())
+@_prints_hints
 def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, re_embed: bool, monitor: bool, source_uri: str | None, sensitive: bool = False, ack_external_embedder: bool = False) -> None:
     """Extract and index a Markdown file into T3 docs__CORPUS (or --collection)."""
     from nexus.corpus import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
         EmbeddingProfileMismatchError,
         LocalVoyageCredentialMissingError,
+        catalog_subject_finder,
+        require_corpus_name,
         t3_collection_name,
     )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
@@ -3927,6 +3960,8 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     )
     from nexus.sensitive_write import SensitiveFlagNotSetError  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
 
+    if collection is None:
+        require_corpus_name(corpus)  # nexus-p2m1x.28: only when docs__<corpus> is what is built; --collection names the target
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a file the staleness check "
@@ -3943,7 +3978,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     if collection is not None:
         # for_write=True (nexus-35ok4): indexing WRITES new content —
         # raises loud if local.embed_model is voyage-shaped with no key.
-        collection = t3_collection_name(collection, for_write=True)
+        collection = t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
         # No extractor warning for knowledge__ targets: aspect extraction
         # routes each document by shape (scholarly-paper-v1 for papers,
         # general-prose-v1 for prose; c79909c4b, nexus-kk4ut).

@@ -212,14 +212,18 @@ def run(payload: dict | None) -> HookResult:
 
     Also the agent's end as registered work (RDR-253 Step 6 part 1, nexus-hczdo): SubagentStart wrote ``kind=agent``
     running, and this stop removes that row (:func:`nexus.hooks.subagent_work.register_stop`), for every agent type that has
-    one, the ``NO_T1_AGENTS`` too. A nudged agent runs one more turn, so its row ends at the stop after the nudge.
+    one, the ``NO_T1_AGENTS`` too, whether or not the stop is nudged (gh#1680: a nudged read-only agent often ends with its
+    hand-back and no second stop ever comes, so waiting for one left its row running for the life of the session). The row
+    therefore ends at the NUDGING stop, not at the agent's last turn: the extra turn the nudge buys is invisible to the
+    restart ready check and the compaction checkpoint. That is deliberate (the alternative is a row that never ends), so
+    do not move the removal back behind the nudge. The removal is idempotent (a row already gone is removed), so the
+    re-stop after a nudge repeats it harmlessly.
     Best effort, after the verdict is made: a failed label changes nothing about the stop."""
     result = never_fail(lambda: _decide(payload), "subagent-stop-t1-nudge", payload=lambda: payload, module=__name__)
-    if not result.stdout:
-        try:
-            from nexus.hooks import subagent_work  # noqa: PLC0415 — stdlib-only at module scope; deferred so an orphan stop pays nothing
+    try:
+        from nexus.hooks import subagent_work  # noqa: PLC0415 — stdlib-only at module scope; deferred so an orphan stop pays nothing
 
-            subagent_work.register_stop(payload)
-        except Exception:  # noqa: BLE001 — a label never costs the stop
-            pass
+        subagent_work.register_stop(payload)
+    except Exception:  # noqa: BLE001 — a label never costs the stop
+        pass
     return result

@@ -244,6 +244,8 @@ def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
 def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
     from nexus.search_engine import (  # noqa: PLC0415 — deferred import
+        _catalog_rows,
+        _collection_content_type_resolver,
         _collection_model_resolver,
         _engine_is_dual,
         _threshold_for_collection_model,
@@ -259,9 +261,11 @@ def _default_threshold_for(col: str, t3: Any = None) -> float | None:
     # (nexus-noayy).
     if not _voyage_thresholds_active(t3):
         return None
+    rows = _catalog_rows(t3, [col])
     return _threshold_for_collection_model(
         col, load_config(), dual=_engine_is_dual(t3),
-        model_of=_collection_model_resolver(t3, [col]),
+        model_of=_collection_model_resolver(t3, [col], rows),
+        content_type_of=_collection_content_type_resolver(t3, [col], rows),
     )
 
 

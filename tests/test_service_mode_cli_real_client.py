@@ -274,6 +274,8 @@ def test_model_drift_probe_service_mode_real_client(real_client, monkeypatch):
     """The retrieval-quality probe resolves collection_metadata through the
     REAL client (default metadata_fn) — outcome must not be 'error'
     (the pre-fix service-mode symptom) and drift detection must work."""
+    # No registry row: the model comes from the name, and the row read needs no tenant.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)
     from nexus.doctor_search import run_retrieval_quality_probe
     from nexus.search_engine import SearchDiagnostics
 

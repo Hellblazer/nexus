@@ -23,7 +23,7 @@ final class TemplateSchemaParser {
 
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "name", "keys", "dimensions", "id_from", "id_dims", "take", "retention_seconds",
-            "max_body_bytes", "lock", "max_live_rows", "claim_log_ttl_seconds", "doc");
+            "max_body_bytes", "lock", "max_live_rows", "claim_log_ttl_seconds", "retention_by_suffix", "doc");
 
     /** Closed field set of the {@code doc} block (RDR-239 Technical Design item 1). */
     private static final Set<String> DOC_FIELDS =
@@ -100,9 +100,31 @@ final class TemplateSchemaParser {
         boolean lock = parseLock(source, doc);
         Long maxLiveRows = parseMaxLiveRows(source, doc);
         Long claimLogTtlSeconds = parseClaimLogTtlSeconds(source, doc);
+        Map<String, Long> retentionBySuffix = parseRetentionBySuffix(source, doc);
 
         return new TemplateSchema(name, nameSegments, keys, keyValues, dimensions, idFrom, idDims, take,
-                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, null);
+                retentionSeconds, maxBodyBytes, lock, maxLiveRows, claimLogTtlSeconds, retentionBySuffix, null);
+    }
+
+    /**
+     * {@code retention_by_suffix} (RDR-252, nexus-igea9.4): optional map of a topic suffix to a positive whole number of
+     * seconds, the default TTL and ceiling of a subspace whose last segment ends with that suffix.
+     */
+    private static Map<String, Long> parseRetentionBySuffix(String source, Map<String, Object> doc) {
+        if (!doc.containsKey("retention_by_suffix") || doc.get("retention_by_suffix") == null) {
+            return Map.of();
+        }
+        if (!(doc.get("retention_by_suffix") instanceof Map<?, ?> raw) || raw.isEmpty()) {
+            throw breach(source, "retention_by_suffix", "must be a non-empty map of topic suffix to seconds");
+        }
+        Map<String, Long> out = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : raw.entrySet()) {
+            if (!(e.getKey() instanceof String k) || k.isEmpty() || k.contains("/") || !(e.getValue() instanceof Long v) || v <= 0) {
+                throw breach(source, "retention_by_suffix", "every entry must be a non-empty suffix without '/' and a positive integer of seconds");
+            }
+            out.put(k, v);
+        }
+        return out;
     }
 
     // ── doc block (RDR-239 Technical Design item 1, bead nexus-mdbds.2.10) ──────────

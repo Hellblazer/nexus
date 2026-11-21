@@ -221,6 +221,9 @@ class NoteWriteResult:
     swept_chashes_truncated: bool = False
     completed: bool = False
     recovered: bool = False
+    #: False when the collection's catalog row could not be read, so the ``embedding_model`` stamped on the
+    #: chunks is the name's guess (RDR-229 item 1, Unreadable): a reader must not judge it against a row.
+    model_known: bool = True
 
 
 def note_manifest_rows(manifest_metadatas: Sequence[dict], pieces: Sequence[str] | None = None) -> list[dict]:
@@ -264,7 +267,7 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict], pieces: Sequence[str]
 
 def _chunk_payload(
     collection: str, pieces: Sequence[str], rows: Sequence[dict], *, content_type: str,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     """The ``chunks`` array: one ``{chash, text, metadata}`` per DISTINCT piece.
 
     The metadata is the chunk row's CHUNK keys and nothing else (RDR-236 Phase 4 Step 1,
@@ -272,13 +275,16 @@ def _chunk_payload(
     agent and TTL are its catalog entry's (``note_catalog_meta``, written by the same put), and a
     piece's span is its manifest row's (:func:`note_manifest_rows`); neither rides on the shared row.
     Identical pieces collapse to one chunk, as identical text always did.
+
+    Returns ``(chunks, model_known)``: ``model_known`` is False when the collection's catalog row could
+    not be read (a failed listing), and the stamped model is then the name's own derivation.
     """
-    from nexus.corpus import embedding_model_row_preferred  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+    from nexus.corpus import embedding_model_for_write  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
     from nexus.metadata_schema import make_chunk_metadata  # noqa: PLC0415 — deferred: circular-dep avoidance
 
     # The row's model, as the engine embeds by it (nexus-ldh33); the same cached read
     # note_pieces chose the window from.
-    model = embedding_model_row_preferred(collection)
+    model, model_known = embedding_model_for_write(collection)
     out: list[dict] = []
     seen: set[str] = set()
     for piece, row in zip(pieces, rows, strict=True):
@@ -288,7 +294,7 @@ def _chunk_payload(
         seen.add(chash)
         meta = make_chunk_metadata(content_type=content_type, chunk_text_hash=chash, embedding_model=model)
         out.append({"chash": chash, "text": piece, "metadata": meta})
-    return out
+    return out, model_known
 
 
 def write_note(
@@ -357,11 +363,12 @@ def write_note(
 
     _first, manifest_metadatas = note_manifest_metadata(pieces)
     rows = note_manifest_rows(manifest_metadatas, pieces)
-    chunks = _chunk_payload(
+    chunks, model_known = _chunk_payload(
         collection, pieces, rows, content_type=content_type or chunk_content_type_for_collection(collection),
     )
     result = NoteWriteResult(
-        catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=[r["chash"] for r in rows])
+        catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=[r["chash"] for r in rows],
+        model_known=model_known)
     expected = [(r["position"], r["chash"]) for r in rows]
 
     owns_cat = cat is None

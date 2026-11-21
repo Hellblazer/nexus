@@ -132,6 +132,15 @@ _ANY_INVOCATION_RE = re.compile(
 #: test_ledger_matches_live_count) -- a stale high entry is a free slot a
 #: future unguarded site could occupy unreviewed.
 ALLOWLIST: dict[str, tuple[int, str]] = {
+    # nexus-p2m1x.16: RDR-229 P2.R's gate. The checks run `nx index md` / `nx collection rename` through the CLI in
+    # process on the pytest engine substrate (a hermetic PG and the stamped jar of this checkout), into a tenant
+    # minted for the test, with a scratch NEXUS_CONFIG_DIR; tests/e2e/rdr229-p2r-mvv.sh gives it the production-write
+    # reason for that one command. All eight matches are docstring or message text; the CLI calls pass argv lists.
+    "tests/e2e/rdr229_p2r_mvv_checks.py": (
+        8,
+        "NX_LOCAL+SANDBOX: self-provisioned substrate engine, minted tenant, scratch NEXUS_CONFIG_DIR "
+        "(like local-service-gate); all eight matches are docstring or message text",
+    ),
     # nexus-s08oe: the RDR-210 Phase 6 scenarios store one note through the real client into the gate's own
     # engine: a scratch NEXUS_CONFIG_DIR provisioned by `nx init --service` in a fenced HOME, torn down at exit.
     "tests/e2e/dual-embedder-gate.sh": (

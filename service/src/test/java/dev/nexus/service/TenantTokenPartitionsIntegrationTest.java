@@ -186,7 +186,7 @@ class TenantTokenPartitionsIntegrationTest {
     private void assertWriteLandsInItsLeaf(String tenant, String suffix) throws Exception {
         String collection = "code__p225tok" + suffix + "__voyage-code-3__v1";
         catalog.upsertCollection(tenant, Map.of("name", collection, "content_type", "code",
-            "owner_id", "p225", "embedding_model", "voyage-code-3"));
+            "owner_id", "p225", "embedding_model", "voyage-code-3", "model_version", "v1"));
         String chash = String.format("%064x", Math.abs((tenant + suffix).hashCode()) + 1L);
         vectors.upsertChunks(tenant, collection, List.of(chash), List.of("text of " + tenant), List.of(Map.of()));
         try (Connection su = pg.createConnection("")) {
@@ -320,7 +320,8 @@ class TenantTokenPartitionsIntegrationTest {
                 var scope = new TenantScope(ds2);
                 var embedder = new FixedEmbedder(1024);
                 new CatalogRepository(scope).upsertCollection("default", Map.of("name", CODE_COLLECTION,
-                    "content_type", "code", "owner_id", "p225", "embedding_model", "voyage-code-3"));
+                    "content_type", "code", "owner_id", "p225", "embedding_model", "voyage-code-3",
+                    "model_version", "v1"));
                 new PgVectorRepository(scope, embedder, embedder).upsertChunks("default", CODE_COLLECTION,
                     List.of("a".repeat(64)), List.of("first write"), List.of(Map.of()));
                 try (Connection su = c2.createConnection("")) {
@@ -392,7 +393,7 @@ class TenantTokenPartitionsIntegrationTest {
         postOk(BOOT, "/v1/tenants/create", "{\"name\":\"" + writerTenant + "\"}");
         String writerCollection = "docs__p225writer__" + firstModel + "__v1";
         catalog.upsertCollection(writerTenant, Map.of("name", writerCollection, "content_type", "docs",
-            "owner_id", "p225", "embedding_model", firstModel));
+            "owner_id", "p225", "embedding_model", firstModel, "model_version", "v1"));
         var writerEmbedder = new FixedEmbedder(firstDim);
         var writerRepo = new PgVectorRepository(tenantScope, writerEmbedder, writerEmbedder);
         try (Connection blocker = pg.createConnection("")) {

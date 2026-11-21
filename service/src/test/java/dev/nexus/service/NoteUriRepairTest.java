@@ -250,8 +250,8 @@ class NoteUriRepairTest {
         Fx f = new Fx("empty");
         Map<String, Object> r = repo.repairStaleNoteUris(f.tenant, false, 1000, 5);
         for (String k : List.of("stale_live", "rewrite", "merge", "merge_twin", "merge_sibling", "refused",
-                "refused_file_routed_collection", "refused_malformed", "tombstoned", "export_copies",
-                "export_copies_target_moved")) {
+                "refused_file_routed_collection", "refused_malformed", "refused_unregistered_collection",
+                "refused_unproven_content_type", "tombstoned", "export_copies", "export_copies_target_moved")) {
             assertThat(r.get(k)).as(k).isEqualTo(0);
         }
     }

@@ -5,17 +5,20 @@ Each ``row_*`` takes a scoped :class:`~tests.identity.conftest.World` on the one
 tests/identity/test_identity_engine_journeys.py and drives the REAL engine through the verbs. This module holds no test
 and mints no tenant (the tenant ceiling, tests/storage_touch_ceiling.toml, is Sam's); one ``_journey`` entry there runs
 ``ROWS`` (tag ``grp``). Run only these: ``NX_ROWS=group_journeys uv run pytest tests/identity/test_identity_engine_journeys.py``.
-The tenant-free tests of the same behaviour, against canned engine answers, are tests/test_group_cmd.py.
+The tenant-free tests of the same behaviour, against canned engine answers, are tests/test_group_cmd.py and, for ack-times, tests/test_group_ack_times.py.
 """
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from unittest import mock
 
 import pytest
 from click.testing import CliRunner
@@ -25,8 +28,9 @@ from nexus.commands.group_cmd import GroupEnv, group_group
 from nexus.db.t2.http_tuple_store import HttpTupleStore
 from nexus.groups import GroupsClient, GroupsError
 from nexus.identity import token_contract, token_header
+from nexus.identity.binder import NX_IDENTITY_TOKEN_ENV, SessionBinder
 from nexus.identity.token_file import read_token_file, token_path
-from tests.identity.conftest import World
+from tests.identity.conftest import T0, World
 
 # Group names and topic names carry the row's tag (``world.q``): groups, and the one-live-group-per-topic rule, are per
 # tenant and the rows share one.
@@ -41,6 +45,8 @@ class Actor:
     generation: int
     client: GroupsClient
     env: GroupEnv
+    #: The process's identity token file, which a write posted AS this actor sends (see :func:`_as_actor`).
+    token_file: Path | None = None
 
 
 def _operator(world: World, stack: contextlib.ExitStack) -> Actor:
@@ -50,14 +56,28 @@ def _operator(world: World, stack: contextlib.ExitStack) -> Actor:
     return Actor("", 0, client, GroupEnv(client=client, caller=lambda: None, tuples=lambda: None))
 
 
+def _bind_as_session(world: World, pid: int, name: str, session_id: str) -> Any:
+    """``world.process`` then ``world.hook``, but under *session_id* as written: the world qualifies a session id with its
+    row's tag, and ``nx group ack-times`` asks the session route only about a UUID (a Claude session id)."""
+    world.procs.start(pid, T0, name=world.q(name), entrypoint="cli", session_id=session_id, registry=True)
+    binder = SessionBinder(client=world.client, procs=world.procs, identity_dir=world.identity_dir, allow_privileged=True,
+                           clock=lambda: world.now, sleep=lambda s: None)
+    world.procs.set_session(pid, session_id)
+    return binder.bind(world.facts(pid, "startup", session_id), env=None)
+
+
 def _actor(world: World, stack: contextlib.ExitStack, name: str | None, pid: int, *, entrypoint: str = "cli",
-           tuples: Any = None) -> Actor:
-    """A process holding a seat *name* (or, with None, an ephemeral identity), bound by the hook, with its token file."""
+           tuples: Any = None, uuid_session: bool = False) -> Actor:
+    """A process holding a seat *name* (or, with None, an ephemeral identity), bound by the hook, with its token file.
+    *uuid_session* binds it under a UUID session id (a real Claude session id) that the engine's session index maps to it."""
     world.now = time.time()                   # the hook stamps the file's expiry from this clock; the engine's tokens live a real hour
     if name:
         world.seat(name)
-    world.process(pid, name=name or "", entrypoint=entrypoint, session_id=f"s{pid}")
-    out = world.hook(pid, "startup", f"s{pid}")
+    if uuid_session:
+        out = _bind_as_session(world, pid, name or "", str(uuid.uuid5(uuid.NAMESPACE_URL, f"{world.tag}/{pid}")))
+    else:
+        world.process(pid, name=name or "", entrypoint=entrypoint, session_id=f"s{pid}")
+        out = world.hook(pid, "startup", f"s{pid}")
     path = token_path(world.identity_dir, pid, pid * 1000)
     assert read_token_file(path).token, "the engine issued no identity token"
     client = GroupsClient(world.base_url, os.environ["NX_SERVICE_TOKEN"],
@@ -65,7 +85,7 @@ def _actor(world: World, stack: contextlib.ExitStack, name: str | None, pid: int
                           retry_headers=lambda sent, p: None)
     stack.callback(client.close)
     return Actor(out.identity, out.generation, client,
-                 GroupEnv(client=client, caller=lambda: out.identity, tuples=lambda: tuples))
+                 GroupEnv(client=client, caller=lambda: out.identity, tuples=lambda: tuples), path)
 
 
 def _cli(actor: Actor, *args: str) -> Any:
@@ -232,7 +252,7 @@ def _stamp_engine_rows(world: World, subspace: str) -> None:
     import subprocess  # noqa: PLC0415 -- deferred: only this row seeds through SQL
 
     state = world.state
-    sql = ("WITH stamped AS (UPDATE nexus.tuples SET dims = jsonb_set(dims, '{from}', '\"engine\"') "
+    sql = ("WITH stamped AS (UPDATE nexus.tuples SET dims = jsonb_set(dims, '{from}', '\"engine\"'), sender_session = NULL "
            f"WHERE subspace = '{subspace}' AND dims->>'from' = '{_ENGINE_SEED}' RETURNING 1) "
            "SELECT count(*) FROM stamped")
     proc = subprocess.run([str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
@@ -242,10 +262,23 @@ def _stamp_engine_rows(world: World, subspace: str) -> None:
     assert proc.stdout.strip() == "5", f"expected the seed's 5 engine rows, got {proc.stdout!r}"
 
 
+@contextlib.contextmanager
+def _as_actor(token_file: Path) -> Any:
+    """Writes made inside send *token_file*'s identity token, as a process holding it does (``NX_IDENTITY_TOKEN``), so the
+    engine stamps each row's ``sender_session`` with that actor's session: the stamp ``ack-times`` counts."""
+    with mock.patch.dict(os.environ, {NX_IDENTITY_TOKEN_ENV: str(token_file)}):
+        token_header.reset_for_tests()
+        try:
+            yield
+        finally:
+            token_header.reset_for_tests()
+
+
 def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was_handed_away_from(world: World) -> None:
     store = HttpTupleStore(base_url=world.base_url, tenant="default", _token=os.environ["NX_SERVICE_TOKEN"])
     with contextlib.ExitStack() as stack:
-        alpha, beta = _actor(world, stack, "alpha", 100, tuples=store), _actor(world, stack, "beta", 101, tuples=store)
+        alpha = _actor(world, stack, "alpha", 100, tuples=store, uuid_session=True)
+        beta = _actor(world, stack, "beta", 101, tuples=store, uuid_session=True)
         name, topic = world.q("train"), world.q("topic")
         assert _cli(alpha, "form", name, "--serves", topic).exit_code == 0
         subspace, key = f"board/ci/{topic}--owner", f"{topic}--owner"
@@ -254,7 +287,15 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
             # a client write of from=engine on board/ci is refused (RDR-252, 403 reserved_dim): an engine row is
             # posted under a stand-in sender and stamped from=engine below, as the stamper's repository write leaves it
             sender = _ENGINE_SEED if who == "engine" else who
-            store.out(subspace, {"topic": key}, {"from": sender, "kind": kind, "sha": sha}, json.dumps(body), nonce=uuid.uuid4().hex)
+            store.out(subspace, {"topic": key}, {"from": sender, "kind": kind, "sha": sha}, json.dumps(body),
+                      nonce=uuid.uuid4().hex)
+
+        def ack(sha: str, actor: Actor) -> None:
+            # the engine counts an ack by its sender-session stamp, so each ack is posted under its poster's own token:
+            # the client signs `from` as that identity (nexus.ci_ack) and the engine stamps the poster's session
+            assert actor.token_file is not None
+            with _as_actor(actor.token_file):
+                post("ack", sha, actor.identity)
 
         def minutes_ago(n: int) -> str:
             return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - n * 60))
@@ -262,24 +303,34 @@ def row_ack_times_counts_the_owners_ack_and_not_one_from_an_identity_the_red_was
         s1, s2, s3 = "1" * 40, "2" * 40, "3" * 40
         e1, e2, e3 = minutes_ago(12), minutes_ago(9), minutes_ago(3)
         post("owner", s1, "engine", owner=alpha.identity, next=beta.identity, reason="earliest_suspect", episode_at=e1, refresh=False, handoffs=0)
-        post("ack", s1, alpha.identity)
+        ack(s1, alpha)
         post("clear", s1, "engine", episode_at=e1)
         post("owner", s2, "engine", owner=alpha.identity, next=beta.identity, reason="earliest_suspect", episode_at=e2, refresh=False, handoffs=0)
         # the engine's hand-on row carries a NEW episode_at (OwnerDecision.handOn passes in.now()); it is the same red
         post("owner", s2, "engine", owner=beta.identity, next=None, reason="handoff", episode_at=minutes_ago(5), refresh=False, handoffs=1)
-        post("ack", s2, alpha.identity)                                  # the red was handed away from alpha: this does not count
-        post("ack", s2, beta.identity)
+        ack(s2, alpha)                                                   # the red was handed away from alpha: this does not count
+        ack(s2, beta)
         post("owner", s3, "engine", owner=alpha.identity, next=beta.identity, reason="no_record", episode_at=e3, refresh=False, handoffs=0)
+        # the engine's rule (nexus-igea9): an ack with no sender-session stamp counts for nobody, whatever its `from` says.
+        # Posted by a credential holding no session (an absent token file), signed as the owner by hand.
+        with mock.patch("nexus.ci_ack.counted_identity", return_value=alpha.identity), _as_actor(world.tmp / "no-such-token"):
+            post("ack", s3, alpha.identity)
 
         _stamp_engine_rows(world, subspace)
 
-        result = _cli(alpha, "ack-times", name, "--json")
+        # the identity service's session and record routes, as `nx group` builds them from the host's config
+        reader = dataclasses.replace(alpha, env=dataclasses.replace(alpha.env, session_lookup=world.client.session,
+                                                                    identity_lookup=world.client.show))
+        result = _cli(reader, "ack-times", name, "--json")
         assert result.exit_code == 0, result.output
+        assert "could not be resolved" not in result.stderr, result.stderr
         reds = json.loads(result.stdout)["reds"]
         assert [(r["sha"], r["acked_by"], r["handoffs"]) for r in reds] == [(s1, alpha.identity, 0), (s2, beta.identity, 1), (s3, None, 0)]
+        assert [r["ignored_acks"] for r in reds] == [0, 0, 1], "only the s3 ack, which carried no session stamp, is ignored"
+        assert "1 ack on red tips carried no session stamp the engine maps; it did not count" in result.stderr, result.stderr
         assert 11.9 <= reds[0]["minutes"] <= 12.6 and 8.9 <= reds[1]["minutes"] <= 9.6 and reds[2]["minutes"] is None, reds
         assert reds[0]["cleared_at"] and reds[1]["cleared_at"] is None
-        text = _cli(alpha, "ack-times", name)
+        text = _cli(reader, "ack-times", name)
         assert text.exit_code == 0 and "3 reds, 2 acknowledged" in text.output and "no ack" in text.output, text.output
 
 

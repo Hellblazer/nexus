@@ -4,7 +4,11 @@
 The engine's move worker reports each open or failed data move as a ``/v1/status`` ``boot_work`` entry whose id is
 ``data-move:<label>``. The shape has no state field, so ``what`` begins with the state:
 
-* ``blocked:`` (the reason follows) and ``failed:`` (the failure follows): one red row per move.
+* ``blocked:`` (the reason follows) and ``failed:`` (the failure follows): one red row per move, except a ``blocked:``
+  entry whose ``reason_class`` is ``missing_prerequisite`` (the ``pg_background`` extension is not installed): that one
+  waits for the install and an engine restart and nothing is wrong with the data, so it is a warning until the engine's
+  retry cap (about four hours), when the engine drops the class and the row is red. The class is the engine's field,
+  never read from the words; an engine that predates it sends none, and its blocked move stays red.
 * ``stalled:``: a CALL that has completed no chunk for a long time; a warning, since a slow chunk looks the same.
 * ``paused:``: an operator holds the move; a note, never red.
 * ``working:``, ``queued:``, ``runs complete:``: no row of their own; the summary row counts them.
@@ -49,12 +53,27 @@ _ENGINE_STATE_ROWS: dict[str, tuple[str, str, str]] = {
 }
 
 SUMMARY_LABEL = "Data moves"
+#: ``reason_class`` of a ``blocked:`` entry whose move waits for the pg_background extension to be installed (``MoveReasons.MISSING_PREREQUISITE``).
+MISSING_PREREQUISITE = "missing_prerequisite"
 
 _RETRY_NOW = (
     "UPDATE nexus.data_moves SET transient_retries = 0, last_transient_at = NULL, last_transient = NULL "
     "WHERE label = '{label}'; (as nexus_admin) makes the next pass run at once"
 )
 _RESUME = "UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label = '{label}'; (as nexus_admin)"
+
+
+def _old_bundle_pending() -> bool:
+    """This install's extracted PostgreSQL bundle lacks pg_background (the doctor's PostgreSQL bundle row shows). Only
+    then does the blocked-move hint send the user to ``nx upgrade`` for the bundle; with the bundle in place the
+    advice would point at a fix already made (F33). Unknown reads as pending, which keeps the advice."""
+    try:
+        import nexus.config as _config  # noqa: PLC0415 - deferred, CLI startup cost
+        from nexus.daemon.pg_bundle_refresh import bundle_lacks_pg_background  # noqa: PLC0415 - deferred, CLI startup cost
+
+        return bundle_lacks_pg_background(_config.nexus_config_dir())
+    except Exception:  # noqa: BLE001 - a hint's wording must never cost the doctor row
+        return True
 
 
 def _entries(status: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -137,7 +156,26 @@ def check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[Healt
         tally[state or "unknown"] = tally.get(state or "unknown", 0) + 1
         text = _after_state(what)
         row_label = f"Data move {label}"
-        if state == "blocked":
+        if state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE:
+            rows.append(HealthResult(
+                label=row_label, ok=False, warn=True, detail=f"blocked: {text}{_counts(entry)}",
+                fix_suggestions=[
+                    "The move waits for the pg_background extension; nothing was changed and nothing is lost. The engine "
+                    "looks for the extension only when it starts, so installing it is not enough: restart the engine "
+                    "after. "
+                    + (
+                        "A local install's bundled PostgreSQL carries pg_background, but an install first set up on "
+                        "conexus 8.2.0 or earlier keeps an older bundle without it: `nx upgrade` replaces that bundle and "
+                        "restarts the engine (`nx doctor` has a PostgreSQL bundle row while it is pending). "
+                        if _old_bundle_pending() else ""
+                    )
+                    + "A self-managed "
+                    "PostgreSQL needs pg_background installed, then the engine restarted. If the move is still blocked after about "
+                    "four hours of retries the engine drops the class and this row turns red (the full reason is in the "
+                    "engine log, event=data_move_blocked)",
+                ],
+            ))
+        elif state == "blocked":
             rows.append(HealthResult(
                 label=row_label, ok=False, detail=f"blocked: {text}{_counts(entry)}",
                 fix_suggestions=[

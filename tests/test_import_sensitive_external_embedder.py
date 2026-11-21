@@ -106,12 +106,23 @@ def test_the_refusal_is_a_runtime_error_too(db, tmp_path) -> None:
         import_collection(db=db, input_path=_voyage_file(tmp_path, ("secret memo", True)))
 
 
-def test_a_collection_override_into_voyage_is_refused_the_same_way(db, tmp_path, cloud_mode) -> None:
+@pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: the target holds no chunk; NoRow derives from its name with no listing
+def test_a_collection_override_into_voyage_is_refused_the_same_way(db, tmp_path, cloud_mode, monkeypatch) -> None:
     """The gate reads the TARGET, not the file's header: a bge export imported into a Voyage name is Voyage."""
+    built: list[str] = []
+
+    def _no_real_client():
+        built.append("get_t3")  # recorded as well as raised: the import's routing read falls back and would hide the raise
+        raise AssertionError("the import's routing read built a real managed-service client")
+
+    monkeypatch.setattr("nexus.mcp_infra.get_t3", _no_real_client)
+    # A cold collections cache is what CI's unstamped engine meets: the first routing read then builds a client.
+    monkeypatch.setattr("nexus.mcp_infra._collections_cache", ([], {}, {}, 0.0))
     path = _file(tmp_path, BGE, ("secret memo", True), model="voyage-context-3", dim=1024)
     with pytest.raises(ExternalEmbedderRefusedError):
         import_collection(db=db, input_path=path, target_collection=VOYAGE)
     assert _stored(db, VOYAGE) == 0
+    assert built == [], "the import's routing read built a real managed-service client"
 
 
 # ── the exits ───────────────────────────────────────────────────────────────

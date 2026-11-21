@@ -29,6 +29,8 @@ from nexus.cli import main
 from nexus.db import serving_engine_version as sev
 from nexus.errors import NoteUriEngineTooOldError
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: a prefix-named target gets a catalog row
+
 _FLOOR = (0, 1, 200)
 _BELOW = (0, 1, 199)
 

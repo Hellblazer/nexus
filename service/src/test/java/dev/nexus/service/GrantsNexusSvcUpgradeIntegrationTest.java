@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.datamove.ShippedMoveRegistrations;
 import dev.nexus.service.db.SchemaMigrator;
 import liquibase.Contexts;
 import liquibase.Liquibase;
@@ -23,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -242,6 +244,17 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         String master = read("db/changelog/db.changelog-master.xml");
         assertThat(master).as("the master carries the registry include").contains(DATAMOVES_INCLUDE);
         master = master.replace(DATAMOVES_INCLUDE, "");
+        // a changeset that registers a move writes into the registry, so the includes that register one are as unborn as
+        // the registry itself in the old state; the new boot applies them. The set is read from the master (every include
+        // whose file INSERTs INTO nexus.data_moves), so a new registering include cannot be forgotten here. The owner-read
+        // policy follows the registering includes and reads the same unborn state, so it goes with them.
+        List<String> stripped = new ArrayList<>(ShippedMoveRegistrations.byInclude().keySet());
+        stripped.add("db/changelog/vectors-065-catalog-collections-owner-read.xml");
+        for (String registering : stripped) {
+            String include = "<include file=\"" + registering + "\"/>";
+            assertThat(master).as("the master includes " + registering).contains(include);
+            master = master.replace(include, "");
+        }
         String grantsInclude = "<include file=\"" + GRANTS_FILE + "\"/>";
         assertThat(master).as("the master includes the service grants file").contains(grantsInclude);
         master = master.replace(grantsInclude, "<include file=\"" + OLD_GRANTS_FILE + "\"/>");

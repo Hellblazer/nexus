@@ -216,7 +216,7 @@ def test_the_client_rule_counts_each_scenarios_owners(scenario: dict, monkeypatc
 def test_a_collection_registered_by_the_client_gets_its_names_first_segment_as_the_registry_content_type(
     name: str, prefix: str, cloud_mode: None,
 ) -> None:
-    """The engine route examines the registry's knowledge and docs collections; the client scans the name prefixes.
+    """The engine route examines the registry's knowledge and docs collections; the client scans the rows of those content types.
 
     ``register_collection`` derives the content type with ``collection_registration_kwargs``, the first segment of the
     name, so the two sets agree for every prefixed name (the engine cannot parse names: CollectionParseGateTest).
@@ -226,10 +226,13 @@ def test_a_collection_registered_by_the_client_gets_its_names_first_segment_as_t
     assert collection_registration_kwargs(name)["content_type"] == prefix
 
 
-def test_a_bare_name_registers_as_knowledge_though_the_clients_prefix_scan_skips_it() -> None:
-    """The one place the sets differ, in the engine's favour: the engine can examine a collection the client does not."""
+def test_a_bare_name_registers_as_knowledge_and_the_clients_row_scan_reads_it() -> None:
+    """RDR-229 P2.9: the client scans the rows whose content_type is knowledge or docs, so a bare name, which
+    registers as knowledge, is scanned: the two sets now agree where they differed under the name prefix scan."""
     from nexus.corpus import collection_registration_kwargs
 
     name = "my-notes"
-    assert not name.startswith(health._PDF_STUB_SCAN_PREFIXES)
-    assert collection_registration_kwargs(name)["content_type"] == "knowledge"
+    content_type = collection_registration_kwargs(name)["content_type"]
+    assert content_type == "knowledge"
+    assert content_type in health._PDF_STUB_SCAN_CONTENT_TYPES
+    assert set(health._PDF_STUB_SCAN_CONTENT_TYPES) == {"knowledge", "docs"}

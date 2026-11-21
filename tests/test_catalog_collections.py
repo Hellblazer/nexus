@@ -45,11 +45,8 @@ from typing import Any
 
 import pytest
 
-from nexus.corpus import (
-    _write_intent_embedding_model,
-    is_conformant_collection_name,
-    parse_conformant_collection_name,
-)
+from nexus.corpus import _write_intent_embedding_model
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name, parse_conformant_collection_name
 from tests._catalog_fixture_ops import ActiveCatalog
 
 # RDR-204 Phase 1 follow-up (nexus-f5wwx): the engine's ``/collections/upsert``
@@ -241,7 +238,7 @@ def test_parse_conformant_collection_name_raises_on_legacy():
     in production, but the docstring documents the contract.
 
     nexus-i711w: the unused ``catalog`` fixture parameter was dropped. The
-    subject is ``nexus.corpus.parse_conformant_collection_name``, a pure
+    subject is ``nexus.catalog.rows.legacy_names.parse_conformant_collection_name``, a pure
     function on neither substrate's side of the seam; the fixture only ever
     forced a catalog to be constructed for nothing.
     """

@@ -440,6 +440,11 @@ routes, so a client never prints a command its engine refuses. The two
 repository hints read durable catalog state at the end of `nx index repo`, so
 each repeats on every run until the move is made or the old owner is
 deactivated, and neither depends on catching the moment of registration.
+Every hint query is fail-open: a query that fails or times out, or data it
+cannot read, is logged and dropped and never changes the run's exit code. The
+hints also print when the run ends with a `ClickException` (a `--dir` batch
+that ends "N of M failed"), because they describe writes that completed; any
+other exception prints none.
 
 The curator hint does depend on that moment, by choice. It runs where the
 duplicate is written; a later `nx index pdf` or `nx index md` of the unchanged
@@ -461,10 +466,17 @@ documented command repairs it at any time.
   is a curator owner. After the helper stamps hash H on document D, the client
   asks the metadata route for live rows with `content_hash` equal to H
   (`documents_by_meta`, which is tenant-wide and paged), keeps those under D's
-  owner prefix other than D, and prints `nx catalog owners --execute move
-  --document <old tumbler> --new-path <D's path>` for
+  owner prefix other than D that are not alias rows, and prints `nx catalog
+  owners --execute move --document <old tumbler> --new-path <D's path>` for
   each whose file is absent on this machine. A row whose file is present is a
-  copy and gets no hint (nexus-o19i0).
+  copy and gets no hint (nexus-o19i0). "Absent on this machine" is read as
+  "moved", so a row of a catalog shared with another machine, or on an
+  unmounted volume, is named too; the line is a dry run. The hint is bounded
+  per run: it asks about at most 50 files, stops when the seconds spent in its
+  own queries reach 30 (extraction and the time between files do not count),
+  and stops after the first query that fails; when it skips any file the run
+  ends with one note, "move hints checked for N of M files", which names no
+  write form and is not printed on an engine without the move routes.
 
   The hint cannot see an old row that has no `meta.content_hash`. PDF and
   markdown documents carry it only since 2026-11-03 (f90135242, nexus-ypgbz):
@@ -474,11 +486,14 @@ documented command repairs it at any time.
   since, a user who plans to move it runs `nx index pdf --force` (or `md`) on
   it once before the move, and the hint then works. For one already moved,
   the old row cannot be stamped any more (its file is gone): the user finds
-  its tumbler (`nx search` returns both copies) and runs the document move by
-  hand.
+  its tumbler (`nx catalog search '<file name>'`; `nx search` prints paths, not
+  tumblers) and runs the document move by hand.
 - **Documents outside their root (Gap 3).** At the end of `nx index repo`, the
-  client reads the first page of the owner's documents and counts root-derived
-  `source_uri`s that do not start with `file://<repo_root>/`. When any do, it
+  client reads the first page of the owner's documents and counts the rows the
+  owner move would rewrite: root-derived rows whose `source_uri` differs from
+  the URI a fresh registration at the root gives (the engine's
+  `rootDerivedUri` and `deriveSourceUri`, mirrored by the client and pinned by
+  a parity table). When any do, it
   prints `nx catalog owners --execute move --owner <prefix> --new-root
   <repo_root>`. This catches the same-name move after
   registration has silently re-rooted the owner row, on that run and every
@@ -489,17 +504,25 @@ documented command repairs it at any time.
   X's first 20 documents in tumbler order that carry `meta.content_hash`
   (stamped at registration for repo files, `indexer._register_time_meta`), asks
   the metadata route for each hash, and counts the hashes that also have a
-  live row under V's prefix. When V matches at least half, it prints the owner
-  move command with V's prefix and X's root. The 20 and the half are starting
-  values to tune on a real renamed repository at implementation; they decide
-  only whether a line prints.
+  live row under V's prefix. When V matches at least half of the hashes asked
+  and at least two, it prints the owner move command with V's prefix and X's
+  root; several qualifying owners print highest count first, ties in tumbler
+  order. The loop has its own 30-second budget, and when it runs out the
+  matches already found still print. The 20, the half and the two are
+  starting values to tune on a real renamed repository; they decide only
+  whether a line prints.
 - **Census.** `nx catalog owners --census` adds a `docs_outside_root` flag to
   each owner it reports, beside the root class and not as a new one: the root
   classes (`_CENSUS_CLASSES`, `owners.py:121`) are one per owner and drive the
   deactivate arm, and a flagged owner is never deactivate-eligible because of
-  the flag. A flagged owner is reported with the owner move command, and each
-  `path_vanished` owner gets the move command with a `<new root>` placeholder,
-  beside the deactivate arm it already offers.
+  the flag. A flagged `healthy` owner is reported with the owner move command
+  (the move refuses a root that is not a git work tree, so a flagged owner of
+  another class keeps the flag and gets no command), and each `path_vanished`
+  owner gets the move command with a `<new root>` placeholder, beside the
+  deactivate arm it already offers. The flag is `null` when the page cannot be
+  read or every entry on it is malformed. The flag's page read is made on
+  every census, one `/list` per owner, even on an engine without the move
+  routes.
 
 #### A second live clone (Gap 4)
 
@@ -898,3 +921,4 @@ else.
 - 2026-11-19: Gate round 1 — BLOCKED (1 Critical, 0 Significant, 1 ship-blocker(s)); blob `def7ceb59122`; critique `nexus_rdr/254-gate-critique-2026-11-19-r1`.
 - 2026-11-19: Fix check of round 1 fixes FAILED (1 BLOCKS-PLANNING, curator hint repeat claim); fixed once; verdict `nexus_rdr/254-fix-check-3c757064d55d`.
 - 2026-11-19: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); blob `c2ff1151086d`; critique `nexus_rdr/254-gate-critique-2026-11-19-r2`.
+- 2026-11-20: Move hints wording matched to the reviewed Phase 3 code (grant 3; reviews `nexus_rdr/254-p3-review-r1`, `nexus/confirm-afba69e8d-none-2026-11-20-r3`): alias rows excluded, per-run bounds and the closing note, fail-open and `ClickException` printing, the engine's outside-root rule, the two-hash minimum, the census move line for healthy owners only, and the `nx catalog search` lookup.

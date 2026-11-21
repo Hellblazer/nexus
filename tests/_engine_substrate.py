@@ -107,7 +107,7 @@ from tests import _signal_fence
 from tests._child_process import kill_group, pid_alive, popen_in_group, stop_group
 from tests._ddl_counter import PROBE_SQL, READY_LABEL, RESTART_LABEL, START_LABEL, log_conf, mark_sql
 from tests._ddl_counter import enabled as ddl_count_enabled
-from tests._pg_ctl import check_socket_dir, pg_ctl_start
+from tests._pg_ctl import check_socket_dir, pg_ctl_start, sun_path_max
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
@@ -153,7 +153,8 @@ _state: dict | None = None
 _boot_error: str | None = None
 
 #: Glob for a substrate pgdata cluster dir, matched under every root in
-#: :func:`substrate_pg_roots` (the process tempdir and the tmpfs root).
+#: :func:`substrate_pg_roots` (the process tempdir, the tmpfs root and the macOS
+#: ``/tmp`` fallback root).
 _STRAY_GLOB = "nexus_t2_substrate_pg_*"
 
 #: Where substrate clusters live (nexus-me3gm). The per-worker Postgres clusters
@@ -161,9 +162,11 @@ _STRAY_GLOB = "nexus_t2_substrate_pg_*"
 #: drives WAL and heap writes, and nothing in a throwaway cluster needs to survive
 #: a reboot. On Linux the clusters therefore go on tmpfs (``/dev/shm``) when it is
 #: tmpfs, writable and has room; everywhere else they stay under the process
-#: tempdir. ``NX_TEST_PG_ROOT=<dir>`` picks a root outright and
-#: ``NX_TEST_PG_ROOT=default`` forces the old tempdir root for new clusters (the
-#: sweep still looks in an existing tmpfs root).
+#: tempdir, except that on macOS a tempdir too long for a unix socket path moves
+#: them to ``/tmp/nexus-test-pg-<uid>`` (a disk root). ``NX_TEST_PG_ROOT=<dir>``
+#: picks a root outright (refused loud when too long) and ``NX_TEST_PG_ROOT=default``
+#: forces the tempdir for new clusters (the sweep still looks in an existing tmpfs
+#: or ``/tmp`` fallback root).
 _PG_ROOT_ENV = "NX_TEST_PG_ROOT"
 
 #: Test seam for the SWEEP only: a directory standing in for ``/dev/shm`` so the
@@ -213,15 +216,29 @@ _TMPFS_MIN_FREE_BYTES = 3 * 1024**3
 _SWEEP_BARE_TMPFS_MIN_AGE_S = 600.0
 
 #: ``sun_path`` is 108 bytes on Linux including the NUL, so a socket path may use
-#: 107. A cluster dir is ``<root>/<prefix><8 random>`` and the socket
-#: ``/.s.PGSQL.<port>`` inside it, so the root may use ``107 - reserve`` bytes. The
+#: 107; on macOS it is 104, so 103. ``tests/_pg_ctl.py::sun_path_max`` is the one
+#: source of both (it also refuses a start past the real platform's), and
+#: :func:`_socket_path_max` derives the figure for a platform from it.
+#: ``_SOCKET_PATH_MAX`` is the Linux figure and the base the others derive from
+#: (tests monkeypatch it to lift the limit).
+#: A cluster dir is ``<root>/<prefix><8 random>`` and the socket
+#: ``/.s.PGSQL.<port>`` inside it, so the root may use ``limit - reserve`` bytes. The
 #: reserve is sized for the LONGEST prefix any cluster maker uses (the integration
 #: fixtures reach 26 chars, e.g. ``nexus_recovery_inttest_pg_``; the substrate's own
 #: is 22); :func:`integration_cluster_dir` also checks the actual path, so a new
 #: longer prefix fails loud there instead of overrunning ``sun_path``.
-_SOCKET_PATH_MAX = 107
+_SOCKET_PATH_MAX = sun_path_max("Linux")
 _LONGEST_CLUSTER_PREFIX = len("nexus_recovery_inttest_pg_")
 _SOCKET_SUFFIX_RESERVE = 1 + _LONGEST_CLUSTER_PREFIX + 8 + len("/.s.PGSQL.65535")
+
+#: Where a macOS run (only macOS: its sun_path is 104) puts its clusters when its
+#: tempdir is too long for a socket path (over :func:`_socket_path_max` minus the
+#: reserve): ``/tmp/nexus-test-pg-<uid>``, the tmpfs root's name under a short
+#: directory. ``lab-remote`` on hellmini ran under a 68-byte tempdir and errored
+#: every test at setup (2026-11-20). It is a disk root: no tmpfs gates, no WAL cap.
+#: ``NX_TEST_PG_ROOT=<dir>`` still decides outright (and refuses loud when too long),
+#: ``=default`` still forces the tempdir.
+_SHORT_ROOT_DIR = Path("/tmp")
 
 #: Appended to the substrate's ``postgresql.conf`` (nexus-me3gm). Caps pg_wal at
 #: about 64 MB instead of the 1 GB default. ``wal_level = minimal`` requires
@@ -360,8 +377,27 @@ def _mount_fstype(mounts_text: str, mountpoint: str) -> str | None:
     return found
 
 
-def _socket_path_fits(root: Path) -> bool:
-    return len(str(root)) + _SOCKET_SUFFIX_RESERVE <= _SOCKET_PATH_MAX
+def _socket_path_max(system: str | None = None) -> int:
+    """Bytes a unix socket path may use on *system* (default: this one): ``sun_path``
+    less its NUL, 103 on macOS and 107 elsewhere."""
+    system = platform.system() if system is None else system
+    return _SOCKET_PATH_MAX - (sun_path_max("Linux") - sun_path_max(system))
+
+
+def _socket_path_fits(root: Path, system: str | None = None) -> bool:
+    return len(str(root)) + _SOCKET_SUFFIX_RESERVE <= _socket_path_max(system)
+
+
+def _short_root_candidate(uid: int | str, short_dir: Path | None = None) -> Path:
+    return (_SHORT_ROOT_DIR if short_dir is None else short_dir) / f"{_TMPFS_DIR_PREFIX}-{uid}"
+
+
+def _is_short_root(root: Path) -> bool:
+    """Is *root* the ``/tmp/nexus-test-pg-<uid>`` fallback (a disk root, so the tmpfs
+    room check does not apply to it)? It reads :data:`_SHORT_ROOT_DIR`, which is what
+    :func:`decide_pg_root` uses unless a caller injects ``short_dir=``; production
+    (``session_pg_root`` and ``pg_cluster_parent``) never does, so the two agree there."""
+    return root.parent == _SHORT_ROOT_DIR and root.name.startswith(f"{_TMPFS_DIR_PREFIX}-")
 
 
 def _cgroup_dirs(
@@ -470,28 +506,43 @@ def decide_pg_root(
     cgroup_headroom: Callable[[], int | None] | None = None,
     uid: int | str | None = None,
     shm_dir: Path = _SHM_DIR,
+    tempdir: Path | None = None,
+    short_dir: Path | None = None,
 ) -> tuple[Path | None, str | None]:
     """``(root, refusal)``: the directory substrate clusters are created under, or
     ``None`` for the process tempdir, and, when a Linux box with no override could
-    not use tmpfs, the reason (else ``None``). Pure decision: it creates and warns
-    about nothing. Every input is injectable so the outcomes (override, forced
-    default, tmpfs, no tmpfs, too small) are unit tests, not machine state.
+    not use tmpfs, the reason (else ``None``). On macOS with no override, a tempdir
+    too long for a socket path gets the short ``/tmp/nexus-test-pg-<uid>`` root
+    (:data:`_SHORT_ROOT_DIR`), with no refusal: that is a working choice, not a
+    degradation. Pure decision: it creates and warns about nothing. Every input is
+    injectable so the outcomes (override, forced default, tmpfs, no tmpfs, too
+    small, long tempdir) are unit tests, not machine state.
     """
     env = os.environ if env is None else env
+    system = platform.system() if system is None else system
     override = (env.get(_PG_ROOT_ENV) or "").strip()
     if override == "default":
         return None, None
     if override:
         root = _abs(override)
-        if not _socket_path_fits(root):
+        if not _socket_path_fits(root, system):
+            limit = _socket_path_max(system)
             raise ValueError(
                 f"{_PG_ROOT_ENV}={root} is too long: a substrate cluster's unix "
-                f"socket path under it would pass the {_SOCKET_PATH_MAX}-byte "
+                f"socket path under it would pass the {limit}-byte "
                 f"sun_path limit (root may use at most "
-                f"{_SOCKET_PATH_MAX - _SOCKET_SUFFIX_RESERVE} bytes)"
+                f"{limit - _SOCKET_SUFFIX_RESERVE} bytes)"
             )
         return root, None
-    if (platform.system() if system is None else system) != "Linux":
+    if system == "Darwin":
+        disk_root = _original_tempdir() if tempdir is None else tempdir
+        if _socket_path_fits(disk_root, system):
+            return None, None
+        short = _short_root_candidate(_current_uid() if uid is None else uid, short_dir)
+        # A fallback that cannot fit either leaves the tempdir, and the cluster start
+        # fails loud at its own socket check (tests/_pg_ctl.py) naming both knobs.
+        return (short, None) if _socket_path_fits(short, system) else (None, None)
+    if system != "Linux":
         return None, None
     if mounts_text is None:
         mounts_text = _read_mounts()
@@ -539,7 +590,7 @@ def decide_pg_root(
             f"are charged to it)"
         )
     root = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
-    if not _socket_path_fits(root):
+    if not _socket_path_fits(root, system):
         return None, f"a unix socket path under {root} would pass the sun_path limit"
     return root, None
 
@@ -578,15 +629,22 @@ class SubstrateRootExhausted(RuntimeError):
     answered by a silent fall back to disk (nexus-vo9qn)."""
 
 
+#: ``root=<dir>`` is a chosen cluster root of ANY kind: the tmpfs root, or the macOS
+#: ``/tmp`` disk root a long tempdir falls back to. ``tmpfs=`` is what an older
+#: controller wrote for it; it is still read, never written.
+_SESSION_ROOT_PREFIXES = ("root=", "tmpfs=")
+
+
 def _encode_session_root(root: Path | None, refusal: str | None) -> str:
-    return f"tmpfs={root}" if root is not None else f"disk={refusal or ''}"
+    return f"root={root}" if root is not None else f"disk={refusal or ''}"
 
 
 def _decode_session_root(raw: str | None) -> tuple[bool, Path | None, str | None]:
     """``(valid, root, refusal)`` for a :data:`_PG_ROOT_SESSION_ENV` value; an
     absent or unrecognised value is not valid and is decided afresh."""
-    if raw and raw.startswith("tmpfs=") and len(raw) > len("tmpfs="):
-        return True, Path(raw[len("tmpfs="):]), None
+    for prefix in _SESSION_ROOT_PREFIXES:
+        if raw and raw.startswith(prefix) and len(raw) > len(prefix):
+            return True, Path(raw[len(prefix):]), None
     if raw is not None and raw.startswith("disk="):
         return True, None, raw[len("disk="):] or None
     return False, None, None
@@ -709,8 +767,10 @@ def persist_controller_failure(exc: BaseException) -> None:
         _tmpfs_refused(reason)
 
 
-def _record_cluster_root(kind: str, root: str | None, reason: str | None) -> None:
-    row = {"kind": kind, "root": root, "reason": reason, "pid": os.getpid()}
+def _record_cluster_root(
+    kind: str, root: str | None, reason: str | None, note: str | None = None,
+) -> None:
+    row = {"kind": kind, "root": root, "reason": reason, "note": note, "pid": os.getpid()}
     _LOCAL_ROWS.append(row)
     path = os.environ.get(_PG_ROOT_LOG_ENV)
     if path:
@@ -747,6 +807,9 @@ def pg_root_run_summary(*, finish: bool = False) -> str | None:
     why = sorted({r["reason"] for r in disk if r.get("reason")})
     if why:
         line += " (disk because: " + "; ".join(why) + ")"
+    notes = sorted({r["note"] for r in rows if r.get("note")})
+    if notes:
+        line += " (" + "; ".join(notes) + ")"
     roots = sorted({r["root"] for r in rows if r.get("root")})
     if roots:
         line += " [root " + ", ".join(roots) + "]"
@@ -936,7 +999,8 @@ def pg_cluster_parent() -> str | None:
             _tmpfs_refused(refusal)
         _log_cluster_root(None, refusal)
         return None
-    if not explicit:
+    short = not explicit and _is_short_root(root)
+    if not explicit and not short:
         _check_tmpfs_has_room(root)
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -962,21 +1026,53 @@ def pg_cluster_parent() -> str | None:
             )
         _log_cluster_root(None, f"cannot use {root} ({exc})")
         return None
-    _log_cluster_root(root, None)
+    _log_cluster_root(
+        root,
+        None,
+        note=(
+            f"clusters moved to {root}: the tempdir {_original_tempdir()} is too long "
+            f"for a unix socket ({_socket_path_max()}-byte sun_path)"
+            if short else None
+        ),
+    )
     return str(root)
 
 
-def _log_cluster_root(root: Path | None, reason: str | None) -> None:
+def _log_cluster_root(root: Path | None, reason: str | None, *, note: str | None = None) -> None:
     """One structured line per cluster start and one row in the run's cluster
     log. A disk start with a reason is a warning (visible at the default log
-    level); the rest are info."""
+    level); the rest are info. *note* says why a chosen root is where it is (the
+    short ``/tmp`` root a long tempdir moved the clusters to); it is not a refusal
+    and never warns."""
     kind = "tmpfs" if root is not None and _on_tmpfs_root(str(root), mounts_text=None) else "disk"
-    fields = {"root": str(root) if root else "tempdir", "on": kind, "reason": reason}
+    fields = {"root": str(root) if root else "tempdir", "on": kind, "reason": reason, "note": note}
     if reason:
         _log.warning("nexus_t2_substrate.cluster_root", bead="nexus-vo9qn", **fields)
     else:
         _log.info("nexus_t2_substrate.cluster_root", bead="nexus-vo9qn", **fields)
-    _record_cluster_root(kind, str(root) if root else None, reason)
+    _record_cluster_root(kind, str(root) if root else None, reason, note)
+
+
+def _is_our_root_dir(cand: Path) -> bool:
+    """Is *cand* a real directory (lstat, as the creation path does: a symlink planted
+    under our name in a world-writable ``/dev/shm`` or ``/tmp`` is not our root, and the
+    sweep must not follow it) owned by the service identity? A directory under our
+    predictable name that someone else made is skipped, and said so: the sweep would
+    otherwise signal and delete what a peer's run put there. A missing path is no root."""
+    try:
+        st = cand.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISDIR(st.st_mode):
+        _log.info("nexus_t2_substrate.sweep_root_skipped", root=str(cand), why="not a real directory")
+        return False
+    if os.name != "nt" and st.st_uid != int(_current_uid()):
+        _log.warning(
+            "nexus_t2_substrate.sweep_root_skipped", root=str(cand),
+            why=f"owned by uid {st.st_uid}, not {_current_uid()}",
+        )
+        return False
+    return True
 
 
 def substrate_pg_roots(
@@ -986,12 +1082,18 @@ def substrate_pg_roots(
     uid: int | str | None = None,
     tempdir: Path | None = None,
     shm_dir: Path | None = None,
+    short_dir: Path | None = None,
 ) -> list[Path]:
     """Every root the stray-cluster sweep must look in: the tempdir (where the
-    older clusters live), ``NX_TEST_PG_ROOT`` when set, and the tmpfs root
-    whenever its directory EXISTS on Linux. The override never hides the tmpfs
-    root: ``=default`` and ``=<dir>`` change where NEW clusters go, never what the
-    sweep looks at, because a cluster stranded in tmpfs is RAM until reaped.
+    older clusters live), ``NX_TEST_PG_ROOT`` when set, the tmpfs root whenever its
+    directory EXISTS on Linux, and, on macOS, the short ``/tmp`` root a long
+    tempdir falls back to (:data:`_SHORT_ROOT_DIR`) whenever it exists; each only
+    when it is a real directory owned by this user (:func:`_is_our_root_dir`). The
+    override never hides the tmpfs or short root: ``=default`` and ``=<dir>``
+    change where NEW clusters go, never what the sweep looks at, because a cluster
+    stranded in tmpfs is RAM until reaped and one stranded in ``/tmp`` outlives
+    every tempdir. The ``NX_TEST_PG_SHM_DIR`` seam stands in for the short
+    directory too.
     """
     env = os.environ if env is None else env
     base = _original_tempdir() if tempdir is None else tempdir
@@ -1003,11 +1105,14 @@ def substrate_pg_roots(
         roots.append(_abs(override))
     if (platform.system() if system is None else system) == "Linux":
         cand = _tmpfs_candidate(_current_uid() if uid is None else uid, shm_dir)
-        # lstat, as the creation path does: a symlink planted under our name in the
-        # world-writable /dev/shm is not our root, and the sweep must not follow it.
-        with contextlib.suppress(OSError):
-            if stat.S_ISDIR(cand.lstat().st_mode):
-                roots.append(cand)
+        if _is_our_root_dir(cand):
+            roots.append(cand)
+    elif (platform.system() if system is None else system) == "Darwin":
+        if short_dir is None:
+            short_dir = Path(env.get(_SHM_DIR_SEAM_ENV) or _SHORT_ROOT_DIR)
+        short = _short_root_candidate(_current_uid() if uid is None else uid, short_dir)
+        if _is_our_root_dir(short):
+            roots.append(short)
     roots.append(base)
     unique: list[Path] = []
     seen: set[Path] = set()
@@ -1404,11 +1509,11 @@ def integration_cluster_dir(prefix: str) -> str:
     if parent is not None:
         # The reserve is a guess about prefixes; this is the real path. Only a
         # chosen root: the tempdir fallback keeps the callers' older behaviour.
-        if len(path) + len("/.s.PGSQL.65535") > _SOCKET_PATH_MAX:
+        if len(path) + len("/.s.PGSQL.65535") > _socket_path_max():
             shutil.rmtree(path, ignore_errors=True)
             raise ValueError(
                 f"cluster dir {path} is too long: its unix socket path would pass "
-                f"the {_SOCKET_PATH_MAX}-byte sun_path limit; use a shorter "
+                f"the {_socket_path_max()}-byte sun_path limit; use a shorter "
                 f"{_PG_ROOT_ENV} or cluster prefix"
             )
     grant_user_tree_access(path)
@@ -2341,6 +2446,31 @@ def _psql_command(
         raise RuntimeError(f"psql failed: {proc.stderr.strip()[-300:]}")
 
 
+#: Opt-in (RDR-229 P2.R, tests/e2e/rdr229-p2r-mvv.sh): give the substrate PG what the engine's data-move worker needs,
+#: so the engine applies the dml_utils library at boot and runs the registered moves. Off by default: every other
+#: test's PG stays as it was (no extension, no library roles, no extra DDL).
+DATA_MOVES_ENV = "NX_TEST_SUBSTRATE_DATA_MOVES"
+
+
+def _bootstrap_data_move_libraries(bin_dir: Path, pg_port: int, pg_user: str) -> None:
+    """With ``NX_TEST_SUBSTRATE_DATA_MOVES=1``, run the product's own dml_utils bootstrap (the ``pg_background``
+    extension, the three library roles, the ``liquibase`` schema) against the substrate database before the engine
+    migrates. The product function names its database as ``NEXUS_DB_NAME``; the substrate's is ``_DBNAME``. A bundle
+    with no pg_background library raises: the caller asked for moves and cannot have them, which is not a skip."""
+    if os.environ.get(DATA_MOVES_ENV) != "1":
+        return
+    from unittest import mock  # noqa: PLC0415 -- only the opt-in path needs it
+
+    from nexus.db import pg_provision  # noqa: PLC0415 -- same
+    from nexus.db.pg_bootstrap import dml_utils  # noqa: PLC0415 -- same
+
+    with mock.patch.object(dml_utils, "NEXUS_DB_NAME", _DBNAME):
+        result = dml_utils.bootstrap_dml_utils(pg_provision.PgBinaries.from_dir(bin_dir), pg_port, pg_user)
+    if not result.applied:
+        raise RuntimeError(f"T2 engine substrate: {DATA_MOVES_ENV}=1 but the data-move libraries cannot be "
+                           f"installed: {result.blocked_reason}")
+
+
 def _boot() -> dict:
     """Boot hermetic PG + the shaded service JAR. Called once, under _lock."""
     try:
@@ -2551,6 +2681,7 @@ def _boot() -> dict:
             raise RuntimeError(
                 f"T2 engine substrate: role bootstrap failed:\n{proc.stderr}"
             )
+        _bootstrap_data_move_libraries(bin_dir, pg_port, pg_user)
         # nexus-sz651: before the engine migrates, so its DDL (and every nested leaf a
         # tenant mint creates) reaches pg.log through the event trigger.
         # NX_DDL_COUNT=0 (nexus-3cwsw) skips the probe and both marks, the logging lines above and the plugin.

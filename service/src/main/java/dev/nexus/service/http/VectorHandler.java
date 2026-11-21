@@ -1663,6 +1663,7 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = parseBody(raw);
         String collection           = requireString(body, "collection");
         String quarantineCollection = requireString(body, "quarantine_collection");
+        dev.nexus.service.db.QuarantineOrigin.requireMoverSibling(quarantineCollection);
         String quarantinedAt        = requireString(body, "quarantined_at");
         // nexus-0uuit/sybbh crit-fix critique 2026-08-19 (code-review-expert):
         // sample_limit was caller-supplied with no upper bound, unlike every
@@ -2638,7 +2639,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
-        requireNotQuarantineCollection(collection);
+        requireNotQuarantineCollection(repo, tenant, collection);
         int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_CENSUS_LIMIT));
         int offset = Math.max(0, optInt(body, "offset", 0));
 
@@ -2654,19 +2655,12 @@ public final class VectorHandler implements HttpHandler {
 
     /**
      * {@code /v1/vectors/manifest-less-census}'s quarantine refusal (RDR-192 S2):
-     * a {@code quarantine-*} collection is out of the census by construction, so
-     * the route 400s rather than silently classifying quarantine rows. Extracted
-     * to a package-private static method so it is directly unit-testable without
-     * an HTTP round trip or a database — same precedent as {@link
-     * #resolveRowLimit}/{@link #clampSampleLimit}, see {@code
-     * VectorHandlerManifestLessCensusRoutingTest}.
+     * a quarantine collection (its catalog row's state, RDR-229 P2.5; a name with no row, its prefix) is out of
+     * the census by construction, so the route 400s rather than silently classifying quarantine rows. Package-private
+     * so {@code VectorHandlerLifecycleGuardTest} can pin it, and {@code VectorHandlerReapableRouteTest} pins the routes.
      */
-    static void requireNotQuarantineCollection(String collection) {
-        if (dev.nexus.service.db.QuarantineOrigin.isQuarantineName(collection)) {
-            throw new IllegalArgumentException(
-                "collection " + collection + " is a quarantine collection; quarantine rows "
-                + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");
-        }
+    static void requireNotQuarantineCollection(PgVectorRepository repo, String tenant, String collection) {
+        dev.nexus.service.db.QuarantineOrigin.requireOutOfCensus(collection, repo.lifecycleState(tenant, collection));
     }
 
     /**
@@ -2730,7 +2724,7 @@ public final class VectorHandler implements HttpHandler {
         var tenant = requireTenant(ex);
         Map<String, Object> body = readBody(ex);
         String collection = requireString(body, "collection");
-        requireNotQuarantineCollection(collection);
+        requireNotQuarantineCollection(repo, tenant, collection);
         int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_REAPABLE_LIMIT));
         int offset = Math.max(0, optInt(body, "offset", 0));
         Long graceSeconds = parseGraceSeconds(body.get("grace_seconds"));

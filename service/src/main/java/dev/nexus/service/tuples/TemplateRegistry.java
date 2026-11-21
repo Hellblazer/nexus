@@ -432,7 +432,7 @@ public final class TemplateRegistry {
                                 + ") -- a template may only SHORTEN it, never lengthen it");
             }
             long effectiveTtl = effectiveClaimLogTtlSeconds(t, claimLogTtlSeconds);
-            long ceiling = t.retentionSeconds() + sweepIntervalSeconds;
+            long ceiling = t.maxRetentionSeconds() + sweepIntervalSeconds;
             if (effectiveTtl <= ceiling) {
                 String source = t.claimLogTtlSeconds() != null
                         ? "its own claim_log_ttl_seconds"
@@ -440,7 +440,7 @@ public final class TemplateRegistry {
                 throw new TemplateRegistryException(t.name(), "retention_seconds",
                         "refuses to boot: template '" + t.name() + "' effective claim log TTL "
                                 + effectiveTtl + "s (from " + source + ") does not exceed its own"
-                                + " retention_seconds " + t.retentionSeconds()
+                                + " retention " + t.maxRetentionSeconds()
                                 + "s by strictly more than one sweep interval " + sweepIntervalSeconds + "s");
             }
         }
@@ -608,6 +608,9 @@ public final class TemplateRegistry {
         }
         m.put("take", take);
         m.put("retention_seconds", t.retentionSeconds());
+        if (!t.retentionBySuffix().isEmpty()) {
+            m.put("retention_by_suffix", new TreeMap<>(t.retentionBySuffix()));
+        }
         if (t.maxBodyBytes() != null) {
             m.put("max_body_bytes", t.maxBodyBytes());
         }

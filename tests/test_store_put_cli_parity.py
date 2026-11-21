@@ -31,6 +31,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 # Anchored to the repo root, not the cwd: another test in the same xdist worker
 # can leave the cwd changed, and these reads then miss (seen on hellmini).
 _SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"
@@ -50,9 +52,17 @@ def _make_stub_t3():
         def __exit__(self, *a):
             pass
 
+        def collection_exists(self, name):  # the write probe in t3_collection_name must answer (RDR-229 P2.8)
+            return False
+
         def put(self, *, collection, content, title="", **kwargs):
             # Mirrors T3Database.put: chunk_text_hash[:32] (RDR-108 D1).
             return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+        def list_collections(self, *args, **kwargs):
+            # The note write reads the collection's registry row through the shared listing; this
+            # stub has none (a missing method is a bug in the reader's caller and raises).
+            return []
 
     return lambda: _StubT3()
 

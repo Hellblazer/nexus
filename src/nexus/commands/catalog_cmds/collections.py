@@ -49,7 +49,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
       nx catalog backfill-collections
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -67,7 +67,7 @@ def backfill_collections_cmd(dry_run: bool) -> None:
         # backfill could clear.
         t3_names = {
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         }
     except Exception as exc:
         # Refusing to do a "partial" backfill that registers only the
@@ -143,8 +143,8 @@ def backfill_collections_cmd(dry_run: bool) -> None:
     # shape. `writer`'s `.close()` (called once per name by the seam) is
     # a documented no-op on the shared service-catalog handle this
     # writer wraps -- safe to call from a loop.
-    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-        ensure_collection_registered,
+    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         is_conformant_collection_name,
         parse_conformant_collection_name,
     )
@@ -211,7 +211,7 @@ def collection_name_cmd(content_type: str, repo: Path | None) -> None:
             f"Run 'nx index repo {target_repo}' first; the indexer's "
             f"_catalog_hook registers the owner row that this command needs."
         ) from exc
-    click.echo(name.render())
+    click.echo(name.label)
 
 
 @click.command("rename-collection")
@@ -271,10 +271,10 @@ def rename_collection_cmd(
     from nexus.commands.collection import (  # noqa: PLC0415  — command-local import (nexus.commands.collection)
         rename_collection_data_plane,
     )
-    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.corpus import rename_model_conflict  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         embedding_model_for_collection_name,
         is_conformant_collection_name,
-        rename_model_conflict,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
 
@@ -433,10 +433,8 @@ def rename_collection_cmd(
         # on bare name-derivation (nexus-cecqy's legacy_grandfathered
         # flag), matching register_collection's own pre-existing
         # internal fallback for that shape.
-        from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
-            ensure_collection_registered,
-            parse_conformant_collection_name,
-        )
+        from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — command-local import (nexus.corpus)
+        from nexus.catalog.rows.legacy_names import parse_conformant_collection_name  # noqa: PLC0415  — command-local import (nexus.corpus)
         if is_conformant_collection_name(new):
             parsed = parse_conformant_collection_name(new)
             ensure_collection_registered(
@@ -553,7 +551,7 @@ def collection_gc_cmd(apply: bool) -> None:
     Filed under nexus-ks40 (catalog/T3 hygiene).
     """
     from nexus.db import make_t3  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
@@ -588,7 +586,7 @@ def collection_gc_cmd(apply: bool) -> None:
         # collection whose chunks have no live owner has live count 0 but is
         # not empty, and must not be deleted as a zombie.
         count = c.get("stored_count", c.get("count", 0))
-        if name.startswith(_BYPASS_SCHEMA_PREFIXES):
+        if bypasses_canonical_schema(name, c):
             skipped_bypass += 1
             continue
         if name in projection_names or name in doc_collection_names:

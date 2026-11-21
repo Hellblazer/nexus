@@ -226,6 +226,21 @@ class TupleHandlerWiringTest {
      */
     @Test
     @SuppressWarnings("unchecked")
+    void registryPresent_retentionBySuffixRenderedOnlyWhereDeclared() throws Exception {
+        var resp = get(withRegistry, "/v1/tuples/registry");
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var templates = (java.util.List<Map<String, Object>>) mapper.readValue(resp.body(), MAP_T).get("templates");
+
+        Map<String, Object> ci = templates.stream().filter(t -> "board/ci/<topic>".equals(t.get("name"))).findFirst().orElseThrow();
+        assertThat(ci.get("retention_by_suffix")).as("RDR-252: --owner rows live 35 days")
+            .isEqualTo(Map.of("--owner", 3_024_000));
+        assertThat(ci.get("retention_seconds")).isEqualTo(259_200);
+        Map<String, Object> mailbox = templates.stream().filter(t -> "mailbox/<address>".equals(t.get("name"))).findFirst().orElseThrow();
+        assertThat(mailbox).doesNotContainKey("retention_by_suffix");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void registryPresent_lockAndScaleLimitFieldsRendered() throws Exception {
         var resp = get(withRegistry, "/v1/tuples/registry");
         assertThat(resp.statusCode()).isEqualTo(200);

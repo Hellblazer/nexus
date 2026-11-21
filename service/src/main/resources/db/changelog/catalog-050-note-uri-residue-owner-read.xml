@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.15 (RDR-229 P2.10): the owner-read policies of the three driving tables of the residue repair moves
+    that catalog-049-2 registers (and whose on_complete registers the second and third). THE POLICY HALF of RDR-246's
+    owner-read pattern, copied from service/src/test/resources/datamove/owner-read-policy/policy.xml with the three
+    tables written as literals and vectors-029's guard word for word. It follows the registering changeset, and each
+    table has its own changeset: a Liquibase precondition skips a whole changeset, so the guard of one table never skips
+    another's policy, and none shares a changeset with the registering INSERT.
+
+    catalog-050-1  catalog_documents_owner_read on nexus.catalog_documents
+    catalog-050-2  document_aspects_owner_read on nexus.document_aspects
+    catalog-050-3  document_highlights_owner_read on nexus.document_highlights
+
+    nexus.catalog_collections is NOT a driving table, but every verification joins it for the collection's content type,
+    and the worker's TABLE-WIDE verification (the backstop for a tenant the list missed) runs as the migrating role with no
+    nexus.tenant, so under FORCE row level security the join would see no collection and report a table with residue
+    clean. Its owner-read policy, catalog_collections_owner_read, is vectors-065's (nexus-f3yqd.2.23, RDR-229 D2, which
+    lands first and needs it for its own move), not a fourth changeset here: one changeset owns the policy, so no rollback
+    of one drops another's. DrivingTableIsolationCheck asks the isolation question of that table too while a move that
+    reads it is registered (its SUPPORT_TABLES), so a membership granted after vectors-065 ran is caught.
+
+    Each is FOR SELECT TO CURRENT_USER USING (true), permissive beside tenant_isolation: the migrating role reads every
+    tenant's rows so the worker can verify and finish the moves, and it can still write only the rows of the tenant its
+    session carries. Skipped whole (MARK_RAN) where nexus_svc, or another login role that row-level security binds, is or
+    inherits the migrating role (the single-role posture): the moves are then registered and blocked, as the pattern says.
+    DrivingTableIsolationCheck refuses boot when such a policy ever applies to the serving role. DDL only, no row DML.
+    After catalog-049, before the grants-nexus-svc.xml runAlways block.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-050-1" author="nexus-p2m1x.15">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>Owner-read SELECT policy catalog_documents_owner_read on nexus.catalog_documents for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP POLICY IF EXISTS catalog_documents_owner_read ON nexus.catalog_documents;
+CREATE POLICY catalog_documents_owner_read ON nexus.catalog_documents
+    FOR SELECT TO CURRENT_USER USING (true);
+
+DO $post$
+DECLARE
+    me            oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    pol_roles     oid[];
+    exposed_roles text;
+BEGIN
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = 'nexus.catalog_documents'::regclass AND pol.polname = 'catalog_documents_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'owner-read policy catalog_documents_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'role(s) % have the privileges of the migrating role %; the owner-read policy would apply to them and let them read every tenant''s rows of nexus.catalog_documents', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql>DROP POLICY IF EXISTS catalog_documents_owner_read ON nexus.catalog_documents</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-050-2" author="nexus-p2m1x.15">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>Owner-read SELECT policy document_aspects_owner_read on nexus.document_aspects for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP POLICY IF EXISTS document_aspects_owner_read ON nexus.document_aspects;
+CREATE POLICY document_aspects_owner_read ON nexus.document_aspects
+    FOR SELECT TO CURRENT_USER USING (true);
+
+DO $post$
+DECLARE
+    me            oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    pol_roles     oid[];
+    exposed_roles text;
+BEGIN
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = 'nexus.document_aspects'::regclass AND pol.polname = 'document_aspects_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'owner-read policy document_aspects_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'role(s) % have the privileges of the migrating role %; the owner-read policy would apply to them and let them read every tenant''s rows of nexus.document_aspects', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql>DROP POLICY IF EXISTS document_aspects_owner_read ON nexus.document_aspects</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-050-3" author="nexus-p2m1x.15">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="0">SELECT COUNT(*) FROM pg_catalog.pg_roles r WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE'))) OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE') AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin)</sqlCheck>
+        </preConditions>
+        <comment>Owner-read SELECT policy document_highlights_owner_read on nexus.document_highlights for the migrating role (RDR-246): skipped whole (MARK_RAN) when nexus_svc, or any other login role subject to row-level security, is or inherits the migrating role; ends with a post-condition that RAISEs unless the policy names exactly the migrating role.</comment>
+        <sql splitStatements="false" stripComments="false">
+DROP POLICY IF EXISTS document_highlights_owner_read ON nexus.document_highlights;
+CREATE POLICY document_highlights_owner_read ON nexus.document_highlights
+    FOR SELECT TO CURRENT_USER USING (true);
+
+DO $post$
+DECLARE
+    me            oid := (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user);
+    pol_roles     oid[];
+    exposed_roles text;
+BEGIN
+    SELECT pol.polroles INTO pol_roles
+      FROM pg_catalog.pg_policy pol
+     WHERE pol.polrelid = 'nexus.document_highlights'::regclass AND pol.polname = 'document_highlights_owner_read';
+    IF pol_roles IS DISTINCT FROM ARRAY[me] THEN
+        RAISE EXCEPTION 'owner-read policy document_highlights_owner_read must name exactly the migrating role % and nothing else, found %', current_user, pol_roles;
+    END IF;
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO exposed_roles
+      FROM pg_catalog.pg_roles r
+     WHERE (r.rolname = 'nexus_svc' AND (r.rolname = current_user OR pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')))
+        OR (r.rolname &lt;&gt; current_user AND pg_catalog.pg_has_role(r.oid, current_user, 'USAGE')
+            AND NOT r.rolsuper AND NOT r.rolbypassrls AND r.rolcanlogin);
+    IF exposed_roles IS NOT NULL THEN
+        RAISE EXCEPTION 'role(s) % have the privileges of the migrating role %; the owner-read policy would apply to them and let them read every tenant''s rows of nexus.document_highlights', exposed_roles, current_user;
+    END IF;
+END
+$post$;
+        </sql>
+        <rollback>
+            <sql>DROP POLICY IF EXISTS document_highlights_owner_read ON nexus.document_highlights</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

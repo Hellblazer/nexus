@@ -191,6 +191,18 @@ EXIT_COULD_NOT_CHECK = 3
     ),
 )
 @click.option(
+    "--uri-residue",
+    "uri_residue",
+    is_flag=True,
+    help=(
+        "RDR-229 P1.2 (nexus-p2m1x.2): count the chroma:// source-URI rows whose segment has no "
+        "rdr__/docs__/code__ prefix, split by whether their collection is code/docs/rdr, and the nx-note:// "
+        "rows of such a collection with a prefix-free segment, across catalog_documents, document_aspects and "
+        "document_highlights. One engine read (engine-service 0.1.200), no catalog walk. WARN on any; never "
+        "changes the exit status. Not checked, never a pass, on an engine without the route."
+    ),
+)
+@click.option(
     "--json", "as_json", is_flag=True,
     help="Emit machine-readable JSON instead of text output.",
 )
@@ -207,6 +219,7 @@ def doctor_cmd(
     sensitive_with_aspects: bool,
     sensitive_in_external_embedder: bool,
     sensitivity_mcp_output: bool,
+    uri_residue: bool,
     as_json: bool,
 ) -> None:
     """RDR-101 catalog doctor surface.
@@ -232,6 +245,7 @@ def doctor_cmd(
         or link_coverage or visible_outside_manifest
         or sensitive_in_aspect_eligible or sensitive_with_aspects
         or sensitive_in_external_embedder or sensitivity_mcp_output
+        or uri_residue
     )
     if not any_check:
         raise click.UsageError(
@@ -240,8 +254,8 @@ def doctor_cmd(
             "--t3-vs-catalog, --name-vs-embed-dim, "
             "--store-put-integrity, --link-coverage, "
             "--visible-outside-manifest, --sensitive-in-aspect-eligible, "
-            "--sensitive-with-aspects, --sensitive-in-external-embedder, or "
-            "--sensitivity-mcp-output."
+            "--sensitive-with-aspects, --sensitive-in-external-embedder, "
+            "--sensitivity-mcp-output, or --uri-residue."
         )
 
     overall_pass = True
@@ -374,6 +388,19 @@ def doctor_cmd(
         elif check == "check_sensitive_with_aspects" and _sd.is_not_checked(report):
             could_not_check = True
 
+    if uri_residue:
+        from nexus.catalog.rdr229 import uri_residue_doctor as _ur  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost
+
+        report = _ur.check_uri_residue()
+        if as_json:
+            json_payload[report["name"]] = report
+        else:
+            if _printed_anything:
+                click.echo("")
+            for line in _ur.render_text(report):
+                click.echo(line)
+            _printed_anything = True
+
     if as_json:
         click.echo(json.dumps(json_payload, indent=2))
 
@@ -426,7 +453,7 @@ def _run_collections_drift() -> dict:
     with-report, not all-or-nothing.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
     from nexus.db.collection_state import CollectionState, probe_collection_state  # noqa: PLC0415  — command-local import (nexus.db.collection_state)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -435,7 +462,7 @@ def _run_collections_drift() -> dict:
         t3_db = make_t3()
         t3_names = {
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         }
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -641,14 +668,14 @@ def _run_chunk_size_distribution() -> dict:
     aren't meaningful.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
     from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
         t3 = make_t3()
         collections = [
             c["name"] for c in t3.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         ]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -758,14 +785,14 @@ def _run_chunk_text_dedup() -> dict:
     ``{"pass": bool, "within": {coll: {...}}, "cross": [{...}]}``.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
     from nexus.db.limits import QUOTAS  # noqa: PLC0415  — command-local import (nexus.db.limits)
 
     try:
         t3 = make_t3()
         collections = [
             c["name"] for c in t3.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         ]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -899,7 +926,7 @@ def _run_t3_vs_catalog() -> dict:
     Bypass-schema collections (``taxonomy__*``) are skipped from all.
     """
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.commands.catalog_cmds.t3_orphans import classify_t3_orphan_collections  # noqa: PLC0415 — command-local import
@@ -908,7 +935,7 @@ def _run_t3_vs_catalog() -> dict:
         t3_db = make_t3()
         t3_listing = {
             c["name"]: c for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         }
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -1075,12 +1102,12 @@ def _run_name_vs_embed_dim() -> dict:
     # segment, not the (should-already-agree) catalog row.
     # embedding_model_for_collection_name (regex, unaffected by the
     # repoint) reads it directly.
-    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415  — command-local import (nexus.corpus)
         embedding_model_for_collection_name,
         is_conformant_collection_name,
     )
     from nexus.db import make_t3  # noqa: PLC0415  — command-local import (nexus.db)
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415  — command-local import (nexus.db.t3)
+    from nexus.db.rows.lifecycle import bypasses_canonical_schema  # noqa: PLC0415  — command-local import (nexus.db.rows.lifecycle)
 
     mismatches: list[dict] = []
     empty: list[str] = []
@@ -1093,7 +1120,7 @@ def _run_name_vs_embed_dim() -> dict:
         t3_db = make_t3()
         cols = [
             c["name"] for c in t3_db.list_collections()
-            if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
+            if not bypasses_canonical_schema(c["name"], c)
         ]
     except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
         return {
@@ -1481,7 +1508,7 @@ VISIBLE_CHECK_ROW_BUDGET: int = 5000
 #: worst case of a slow census page followed by a slow probe batch.
 VISIBLE_CHECK_TIME_BUDGET_S: float = 120.0
 
-_VISIBLE_CHECK_PREFIX = "knowledge__"
+_VISIBLE_CHECK_CONTENT_TYPE = "knowledge"
 
 
 def _titles_for_tumblers(tumblers: list[str]) -> dict[str, str]:
@@ -1554,7 +1581,7 @@ def _run_visible_outside_manifest(
     report: dict = {
         "pass": True, "not_applicable": False, "vacuous": False, "inconclusive": False,
         "reason": "", "checked": 0, "total": 0, "findings": [], "collections": [],
-        "collections_total": 0, "collections_unreached": 0,
+        "collections_total": 0, "collections_unreached": 0, "unrowed_collections": 0,
         "truncated": False, "truncated_reason": "",
         "check_errors": [], "elapsed_s": 0.0,
         "row_budget": row_budget, "time_budget_s": time_budget_s,
@@ -1565,10 +1592,14 @@ def _run_visible_outside_manifest(
             from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
 
             t3 = make_t3()
+        listing = list(t3.list_collections())
         names = sorted(
-            c["name"] for c in t3.list_collections()
-            if c["name"].startswith(_VISIBLE_CHECK_PREFIX)
+            c["name"] for c in listing
+            if c.get("content_type") == _VISIBLE_CHECK_CONTENT_TYPE and c.get("lifecycle_state") != "quarantine"
         )
+        # A listing row with no content_type has no catalog row behind it (RDR-229 P2.9): counted, not read as
+        # "no knowledge collection here".
+        report["unrowed_collections"] = sum(1 for c in listing if not c.get("content_type"))
     except Exception as exc:  # noqa: BLE001 — an unreadable T3 is UNKNOWN, never a pass
         report["pass"] = False
         report["error"] = f"Failed to list T3 collections: {exc}"
@@ -1577,6 +1608,10 @@ def _run_visible_outside_manifest(
     if not names:
         report["not_applicable"] = True
         report["reason"] = "no knowledge__ collection on this box; nothing to check"
+        if report["unrowed_collections"]:
+            report["reason"] += (
+                f" ({report['unrowed_collections']} collection(s) carry no catalog row and were not examined)"
+            )
         return report
     report["collections_total"] = len(names)
 

@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): the registered RDR-246 data move
+    rdr229-reown-repo-stems-from-curator. A collection's owner_id is its source, set once at registration. A repo's
+    collections (code__<slug>-<hash8>__*, docs__<slug>-<hash8>__*, rdr__<slug>-<hash8>__*) were registered under a curator
+    by nexus-wbfpw.33's import fallback, and catalog-044-3 then froze that. This move gives them the repo owner.
+
+    THE RULE, per tenant. A stem S = <slug>-<hash8> (hash8 is eight lowercase hex digits: repo_identity's
+    sha256(main_repo)[:8]) is a REPO when EITHER a catalog_owners row of owner_type 'repo' with repo_hash = hash8 already exists
+    in the tenant, OR a code__S__* row (unsuperseded, not in quarantine) is owned by a curator (nexus.catalog_owner_is_curator). The second arm is the only
+    one that can mint an owner (only nx index repo mints a code__ collection, so a code__ row is the signal); the first arm is
+    what lets a docs-only stem under a curator find a repo owner that already exists, and keeps a stem whole when its code__
+    rows moved in an earlier chunk. A docs-only stem with no such owner and no code__ row is a corpus and is NEVER touched.
+    Every unsuperseded, non-quarantine code__S__*, docs__S__* and rdr__S__* row of a repo stem that is OWNED BY A CURATOR is set to the
+    repo owner with repo_hash = hash8 (the segment form, 1.17 -> 1-17): a row on any other owner is left alone. An existing
+    catalog_owners row with that repo_hash is reused, else one is inserted (owner_type 'repo', repo_root '', name <slug>, or
+    <slug>-<hash8> when that name is taken or two stems of one chunk share a slug). Superseded rows are not touched.
+
+    QUARANTINE SIBLINGS. A stem row's quarantine sibling (a lifecycle_state 'quarantine' row named 'quarantine-' || the
+    origin's name, the reaper's sibling) moves with its origin. QuarantineOrigin.rowsOf attributes an untagged quarantine row
+    to its origin either by that exact name or, for the client's sibling, by equal owner_id, embedding_model, model_version
+    and content_type; the owner_id arm stops matching when only the origin is re-owned, so the sibling follows. A sibling named
+    for a collection of a repo stem is the only quarantine row this move touches. (The client's row-derived sibling is shared by
+    every collection of one owner and model and is not named for an origin: it is not moved.)
+
+    OCCUPIED DESTINATION, SKIPPED AND REPORTED. P3.8's partial UNIQUE index (Sam's ruling, T2
+    nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21, Q1) holds at most one row per (tenant_id, content_type, owner_id,
+    embedding_model, model_version) WHERE superseded_by = '' AND lifecycle_state <> 'quarantine'. That one predicate is what
+    HELD means here, in catalog-051-2's guard, and in the verification below: a row holds its tuple when it is unsuperseded
+    and not in quarantine, so a dormant or disputed holder holds like a live one. A curator-owned stem row whose destination
+    tuple (its content_type, embedding_model and model_version on the repo owner's owner_id) is already held by ANOTHER
+    such row of the tenant (a native code__1-17__* collection beside a restored legacy code__<slug>-<hash8>__*) is NOT moved:
+    the move would create a duplicate tuple. It stays curator-owned, in the curator tuple it
+    already had, so the move adds no duplicate tuple (two skipped rows of different repos under one curator, model and version
+    share that tuple after the move exactly as they did before it), and its quarantine sibling stays with it. Each such row is
+    REPORTED: the statement writes one nexus.gc_audit row per skipped row (operation 'rdr229_reown_skipped', collection = the
+    row's name, details = the reason, its owner_id, the destination owner_id and the name of the row that holds the tuple),
+    once per row, so a rerun adds none. gc_audit is the engine's existing per-tenant audit; the worker keeps nothing per row
+    (dml_utils records only run totals and chunk errors, and a single SQL statement cannot RAISE NOTICE), and the report rows are
+    what an operator reads.
+
+    THE VERSION IN A TUPLE. model_version is '' on a row until RDR-229 D2's repair move (vectors-064) writes it from the name,
+    and the worker may run this move before D2 completes (D2 blocked or backed off, another move's turn). A row's version is
+    therefore read as COALESCE(NULLIF(model_version, ''), substring(name from '__(v[0-9]+)$'), ''): the stored value, else
+    the trailing __vN of the name, else ''. The trailing __vN is read whether or not the name is conformant: D2's template only
+    repairs a name that matches its conformance regex, so a non-conformant name ending __vN stays '' after D2 while this move
+    reads it as vN. That errs toward HELD (such a row is skipped and reported, never moved onto a tuple), which is the safe
+    direction. It is compared that way everywhere this move compares tuples (the stem rows and the holders in occ, the ranking
+    in ranked, the verification), so a blank-version row is seen as the v1 twin of a native v1 collection and skipped, not moved
+    onto the tuple D2 would then make a duplicate. The tuple LOCK below uses the version as STORED, because that is what the
+    index and every other writer's lock key see.
+
+    WHERE AN OPERATOR LOOKS. SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'
+    (per tenant: gc_audit is tenant-isolated, so read it with the tenant set). details is a JSON object with the keys
+    reason, owner_id, destination_owner_id, content_type and held_by. The template writes exactly two reason values:
+      'destination tuple held by <name>'                   the destination tuple is already held by the live collection <name>
+      'destination tuple claimed in this run by <name>'    <name> sorts first among the rows that would move onto the same free tuple
+    (<name> is also in held_by). The verification REQUIRES each report: a curator-owned repo-stem row whose destination
+    tuple is held by another row passes only when its gc_audit row exists, and any other curator-owned repo-stem row blocks the
+    move, so a skip that is not reported keeps the move from completing.
+
+    CLAIMED IN THE SAME RUN. Two or more rows that would move onto the same FREE destination tuple (two stems of one repo hash
+    with different slugs, say) cannot all move: the statement ranks them with row_number() over the destination tuple, by
+    collection name, over every row of the tenant (not only the chunk), so the first by name is the one that moves and every
+    other row is skipped and reported with reason 'destination tuple claimed in this run by <name>'. The ranking does not
+    depend on which chunk a row falls in. Across chunks the occupied check covers it: once the first row's chunk has
+    committed, a later chunk sees it holding the tuple, so the others are occupied (their report is already written, and a
+    rerun adds none). One owner is minted per hash8, however many stems carry it.
+
+    THE DESTINATION TUPLE LOCKS (S2). catalog-051-2's triggers take pg_advisory_xact_lock(nexus.collection_tuple_lock_key(...)) on
+    the tuple a row would land on, so a document registration and a re-own cannot both claim one free tuple. The move takes the
+    same lock on the same key for each tuple it moves a row onto, and ONLY for the rows this chunk moves: CTE mv holds the
+    chunk's rows (the one place that carries <driving_table> and <chunking_clause>; rows that match the chunking clause, are
+    curator-owned, are not skipped), with each row's tuple key computed by the one SQL function from the stored version; CTE tk
+    selects the DISTINCT keys of mv, ORDER BY the key, MATERIALIZED; CTE tlk calls pg_advisory_xact_lock(k.key) for each row of
+    tk; the UPDATE reads mv and references tlk (AND (SELECT count(*) FROM tlk) >= 0), which runs it to completion before the
+    UPDATE writes a row. A chunk therefore holds at most chunk_size tuple locks (1000), however many tuples the tenant has: a
+    tenant with more tuples than the lock table holds (about 6400 at max_locks_per_transaction 64) cannot fail the move with
+    53200, which is class 53 and would retry forever. ORDER. The keys are locked in ascending order, which is the order
+    CollectionTupleLock.lock uses for every Java caller, so no two takers of several tuples hold a lock the other waits on. In
+    one statement that order holds because tlk's FROM is the materialised tk, a subquery with DISTINCT and ORDER BY that the
+    planner does not flatten or re-sort, and the volatile function in tlk's select list is evaluated for the rows in the order
+    tk returns them (the function is parallel-unsafe, so no parallel scan reorders it). The owner lock comes first: tlk's WHERE
+    EXISTS (SELECT 1 FROM lck) makes the lck CTE run before the first tuple lock. THE CYCLE THAT REMAINS. That fixes the order
+    among advisory locks, not against row locks, so a deadlock with another transaction exists: a transaction that holds the
+    row lock of collection X (an UPDATE or a document write that touched it) and then waits on tuple lock K, held by this
+    move, cycles with the move's later UPDATE of X; likewise a transaction that holds a tuple lock and then calls upsertOwner
+    (the owner lock) while the move holds the owner lock and waits on that tuple. PostgreSQL kills one of the two with 40P01.
+    Who retries: the move, when it is the victim (DataMoveFailureClassifier treats 40P01 as transient and the worker retries the
+    chunk, which is safe because a chunk is one statement). Who surfaces it: when the other side is the victim, a plain
+    document registration (upsertDocument, registerDocument), upsertCollection and supersedeCollection are not wrapped in
+    DeadlockRetry, so the caller sees the 40P01 error (see catalog-051's header for the wrapped paths). RESIDUAL, the same as
+    the owner lock's: the statement's snapshot is taken before any of these locks are granted, so a trigger rewrite that
+    commits between the snapshot and the grant is not seen by occ; under the P3.8 index the move's UPDATE then raises 23505,
+    which DataMoveFailureClassifier treats as permanent, so the move is reported failed and a superseding move re-runs it;
+    without the index it is a duplicate. The window is the wait itself.
+
+    ONE STATEMENT, ONE CHUNK. The template is a single statement with data-modifying CTEs: the advisory lock
+    CatalogRepository.upsertOwner takes (pg_advisory_xact_lock(hashtext('catalog_owners/' || tenant)); the CTE is REFERENCED by the
+    INSERT's FROM, or PostgreSQL would never run it), the INSERT of the missing owners with the tumbler allocation upsertOwner
+    uses ('1.' || max(second segment) + 1, consecutive for several new owners), the INSERT of the skip reports, and the UPDATE of
+    the driving table. All the sub-statements share one snapshot, so the UPDATE cannot read the INSERT's rows through
+    catalog_owners: it joins the INSERT's RETURNING to the owners already visible. <driving_table> and <chunking_clause> appear
+    once, in the mv CTE (dml_utils requires exactly once; the UPDATE names the driving table and joins mv on its primary key, and
+    re-checks that the row is still curator-owned and not superseded, which a row changed after the snapshot re-evaluates); the CTEs read the tenant's catalog rows by name, so each chunk re-derives
+    the tenant's repo stems, the owner INSERT is a no-op after the first, and the report INSERT adds only rows not yet reported.
+    A stem's rows may fall in different chunks (code__ sorts before docs__), which is why a stem whose owner already exists is a
+    repo. The tenant is current_setting('nexus.tenant'): the worker runs the move once per tenant.
+
+    RESIDUAL. The statement's snapshot is taken before the lock is granted. A repo owner registered by another session in the
+    window between the snapshot and the lock would make the INSERT compute an already-used tumbler; ON CONFLICT DO NOTHING drops
+    that owner, the verification below then finds its rows and the move fails (a superseding move re-runs it). It needs a new repo
+    registered in the same tenant during the release's first minutes.
+
+    VERIFICATION. No unsuperseded, non-quarantine row of a repo stem is still owned by a curator, except a skipped row whose
+    report is written: a curator-owned repo-stem row passes only when its destination tuple is held by another row AND its
+    gc_audit report exists, so a skip that was not reported (or a row that should have moved) blocks completion. It reads
+    catalog_owners (the curator test, the repo owners) and gc_audit (the reports), both under FORCE row level security with
+    only a tenant policy, so the table-wide run (no tenant setting) would see both empty and pass trivially. The owner-read
+    policies of vectors-067-2 and vectors-067-3 (below) let the migrating role read every tenant's rows of both, and
+    DrivingTableIsolationCheck.SUPPORT_TABLES asks the boot question of them while this move is registered. The per-tenant
+    runs, which carry the tenant, were always the check; the table-wide run is now one too. Quarantine siblings are not part
+    of the verification.
+
+    S4, THE POLICIES. Smaller than rewriting the verification onto catalog_collections alone (which cannot say who is a curator
+    or what a repo owner is without catalog_owners): two guarded SELECT policies, catalog_owners_owner_read and
+    gc_audit_owner_read, in their own include (vectors-067-reown-repo-stems-owner-read.xml, changesets vectors-067-2 and
+    vectors-067-3, one guard each), after this registering changeset and never inside it. They carry the guard of vectors-029
+    and vectors-065 word for word, so in the single-role posture they are skipped (MARK_RAN) and the move is blocked like D2's.
+
+    Reads: the stem is parsed from the collection NAME (split_part on the double-underscore separator): the one name read of
+    this move, a migration source (the legacy owner_id was derived from the name), not a runtime parse.
+
+    NOT IN THIS CHANGESET: the owner-read SELECT policy on nexus.catalog_collections (vectors-065, owned by RDR-229 D2). The
+    admin role must read every tenant's collection rows for the worker's tenant list and verification; this move registers
+    against that policy and does not carry a second copy of it. DATA EFFECT: none here (one INSERT into nexus.data_moves);
+    the rows move after boot, in the worker.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-067-1" author="nexus-p2m1x.14">
+        <comment>Register the data move rdr229-reown-repo-stems-from-curator over nexus.catalog_collections (RDR-246, RDR-229): one INSERT into nexus.data_moves, no policy</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-reown-repo-stems-from-curator',
+        'WITH lck AS (
+    SELECT pg_advisory_xact_lock(hashtext(''catalog_owners/'' || current_setting(''nexus.tenant'', true))) AS locked
+), stemrows AS (
+    SELECT c.name, c.content_type, c.embedding_model, c.model_version AS stored_version,
+           COALESCE(NULLIF(c.model_version, ''''), substring(c.name from ''__(v[0-9]+)$''), '''') AS model_version,
+           c.owner_id, split_part(c.name, ''__'', 2) AS stem
+      FROM nexus.catalog_collections c
+     WHERE c.tenant_id = current_setting(''nexus.tenant'', true)
+       AND c.content_type IN (''code'', ''docs'', ''rdr'') AND c.lifecycle_state <> ''quarantine'' AND c.superseded_by = ''''
+       AND split_part(c.name, ''__'', 1) = c.content_type
+       AND split_part(c.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
+), cand AS (
+    SELECT DISTINCT r.stem
+      FROM stemrows r
+     WHERE EXISTS (SELECT 1 FROM nexus.catalog_owners o
+                    WHERE o.tenant_id = current_setting(''nexus.tenant'', true) AND o.owner_type = ''repo''
+                      AND o.repo_hash = right(r.stem, 8))
+        OR EXISTS (SELECT 1 FROM stemrows k
+                    WHERE k.stem = r.stem AND k.content_type = ''code''
+                      AND nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), k.owner_id))
+), stems AS (
+    SELECT stem, left(stem, length(stem) - 9) AS slug, right(stem, 8) AS hash8,
+           row_number() OVER (PARTITION BY left(stem, length(stem) - 9) ORDER BY stem) AS nth
+      FROM cand
+), mx AS (
+    SELECT COALESCE(max(CASE WHEN split_part(o.tumbler_prefix, ''.'', 2) ~ ''^[0-9]{1,9}$''
+                             THEN split_part(o.tumbler_prefix, ''.'', 2)::int END), 0) AS n
+      FROM nexus.catalog_owners o
+     WHERE o.tenant_id = current_setting(''nexus.tenant'', true) AND o.tumbler_prefix LIKE ''1.%''
+), fresh AS (
+    SELECT d.stem, d.slug, d.hash8, d.nth, row_number() OVER (ORDER BY d.stem) AS rn
+      FROM (SELECT DISTINCT ON (s.hash8) s.stem, s.slug, s.hash8, s.nth FROM stems s ORDER BY s.hash8, s.stem) d
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                        WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.repo_hash = d.hash8)
+), ins AS (
+    INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root)
+    SELECT current_setting(''nexus.tenant'', true), ''1.'' || (mx.n + f.rn),
+           CASE WHEN f.nth > 1
+                  OR EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                              WHERE r.tenant_id = current_setting(''nexus.tenant'', true)
+                                AND r.name = f.slug AND r.owner_type = ''repo'')
+                THEN f.stem ELSE f.slug END,
+           ''repo'', f.hash8, ''''
+      FROM lck CROSS JOIN fresh f CROSS JOIN mx
+    ON CONFLICT DO NOTHING
+    RETURNING tumbler_prefix, repo_hash
+), repo_owner AS (
+    SELECT i.tumbler_prefix, i.repo_hash FROM ins i
+    UNION
+    SELECT r.tumbler_prefix, r.repo_hash FROM nexus.catalog_owners r
+     WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.owner_type = ''repo''
+       AND r.repo_hash IS NOT NULL AND r.repo_hash <> ''''
+), occ AS (
+    SELECT r.name, r.owner_id, r.content_type, w.tumbler_prefix AS dest_prefix, min(h.name) AS held_by
+      FROM stemrows r
+      JOIN stems s ON s.stem = r.stem
+      JOIN repo_owner w ON w.repo_hash = s.hash8
+      JOIN nexus.catalog_collections h
+        ON h.tenant_id = current_setting(''nexus.tenant'', true)
+       AND h.owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
+       AND h.content_type = r.content_type AND h.embedding_model = r.embedding_model
+       AND COALESCE(NULLIF(h.model_version, ''''), substring(h.name from ''__(v[0-9]+)$''), '''') = r.model_version
+       AND h.lifecycle_state <> ''quarantine'' AND h.superseded_by = '''' AND h.name <> r.name
+     WHERE nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), r.owner_id)
+     GROUP BY r.name, r.owner_id, r.content_type, w.tumbler_prefix
+), ranked AS (
+    SELECT m.name, m.owner_id, m.content_type, m.dest_prefix, m.embedding_model, m.stored_version,
+           row_number() OVER (PARTITION BY m.dest_prefix, m.content_type, m.embedding_model, m.model_version
+                              ORDER BY m.name) AS rn,
+           first_value(m.name) OVER (PARTITION BY m.dest_prefix, m.content_type, m.embedding_model, m.model_version
+                                     ORDER BY m.name) AS first_name
+      FROM (SELECT r.name, r.owner_id, r.content_type, r.embedding_model, r.model_version, r.stored_version,
+                   w.tumbler_prefix AS dest_prefix
+              FROM stemrows r
+              JOIN stems s ON s.stem = r.stem
+              JOIN repo_owner w ON w.repo_hash = s.hash8
+             WHERE nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), r.owner_id)
+               AND NOT EXISTS (SELECT 1 FROM occ o WHERE o.name = r.name)) m
+), skipped AS (
+    SELECT o.name, o.owner_id, o.content_type, o.dest_prefix, o.held_by,
+           ''destination tuple held by '' || o.held_by AS reason
+      FROM occ o
+    UNION ALL
+    SELECT k.name, k.owner_id, k.content_type, k.dest_prefix, k.first_name,
+           ''destination tuple claimed in this run by '' || k.first_name
+      FROM ranked k WHERE k.rn > 1
+), reported AS (
+    INSERT INTO nexus.gc_audit (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    SELECT current_setting(''nexus.tenant'', true), ''rdr229_reown_skipped'', k.name,
+           ''data-move:rdr229-reown-repo-stems-from-curator'', false, 0, ''[]''::jsonb,
+           jsonb_build_object(''reason'', k.reason,
+                              ''owner_id'', k.owner_id, ''destination_owner_id'', replace(k.dest_prefix, ''.'', ''-''),
+                              ''content_type'', k.content_type, ''held_by'', k.held_by)
+      FROM skipped k
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.gc_audit g
+                        WHERE g.tenant_id = current_setting(''nexus.tenant'', true)
+                          AND g.operation = ''rdr229_reown_skipped'' AND g.collection = k.name)
+    RETURNING id
+), mv AS MATERIALIZED (
+    SELECT t.tenant_id, t.name, replace(w.tumbler_prefix, ''.'', ''-'') AS dest,
+           CASE WHEN t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' THEN
+                nexus.collection_tuple_lock_key(t.tenant_id, t.content_type, replace(w.tumbler_prefix, ''.'', ''-''),
+                                                t.embedding_model, t.model_version) END AS key
+      FROM <driving_table>
+     CROSS JOIN stems s
+      JOIN repo_owner w ON w.repo_hash = s.hash8
+     WHERE <chunking_clause>
+       AND t.tenant_id = current_setting(''nexus.tenant'', true)
+       AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
+       AND t.owner_id IS DISTINCT FROM replace(w.tumbler_prefix, ''.'', ''-'')
+       AND ((t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' AND t.superseded_by = ''''
+             AND split_part(t.name, ''__'', 1) = t.content_type AND split_part(t.name, ''__'', 2) = s.stem
+             AND NOT EXISTS (SELECT 1 FROM skipped k WHERE k.name = t.name))
+         OR (t.lifecycle_state = ''quarantine''
+             AND EXISTS (SELECT 1 FROM stemrows o WHERE o.stem = s.stem AND t.name = ''quarantine-'' || o.name)
+             AND NOT EXISTS (SELECT 1 FROM skipped k WHERE t.name = ''quarantine-'' || k.name)))
+), tk AS MATERIALIZED (
+    SELECT DISTINCT m.key FROM mv m WHERE m.key IS NOT NULL ORDER BY 1
+), tlk AS (
+    SELECT pg_advisory_xact_lock(k.key) AS locked
+      FROM tk k
+     WHERE EXISTS (SELECT 1 FROM lck)
+)
+UPDATE nexus.catalog_collections u
+   SET owner_id = m.dest
+  FROM mv m
+ WHERE u.tenant_id = m.tenant_id AND u.name = m.name
+   AND (SELECT count(*) FROM tlk) >= 0
+   AND nexus.catalog_owner_is_curator(u.tenant_id, u.owner_id)
+   AND u.owner_id IS DISTINCT FROM m.dest
+   AND (u.lifecycle_state = ''quarantine'' OR u.superseded_by = '''')',
+        'nexus', 'catalog_collections', 1000, 0, 60000,
+        'SELECT 1 FROM nexus.catalog_collections t
+ WHERE t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state <> ''quarantine'' AND t.superseded_by = ''''
+   AND split_part(t.name, ''__'', 1) = t.content_type
+   AND split_part(t.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
+   AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
+   AND (EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                 WHERE r.tenant_id = t.tenant_id AND r.owner_type = ''repo''
+                   AND r.repo_hash = right(split_part(t.name, ''__'', 2), 8))
+        OR EXISTS (SELECT 1 FROM nexus.catalog_collections k
+                    WHERE k.tenant_id = t.tenant_id AND k.content_type = ''code'' AND k.lifecycle_state <> ''quarantine''
+                      AND k.superseded_by = '''' AND split_part(k.name, ''__'', 1) = ''code''
+                      AND split_part(k.name, ''__'', 2) = split_part(t.name, ''__'', 2)
+                      AND nexus.catalog_owner_is_curator(k.tenant_id, k.owner_id)))
+   AND NOT (EXISTS (SELECT 1 FROM nexus.catalog_owners w
+                      JOIN nexus.catalog_collections h
+                        ON h.tenant_id = w.tenant_id AND h.owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
+                       AND h.content_type = t.content_type AND h.embedding_model = t.embedding_model
+                       AND COALESCE(NULLIF(h.model_version, ''''), substring(h.name from ''__(v[0-9]+)$''), '''')
+                           = COALESCE(NULLIF(t.model_version, ''''), substring(t.name from ''__(v[0-9]+)$''), '''')
+                       AND h.lifecycle_state <> ''quarantine'' AND h.superseded_by = '''' AND h.name <> t.name
+                     WHERE w.tenant_id = t.tenant_id AND w.owner_type = ''repo''
+                       AND w.repo_hash = right(split_part(t.name, ''__'', 2), 8))
+            AND EXISTS (SELECT 1 FROM nexus.gc_audit g
+                         WHERE g.tenant_id = t.tenant_id AND g.operation = ''rdr229_reown_skipped''
+                           AND g.collection = t.name))
+   AND (t.tenant_id = $1 OR $1 IS NULL)',
+        NULL, 'vectors-067-1');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-reown-repo-stems-from-curator'</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

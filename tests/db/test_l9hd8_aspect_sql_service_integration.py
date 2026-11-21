@@ -45,6 +45,7 @@ import time
 from pathlib import Path
 
 import pytest
+from unittest import mock
 
 from nexus._install.layout_core import exe_name
 from nexus.db.pg_provision import bootstrap_superuser
@@ -81,6 +82,7 @@ _ALL_PREREQS = (
 
 pytestmark = [
     pytest.mark.integration,
+    pytest.mark.usefixtures("rowless_collection_cache"),  # RDR-229 P2.9: the operators take item 1's NoRow outcome
     pytest.mark.skipif(
         not _ALL_PREREQS,
         reason=(
@@ -344,6 +346,11 @@ def _make_aspect(
     from nexus.db.t2.records import AspectRecord
     from nexus.aspect_readers import uri_for
     source_path = f"/l9hd8/{suffix}.pdf"
+    # RDR-229 P2.9: uri_for reads the catalog row on its write path. The class-scoped seed fixtures run before
+    # any function-scoped row stub and before the tenant is set, so derive the URI from the name here (item 1's
+    # NoRow outcome, as before P2.9); the operators under test take the same outcome via rowless_collection_cache.
+    with mock.patch("nexus.mcp_infra.get_collection_row", lambda *_a, **_k: None):
+        source_uri = uri_for(collection, source_path) or ""
     extras: dict = {}
     if venue is not None:
         extras["venue"] = venue
@@ -362,7 +369,7 @@ def _make_aspect(
         extractor_name="test",
         # uri_for must match what try_filter/_groupby/_aggregate compute
         # from (collection, source_path); mismatched URIs → zero hits.
-        source_uri=uri_for(collection, source_path) or "",
+        source_uri=source_uri,
         # hygiene-001: doc_id is NOT NULL now and must reference a real
         # catalog_documents row — seeded (tenant_id='default') by the
         # module-scoped _seed_catalog_docs fixture, keyed on this suffix.

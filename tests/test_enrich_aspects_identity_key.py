@@ -29,6 +29,8 @@ from click.testing import CliRunner
 import nexus.commands.enrich as enrich_mod
 from nexus.commands.enrich import _aspect_identity, _select_entries, aspects_list_cmd
 
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes item 1's NoRow outcome without a listing
+
 COLLECTION = "knowledge__knowledge__voyage-context-3__v1"
 
 # Captured at import, BEFORE the fixture below silences ``click.echo`` -- the

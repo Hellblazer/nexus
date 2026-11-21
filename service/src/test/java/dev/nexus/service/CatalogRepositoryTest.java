@@ -1900,10 +1900,12 @@ class CatalogRepositoryTest {
     private static final String OWN_MODEL = "voyage-code-3";
 
     private void registerColl(String tenant, String name, String contentType, String ownerId) {
+        // RDR-229 P2.5: a quarantine- name registers only as 'quarantine', which the caller now says explicitly.
         repo.upsertCollection(tenant, Map.of(
             "name", name, "content_type", contentType, "owner_id", ownerId,
             "embedding_model", contentType.equals("code") ? OWN_MODEL : "voyage-context-3",
-            "model_version", "v1"));
+            "model_version", "v1",
+            "lifecycle_state", name.startsWith("quarantine-") ? "quarantine" : "live"));
     }
 
     private void putDoc(String tenant, String tumbler, String contentType, String collection) {
@@ -2077,15 +2079,15 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: the wbfpw.33 import fallback mints an import's documents under the
-     * knowledge CURATOR when the collection has no usable owner, so a curator document can
-     * be the first to land in a slug-owned repo collection. It names the collection's
-     * owner only provisionally: a repo document registered afterwards replaces it, and it
-     * never replaces a repo owner back. Curator documents are not ignored outright, because
-     * a collection with nothing else (docs__default, curator 1.14) still takes 1-14.
+     * nexus-6pbwx, amended by catalog-051 (RDR-229, Sam 2026-11-21 "Owner is the source"): the wbfpw.33 import fallback
+     * mints an import's documents under the knowledge CURATOR, so a curator document can be the first to land in a
+     * slug-owned repo collection. A slug owner is still derived from the documents, so that first curator document names
+     * the owner (docs__default, curator 1.14, still takes 1-14). But 1-22 is then a tumbler-shaped owner, and since
+     * catalog-051 a curator's segment is no longer replaceable: a repo document that lands afterwards does not take the
+     * collection from the curator, and neither do more curator documents or a re-registration.
      */
     @Test @Order(60)
-    void collectionOwner_curatorDocumentsGiveWayToRepoDocuments() {
+    void collectionOwner_aCuratorOwnerOnceSetStandsAgainstLaterRepoDocuments() {
         String tenant = "own6pbwx-curator-tenant";
         putOwner(tenant, "1.22", "knowledge", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
@@ -2093,15 +2095,16 @@ class CatalogRepositoryTest {
         registerColl(tenant, name, "code", "curator-first-6pbwx");
 
         putDoc(tenant, "1.22.1", "code", name);
-        assertThat(ownerOf(tenant, name)).as("curator documents alone still name an owner").isEqualTo("1-22");
+        assertThat(ownerOf(tenant, name)).as("a slug owner is derived: curator documents alone still name an owner")
+            .isEqualTo("1-22");
         putDoc(tenant, "1.23.1", "code", name);
-        assertThat(ownerOf(tenant, name)).as("a repo document replaces the curator's segment").isEqualTo("1-23");
+        assertThat(ownerOf(tenant, name)).as("a repo document does not replace a curator's segment (catalog-051)")
+            .isEqualTo("1-22");
         putDoc(tenant, "1.22.2", "code", name);
-        putDoc(tenant, "1.22.3", "code", name);
-        assertThat(ownerOf(tenant, name)).as("more curator documents never replace a repo owner back")
-            .isEqualTo("1-23");
+        putDoc(tenant, "1.23.2", "code", name);
+        assertThat(ownerOf(tenant, name)).as("nor do further documents of either owner").isEqualTo("1-22");
         registerColl(tenant, name, "code", "curator-first-6pbwx");
-        assertThat(ownerOf(tenant, name)).as("nor does a re-registration").isEqualTo("1-23");
+        assertThat(ownerOf(tenant, name)).as("nor does a re-registration").isEqualTo("1-22");
     }
 
     /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
@@ -2120,12 +2123,13 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: a registered CURATOR segment is replaceable even though it is
-     * tumbler-shaped, and a curator-only collection settles on the curator's segment
-     * (docs__default under 1.14) and stays there while more curator documents arrive.
+     * nexus-6pbwx, amended by catalog-051 (RDR-229): a curator-only collection settles on the curator's segment
+     * (docs__default under 1.14, derived from the slug "default") and stays there while more curator documents arrive,
+     * and a collection REGISTERED with a curator's segment keeps it when a repo document lands (catalog-051 removed the
+     * curator-replaceable rule: a curator owner a registration set stands).
      */
     @Test @Order(60)
-    void collectionOwner_curatorOnlyCollectionSettlesAndACuratorSegmentIsReplaceable() {
+    void collectionOwner_curatorOnlyCollectionSettlesAndARegisteredCuratorSegmentStands() {
         String tenant = "own6pbwx-default-tenant";
         putOwner(tenant, "1.14", "default", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
@@ -2137,12 +2141,19 @@ class CatalogRepositoryTest {
         putDoc(tenant, "1.14.3", "docs", name);
         assertThat(ownerOf(tenant, name)).isEqualTo("1-14");
 
-        // A collection REGISTERED with a curator's segment and then given a repo document.
+        // A collection REGISTERED with a curator's segment and then given a repo document: the registration stands.
         String other = "code__registered-curator-6pbwx__voyage-code-3__v1";
         registerColl(tenant, other, "code", "1-14");
         assertThat(ownerOf(tenant, other)).as("guard: registered with the curator segment").isEqualTo("1-14");
         putDoc(tenant, "1.23.7", "code", other);
-        assertThat(ownerOf(tenant, other)).isEqualTo("1-23");
+        assertThat(ownerOf(tenant, other)).as("a repo document does not re-own a registered curator (catalog-051)")
+            .isEqualTo("1-14");
+
+        // A slug owner (not tumbler-shaped) is still replaceable by a repo document: the legacy case is unchanged.
+        String slug = "code__registered-slug-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, slug, "code", "registered-slug-6pbwx");
+        putDoc(tenant, "1.23.8", "code", slug);
+        assertThat(ownerOf(tenant, slug)).as("a slug owner is still derived from its documents").isEqualTo("1-23");
     }
 
     /**
@@ -2195,32 +2206,32 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: a repaired legacy slug collection and the conformant collection of the
-     * same owner now share a (content_type, owner_id, embedding_model) tuple. The tie-break
-     * is deliberate: at equal version the lexically lower name wins, which is the conformant
-     * one (its hyphenated segment starts with a digit; the old NAME DESC picked the slug,
-     * 'z' above '1'), and a higher version still wins whatever the name.
+     * catalog-051-2 (RDR-229), amending nexus-6pbwx: a legacy slug collection whose documents name an owner a live
+     * conformant collection already holds keeps its slug, so it never shares that (content_type, owner_id, model, version)
+     * tuple and is never a {@code collectionForTuple} candidate for it. A slug row on a free tuple (here the next model
+     * version) is still given the documents' owner and, as the higher version, wins the tuple. The equal-version tie between
+     * a conformant row and a repaired slug is no longer reachable through documents; the direct-registration tests
+     * ({@code collectionForTuple_aLegacySlugOlderThanItsConformantSiblingNowWinsTheTie} and the flip and parity tests) cover it.
      */
     @Test @Order(60)
-    void collectionForTuple_conformantNameBeatsARepairedSlugAtEqualVersion() {
+    void collectionOwner_aSlugOnAHeldTupleKeepsItsSlug_andOneOnAFreeHigherVersionTakesTheOwnerAndWins() {
         String tenant = "own6pbwx-tuple-tenant";
         String conformant = "code__1-27__voyage-code-3__v1";
         String slug = "code__zslug-6pbwx__voyage-code-3__v1";
         registerColl(tenant, conformant, "code", "1-27");
         registerColl(tenant, slug, "code", "zslug-6pbwx");
         putDoc(tenant, "1.27.1", "code", slug);
-        assertThat(ownerOf(tenant, slug)).as("guard: the slug row now shares the tuple").isEqualTo("1-27");
-
-        assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
-            .as("equal version: the lexically lower, conformant name wins").isEqualTo(conformant);
+        assertThat(ownerOf(tenant, slug)).as("catalog-051-2: the conformant row holds the tuple, so the slug row keeps its owner")
+            .isEqualTo("zslug-6pbwx");
 
         String slugV2 = "code__zslug-6pbwx__voyage-code-3__v2";
         repo.upsertCollection(tenant, Map.of(
             "name", slugV2, "content_type", "code", "owner_id", "zslug-6pbwx",
             "embedding_model", OWN_MODEL, "model_version", "v2"));
         putDoc(tenant, "1.27.2", "code", slugV2);
+        assertThat(ownerOf(tenant, slugV2)).as("a free tuple (v2) still takes the documents' owner").isEqualTo("1-27");
         assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
-            .as("a higher model_version still wins").isEqualTo(slugV2);
+            .as("a higher model_version wins").isEqualTo(slugV2);
     }
 
     private void registerCollAt(String tenant, String name, String owner, String model, String version,
@@ -2234,8 +2245,11 @@ class CatalogRepositoryTest {
     /**
      * nexus-p2m1x.4, the RDR's third assertion: a tuple holding a conformant collection, a repaired
      * legacy slug and a {@code legacy_grandfathered} row resolves to the same collection before P1.4,
-     * after it, and after D5 drops the {@code legacy_grandfathered = false} filter (P3.8 re-runs this
-     * test with that predicate gone; keep it in the suite). The conformant row is the lexically lowest
+     * after it, and after D5 drops the {@code legacy_grandfathered = false} filter. The filter drop
+     * moved into engine 0.1.200 (RDR-229 P2.8, nexus-p2m1x.13; lead ruling 2026-11-20), so this test
+     * runs with that predicate gone, and
+     * {@link #collectionForTuple_aGrandfatheredRowIsACandidateOfItsTuple} proves the grandfathered
+     * row is now a candidate rather than still filtered out. The conformant row is the lexically lowest
      * name AND the first registered, and the grandfathered row sorts above it and was registered last,
      * so the winner does not move whether the tie runs by name (today) or by registration time (the
      * census-gated switch, Sam 2026-11-20): the one the filter drop must not change.
@@ -2258,28 +2272,189 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: the NAME ASC tie-break is a proxy for "the conformant name", and this
-     * documents where it stops holding: a slug that starts with '0' sorts below the
-     * conformant '1-..' segment and wins the tie. The consequence is bounded. The only
-     * consumers of /collections/for_tuple (HttpCatalogClient.collection_for and
-     * _tuple_registered) read the returned name's model_version, or only that it exists,
-     * and re-render the collection name from owner_id themselves, and version dominates the
-     * ordering, so both names carry the same version here. Only which same-version name comes
-     * back changes. If this test starts failing because the ordering learned better, delete it.
+     * nexus-p2m1x.13 (engine 0.1.200), the case the test above cannot exercise: there the grandfathered
+     * row is the newest and highest-named, so it loses with the {@code legacy_grandfathered = false}
+     * filter on or off. Here it is OLDER and LOWER-named than the conformant row, so the filter drop
+     * moves the winner: before it, the conformant row won (the grandfathered one was not a candidate);
+     * now the equal-version tie goes to the lexically lower name, which is the grandfathered row (the
+     * documented limit of the name proxy, as for a '0'-leading slug). The census found no tuple like
+     * this on either production tenant (0 winner changes, T2 nexus_rdr/229-p1.2-census-2026-11-20),
+     * and the held created_at-ascending tie would also pick the older row, so both orderings agree.
      */
     @Test @Order(60)
-    void collectionForTuple_zeroLeadingSlugWinsTheTieAndThatIsVersionNeutral() {
-        String tenant = "own6pbwx-tuple0-tenant";
+    void collectionForTuple_anOlderLowerNamedGrandfatheredRowWinsTheTieOnceTheFilterIsGone() {
+        String tenant = "p2m1x13-older-gf-tenant";
+        String conformant = "code__1-45__voyage-code-3__v1";
+        String grandfathered = "code__0grand-p2m1x13__voyage-code-3__v1";
+        registerCollAt(tenant, grandfathered, "1-45", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, conformant, "1-45", OWN_MODEL, "v1", "2026-03-01T00:00:00Z", false);
+        assertThat(grandfathered.compareTo(conformant)).as("guard: it sorts below the conformant name").isLessThan(0);
+
+        assertThat(repo.collectionForTuple(tenant, "code", "1-45", OWN_MODEL).get("name"))
+            .as("the older, lower-named grandfathered row is the tuple's winner").isEqualTo(grandfathered);
+    }
+
+    /**
+     * nexus-p2m1x.13: {@code collectionForTuple} and the re-embed target selection drop the
+     * {@code legacy_grandfathered} filter together, so they name the same winner on every tuple,
+     * a grandfathered row included (RDR-229 P2.8, the lead's condition from the Phase 1 critique).
+     */
+    @Test @Order(60)
+    void collectionForTuple_andTheReembedTargetSelectionPickTheSameWinnerWithAGrandfatheredRow() {
+        String tenant = "p2m1x13-parity-tenant";
+        registerCollAt(tenant, "code__0grand-parity__voyage-code-3__v1", "1-46", OWN_MODEL, "v1",
+            "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, "code__1-46__voyage-code-3__v1", "1-46", OWN_MODEL, "v1",
+            "2026-03-01T00:00:00Z", false);
+        registerCollAt(tenant, "notes-parity-only", "field-parity", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, "code__zgrand-parity__voyage-code-3__v3", "1-47", OWN_MODEL, "v3",
+            "2026-01-01T00:00:00Z", true);
+        registerCollAt(tenant, "code__1-47__voyage-code-3__v1", "1-47", OWN_MODEL, "v1",
+            "2026-03-01T00:00:00Z", false);
+        var rows = repo.listCollections(tenant, "code", null).stream()
+            .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
+
+        for (String owner : List.of("1-46", "field-parity", "1-47")) {
+            var forTuple = repo.collectionForTuple(tenant, "code", owner, OWN_MODEL);
+            var selected = dev.nexus.service.reembed.TargetSelection.select(rows, "code", owner, OWN_MODEL);
+            assertThat(forTuple).as("guard: the tuple answers for " + owner).isNotNull();
+            assertThat(selected).as("same winner for " + owner)
+                .isEqualTo(new dev.nexus.service.reembed.TargetSelection.Live((String) forTuple.get("name")));
+        }
+    }
+
+    /**
+     * nexus-p2m1x.13 (engine 0.1.200): the {@code legacy_grandfathered = false} predicate is gone from
+     * {@code collectionForTuple}, so a flagged row is a candidate like any other. Ordering is unchanged
+     * (highest {@code model_version}, then the first registered, P1.4): a grandfathered row alone on its
+     * tuple wins it, one at a higher version beats a conformant row at a lower one, and at equal
+     * version the conformant row, registered first here, still wins. Before the drop the first two cases answered null and
+     * the conformant row respectively.
+     */
+    @Test @Order(59)
+    void collectionForTuple_aGrandfatheredRowIsACandidateOfItsTuple() {
+        String tenant = "p2m1x13-gf-tenant";
+        String alone = "notes-from-2024";
+        registerCollAt(tenant, alone, "field-notes-gf", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", true);
+        assertThat(repo.getCollection(tenant, alone).get("legacy_grandfathered"))
+            .as("guard: the row is flagged").isEqualTo(true);
+        assertThat(repo.collectionForTuple(tenant, "code", "field-notes-gf", OWN_MODEL))
+            .as("a grandfathered row alone on its tuple answers it").isNotNull();
+        assertThat(repo.collectionForTuple(tenant, "code", "field-notes-gf", OWN_MODEL).get("name"))
+            .isEqualTo(alone);
+
+        String conformant = "code__1-43__voyage-code-3__v1";
+        registerCollAt(tenant, conformant, "1-43", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, "code__zgrand-p2m1x13__voyage-code-3__v2", "1-43", OWN_MODEL, "v2",
+            "2026-02-01T00:00:00Z", true);
+        assertThat(repo.collectionForTuple(tenant, "code", "1-43", OWN_MODEL).get("name"))
+            .as("version dominates: a grandfathered v2 beats a conformant v1")
+            .isEqualTo("code__zgrand-p2m1x13__voyage-code-3__v2");
+
+        String conformantTie = "code__1-44__voyage-code-3__v1";
+        registerCollAt(tenant, conformantTie, "1-44", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, "code__zgrand-p2m1x13b__voyage-code-3__v1", "1-44", OWN_MODEL, "v1",
+            "2026-02-01T00:00:00Z", true);
+        assertThat(repo.collectionForTuple(tenant, "code", "1-44", OWN_MODEL).get("name"))
+            .as("equal version: the conformant name still wins the tie").isEqualTo(conformantTie);
+    }
+
+    /**
+     * nexus-p2m1x.4 (RDR-229 P1.4, the census-gated switch, Sam 2026-11-20): a tie at equal
+     * model_version goes to the collection registered FIRST ({@code created_at} ascending), not to the
+     * lexically lower name. The older row here is the conformant one and its name sorts ABOVE the slug's
+     * ('1' above '0'), so the NAME ASC order picked the slug (this replaces nexus-6pbwx's zero-leading-slug
+     * test, which documented that limit). A later registration cannot change what an existing tuple
+     * resolves to, whatever it is named; P3.1's {@code collection_id} (identity) keeps the same rule.
+     */
+    @Test @Order(60)
+    void collectionForTuple_theFirstRegisteredWinsATieNotTheLowerName() {
+        String tenant = "p2m1x4-tie-tenant";
         String conformant = "code__1-34__voyage-code-3__v1";
         String slug = "code__0slug-6pbwx__voyage-code-3__v1";
-        registerColl(tenant, conformant, "code", "1-34");
-        registerColl(tenant, slug, "code", "0slug-6pbwx");
-        putDoc(tenant, "1.34.1", "code", slug);
-        assertThat(ownerOf(tenant, slug)).as("guard: the slug row shares the tuple").isEqualTo("1-34");
+        assertThat(slug.compareTo(conformant)).as("guard: the slug sorts BELOW the conformant name").isLessThan(0);
+        registerCollAt(tenant, conformant, "1-34", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, slug, "1-34", OWN_MODEL, "v1", "2026-02-01T00:00:00Z", false);
+
         var resolved = repo.collectionForTuple(tenant, "code", "1-34", OWN_MODEL);
-        assertThat(resolved.get("name")).as("the documented limit of the proxy").isEqualTo(slug);
-        assertThat(resolved.get("model_version")).as("version-neutral: same version either way")
-            .isEqualTo("v1");
+        assertThat(resolved.get("name")).as("the older registration wins, not the lower name")
+            .isEqualTo(conformant);
+        assertThat(resolved.get("model_version")).isEqualTo("v1");
+    }
+
+    /**
+     * nexus-p2m1x.4, THE FLIP the census gate exists for, stated plainly: a legacy slug that is OLDER than
+     * its conformant sibling, at equal version, now WINS. Under NAME ASC the conformant name ('1' below
+     * 'z') won; under created_at ascending the slug does. The tuple's version is the same either way and
+     * the client re-renders the name from owner_id, so {@code collection_for} is unaffected; but a tuple
+     * resolving to a different collection is exactly what P1.2's census must find none of before this
+     * order ships.
+     */
+    @Test @Order(60)
+    void collectionForTuple_aLegacySlugOlderThanItsConformantSiblingNowWinsTheTie() {
+        String tenant = "p2m1x4-flip-tenant";
+        String conformant = "code__1-43__voyage-code-3__v1";
+        String slug = "code__zslug-p2m1x4__voyage-code-3__v1";
+        assertThat(conformant.compareTo(slug)).as("guard: NAME ASC would pick the conformant").isLessThan(0);
+        registerCollAt(tenant, slug, "1-43", OWN_MODEL, "v1", "2026-01-01T00:00:00Z", false);
+        registerCollAt(tenant, conformant, "1-43", OWN_MODEL, "v1", "2026-02-01T00:00:00Z", false);
+
+        assertThat(repo.collectionForTuple(tenant, "code", "1-43", OWN_MODEL).get("name"))
+            .as("the older slug wins under created_at ascending").isEqualTo(slug);
+    }
+
+    /**
+     * nexus-p2m1x.4: the order is TOTAL and independent of row order. Two rows with the same created_at
+     * fall to the name whichever was inserted first, and a version above both still wins whatever
+     * the age. (The name is the last key only because it is the one column unique within a tenant until
+     * P3.1.)
+     */
+    @Test @Order(60)
+    void collectionForTuple_equalRegistrationTimeFallsToTheNameInEitherInsertOrder() {
+        String same = "2026-03-01T00:00:00Z";
+        String lower = "code__1-41__voyage-code-3__v1";
+        String higher = "code__zslug-p2m1x4__voyage-code-3__v1";
+        String t1 = "p2m1x4-tie-a-tenant";
+        registerCollAt(t1, lower, "1-41", OWN_MODEL, "v1", same, false);
+        registerCollAt(t1, higher, "1-41", OWN_MODEL, "v1", same, false);
+        String t2 = "p2m1x4-tie-b-tenant";
+        registerCollAt(t2, higher, "1-41", OWN_MODEL, "v1", same, false);
+        registerCollAt(t2, lower, "1-41", OWN_MODEL, "v1", same, false);
+        assertThat(repo.collectionForTuple(t1, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(lower);
+        assertThat(repo.collectionForTuple(t2, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(lower);
+
+        // age never beats version: a NEWER row at a higher version wins
+        registerCollAt(t1, "code__1-41__voyage-code-3__v2", "1-41", OWN_MODEL, "v2", "2026-04-01T00:00:00Z", false);
+        assertThat(repo.collectionForTuple(t1, "code", "1-41", OWN_MODEL).get("name"))
+            .isEqualTo("code__1-41__voyage-code-3__v2");
+    }
+
+    /**
+     * nexus-p2m1x.4: the reembed target selection ({@code TargetSelection.select}, over the list route's
+     * rows) and {@code collectionForTuple} pick the same collection at an equal-version tie, in each of
+     * the shapes that differ between the two orders (older conformant, older slug, equal stamps).
+     */
+    @Test @Order(60)
+    void collectionForTuple_andTheReembedTargetSelectionPickTheSameTieWinner() {
+        String[][] cases = {
+            // {tenant, owner, firstName, firstAt, secondName, secondAt}
+            {"p2m1x4-par-a-tenant", "1-44", "code__1-44__voyage-code-3__v1", "2026-01-01T00:00:00Z",
+                "code__0slug-p2m1x4__voyage-code-3__v1", "2026-02-01T00:00:00Z"},
+            {"p2m1x4-par-b-tenant", "1-45", "code__zslug-p2m1x4__voyage-code-3__v1", "2026-01-01T00:00:00Z",
+                "code__1-45__voyage-code-3__v1", "2026-02-01T00:00:00Z"},
+            {"p2m1x4-par-c-tenant", "1-46", "code__zslug-p2m1x4__voyage-code-3__v1", "2026-01-01T00:00:00Z",
+                "code__1-46__voyage-code-3__v1", "2026-01-01T00:00:00Z"},
+        };
+        for (String[] c : cases) {
+            registerCollAt(c[0], c[2], c[1], OWN_MODEL, "v1", c[3], false);
+            registerCollAt(c[0], c[4], c[1], OWN_MODEL, "v1", c[5], false);
+            String sql = (String) repo.collectionForTuple(c[0], "code", c[1], OWN_MODEL).get("name");
+            var rows = repo.listCollections(c[0]).stream()
+                .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
+            var picked = dev.nexus.service.reembed.TargetSelection.select(rows, "code", c[1], OWN_MODEL);
+            assertThat(picked).as("case " + c[0])
+                .isEqualTo(new dev.nexus.service.reembed.TargetSelection.Live(sql));
+        }
     }
 
     /**
@@ -2443,7 +2618,8 @@ class CatalogRepositoryTest {
         assertThatThrownBy(() -> repo.upsertCollection(TENANT_A, Map.of(
                 "name", name,
                 "content_type", contentType,
-                "owner_id", "cat-noprofile-owner")))
+                "owner_id", "cat-noprofile-owner",
+            "model_version", "v1")))
             .isInstanceOf(CatalogRepository.EmbeddingProfileConflictException.class)
             .hasMessageContaining(name)
             .hasMessageContaining("embedding_model")
@@ -2605,7 +2781,8 @@ class CatalogRepositoryTest {
             "name", "code__nexus__voyage-code-3__v0",
             "content_type", "code",
             "owner_id", "nexus-1-1",
-            "embedding_model", "voyage-code-3"
+            "embedding_model", "voyage-code-3",
+            "model_version", "v0"
         ));
         int updated = repo.supersedeCollection(TENANT_A, "code__nexus__voyage-code-3__v0",
             "code__nexus__voyage-code-3__v1", "2026-06-01T00:00:00Z");
@@ -2627,7 +2804,8 @@ class CatalogRepositoryTest {
         String name = "code__chainguard__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "chainguard", "embedding_model", "voyage-code-3"));
+            "owner_id", "chainguard", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
         assertThat(repo.supersedeCollection(TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
@@ -2665,7 +2843,8 @@ class CatalogRepositoryTest {
         String name = "code__samestamp__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "samestamp", "embedding_model", "voyage-code-3"));
+            "owner_id", "samestamp", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
         assertThat(repo.supersedeCollection(TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
@@ -2692,7 +2871,8 @@ class CatalogRepositoryTest {
         String target = "code__concstamp__voyage-code-3__v2";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "concstamp", "embedding_model", "voyage-code-3"));
+            "owner_id", "concstamp", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
 
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
@@ -2735,7 +2915,8 @@ class CatalogRepositoryTest {
         String name = "code__revive__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code",
-            "owner_id", "revive", "embedding_model", "voyage-code-3"));
+            "owner_id", "revive", "embedding_model", "voyage-code-3",
+            "model_version", "v1"));
         assertThat(repo.supersedeCollection(TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
             .isEqualTo(1);
         // NON-VACUITY: the row really is tombstoned before the re-registration.
@@ -2763,13 +2944,11 @@ class CatalogRepositoryTest {
      * nexus-bc7ps, and THIS TEST IS THE POINT rather than the predicate it guards. A
      * quarantine sibling shares every discriminator column with its origin, so the only
      * thing keeping it from a tuple is the {@code lifecycle_state != 'quarantine'}
-     * predicate, and the tie-break that would otherwise decide is a name ordering that
-     * has changed before (DESC until nexus-6pbwx, ASC now). Whichever direction it runs,
-     * SOME content type has its quarantine sibling on the winning side: under NAME DESC
-     * 'quarantine-code' sorted above 'code' (the live incident), under NAME ASC
-     * 'quarantine-rdr' sorts below 'rdr'. So the pin covers BOTH and each case guards, by
-     * assertion, that its sibling really is the name the tie-break would have picked
-     * under one of the two directions, or the case pins nothing.
+     * predicate, and the tie-break that would otherwise decide has changed before (name
+     * DESC until nexus-6pbwx, name ASC until nexus-p2m1x.4, {@code created_at} ascending now).
+     * Whichever key it runs on, a sibling can sit on the winning side of it. Under {@code
+     * created_at} ascending that means a sibling registered BEFORE its origin, which is what
+     * each case builds and guards by assertion, or the case pins nothing.
      *
      * <p>The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
      * content_type/owner_id/embedding_model on 8 quarantine rows, making them eligible
@@ -2779,22 +2958,22 @@ class CatalogRepositoryTest {
      * synthesised a path-derived name -- stranding 41,032 chunks (nexus-n9xjy).
      *
      * <p>Falsifiability: with the {@code LIFECYCLE_STATE.ne("quarantine")} predicate
-     * removed from {@link CatalogRepository#collectionForTuple}, the rdr case fails under
-     * NAME ASC; the code case fails again if the ordering is ever flipped back to DESC.
+     * removed from {@link CatalogRepository#collectionForTuple}, both cases fail: the sibling
+     * is the older row, so it wins the tie.
      */
     @Test @Order(62)
     void collectionForTuple_neverResolvesToAQuarantineSibling() {
-        assertQuarantineSiblingNeverWins("code", "voyage-code-3", "qsib", false);
-        assertQuarantineSiblingNeverWins("rdr", "voyage-context-3", "qsib", true);
+        assertQuarantineSiblingNeverWins("code", "voyage-code-3", "qsib");
+        assertQuarantineSiblingNeverWins("rdr", "voyage-context-3", "qsib");
     }
 
-    private void assertQuarantineSiblingNeverWins(String contentType, String model, String owner,
-                                                   boolean siblingWinsUnderAsc) {
+    private void assertQuarantineSiblingNeverWins(String contentType, String model, String owner) {
         String real = contentType + "__" + owner + "__" + model + "__v1";
         String quarantined = "quarantine-" + contentType + "__" + owner + "__" + model + "__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", real, "content_type", contentType,
-            "owner_id", owner, "embedding_model", model));
+            "owner_id", owner, "embedding_model", model,
+            "created_at", "2026-06-01T00:00:00Z", "model_version", "v1"));
         // Seeded through PgContainerHelper.insertCollection, which derives
         // lifecycle_state='quarantine' from the name prefix exactly as
         // gc_quarantine_orphans does in production. upsertCollection does NOT
@@ -2804,6 +2983,14 @@ class CatalogRepositoryTest {
             PgContainerHelper.insertCollection(
                 org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
                 TENANT_A, quarantined);
+            // The sibling is the OLDER registration, so the created_at tie-break would pick it
+            // were it a candidate (nexus-p2m1x.4).
+            org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
+                .set(org.jooq.impl.DSL.field("created_at", java.time.OffsetDateTime.class),
+                     java.time.OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+                .where(org.jooq.impl.DSL.field("name", String.class).eq(quarantined))
+                .execute();
         } catch (Exception e) {
             throw new IllegalStateException("seeding the quarantine sibling failed", e);
         }
@@ -2816,10 +3003,9 @@ class CatalogRepositoryTest {
         // NON-VACUITY, and this test is worthless without it: the sibling must
         // actually be a candidate that WOULD WIN. It shares every discriminator
         // column, is not superseded, is not legacy-grandfathered, ties on
-        // model_version, and sorts on the winning side of the CURRENT tie-break
-        // (or, for the code case, of the retired DESC one, which is what the
-        // live incident ran under). If any of that stops being true the case
-        // passes for the wrong reason.
+        // model_version, and is older than the real row, the winning side of the
+        // CURRENT tie-break. If any of that stops being true the case passes for
+        // the wrong reason.
         var sibling = repo.getCollection(TENANT_A, quarantined);
         assertThat(sibling).as("guard: the quarantine sibling must exist").isNotNull();
         // Read lifecycle_state from the COLUMN, not from getCollection: collRow
@@ -2842,23 +3028,34 @@ class CatalogRepositoryTest {
         assertThat(sibling.get("superseded_by"))
             .as("guard: it must pass the superseded_by filter, as the live rows did")
             .isEqualTo("");
-        if (siblingWinsUnderAsc) {
-            assertThat(quarantined.compareTo(real))
-                .as("guard: it must SORT BELOW the real name, or NAME ASC would not "
-                    + "have picked it and this case pins nothing")
-                .isLessThan(0);
-        } else {
-            assertThat(quarantined.compareTo(real))
-                .as("guard: it must SORT ABOVE the real name, the shape NAME DESC "
-                    + "picked in the live incident; this case guards a flip back to DESC")
-                .isGreaterThan(0);
+        java.time.OffsetDateTime siblingAt;
+        java.time.OffsetDateTime realAt;
+        try (Connection su = pg.createConnection("")) {
+            var d = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            var tbl = org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections"));
+            var at = org.jooq.impl.DSL.field("created_at", java.time.OffsetDateTime.class);
+            var nm = org.jooq.impl.DSL.field("name", String.class);
+            siblingAt = d.select(at).from(tbl).where(nm.eq(quarantined)).fetchOne(0, java.time.OffsetDateTime.class);
+            realAt = d.select(at).from(tbl).where(nm.eq(real)).fetchOne(0, java.time.OffsetDateTime.class);
+        } catch (Exception e) {
+            throw new IllegalStateException("reading created_at failed", e);
         }
+        assertThat(siblingAt)
+            .as("guard: it must be OLDER than the real row, the side the created_at tie-break "
+                + "would have picked, or this case pins nothing")
+            .isBefore(realAt);
 
         var resolved = repo.collectionForTuple(TENANT_A, contentType, owner, model);
         assertThat(resolved).as("the tuple must still resolve to something").isNotNull();
         assertThat(resolved.get("name"))
             .as("a quarantine sibling must NEVER win a tuple, however it sorts")
             .isEqualTo(real);
+        // RDR-229 P2.5: the row carries its lifecycle_state, so the client can refuse a
+        // quarantine row itself (HttpCatalogClient.collection_for) instead of relying on
+        // a name that fails to parse (P1.4 removed that accident).
+        assertThat(resolved.get("lifecycle_state"))
+            .as("the for_tuple row carries lifecycle_state")
+            .isEqualTo("live");
     }
 
     // Order(63) was importCollection_overwritesStubRow: it seeded a "stub" row (all
@@ -2909,7 +3106,8 @@ class CatalogRepositoryTest {
             "name", "knowledge__old__v1",
             "content_type", "knowledge",
             "owner_id", "nexus-1-1",
-            "embedding_model", "voyage-context-3"
+            "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
         repo.upsertDocument(TENANT_A, Map.of("tumbler", "rn.1", "title", "Rename Test",
             "content_type", "paper", "corpus", "knowledge",
@@ -3841,7 +4039,8 @@ class CatalogRepositoryTest {
             "name", collName,
             "content_type", "knowledge",
             "owner_id", "cor.1",
-            "embedding_model", "voyage-context-3"
+            "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
 
         var result = repo.collectionOwnerRoot(corTenant, collName);
@@ -3870,7 +4069,8 @@ class CatalogRepositoryTest {
         ));
         repo.upsertCollection(tA, Map.of(
             "name", collA, "content_type", "knowledge",
-            "owner_id", "cora.1", "embedding_model", "voyage-context-3"
+            "owner_id", "cora.1", "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
 
         repo.upsertOwner(tB, mapOf(
@@ -3879,7 +4079,8 @@ class CatalogRepositoryTest {
         ));
         repo.upsertCollection(tB, Map.of(
             "name", collB, "content_type", "knowledge",
-            "owner_id", "corb.1", "embedding_model", "voyage-context-3"
+            "owner_id", "corb.1", "embedding_model", "voyage-context-3",
+            "model_version", "v1"
         ));
 
         // tA cannot see tB's collection and vice versa
@@ -5612,7 +5813,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-default__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-default", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-default", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         var coll = repo.getCollection(TENANT_A, name);
         assertThat(coll.get("aspects_enabled")).isNull();
     }
@@ -5622,7 +5824,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-shape__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-shape", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-shape", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         repo.setCollectionAspectsEnabled(TENANT_A, name, true);
 
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
@@ -5637,7 +5840,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-set__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-set", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-set", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         // An untouched row is null (no opinion), not false -- see
         // collection_aspectsEnabled_isNullForANewRegistration.
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
@@ -5667,7 +5871,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-rls__voyage-context-3__v1";
         repo.upsertCollection(TB, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-rls", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-rls", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
 
         // TENANT A attempting to set TENANT B's collection must affect nothing --
         // FORCE ROW LEVEL SECURITY scopes the UPDATE's WHERE to tenant A's own
@@ -5690,7 +5895,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-explicit-false__voyage-context-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-explicit-false", "embedding_model", "voyage-context-3"));
+            "owner_id", "aspects-explicit-false", "embedding_model", "voyage-context-3",
+            "model_version", "v1"));
         assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
 
         repo.setCollectionAspectsEnabled(TENANT_A, name, false);
@@ -5706,7 +5912,8 @@ class CatalogRepositoryTest {
         String name = "docs__aspects-survives-upsert__voyage-context-3__v1";
         Map<String, Object> row = Map.of(
             "name", name, "content_type", "docs",
-            "owner_id", "aspects-survives-upsert", "embedding_model", "voyage-context-3");
+            "owner_id", "aspects-survives-upsert", "embedding_model", "voyage-context-3",
+            "model_version", "v1");
         repo.upsertCollection(TENANT_A, row);
         repo.setCollectionAspectsEnabled(TENANT_A, name, true);
 

@@ -225,10 +225,55 @@ def test_me_caps_the_note_at_two_kb_with_a_marker(monkeypatch) -> None:
 
 def test_me_without_a_startup_note_prints_one_line_saying_so(monkeypatch) -> None:
     monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    from nexus.identity import notes  # noqa: PLC0415
+
+    monkeypatch.setattr(notes, "write_refusal", lambda project: None)  # a seat: no identity lookup against a real engine
     monkeypatch.setattr(brief, "_open_memory_store", lambda: _Store(None))
     result = brief.render("me")
     assert result.ok and "\n" not in result.text
     assert "no startup note" in result.text.lower() and "identity/i5" in result.text
+
+
+def test_me_does_not_suggest_a_write_the_identity_would_refuse(monkeypatch) -> None:
+    """gh#1680: an ephemeral or delegated identity keeps no identity notes, and the hint named ``nx memory put --mine``,
+    which that same identity refuses. The hint follows what ``notes.write_refusal`` says the caller may do."""
+    from nexus.identity import notes  # noqa: PLC0415
+
+    def refuse(project: str) -> tuple[str, str]:
+        return "i5", "this ephemeral identity keeps no identity notes; only a seat does: write the note in project T2"
+
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: _Store(None))
+    monkeypatch.setattr(notes, "write_refusal", refuse)
+    result = brief.render("me")
+    assert result.ok and "\n" not in result.text
+    assert "no startup note" in result.text.lower() and "identity/i5" in result.text
+    assert "--mine" not in result.text, "the refused write must not be offered"
+    assert "only a seat" in result.text
+
+
+def test_me_still_suggests_the_mine_write_to_a_seat(monkeypatch) -> None:
+    from nexus.identity import notes  # noqa: PLC0415
+
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: _Store(None))
+    monkeypatch.setattr(notes, "write_refusal", lambda project: None)
+    assert "nx memory put --mine --title startup" in brief.render("me").text
+
+
+def test_a_failing_identity_lookup_never_fails_the_me_topic(monkeypatch) -> None:
+    """The hint is best effort: whatever the guard raises, the topic still answers, with a neutral hint."""
+    from nexus.identity import notes  # noqa: PLC0415
+
+    def boom(project: str):
+        raise RuntimeError("identity engine exploded")
+
+    monkeypatch.setattr(brief, "_own_notes_project", lambda: "identity/i5")
+    monkeypatch.setattr(brief, "_open_memory_store", lambda: _Store(None))
+    monkeypatch.setattr(notes, "write_refusal", boom)
+    result = brief.render("me")
+    assert result.ok and "\n" not in result.text
+    assert "no startup note" in result.text.lower() and "if this identity is a seat" in result.text
 
 
 def test_me_without_an_identity_says_so(monkeypatch) -> None:

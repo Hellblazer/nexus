@@ -15,6 +15,8 @@ import pytest
 
 from nexus.commands.enrich import _select_entries
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 def _entry(path: str) -> SimpleNamespace:
     return SimpleNamespace(file_path=path, title=path)

@@ -287,7 +287,7 @@ def test_index_legacy_registry_name_no_catalog_owner_succeeds(
     uninitialized local dir; single index run, so the nexus-7vuw rename data
     plane should not fire — if this fails, see the module-header hazard.
     """
-    from nexus.corpus import is_conformant_collection_name
+    from nexus.catalog.rows.legacy_names import is_conformant_collection_name
     from nexus.indexer import _legacy_collection_name
 
     # RepoRegistry.add now mints conformant names; force the entry to the

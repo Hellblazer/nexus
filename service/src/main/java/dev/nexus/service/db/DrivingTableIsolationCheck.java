@@ -101,8 +101,35 @@ public final class DrivingTableIsolationCheck {
                 out.add(t);
             }
         }
+        // tables a registered move's verification reads under an owner-read policy of their own, though they drive no move
+        var label = DSL.field(DSL.name("label"), SQLDataType.VARCHAR);
+        for (var support : SUPPORT_TABLES) {
+            boolean registered = admin.fetchExists(DSL.table(DSL.name("nexus", "data_moves")),
+                DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, label, DSL.val(support.labelPrefix()))));
+            if (registered && !out.contains(support.table())) {
+                out.add(support.table());
+            }
+        }
         return out;
     }
+
+    /** A table a registered move reads under an owner-read policy of its own, keyed by the label prefix of the moves that read it. */
+    record SupportTable(String labelPrefix, Table table) { }
+
+    /**
+     * Tables that carry an owner-read policy for a move's VERIFICATION and drive no move, by the label prefix of the moves that
+     * read them (a prefix may name several tables). RDR-229 P2.10 (the policy is {@code vectors-065}'s, RDR-229 D2): the three
+     * residue-repair verifications join {@code nexus.catalog_collections} for the content type, and the table-wide verification
+     * (the backstop for a tenant the list missed) runs as the migrating role with no tenant, which under FORCE row level
+     * security sees no collection without it. RDR-229 owner-is-source: the re-own move's verification reads
+     * {@code nexus.catalog_owners} (the curator test, the repo owners) and {@code nexus.gc_audit} (the skip reports), whose
+     * policies are {@code vectors-067-2} and {@code vectors-067-3}. Each policy is as exposed as a driving table's, so it gets the
+     * same boot question while any of those moves is registered, in any state.
+     */
+    static final java.util.List<SupportTable> SUPPORT_TABLES = java.util.List.of(
+        new SupportTable("rdr229-residue-", new Table("nexus", "catalog_collections")),
+        new SupportTable("rdr229-reown-", new Table("nexus", "catalog_owners")),
+        new SupportTable("rdr229-reown-", new Table("nexus", "gc_audit")));
 
     /**
      * {@code nexus.chunks}: {@link ChunksIsolationCheck#violations(DSLContext)} asks the policy question of it alone. Its

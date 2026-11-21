@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * The quarantine rows of one ORIGIN collection, found, deleted and retagged inside the caller's transaction
@@ -49,7 +50,11 @@ import java.util.Map;
  */
 public final class QuarantineOrigin {
 
-    /** The name prefix of a quarantine collection; the one predicate the engine's guards share. */
+    /**
+     * The name prefix a quarantine collection is LABELLED with (the reaper's {@code quarantine-<origin>}, the
+     * client's row-derived sibling). Since RDR-229 P2.5 it builds and finds names; whether a collection IS a
+     * quarantine collection is its row's {@code lifecycle_state} ({@link #isQuarantine}).
+     */
     public static final String PREFIX = "quarantine-";
 
     /** Origin collection deleted: its rows were taken out of one sibling. */
@@ -69,26 +74,84 @@ public final class QuarantineOrigin {
     private QuarantineOrigin() {
     }
 
-    /** True for a {@code quarantine-*} collection name. */
-    public static boolean isQuarantineName(String name) {
+    /**
+     * True for a {@code quarantine-*} collection NAME. Private since RDR-229 P2.5: it is the rule for a name that
+     * has no catalog row (a rename or rehome TARGET, where no row exists yet, and a name nothing registered), and
+     * nothing outside this class asks a bare name any more. A collection that has a row is judged by the row.
+     */
+    private static boolean isQuarantineName(String name) {
         return name != null && name.startsWith(PREFIX);
     }
 
     /**
-     * Refuses {@code name} when it is a quarantine collection, naming the sanctioned verbs. Used where an engine
-     * path would move or delete a quarantine collection's chunks with no audit row (store-delete, rename, rehome).
+     * Whether a collection is a quarantine collection, given the {@code lifecycle_state} of its catalog row
+     * ({@link CollectionRegistry#lifecycleState}) or empty when it has none (RDR-229 P2.5). A row decides: a
+     * {@code quarantine-} name whose row is {@code live} is not one, and a name with no prefix whose row says
+     * {@code quarantine} is. With no row the name is judged by its prefix, which is what every guard did before
+     * the row was consulted, so a name nothing registered keeps its old outcome.
+     */
+    public static boolean isQuarantine(Optional<String> lifecycleState, String name) {
+        return lifecycleState.map("quarantine"::equals).orElseGet(() -> isQuarantineName(name));
+    }
+
+    /** {@link #isQuarantine(Optional, String)} with the row read on the caller's own transaction. */
+    public static boolean isQuarantine(DSLContext ctx, String tenant, String name) {
+        return isQuarantine(CollectionRegistry.lifecycleState(ctx, tenant, name), name);
+    }
+
+    /** {@link #isQuarantine(Optional, String)} with the row read through the registry cache or a short read. */
+    public static boolean isQuarantine(TenantScope scope, String tenant, String name) {
+        return isQuarantine(CollectionRegistry.lifecycleState(scope, tenant, name), name);
+    }
+
+    /**
+     * Refuses a collection that is a quarantine collection, naming the sanctioned verbs (RDR-229 P2.5; store-delete,
+     * and BOTH ends of rename and rehome). The catalog row decides ({@link #isQuarantine}): the registry cache when
+     * the row is cached, else one single-column read in a short transaction. A name with no row, such as a rename or
+     * rehome target not yet registered, is judged by its prefix, as it always was. (The allow-list CHECK, a name
+     * rule, is a separate guard and is not touched.)
      *
      * @param verb what the caller asked for, as the message names it ({@code store-delete}, {@code rename}, ...)
      * @throws IllegalArgumentException when {@code name} is a quarantine collection (a 400 on every route)
      */
-    public static void requireNotQuarantine(String verb, String name) {
-        if (isQuarantineName(name)) {
-            throw new IllegalArgumentException(
-                verb + " is refused on the quarantine collection " + name + ": it would move or delete quarantined "
-                + "chunks outside the audited paths. Return chunks to their origin with `nx t3 quarantine restore`, "
-                + "let `nx t3 gc` expire them (client expiry), or delete the whole quarantine collection with "
-                + "collection delete, which writes a gc_audit row.");
+    public static void requireNotQuarantine(TenantScope scope, String tenant, String verb, String name) {
+        if (isQuarantine(scope, tenant, name)) {
+            throw refused(verb, name);
         }
+    }
+
+    /**
+     * The manifest-less census and reapable listing's refusal (RDR-192 MVV (a)): a quarantine collection is out of
+     * both by construction. {@code lifecycleState} is the collection's row state, or empty for a name with no row
+     * (RDR-229 P2.5; such a name is judged by its prefix, as before).
+     */
+    public static void requireOutOfCensus(String collection, Optional<String> lifecycleState) {
+        if (isQuarantine(lifecycleState, collection)) {
+            throw new IllegalArgumentException(
+                "collection " + collection + " is a quarantine collection; quarantine rows "
+                + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");
+        }
+    }
+
+    /**
+     * The sibling a mover route names ({@code POST /v1/vectors/gc/quarantine-orphans}): the SQL mover registers whatever
+     * it is given as a {@code quarantine} collection, so a name without the prefix would mint a quarantine row
+     * with a plain name. Refused, a registration-side name guard like the client route's (RDR-229 P2.5).
+     */
+    public static void requireMoverSibling(String quarantineCollection) {
+        if (!isQuarantineName(quarantineCollection)) {
+            throw new IllegalArgumentException("quarantine_collection " + quarantineCollection + " must start with the "
+                + "prefix quarantine- : the move registers it as a quarantine collection, and only a quarantine- name "
+                + "may be one");
+        }
+    }
+
+    private static IllegalArgumentException refused(String verb, String name) {
+        return new IllegalArgumentException(
+            verb + " is refused on the quarantine collection " + name + ": it would move or delete quarantined "
+            + "chunks outside the audited paths. Return chunks to their origin with `nx t3 quarantine restore`, "
+            + "let `nx t3 gc` expire them (client expiry), or delete the whole quarantine collection with "
+            + "collection delete, which writes a gc_audit row.");
     }
 
     /**
@@ -159,7 +222,12 @@ public final class QuarantineOrigin {
      * refuses a non-live origin, the engine's expiry skips it, and {@code nx t3 gc} refuses its name).
      */
     static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin) {
-        return !isQuarantineName(origin)
+        return holdsRowsOf(ctx, tenant, origin, CollectionRegistry.lifecycleState(ctx, tenant, origin));
+    }
+
+    /** {@link #holdsRowsOf(DSLContext, String, String)} for a caller that already holds the origin's row state. */
+    static boolean holdsRowsOf(DSLContext ctx, String tenant, String origin, Optional<String> lifecycleState) {
+        return !isQuarantine(lifecycleState, origin)
             && ctx.fetchExists(ctx.selectOne().from(CHUNKS).where(rowsOf(tenant, origin, null)));
     }
 
@@ -168,7 +236,7 @@ public final class QuarantineOrigin {
      * re-embed plan states it before a job deletes its source (RDR-210 Cutover). A quarantine name has none.
      */
     static int countRowsOf(DSLContext ctx, String tenant, String origin) {
-        return isQuarantineName(origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null));
+        return isQuarantine(ctx, tenant, origin) ? 0 : ctx.fetchCount(CHUNKS, rowsOf(tenant, origin, null));
     }
 
     /** The quarantine collections that hold at least one row of {@code origin}, by name. */

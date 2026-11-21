@@ -24,6 +24,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -225,6 +226,218 @@ class ChashConformanceReportIntegrationTest {
         assertThat(((Number) chunksRow.get("total")).longValue()).isZero();
         assertThat(((Number) chunksRow.get("non_conformant")).longValue()).isZero();
         assertThat((String[]) chunksRow.get("sample_chashes")).isEmpty();
+    }
+
+    // ── RDR-229 P2.6 (nexus-p2m1x.11): the report reads the collection's catalog row, not its name ─────────────
+
+    private static final String NO_ROW_LINE = "nexus.catalog_document_chunks (no catalog row)";
+    private static final String TENANT_LABEL = "t-chashconf-label";
+    private static final String TENANT_AGREE = "t-chashconf-agree";
+
+    private static Vector vecOf(int dim) {
+        return Vector.of(new float[dim]);
+    }
+
+    /** A chunk and its manifest row under {@code collection}, written at {@code dim} wide with {@code model}. */
+    private static void chunkAndManifest(Connection su, String tenant, String collection, String model, int dim,
+                                         String doc, int position, byte[] chash, String text) {
+        DSLContext seed = DSL.using(su, SQLDialect.POSTGRES);
+        var ins = seed.insertInto(CHUNKS)
+            .set(CHUNKS.TENANT_ID, tenant)
+            .set(CHUNKS.COLLECTION, collection)
+            .set(CHUNKS.CHASH, chash)
+            .set(CHUNKS.EMBEDDING_MODEL, model)
+            .set(CHUNKS.CHUNK_TEXT, text);
+        switch (dim) {
+            case 384 -> ins.set(CHUNKS.EMBEDDING_384, vecOf(384)).execute();
+            case 768 -> ins.set(CHUNKS.EMBEDDING_768, vecOf(768)).execute();
+            default -> ins.set(CHUNKS.EMBEDDING_1024, vecOf(1024)).execute();
+        }
+        manifestRow(seed, tenant, collection, model, doc, position, chash);
+    }
+
+    private static void manifestRow(DSLContext seed, String tenant, String collection, String model, String doc,
+                                    int position, byte[] chash) {
+        seed.insertInto(CATALOG_DOCUMENTS)
+            .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENTS.TUMBLER, doc)
+            .set(CATALOG_DOCUMENTS.TITLE, "doc " + doc)
+            .onConflictDoNothing()
+            .execute();
+        seed.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, doc)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, position)
+            // the stamp trigger fills it, and it is off while the foreign keys are set aside for a row-less seed
+            .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, position)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
+            .execute();
+    }
+
+    private static long total(List<Map<String, Object>> report, String tableName) {
+        return report.stream().filter(r -> tableName.equals(r.get("table_name")))
+            .mapToLong(r -> ((Number) r.get("total")).longValue()).sum();
+    }
+
+    private static boolean hasLine(List<Map<String, Object>> report, String tableName) {
+        return report.stream().anyMatch(r -> tableName.equals(r.get("table_name")));
+    }
+
+    @Test
+    @Order(4)
+    void a_collection_whose_catalog_row_names_the_model_is_counted_though_its_name_has_no_model_token() throws Exception {
+        // A label with no "__" and no model token: the name says nothing, the row says bge-base-en-v15-768.
+        String label = "plain-label-no-token";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_LABEL, label, MODEL);
+            chunkAndManifest(su, TENANT_LABEL, label, MODEL, 768, "2.1", 0, sha256("label one"), "label one");
+            chunkAndManifest(su, TENANT_LABEL, label, MODEL, 768, "2.1", 1, sha256("label two"), "label two");
+        }
+
+        List<Map<String, Object>> r768 = repo.chashConformanceReport(TENANT_LABEL, 768);
+        assertThat(total(r768, "nexus.catalog_document_chunks"))
+            .as("the collection's row says the 768 model: its two manifest rows are counted at dim 768").isEqualTo(2L);
+        assertThat(hasLine(r768, NO_ROW_LINE)).as("it has a catalog row: not on the no-catalog-row line").isFalse();
+        assertThat(total(repo.chashConformanceReport(TENANT_LABEL, 384), "nexus.catalog_document_chunks")).isZero();
+        assertThat(total(repo.chashConformanceReport(TENANT_LABEL, 1024), "nexus.catalog_document_chunks")).isZero();
+    }
+
+    @Test
+    @Order(5)
+    void a_name_that_says_one_model_while_the_row_says_another_is_counted_under_the_row() throws Exception {
+        // The name carries the 1024 token and the row registers the 768 model: the row decides.
+        String liar = "knowledge__liar__voyage-context-3__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_LABEL, liar, MODEL);
+            chunkAndManifest(su, TENANT_LABEL, liar, MODEL, 768, "2.2", 0, sha256("liar one"), "liar one");
+        }
+
+        assertThat(total(repo.chashConformanceReport(TENANT_LABEL, 768), "nexus.catalog_document_chunks"))
+            .as("two plain-label rows plus the row under the 768 model").isEqualTo(3L);
+        assertThat(total(repo.chashConformanceReport(TENANT_LABEL, 1024), "nexus.catalog_document_chunks"))
+            .as("the name's 1024 token is not read").isZero();
+    }
+
+    /** The vectors-005-11 manifest arm (the name-parsing predicate this changeset removes), as a query over one tenant. */
+    private long[] oldManifestCounts(DSLContext d, String tenant, int dim) {
+        List<String> models = switch (dim) {
+            case 384 -> List.of("minilm-l6-v2-384");
+            case 768 -> List.of("bge-base-en-v15-768");
+            default -> List.of("voyage-code-3", "voyage-context-3", "voyage-3");
+        };
+        var modelFromName = DSL.function("split_part", String.class, CATALOG_DOCUMENT_CHUNKS.COLLECTION,
+            DSL.inline("__"), DSL.inline(3));
+        var rec = d.select(DSL.count(), DSL.count().filterWhere(DSL.function("octet_length", Integer.class, CATALOG_DOCUMENT_CHUNKS.CHASH).ne(32)))
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.isNotNull()).and(modelFromName.in(models)))
+            .fetchOne();
+        return new long[] {rec.value1(), rec.value2()};
+    }
+
+    @Test
+    @Order(6)
+    void old_and_new_totals_agree_per_dim_when_a_legacy_collection_has_no_catalog_row() throws Exception {
+        String c384 = "knowledge__agree384__minilm-l6-v2-384__v1";
+        String c768 = "knowledge__agree768__bge-base-en-v15-768__v1";
+        String c1024 = "knowledge__agree1024__voyage-context-3__v1";
+        // Legacy: manifest rows whose collection has no catalog row at all (a name nothing registered).
+        String legacy = "knowledge__legacy__bge-base-en-v15-768__v1";
+        byte[] poisoned = HexFormat.of().parseHex("b".repeat(32));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext d = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(d, TENANT_AGREE, c384);
+            PgContainerHelper.insertCollection(d, TENANT_AGREE, c768);
+            PgContainerHelper.insertCollection(d, TENANT_AGREE, c1024);
+            chunkAndManifest(su, TENANT_AGREE, c384, "minilm-l6-v2-384", 384, "3.1", 0, sha256("a384"), "a384");
+            chunkAndManifest(su, TENANT_AGREE, c768, MODEL, 768, "3.2", 0, sha256("a768 clean"), "a768 clean");
+            chunkAndManifest(su, TENANT_AGREE, c1024, "voyage-context-3", 1024, "3.3", 0, sha256("a1024"), "a1024");
+            // The row-less rows: no catalog row and no chunk row, so the foreign keys are set aside for the insert.
+            d.set(DSL.name("session_replication_role"), DSL.inline("replica")).execute();
+            try {
+                withChecksDropped(su, () -> {
+                    manifestRow(d, TENANT_AGREE, legacy, MODEL, "3.4", 0, sha256("legacy clean"));
+                    manifestRow(d, TENANT_AGREE, legacy, MODEL, "3.4", 1, poisoned);
+                });
+            } finally {
+                d.set(DSL.name("session_replication_role"), DSL.inline("origin")).execute();
+            }
+            assertThat(d.fetchExists(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT_AGREE).and(CATALOG_COLLECTIONS.NAME.eq(legacy))))
+                .as("the legacy collection has no catalog row").isFalse();
+
+            for (int dim : new int[] {384, 768, 1024}) {
+                long[] old = oldManifestCounts(d, TENANT_AGREE, dim);
+                List<Map<String, Object>> report = repo.chashConformanceReport(TENANT_AGREE, dim);
+                long newTotal = 0;
+                long newBad = 0;
+                for (Map<String, Object> row : report) {
+                    String name = (String) row.get("table_name");
+                    if (name.startsWith("nexus.catalog_document_chunks")) {
+                        newTotal += ((Number) row.get("total")).longValue();
+                        newBad += ((Number) row.get("non_conformant")).longValue();
+                    }
+                }
+                assertThat(newTotal).as("dim %d: manifest total, old name read vs new row read", dim).isEqualTo(old[0]);
+                assertThat(newBad).as("dim %d: manifest non-conformant, old vs new", dim).isEqualTo(old[1]);
+            }
+        }
+
+        List<Map<String, Object>> r768 = repo.chashConformanceReport(TENANT_AGREE, 768);
+        assertThat(total(r768, "nexus.catalog_document_chunks")).as("the registered 768 collection").isEqualTo(1L);
+        Map<String, Object> noRow = tableRow(r768, NO_ROW_LINE);
+        assertThat(((Number) noRow.get("total")).longValue()).as("the two row-less manifest rows").isEqualTo(2L);
+        assertThat(((Number) noRow.get("non_conformant")).longValue()).isEqualTo(1L);
+        assertThat((String[]) noRow.get("sample_chashes")).containsExactly(HexFormat.of().formatHex(poisoned));
+        assertThat(hasLine(repo.chashConformanceReport(TENANT_AGREE, 384), NO_ROW_LINE))
+            .as("no row-less rows at 384: no line").isFalse();
+        assertThat(hasLine(repo.chashConformanceReport(TENANT_AGREE, 1024), NO_ROW_LINE)).isFalse();
+    }
+
+    private static final String TENANT_FK = "t-chashconf-fk";
+
+    @Test
+    @Order(7)
+    void no_manifest_row_can_name_a_collection_without_a_catalog_row_or_a_model_outside_embedding_models() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext d = DSL.using(su, SQLDialect.POSTGRES);
+            // The chain: manifest (fk_catalog_chunks_chunk, vectors-030 7.6) -> chunks (chunks_collection_fk, vectors-030 7.6)
+            // -> catalog_collections (catalog_collections_embedding_model_fk, hygiene-002-1) -> embedding_models.
+            for (String con : List.of("fk_catalog_chunks_chunk", "chunks_collection_fk", "catalog_collections_embedding_model_fk")) {
+                assertThat(PgCatalogProbes.constraintValidated(d, con)).as(con + " exists and is validated").isTrue();
+            }
+
+            // A model outside embedding_models cannot be registered, 'voyage-3' (the old 1024 list's third entry) included.
+            for (String model : List.of("voyage-3", "mystery-model")) {
+                String name = "knowledge__fk" + model.length() + "__bge-base-en-v15-768__v1";
+                assertThatThrownBy(() -> PgContainerHelper.insertCollection(d, TENANT_FK, name, model))
+                    .as("registering a collection under " + model)
+                    .hasMessageContaining("catalog_collections_embedding_model_fk");
+            }
+
+            // A manifest row cannot be written for a collection with no catalog row, under a known model or an unknown one.
+            for (String model : List.of(MODEL, "mystery-model")) {
+                assertThatThrownBy(() -> manifestRow(d, TENANT_FK, "knowledge__nocat__bge-base-en-v15-768__v1", model, "4.1", 0,
+                    sha256("no catalog row " + model)))
+                    .as("a manifest row under a collection with no catalog row, model " + model)
+                    .hasMessageContaining("fk_catalog_chunks_chunk");
+            }
+
+            // A chunk cannot carry a model other than its collection's registered one, so neither can its manifest row.
+            String bge = "knowledge__fkbge__bge-base-en-v15-768__v1";
+            PgContainerHelper.insertCollection(d, TENANT_FK, bge);
+            assertThatThrownBy(() -> d.insertInto(CHUNKS)
+                .set(CHUNKS.TENANT_ID, TENANT_FK).set(CHUNKS.COLLECTION, bge).set(CHUNKS.CHASH, sha256("wrong model"))
+                .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384").set(CHUNKS.CHUNK_TEXT, "wrong model")
+                .set(CHUNKS.EMBEDDING_384, vecOf(384)).execute())
+                .hasMessageContaining("chunks_collection_fk");
+        }
     }
 
     // ── Test 3: dim validation ────────────────────────────────────────────

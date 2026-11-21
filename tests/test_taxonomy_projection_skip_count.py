@@ -36,6 +36,9 @@ class _Catalog:
 @pytest.fixture
 def registry(monkeypatch) -> None:
     monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Catalog())
+    # RDR-229 P2.4: the projection threshold reads each collection's catalog row; no row here
+    # means the name derivation, and the test reaches no engine.
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda *_a, **_k: None)
 
 
 class _Store:

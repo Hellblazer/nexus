@@ -27,6 +27,7 @@ from typing import Any
 import structlog
 
 from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableError
+from nexus.identity.hostname import describe_host, is_key
 from nexus.identity.holder import (
     GONE, OTHER_HOST, RUNNING, UNKNOWN, Processes, Verdict, holder_process, normalise_instant,
 )
@@ -52,13 +53,27 @@ def no_identity_path(identity_dir: Path) -> Path:
     return delegated_dir(identity_dir) / "none"
 
 
-def check_dispatcher(holder: Mapping[str, Any], *, procs: Processes | Any, host: str | None = None) -> Verdict:
+def _dispatcher_local(holder: Mapping[str, Any], here: str, identity_dir: Path | None, identity: str | None) -> bool:
+    """Whether the dispatcher *holder* names is on this machine: its host is *here*, or a name that is not a key and that
+    the delegated token file of *identity* (this machine's own, in *identity_dir*) records for the same pid
+    (:mod:`nexus.identity.hostname`, "Rows under a name that is not a key")."""
+    name = holder.get("host")
+    if name == here:
+        return True
+    if not isinstance(name, str) or is_key(name) or identity_dir is None or identity is None:
+        return False
+    record = read_token_file(delegated_token_path(identity_dir, identity))
+    return record is not None and record.host == name and record.pid == holder.get("pid")
+
+
+def check_dispatcher(holder: Mapping[str, Any], *, procs: Processes | Any, host: str | None = None,
+                     identity_dir: Path | None = None, identity: str | None = None) -> Verdict:
     """Whether the dispatcher process *holder* names still exists: the pid probe, then the OS start time against
     ``proc_start`` (a reused pid is gone). Another host's dispatcher is judged by its lease alone (``other_host``);
     a pid that runs but whose start time cannot be read, or a binding that recorded none, is running, never gone."""
     here = host if host is not None else procs.host
-    if holder.get("host") != here:
-        return Verdict(OTHER_HOST, f"dispatched from {holder.get('host')}, not from {here}")
+    if not _dispatcher_local(holder, here, identity_dir, identity):
+        return Verdict(OTHER_HOST, f"dispatched from {describe_host(holder.get('host'))}, not from {describe_host(here)}")
     pid = holder.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
         return Verdict(UNKNOWN, "the binding names no pid")
@@ -76,7 +91,7 @@ def check_dispatcher(holder: Mapping[str, Any], *, procs: Processes | Any, host:
 
 
 def sweep_delegated(client: Any, procs: Processes | Any, views: list[Mapping[str, Any]], *, host: str,
-                    report: Any = None) -> list[str]:
+                    report: Any = None, identity_dir: Path | None = None) -> list[str]:
     """Report each delegated identity in *views* (live or lapsed bindings on *host*) whose dispatcher is gone to the
     ``gone`` route. Returns the ids the engine recorded. A 403 (a credential that may not report ``gone``) ends it
     quietly and, with a *report* (the main sweep's), marks it ``forbidden`` so the caller deletes no token file; a 409 (rebound, or recorded already) is skipped, as in the main sweep; any other failure of one row is
@@ -86,7 +101,7 @@ def sweep_delegated(client: Any, procs: Processes | Any, views: list[Mapping[str
         holder = view.get("holder")
         if view.get("kind") != "delegated" or not isinstance(holder, Mapping):
             continue
-        if check_dispatcher(holder, procs=procs, host=host).state != GONE:
+        if check_dispatcher(holder, procs=procs, host=host, identity_dir=identity_dir, identity=str(view.get("id"))).state != GONE:
             continue
         try:
             answer = client.gone(view["id"], int(view["generation"]), holder_process(holder))
@@ -144,7 +159,7 @@ def clean_delegated_files(identity_dir: Path, procs: Processes | Any, *, host: s
             continue
         holder = {"host": record.host or host, "pid": record.pid, "started_at": record.started_at,
                   "proc_start": record.proc_start}
-        if check_dispatcher(holder, procs=procs, host=host).state == GONE:
+        if check_dispatcher(holder, procs=procs, host=host, identity_dir=identity_dir, identity=path.stem).state == GONE:
             delete_token_file(path)
             removed.append(path.name)
     return removed

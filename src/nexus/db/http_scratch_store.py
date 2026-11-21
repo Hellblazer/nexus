@@ -80,6 +80,11 @@ _HEADER_T1_SESSION: str = "X-Nexus-T1-Session"
 #: the coupling end-to-end.
 SESSION_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized T1 session (HTTP 401)"
 
+#: The 401 text of a store that sends no session token (the identity scope). It deliberately does NOT contain
+#: :data:`SESSION_UNAUTHORIZED_MARKER`: the session-lease and MCP-reconnect advice keyed on that marker names a cause
+#: (a dead session token) this store cannot have (nexus-hczdo).
+IDENTITY_UNAUTHORIZED_MARKER: str = "HttpScratchStore: unauthorized identity scratch (HTTP 401)"
+
 #: Appended to SESSION_UNAUTHORIZED_MARKER when the post-401 self-heal was
 #: attempted but found nothing fresher to adopt (no lease, expired, or
 #: unchanged) -- the ADOPTED/DECLINED distinction the owner-death guidance in
@@ -184,6 +189,16 @@ class HttpScratchStore:
                     passes False: its token belongs to that session alone and
                     must never replace the env token of the scope the process
                     now holds (nexus-mtheb.9).
+        send_session_token: When True (the default), every request carries
+                    ``X-Nexus-T1-Session``. The identity scope (``identity:<id>``)
+                    needs no session: the engine admits a request with no such
+                    header, reads the scope open and fences its writes on the
+                    identity token alone. A store bound to it passes False, so it
+                    works with no session lease (a ``/clear`` start has none for
+                    its new session id yet) and the session-token self-heal rungs
+                    (lease re-read, borrowed-session recovery) are no-ops
+                    (nexus-hczdo). The bearer re-mint and the identity-token
+                    401 retry stay.
     """
 
     def __init__(
@@ -195,8 +210,10 @@ class HttpScratchStore:
         _token: str | None = None,
         _session_token: str | None = None,
         export_adopted_token: bool = True,
+        send_session_token: bool = True,
     ) -> None:
         self._export_adopted_token = export_adopted_token
+        self._send_session_token = send_session_token
         # nexus-wrwb7: whether the CALLER explicitly pinned the bearer (a
         # test fixture pointing at a fake server) -- tracked BEFORE the
         # env/lease-resolution fallback below overwrites the local, same
@@ -228,6 +245,12 @@ class HttpScratchStore:
                 f"{_SESSION_ENV} (or {_SESSION_ID_ENV}) is required when "
                 "NX_STORAGE_BACKEND_T1=service. Set it to the session shared across siblings."
             )
+        if not send_session_token and not self._session_id.startswith("identity:"):
+            # The engine admits a header-less call only for the identity scope (reads open, writes fenced on the identity
+            # token). For any other session id it would take the body's id unchecked, dropping the session gate.
+            raise ValueError(
+                f"send_session_token=False is for an identity scope (session_id 'identity:<id>'), not {self._session_id!r}"
+            )
         # The minted session token (resolves to a live session_tokens row) is sent
         # as the X-Nexus-T1-Session header; the AuthFilter require-minted gate 401s a
         # header that does not resolve. Production mints via the MCP lifespan and
@@ -238,11 +261,12 @@ class HttpScratchStore:
         self._headers = {
             "Authorization": f"Bearer {_token}",
             "X-Nexus-Tenant": tenant,
-            _HEADER_T1_SESSION: self._session_token,
             "Content-Type": "application/json",
             # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's logs.
             **client_identity_headers(),
         }
+        if send_session_token:
+            self._headers[_HEADER_T1_SESSION] = self._session_token
         # nexus-wrwb7 (RDR-005 2a self-minting): substitute a self-minted
         # data token for the Authorization header above when a mint_token
         # credential is configured. No-op (byte-identical to pre-existing
@@ -550,7 +574,7 @@ class HttpScratchStore:
         / expired / unchanged.
         """
         session_id = getattr(self, "_session_id", "")
-        if not session_id:
+        if not session_id or not getattr(self, "_send_session_token", True):
             return False
         with self._refresh_lock:
             if self._session_token != sent_token:
@@ -581,7 +605,10 @@ class HttpScratchStore:
 
     def _adopt_session_token(self, fresh: str, session_id: str) -> None:
         """Swap in *fresh* as this store's session token and rebuild the
-        client. Callers hold ``self._refresh_lock``."""
+        client. Callers hold ``self._refresh_lock``. A no-op for a store that sends no
+        session token."""
+        if not getattr(self, "_send_session_token", True):
+            return
         self._session_token = fresh
         self._headers[_HEADER_T1_SESSION] = fresh
         # Subprocess children resolve NX_T1_SESSION at spawn — hand them
@@ -619,7 +646,7 @@ class HttpScratchStore:
         hook = getattr(self, "session_recovery", None)
         session_id = getattr(self, "_session_id", "")
         lock = getattr(self, "_refresh_lock", None)
-        if hook is None or not session_id or lock is None:
+        if hook is None or not session_id or lock is None or not getattr(self, "_send_session_token", True):
             return False
         if self._recovery_is_futile():
             return False
@@ -1078,13 +1105,22 @@ class HttpScratchStore:
                     # nexus-k9sec: a recovered token that still 401s means the
                     # session token was not the cause; stop re-minting per call.
                     self._recovery_futile_at = time.monotonic()
-                raise RuntimeError(
-                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
-                )
+                raise self._unauthorized_error(path, heal_suffix, resp.text)
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )
         return resp.json()
+
+    def _unauthorized_error(self, path: str, heal_suffix: str, text: str) -> RuntimeError:
+        """The error for a 401 the whole ladder left standing. A store that sends a session token blames it
+        (:data:`SESSION_UNAUTHORIZED_MARKER`, which the CLI and the MCP key their lease and reconnect advice on); one that
+        sends none (the identity scope) names the bearer and the identity token instead."""
+        if not getattr(self, "_send_session_token", True):
+            return RuntimeError(
+                f"{IDENTITY_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: the bearer or the identity token was refused "
+                f"(an identity scope sends no session token): {text[:200]}"
+            )
+        return RuntimeError(f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {text[:200]}")
 
     @staticmethod
     def _edge_refusal(path: str, resp: httpx.Response) -> str | None:
@@ -1178,9 +1214,7 @@ class HttpScratchStore:
                     # nexus-k9sec: a recovered token that still 401s means the
                     # session token was not the cause; stop re-minting per call.
                     self._recovery_futile_at = time.monotonic()
-                raise RuntimeError(
-                    f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
-                )
+                raise self._unauthorized_error(path, heal_suffix, resp.text)
             raise RuntimeError(
                 f"HttpScratchStore: {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
             )

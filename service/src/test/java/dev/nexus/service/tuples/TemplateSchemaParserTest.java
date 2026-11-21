@@ -348,6 +348,39 @@ class TemplateSchemaParserTest {
         assertTrue(ex.getMessage().contains("max_live_rows"), ex.getMessage());
     }
 
+    // ── retention_by_suffix (RDR-252, bead nexus-igea9.4) ────────────────────
+
+    @Test
+    void retentionBySuffixAbsent_everySubspaceTakesTheTemplateRetention() {
+        TemplateSchema t = TemplateSchemaParser.parse("board.yaml", validDoc());
+        assertTrue(t.retentionBySuffix().isEmpty());
+        assertEquals(t.retentionSeconds(), t.retentionSecondsFor("board/ci/x--owner"));
+    }
+
+    @Test
+    void retentionBySuffix_theLongestMatchingSuffixOfTheLastSegmentWins() {
+        Map<String, Object> doc = validDoc();
+        long base = ((Number) doc.get("retention_seconds")).longValue();
+        doc.put("retention_by_suffix", new java.util.LinkedHashMap<String, Object>(Map.of("--owner", 111L, "r--owner", 222L)));
+        TemplateSchema t = TemplateSchemaParser.parse("board.yaml", doc);
+        assertEquals(111L, t.retentionSecondsFor("board/ci/nexus-develop--owner"));
+        assertEquals(222L, t.retentionSecondsFor("board/ci/nexus-develop-r--owner"));
+        assertEquals(base, t.retentionSecondsFor("board/ci/nexus-develop"));
+        assertEquals(base, t.retentionSecondsFor("board/ci/nexus-develop--push"));
+        assertEquals(Math.max(base, 222L), t.maxRetentionSeconds());
+    }
+
+    @Test
+    void retentionBySuffixMalformed_isABreach() {
+        for (Object bad : new Object[] {"nope", Map.of(), Map.of("--owner", 0L), Map.of("--owner", "x"), Map.of("", 5L), Map.of("a/b", 5L)}) {
+            Map<String, Object> doc = validDoc();
+            doc.put("retention_by_suffix", bad);
+            var ex = assertThrows(TemplateRegistryException.class,
+                    () -> TemplateSchemaParser.parse("broken.yaml", doc), String.valueOf(bad));
+            assertTrue(ex.getMessage().contains("retention_by_suffix"), ex.getMessage());
+        }
+    }
+
     // ── claim_log_ttl_seconds (RDR-211 Phase 1 Step 1, bead nexus-rplay.6) ───
     //
     // Only the syntactic "positive integer" shape lives here. "May only shorten

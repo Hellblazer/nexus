@@ -104,6 +104,7 @@ from typing import Any, NoReturn
 import httpx
 import structlog
 
+from nexus import ci_ack
 from nexus.db.t2.records import ParkStats, ReplySpec, SubspaceCensus, TupleRow, WaitResult, WaitSpec
 
 # nexus-em75s.9: construction, credential/endpoint refresh-on-401, and the
@@ -940,6 +941,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     ) -> dict[str, Any]:
         if not subspace:
             raise ValueError("subspace must not be empty")
+        # RDR-252 (nexus-igea9): an ack of a develop red names its poster by identity id, whatever the caller typed.
+        dims = ci_ack.stamp_ack_from(subspace, dims)
         _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
         for k, v in (keys or {}).items():
             _check_field_size(f"keys.{k}", v, _MAX_FIELD_VALUE_BYTES)
@@ -1221,6 +1224,7 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             raise ValueError("claimant must not be empty")
         _check_field_size("claim_id", claim_id, _MAX_CLAIM_ID_BYTES)
         _check_field_size("claimant", claimant, _MAX_CLAIMANT_BYTES)
+        reply = ci_ack.stamp_ack_reply(reply)  # an ack of a develop red riding on a reply names its poster by identity
         if reply is not None:
             _check_field_size("reply.subspace", reply.subspace, _MAX_SUBSPACE_BYTES)
             for k, v in (reply.keys or {}).items():

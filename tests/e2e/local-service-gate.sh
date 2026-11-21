@@ -852,7 +852,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   # RDR-204 Phase 1 (nexus-ft04v.7): a chunk write against an unregistered
   # collection is a 422; the engine no longer auto-registers. Register the
   # way the client does, with the tenant profile's bge model.
-  SMOKE_BODY="$("$E2E_PYTHON" -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768'}))")"
+  SMOKE_BODY="$("$E2E_PYTHON" -c "import json;print(json.dumps({'name':'$SMOKE_VEC_COLLECTION','content_type':'knowledge','owner_id':'gate-smoke','embedding_model':'bge-base-en-v15-768','model_version':'v1'}))")"
   smoke_request POST /v1/catalog/collections/upsert "$SMOKE_BODY"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/collections/upsert"
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
@@ -1043,9 +1043,9 @@ fi
 
 # The pg_bundle_artifact carve-out (nexus-f3yqd.2). tests/db/test_pg_bundle_relocation.py tests the BUILT
 # portable PostgreSQL bundle, relocated; only the ci.yml CA-3 bundle jobs build one, and they run the file by
-# path and assert its core tests passed (scripts/assert_ca3_ran.py). Here it could only skip, 19 times, against
+# path and assert its core tests passed (scripts/assert_ca3_ran.py). Here it could only skip, 21 times, against
 # this gate's skip budget. Same exact-count discipline as above.
-PG_BUNDLE_ARTIFACT_EXPECTED=19
+PG_BUNDLE_ARTIFACT_EXPECTED=21
 PG_BUNDLE_ARTIFACT_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and pg_bundle_artifact" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$PG_BUNDLE_ARTIFACT_COUNT" -ne "$PG_BUNDLE_ARTIFACT_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: pg_bundle_artifact carve-out is $PG_BUNDLE_ARTIFACT_COUNT tests, expected exactly $PG_BUNDLE_ARTIFACT_EXPECTED" >&2

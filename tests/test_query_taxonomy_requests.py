@@ -87,7 +87,7 @@ def wired(monkeypatch):
     monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, _t3, **_kw: [_COLLECTION])
     # Hybrid scoring asks the T3 collection registry whether a result's
     # collection is code (a cached /v1/vectors/stats read): keep it offline.
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)
     monkeypatch.setattr("nexus.config.load_config", lambda **_kw: {"search": {}})
     monkeypatch.setattr("nexus.search_engine.load_config", lambda **_kw: {"search": {}})
     return engine

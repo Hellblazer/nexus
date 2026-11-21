@@ -45,9 +45,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * wait, then a connection wait: up to two connection timeouts, past the edge's 30 s bound).
  *
  * <p>The pool here is real and really exhausted: the hook that fails the sweep (inside the sweep's own
- * transaction, which holds one connection) first takes every other connection, then parks a waiter on the pool
- * so the connection the sweep's rollback frees is handed to it, not left for the marker. The connection timeout
- * is {@link #CONNECTION_TIMEOUT_MS}; the old code's response took at least that long.
+ * transaction, which holds one connection) first takes every other connection. The exhaustion-skip test then parks
+ * a waiter on the pool so the connection the sweep's rollback frees is handed to it; the deferred-marker test
+ * suspends the pool instead, so no getConnection, the marker's included, can take that connection until the test
+ * resumes it (a parked waiter only wins the hand-off if it is polling at that instant, which under load it may not be).
+ * The connection timeout is {@link #CONNECTION_TIMEOUT_MS}; the old code's response took at least that long, and
+ * each request is bounded by it, so a regression fails within it rather than at the HTTP client's 300 s default.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class KeyedSweepPoolExhaustionTest {
@@ -90,6 +93,7 @@ class KeyedSweepPoolExhaustionTest {
         cfg.setMaximumPoolSize(POOL_SIZE);
         cfg.setConnectionTimeout(CONNECTION_TIMEOUT_MS);
         cfg.setAutoCommit(true);
+        cfg.setAllowPoolSuspension(true); // the deferred-marker test suspends the pool instead of racing a waiter
         svcDs = new HikariDataSource(cfg);
         FakeEmbedder embedder = new FakeEmbedder(384);
         repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
@@ -153,7 +157,7 @@ class KeyedSweepPoolExhaustionTest {
     }
 
     private HttpResponse<String> post(Map<String, Object> body, String key) throws Exception {
-        return http.send(TestHttp.request(url(QUARANTINE_PATH))
+        return http.send(TestHttp.request(url(QUARANTINE_PATH)).timeout(Duration.ofMillis(CONNECTION_TIMEOUT_MS))
             .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json")
             .header("Idempotency-Key", key)
@@ -197,7 +201,35 @@ class KeyedSweepPoolExhaustionTest {
         });
     }
 
+    /**
+     * Fail the sweep with {@code failure} after taking every connection but the sweep's own, then SUSPEND the pool, so
+     * that once the sweep's rollback returns its connection no {@code getConnection} can take it until
+     * {@link #releasePoolNow}. Deterministic where {@link #failWithAnExhaustedPool} is not: a parked waiter only wins
+     * the freed connection if it is polling Hikari's hand-off queue at that instant, and under full-suite load it may
+     * not be, so the marker took the connection and landed at once (KeyedSweepPoolExhaustionTest flake, 2026-11-20).
+     * The marker's wait is the engine's own bounded await (KeyedSweep.FAIL_MARKER_WAIT_MS), not Hikari's timeout, so a
+     * suspended pool leaves the response bounded.
+     */
+    private void failWithASuspendedPool(java.util.function.Supplier<RuntimeException> failure) {
+        repo.setAfterSweepSqlHookForTests(() -> {
+            // The suspend alone blocks the marker; taking the other connections keeps the pool exhausted as well, so
+            // the scenario stays the production one (an exhausted pool when the marker is written), not just a paused one.
+            try {
+                for (int i = 0; i < POOL_SIZE - 1; i++) {
+                    held.add(svcDs.getConnection());
+                }
+            } catch (java.sql.SQLException e) {
+                throw new IllegalStateException(e);
+            }
+            svcDs.getHikariPoolMXBean().suspendPool();
+            throw failure.get();
+        });
+    }
+
     private void releasePoolNow() {
+        if (svcDs != null) {
+            svcDs.getHikariPoolMXBean().resumePool(); // a no-op unless suspended
+        }
         releasePool.countDown();
         for (Connection c : held) {
             try {
@@ -249,7 +281,15 @@ class KeyedSweepPoolExhaustionTest {
         // on the exhausted pool, and it is the only assertion here that fails when the skip is removed and the
         // marker is merely quick. The elapsed-time assertion below is SECONDARY: a marker bounded by
         // FAIL_MARKER_WAIT_MS would also answer inside CONNECTION_TIMEOUT_MS / 2, so it passes without the skip.
+        // Polled with a bound, not read once: the parked waiter takes the sweep's freed connection on its own thread,
+        // so right after the 503 it may still count as awaiting under load. A marker that queued on the pool (the
+        // regression this pins) would stay a waiter for the whole connection timeout, far past this bound.
         var pool = svcDs.getHikariPoolMXBean();
+        long settle = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while ((pool.getActiveConnections() != POOL_SIZE || pool.getThreadsAwaitingConnection() != 0)
+                && System.nanoTime() < settle) {
+            Thread.sleep(20);
+        }
         assertThat(pool.getActiveConnections()).as("the pool is still exhausted when the 503 is sent")
             .isEqualTo(POOL_SIZE);
         assertThat(pool.getThreadsAwaitingConnection())
@@ -267,7 +307,7 @@ class KeyedSweepPoolExhaustionTest {
             throws Exception {
         var body = seedOrphans(3);
         String key = UUID.randomUUID().toString();
-        failWithAnExhaustedPool(() -> new RuntimeException("injected opaque failure"));
+        failWithASuspendedPool(() -> new RuntimeException("injected opaque failure"));
 
         long start = System.nanoTime();
         HttpResponse<String> r = post(body, key);

@@ -165,7 +165,7 @@ final class ChunkReaper {
     /** A census that read this many TIMES the dry run's total, and at least {@link #CENSUS_GROWTH_WARN_MIN_EXTRA} more, is warned about. */
     private static final int CENSUS_GROWTH_WARN_FACTOR = 2;
     private static final long CENSUS_GROWTH_WARN_MIN_EXTRA = 100;
-    private static final String QUARANTINE_PREFIX = "quarantine-";
+    private static final String QUARANTINE_PREFIX = dev.nexus.service.db.QuarantineOrigin.PREFIX;
     private static final String LIVE = "live";
     /** Per-statement bound for the enumeration, the dry run, the move and the expiry. */
     private static final int STATEMENT_TIMEOUT_MS = 25_000;
@@ -850,6 +850,11 @@ final class ChunkReaper {
         return out;
     }
 
+    /** A quarantine sibling by its row's state in {@code states}; a name with no row by its prefix (RDR-229 P2.5). */
+    private static boolean isQuarantine(Map<String, String> states, String name) {
+        return dev.nexus.service.db.QuarantineOrigin.isQuarantine(java.util.Optional.ofNullable(states.get(name)), name);
+    }
+
     private TenantResult passTenant(String tenant, Duration grace, long deadlineNanos, long pass) {
         try {
             gate.requireComplete(tenant);
@@ -873,10 +878,13 @@ final class ChunkReaper {
             List<String> names = store.collectionsWithChunks(tenant, Duration.ofMillis(STATEMENT_TIMEOUT_MS)).stream()
                 .sorted().toList();
             Map<String, String> states = store.lifecycleStates(tenant);
+            // RDR-229 P2.5: a collection is a quarantine sibling when its catalog row says so (the `states` map just
+            // read, one SELECT per pass for the whole tenant, so the split costs no extra read); a name with no row
+            // keeps the prefix rule, so it is split as before (the live side then refuses it as unregistered).
             List<String> quarantines = rotatedFrom(
-                names.stream().filter(n -> n.startsWith(QUARANTINE_PREFIX)).toList(), resumeExpiry.get(tenant));
+                names.stream().filter(n -> isQuarantine(states, n)).toList(), resumeExpiry.get(tenant));
             List<String> live = rotatedFrom(
-                names.stream().filter(n -> !n.startsWith(QUARANTINE_PREFIX)).toList(), resumeCollection.get(tenant));
+                names.stream().filter(n -> !isQuarantine(states, n)).toList(), resumeCollection.get(tenant));
             String firstUnvisited = null;
 
             // Expire first, so the floor judges the quarantine as it stood before this pass adds to it.

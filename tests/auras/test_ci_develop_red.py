@@ -64,9 +64,9 @@ OTHER = "i9"
 THIRD = "i12"
 SHORT = SHA[:7]
 OWNER_SUBSPACE = "board/ci/nexus-develop--owner"
-#: What the owner displays append so the owner can acknowledge. The 200-character state line has no room for the
-#: whole command, so it names the subspace, the row kind and the sha; docs/auras.md has the full command.
-ACK = f" Ack: post kind=ack sha={SHA} to {OWNER_SUBSPACE}."
+#: What the owner displays append so the owner can acknowledge: the helper and the sha's first 7 digits. The helper
+#: posts the row from the caller's own identity id (nexus-igea9), so the 200-character state line needs no command.
+ACK = f" Ack: nx ci ack {SHA[:7]}."
 
 
 def _row(
@@ -218,9 +218,25 @@ def test_the_longest_owner_text_with_a_full_sha_keeps_its_ack_hint_inside_the_st
     assert text.endswith(ACK) and len(text) <= MAX_STATE_CHARS, len(text)
 
 
-def test_a_sha_too_long_for_the_ack_hint_drops_the_hint_rather_than_cut_it() -> None:
-    text = _run(**_row(ME, reason="handoff", sha="a" * 64))["text"]
-    assert text == "Develop is red at aaaaaaa; it was handed to you after no acknowledgement. Diagnose it."
+def test_every_owner_display_carries_the_hint_whole_inside_the_state_line_at_the_longest_inputs() -> None:
+    """nexus-igea9: the hint is a fixed `nx ci ack <sha7>`, so it never overflows and is never dropped. Pinned at a
+    64-digit sha, the longest reason (32 characters) and the longest identity the procedure accepts to show."""
+    longest_reason = "r" * 32
+    shown = [
+        _run(**_row("i" + "9" * 12, reason=reason, sha="a" * 64, me="i" + "9" * 12))["text"]
+        for reason in ("earliest_suspect", "handoff", longest_reason)
+    ]
+    for text in shown:
+        assert text.endswith(" Ack: nx ci ack aaaaaaa."), text
+        assert len(text) <= MAX_STATE_CHARS, (len(text), text)
+    assert len(shown[2]) == max(len(t) for t in shown), "the longest reason is the longest text"
+    assert max(len(t) for t in shown) <= MAX_STATE_CHARS - 40, "the hint has room to spare: no drop path is left to test"
+
+
+def test_the_hint_names_the_helper_not_a_post_the_caller_has_to_field_by_hand() -> None:
+    """The defect: the old hint said `post kind=ack ... to <subspace>`, and a hand post of it wrote `from=<alias>`."""
+    text = _run(**_row(ME))["text"]
+    assert "nx ci ack " in text and "kind=ack" not in text and "post " not in text.split("Diagnose it.")[1]
 
 
 @pytest.mark.parametrize("sha", ["a" * 7, "a" * 64])

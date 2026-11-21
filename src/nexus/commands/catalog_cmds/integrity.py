@@ -529,7 +529,10 @@ def _class_a_vanished_collections(
     without double-reporting them; Class B, formerly excluded the same way,
     is retired — RDR-191 Phase 6, nexus-o8dil.33).
     """
-    from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+    from nexus.db.rows.lifecycle import (  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
+        bypasses_canonical_schema,
+        registry_rows_by_name,
+    )
 
     try:
         doc_counts = cat.collection_doc_counts()
@@ -539,15 +542,23 @@ def _class_a_vanished_collections(
         return [], set()
 
     try:
-        t3_names = {c["name"] for c in t3.list_collections()}
+        t3_rows = {c["name"]: c for c in t3.list_collections()}
     except Exception as exc:  # noqa: BLE001 — isolated: reported, not swallowed
         unreadable.append("t3:list_collections")
         _log.warning("catalog_verify_t3_list_collections_failed", error=str(exc))
         return [], set()
+    t3_names = set(t3_rows)
 
+    # RDR-229 P2.5: a quarantine sibling is the row saying so. A collection the T3 listing names has its
+    # row there. One it does not name (the vanished candidates, which is the point of this check) has
+    # none in the vector listing, so the catalog registry is the only row it can have; it is read, once,
+    # only when such a name exists, so the clean path pays no extra request. An unreadable registry is no
+    # row, and the name decides as it always did.
+    absent = [coll for coll, count in doc_counts.items() if count > 0 and coll not in t3_names]
+    registry = registry_rows_by_name(cat) if absent else {}
     populated = {
         coll: count for coll, count in doc_counts.items()
-        if count > 0 and not coll.startswith(_BYPASS_SCHEMA_PREFIXES)
+        if count > 0 and not bypasses_canonical_schema(coll, t3_rows.get(coll, registry.get(coll)))
     }
 
     if not t3_names and populated:
@@ -644,7 +655,8 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     # the treatment db/http_vector_client.py's _is_cce_collection already got
     # (db/reconcile.py's _model_for_collection, the other, was deleted by
     # RDR-223 P3.3).
-    from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.corpus import resolve_row_preferred  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     content_type = resolve_row_preferred(
         e.physical_collection, "content_type",

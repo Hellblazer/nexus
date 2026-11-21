@@ -33,15 +33,13 @@ from nexus.corpus import (
     collection_content_type,
     collection_model,
     collection_owner,
-    embedding_model_for_collection,
-    index_model_for_collection,
-    is_conformant_collection_name,
     resolve_corpus,
     store_read_scope,
-    split_candidate_collection_name,
     t3_collection_name,
     t3_collection_names_for_read,
 )
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name, split_candidate_collection_name
+from nexus.catalog.rows.resolve import embedding_model_for
 from nexus.db.t2.records import ReplySpec
 from nexus.db.t3 import verify_collection_deep
 from nexus.migration.banner import degrade_loud_when_migrating
@@ -8456,18 +8454,21 @@ def scratch(
     """
     opened = None
     try:
-        t1, isolated = _get_t1()
-        prefix = "[T1 isolated] " if isolated else ""
         if scope == "identity":
             if persist:
                 return _fail("Error: persist flags an entry for the session-end flush, which never runs for identity "
                              "scratch; use scratch_manage(action=\"promote\", scope=\"identity\") to copy an entry to T2")
             from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
-            t1 = opened = identity_scratch(t1)
+            # No session store: the identity scope needs no T1 session, so this works when the session's lease does not
+            # resolve (nexus-hczdo).
+            t1 = opened = identity_scratch()
             prefix = "[identity] "
         elif scope != "session":
             return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
+        else:
+            t1, isolated = _get_t1()
+            prefix = "[T1 isolated] " if isolated else ""
 
         if action == "put":
             if not content:
@@ -8579,18 +8580,19 @@ def scratch_manage(
     """
     opened = None
     try:
-        t1, isolated = _get_t1()
-        prefix = "[T1 isolated] " if isolated else ""
         if scope == "identity":
             if action == "flag":
                 return _fail("Error: flag marks an entry for the session-end flush, which never runs for identity scratch; "
                              "use action=\"promote\" to copy it to T2")
             from nexus.identity.scratch_scope import identity_scratch  # noqa: PLC0415 — deferred: identity scope only
 
-            t1 = opened = identity_scratch(t1)
+            t1 = opened = identity_scratch()                   # no session store: see scratch above (nexus-hczdo)
             prefix = "[identity] "
         elif scope != "session":
             return _fail(f"Error: unknown scope {scope!r}. Use: session, identity")
+        else:
+            t1, isolated = _get_t1()
+            prefix = "[T1 isolated] " if isolated else ""
 
         if action == "flag":
             # `scratch list` prints an 8-character prefix and the engine matches
@@ -8643,7 +8645,8 @@ def collection_list() -> str:
             return "No collections found."
         lines: list[str] = []
         for c in sorted(cols, key=lambda x: x["name"]):
-            model = embedding_model_for_collection(c["name"])
+            # The listing row is the registry row: its own model first, the name only when it carries none.
+            model = embedding_model_for(c["name"], row_resolver=lambda _n, row=c: row)
             lines.append(f"{c['name']}  {c['count']:>6} docs  ({model})")
         return "\n".join(lines)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
@@ -9161,6 +9164,10 @@ def tuple_out(
     store. Keep `body` a short message or signal. Put longer content in T2
     (`memory_put`) or T3 (`store_put`) and pass a reference here (a
     project/title or a document id), not the content itself.
+
+    A `kind=ack` row on a `board/ci/<topic>--owner` subspace gets `from` set
+    to the caller's own identity id whatever `dims` says (a hint: the engine
+    counts the sender session); a caller with no identity is refused (RDR-252).
 
     Idempotent by construction: the tuple id is derived from the
     template's `id_from` fields only, so a retry lands on the same tuple.
@@ -9989,8 +9996,7 @@ def collection_info(name: str) -> str:
             info = db.collection_info(name)
         except KeyError:
             return f"Collection not found: {name!r}"
-        qry_model = embedding_model_for_collection(name)
-        idx_model = index_model_for_collection(name)
+        qry_model = idx_model = embedding_model_for(name)
         count = info.get("count", 0)
         lines: list[str] = [
             f"Collection:  {name}",

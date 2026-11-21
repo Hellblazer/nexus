@@ -52,6 +52,8 @@ from tests.test_rdr232_coverage_repair import _run, by_topic
 from tests.test_rdr232_coverage_wiring import _drive, _match
 from tests.test_rdr232_coverage_wiring import _coverage_opted_in  # noqa: F401 — the wiring tests' autouse opt-in
 
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes item 1's NoRow outcome without a listing
+
 #: No facet's topic word appears in any anchor or joined item: every facet stays unsupported after the re-check, so
 #: the FINAL ledger is ``unavailable`` / ``uncovered`` (state_for: every facet known, none usable).
 NOTHING = by_topic(topic={"f1": "zz-no-such-word-1", "f2": "zz-no-such-word-2", "f3": "zz-no-such-word-3"})

@@ -71,7 +71,7 @@ class TestGenerateContextL1:
 
         monkeypatch.setattr(
             "nexus.mcp_infra.get_collection_row",
-            lambda name: catalog_row_for_collection_name(name),
+            lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
         )
 
     def test_with_topics(self, db: T2Database, tmp_path: Path) -> None:

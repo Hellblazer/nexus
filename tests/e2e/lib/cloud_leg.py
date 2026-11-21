@@ -253,36 +253,15 @@ from nexus.identity.bind_client import IdentityClient
 print(json.dumps(IdentityClient.from_config().bind("@identity@", "end", int("@generation@"))))
 """
 
-_BY_AUTHOR = r"""
-import json
-from nexus.mcp.catalog import catalog_search
-print(catalog_search(author="@label@"))
-"""
+def _load_sibling(name: str) -> Any:
+    """A module beside this file, loaded by path (this file is run as a script and loaded by path in its tests)."""
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
 
-_TUPLE_ACK = r"""
-from nexus.db.t2.http_tuple_store import HttpTupleStore
-# RDR-252 (nexus-igea9): /v1/tuples/ack now refuses a reply that claims from=engine on board/ci; the probe acks a
-# claim of the seat's own mailbox row, the path every client ack takes.
-store = HttpTupleStore()
-store.out("mailbox/@identity@", {"to": "@identity@"}, {"from": "@identity@", "kind": "cloudleg"}, "@label@ ack probe",
-          nonce="@label@-ack")
-claimed = store.in_("mailbox/@identity@", {"to": "@identity@"}, claimant="@identity@", lease_s=60)
-assert claimed is not None, "the probe row was not claimable"
-print(store.ack(claimed[1], "@identity@"))
-"""
 
-_FOR_TUPLE = r"""
-from nexus.commands.catalog import _get_catalog
-# RDR-229 P1.4: collection_for reads the next version from the for_tuple row (the probe subject's tuple; a
-# missing row answers 404 and the client falls back to v1, so the route is exercised either way).
-print(_get_catalog().collection_for("knowledge", "1.9999", "voyage-context-3"))
-"""
-
-_LOCATORS = r"""
-import json
-from nexus.commands.catalog import _get_catalog
-print(json.dumps(_get_catalog().sensitive_locators(limit=10), default=str)[:400])
-"""
+_routes = _load_sibling("cloud_leg_route_snippets")
 
 
 def core_steps() -> list[Step]:
@@ -338,11 +317,11 @@ ROUTE_MAP: dict[str, Step] = {
                                            expect_route="/v1/catalog/docs/by-scheme"),
     "GET /v1/catalog/docs/by-meta": Step("route-docs-by-meta", "nx", ["catalog", "list", "--meta", "cloudleg=@run@", "--json"],
                                          expect_route="/v1/catalog/docs/by-meta"),
-    "GET /v1/catalog/docs/by-author": Step("route-docs-by-author", "py", ["-c", _BY_AUTHOR],
+    "GET /v1/catalog/docs/by-author": Step("route-docs-by-author", "py", ["-c", _routes.BY_AUTHOR],
                                            expect_route="/v1/catalog/docs/by-author"),
-    "GET /v1/catalog/sensitive/locators": Step("route-sensitive-locators", "py", ["-c", _LOCATORS],
+    "GET /v1/catalog/sensitive/locators": Step("route-sensitive-locators", "py", ["-c", _routes.LOCATORS],
                                                expect_route="/v1/catalog/sensitive/locators"),
-    "GET /v1/catalog/collections/for_tuple": Step("route-collections-for-tuple", "py", ["-c", _FOR_TUPLE],
+    "GET /v1/catalog/collections/for_tuple": Step("route-collections-for-tuple", "py", ["-c", _routes.FOR_TUPLE],
                                                   expect_route="/v1/catalog/collections/for_tuple"),
     # RDR-252 (nexus-igea9): /v1/tuples/out refuses a client write of from=engine on board/ci (403 reserved_dim);
     # the probe is an ordinary client write, which must still land.
@@ -350,8 +329,18 @@ ROUTE_MAP: dict[str, Step] = {
                                                            "--dim", "from=@identity@", "--dim", "kind=cloudleg",
                                                            "--nonce", "@label@-out", "--body", "@label@"],
                                 identity=True, needs=["identity"], expect_route="/v1/tuples/out"),
-    "POST /v1/tuples/ack": Step("route-tuples-ack", "py", ["-c", _TUPLE_ACK], identity=True, needs=["identity"],
+    "POST /v1/tuples/ack": Step("route-tuples-ack", "py", ["-c", _routes.TUPLE_ACK], identity=True, needs=["identity"],
                                 expect_route="/v1/tuples/ack"),
+    # RDR-252 (nexus-igea9.4): the registry listing names a template's retention_by_suffix (board-ci's --owner, 35 days).
+    "GET /v1/tuples/registry": Step("route-tuples-registry", "nx", ["tuple", "templates"],
+                                    expect_route="/v1/tuples/registry"),
+    "GET /v1/catalog/uri_segment_census": Step("route-uri-segment-census", "py", ["-c", _routes.URI_SEGMENTS],
+                                               expect_route="/v1/catalog/uri_segment_census"),
+    "POST /v1/catalog/collections/upsert": Step("route-collections-upsert", "py", ["-c", _routes.COLLECTION_UPSERT],
+                                                expect_route="/v1/catalog/collections/upsert"),
+    "POST /v1/taxonomy/assignments/prune_projection": Step("route-prune-projection", "py", ["-c", _routes.PRUNE_PROJECTION],
+                                                           expect_route="/v1/taxonomy/assignments/prune_projection",
+                                                           expect_stdout="match=bogus refused 400"),
 }
 
 _ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/v1/[A-Za-z0-9_\-/.{}]+)")
@@ -362,14 +351,6 @@ def _load_ledger_module() -> Any:
     spec = importlib.util.spec_from_file_location("check_wire_contract_pairing", path)
     mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     sys.modules[spec.name] = mod  # type: ignore[union-attr]
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-    return mod
-
-
-def _load_sibling(name: str) -> Any:
-    """A module beside this file, loaded by path (this file is run as a script and loaded by path in its tests)."""
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod
 

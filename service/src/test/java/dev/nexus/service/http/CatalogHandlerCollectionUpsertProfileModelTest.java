@@ -45,8 +45,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * profile's value. An EXISTING row is never re-pointed by the profile
  * (Technical Design 1a): a differing model on an existing row is refused the
  * same way, but naming the ROW's own value instead. New rows also get {@code
- * lifecycle_state} ({@code live} unless the {@code quarantine-} prefix
- * convention applies) and {@code dimension} from {@code
+ * lifecycle_state} (the request's, {@code live} when it names none; RDR-229 P2.5
+ * stopped reading the {@code quarantine-} prefix) and {@code dimension} from {@code
  * nexus.embedding_models}; {@code model_version} keeps round-tripping
  * exactly as sent.
  *
@@ -330,10 +330,10 @@ class CatalogHandlerCollectionUpsertProfileModelTest {
             .isEqualTo("voyage-code-3");
     }
 
-    // ── (f) quarantine-prefixed name -> lifecycle_state='quarantine' ────────
+    // ── (f) the client route registers 'live' only, and never mints a quarantine- name ──
 
     @Test
-    void newCollection_quarantinePrefixedName_getsQuarantineLifecycleState() throws Exception {
+    void newCollection_quarantinePrefixedName_isRefused400ForAClient_andNothingIsWritten() throws Exception {
         String tenant = "profile-model-tenant-7";
         String name = "quarantine-code__" + tenant + "__voyage-code-3__v1";
 
@@ -341,14 +341,42 @@ class CatalogHandlerCollectionUpsertProfileModelTest {
             "{\"name\":\"" + name + "\",\"content_type\":\"code\","
             + "\"owner_id\":\"" + tenant + "\",\"model_version\":\"v1\"}");
         handleWithTenant(ex, tenant);
-        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
 
-        var row = collectionRow(tenant, name);
-        assertThat(row).isNotNull();
-        assertThat(row.lifecycleState()).isEqualTo("quarantine");
-        // Still gets a real model from the profile -- quarantine is orthogonal to
-        // model resolution.
-        assertThat(row.embeddingModel()).isEqualTo("voyage-code-3");
+        assertThat(ex.status).as(ex.bodyString()).isEqualTo(400);
+        assertThat(ex.bodyString()).contains(name).contains("quarantine-");
+        assertThat(collectionRow(tenant, name)).isNull();
+    }
+
+    @Test
+    void newCollection_aStateOtherThanLive_isRefused400ForAClient_namingTheField() throws Exception {
+        String tenant = "profile-model-tenant-7s";
+        for (String state : new String[] {"quarantine", "dormant", "disputed"}) {
+            String name = "code__" + tenant + state + "__voyage-code-3__v1";
+            CapturingExchange ex = post("/v1/catalog/collections/upsert",
+                "{\"name\":\"" + name + "\",\"content_type\":\"code\",\"owner_id\":\"" + tenant
+                + "\",\"model_version\":\"v1\",\"lifecycle_state\":\"" + state + "\"}");
+            handleWithTenant(ex, tenant);
+
+            assertThat(ex.status).as(state + ": " + ex.bodyString()).isEqualTo(400);
+            assertThat(ex.bodyString()).as(state).contains("lifecycle_state");
+            assertThat(collectionRow(tenant, name)).as(state + ": nothing written").isNull();
+        }
+    }
+
+    @Test
+    void newCollection_anExplicitLiveStateIsAccepted_andAnAbsentOneIsLive() throws Exception {
+        String tenant = "profile-model-tenant-7l";
+        String withState = "code__" + tenant + "a__voyage-code-3__v1";
+        String without = "code__" + tenant + "b__voyage-code-3__v1";
+
+        for (String[] c : new String[][] {{withState, ",\"lifecycle_state\":\"live\""}, {without, ""}}) {
+            CapturingExchange ex = post("/v1/catalog/collections/upsert",
+                "{\"name\":\"" + c[0] + "\",\"content_type\":\"code\",\"owner_id\":\"" + tenant
+                + "\",\"model_version\":\"v1\"" + c[1] + "}");
+            handleWithTenant(ex, tenant);
+            assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
+            assertThat(collectionRow(tenant, c[0]).lifecycleState()).isEqualTo("live");
+        }
     }
 
     @Test

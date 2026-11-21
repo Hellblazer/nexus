@@ -314,3 +314,37 @@ def test_a_cached_gate_jar_with_the_same_engine_tree_is_accepted() -> None:
     assert same["ok"] and same["how"] == "same service/ tree"
     assert not _mod.jar_identity_verdict("ccccccc3", "aaaaaaa1", tree)["ok"]     # a different engine
     assert not _mod.jar_identity_verdict("ccccccc3", None, tree)["ok"]           # no stamp
+
+
+# Sam 2026-11-21 (T2 nexus/sam-ruling-3h-idle-rule-2026-11-21): a data move parked for a missing prerequisite, or
+# paused by an operator, does not hold idle and is reported; a failed move still fails the leg. The harness boots the
+# new jar on the old install's bundle (no nx upgrade, so no bundle refresh), so a 7.76.0 start leaves every registered
+# move blocked on pg_background for good, which a real upgrade does not.
+
+_BLOCKED = {"id": "data-move:repair-catalog-collection-model-version", "what": "blocked: pg_background is not installed",
+            "reason_class": "missing_prerequisite"}
+_PAUSED = {"id": "data-move:rdr229-residue-catalog-documents", "what": "paused: by sam"}
+_WORKING = {"id": "data-move:rdr229-residue-catalog-documents", "what": "working: 3 of 51 chunks"}
+_BLOCKED_OTHER = {"id": "data-move:x", "what": "blocked: retrying a transient error", "reason_class": "transient"}
+_FAILED = {"id": "data-move:x", "what": "failed: check violation"}
+
+
+def test_a_move_parked_for_a_missing_prerequisite_or_paused_does_not_hold_idle() -> None:
+    assert _mod.status_says_idle(200, {"boot_work": [_BLOCKED]})
+    assert _mod.status_says_idle(200, {"boot_work": [_PAUSED, _BLOCKED]})
+    assert _mod.parked_moves({"boot_work": [_BLOCKED, {"kind": "pci_build"}, _PAUSED]}) == [_BLOCKED, _PAUSED]
+
+
+def test_a_working_or_otherwise_blocked_move_or_any_other_entry_still_holds_idle() -> None:
+    for entry in (_WORKING, _BLOCKED_OTHER, {"kind": "pci_build"}):
+        assert not _mod.status_says_idle(200, {"boot_work": [entry]}), entry
+        assert not _mod.status_says_idle(200, {"boot_work": [_BLOCKED, entry]}), entry
+    # the engine's own worker entries are not moves (their ids have no "data-move:" prefix with a label)
+    for ident in ("data-move-worker", "data-move-boot-work"):
+        assert not _mod.status_says_idle(200, {"boot_work": [{"id": ident, "what": "blocked: x",
+                                                              "reason_class": "missing_prerequisite"}]})
+
+
+def test_a_failed_move_fails_the_leg() -> None:
+    assert _mod.failed_moves({"boot_work": [_BLOCKED, _FAILED]}) == [_FAILED]
+    assert not _mod.status_says_idle(200, {"boot_work": [_FAILED]})

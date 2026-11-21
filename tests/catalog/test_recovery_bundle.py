@@ -43,6 +43,8 @@ from nexus.catalog.types import CatalogEntry
 from nexus.catalog.tumbler import Tumbler
 from nexus.db.http_vector_client import VectorServiceError
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 CH_A = "a" * 64
 CH_B = "b" * 64
 CH_L = "c" * 64

@@ -467,7 +467,6 @@ class ReembedRoutesTest {
             .containsEntry("embedding_model", BGE).containsEntry("superseded_by", t.src());
         assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
     }
-
     // ── start: reviving a superseded target ──────────────────────────────────
 
     /** A to B done (or aborted) with A superseded by B, as a cutover leaves it; then the profile names A's model. */
@@ -537,7 +536,8 @@ class ReembedRoutesTest {
     @Test
     void aTargetSupersededByAnotherNameIsRefusedNamingTheRowAndItsSuccessor() throws Exception {
         Tn t = tenant("revother");
-        String third = name(t, MINI, 2);
+        // A different owner: a v2 on the source's own tuple would be a live twin and refused first (nexus-p2m1x.28).
+        String third = TYPE + "__" + t.owner() + "x__" + MINI + "__v2";
         register(t, third);
         setProfile(t.tenant(), BGE, 768);
         // The bge sibling A is superseded by a third collection, not by the source B of the new job.
@@ -1066,6 +1066,46 @@ class ReembedRoutesTest {
         assertThat(same.statusCode()).isEqualTo(409);
         assertThat(json(same).get("error").toString()).contains("already holds the profile model");
         assertThat(jobs.listAll(t.tenant())).isEmpty();
+    }
+
+    @Test
+    void aTargetNameThatIsNotConformantIsRefusedByPlanAndStart_andNothingIsRegistered() throws Exception {
+        // Review: the engine reads the target's version off its minted name, so a target to register must be conformant.
+        Tn t = tenant("legacyname");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String legacy = "my_legacy_target_" + t.owner();
+
+        var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy + "\"}");
+        var start = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + legacy + "\"}");
+
+        assertThat(plan.statusCode()).as(plan.body()).isEqualTo(400);
+        assertThat(start.statusCode()).as(start.body()).isEqualTo(400);
+        assertThat(json(plan).get("error").toString()).contains(legacy).contains("conformant");
+        assertThat(json(start).get("error").toString()).contains(legacy).contains("conformant");
+        assertThat(catalog.getCollection(t.tenant(), legacy)).isNull();
+        assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).isEmpty();
+    }
+
+    @Test
+    void aQuarantinePrefixedTargetIsRefusedByPlanAndStart_andNoRowAndNoJobIsCreated() throws Exception {
+        // Review N1: a re-embed target named quarantine-<conformant> would mint a live row under the engine's prefix.
+        Tn t = tenant("qtarget");
+        su(ctx -> ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+            .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        String quarantineName = "quarantine-" + t.tgt();
+
+        var plan = post(t, "/plan", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + quarantineName + "\"}");
+        var start = post(t, "/jobs", "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + quarantineName + "\"}");
+
+        assertThat(plan.statusCode()).as(plan.body()).isEqualTo(400);
+        assertThat(start.statusCode()).as(start.body()).isEqualTo(400);
+        assertThat(json(plan).get("error").toString()).contains(quarantineName).contains("quarantine-");
+        assertThat(json(start).get("error").toString()).contains(quarantineName).contains("quarantine-");
+        assertThat(catalog.getCollection(t.tenant(), quarantineName)).as("no row").isNull();
+        assertThat(jobs.listByStates(t.tenant(), ReembedJobRepository.LOCK_STATES)).as("no job").isEmpty();
     }
 
     @Test

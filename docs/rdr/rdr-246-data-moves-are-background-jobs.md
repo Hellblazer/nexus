@@ -642,8 +642,14 @@ always reports how many times it has been retried:
   retries every 15 minutes indefinitely, so a move registered before its
   install or roles exist runs once they appear (the cloud order in
   Activation Step 1). After 20 consecutive transients, about four hours of
-  backoff, `blocked:` adds "needs an operator". nx doctor shows every
-  `blocked:` move red already; the cap only changes the text. The move is
+  backoff, `blocked:` adds "needs an operator". nx doctor shows a
+  `blocked:` move red, except a move blocked on `pg_background is not
+  installed`: the engine marks that entry `reason_class: missing_prerequisite`
+  (`MoveReasons.classOf`) and nx doctor shows a warning (the move waits for
+  the install and an engine restart, since `DmlUtilsInstaller.install` looks
+  for the extension only at boot), until the cap, where `classOf` returns
+  null and the row turns red. The `dml_utils.run_migration_chunks_committing`
+  miss comes after the library install passed, so it is never classed. The move is
   never made `failed:` for transient errors: a busy slot, a missing grant or
   a missing install before or during its runs is not the move's fault, and
   `failed:` would need a superseding move to clear. A grant or function the
@@ -733,7 +739,9 @@ itself (the bound tenant in the verification query does this). Any other
 driving table has only the tenant policy (a census of CREATE POLICY in the
 changelogs finds `tenant_isolation` everywhere and the owner-read policy only
 on `nexus.chunks`), so the move adds the same owner-read SELECT policy, named
-`<table>_owner_read`, for
+`<table>_owner_read`, on its driving table and on every tenant-scoped table its
+template or verification joins (a support table; the boot check covers those
+through `DrivingTableIsolationCheck.SUPPORT_TABLES`), for
 the migrating role (`TO CURRENT_USER`, the vectors-029 pattern) in its own
 changeset, ordered after the registering changeset. That changeset carries
 vectors-029's guard: a precondition that skips it (MARK_RAN) when `nexus_svc`,
@@ -798,7 +806,12 @@ nexus_rdr/246-research-5):
    (`_backfill_provision_grants`, storage_service_daemon.py; it runs only when
    the credentials name the bundled cluster's data directory) and which
    already backfills the diag role; it is extended to create the extension,
-   roles, grants and schema when they are missing. A BYO or `--no-pg-bundle`
+   roles, grants and schema when they are missing. It can only do that with a
+   bundle that has the library, and a local install keeps the bundle it was
+   first set up with: one set up before engine-service-v0.1.190 (conexus
+   8.2.0 and earlier) has none, and nothing else replaced it. A plain `nx upgrade` now
+   replaces it (Activation Step 1b), after which the next service start runs this
+   step. A BYO or `--no-pg-bundle`
    PostgreSQL gets it from its DBA, as SQL in docs/configuration.md's
    prerequisites, and the cloud from Activation Step 1. In production the
    engine does not run as a superuser, so it cannot do this itself. Until the
@@ -855,8 +868,12 @@ grant loop (`nexus.partition_copy_access`, which copies the parent's grants to
 each new leaf, vectors-039).
 
 **Progress.** `/v1/status` `boot_work` lists each open or failed move in
-nexus-f3yqd.3's shape (BootWorkRegistry.java:45: id, what, startedAt, done,
-total, unit, safeToStop, onStop, step). `done` and `total` are
+nexus-f3yqd.3's shape (BootWorkRegistry.java:49: id, what, startedAt, done,
+total, unit, safeToStop, onStop, step, reasonClass). `reasonClass` is the wire
+field `reason_class`, present only on a `blocked:` entry whose reason is
+`pg_background is not installed` and has not reached the retry cap
+(`MoveReasons.classOf`, nexus-f3yqd.2.23); an engine that predates it sends none
+and its blocked move stays red. `done` and `total` are
 `total_chunks_completed` and `total_chunks` from
 `dml_utils_data.migration_run` (006-create-migration-tables.sql lines 27-28),
 summed over the move's active runs (`archived_at IS NULL`), `unit: "chunks"`. A run with no rows has a total
@@ -889,8 +906,10 @@ failed move, in `nexus.data_moves.failure`. A worker that failed to start, or a
 reporter that failed to start, is published as a `blocked:` entry (ids
 `data-move-worker` and `data-move-boot-work`), so that an empty list is never
 read as no move open. nx doctor shows one red row per `blocked:` or `failed:`
-move, a warning per `stalled:` move and a note per `paused:` move, and a red
-row for each of those two entries.
+move, except a `blocked:` move whose entry carries `reason_class:
+missing_prerequisite` (`pg_background is not installed`, before the retry cap),
+which is a warning; a warning per `stalled:` move and a note per `paused:`
+move, and a red row for each of those two entries.
 
 **Readers during a move.** Each move's RDR or bead states how readers behave
 while it runs: read both shapes, or keep the feature off until `completed_at`
@@ -1098,7 +1117,10 @@ launcher that upstream does not test.
 - **pg_background missing**: the engine skips the dml_utils changelogs and
   serves; the move worker does not start the move. boot_work
   reports it as `blocked: pg_background is not installed`, and nx doctor shows
-  a red line. Nothing falls back to a boot-time move.
+  a warning (`reason_class: missing_prerequisite`) until the retry cap (about
+  four hours), then a red line. The engine looks for the extension only at
+  boot, so the remedy is to install it and restart the engine. Nothing falls
+  back to a boot-time move.
 - **A chunk fails** (a constraint, a bad template): dml_utils stops launching
   chunks, lets the ones in flight commit, records the failure in
   migration_error, and raises. Unless its SQLSTATE is a recorded transient
@@ -1310,6 +1332,38 @@ engine without it serves and reports its moves blocked (Technical Design), so
 this step lands before the first registered move is expected to run in the
 cloud.
 
+#### Activation Step 1b: local installs, bundle refresh at convergence
+
+Step 1 is the cloud host. A local install has its own version of the same
+gap: the extracted PostgreSQL bundle (`<config>/pg-bundle`) is the one it was
+first set up with, `nx upgrade` installed the engine binary and never touched
+it, and pg_background first shipped in the bundle at engine-service-v0.1.190
+(conexus 8.2.1). An install first set up on 8.2.0 or earlier reached the
+pinned engine without the extension, and every registered move stayed `blocked:
+pg_background is not installed` (nexus-f3yqd.2.23; T2
+nexus/first-run-ux-triage). A plain `nx upgrade` now takes the pinned
+release's bundle and swaps it in, when the engine version changes and when the
+engine is already the pinned one but the extracted bundle has no
+`bundle/share/postgresql/extension/pg_background.control`. The swap is a
+binary replacement, not a data migration: nothing is rewritten, and PostgreSQL
+stays on 17.5, so the data directory starts under the new bundle; a swap that
+would change the major version (read from the data directory's `PG_VERSION`)
+or drop pg_background is refused before anything is stopped. The client's
+superuser bootstrap then creates the extension at the next service start
+(Install sequence, step 1). A bundle swap restarts
+PostgreSQL (an engine replacement alone does not), so on a converged engine and
+on an engine change alike it runs only in an attended `nx upgrade` and only
+while the engine is idle: no `boot_work` except a data move that is only
+`blocked:`, `failed:` or `paused:` (a move blocked on the missing extension is
+what the swap fixes), and no index build or vacuum. An unattended run or a busy
+engine installs the engine and leaves the bundle for the next attended run, and
+the swap is only reported by `nx upgrade --auto`, `nx upgrade --dry-run` and the
+MCP start; `nx doctor`
+warns on a `PostgreSQL bundle` row while it is pending. The release's
+upgrade rehearsal exercises it (scripts/upgrade_rehearsal.py, an old-bundle
+start from 8.2.0). A BYO or `--no-pg-bundle` PostgreSQL has no extracted
+bundle and is untouched.
+
 #### Activation Step 2: the first registered move
 
 Step 1's second PR and four-column change, Steps 3b and 3c, and Step 4 come before this. The first
@@ -1484,3 +1538,4 @@ the first registered move.
 - 2026-11-17: wording to landed, reviewed code (grant 3), nexus-f3yqd.2.14, .2.15 and .2.17, develop commits 8cf174765..20b338640: `on_complete` runs under `lock_timeout` min(5 s, `statement_timeout_ms` / 2), at least 1 ms, on every move, and builder termination stays chunk-family only, decided by a name match pinned to the lint's list (`ChunkFamily`, `ChunkFamilyLintPinTest`); the completion UPDATE runs first and is guarded (not paused, failed, completed or superseded), with builders ended after it matched, inside the transaction; every run executes before a non-empty verification is reported, a move with no tenant scope gets the table-wide run only, a refused verification text is a permanent failure (Stage `VERIFICATION_REFUSED`; `MoveSql` sanctioned by Sam, 2026-11-17), and a stop is read between tenants and before completion; a missing driving schema or table is permanent, a raised 42501, 42883 or class 08 is read once more after 750 ms for dml_utils' asynchronous recorder, a paused pass and a stop count no retry, and an unwritable registry reports `blocked:`; boot_work entries come from `MoveBootWork` (own admin session, every 5 s) with the `working:`, `queued:`, `blocked:`, `failed:`, `paused:`, `stalled:` and `runs complete:` classes, carry no tenant, leaf, run label, pid or server text, `stalled:` after `NX_DATA_MOVE_STALL_MINUTES`, `done` as a clamped high-water, red entries for a worker or reporter that did not start, and `grants-nexus-svc-1` revoking `nexus_svc`'s privileges on `nexus.data_moves` where it can; nx doctor rows for each.
 - 2026-11-17: verification and `on_complete` failure classes to the code of nexus-f3yqd.2.15's follow-up and its critique (decided by linda under Sam's "keep things moving" rule, reversible): a verification run is transient for its timeout, a lost connection, a shutdown, a busy host (class 53) or a fault with no SQLSTATE, and an open failure of its connection is a connection failure; any other error it raises is permanent, 42501 and 42883 included; an `on_complete` is also transient for a lost connection, a shutdown, a busy host, a deadlock or a serialization failure, since its transaction rolls back whole.
 - 2026-11-17: verification refusals to the code of nexus-f3yqd.2.19's parity follow-up (grant 3): the gate and `MoveSql` both refuse a blank text, a `/*/` and a `$` directly next to a non-ASCII character, and a standalone `$1` has no word character, `$` or non-ASCII character beside it.
+- 2026-11-20: wording to reviewed code (grant 3), RDR-229 P2.10 (nexus-p2m1x.15, reviews T2 nexus/review-p2m1x15-2026-11-20-r2 and nexus/critique-p2m1x15-2026-11-20-r2): the owner-read policy also covers a tenant-scoped support table a move's template or verification joins (`catalog_collections_owner_read`, which RDR-229 D2's `vectors-065` adds and P2.10 reuses), and the boot check covers it through `DrivingTableIsolationCheck.SUPPORT_TABLES`.

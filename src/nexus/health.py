@@ -4818,6 +4818,13 @@ def _status_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
+def _check_pg_bundle() -> list[HealthResult]:
+    """nexus-f3yqd.2.23: ``nexus.daemon.pg_bundle_refresh.check_pg_bundle`` (a warning while the extracted bundle lacks pg_background)."""
+    from nexus.daemon.pg_bundle_refresh import check_pg_bundle  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_pg_bundle()
+
+
 def _check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """RDR-246 data moves (nexus-f3yqd.2.17): ``nexus.data_moves_health.check_data_moves``. Named ``_check_*`` here, like
     every other row of the sweep, so a test that steps over the sweep's ``_check_*`` rows steps over this one too instead
@@ -11211,7 +11218,10 @@ def _check_chash_conformance_report() -> list[HealthResult]:
     # never crash this check or hide the primary (non_)conformant result.
     unroutable_collections: list[str] = []
     try:
-        from nexus.corpus import embedding_model_for_collection_name, is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog.rows.legacy_names import (  # noqa: PLC0415 — deferred to avoid import cycle
+            embedding_model_for_collection_name,
+            is_conformant_collection_name,
+        )
         from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid a heavy/optional import at module load
         from nexus.db.reconcile import dim_for_model_token  # noqa: PLC0415 — deferred to avoid import cycle; the canonical dim table (nexus-h1zu0)
 
@@ -12266,9 +12276,9 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
     return [HealthResult(label=label, ok=True, detail="none (no catalog document)")]
 
 
-#: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
-#: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
-_PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
+#: Content types (a listing row's ``content_type``) whose collections can hold PDF chunks. ``code`` never
+#: does, and ``rdr`` holds only RDR markdown; skipping both saves one request each.
+_PDF_STUB_SCAN_CONTENT_TYPES: tuple[str, ...] = ("knowledge", "docs")
 #: Pages of chunk rows read per collection before the scan of that collection
 #: stops and is reported as partial. Only PDF documents whose catalog meta
 #: records no extraction_method are looked at (111 placeholder chunks in 2
@@ -12511,19 +12521,29 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches make_t3
 
         t3 = make_t3()
+        # RDR-229 P2.9: the listing row's own content_type picks the collections, never the name. A
+        # quarantine sibling's row carries its origin's content type, so it is left out by its state
+        # (the name test left it out by its ``quarantine-`` prefix).
+        listing = list(t3.list_collections())
         names = sorted(
-            str(c.get("name", "")) for c in t3.list_collections()
-            if str(c.get("name", "")).startswith(_PDF_STUB_SCAN_PREFIXES)
+            str(c.get("name", "")) for c in listing
+            if c.get("content_type") in _PDF_STUB_SCAN_CONTENT_TYPES and c.get("lifecycle_state") != "quarantine"
         )
+        # A listing row with no content_type has no catalog row behind it: it is not scanned, and it is counted
+        # rather than read as "nothing here" (RDR-229 P2.9).
+        unrowed = sum(1 for c in listing if not c.get("content_type"))
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_pdf_stub_metadata_check_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (T3 unavailable)")]
 
     if not names:
+        gap = f"; {unrowed} collection(s) carry no catalog row and were not scanned" if unrowed else ""
         return [HealthResult(
             label=label, ok=True,
-            detail="not applicable (no knowledge or docs collections)",
+            detail=f"not applicable (no knowledge or docs collections{gap})",
         )]
+    if unrowed:
+        _log.info("doctor_pdf_stub_metadata_unrowed_collections_not_scanned", count=unrowed)
 
     # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.189) counts every collection it lists in one read;
     # only a collection it does not list is scanned. Without the route the scan runs as before.
@@ -13655,6 +13675,7 @@ def run_health_checks(
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
     results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
+    results.extend(_step("_check_pg_bundle", _check_pg_bundle))  # nexus-f3yqd.2.23: a bundle without pg_background
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c

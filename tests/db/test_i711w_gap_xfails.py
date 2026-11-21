@@ -528,7 +528,7 @@ class TestLegacyGrandfatheredDerivation:
     # bare-else call sites (indexer.py:784, catalog_cmds/collections.py:138
     # and :349) at one boundary instead of patching them one at a time.
     def test_bare_register_nonconformant_name_flagged_legacy(self, cat) -> None:
-        from nexus.corpus import is_conformant_collection_name
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
         # Legacy 2-segment shape — the vacuity trap named on the bead: the
         # CONFORMANT case is correct-by-accident at the False default, so
@@ -546,7 +546,7 @@ class TestLegacyGrandfatheredDerivation:
         """Passing companion (correct today): a CONFORMANT name stays
         un-flagged. Pins the other half of the derivation so a future 'fix'
         that blanket-flags every service registration True also fails."""
-        from nexus.corpus import is_conformant_collection_name
+        from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
         name = "docs__i711w-conf__bge-base-en-v15-768__v1"
         assert is_conformant_collection_name(name)

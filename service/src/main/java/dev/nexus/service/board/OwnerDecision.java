@@ -196,6 +196,39 @@ public final class OwnerDecision {
     }
 
     /**
+     * Whether the owner's stamped ack exists on the current owner row's own tip, posted at or after the row: an ack
+     * row with a non-null {@code sender_session} whose {@code from} equals the row's owner. The engine stamps an ack's
+     * {@code from} with the identity of its sender session at write time (and leaves it as typed when the session maps
+     * to nothing), so this reads the identity the deadline counts from the row itself and needs no identity read; the
+     * fail-safe can then tell "possibly acknowledged" from "plainly not" when the liveness read is down. The time
+     * bound keeps a handed-away owner's late ack from suppressing the next owner's escalation.
+     *
+     * <p>Residual: a minted session with no identity that hand-types the owner's id in {@code from} still holds the
+     * escalation off while the read is down (a recovered read then matches nothing and escalates). Known transition: a
+     * pre-0.1.200 ack row has a typed {@code from} (perhaps an alias) and does not match, so during a liveness fault an
+     * open red acknowledged before the deploy escalates with owner null, a bounded false wake. This check is also
+     * narrower than the normal count ({@link #dueAt}): an owner's ack before its owner row, or on an older tip, makes
+     * the fail-safe escalate where the normal path would count it, the safe direction.
+     */
+    static boolean ackOnTip(List<BoardRow> owners) {
+        BoardRow cur = currentRow(owners);
+        if (cur == null || cur.sha() == null) {
+            return false;
+        }
+        Object owner = parse(cur.body()).get("owner");
+        if (!(owner instanceof String ownerId)) {
+            return false;
+        }
+        for (BoardRow a : owners) {
+            if ("ack".equals(a.kind()) && cur.sha().equals(a.sha()) && !a.createdAt().isBefore(cur.createdAt())
+                && a.senderSession() != null && ownerId.equals(a.dim("from"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * When the deadline of the current open owner row falls due, from that row alone ({@code episode_at} plus the
      * topic's deadline); null when the current row is not an open owner row, is {@code escalated} or names no owner,
      * or there is no live group.

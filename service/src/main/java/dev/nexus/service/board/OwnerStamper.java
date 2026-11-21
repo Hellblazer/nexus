@@ -42,6 +42,7 @@ public final class OwnerStamper implements OwnerOutHook {
     private final Clock clock;
     private volatile AckDeadlineTimer timer;
     private final AliasReader aliases;
+    private final LivenessReader liveness;
     /** The decision; replaced in a test to make an evaluation fail. */
     private final BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider;
 
@@ -55,6 +56,19 @@ public final class OwnerStamper implements OwnerOutHook {
         this(scope, tuples, groups, identities, clock, decider, IdentityRepository::liveAliases);
     }
 
+    OwnerStamper(TenantScope scope, TupleRepository tuples, GroupRepository groups, IdentityRepository identities,
+                 Clock clock, BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider,
+                 AliasReader aliases) {
+        this(scope, tuples, groups, identities, clock, decider, aliases, BoardReads::identities);
+    }
+
+    /** The fail-safe's liveness read; replaced in a test to make it fail. */
+    @FunctionalInterface
+    interface LivenessReader {
+        Identities read(IdentityRepository identities, String tenant, List<BoardRow> pushes, List<BoardRow> owners,
+                        GroupView group);
+    }
+
     /** The live alias of each identity, read in the evaluation's transaction; replaced in a test to make the read fail. */
     @FunctionalInterface
     interface AliasReader {
@@ -63,8 +77,9 @@ public final class OwnerStamper implements OwnerOutHook {
 
     OwnerStamper(TenantScope scope, TupleRepository tuples, GroupRepository groups, IdentityRepository identities,
                  Clock clock, BiFunction<OwnerDecision.Input, OwnerDecision.Trigger, OwnerDecision.Decision> decider,
-                 AliasReader aliases) {
+                 AliasReader aliases, LivenessReader liveness) {
         this.aliases = aliases;
+        this.liveness = liveness;
         this.scope = scope;
         this.tuples = tuples;
         this.groups = groups;
@@ -87,10 +102,16 @@ public final class OwnerStamper implements OwnerOutHook {
             if (base == null) {
                 return;
             }
-            DoneVerdict.Verdict v = DoneVerdict.of(new BoardRow(null, clock.instant(), dims, body, null))
-                .filter(DoneVerdict.Verdict::counts).orElse(null);
+            DoneVerdict.Resolution r = DoneVerdict.resolve(new BoardRow(null, clock.instant(), dims, body, null));
+            DoneVerdict.Verdict v = r.verdict().filter(DoneVerdict.Verdict::counts).orElse(null);
             if (v == null) {
-                return;   // not kind=sha, or cancelled, or an outcome that cannot be told: not a verdict
+                // not kind=sha, or cancelled, or an outcome that cannot be told: not a verdict. A sha row that leaves
+                // no verdict says why, since a suppressed clear after a failed carry read is otherwise silent.
+                if ("sha".equals(dims.get("kind"))) {
+                    log.info("event=board_done_no_verdict tenant={} base={} sha={} reason={}",
+                        tenant, base, dims.get("sha"), r.reason());
+                }
+                return;
             }
             try {
                 evaluate(tenant, base, OwnerDecision.Trigger.DONE);
@@ -117,16 +138,21 @@ public final class OwnerStamper implements OwnerOutHook {
     /**
      * The timer's hand-off: re-decide from fresh rows, and post a hand-off or the escalation when it is due. If the
      * evaluation throws, the fail-safe still escalates a due row from the current owner row alone, so a deterministic
-     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run either throws, and the
-     * timer tries again after its retry delay.
+     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run throws, with the
+     * evaluation's fault kept as suppressed on what it throws, and the timer tries again after its retry delay.
      */
     public void onDeadline(String tenant, String base) {
         try {
             evaluate(tenant, base, OwnerDecision.Trigger.DEADLINE);
         } catch (Throwable t) {
-            log.warn("event=board_owner_deadline_evaluation_failed tenant={} base={} error={}; posting the fail-safe row",
+            try {
+                failSafe(tenant, base);
+            } catch (Throwable f) {
+                f.addSuppressed(t);
+                throw f;
+            }
+            log.warn("event=board_owner_deadline_evaluation_failed tenant={} base={} error={}; the fail-safe ran",
                 tenant, base, t.getMessage(), t);
-            failSafe(tenant, base);
         }
     }
 
@@ -163,22 +189,34 @@ public final class OwnerStamper implements OwnerOutHook {
         });
     }
 
-    /** The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock; the liveness read may fail soft. */
+    /**
+     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. Who is live, and whose ack
+     * an ack row is, come from the identity read, which is made only when an escalation is owed. If that read fails and
+     * the owner's stamped ack sits on the row's own tip ({@link OwnerDecision#ackOnTip}), the red may be acknowledged and cannot be matched without the read, so this
+     * throws and the timer retries; escalating then would wake every member over an acknowledged red. If no such ack
+     * row exists, nobody acknowledged, so the escalation is posted at once with no one named, the row the RDR gives
+     * for nobody live.
+     */
     private void failSafe(String tenant, String base) {
         scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
-            Identities ids;
-            try {
-                ids = group == null ? new Identities(Map.of(), Map.of())
-                    : BoardReads.identities(identities, tenant, List.of(), owners, group);
-            } catch (Throwable t) {
-                // Nobody can be shown live: the row then names no one and wakes every member, as the RDR says for that case.
-                log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
-                ids = new Identities(Map.of(), Map.of());
+            Instant now = clock.instant();
+            Instant due = OwnerDecision.rowDeadline(group, base, owners);
+            Identities ids = new Identities(Map.of(), Map.of());
+            if (due != null && !now.isBefore(due)) {
+                try {
+                    ids = liveness.read(identities, tenant, List.of(), owners, group);
+                } catch (Throwable t) {
+                    if (OwnerDecision.ackOnTip(owners)) {
+                        throw t;
+                    }
+                    log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}; no ack row on the tip, "
+                        + "escalating with no owner", tenant, base, t.getMessage());
+                }
             }
-            OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, clock.instant());
+            OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, now);
             if (d.post() != null) {
                 post(ctx, tenant, base, d.post());
                 log.warn("event=board_owner_failsafe_row tenant={} base={} sha={}", tenant, base, d.post().sha());

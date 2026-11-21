@@ -78,18 +78,18 @@ UPSERT handles transparently).
 `--threshold` on `nx taxonomy project` resolves in this order:
 
 1. Explicit `--threshold F` — always wins.
-2. Per-prefix default — applied when `--threshold` is omitted.
-3. Hard fallback — `0.70` for unknown prefixes.
+2. Per-content-type default — applied when `--threshold` is omitted. The content type is read from the source collection's catalog row, so a `code__`-named collection whose row says `knowledge` gets the knowledge default. A collection with no catalog row (unregistered, or holding no chunk), or one whose row cannot be read, uses its name's prefix.
+3. Hard fallback — `0.70` for an unknown content type or prefix.
 
-| Source prefix | Default | Rationale |
+| Content type (name prefix) | Default | Rationale |
 |---------------|---------|-----------|
-| `code__*` | 0.70 | Syntax tokens (class, def, return, import) inflate raw cosine; a high bar keeps projections meaningful. |
-| `knowledge__*` | 0.50 | Dense prose with semantic embeddings yields lower raw cosine even for highly related content. |
-| `docs__*` | 0.55 | Mixed prose + fenced code; splits the difference between the above. |
-| `rdr__*` | 0.55 | Same composition as docs. |
+| `code` (`code__*`) | 0.70 | Syntax tokens (class, def, return, import) inflate raw cosine; a high bar keeps projections meaningful. |
+| `knowledge` (`knowledge__*`) | 0.50 | Dense prose with semantic embeddings yields lower raw cosine even for highly related content. |
+| `docs` (`docs__*`) | 0.55 | Mixed prose + fenced code; splits the difference between the above. |
+| `rdr` (`rdr__*`) | 0.55 | Same composition as docs. |
 | unknown | 0.70 | Safer under-match bias — prefer false negatives over false positives for an unfamiliar corpus. |
 
-Source: `nexus.corpus.default_projection_threshold`.
+Source: `nexus.projection_threshold.projection_threshold` (the row read); the name derivation it falls back to is `nexus.corpus.default_projection_threshold`.
 
 ## Calibrating a new corpus type
 
@@ -181,9 +181,15 @@ Two flags undo a bad state without touching the database by hand.
 
 - `nx taxonomy project <src> --prune-below-threshold` deletes the projection
   assignments whose stored raw cosine is below the corpus threshold (your
-  `--threshold`, else the per-prefix default above). Use it to undo a pass
-  that admitted weak matches (GH #1528). With `--backfill` it prunes every
-  corpus prefix instead of one source.
+  `--threshold`, else the per-content-type default above). Use it to undo a
+  pass that admitted weak matches (GH #1528). With `--backfill` it prunes
+  every collection (the live catalog listing plus the collections that hold
+  topics), one prune per full collection name at that collection's own
+  default, instead of one source. It never deletes on a guess from the name:
+  a collection whose catalog row cannot be read is refused with a line saying
+  so, and `--threshold` prunes it anyway. The engine matches a prune by name
+  prefix, so a collection whose name prefixes a lower-threshold collection is
+  pruned only down to that lower threshold and counted in an `N skipped` line.
 - `nx taxonomy audit -c <src> --fix-doc-count` previews `topics.doc_count` drift
   and adding `--yes` applies the correction. It is the repeatable form of
   the engine's boot-time recount and the remedy the `nx doctor`

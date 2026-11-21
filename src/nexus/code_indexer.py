@@ -554,7 +554,7 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     with _stage("chunking"):
         chunks = chunk_file(
             file_path, content, chunk_lines=ctx.chunk_lines,
-            token_window=window_for_collection(ctx.corpus, ctx.embedding_model),
+            token_window=window_for_collection(ctx.corpus, ctx.embedding_model, row_model=ctx.embedding_model),
         )
     if not chunks:
         _log.debug("skipped file with no chunks", path=str(file_path))

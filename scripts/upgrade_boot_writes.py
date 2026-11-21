@@ -23,7 +23,8 @@ included, with no reset hook between the PG start and Liquibase. ``pg_stat_io`` 
 are reported beside it, measured from the first sample after PG accepts connections. Phases:
 ``migrate`` is PG up to the engine's HTTP bind, ``ready`` is up to ``/health`` 200, ``settle`` is up to
 idle. Idle means all of: ``/v1/status`` ``boot_work`` empty (absent on engines that predate it is
-taken as empty), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progress_vacuum``, and WAL
+taken as empty) or holding only parked data moves (``blocked:`` for a missing prerequisite, or ``paused:``;
+reported as ``parked_moves``, never gated; a ``failed:`` move fails the leg; Sam 2026-11-21), no rows in ``pg_stat_progress_create_index`` or ``pg_stat_progress_vacuum``, and WAL
 growth under ``--idle-wal-bytes`` over the last ``--idle-window`` seconds; and, unless
 ``--no-reconcile-wait``, a completed PCI reconcile pass in this boot's engine log plus the PCI end state (a
 valid ``pci_`` index for each large seeded collection, none INVALID). The ceiling applies to the total;
@@ -481,13 +482,53 @@ def boot_work_empty(status: dict | None) -> bool:
     return not status["boot_work"]
 
 
+#: The engine's boot_work id prefix for one registered data move (``MoveBootWork.ID_PREFIX``); the worker's own
+#: entries (``data-move-worker``, ``data-move-boot-work``) carry no ``:`` and are not moves.
+MOVE_ID_PREFIX = "data-move:"
+#: ``reason_class`` of a move blocked because a prerequisite is not installed (``MoveReasons.MISSING_PREREQUISITE``).
+MISSING_PREREQUISITE = "missing_prerequisite"
+
+
+def _move_state(entry: dict) -> str | None:
+    """The state word of a data-move entry (``blocked``, ``paused``, ``failed``, ``working`` ...), or None."""
+    if not isinstance(entry, dict) or not str(entry.get("id") or "").startswith(MOVE_ID_PREFIX):
+        return None
+    return str(entry.get("what") or "").partition(":")[0].strip().lower()
+
+
+def _is_parked(entry: dict) -> bool:
+    """A move waiting on something no boot will supply (Sam 2026-11-21, T2 nexus/sam-ruling-3h-idle-rule-2026-11-21):
+    ``blocked:`` for a missing prerequisite, or ``paused:`` by an operator. The harness boots the new jar on the old
+    install's bundle with no ``nx upgrade``, so a start from before pg_background leaves every registered move blocked
+    on it for good; a real upgrade refreshes the bundle and the moves run."""
+    state = _move_state(entry)
+    return state == "paused" or (state == "blocked" and entry.get("reason_class") == MISSING_PREREQUISITE)
+
+
+def parked_moves(status: dict | None) -> list[dict]:
+    """The parked data-move entries of ``/v1/status`` boot_work, reported in the boot's record, never gated."""
+    return [e for e in ((status or {}).get("boot_work") or []) if _is_parked(e)]
+
+
+def failed_moves(status: dict | None) -> list[dict]:
+    """The ``failed:`` data-move entries: a failed move fails the leg."""
+    return [e for e in ((status or {}).get("boot_work") or []) if _move_state(e) == "failed"]
+
+
+def boot_work_settled(status: dict | None) -> bool:
+    """Every boot_work entry is a parked move (or there is none): nothing in it is still working."""
+    if boot_work_empty(status):
+        return True
+    return all(_is_parked(e) for e in status["boot_work"])
+
+
 def status_says_idle(code: int, status: dict | None) -> bool:
     """The ``/v1/status`` half of the idle rule: a 200 whose boot_work is empty (or absent, on an engine that
     predates the field), or a 404 from an engine that predates the route. Any other answer (none, a 401, a
     500) is not idle: a status that cannot be read says nothing about boot work."""
     if code == 404:
         return True
-    return code == 200 and boot_work_empty(status)
+    return code == 200 and boot_work_settled(status)
 
 
 @dataclass
@@ -560,9 +601,10 @@ def reconcile_pass_did_work(lines: list[str]) -> bool:
 
 
 def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: IdleRule, deadline: float,
-              what: str, extra=None, on_sample=None) -> Sample:
+              what: str, extra=None, on_sample=None, parked: list[dict] | None = None) -> Sample:
     """Sample every second until idle (module docstring) and ``extra()``, when given, is true; raise
-    HarnessError at the deadline."""
+    HarnessError at the deadline, or at once when a data move reports ``failed:``. At idle, ``parked`` (when
+    given) is filled with the parked moves the last status showed (:func:`parked_moves`)."""
     last_note = 0.0
     while True:
         now = time.monotonic()
@@ -575,15 +617,20 @@ def wait_idle(inst: Install, port_fn, t0: float, samples: list[Sample], rule: Id
                 on_sample(samples)
             port = port_fn()
             code, status = http_status(port, "/v1/status") if port else (0, None)
+            if code == 200 and (failed := failed_moves(status)):
+                raise HarnessError(f"{what}: data move failed: {failed}")
             older = [x for x in samples if x.t <= s.t - rule.window_s]
             if older and s.building == 0 and s.vacuuming == 0 and status_says_idle(code, status) \
                     and (extra is None or extra()):
                 if s.lsn - older[-1].lsn < rule.wal_bytes:
+                    if parked is not None:
+                        parked[:] = parked_moves(status)
                     return s
             if now - last_note > 60:
                 last_note = now
                 log(f"{what}: {s.t:.0f}s, wal +{s.lsn - samples[0].lsn} bytes, building={s.building} "
-                    f"vacuuming={s.vacuuming} status={code} boot_work_empty={boot_work_empty(status)}")
+                    f"vacuuming={s.vacuuming} status={code} boot_work_empty={boot_work_empty(status)} "
+                    f"parked_moves={len(parked_moves(status))}")
         time.sleep(1.0)
 
 
@@ -961,9 +1008,10 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
             raise MidQueueRestart
 
     restart_at = a.restart_mid_queue if label == "upgrade" else 0
+    parked: list[dict] = []   # filled at idle: the moves parked for a missing prerequisite or paused, reported
     try:
         idle = wait_idle(inst, inst.service_port, t0, samples, IdleRule(a.idle_window, a.idle_wal_bytes),
-                         deadline, f"new engine ({label})", extra, on_sample)
+                         deadline, f"new engine ({label})", extra, on_sample, parked=parked)
     except MidQueueRestart:
         last = samples[-1]
         if a.restart_mode == "kill":
@@ -1027,6 +1075,8 @@ def measure_boot(inst: Install, a: argparse.Namespace, env: dict[str, str], labe
         rec["total_io_write_bytes"] = int(idle.io_write_bytes or 0) - int(first.io_write_bytes or 0)
         rec["total_io_extend_bytes"] = int(idle.io_extend_bytes or 0) - int(first.io_extend_bytes or 0)
     rec["elapsed_s"] = round(idle.t, 1)
+    rec["parked_moves"] = [{"id": e.get("id"), "what": e.get("what"), "reason_class": e.get("reason_class")}
+                           for e in parked]
     after = hnsw_indexes(inst)
     rec["hnsw"] = len(after)
     rec["pci"] = sum(1 for n, _, ok in after if n.startswith(PCI_PREFIX) and ok)

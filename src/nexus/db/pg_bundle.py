@@ -27,7 +27,9 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
 from contextlib import AbstractContextManager
@@ -56,6 +58,23 @@ _BUILD_PREFIX_MARKER = ".build_prefix"
 
 #: Sub-directory of the config dir the bundle is extracted into.
 _CACHE_SUBDIR = "pg-bundle"
+
+
+class PgBundleSwapRefused(RuntimeError):
+    """A bundle swap that is refused before anything is stopped or replaced.
+
+    Retrying does not change the answer: the message says what to do instead."""
+
+
+class PgBundleMajorChangeError(PgBundleSwapRefused):
+    """A bundle swap would change the PostgreSQL major version.
+
+    A data directory made by PostgreSQL N cannot be started by N+1 binaries, and a bundle
+    swap moves no data. A real major bump needs pg_upgrade or a dump and restore."""
+
+
+class PgBundleDowngradeError(PgBundleSwapRefused):
+    """A bundle swap would drop pg_background from a bundle that has it."""
 
 
 def current_platform_tag(*, system: str | None = None, machine: str | None = None) -> str:
@@ -114,6 +133,106 @@ def is_bundle_extracted(extract_root: Path) -> bool:
         marker.is_file()
         and PgBinaries.from_dir(bundle_bin_dir(extract_root)).all_present()
     )
+
+
+_PG_VERSION_RE = re.compile(r"\)\s*(\d+)")
+_PG_TOOL_VERSION_TIMEOUT_S = 15.0
+
+
+def pg_background_control_files(extract_root: Path) -> tuple[Path, ...]:
+    """Where the pg_background control file sits in an extracted bundle.
+
+    The real layout puts it beside ``vector.control`` at ``bundle/share/postgresql/extension/``
+    (PostgreSQL adds ``postgresql`` to the share directory when the prefix does not name it). A
+    build that does not add it is covered by the second entry."""
+    share = extract_root / "bundle" / "share"
+    return (
+        share / "postgresql" / "extension" / "pg_background.control",
+        share / "extension" / "pg_background.control",
+    )
+
+
+def bundle_has_pg_background(extract_root: Path) -> bool:
+    return any(p.is_file() for p in pg_background_control_files(extract_root))
+
+
+def bundle_major(bin_dir: Path, *, platform: str | None = None) -> int | None:
+    """The PostgreSQL major version the bundle at *bin_dir* reports
+    (``pg_ctl --version``: ``pg_ctl (PostgreSQL) 17.5`` is 17), or ``None`` when it cannot
+    be run or says nothing a version can be read from.
+
+    The published bundles carry no RPATH, so the child gets the tree's own ``lib/`` on the
+    loader path (:func:`~nexus.db.pg_provision._bundle_lib_env`); a bare call exits 127 on a
+    minimal Linux base."""
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 - deferred, keeps this module's import light
+    from nexus.db.pg_provision import _bundle_lib_env  # noqa: PLC0415 - deferred, as above
+
+    pg_ctl = PgBinaries.from_dir(bin_dir, platform=platform).pg_ctl
+    try:
+        done = run_bounded(
+            [str(pg_ctl), "--version"], timeout=_PG_TOOL_VERSION_TIMEOUT_S,
+            env=_bundle_lib_env([str(pg_ctl)], None, platform=platform),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    match = _PG_VERSION_RE.search(done.stdout or "")
+    return int(match.group(1)) if match else None
+
+
+def cluster_major(config_dir: Path) -> int | None:
+    """The PostgreSQL major version of the data directory under *config_dir*, from its
+    ``PG_VERSION`` file, or ``None`` when there is no cluster. Authoritative and needs no
+    binary: it is what the data directory was made by."""
+    from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials  # noqa: PLC0415 - deferred, as above
+
+    pgdata = config_dir / "postgres"
+    try:
+        recorded = _read_credentials(config_dir / CREDENTIALS_FILENAME).get("PG_DATA", "")
+        if recorded:
+            pgdata = Path(recorded)
+    except (OSError, UnicodeDecodeError):
+        pass
+    try:
+        head = (pgdata / "PG_VERSION").read_text(encoding="utf-8").strip().split(".", 1)[0]
+    except (OSError, UnicodeDecodeError):
+        return None
+    return int(head) if head.isascii() and head.isdigit() else None
+
+
+def _refuse_unsafe_swap(old_root: Path, new_root: Path) -> None:
+    """Raise a :class:`PgBundleSwapRefused` when swapping the tree at *old_root* for the staged
+    *new_root* could strand the install.
+
+    Major version: the reference is the data directory's ``PG_VERSION`` (authoritative, needs no
+    binary); without a cluster, the tree in service. The staged tree's major is read with its own
+    libraries. A staged major that cannot be read while a reference exists is refused: it is not
+    provably the same major. With no reference at all there is nothing to strand.
+
+    Downgrade: a bundle that has pg_background is never swapped for one that lacks it."""
+    reference = cluster_major(old_root.parent)
+    source = "the data directory"
+    if reference is None:
+        reference, source = bundle_major(bundle_bin_dir(old_root)), "the bundle in service"
+    if reference is not None:
+        new = bundle_major(bundle_bin_dir(new_root))
+        if new != reference:
+            _log.warning(
+                "pg_bundle_major_change_refused", extract_root=str(old_root), reference=reference, incoming=new,
+            )
+            raise PgBundleMajorChangeError(
+                f"{source} is PostgreSQL {reference} and the incoming PostgreSQL bundle "
+                f"{'reports no version' if new is None else 'is PostgreSQL ' + str(new)}: not swapped. "
+                "A data directory belongs to the major version that made it, and a bundle swap moves no "
+                "data, so a major change needs pg_upgrade or a dump and restore first."
+            )
+    if bundle_has_pg_background(old_root) and not bundle_has_pg_background(new_root):
+        _log.warning("pg_bundle_downgrade_refused", extract_root=str(old_root))
+        raise PgBundleDowngradeError(
+            "the PostgreSQL bundle in service has pg_background and the incoming one does not: not swapped. "
+            "Data moves need it, so the incoming bundle is older than the one installed."
+        )
 
 
 def _default_search_dirs() -> list[Path]:
@@ -234,7 +353,9 @@ def extract_bundle(
     cannot be started by PG N+1 binaries. Swapping the binaries under an
     existing cluster surfaces as a loud PostgreSQL startup refusal, not
     silent corruption, but a real major bump additionally needs pg_upgrade or
-    dump/restore. That is RDR-scale and deliberately out of scope here.
+    dump/restore. That is RDR-scale and deliberately out of scope here, so a swap
+    across a major version is refused before anything is stopped
+    (:class:`PgBundleMajorChangeError`, nexus-f3yqd.2.23).
 
     Every platform (RDR-224, nexus-f9bgu.20 for Windows, where a running
     ``postgres.exe`` keeps its bundle directory from being renamed; macOS and
@@ -293,16 +414,16 @@ def extract_bundle(
         # existing fleet takes this branch once on first upgrade, with a
         # byte-identical archive. Extract to a staging tree, prove it, then
         # swap.
-        staging = extract_root.parent / (extract_root.name + ".incoming")
-        shutil.rmtree(staging, ignore_errors=True)
-        _extract_and_validate(archive, staging)
+        staging = _stage(archive, extract_root, identity)
 
         # Swap: move the old tree aside (fast rename), move the proven tree
         # into place, then drop the old one. If the second rename fails the
         # backup is restored, so the window where neither exists is a single
         # rename wide and is recoverable. The tree is first freed
-        # of the running PostgreSQL and the marker is written before it starts
-        # again, because the start finds the binaries through the marker.
+        # of the running PostgreSQL. The marker is already in the staged tree
+        # (written last, after the tree was proven), so the swap carries it and
+        # a failure writing one can never leave a tree without it; the start
+        # finds the binaries through the marker.
         backup = extract_root.parent / (extract_root.name + ".replaced")
         shutil.rmtree(backup, ignore_errors=True)
         guard = quiesce if quiesce is not None else _bundle_quiesce(
@@ -317,7 +438,6 @@ def extract_bundle(
                     replace_with_retry(backup, extract_root, platform=platform)
                     raise
                 shutil.rmtree(backup, ignore_errors=True)
-                _write_marker(extract_root, identity)
         except BaseException:
             # Refused before the swap, or failed in it with the old tree put
             # back: the staged tree is hundreds of megabytes nobody will use,
@@ -331,6 +451,50 @@ def extract_bundle(
 
     _log.info("pg_bundle_extracted", bin_dir=str(bin_dir))
     return bin_dir
+
+
+def staging_dir(extract_root: Path) -> Path:
+    """Where a different archive is staged before it replaces *extract_root*."""
+    return extract_root.parent / (extract_root.name + ".incoming")
+
+
+def _stage(archive: Path, extract_root: Path, identity: str) -> Path:
+    """The staged tree for *archive*, proven and marked: extracted and validated unless a
+    complete one for the same bytes is already there (:func:`prestage_bundle`), then checked
+    against the swap guards. A refused or failed stage leaves no staging tree behind."""
+    staging = staging_dir(extract_root)
+    marker = staging / _EXTRACT_MARKER
+    try:
+        if not (marker.is_file() and marker.read_text(encoding="utf-8") == identity):
+            shutil.rmtree(staging, ignore_errors=True)
+            _extract_and_validate(archive, staging)
+        _refuse_unsafe_swap(extract_root, staging)  # before anything is stopped
+        _write_marker(staging, identity)  # last: the marker says the tree was proven
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return staging
+
+
+def prestage_bundle(archive: Path, extract_root: Path) -> bool:
+    """Do the slow part of a swap now, with nothing stopped: extract, validate, guard and mark
+    the staged tree. True when :func:`extract_bundle` of *archive* would swap (a complete tree
+    of different bytes is in place) and its staged tree is ready; False when it would not
+    (nothing extracted yet, or the same bytes). Raises what the swap guards raise
+    (:class:`PgBundleSwapRefused`) and what extraction raises."""
+    if not is_bundle_extracted(extract_root):
+        return False
+    marker = extract_root / _EXTRACT_MARKER
+    recorded = marker.read_text(encoding="utf-8") if marker.is_file() else ""
+    if recorded == _archive_identity(archive) or (recorded and recorded == _legacy_archive_identity(archive)):
+        return False
+    _stage(archive, extract_root, _archive_identity(archive))
+    return True
+
+
+def discard_staging(extract_root: Path) -> None:
+    """Remove a staged tree nobody will swap in (a run that failed after staging)."""
+    shutil.rmtree(staging_dir(extract_root), ignore_errors=True)
 
 
 def _write_marker(extract_root: Path, identity: str) -> None:

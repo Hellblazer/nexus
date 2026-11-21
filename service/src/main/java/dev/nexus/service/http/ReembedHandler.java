@@ -98,6 +98,15 @@ import java.util.function.Supplier;
  *       or mark failed is healed by the retry;</li>
  *   <li>otherwise 409 naming the row, its successor, or the job that holds it.</li>
  * </ul>
+ * Two more refusals (nexus-p2m1x.28), because the lookup tuple (content type, owner, model) is not unique when two
+ * sources share a curator owner. The first runs before the target is looked at: a source with another live
+ * collection on its own tuple is 409. The second runs after the decision and only when the target is live
+ * ({@code UseLive}; a revive names this source as the successor): a live target that the job log shows another
+ * source with this source's embedding model was moved into is 409 ({@link TargetSelection#foreignOrigin}: only a job
+ * that moved a document counts, by {@code documents_moved}; the other source's model is read from its row, or from
+ * its name when the row is gone; its current owner is never read). A v2 of an already-moved source is refused too, deliberately: the log is keyed by name. Both
+ * name the collections involved and say that a client cannot change an owner in place, and that an owner changes
+ * through an engine data move or a rename that re-homes the collection. These guards close same-model twins only.
  * The refusals that need no write all run before the first write. The source lock is taken by the start itself; a
  * start that loses it to a concurrent start after a registration or a revive leaves that in place and answers 409
  * naming the winner.
@@ -379,7 +388,17 @@ public final class ReembedHandler implements HttpHandler {
         // too, so it refuses what the start would.
         requireServed(profileModel);
 
-        Result found = TargetSelection.select(rows(tenant, contentType), contentType, owner, profileModel);
+        List<CollectionRow> tenantRows = rows(tenant, contentType);
+        // nexus-p2m1x.28: the tuple is not unique when two sources share a curator owner, and the target is chosen by
+        // it. A source with a live twin on its tuple is refused before any target is looked at or registered.
+        List<String> mates = TargetSelection.tupleMates(tenantRows, source, contentType, owner, sourceModel);
+        if (!mates.isEmpty()) {
+            throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
+                "error", TargetSelection.sharedSourceTupleReason(source, mates, contentType, owner, sourceModel),
+                "collection", source, "tuple_mates", mates)));
+        }
+
+        Result found = TargetSelection.select(tenantRows, contentType, owner, profileModel);
         String candidate = switch (found) {
             case Live l -> l.name();
             case Superseded s -> s.name();
@@ -397,6 +416,19 @@ public final class ReembedHandler implements HttpHandler {
                 refusal.put("state", holder.state());
             }
             throw new Reply(409, MAPPER.writeValueAsString(refusal));
+        }
+        if (decision instanceof UseLive u) {
+            // The job log is the record of where a target's documents came from: a live target that another source
+            // sharing this source's tuple was moved into is not this source's to join. A Revive names this source as
+            // the successor, so it is exempt.
+            Job foreign = TargetSelection.foreignOrigin(jobs.listAll(tenant), tenantRows, u.name(), source,
+                sourceModel);
+            if (foreign != null) {
+                throw new Reply(409, MAPPER.writeValueAsString(orderedMap(
+                    "error", TargetSelection.foreignOriginReason(source, u.name(), foreign),
+                    "collection", u.name(), "origin_source", foreign.sourceCollection(),
+                    "job_id", foreign.jobId().toString(), "state", foreign.state())));
+            }
         }
         if (!(decision instanceof UseLive) && !(decision instanceof Revive)) {
             requireRegistrable(tenant, requestedTarget, contentType, owner, profileModel, locked);
@@ -680,6 +712,18 @@ public final class ReembedHandler implements HttpHandler {
             throw new IllegalArgumentException("no registered collection has " + need
                 + "; send target_collection to register one");
         }
+        if (dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested) == null) {
+            // The version of a new row is read off the target's minted name (D1), so a name to register must have one.
+            // This applies only when a NEW row would be registered: an existing live target is used as-is.
+            throw new IllegalArgumentException("target_collection " + requested + " is not a conformant collection "
+                + "name: a re-embed target is registered under a conformant name (content type, owner, model and a "
+                + "v<n> version, joined by double underscores)");
+        }
+        if (requested.startsWith(dev.nexus.service.db.QuarantineOrigin.PREFIX)) {
+            // The prefix is the engine's own: a target registered under it would be a live row named like a quarantine.
+            throw new IllegalArgumentException("target_collection " + requested + " starts with quarantine-, a name "
+                + "prefix only the engine's own quarantine siblings carry; choose another target name");
+        }
         Job asSource = firstMatch(locked, j -> j.sourceCollection().equals(requested));
         if (asSource != null) {
             throw heldBy(asSource, "target_collection " + requested + " is held as the source of");
@@ -702,7 +746,10 @@ public final class ReembedHandler implements HttpHandler {
                             List<Job> locked) {
         requireRegistrable(tenant, requested, contentType, owner, profileModel, locked);
         String need = needOf(contentType, owner, profileModel);
-        catalog.upsertCollection(tenant, orderedMap("name", requested, "content_type", contentType, "owner_id", owner));
+        // D1 (Sam 2026-11-20): a new row needs a model_version. The client mints the target as <...>__v<n>; the version
+        // is read off that name (a migration-source read), and a name with none is refused by the upsert.
+        catalog.upsertCollection(tenant, orderedMap("name", requested, "content_type", contentType, "owner_id", owner,
+            "model_version", dev.nexus.service.db.CollectionRegistration.versionOfConformantName(requested)));
         // The profile gate fixed the model and a trigger may have settled the owner: check what is there now.
         Result registered = TargetSelection.select(rows(tenant, contentType), contentType, owner, profileModel);
         if (registered instanceof Live l && l.name().equals(requested)) {

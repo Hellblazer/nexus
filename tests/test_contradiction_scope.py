@@ -54,6 +54,8 @@ from tests.test_search_per_collection_embeddings import (  # type: ignore[import
 )
 from tests.test_search_per_collection_route import _BGE, _cols  # type: ignore[import-not-found]
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _FLAG = "[CONTRADICTS ANOTHER RESULT]"
 _CHECK_ON = {"search": {"contradiction_check": True}}
 _CHECK_OFF = {"search": {"contradiction_check": False}}

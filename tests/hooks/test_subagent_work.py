@@ -97,14 +97,42 @@ def test_the_stop_verb_removes_the_row_even_when_the_transcript_is_unreadable(la
     assert labels == [("agent", REF, "forget")]
 
 
-def test_a_nudged_agent_runs_one_more_turn_so_its_row_ends_at_the_stop_after_the_nudge(labels: list, tmp_path) -> None:
+_NO_PUT_TRANSCRIPT = '{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}\n'
+
+
+def test_a_nudged_agent_loses_its_row_at_the_stop_that_nudged_it(labels: list, tmp_path) -> None:
+    """gh#1680: the nudge used to skip the removal and wait for a second stop, which a read-only agent that ends with its
+    hand-back often never makes, so its row stayed running while the session lived. The row ends at every stop."""
     transcript = tmp_path / "t.jsonl"
-    transcript.write_text('{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "hi"}]}}\n', encoding="utf-8")
+    transcript.write_text(_NO_PUT_TRANSCRIPT, encoding="utf-8")
     out = nudge.run({**START, "agent_transcript_path": str(transcript)})
     assert out.stdout and "You wrote nothing to T1" in out.stdout
-    assert labels == [], "the nudge keeps the agent running: not done yet"
-    nudge.run({**START, "agent_transcript_path": str(transcript), "stop_hook_active": True})
-    assert labels == [("agent", REF, "forget")]
+    assert labels == [("agent", REF, "forget")], "the nudging stop removes the row; no second stop is needed"
+
+
+def test_a_second_stop_after_the_nudge_forgets_again_and_stays_idempotent(labels: list, tmp_path) -> None:
+    """``forget_own`` answers True for a row already gone, so the re-stop (``stop_hook_active``) is a no-op that must
+    neither raise nor nudge again."""
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(_NO_PUT_TRANSCRIPT, encoding="utf-8")
+    nudge.run({**START, "agent_transcript_path": str(transcript)})
+    again = nudge.run({**START, "agent_transcript_path": str(transcript), "stop_hook_active": True})
+    assert again.stdout in (None, ""), "no second nudge"
+    assert labels and all(label == ("agent", REF, "forget") for label in labels), "every recorded call is a forget"
+
+
+def test_a_forget_that_raises_during_a_nudging_stop_still_returns_the_exact_nudge(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The removal is best effort and runs after the verdict: a failing engine must neither cost the nudge nor change it."""
+    from nexus._hook_runtime._io import additional_context  # noqa: PLC0415
+
+    def boom(kind, ref, **k):
+        raise RuntimeError("engine down")
+
+    monkeypatch.setattr("nexus.identity.work.forget_own", boom)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(_NO_PUT_TRANSCRIPT, encoding="utf-8")
+    out = nudge.run({**START, "agent_transcript_path": str(transcript)})
+    assert out.stdout == additional_context("SubagentStop", nudge.NUDGE)
 
 
 def test_an_orphan_stop_with_no_agent_type_writes_nothing(labels: list) -> None:

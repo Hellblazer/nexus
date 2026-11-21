@@ -285,6 +285,30 @@ class TemplateRegistryTest {
     }
 
     @Test
+    void aSuffixRetentionAtOrAboveTheClaimLogTtlRefusesAtBootAndTheMessageNamesTheMax() {
+        String yaml = minimalTemplateYaml("session-log/<session_id>", 100L) + "retention_by_suffix:\n  --owner: 5000\n";
+        var groups = List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("t.yaml", yaml))));
+        // 100 s retention and a log TTL of 100 s + one sweep would pass without the suffix; with it the bar is 5000 s.
+        var ex = assertThrows(TemplateRegistryException.class,
+                () -> TemplateRegistry.load(groups, 5000L + SWEEP_INTERVAL_SECONDS, SWEEP_INTERVAL_SECONDS));
+        assertTrue(ex.getMessage().contains("refuses to boot"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("5000"), "the message prints the longest retention, 5000: " + ex.getMessage());
+        assertEquals(1, TemplateRegistry.load(groups, 5000L + SWEEP_INTERVAL_SECONDS + 1, SWEEP_INTERVAL_SECONDS).templates().size());
+    }
+
+    @Test
+    void registryDigestChangesWhenATemplateGainsRetentionBySuffix() {
+        String base = minimalTemplateYaml("session-log/<session_id>", 100L);
+        TemplateRegistry r1 = TemplateRegistry.load(List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("a.yaml", base)))), DAYS(180), SWEEP_INTERVAL_SECONDS);
+        TemplateRegistry r2 = TemplateRegistry.load(List.of(new TemplateRegistry.SourceGroup("test",
+                List.of(new TemplateRegistry.TemplateSource("a.yaml", base + "retention_by_suffix:\n  --owner: 200\n")))),
+                DAYS(180), SWEEP_INTERVAL_SECONDS);
+        assertNotEquals(r1.digest(), r2.digest());
+    }
+
+    @Test
     void bootCheckRefusesWhenLogTtlIsShorter() {
         long retentionSeconds = 100L;
         long logTtlSeconds = retentionSeconds; // far short

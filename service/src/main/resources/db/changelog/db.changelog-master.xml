@@ -2194,6 +2194,16 @@
     <include file="db/changelog/vectors-062-topic-set-search.xml"/>
 
     <!--
+        Bead nexus-p2m1x.11 (RDR-229 P2.6): chash_conformance_report, quarantine_restore_chunks and reaper_expire_client_quarantine read the
+        collection's catalog row (embedding_model, lifecycle_state) in place of parsing its name: the nine split_part(collection, '__', 3)
+        model lists and the two 'quarantine-' prefix tests are gone. A manifest row whose collection has no catalog row is reported on its
+        own line, not guessed. Each function keeps its signature (CREATE OR REPLACE); the rollback of each restores the previous last
+        definer (vectors-005-11, vectors-053-1, vectors-056-2). No DATA EFFECT: function definitions only. After vectors-062, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-063-live-functions-read-collection-row.xml"/>
+
+    <!--
         Bead nexus-7fku2.1.2 (RDR-134 Step 2): nexus.taxonomy_coverage_counts_384/768/1024(p_collection), one row (has_taxonomy,
         chunks, unassigned) per collection, from which the engine computes the topic coverage the routed search gates on. Numerator and
         denominator share one live-chunk predicate; why a new function beside taxonomy_unassigned_chashes_<dim>, and where the
@@ -2265,6 +2275,76 @@
         before the grants-nexus-svc.xml runAlways block.
     -->
     <include file="db/changelog/identity-005-work-kind-agent.xml"/>
+
+    <!--
+        nexus.drop_tenant_partitions takes the locks its teardown needs up front (the tables around the leaves, the two roots ONLY and
+        the tenant's own partitions; none of another tenant's), after serializing with other drops, in up to five attempts that each
+        share one deadline (half of deadlock_timeout, at most 500 ms), then lock_not_available naming the tenant (the 2026-11-20
+        production deadlock against a search, engine 0.1.199); the included file's header has the reasoning and what the order does
+        and does not promise. DATA EFFECT: none. Function definition only. After identity-005, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/vectors-066-drop-tenant-partitions-lock-order.xml"/>
+
+    <!--
+        Bead nexus-f3yqd.2.23 (RDR-246 Activation Step 2, the first registered data move; RDR-229 Phase 1 decision D2, Sam
+        2026-11-20): registers repair-catalog-collection-model-version, which sets catalog_collections.model_version from the
+        conformant name where it is ''. One INSERT into nexus.data_moves and nothing else; the engine's worker runs the repair
+        after the engine serves, per tenant. DATA EFFECT: one registry row, no existing row changes at boot. After
+        identity-004, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-064-register-model-version-repair-move.xml"/>
+
+    <!--
+        Bead nexus-f3yqd.2.23: the owner-read SELECT policy catalog_collections_owner_read for the migrating role, so the move
+        above can list the tenants that hold rows and verify them (RDR-246, Row-level security). Its own include after the
+        registering one: its guard skips the whole changeset. DDL only. After vectors-064, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/vectors-065-catalog-collections-owner-read.xml"/>
+
+    <!--
+        RDR-229 amendment (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): catalog-051-1 replaces
+        nexus.catalog_collection_owner_replaceable with catalog-044-1's body minus the curator clause, so a collection registered
+        under a curator owner is no longer re-owned from its documents (catalog-044 is immutable). Same signature, grants and
+        security posture; function definition only, no DATA EFFECT. After identity-005, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/catalog-051-curator-owner-not-replaceable.xml"/>
+
+    <!--
+        RDR-229 (Sam 2026-11-21; bead nexus-p2m1x.14): the registered data move rdr229-reown-repo-stems-from-curator over
+        nexus.catalog_collections (RDR-246). One INSERT into nexus.data_moves, the registering changeset only; the move re-owns a
+        repo's code__, docs__ and rdr__ collection rows from a curator to the repo owner (inserting the owner when absent), in the
+        worker, after boot. NO owner-read policy here: nexus.catalog_collections' catalog_collections_owner_read is vectors-065
+        (RDR-229 D2), the one copy. After catalog-051 (the trigger no longer undoes a curator-owned row's owner), before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-067-reown-repo-stems-register.xml"/>
+
+    <!--
+        RDR-229 (bead nexus-p2m1x.14): the owner-read policies of nexus.catalog_owners and nexus.gc_audit, the two tables the
+        verification of the move registered just above reads without driving, so the table-wide verification does not pass on
+        two empty tables. Two guarded changesets (vectors-067-2, vectors-067-3), DDL only, no DATA EFFECT. After the registering
+        include; see the included file's header.
+    -->
+    <include file="db/changelog/vectors-067-reown-repo-stems-owner-read.xml"/>
+
+    <!--
+        Bead nexus-p2m1x.15 (RDR-229 P2.10): catalog-049-1 redefines nexus.catalog_reconcile_commit with NoteUri.moveTo's rule
+        (its three URI rewrites leave chroma:// residue and an nx-note:// value with a file-routed segment on their old
+        segment); catalog-049-2 registers the RDR-246 data move rdr229-residue-catalog-documents, whose on_complete registers
+        the two satellite moves at run time. One function definition and one registering INSERT: no row is touched at boot,
+        no schema changes. See the included file's header. After vectors-065, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/catalog-049-note-uri-residue.xml"/>
+
+    <!--
+        Bead nexus-p2m1x.15 (RDR-229 P2.10): the owner-read SELECT policies of the three driving tables of those moves
+        (catalog-050-1 to -3), RDR-246's pattern (nexus.catalog_collections, which their verifications join, has vectors-065's), each guarded as vectors-029 is. DDL only. After catalog-049, before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/catalog-050-note-uri-residue-owner-read.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

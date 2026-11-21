@@ -1602,7 +1602,7 @@ def _report_fanout_floor_census() -> None:
     round trip, no write, no effect on ``nx doctor``'s exit code —
     informational only, same posture as ``--check-engine-activity``.
     """
-    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
+    from nexus.catalog.rows.legacy_names import split_candidate_collection_name  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
     from nexus.mcp.core import _fanout_exclusions_for_group  # noqa: PLC0415 — deferred command-local import; avoids import-time cost for unrelated CLI commands
 
     try:
@@ -2814,7 +2814,7 @@ _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
     "index-failures", "fanout-floor", "ghost-sweep", "harness-grant",
     "docs-aspects-config", "sensitive-in-aspect-eligible", "sensitive-with-aspects",
-    "sensitive-in-external-embedder", "sensitivity-mcp-output",
+    "sensitive-in-external-embedder", "sensitivity-mcp-output", "uri-residue",
 )
 
 
@@ -2846,6 +2846,17 @@ def _run_check_sensitivity_mcp_output() -> None:
     from nexus.catalog import sensitivity_doctor as sd  # noqa: PLC0415 — deferred, keeps CLI startup fast
 
     for line in sd.render_text(sd.check_sensitivity_mcp_output()):
+        click.echo(line)
+
+
+def _run_check_uri_residue() -> None:
+    """RDR-229 P1.2 (nexus-p2m1x.2): the ``chroma://`` residue pre-flight. WARN when a code/docs/rdr collection holds
+    ``chroma://`` rows with a prefix-free segment or ``nx-note://`` rows with one. One engine read, no catalog walk
+    (RDR-241). Does NOT gate: P2.10's repair move clears it, and until it ships nothing can. The verdicts and wording
+    are :mod:`nexus.catalog.rdr229.uri_residue_doctor`'s, shared with ``nx catalog doctor --uri-residue``."""
+    from nexus.catalog.rdr229 import uri_residue_doctor as ur  # noqa: PLC0415 — deferred, keeps CLI startup fast
+
+    for line in ur.render_text(ur.check_uri_residue()):
         click.echo(line)
 
 
@@ -2964,6 +2975,7 @@ def _run_supplementary_checks(engine_status: object = _ENGINE_STATUS_UNSET, *, p
         "sensitive-with-aspects": _run_check_sensitive_with_aspects,
         "sensitive-in-external-embedder": _run_check_sensitive_in_external_embedder,
         "sensitivity-mcp-output": _run_check_sensitivity_mcp_output,
+        "uri-residue": _run_check_uri_residue,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "

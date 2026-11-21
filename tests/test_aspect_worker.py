@@ -42,6 +42,8 @@ from tests._catalog_fixture_ops import register_real_doc_id
 from tests._module_seam import module_time
 from tests._settle import FakeClock, settle
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 # hygiene-001-1 (nexus-tk070.p6a follow-on): document_aspects.doc_id (and,
 # since the same turn, aspect_extraction_queue.doc_id via the engine's
 # POST /v1/aspects/queue/enqueue[+_many] 400) now require a doc_id naming a

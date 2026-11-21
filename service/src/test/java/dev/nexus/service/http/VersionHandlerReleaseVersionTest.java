@@ -344,6 +344,13 @@ class VersionHandlerReleaseVersionTest {
     }
 
     @Test
+    void versionAdvertisesTheRdr229UriSegmentCensusRoute_AsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendCatalogUriSegmentCensusCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"catalog_uri_segment_census_supported\":true");
+    }
+
+    @Test
     void versionAdvertisesTheRdr241Route_CatalogSensitiveLocators_AsItsOwnFlag() {
         var body = new StringBuilder();
         VersionHandler.appendCatalogSensitiveLocatorsCapabilityField(body);
@@ -366,6 +373,15 @@ class VersionHandlerReleaseVersionTest {
         var body = new StringBuilder();
         VersionHandler.appendVectorTopicRouteCapabilityField(body);
         assertThat(body.toString()).isEqualTo(",\"vector_topic_route_supported\":true");
+    }
+
+    // ── nexus-p2m1x.9 (RDR-229 P2.4): match=exact on POST /v1/taxonomy/assignments/prune_projection ──
+
+    @Test
+    void versionAdvertisesTheTaxonomyPruneExactModeAsItsOwnFlag() {
+        var body = new StringBuilder();
+        VersionHandler.appendTaxonomyPruneExactCapabilityField(body);
+        assertThat(body.toString()).isEqualTo(",\"taxonomy_prune_exact_supported\":true");
     }
 
     // ── nexus-rfvyy.7.4 (RDR-243 Phase 2): sensitivity=exclude on every chunk-text route ──

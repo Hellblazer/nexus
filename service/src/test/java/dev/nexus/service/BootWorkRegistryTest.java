@@ -208,4 +208,17 @@ class BootWorkRegistryTest {
             .allSatisfy(e -> assertThat(Integer.parseInt(e.id().substring(e.id().indexOf('-') + 1)) % 2)
                 .isEqualTo(1));
     }
+
+    @Test
+    void updateWithAReasonClassSetsIt_aPlainUpdateClearsIt_andProgressAndStepKeepIt() {
+        registerOne("a");
+
+        registry.update("a", "blocked: a", 1L, 5L, null, "missing_prerequisite");
+        registry.progress("a", 2L, 5L);
+        registry.step("a", new Step("s", null, null, null));
+        assertThat(registry.snapshot().get(0).reasonClass()).isEqualTo("missing_prerequisite");
+
+        registry.update("a", "working: a", 2L, 5L, null);
+        assertThat(registry.snapshot().get(0).reasonClass()).isNull();
+    }
 }

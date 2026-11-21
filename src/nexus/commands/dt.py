@@ -74,6 +74,8 @@ def _resolve_dt_collection(
     ``T3Database.get_or_create_collection`` accepts them.
     """
     from nexus.corpus import (  # noqa: PLC0415 — command-local import
+        catalog_subject_finder,
+        docs_leaf_fallback_collection_name,
         resolve_write_embedding_model,
         t3_collection_name,
     )
@@ -85,14 +87,10 @@ def _resolve_dt_collection(
         # catalog Document had already been registered. ``nx index pdf``
         # normalises its --collection through the same resolver; this
         # path must too.
-        return t3_collection_name(collection, for_write=True)
-    owner = corpus.replace("_", "-")
-    content_type = "knowledge" if ext == ".pdf" else "docs"
-    suffix = f"{owner}-papers" if ext == ".pdf" else owner
-
+        return t3_collection_name(collection, for_write=True, subject_finder=catalog_subject_finder())
     _db_cache: list = []  # nexus-o5x2c: memoize make_t3() across candidates below
 
-    def _local_token_collection_exists(token: str) -> bool:
+    def _local_collection_exists(candidate: str) -> bool:
         # nexus-o5x2c: no live T3 handle in scope here — best-effort
         # construct one purely to probe for a pre-existing collection to
         # grandfather onto (a keyless voyage-configured local install
@@ -104,18 +102,18 @@ def _resolve_dt_collection(
         if not _db_cache:
             from nexus.db import make_t3  # noqa: PLC0415 — deferred, probe-local
             _db_cache.append(make_t3())
-        candidate = (
-            f"knowledge__{suffix}__{token}__v1" if ext == ".pdf"
-            else f"docs__{suffix}__{token}__v1"
-        )
         return _db_cache[0].collection_exists(candidate)
 
+    if ext != ".pdf":
+        # The one builder of a docs__ name from a corpus; it refuses a corpus shaped like a repo owner segment
+        # (nexus-p2m1x.28). A PDF goes to knowledge__<corpus>-papers, which no repo owner segment can name.
+        return docs_leaf_fallback_collection_name(corpus, collection_exists=_local_collection_exists)
+    owner = corpus.replace("_", "-")
     model = resolve_write_embedding_model(
-        content_type, collection_exists=_local_token_collection_exists,
+        "knowledge",
+        collection_exists=lambda token: _local_collection_exists(f"knowledge__{owner}-papers__{token}__v1"),
     )
-    if ext == ".pdf":
-        return f"knowledge__{owner}-papers__{model}__v1"
-    return f"docs__{owner}__{model}__v1"
+    return f"knowledge__{owner}-papers__{model}__v1"
 
 
 # nexus-i0cwh: DEVONthink's own metadata for a record, read once per run over
@@ -1103,6 +1101,12 @@ def index_cmd(
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
+    if collection is None:
+        # nexus-p2m1x.28: refuse before any DEVONthink record is read, so a mixed batch refuses up front and not after
+        # its PDFs were indexed. Without --collection a markdown record goes to docs__<corpus> (a PDF cannot collide,
+        # but the batch's records are not known yet), so the corpus is checked once here.
+        from nexus.corpus import require_corpus_name  # noqa: PLC0415 — command-local import (nexus.corpus)
+        require_corpus_name(corpus)
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a record the staleness check "
@@ -2161,6 +2165,11 @@ def capture_cmd(
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
+    if collection is None and not _capture_is_pdf(url, doi, file_path, capture_type):
+        # nexus-p2m1x.28: a markdown or html capture goes to docs__<corpus>; refuse a corpus that names a repo's
+        # collection before DEVONthink creates a record (a PDF goes to knowledge__<corpus>-papers, which cannot collide).
+        from nexus.corpus import require_corpus_name  # noqa: PLC0415 — command-local import (nexus.corpus)
+        require_corpus_name(corpus)
     if not _is_darwin():
         raise click.ClickException("DEVONthink integration is macOS-only")
 

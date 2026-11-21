@@ -20,6 +20,8 @@ from nexus.search_engine import (
 )
 from nexus.types import SearchResult
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # ── AC1: Hybrid scoring ───────────────────────────────────────────────────────
 
@@ -86,7 +88,7 @@ def test_hybrid_mixed_corpus_no_warning(capsys, monkeypatch):
 
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",
-        lambda name: catalog_row_for_collection_name(name),
+        lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
     )
     results = [
         SearchResult(id="1", content="code", distance=0.1,
@@ -120,6 +122,10 @@ def test_cross_corpus_overfetch():
     """search_cross_corpus over-fetches per corpus: 2x code, 4x docs."""
     mock_t3 = MagicMock()
     mock_t3.search.return_value = []
+    # RDR-229 P2.9: the over-fetch follows the row's content type, from the handle's own rows
+    mock_t3._resolve_collection_rows.return_value = {
+        "code__r": {"content_type": "code"}, "docs__d": {"content_type": "docs"},
+    }
     # code__r → 2x (20), docs__d → 4x (40)
     search_cross_corpus(
         query="test", collections=["code__r", "docs__d"],
@@ -219,6 +225,12 @@ class _ThresholdFakeT3:
 
     def search(self, query, collection_names, n_results=10, where=None, *, sensitivity="include"):
         return self._results.get(collection_names[0], [])
+
+    def _resolve_collection_rows(self, names):
+        """The handle's own catalog rows (RDR-229 P2.9: the content type is the row's): content type only."""
+        from tests.conftest import catalog_row_for_collection_name
+
+        return {n: {"content_type": catalog_row_for_collection_name(n)["content_type"]} for n in names}
 
 
 class TestThresholdOverride:
@@ -2343,7 +2355,7 @@ class TestApplyRankingBoosts:
 
         monkeypatch.setattr(
             "nexus.mcp_infra.get_collection_row",
-            lambda name: catalog_row_for_collection_name(name),
+            lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
         )
 
     def test_empty_results_returns_empty(self):
@@ -2438,7 +2450,7 @@ class TestBoostWindow:
 
         monkeypatch.setattr(
             "nexus.mcp_infra.get_collection_row",
-            lambda name: catalog_row_for_collection_name(name),
+            lambda name, *, refresh=True, strict=False: catalog_row_for_collection_name(name),
         )
 
     @staticmethod

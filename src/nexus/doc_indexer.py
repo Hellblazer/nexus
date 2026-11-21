@@ -1584,7 +1584,7 @@ def _resolve_write_db(t3: Any) -> Any:
 _NO_REGISTRAR = object()
 
 
-def _target_model(db: Any, collection_name: str) -> tuple[str, bool]:
+def _target_model(db: Any, collection_name: str, *, name_model: str | None = None) -> tuple[str, bool]:
     """The model chunks written to *collection_name* through *db* are stamped with and
     compared against for the unchanged-content skip (nexus-7jy5r), and whether the
     catalog was read to decide it (nexus-s8r5o).
@@ -1592,24 +1592,25 @@ def _target_model(db: Any, collection_name: str) -> tuple[str, bool]:
     The catalog row's model, read through *db*'s own resolver, because the engine embeds
     by the row: a legacy name's derivation guesses Voyage for a collection whose row says
     bge. A row without a model, or no row, answers the calibrated name derivation, as
-    :func:`~nexus.corpus.embedding_model_row_preferred` does. A store with no resolver (an
+    :func:`~nexus.corpus.embedding_model_for_write` does (it is the read). A store with no resolver (an
     in-memory double, a dry run's throwaway store) has no catalog, so the name decides,
     as it always did there. A row read that FAILED answers the name too, flagged
     ``False``: the skip must not judge a stored stamp against that guess
     (:func:`_stored_model_is_current`).
+
+    *name_model* is what "the name decides" answers in place of the name derivation, for a
+    caller whose name carries no model to derive: ``nx index repo`` keeps a legacy name on
+    the model the local embedder reports (RDR-229 P2.3, nexus-p2m1x.8). It never overrides
+    a row, and the flag is unchanged.
     """
-    from nexus.corpus import embedding_model_for_collection_calibrated  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
+    from nexus.corpus import embedding_model_for_write  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
 
     # Looked up on the type: a mock store answers any attribute.
     if getattr(type(db), "_resolve_collection_row", None) is None:
-        return index_model_for_collection(collection_name), True
-    try:
-        row = db._resolve_collection_row(collection_name, strict=True)
-    except Exception:  # noqa: BLE001 — any failed read is "unreadable", never "no row"; the write goes on with the name's model
-        _log.warning("index_target_model_row_unreadable", collection=collection_name, exc_info=True)
-        return embedding_model_for_collection_calibrated(collection_name), False
-    model = (row or {}).get("embedding_model")
-    return (str(model) if model else embedding_model_for_collection_calibrated(collection_name)), True
+        return name_model or index_model_for_collection(collection_name), True
+    return embedding_model_for_write(
+        collection_name, row_resolver=db._resolve_collection_row, name_model=name_model,
+    )
 
 
 def _stored_model_is_current(stored_model: str, target_model: str, model_known: bool) -> bool:
@@ -1923,8 +1924,14 @@ def _index_document(
     doc_just_created: bool = False,
     pending_stamp: "list[_DeferredOwnerWrite] | None" = None,
     content_type: str = "prose",
+    chunk_row_model: bool = False,
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, then one write of the chunks with their owner rows.
+
+    *chunk_row_model* hands *chunk_fn* the model :func:`_target_model` already read, as
+    ``row_model=`` (RDR-229 P2.2): the chunker sizes its token window from the row's model, with no
+    second catalog read. It is the row's when a row backs the collection, else the name's own
+    derivation, which is the window the name rule gave; a local-mode override passes none.
 
     *chunk_fn(file_path, content_hash, target_model, now_iso)* produces the
     per-format (chunk_id, document_text, metadata_dict) tuples.  Returns the
@@ -2110,7 +2117,14 @@ def _index_document(
             return 0
 
     now_iso = datetime.now(UTC).isoformat()
-    prepared = chunk_fn(file_path, content_hash, target_model, now_iso, corpus)
+    prepared = (
+        chunk_fn(
+            file_path, content_hash, target_model, now_iso, corpus,
+            row_model=None if local_target_model is not None else target_model,
+        )
+        if chunk_row_model
+        else chunk_fn(file_path, content_hash, target_model, now_iso, corpus)
+    )
     if not prepared:
         return 0
 
@@ -2568,6 +2582,7 @@ def _pdf_chunks(
     title_override: str = "",
     collection_name: str = "",
     sensitive: bool = False,
+    row_model: str | None = None,
 ) -> list[tuple[str, str, dict, dict]]:
     """Chunk a PDF and return (id, text, metadata, positions) tuples.
 
@@ -2635,7 +2650,7 @@ def _pdf_chunks(
         # RDR-237: the catalog hook records these on the document (see _register_in_catalog).
         from nexus.pipeline_stages import extraction_record  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
         extraction_stats.update(extraction_record(result.metadata))
-    window = window_for_collection(collection_name, target_model)  # nexus-spujb, nexus-25wlq
+    window = window_for_collection(collection_name, target_model, row_model=row_model)  # nexus-spujb, nexus-25wlq
     chunker = (
         PDFChunker(chunk_chars=chunk_chars, token_window=window)
         if chunk_chars is not None
@@ -2720,6 +2735,7 @@ def _markdown_chunks(
     doc_id: str = "",
     extraction_source: str = "file",
     collection_name: str = "",
+    row_model: str | None = None,
 ) -> list[tuple[str, str, dict, dict]]:
     """Chunk a Markdown file and return (id, text, metadata, positions) tuples.
 
@@ -2749,7 +2765,7 @@ def _markdown_chunks(
         "corpus": corpus,
     }
     chunks = SemanticMarkdownChunker(
-        token_window=window_for_collection(collection_name, target_model),  # nexus-spujb, nexus-25wlq
+        token_window=window_for_collection(collection_name, target_model, row_model=row_model),  # nexus-spujb, nexus-25wlq
     ).chunk(body, base_meta)
     if not chunks:
         return []
@@ -3251,6 +3267,7 @@ def index_pdf(
                     pdf_path, content_hash, col_name, db,
                     embed_fn=embed_fn, extractor=extractor,
                     corpus=corpus, target_model=target_model,
+                    row_model=None if local_target_model is not None else target_model,
                     force=force,
                     force_re_embed=force_re_embed,
                     doc_id=doc_id,
@@ -3485,7 +3502,10 @@ def index_pdf(
         collection_name=col_name,
         **({"sensitive": True} if ext_sensitive else {}),
     )
-    prepared = chunk_fn(pdf_path, content_hash, target_model, now_iso, corpus)
+    prepared = chunk_fn(
+        pdf_path, content_hash, target_model, now_iso, corpus,
+        row_model=None if local_target_model is not None else target_model,
+    )
     if not prepared:
         return _empty_meta if return_metadata else 0
 
@@ -4283,6 +4303,7 @@ def index_markdown(
         doc_just_created=_doc_just_created,
         pending_stamp=_stamps,
         content_type="markdown",
+        chunk_row_model=True,
     )
 
     def _stamp_last() -> None:

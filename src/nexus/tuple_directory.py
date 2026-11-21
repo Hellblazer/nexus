@@ -301,6 +301,39 @@ def identity_alias_lookup() -> AliasLookup:
     return lookup
 
 
+def identity_session_lookup() -> AliasLookup:
+    """``IdentityClient.session`` for this host's engine: the session index, a session id in, ``{"identity": ...}`` out;
+    the same index the engine reads to map a row's sender-session stamp. Built, used and closed inside each lookup, like
+    :func:`identity_alias_lookup`. A session the index does not know raises ``IdentityApiError`` 404."""
+
+    def lookup(session_id: str) -> Mapping[str, Any]:
+        from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
+
+        client = IdentityClient.from_config()
+        try:
+            return client.session(session_id)
+        finally:
+            client.close()
+
+    return lookup
+
+
+def identity_record_lookup() -> AliasLookup:
+    """``IdentityClient.show`` for this host's engine: an identity id in, its record out (``kind``, and ``parent`` for a
+    delegated identity). Built, used and closed inside each lookup, like :func:`identity_alias_lookup`."""
+
+    def lookup(identity: str) -> Mapping[str, Any]:
+        from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
+
+        client = IdentityClient.from_config()
+        try:
+            return client.show(identity)
+        finally:
+            client.close()
+
+    return lookup
+
+
 def identity_from_not_own_message(value: str, own: str) -> str:
     """Refusal for an identity-shaped ``from_address`` that is not the sender's own identity (RDR-253 Step 5, the
     identity counterpart of :func:`from_address_not_own_message`)."""

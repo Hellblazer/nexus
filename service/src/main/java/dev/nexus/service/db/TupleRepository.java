@@ -567,18 +567,19 @@ public final class TupleRepository {
         if (ttlSecondsOrNull != null && ttlSecondsOrNull <= 0) {
             throw new SchemaViolationException("ttl_seconds", "must be positive");
         }
-        long ttlSeconds = ttlSecondsOrNull == null ? t.retentionSeconds() : ttlSecondsOrNull;
-        if (ttlSeconds > t.retentionSeconds()) {
-            throw new TtlTooLongException(ttlSeconds, t.retentionSeconds(), t.name());
+        long retention = t.retentionSecondsFor(subspace);   // RDR-252: --owner topics keep their rows longer
+        long ttlSeconds = ttlSecondsOrNull == null ? retention : ttlSecondsOrNull;
+        if (ttlSeconds > retention) {
+            throw new TtlTooLongException(ttlSeconds, retention, t.name());
         }
         // nexus-5r2sc.2.1 (RDR-235 E1): delay_s is validated with the other out fields, before
         // any write. Absent or 0 is no delay (available_at stays NULL).
-        checkDelaySeconds("delay_s", delaySecondsOrNull, t);
+        checkDelaySeconds("delay_s", delaySecondsOrNull, t, subspace);
         DayToSecond delayInterval = delaySecondsOrNull == null || delaySecondsOrNull == 0
                 ? null : interval(delaySecondsOrNull);
         JSONB dimsJsonb = dimsSafe.isEmpty() ? null : toJsonb(dimsSafe);
         return new PreparedOut(t, subspace, keysSafe, dimsSafe, toJsonb(keysSafe), dimsJsonb,
-                interval(ttlSeconds), interval(t.retentionSeconds()), delayInterval);
+                interval(ttlSeconds), interval(retention), delayInterval);
     }
 
     /**
@@ -588,16 +589,17 @@ public final class TupleRepository {
      * retention_seconds} is a {@link SchemaViolationException} naming both numbers -- a row
      * that stays hidden for longer than its own retention would expire unclaimed.
      */
-    private static void checkDelaySeconds(String field, Long seconds, TemplateSchema t) {
+    private static void checkDelaySeconds(String field, Long seconds, TemplateSchema t, String subspace) {
         if (seconds == null) {
             return;
         }
         if (seconds < 0) {
             throw new SchemaViolationException(field, "must be non-negative");
         }
-        if (seconds > t.retentionSeconds()) {
+        long retention = t.retentionSecondsFor(subspace);
+        if (seconds > retention) {
             throw new SchemaViolationException(field, seconds + " exceeds template '" + t.name()
-                    + "' retention_seconds " + t.retentionSeconds());
+                    + "' retention_seconds " + retention);
         }
     }
 
@@ -943,7 +945,7 @@ public final class TupleRepository {
      * {@code out} on it accepts. Throws {@link UnknownSubspaceException} when no template matches.
      */
     public long retentionSeconds(String subspace) {
-        return resolveOrThrow(subspace).retentionSeconds();
+        return resolveOrThrow(subspace).retentionSecondsFor(subspace);
     }
 
     /** Wakes the parked claimers of {@code subspace}; call AFTER the transaction a drain wrote in has committed. */
@@ -2568,7 +2570,7 @@ public final class TupleRepository {
                         + "dead-lettered lock row would be unobtainable until the sweep purges it -- call "
                         + "release instead to return the lock");
             }
-            checkDelaySeconds("retry_after_s", retryAfterSecondsOrNull, t);
+            checkDelaySeconds("retry_after_s", retryAfterSecondsOrNull, t, row.getSubspace());
             long maxAttempts = t.take().maxAttempts() == null ? Long.MAX_VALUE : t.take().maxAttempts();
             int attempts = row.getAttempts() + 1;
             // TEST-ONLY (nexus-h61dl.2): see ack.

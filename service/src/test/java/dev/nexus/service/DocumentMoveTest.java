@@ -9,6 +9,7 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.CollectionRow;
 import dev.nexus.service.db.CombinedWriteService;
+import dev.nexus.service.db.NoteUri;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.Embedder;
@@ -43,6 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -1060,6 +1062,61 @@ class DocumentMoveTest {
             .where(DOCUMENT_HIGHLIGHTS.TENANT_ID.eq(TENANT)).and(DOCUMENT_HIGHLIGHTS.DOC_ID.eq(docId)).execute());
     }
 
+    /**
+     * RDR-229 P2.10: a file-routed collection's documents carry {@code chroma://} residue and an
+     * {@code nx-note://<file-routed>} value. A re-embed move onto a model sibling whose label is prefix-free leaves
+     * both on their old segment, in all three tables, still classed file-routed by {@code NoteUri.isNote}, and the
+     * stale-note repair skips them.
+     */
+    @Test
+    void reembedMoveOfFileRoutedDocsOntoAPrefixFreeSibling_leavesResidueAndTheNoteValueOnTheirOldSegment() {
+        String t = "p210" + seq.incrementAndGet();
+        String owner = "dm" + t;
+        Fx fx = new Fx(t, "docs__" + owner + "__" + BGE + "__v1", "plainlabel" + t);
+        register(fx.src());
+        register(fx.tgt());
+        su(ctx -> ctx.update(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, "docs")
+            .set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, MINI)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT))
+            .and(CATALOG_COLLECTIONS.NAME.eq(fx.tgt())).execute());
+        CollectionRegistry.evict(TENANT, fx.tgt());
+        String residueUri = "chroma://" + fx.src() + "/a.md";
+        String noteUri = "nx-note://" + fx.src() + "/b.md";
+        String residue = seedNote(fx, "residue", residueUri, List.of("residue a " + fx.tag()));
+        String note = seedNote(fx, "filenote", noteUri, List.of("note a " + fx.tag()));
+        for (String d : List.of(residue, note)) {
+            seedAspect(fx.src(), d, "p/" + d + ".md", "v1");
+            seedHighlight(fx.src(), d);
+        }
+        setSatelliteUris(residue, residueUri, residueUri);
+        setSatelliteUris(note, noteUri, noteUri);
+
+        Map<String, Object> r = move(fx, List.of(residue, note));
+
+        assertThat(failedIds(r)).isEmpty();
+        for (String d : List.of(residue, note)) {
+            String expected = d.equals(residue) ? residueUri : noteUri;
+            assertThat(physical(d)).as("the document moved").isEqualTo(fx.tgt());
+            assertThat(sourceUri(d)).isEqualTo(expected);
+            assertThat(aspectUris(d)).containsExactly(expected);
+            assertThat(highlightUris(d)).containsExactly(expected);
+            assertThat(NoteUri.isNote(expected)).as("still file-routed").isFalse();
+        }
+        for (String row : List.of(residueUri, noteUri)) {
+            assertThat(catalog.documentsBySourceUri(TENANT, row, 0, 0)).as(row).hasSize(1);
+        }
+        var census = catalog.repairStaleNoteUris(TENANT, false, 10_000, 10_000);
+        List<String> listed = new ArrayList<>();
+        for (Object bucket : ((Map<?, ?>) census.get("sample")).values()) {
+            for (Object row : (List<?>) bucket) {
+                listed.add((String) ((Map<?, ?>) row).get("tumbler"));
+            }
+        }
+        assertThat(listed).as("the stale-note repair skips both values: they are not notes").doesNotContain(residue, note);
+    }
+
     @Test
     void reembedMoveOfANote_theUriNamesTheSibling_aspectsAndHighlightsMatch_andARePutUnderTheSiblingFindsIt() {
         // RDR-231 Test Plan row 553.
@@ -1080,8 +1137,8 @@ class DocumentMoveTest {
 
         assertThat(failedIds(r)).isEmpty();
         assertThat(sourceUri(note)).isEqualTo("nx-note://" + fx.tgt() + "/my-title");
-        assertThat(sourceUri(legacy)).as("a legacy spelling keeps its scheme")
-            .isEqualTo("chroma://" + fx.tgt() + "/old-title");
+        assertThat(sourceUri(legacy)).as("P2.10: a legacy spelling is not moved; it keeps its segment")
+            .isEqualTo("chroma://" + fx.src() + "/old-title");
         assertThat(sourceUri(file)).as("a non-note URI is not touched")
             .isEqualTo("file:///tmp/" + fx.tag() + "/plain.md");
         for (String d : List.of(note, legacy, file)) {
@@ -1090,9 +1147,9 @@ class DocumentMoveTest {
         // each satellite row is checked against its own derivation: a different leaf than the document's
         assertThat(aspectUris(note)).containsExactly("nx-note://" + fx.tgt() + "/p/asp-note.md");
         assertThat(highlightUris(note)).containsExactly("nx-note://" + fx.tgt() + "/hl-note");
-        assertThat(aspectUris(legacy)).as("a legacy spelling keeps its scheme")
-            .containsExactly("chroma://" + fx.tgt() + "/p/asp-legacy.md");
-        assertThat(highlightUris(legacy)).containsExactly("chroma://" + fx.tgt() + "/hl-legacy");
+        assertThat(aspectUris(legacy)).as("P2.10: a legacy spelling is not moved")
+            .containsExactly("chroma://" + fx.src() + "/p/asp-legacy.md");
+        assertThat(highlightUris(legacy)).containsExactly("chroma://" + fx.src() + "/hl-legacy");
         assertThat(aspectUris(file)).as("a non-note URI is not touched")
             .containsExactly("file:///tmp/" + fx.tag() + "/asp-file.md");
         assertThat(highlightUris(file)).containsExactly("file:///tmp/" + fx.tag() + "/hl-file.md");
@@ -1163,7 +1220,7 @@ class DocumentMoveTest {
     }
 
     @Test
-    void moveUriHolders_namesTheLiveHolderOfEachRewrittenUri_andNothingForFreeNonNoteOrOwnUris() {
+    void moveUriHolders_namesTheLiveHolderOfEachRewrittenNoteUri_andNothingForFreeLegacyNonNoteOrOwnUris() {
         Fx fx = pair("urholders");
         String taken = seedNote(fx, "taken", "nx-note://" + fx.src() + "/a", List.of("h a " + fx.tag()));
         String legacy = seedNote(fx, "legacy", "chroma://" + fx.src() + "/b", List.of("h b " + fx.tag()));
@@ -1175,8 +1232,9 @@ class DocumentMoveTest {
         Map<String, String> holders =
             catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of(taken, legacy, free, file));
 
-        assertThat(holders).containsOnlyKeys(taken, legacy);
-        assertThat(holders).containsEntry(taken, h1).containsEntry(legacy, h2);
+        // P2.10: a chroma:// value is never rewritten, so its would-be target holds nothing against it
+        assertThat(holders).containsOnlyKeys(taken);
+        assertThat(holders).containsEntry(taken, h1).doesNotContainKey(legacy).doesNotContainValue(h2);
         assertThat(catalog.moveUriHolders(TENANT, fx.src(), fx.tgt(), List.of())).isEmpty();
     }
 }

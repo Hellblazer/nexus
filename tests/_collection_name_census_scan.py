@@ -16,7 +16,11 @@ widens the fifth and adds the rest:
 
 - ``primitive_call`` is a call to ANY function in the DERIVED helper set
   (:func:`derive_parser_helpers`): every ``corpus.py`` function that reaches a
-  name parser through the module's own call graph. The three typed in
+  name parser through the module's own call graph, or itself holds a
+  name-decomposing site; and, since the P1.R fix round, a call to a ROOT in
+  any other module (``tests/_collection_name_census_cross.py``: a function
+  that holds such a site or calls ``parse_conformant_collection_name``, matched
+  through the caller's imports). The three typed in
   ``nexus.corpus._CANDIDATE_STRING_PRIMITIVES`` are its non-vacuity floor.
 - ``fstring_prefix``: ``startswith``/``endswith`` on an f-string with a
   literal part ending in ``__``, or on a local bound to one.
@@ -49,6 +53,9 @@ widens the fifth and adds the rest:
 - ``sql_prefix``: a SQL string (it holds SELECT, WHERE or FROM) with
   ``starts_with(.., '<type>__')``, ``LIKE '<type>..'`` or
   ``split_part(.., '__', ..)``.
+- ``regex_prefix``: ``re.compile`` of a literal that opens on a collection
+  prefix (``quarantine-``, ``code__``): a regex parse of a name outside
+  ``corpus.py``.
 - ``fnmatch``: every ``fnmatch`` / ``fnmatchcase`` call. Each is labelled in
   the ledger as a label pattern, a file path or routing.
 
@@ -56,7 +63,14 @@ widens the fifth and adds the rest:
 
 A docstring, a comment, or a bare string expression never contributes a hit.
 
-KNOWN LIMITS (documented, not closed). (6) SQL is matched in the case the
+KNOWN LIMITS (documented, not closed). The cross-module root derivation has
+its own list of what it cannot see (``tests/_collection_name_census_cross.py``:
+one level outside ``corpus.py``; callers of a routing-only function or of a
+wrapper that only calls a helper; instance methods; aliases and ``getattr``).
+Beyond it, the scan cannot see a parse spelled another way: a name read with
+slicing (``name[len(prefix):]``) or ``re.match`` on a non-literal pattern, a
+prefix built in a helper in another module and passed in, or code under
+``scripts/``. (6) SQL is matched in the case the
 scan's patterns spell: ``SELECT/WHERE/FROM`` upper case, ``LIKE`` upper case.
 (7) An aliased import (``from fnmatch import fnmatch as fm``; a helper imported
 under another name) is not followed; a call is matched by its spelled name.
@@ -99,11 +113,15 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 
+from tests._collection_name_census_notes import LABEL_TYPED
 from tests._lint_line_anchor import resolve_anchor
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC = REPO_ROOT / "src" / "nexus"
 CORPUS_REL = "src/nexus/corpus.py"
+#: The parser definitions and the migration-source floor (RDR-229 P2.2): the parser roots live here,
+#: and a call inside it is the floor, never a site. Every other name read is a classified census caller.
+LEGACY_NAMES_REL = "src/nexus/catalog/rows/legacy_names.py"
 
 #: Collection-type / lifecycle prefixes a raw ``startswith``/``endswith``
 #: call names when it parses a collection NAME. RDR-204's five plus
@@ -117,7 +135,8 @@ SHAPES = (
     "split", "rsplit", "partition", "rpartition", "startswith", "endswith",
     "in", "not_in", "primitive_call", "fstring_prefix", "concat_prefix",
     "const_prefix", "loop_prefix", "local_prefix", "strip_prefix", "substring",
-    "dunder_find", "hash_suffix", "glob_default", "sql_prefix", "fnmatch",
+    "dunder_find", "hash_suffix", "glob_default", "sql_prefix", "regex_prefix",
+    "fnmatch",
 )
 
 #: The RDR-229 Technical Design item 1 classes, then the two labels for a
@@ -132,6 +151,12 @@ _STR_SPLITTERS = ("split", "rsplit", "partition", "rpartition")
 _FIND_CALLS = ("find", "index", "count", "rfind", "rindex")
 _STRIP_CALLS = ("removeprefix", "removesuffix", "replace")
 _GLOB_DEFAULT_RE = re.compile(r"^(?:code|docs|rdr|knowledge|taxonomy)__\*$")
+#: A regex compiled from a literal that opens on a collection prefix
+#: (``re.compile(r"^quarantine-(?P<origin>.+)$")``): a name parser that is
+#: neither a split nor a ``startswith``.
+_REGEX_PREFIX_RE = re.compile(
+    r"^\^?(?:quarantine-|(?:code|docs|rdr|knowledge|taxonomy)__)"
+)
 _SQL_KEYWORD_RE = re.compile(r"\b(?:SELECT|WHERE|FROM)\b")
 _SQL_PREFIX_RE = re.compile(
     r"(?i:starts_with\s*\([^)]*'(?:code|docs|rdr|knowledge|taxonomy)__')"
@@ -341,9 +366,13 @@ def _is_raw_parse_call(node: ast.AST) -> bool:
     return False
 
 
-def derive_parser_helpers(corpus_tree: ast.Module) -> frozenset[str]:
-    """The fifth class's helper set, derived from ``corpus.py``'s own call
-    graph (RDR-229 Technical Design item 4), never typed as a list.
+def derive_parser_helpers(
+    corpus_tree: ast.Module, extra_roots: frozenset[str] = frozenset(),
+    legacy_tree: ast.Module | None = None,
+) -> frozenset[str]:
+    """The fifth class's helper set, derived from the call graph of ``legacy_names.py`` (where the
+    parser definitions live since RDR-229 P2.2) and ``corpus.py`` (whose functions reach them),
+    never typed as a list (RDR-229 Technical Design item 4).
 
     Roots are the parser definitions: a module-level function that applies a
     module-level compiled regex (``re.compile``), or that holds a raw
@@ -352,27 +381,32 @@ def derive_parser_helpers(corpus_tree: ast.Module) -> frozenset[str]:
     to a fixpoint; a module-level ``alias = helper`` assignment follows its
     target. ``is_conformant_collection_name`` and
     ``parse_conformant_collection_name`` are roots because they apply
-    ``_CONFORMANT_COLLECTION_RE``.
+    ``_CONFORMANT_COLLECTION_RE``. *extra_roots* are roots found by their
+    sites rather than by a regex or a raw ``"__"`` test (a function whose parse
+    is ``startswith(f"{x}__")``: ``resolve_corpus``), derived by the cross
+    module.
     """
     regexes: set[str] = set()
     aliases: dict[str, str] = {}
-    for n in corpus_tree.body:
-        if not isinstance(n, ast.Assign):
-            continue
-        v = n.value
-        if (
-            isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-            and v.func.attr == "compile"
-            and isinstance(v.func.value, ast.Name) and v.func.value.id == "re"
-        ):
-            regexes |= {t.id for t in n.targets if isinstance(t, ast.Name)}
-        elif isinstance(v, ast.Name):
-            for t in n.targets:
-                if isinstance(t, ast.Name):
-                    aliases[t.id] = v.id
-    funcs = _module_functions(corpus_tree)
+    funcs: dict[str, ast.AST] = {}
+    for tree in (corpus_tree, *([legacy_tree] if legacy_tree is not None else [])):
+        for n in tree.body:
+            if not isinstance(n, ast.Assign):
+                continue
+            v = n.value
+            if (
+                isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
+                and v.func.attr == "compile"
+                and isinstance(v.func.value, ast.Name) and v.func.value.id == "re"
+            ):
+                regexes |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+            elif isinstance(v, ast.Name):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        aliases[t.id] = v.id
+        funcs.update(_module_functions(tree))
     refs: dict[str, set[str]] = {}
-    reach: set[str] = set()
+    reach: set[str] = {n for n in extra_roots if n in funcs}
     for name, fn in funcs.items():
         names = {
             x.id if isinstance(x, ast.Name) else x.attr
@@ -399,7 +433,11 @@ def derive_parser_helpers(corpus_tree: ast.Module) -> frozenset[str]:
 def live_parser_helpers() -> frozenset[str]:
     tree = _parse(REPO_ROOT / CORPUS_REL)
     assert tree is not None, f"{CORPUS_REL} does not parse"
-    return derive_parser_helpers(tree)
+    legacy_tree = _parse(REPO_ROOT / LEGACY_NAMES_REL)
+    assert legacy_tree is not None, f"{LEGACY_NAMES_REL} does not parse"
+    from tests import _collection_name_census_cross as _cross  # noqa: PLC0415 - the cross module imports this one
+
+    return derive_parser_helpers(tree, _cross.corpus_roots(), legacy_tree)
 
 
 def _scope_nodes(scope: ast.AST) -> list[ast.AST]:
@@ -601,6 +639,10 @@ def _call_hits(
         return [(node.lineno, "fnmatch")]
     if name in helpers:
         return [(node.lineno, "primitive_call")]
+    if name == "compile" and node.args:
+        pattern = _str_const(node.args[0])
+        if pattern is not None and _REGEX_PREFIX_RE.match(pattern):
+            return [(node.lineno, "regex_prefix")]
     if not isinstance(func, ast.Attribute):
         return []
     if name in _STR_SPLITTERS:
@@ -636,9 +678,12 @@ def scan_file(
     consts: dict[str, tuple[str, ...]] | None = None,
     helpers: frozenset[str] | None = None,
     dunders: frozenset[str] | None = None,
+    roots: object | None = None,
 ) -> list[tuple[int, str]]:
     """``(lineno, shape)`` for every collection-name-parse-shaped site in one
-    file, BEFORE any exclusion. *consts* is the prefix-constant map (this
+    file, BEFORE any exclusion. *roots* is the cross-module root set
+    (``tests._collection_name_census_cross.Roots``); a call to one is a
+    ``primitive_call``. *consts* is the prefix-constant map (this
     file's own module-level constants are always added), *helpers* the
     derived helper set (default: derived from the live ``corpus.py``) and
     *dunders* the names bound to ``"__"`` (this file's own are added)."""
@@ -650,6 +695,11 @@ def scan_file(
     consts = {**module_prefix_constants(tree), **(consts or {})}
     dunders = module_dunder_names(tree) | (dunders or frozenset())
     helpers = live_parser_helpers() if helpers is None else helpers
+    root_call = None
+    if roots is not None:
+        from tests import _collection_name_census_cross as _cross  # noqa: PLC0415 - the cross module imports this one
+
+        root_call = _cross.call_matcher(path, tree, roots)  # type: ignore[arg-type]
     hits: list[tuple[int, str]] = []
     docstrings = {
         id(n.value) for n in ast.walk(tree)
@@ -671,9 +721,12 @@ def scan_file(
         )
         for node in nodes:
             if isinstance(node, ast.Call):
-                hits.extend(_call_hits(
+                found = _call_hits(
                     node, consts, binds, helpers, dunders, has_hash_rsplit,
-                ))
+                )
+                if not found and root_call is not None and root_call(node):
+                    found = [(node.lineno, "primitive_call")]
+                hits.extend(found)
             elif isinstance(node, ast.Compare):
                 hits.extend(
                     (node.lineno, s) for s in _compare_shapes(node, fsub, dunders)
@@ -691,7 +744,24 @@ def scan_file(
     return sorted(hits)
 
 
+@lru_cache(maxsize=1)
+def _live_raw_sites() -> dict[str, list[tuple[int, str]]]:
+    return _raw_sites_uncached()
+
+
 def raw_sites(
+    src: pathlib.Path = SRC, repo_root: pathlib.Path = REPO_ROOT,
+    consts: dict[str, tuple[str, ...]] | None = None,
+    helpers: frozenset[str] | None = None,
+) -> dict[str, list[tuple[int, str]]]:
+    """The live scan is computed once per process and handed out as a copy;
+    any other argument scans afresh. See :func:`_raw_sites_uncached`."""
+    if src == SRC and repo_root == REPO_ROOT and consts is None and helpers is None:
+        return {rel: list(hits) for rel, hits in _live_raw_sites().items()}
+    return _raw_sites_uncached(src, repo_root, consts, helpers)
+
+
+def _raw_sites_uncached(
     src: pathlib.Path = SRC, repo_root: pathlib.Path = REPO_ROOT,
     consts: dict[str, tuple[str, ...]] | None = None,
     helpers: frozenset[str] | None = None,
@@ -702,7 +772,8 @@ def raw_sites(
     another. ``primitive_call`` hits inside ``corpus.py`` are dropped: the
     helpers call one another by construction, and the coordinator's ruling
     (RDR-204 nexus-ft04v.26) scopes the fifth class to callers outside
-    ``corpus.py``'s own bodies.
+    ``corpus.py``'s own bodies; ``legacy_names.py``, the floor since RDR-229
+    P2.2, holds the parser definitions, so no hit inside it is a site.
 
     Raises ``ValueError`` naming any file that does not parse: a file the
     walk cannot read is a hole in the census, never a quiet zero."""
@@ -718,12 +789,20 @@ def raw_sites(
     ]
     if unparsed:
         raise ValueError(f"census: file(s) did not parse: {unparsed}")
+    from tests import _collection_name_census_cross as _cross  # noqa: PLC0415 - the cross module imports this one
+
+    roots = (
+        _cross.live_roots() if src == SRC and repo_root == REPO_ROOT and consts is None
+        else _cross.derive_roots(src, repo_root, tree_consts, dunders)
+    )
     found: dict[str, list[tuple[int, str]]] = {}
     for path in _py_files(src):
         rel = path.relative_to(repo_root).as_posix()
-        hits = scan_file(path, tree_consts, helpers, dunders)
+        hits = scan_file(path, tree_consts, helpers, dunders, roots)
         if rel == CORPUS_REL:
             hits = [(ln, s) for ln, s in hits if s != "primitive_call"]
+        elif rel == LEGACY_NAMES_REL:
+            hits = []  # the parsers' own bodies: the floor, whatever shape they spell
         if hits:
             found[rel] = hits
     return found
@@ -749,11 +828,18 @@ class Site:
 _STEP_RE = re.compile(r"\bP2\.[0-9]+\b")
 
 
+def _is_typed_label_site(s: Site) -> bool:
+    """The one non-fnmatch ``label-pattern``: RDR item 1 names five parse classes, and a match on a label the user typed is none of them."""
+    return s.cls == "label-pattern" and s.note == LABEL_TYPED
+
+
 def ledger_problems(sites: list[Site]) -> list[str]:
     """Structural defects in the ledger itself: an unknown class or shape,
     a holdover whose note names no ``P2.n`` step, an fnmatch labelled as
     something it is not, a non-fnmatch carrying a fnmatch-only label, a
-    duplicate (file, anchor, shape) entry."""
+    duplicate (file, anchor, shape) entry. ``label-pattern`` is an fnmatch label,
+    and also fits a non-fnmatch site that matches a label the user typed (P2.7's
+    ``resolve_corpus`` fallback and its callers) when the site carries a note."""
     problems: list[str] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()
     for s in sites:
@@ -766,8 +852,11 @@ def ledger_problems(sites: list[Site]) -> list[str]:
             problems.append(f"{where}: a holdover's note must name the Phase 2 step (P2.n) that moves it")
         if s.shape == "fnmatch" and s.cls not in (*NON_PARSE_CLASSES, "routing"):
             problems.append(f"{where}: an fnmatch is a label-pattern, a file-path or routing, not {s.cls!r}")
-        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES:
-            problems.append(f"{where}: {s.cls!r} is for an fnmatch; a {s.shape} site is a parse class")
+        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES and not _is_typed_label_site(s):
+            problems.append(
+                f"{where}: {s.cls!r} is for an fnmatch; a {s.shape} site is a parse class "
+                "(the one exception is a label-pattern carrying the LABEL_TYPED note)"
+            )
         key = (s.rel, s.anchor, s.shape)
         if key in seen:
             problems.append(f"{where}: duplicate ledger entry")
