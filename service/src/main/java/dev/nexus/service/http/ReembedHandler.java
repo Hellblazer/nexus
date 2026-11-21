@@ -105,7 +105,8 @@ import java.util.function.Supplier;
  * source with the same tuple was moved into is 409 ({@link TargetSelection#foreignOrigin}: only a job that moved a
  * document counts, by {@code documents_moved}; the other source's model is read from its row, or from its name when
  * the row is gone). A v2 of an already-moved source is refused too, deliberately: the log is keyed by name. Both
- * name the collections involved and say that an owner changes only through an engine data move.
+ * name the collections involved and say that a client cannot change an owner in place, and that an owner changes
+ * through an engine data move or a rename that re-homes the collection. These guards close same-model twins only.
  * The refusals that need no write all run before the first write. The source lock is taken by the start itself; a
  * start that loses it to a concurrent start after a registration or a revive leaves that in place and answers 409
  * naming the winner.

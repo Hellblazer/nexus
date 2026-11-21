@@ -192,10 +192,11 @@ public final class TargetSelection {
             + String.join(", ", mates) + " also uses. " + ownerExit("one of the twins is re-owned or superseded");
     }
 
-    /** Why a client cannot fix a shared tuple, and what can. {@code then} finishes "can start once ...". */
+    /** Why a client cannot fix a shared tuple in place, and what can. {@code then} finishes "can start once ...". */
     private static String ownerExit(String then) {
-        return "A client cannot change a collection's owner (the registry keeps the owner a collection was "
-            + "registered with); an owner changes only through an engine data move (RDR-229 owner-is-source). "
+        return "A client cannot change a collection's owner in place (the registry keeps the owner a collection was "
+            + "registered with); an owner changes through an engine data move, or a rename that re-homes the "
+            + "collection under another owner (RDR-229 owner-is-source). "
             + "A re-embed of the source can start once " + then + ".";
     }
 
@@ -209,11 +210,19 @@ public final class TargetSelection {
      * already fixed its owner and content type; a name that is not conformant reads as an unknown model, which counts
      * (a refusal, never a merge). The newest such job wins ({@code jobs} is newest first). The name read is a
      * migration-source site, declared in {@code CollectionParseGateTest.NAME_MODEL_READ_CALLS}: a re-embed source
-     * row deleted by cutover; retires at RDR-229 P4.
+     * row deleted by cutover; retires at RDR-229 P4. When it retires, a job whose source row is gone reads as an
+     * unknown model and refuses, so the sibling narrowing reverts to conservative for a deleted source (a sibling on
+     * another model is refused again once the first source's row has been deleted); one whose row is kept is read
+     * by its row, as now.
+     *
+     * <p><b>Scope:</b> this closes same-model twins only. The target is keyed on content type, owner and the PROFILE
+     * model, while both guards key on the SOURCE model, so two shared-curator sources on different source models
+     * still re-embed into one target and merge. That residual is not closed here (it is put to Sam).
      *
      * <p>A v2 of an already-moved source has the same model and a different name, so it is refused too: a deliberate
-     * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin.
-     * Its exit is the same: re-own or supersede one of the two.
+     * conservative refusal, since the job log is keyed by name and cannot tell a v2 from a shared-curator twin. The
+     * log persists (a job row is never deleted), so superseding a collection does not clear it; the exit is to
+     * re-own this source, or the other source if its row still exists.
      */
     public static Job foreignOrigin(List<Job> jobs, List<CollectionRow> rows, String target, String source,
                                     String contentType, String ownerId, String embeddingModel) {
@@ -245,7 +254,9 @@ public final class TargetSelection {
             + "target " + target + " (job " + origin.jobId() + ", " + origin.state() + ", "
             + origin.documentsMoved() + " document(s) moved) and it shares this source's lookup tuple, so "
             + source + " would be moved into a target that " + origin.sourceCollection() + " already filled. "
-            + ownerExit(source + " or " + origin.sourceCollection() + " is re-owned");
+            + ownerExit(source + " is re-owned, or " + origin.sourceCollection() + " is if its row still exists. If "
+                + origin.sourceCollection() + " is an earlier version of " + source + ", only re-owning " + source
+                + " clears it");
     }
 
     /** A job in a lock state whose source is the candidate target: its id and state, to name in a refusal. */

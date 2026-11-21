@@ -402,13 +402,16 @@ class TargetSelectionTest {
         String shared = TargetSelection.sharedSourceTupleReason(SOURCE, List.of("docs__wow-addon-dev__x__v1"), CT,
             OWNER, VC3);
         assertThat(shared).contains(SOURCE).contains("docs__wow-addon-dev__x__v1").contains(OWNER)
-            .contains("same owner").contains("client cannot change a collection's owner")
-            .contains("engine data move").contains("owner-is-source").contains("re-owned or superseded");
+            .contains("same owner").contains("client cannot change a collection's owner in place")
+            .contains("engine data move").contains("rename that re-homes the collection")
+            .contains("owner-is-source").contains("re-owned or superseded");
         Job origin = job("docs__other__x__v1", 3);
         String foreign = TargetSelection.foreignOriginReason(SOURCE, TARGET, origin);
         assertThat(foreign).contains(SOURCE).contains(TARGET).contains("docs__other__x__v1")
             .contains("the job log shows").contains(origin.jobId().toString()).contains("3 document(s) moved")
-            .contains("engine data move").contains(SOURCE + " or docs__other__x__v1 is re-owned")
-            .doesNotContain("holds documents");
+            .contains("engine data move").contains("rename that re-homes the collection")
+            .contains(SOURCE + " is re-owned, or docs__other__x__v1 is if its row still exists")
+            .contains("earlier version of " + SOURCE).doesNotContain("holds documents")
+            .doesNotContain("superseded");
     }
 }

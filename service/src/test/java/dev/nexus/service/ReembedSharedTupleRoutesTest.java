@@ -332,11 +332,39 @@ class ReembedSharedTupleRoutesTest {
             var r = post(t, path, startBody(t.src()));
             assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(409);
             assertThat(json(r).get("error").toString()).contains(t.src()).contains(mate).contains("same owner")
-                .contains("client cannot change a collection's owner").contains("engine data move")
-                .contains("re-owned or superseded");
+                .contains("client cannot change a collection's owner in place").contains("engine data move")
+                .contains("rename that re-homes the collection").contains("re-owned or superseded");
         }
         assertThat(post(t, "/jobs", startBody(mate)).statusCode()).as("from the other side too").isEqualTo(409);
-        assertThat(jobs.listAll(t.tenant())).as("no job, no registration").isEmpty();
+        assertThat(jobs.listAll(t.tenant())).as("the refusals wrote no job").isEmpty();
+    }
+
+    /** The names of every collection the tenant has, whatever its state. */
+    private List<String> collectionNames(Tn t) {
+        return catalog.listCollections(t.tenant(), TYPE, null).stream().map(r -> String.valueOf(r.get("name")))
+            .sorted().toList();
+    }
+
+    @Test
+    void aSharedTupleRefusalWhoseTargetIsAbsentComesBeforeAnyRegistration_onPlanAndStart() throws Exception {
+        Tn t = tenant("absenttarget");
+        String mate = twin(t);
+        // No row on the profile-model tuple: a start that got past the refusal would have to register one.
+        su(ctx -> ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(t.tenant()))
+            .and(CATALOG_COLLECTIONS.NAME.eq(t.tgt())).execute());
+        List<String> before = collectionNames(t);
+        assertThat(before).as("the fixture: two sources on one tuple and nothing on the target's").containsExactly(
+            t.src(), mate).doesNotContain(t.tgt());
+        String fresh = name(t, MINI, 2);
+
+        for (String path : List.of("/plan", "/jobs")) {
+            var r = post(t, path, "{\"source_collection\":\"" + t.src() + "\",\"target_collection\":\"" + fresh
+                + "\"}");
+            assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(409);
+            assertThat(json(r).get("error").toString()).contains(t.src()).contains(mate).contains("same owner");
+            assertThat(collectionNames(t)).as(path + ": the tenant's collection list is unchanged").isEqualTo(before);
+        }
+        assertThat(jobs.listAll(t.tenant())).isEmpty();
     }
 
     @Test
@@ -356,8 +384,9 @@ class ReembedSharedTupleRoutesTest {
                 Map<String, Object> body = json(r);
                 assertThat(body.get("error").toString()).contains(twin).contains(t.tgt()).contains(t.src())
                     .contains("the job log shows").contains(first.toString()).contains("3 document(s) moved")
-                    .contains("engine data move").contains(twin + " or " + t.src() + " is re-owned")
-                    .doesNotContain("holds documents");
+                    .contains("engine data move").contains("rename that re-homes the collection")
+                    .contains(twin + " is re-owned, or " + t.src() + " is if its row still exists")
+                    .contains("earlier version of " + twin).doesNotContain("holds documents");
                 assertThat(body).containsEntry("origin_source", t.src()).containsEntry("collection", t.tgt());
             }
             assertThat(jobs.listAll(t.tenant())).as("rowGone=" + rowGone + ": no job from the refused start")
@@ -391,7 +420,7 @@ class ReembedSharedTupleRoutesTest {
     }
 
     @Test
-    void aV2OfAnAlreadyMovedSourceIsRefused_aDeliberateConservativeRefusal() throws Exception {
+    void aV2OfAnAlreadyMovedSourceIsRefusedByPlanAndStart_aDeliberateConservativeRefusal() throws Exception {
         Tn t = tenant("foreign");
         leg(t, "aborted", 3);
         // The first source left the tuple (superseded, as a cutover leaves it); a v2 of it arrives on the tuple.
@@ -399,34 +428,46 @@ class ReembedSharedTupleRoutesTest {
         String second = name(t, BGE, 2);
         register(t, second);
 
-        var r = post(t, "/jobs", startBody(second));
-
-        assertThat(r.statusCode()).as(r.body()).isEqualTo(409);
-        assertThat(json(r).get("error").toString()).contains(second).contains(t.tgt()).contains(t.src())
-            .contains("the job log shows");
-        assertThat(jobs.listAll(t.tenant())).as("the refused start wrote no job").hasSize(1);
+        for (String path : List.of("/plan", "/jobs")) {
+            var r = post(t, path, startBody(second));
+            assertThat(r.statusCode()).as(path + " " + r.body()).isEqualTo(409);
+            assertThat(json(r).get("error").toString()).contains(second).contains(t.tgt()).contains(t.src())
+                .contains("the job log shows").contains("earlier version of " + second);
+        }
+        assertThat(jobs.listAll(t.tenant())).as("the refused starts wrote no job").hasSize(1);
     }
 
     @Test
-    void aJobThatMovedNoDocumentIsNotAnOrigin_andASourceRestartedIntoItsOwnTargetIsNotRefused() throws Exception {
+    void aJobThatMovedNoDocumentIsNotAnOrigin_planThenStart() throws Exception {
         Tn t = tenant("zerocopy");
         leg(t, "aborted", 0);
         supersedeSrc(t);
         String twin = twin(t);
 
-        var r = post(t, "/jobs", startBody(twin));
+        var plan = post(t, "/plan", startBody(twin));
+        assertThat(plan.statusCode()).as("an aborted zero-copy job put nothing in the target: " + plan.body())
+            .isEqualTo(200);
+        assertThat(json(plan)).containsEntry("target_collection", t.tgt()).containsEntry("target_action", "existing");
+        assertThat(jobs.listAll(t.tenant())).as("the plan wrote nothing").hasSize(1);
 
-        assertThat(r.statusCode()).as("an aborted zero-copy job put nothing in the target: " + r.body())
-            .isEqualTo(201);
-        assertThat(json(r)).containsEntry("target_collection", t.tgt()).containsEntry("target_action", "existing");
+        var start = post(t, "/jobs", startBody(twin));
+        assertThat(start.statusCode()).as(start.body()).isEqualTo(201);
+        assertThat(json(start)).containsEntry("target_collection", t.tgt())
+            .containsEntry("target_action", "existing");
+    }
 
-        Tn own = tenant("sameorigin");
-        UUID first = id(startOk(own, own.src()));
-        advance(own, first, "running", "aborted");
-        su(ctx -> ctx.update(REEMBED_JOBS).set(REEMBED_JOBS.DOCUMENTS_MOVED, 3L)
-            .where(REEMBED_JOBS.TENANT_ID.eq(own.tenant())).and(REEMBED_JOBS.JOB_ID.eq(first)).execute());
-        var again = post(own, "/jobs", startBody(own.src()));
+    @Test
+    void aSourceRestartedIntoItsOwnEarlierTargetIsNotRefused_planThenStart() throws Exception {
+        Tn t = tenant("sameorigin");
+        leg(t, "aborted", 3);
+
+        var plan = post(t, "/plan", startBody(t.src()));
+        assertThat(plan.statusCode()).as(plan.body()).isEqualTo(200);
+        assertThat(json(plan)).containsEntry("target_collection", t.tgt()).containsEntry("target_action", "existing");
+        assertThat(jobs.listAll(t.tenant())).as("the plan wrote nothing").hasSize(1);
+
+        var again = post(t, "/jobs", startBody(t.src()));
         assertThat(again.statusCode()).as(again.body()).isEqualTo(201);
-        assertThat(json(again)).containsEntry("target_collection", own.tgt());
+        assertThat(json(again)).containsEntry("target_collection", t.tgt());
     }
 }
