@@ -245,7 +245,8 @@ RETIRED_SITES: tuple[str, ...] = (
     "src/nexus/commands/index.py (already fixed pre-nexus-ft04v.27, "
     "by nexus-ft04v.34)",
     "src/nexus/health.py (chash-conformance unroutable-collection probe)",
-    "src/nexus/repo_identity.py (list_sibling_collections)",
+    "src/nexus/repo_identity.py (list_sibling_collections, DELETED by RDR-229 P2.7, "
+    "nexus-p2m1x.12: the function is gone, not just retired as a parse caller)",
     "src/nexus/commands/collection.py (_find_dimension_mismatched_collections)",
     "src/nexus/commands/catalog_cmds/doctor.py (_run_name_vs_embed_dim)",
 )

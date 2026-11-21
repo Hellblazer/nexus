@@ -13,6 +13,9 @@ from __future__ import annotations
 import ast
 import pathlib
 
+import nexus.registry as registry
+import nexus.repo_identity as repo_identity
+
 SRC = pathlib.Path(__file__).parent.parent / "src" / "nexus"
 
 _NAME = "list_sibling_collections"
@@ -36,15 +39,11 @@ def _mentions(tree: ast.AST) -> list[int]:
 
 
 def test_the_function_is_gone_from_repo_identity() -> None:
-    import nexus.repo_identity as repo_identity
-
     assert not hasattr(repo_identity, _NAME)
     assert _NAME not in repo_identity.__all__
 
 
 def test_the_registry_shim_no_longer_names_it() -> None:
-    import nexus.registry as registry
-
     assert _NAME not in registry._RELOCATED_HELPERS
     assert _NAME not in registry.__all__
     # The shim's __getattr__ must not forward the name to anything.

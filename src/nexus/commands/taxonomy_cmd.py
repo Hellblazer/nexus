@@ -2896,9 +2896,10 @@ def project_cmd(
         #
         # GitHub #238 + bead nexus-gwhy: single-source defaults to
         # every collection with topics minus the source, matching the
-        # backfill target set. Previously the single-source path tried
-        # ``list_sibling_collections`` first (same-repo, different-prefix
-        # collections) and fell back only if empty; users with multiple
+        # backfill target set. Previously the single-source path tried a
+        # same-repo, different-prefix sibling match first (a name matcher,
+        # since deleted: siblings are now found by row tuple, RDR-210) and
+        # fell back only if empty; users with multiple
         # collections under one prefix family (e.g. several ``docs__*``
         # from distinct repos) saw "against 1 collection(s)" while
         # ``project --backfill`` on the same source targeted the full set.

@@ -369,18 +369,21 @@ for _site in LEDGER:
 #: post-rename conformance check and its else arm went (two migration-source), and the legacy-name fallback of the
 #: NoRow/Unreadable outcome is one new mint. holdover 45 -> 34, diagnostic 40 -> 42, mint 111 -> 112,
 #: migration-source 18 -> 16, primitive_call 192 -> 182.
-PARSE_SITE_PIN: int = 245
+#:
+#: P2.7 part A (nexus-p2m1x.12, 2026-11-20), re-measured on develop 6341b2ac5: 245 -> 240. ``repo_identity.
+#: list_sibling_collections`` was deleted (no caller in ``src``; RDR-210 finds siblings by row tuple), and with it its
+#: five holdovers: holdover 34 -> 29, primitive_call 182 -> 181, startswith 4 -> 3, hash_suffix 2 -> 0, substring 1 -> 0.
+PARSE_SITE_PIN: int = 240
 CLASS_PIN: dict[str, int] = {
-    "mint": 112, "holdover": 34, "diagnostic": 42, "routing": 25,
+    "mint": 112, "holdover": 29, "diagnostic": 42, "routing": 25,
     "migration-source": 16, "label-pattern": 9, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 182, "const_prefix": 21, "fnmatch": 14,
-    "loop_prefix": 7, "strip_prefix": 4, "startswith": 4, "split": 2,
-    "fstring_prefix": 2, "hash_suffix": 2, "regex_prefix": 1, "in": 1,
+    "primitive_call": 181, "const_prefix": 21, "fnmatch": 14,
+    "loop_prefix": 7, "strip_prefix": 4, "startswith": 3, "split": 2,
+    "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
-    "substring": 1,
 }
 
 #: The three candidate-string PRIMITIVES (RDR-204 Phase 3 repoint,
@@ -796,11 +799,12 @@ def test_pin_matches_documented_total() -> None:
     ``resolve_corpus``, ``CollectionName.parse`` and the other roots; then
     265 -- 255 at P2.5, nexus-p2m1x.10, when twelve bypass-schema prefix tests
     became one helper; then 255 -- 245 at P2.3, nexus-p2m1x.8, when the repo
-    indexer's target models became row reads) is derived
+    indexer's target models became row reads; then 245 -- 240 at P2.7 part A,
+    nexus-p2m1x.12, when ``list_sibling_collections`` was deleted) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 245
+    assert PARSE_SITE_PIN == 240
 
 
 # ---------------------------------------------------------------------------
