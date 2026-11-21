@@ -285,16 +285,81 @@ class CollectionLabelRuleRouteTest {
         return row;
     }
 
+    /** The batch report's {@code refused} entries, by label: label -> rule. */
+    @SuppressWarnings("unchecked")
+    private Map<String, String> refusedRules(HttpResponse<String> resp) throws Exception {
+        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(200);
+        var out = new LinkedHashMap<String, String>();
+        for (var entry : (List<Map<String, Object>>) mapper.readValue(resp.body(), MAP_T).get("refused")) {
+            assertThat(entry.get("reason")).as("the entry says why: " + entry).isInstanceOf(String.class);
+            out.put((String) entry.get("name"), (String) entry.get("rule"));
+        }
+        return out;
+    }
+
     @Test
-    void importRefusesABatchHoldingANewRowThatBreaksTheShape_andLandsNothing() throws Exception {
+    void importRefusesOnlyTheRowsWhoseLabelBreaksTheShape_theOthersLand() throws Exception {
+        // RDR-229 item 10: "refuses that collection; the rest of the bundle imports". Four bad labels, one per
+        // clause the route can carry, around a good row and a minted-form row (never refused on import).
+        String overlong = "\u00e9".repeat(130);
+        var resp = post("/v1/catalog/import/collection", Map.of("rows", List.of(
+            importRow("import good first"), importRow("import/bad"), importRow("import\u0007bell"),
+            importRow(overlong), importRow("c4343"), importRow("import good last"))));
+        assertThat(refusedRules(resp)).containsExactly(
+            Map.entry("import/bad", "no_slash"), Map.entry("import\u0007bell", "no_control_character"),
+            Map.entry(overlong, "within_byte_limit"));
+        assertThat(resp.body()).as("imported counts the rows that were not refused").contains("\"imported\":3");
+        for (String landed : List.of("import good first", "c4343", "import good last")) {
+            assertThat(isRegistered(landed)).as(landed).isTrue();
+        }
+        for (String refused : List.of("import/bad", "import\u0007bell", overlong)) {
+            assertThat(isRegistered(refused)).as("refused: " + refused.length()).isFalse();
+        }
+    }
+
+    @Test
+    void importNamesAnEmptyLabelAndAWholeBatchOfRefusals_with200() throws Exception {
+        var resp = post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow(""), importRow("all/bad"))));
+        assertThat(refusedRules(resp)).containsExactly(Map.entry("", "non_empty"), Map.entry("all/bad", "no_slash"));
+        assertThat(resp.body()).contains("\"imported\":0");
+    }
+
+    @Test
+    void importRefusesANulAndALoneSurrogatePerRow_beforeAnyRead() throws Exception {
+        // requireStorable's two clauses stand before the first database read; they too refuse the row only. The lone
+        // surrogate is sent as a \\ud800 escape: Jackson would write the raw character as '?'.
+        String json = "{\"rows\":[" + rawRow("import fine nul-batch", "import fine nul-batch") + ","
+            + rawRow("nul\\u0000row", "nul-owner") + "," + rawRow("surrogate\\ud800row", "surrogate-owner") + "]}";
+        var resp = http.send(request("/v1/catalog/import/collection").header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(json)).build(), HttpResponse.BodyHandlers.ofString());
+        var rules = refusedRules(resp);
+        assertThat(rules.values()).containsExactly("no_control_character", "valid_utf8");
+        assertThat(resp.body()).doesNotContain("database").contains("\"imported\":1");
+        assertThat(isRegistered("import fine nul-batch")).isTrue();
+    }
+
+    private static String rawRow(String escapedLabel, String owner) {
+        return "{\"name\":\"" + escapedLabel + "\",\"content_type\":\"knowledge\",\"owner_id\":\"" + owner
+            + "\",\"embedding_model\":\"" + MODEL + "\",\"model_version\":\"v1\"}";
+    }
+
+    @Test
+    void importOfASingleBadRowBody_isAlsoReportedNotA400() throws Exception {
+        // a body with no "rows" key is one row, and takes the batch's path: the one collection is refused, named
+        var resp = post("/v1/catalog/import/collection", importRow("single body/bad"));
+        assertThat(refusedRules(resp)).containsExactly(Map.entry("single body/bad", "no_slash"));
+        assertThat(resp.body()).contains("\"imported\":0");
+    }
+
+    @Test
+    void aCleanBatchReportsNoRefusals_andAnExistingBadLabelIsNotOne() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, "clean/existing");
+        }
         var resp = post("/v1/catalog/import/collection",
-            Map.of("rows", List.of(importRow("import good first"), importRow("import/bad"))));
-        assertThat(resp.statusCode()).as(resp.body()).isEqualTo(400);
-        assertThat(resp.body()).contains("/");
-        assertThat(isRegistered("import good first")).as("the batch is atomic").isFalse();
-        assertThat(isRegistered("import/bad")).isFalse();
-        assertThat(post("/v1/catalog/import/collection", Map.of("rows", List.of(importRow("é".repeat(130))))).statusCode())
-            .isEqualTo(400);
+            Map.of("rows", List.of(importRow("import clean"), importRow("clean/existing"))));
+        assertThat(refusedRules(resp)).isEmpty();
+        assertThat(resp.body()).contains("\"imported\":2");
     }
 
     @Test
