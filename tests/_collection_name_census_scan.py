@@ -113,6 +113,7 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 
+from tests._collection_name_census_notes import LABEL_TYPED
 from tests._lint_line_anchor import resolve_anchor
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -815,6 +816,11 @@ class Site:
 _STEP_RE = re.compile(r"\bP2\.[0-9]+\b")
 
 
+def _is_typed_label_site(s: Site) -> bool:
+    """The one non-fnmatch ``label-pattern``: RDR item 1 names five parse classes, and a match on a label the user typed is none of them."""
+    return s.cls == "label-pattern" and s.note == LABEL_TYPED
+
+
 def ledger_problems(sites: list[Site]) -> list[str]:
     """Structural defects in the ledger itself: an unknown class or shape,
     a holdover whose note names no ``P2.n`` step, an fnmatch labelled as
@@ -834,11 +840,10 @@ def ledger_problems(sites: list[Site]) -> list[str]:
             problems.append(f"{where}: a holdover's note must name the Phase 2 step (P2.n) that moves it")
         if s.shape == "fnmatch" and s.cls not in (*NON_PARSE_CLASSES, "routing"):
             problems.append(f"{where}: an fnmatch is a label-pattern, a file-path or routing, not {s.cls!r}")
-        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES and not (s.cls == "label-pattern" and s.note):
+        if s.shape != "fnmatch" and s.cls in NON_PARSE_CLASSES and not _is_typed_label_site(s):
             problems.append(
                 f"{where}: {s.cls!r} is for an fnmatch; a {s.shape} site is a parse class "
-                "(a label-pattern may label a non-fnmatch site only with a note saying why: "
-                "it matches the label the user typed and decomposes nothing)"
+                "(the one exception is a label-pattern carrying the LABEL_TYPED note)"
             )
         key = (s.rel, s.anchor, s.shape)
         if key in seen:

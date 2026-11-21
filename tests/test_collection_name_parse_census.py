@@ -328,6 +328,7 @@ from tests import _collection_name_census_scan as _scan
 from tests._collection_name_census_exclusions import EXCLUDED_SITES as _EXCLUDED_SITES
 from tests._collection_name_census_ledger import LEDGER
 from tests._collection_name_census_notes import BYPASS as _BYPASS_NOTE
+from tests._collection_name_census_notes import LABEL_TYPED
 from tests._lint_line_anchor import resolve_anchor, resolve_ledger
 
 pytestmark = pytest.mark.lint
@@ -375,13 +376,16 @@ for _site in LEDGER:
 #: five holdovers: holdover 34 -> 29, primitive_call 182 -> 181, startswith 4 -> 3, hash_suffix 2 -> 0, substring 1 -> 0.
 #:
 #: P2.7 part B (nexus-p2m1x.12, 2026-11-20): 240 -> 240. ``resolve_corpus`` stage 3 matches the row tuple first; its
-#: label-prefix fallback stays as one site, now classed label-pattern (it matches the label the user typed and
-#: decomposes nothing), and its five callers get the same final class (the function still holds that site, so it
-#: stays a root and they stay counted). holdover 29 -> 23, label-pattern 9 -> 15; no shape moves.
+#: label-prefix fallback stays as one site, classed label-pattern (it matches the label the user typed and decomposes
+#: nothing; the validator admits that class on a non-fnmatch site only with the ``LABEL_TYPED`` note). The root rule
+#: (``_collection_name_census_cross.root_hit_exclusions``) no longer counts a non-parse-class site as root evidence, so
+#: ``resolve_corpus`` is not a root of its own. It is still a derived helper, because its typed-value split reaches
+#: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
+#: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
 PARSE_SITE_PIN: int = 240
 CLASS_PIN: dict[str, int] = {
-    "mint": 112, "holdover": 23, "diagnostic": 42, "routing": 25,
-    "migration-source": 16, "label-pattern": 15, "file-path": 5,
+    "mint": 117, "holdover": 23, "diagnostic": 42, "routing": 25,
+    "migration-source": 16, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
@@ -875,15 +879,19 @@ def test_the_census_refuses_a_bad_class_a_bare_holdover_and_a_mislabelled_fnmatc
         site("g", "startswith", "holdover", "needs an owner"),
         site("h", "fnmatch", "label-pattern"),
         site("i", "fnmatch", "file-path"),
-        site("j", "fstring_prefix", "label-pattern", "matches the label the user typed"),
+        site("j", "fstring_prefix", "label-pattern", LABEL_TYPED),
+        site("k", "fstring_prefix", "label-pattern", "any note at all"),
     ])
-    assert len(problems) == 6, problems
+    assert len(problems) == 7, problems
     assert "class 'parse'" in problems[0]
     assert "Phase 2 step (P2.n)" in problems[1]
     assert "an fnmatch is a label-pattern" in problems[2]
     assert "'label-pattern' is for an fnmatch" in problems[3]
     assert "'file-path' is for an fnmatch" in problems[4]
     assert "Phase 2 step (P2.n)" in problems[5]
+    # a non-fnmatch label-pattern is allowed only with the named LABEL_TYPED note, not any note
+    assert "'label-pattern' is for an fnmatch" in problems[6] and "'k'" in problems[6]
+    assert not [p for p in problems if "'j'" in p]
 
 
 def test_an_exclusion_removes_only_the_shape_it_names(tmp_path: pathlib.Path) -> None:

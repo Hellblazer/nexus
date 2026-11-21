@@ -146,6 +146,24 @@ def _root_spans(
 
 
 @lru_cache(maxsize=1)
+def root_hit_exclusions() -> frozenset[tuple[str, int, str]]:
+    """THE ROOT RULE, in one place (RDR-229 P2.7): a function is a parser root iff
+    it holds at least one counted PARSE-CLASS site now. The hits that are not root
+    evidence are the ``EXCLUDED_SITES`` and every ledger site classed with a
+    non-parse label (``label-pattern``, ``file-path``): RDR Technical Design item 1
+    names five parse classes, and a label the user typed or a source path takes no
+    part out of a collection name, so a function holding only such sites is not a
+    parser and its callers are not counted. Derived from the ledger on every scan,
+    never a list; a site the ledger does not label is evidence (and fails the
+    census as unlabelled)."""
+    from tests._collection_name_census_ledger import LEDGER  # noqa: PLC0415 - the ledger imports the scanner
+
+    resolved, _problems = _scan.resolve_sites(_scan.REPO_ROOT, list(LEDGER))
+    non_parse = {key for key, site in resolved.items() if site.cls in _scan.NON_PARSE_CLASSES}
+    return excluded_hit_keys() | frozenset(non_parse)
+
+
+@lru_cache(maxsize=1)
 def corpus_roots() -> frozenset[str]:
     """Names of the ``corpus.py`` functions that are roots in their own right
     (they join the helper set; the fixpoint then adds whatever reaches them)."""
@@ -153,7 +171,7 @@ def corpus_roots() -> frozenset[str]:
     consts, dunders = _scan._live_tree_constants()
     return frozenset(
         name for cls, name in _root_spans(
-            _scan.REPO_ROOT / rel, rel, consts, dunders, excluded_hit_keys(),
+            _scan.REPO_ROOT / rel, rel, consts, dunders, root_hit_exclusions(),
         ) if cls is None
     )
 
@@ -163,7 +181,7 @@ def derive_roots(
     consts: dict[str, tuple[str, ...]], dunders: frozenset[str],
 ) -> Roots:
     """Every root outside ``corpus.py``, across *src*."""
-    excluded = excluded_hit_keys()
+    excluded = root_hit_exclusions()
     funcs: set[tuple[str, str]] = set()
     methods: set[tuple[str, str, str]] = set()
     for path in _scan._py_files(src):

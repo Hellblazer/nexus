@@ -55,7 +55,8 @@ def _hits(tmp_path: pathlib.Path, files: dict[str, str]) -> dict[str, list[tuple
 
 
 def test_the_two_roots_the_review_found_missing_are_derived() -> None:
-    assert "resolve_corpus" in _cross.corpus_roots()
+    # resolve_corpus is a derived helper (its typed-value split reaches a parser). Since P2.7 it is
+    # not a root of its own: its only site of its own is a label-pattern one, see the root-rule tests.
     assert "resolve_corpus" in _scan.live_parser_helpers()
     consts, dunders = _scan._live_tree_constants()
     roots = _cross.derive_roots(_scan.SRC, _scan.REPO_ROOT, consts, dunders)
@@ -164,3 +165,51 @@ def test_the_regex_prefix_shape_counts_a_compiled_collection_prefix(tmp_path: pa
         ),
     })
     assert hits == {"src/nexus/rx.py": [(3, "regex_prefix"), (4, "regex_prefix")]}
+
+
+# ---------------------------------------------------------------------------
+# THE ROOT RULE (RDR-229 P2.7): a function is a parser root iff it holds at
+# least one counted PARSE-CLASS site now.
+# ---------------------------------------------------------------------------
+
+_LABEL_ONLY_PY = (
+    "def match(corpus, names):\n"
+    '    prefix = f"{corpus}__"\n'
+    "    return [n for n in names if n.startswith(prefix)]\n"
+)
+
+
+def _spans(tmp_path: pathlib.Path, excluded: frozenset[tuple[str, int, str]]) -> list[tuple[str | None, str]]:
+    src = _tree(tmp_path, {"labels.py": _LABEL_ONLY_PY})
+    consts, dunders = _scan._live_tree_constants()
+    return _cross._root_spans(src / "labels.py", "src/nexus/labels.py", consts, dunders, excluded)
+
+
+def test_a_function_is_a_root_while_its_site_is_counted_and_stops_when_it_is_a_label_pattern(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The same function: with its site counted it is a root; with the site's key in the non-parse
+    exclusions (what the ledger does for a label-pattern site) it is not."""
+    src = _tree(tmp_path, {"labels.py": _LABEL_ONLY_PY})
+    hit = next(
+        (ln, shape) for ln, shape in _scan.scan_file(src / "labels.py") if shape in _cross.DECOMPOSING
+    )
+    key = ("src/nexus/labels.py", hit[0], hit[1])
+    assert _spans(tmp_path, frozenset()) == [(None, "match")]
+    assert _spans(tmp_path, frozenset({key})) == []
+
+
+def test_the_live_exclusions_hold_exactly_the_non_parse_sites_of_the_ledger() -> None:
+    """Derived from the ledger on every scan, never a list: every non-parse-class ledger site is in the
+    exclusions, no parse-class (or holdover) site is, and the corpus.py label fallback is one of them."""
+    from tests._collection_name_census_ledger import LEDGER  # noqa: PLC0415 - heavy import, one test
+
+    resolved, problems = _scan.resolve_sites(_scan.REPO_ROOT, list(LEDGER))
+    assert not problems
+    excl = _cross.root_hit_exclusions()
+    non_parse = {k for k, v in resolved.items() if v.cls in _scan.NON_PARSE_CLASSES}
+    parse = {k for k, v in resolved.items() if v.cls not in _scan.NON_PARSE_CLASSES}
+    assert non_parse and non_parse <= excl
+    assert not (parse & (excl - _cross.excluded_hit_keys()))
+    assert any(k[0] == _scan.CORPUS_REL and k[2] == "fstring_prefix" for k in non_parse)
+    assert "resolve_corpus" not in _cross.corpus_roots()
