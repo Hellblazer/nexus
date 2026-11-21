@@ -9836,11 +9836,12 @@ public final class CatalogRepository {
         String[] tuple = new String[5];
         CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
             String name           = s(coll, "name");
-            // RDR-229 P3.6: the label rule's shape clauses, on every client registration and BEFORE the first read,
-            // because a NUL bound into the lookup below is a database error and not a 400. Engine-internal callers
-            // (the minter, the movers) use the two-argument form and are not subject to it.
+            // RDR-229 P3.6: the two clauses the database itself enforces (a NUL, a lone surrogate) stand BEFORE the
+            // first read, because a NUL bound into the lookup below is a database error and not a 400. Every other
+            // clause waits for the new-row branch, so an existing row that breaks the rule still re-registers.
+            // Engine-internal callers (the minter, the movers) use the two-argument form and are not subject to it.
             if (clientRoute) {
-                CollectionLabel.validateShape(name);
+                CollectionLabel.requireStorable(name);
             }
             // Raw, nullable/blank — used to key the profile lookup; nne() below still fills the written
             // CONTENT_TYPE column with "" as before when absent.
@@ -9926,9 +9927,12 @@ public final class CatalogRepository {
             } else {
                 if (clientRoute) {
                     CollectionRegistration.requireClientNameNotQuarantine(name);
-                    // RDR-229 P3.6: the minted-form clause of the label rule, on a NEW user-supplied label only (an
-                    // existing row re-registers whatever its label, so a row the engine minted keeps re-registering).
-                    CollectionLabel.requireNotMinted(name);
+                    // RDR-229 P3.6: the label rule, on a NEW user-supplied label only (an existing row re-registers
+                    // whatever its label, so a row the engine minted, or an old install's, keeps re-registering). An
+                    // absent name is another refusal's.
+                    if (name != null) {
+                        CollectionLabel.validateUserLabel(name);
+                    }
                 }
                 modelVersion = CollectionRegistration.requiredModelVersion(coll);
                 CollectionRegistration.requireNameAgreesWithState(name, requestedState != null ? requestedState : "live");
@@ -13660,6 +13664,8 @@ public final class CatalogRepository {
         if (rows == null || rows.isEmpty()) return new ImportCollectionsResult(0, List.of());
         var freshRows = new java.util.concurrent.atomic.AtomicReference<List<Map<String, Object>>>(List.of());
         return CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
+            // RDR-229 P3.6: a NUL or a lone surrogate cannot be bound into the lookups below (a database error, not a 400).
+            for (var coll : rows) CollectionLabel.requireStorable(s(coll, "name"));
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
             for (var coll : rows) {
                 CollectionMint.refuseSuppliedId(coll);
@@ -13688,6 +13694,10 @@ public final class CatalogRepository {
                 deduped.stream().map(c -> s(c, "name")).toList());
             List<Map<String, Object>> fresh = deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList();
             CollectionRegistration.requireStatesAgreeWithNames(fresh);
+            // RDR-229 P3.6: the label rule's shape on a NEW row (the whole batch refuses, nothing lands), never the
+            // minted-form clause (an import carries another install's labels, engine-minted ones included) and never
+            // an existing row (skipped above).
+            for (var coll : fresh) CollectionLabel.validateShape(s(coll, "name"));
             freshRows.set(fresh);
             CollectionMint.refuseLiveTupleConflicts(ctx, tenant, fresh);
             List<String> corrected = fresh.stream().filter(CollectionRegistration::stateCorrectedOnImport)
@@ -13777,11 +13787,13 @@ public final class CatalogRepository {
             throw new EmbeddingProfileConflictException(
                 "importing collection '" + s(coll, "name") + "' requires content_type; none was supplied");
         }
+        CollectionLabel.requireStorable(s(coll, "name"));
         // An already registered name is a no-op: skip it before the version and state checks (see the batch).
         if (!existingCollectionNames(ctx, tenant, List.of(s(coll, "name"))).isEmpty()) {
             return;
         }
         CollectionRegistration.requireStatesAgreeWithNames(List.of(coll));
+        CollectionLabel.validateShape(s(coll, "name"));  // RDR-229 P3.6: a new row's shape, as the batch does
         CollectionMint.refuseLiveTupleConflicts(ctx, tenant, List.of(coll));
         var insert = ctx.insertInto(CATALOG_COLLECTIONS,
                 CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
