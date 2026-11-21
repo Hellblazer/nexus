@@ -5,6 +5,7 @@ package dev.nexus.service;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionTombstones;
 import dev.nexus.service.db.TenantScope;
 import org.jooq.DSLContext;
 import org.jooq.Record;
@@ -210,6 +211,74 @@ class CollectionRenameTupleTest {
         indexState(true);
         assertRenameAndBack("knowledge__rn-conf-on__" + MODEL + "__v1", "knowledge__rn-conf-on-2__" + MODEL + "__v1",
             "rn-subject-conf-on", true);
+    }
+
+    // ── the draw-id-first order leaves P3.1's superseded_by invariant whole (one writer of superseded_by_id) ───
+
+    private long invariantViolations() {
+        return su(ctx -> (long) CollectionTombstones.invariantViolations(ctx, TENANT));
+    }
+
+    /**
+     * A rename draws Y's id, retires X naming Y and that id, then inserts Y with it; the retire goes through
+     * {@code CollectionTombstones.supersede(ctx, tenant, from, to, toId)}, since Y has no registry row yet for the registry
+     * overload's subselect. After it, and after the way back (X's tombstone revived, Y retired naming X's id), the
+     * invariant of {@code CollectionTombstones.invariantViolations} is zero and each tombstone's {@code superseded_by_id} is its
+     * successor's {@code collection_id}.
+     */
+    private void assertDrawIdFirstInvariant(String x, String y, String owner) {
+        register(x, owner);
+        assertThat(invariantViolations()).as("guard: the invariant holds before the rename").isZero();
+
+        repo.renameCollection(TENANT, x, y);
+
+        assertThat(invariantViolations()).as("after the rename").isZero();
+        assertThat(row(x).get(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)).as("X's superseded_by_id is Y's collection_id")
+            .isEqualTo(row(y).get(CATALOG_COLLECTIONS.COLLECTION_ID));
+
+        repo.renameCollection(TENANT, y, x, y);
+
+        assertThat(invariantViolations()).as("after the way back").isZero();
+        assertThat(row(y).get(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)).as("Y's superseded_by_id is the revived X's collection_id")
+            .isEqualTo(row(x).get(CATALOG_COLLECTIONS.COLLECTION_ID));
+        assertThat(row(x).get(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)).as("the revived X is live").isNull();
+    }
+
+    @Test
+    void aRenameInTheDrawIdFirstOrderKeepsTheSupersededByInvariant_andSoDoesTheWayBack_withTheIndexAbsent() {
+        indexState(false);
+        assertDrawIdFirstInvariant("inv-x-off", "inv-y-off", "rn-subject-inv-off");
+    }
+
+    @Test
+    void aRenameInTheDrawIdFirstOrderKeepsTheSupersededByInvariant_andSoDoesTheWayBack_withTheIndexPresent() {
+        indexState(true);
+        assertDrawIdFirstInvariant("inv-x-on", "inv-y-on", "rn-subject-inv-on");
+    }
+
+    /**
+     * R7: a tombstone that names a successor nobody had registered carries its own id ("retired, no successor"). Y's
+     * insert is the registration it was waiting for, so the rename re-points it ({@code repointTombstonesNaming}) in the same
+     * transaction, whichever writer set X's own id.
+     */
+    @Test
+    void aRenameRePointsATombstoneThatWasWaitingForTheNewName() {
+        indexState(false);
+        register("wait-x", "rn-subject-wait");
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, TENANT, "wait-z");
+            return ctx.update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "wait-y")
+                .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CATALOG_COLLECTIONS.COLLECTION_ID)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq("wait-z")).execute();
+        });
+        assertThat(invariantViolations()).as("guard: a tombstone with no successor row is whole").isZero();
+
+        repo.renameCollection(TENANT, "wait-x", "wait-y");
+
+        assertThat(row("wait-z").get(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)).as("the waiting tombstone names Y's id")
+            .isEqualTo(row("wait-y").get(CATALOG_COLLECTIONS.COLLECTION_ID));
+        assertThat(invariantViolations()).isZero();
     }
 
     // ── the rename that changes the tuple, and the refusals, still behave ───────────────────────
