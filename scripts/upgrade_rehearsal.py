@@ -2721,6 +2721,7 @@ def rehearse(from_version: str, cfg: Config) -> dict:
                 except ProbeError as exc:
                     findings.append(f"old-bundle: seeding the blocked moves' retry state failed: {exc}")
                 else:
+                    say(f"[{from_version}] old-bundle: seeded {seeded} blocked moves at retries={SEED_TRANSIENT_RETRIES}")
                     if variant == ENGINE_FIRST and not seeded:
                         # The engine-first leg runs the pinned engine on the old bundle, so its moves are blocked.
                         findings.append("old-bundle (engine-first leg): no move was blocked on pg_background to seed")
