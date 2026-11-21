@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): the registered RDR-246 data move
+    rdr229-reown-repo-stems-from-curator. A collection's owner_id is its source, set once at registration. A repo's
+    collections (code__<slug>-<hash8>__*, docs__<slug>-<hash8>__*, rdr__<slug>-<hash8>__*) were registered under a curator
+    by nexus-wbfpw.33's import fallback, and catalog-044-3 then froze that. This move gives them the repo owner.
+
+    THE RULE, per tenant. A stem S = <slug>-<hash8> (hash8 is eight lowercase hex digits: repo_identity's
+    sha256(main_repo)[:8]) is a REPO when a live code__S__* row exists whose owner_id is a curator (nexus.catalog_owner_is_curator)
+    or is already the repo owner carrying repo_hash = hash8. Only nx index repo mints a code__ collection, so a code__ row is
+    the signal. A docs-only stem (no code__ row for it) is a corpus and is NEVER touched. Every live, unsuperseded code__S__*,
+    docs__S__* and rdr__S__* row of a repo stem is set to the repo owner with repo_hash = hash8 (the segment form, 1.17 -> 1-17):
+    an existing catalog_owners row with that repo_hash is reused, else one is inserted (owner_type 'repo', repo_root '', name <slug>,
+    or <slug>-<hash8> when that name is taken or two stems of one chunk share a slug). Quarantine and superseded rows are not touched.
+
+    ONE STATEMENT, ONE CHUNK. The template is a single statement with a data-modifying CTE: the advisory lock
+    CatalogRepository.upsertOwner takes (pg_advisory_xact_lock(hashtext('catalog_owners/' || tenant)); the CTE is REFERENCED by the
+    INSERT's FROM, or PostgreSQL would never run it), the INSERT of the missing owners with the tumbler allocation upsertOwner
+    uses ('1.' || max(second segment) + 1, consecutive for several new owners), and the UPDATE of the driving table. All the
+    sub-statements share one snapshot, so the UPDATE cannot read the INSERT's rows through catalog_owners: it joins the INSERT's
+    RETURNING to the owners already visible. <driving_table> and <chunking_clause> appear once, in the UPDATE; the CTEs read the
+    tenant's catalog rows by name, so each chunk re-derives the tenant's repo stems and the INSERT is a no-op after the first. A
+    stem's rows may fall in different chunks (code__ sorts before docs__), which is why a repo stem is also one whose code__ row
+    is already on the repo owner. The tenant is current_setting('nexus.tenant'): the worker runs the move once per tenant.
+
+    RESIDUAL. The statement's snapshot is taken before the lock is granted. A repo owner registered by another session in the
+    window between the snapshot and the lock would make the INSERT compute an already-used tumbler; ON CONFLICT DO NOTHING drops
+    that owner, the verification below then finds its rows and the move fails (a superseding move re-runs it). It needs a new repo
+    registered in the same tenant during the release's first minutes.
+
+    VERIFICATION. No live row of a repo stem is still owned by a curator. It reads catalog_owners, which the table-wide run
+    (no tenant setting) sees empty, so that run passes trivially; the per-tenant runs, which carry the tenant, are the check.
+
+    Reads: the stem is parsed from the collection NAME (split_part on the double-underscore separator): the one name read of
+    this move, a migration source (the legacy owner_id was derived from the name), not a runtime parse.
+
+    NOT IN THIS CHANGESET: the owner-read SELECT policy on nexus.catalog_collections (vectors-065, owned by RDR-229 D2). The
+    admin role must read every tenant's collection rows for the worker's tenant list and verification; this move registers
+    against that policy and does not carry a second copy of it. DATA EFFECT: none here (one INSERT into nexus.data_moves);
+    the rows move after boot, in the worker.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-067-1" author="nexus-p2m1x.14">
+        <comment>Register the data move rdr229-reown-repo-stems-from-curator over nexus.catalog_collections (RDR-246, RDR-229): one INSERT into nexus.data_moves, no policy</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, changeset_id)
+VALUES ('rdr229-reown-repo-stems-from-curator',
+        'WITH lck AS (
+    SELECT pg_advisory_xact_lock(hashtext(''catalog_owners/'' || current_setting(''nexus.tenant'', true))) AS locked
+), cand AS (
+    SELECT DISTINCT split_part(c.name, ''__'', 2) AS stem
+      FROM nexus.catalog_collections c
+     WHERE c.tenant_id = current_setting(''nexus.tenant'', true)
+       AND c.content_type = ''code'' AND c.lifecycle_state = ''live'' AND c.superseded_by = ''''
+       AND split_part(c.name, ''__'', 1) = ''code''
+       AND split_part(c.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
+       AND (nexus.catalog_owner_is_curator(c.tenant_id, c.owner_id)
+            OR EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                        WHERE r.tenant_id = c.tenant_id AND r.owner_type = ''repo''
+                          AND r.tumbler_prefix = replace(c.owner_id, ''-'', ''.'')
+                          AND r.repo_hash = right(split_part(c.name, ''__'', 2), 8)))
+), stems AS (
+    SELECT stem, left(stem, length(stem) - 9) AS slug, right(stem, 8) AS hash8,
+           row_number() OVER (PARTITION BY left(stem, length(stem) - 9) ORDER BY stem) AS nth
+      FROM cand
+), mx AS (
+    SELECT COALESCE(max(CASE WHEN split_part(o.tumbler_prefix, ''.'', 2) ~ ''^[0-9]{1,9}$''
+                             THEN split_part(o.tumbler_prefix, ''.'', 2)::int END), 0) AS n
+      FROM nexus.catalog_owners o
+     WHERE o.tenant_id = current_setting(''nexus.tenant'', true) AND o.tumbler_prefix LIKE ''1.%''
+), fresh AS (
+    SELECT s.stem, s.slug, s.hash8, s.nth, row_number() OVER (ORDER BY s.stem) AS rn
+      FROM stems s
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                        WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.repo_hash = s.hash8)
+), ins AS (
+    INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_hash, repo_root)
+    SELECT current_setting(''nexus.tenant'', true), ''1.'' || (mx.n + f.rn),
+           CASE WHEN f.nth > 1
+                  OR EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                              WHERE r.tenant_id = current_setting(''nexus.tenant'', true)
+                                AND r.name = f.slug AND r.owner_type = ''repo'')
+                THEN f.stem ELSE f.slug END,
+           ''repo'', f.hash8, ''''
+      FROM lck CROSS JOIN fresh f CROSS JOIN mx
+    ON CONFLICT DO NOTHING
+    RETURNING tumbler_prefix, repo_hash
+), repo_owner AS (
+    SELECT i.tumbler_prefix, i.repo_hash FROM ins i
+    UNION
+    SELECT r.tumbler_prefix, r.repo_hash FROM nexus.catalog_owners r
+     WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.repo_hash IS NOT NULL AND r.repo_hash <> ''''
+)
+UPDATE <driving_table>
+   SET owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
+  FROM stems s JOIN repo_owner w ON w.repo_hash = s.hash8
+ WHERE <chunking_clause>
+   AND t.tenant_id = current_setting(''nexus.tenant'', true)
+   AND t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state = ''live'' AND t.superseded_by = ''''
+   AND split_part(t.name, ''__'', 1) = t.content_type AND split_part(t.name, ''__'', 2) = s.stem
+   AND t.owner_id IS DISTINCT FROM replace(w.tumbler_prefix, ''.'', ''-'')',
+        'nexus', 'catalog_collections', 1000, 0, 60000,
+        'SELECT 1 FROM nexus.catalog_collections t
+ WHERE t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state = ''live'' AND t.superseded_by = ''''
+   AND split_part(t.name, ''__'', 1) = t.content_type
+   AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
+   AND EXISTS (SELECT 1 FROM nexus.catalog_collections k
+                WHERE k.tenant_id = t.tenant_id AND k.content_type = ''code'' AND k.lifecycle_state = ''live''
+                  AND k.superseded_by = '''' AND split_part(k.name, ''__'', 1) = ''code''
+                  AND split_part(k.name, ''__'', 2) = split_part(t.name, ''__'', 2)
+                  AND split_part(k.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
+                  AND (nexus.catalog_owner_is_curator(k.tenant_id, k.owner_id)
+                       OR EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                                   WHERE r.tenant_id = k.tenant_id AND r.owner_type = ''repo''
+                                     AND r.tumbler_prefix = replace(k.owner_id, ''-'', ''.'')
+                                     AND r.repo_hash = right(split_part(k.name, ''__'', 2), 8))))
+   AND (t.tenant_id = $1 OR $1 IS NULL)',
+        NULL, 'vectors-067-1');
+        ]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-reown-repo-stems-from-curator'</sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>
