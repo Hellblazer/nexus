@@ -4,6 +4,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.CollectionTupleIndexProbe;
 import dev.nexus.service.db.SchemaMigrator;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
@@ -19,8 +20,16 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -38,9 +47,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21).
  *
  * <p>Every test runs as a NOBYPASSRLS, non-superuser owner (the production migration role's shape): the table is
- * FORCE ROW LEVEL SECURITY, so a plain count by that role sees zero rows on every tenant, and
- * {@link #theCounterReadsEveryTenantWhereAPlainCountReadsNothing} pins that. Rows are seeded as superuser, which
- * bypasses RLS, as an engine writing through a tenant scope does.
+ * FORCE ROW LEVEL SECURITY. The counter is a plain SECURITY INVOKER SQL function that never lifts FORCE (a boot in the
+ * cloud must not take ACCESS EXCLUSIVE on the registry, {@link #aWalkWithADuplicateTakesNoAccessExclusiveLock}); it
+ * reads every tenant's rows through D2's owner-read policy {@code catalog_collections_owner_read}
+ * (RDR-229 D2, changeset vectors-065), which this changeset does not create. D2 is not on this branch, so the tests
+ * install {@link #standInOwnerRead}, the policy by the datamove fixture marlowe's move test uses, and
+ * {@link #theCounterReadsEveryTenantThroughTheOwnerReadPolicy} pins both halves: blind without the policy, every
+ * tenant with it. Rows are seeded as superuser, which bypasses RLS, as an engine writing through a tenant scope does.
  */
 class CollectionTupleUniqueIndexLiquibaseTest {
 
@@ -137,6 +150,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             }
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
+                standInOwnerRead(adminDs);
                 try (Connection su = pg.createConnection("")) {
                     registerMove(su, MOVE, true);
                     seed(su, "t1", "docs__a", "docs", "owner-1", MODEL, "", "live", "");
@@ -165,12 +179,12 @@ class CollectionTupleUniqueIndexLiquibaseTest {
     }
 
     /**
-     * The falsification of a naive guard. The migration role owns the table under FORCE ROW LEVEL SECURITY and has
-     * no BYPASSRLS, so a plain count by that role sees nothing on a table that holds rows; the helper lifts FORCE
-     * for the count, counts every tenant, and puts FORCE back.
+     * The counter lifts nothing: it reads whatever the migration role may read. Without an owner-read policy that is
+     * no row (a NOBYPASSRLS owner under FORCE sees nothing, so the counter answers 0 and the index build, not the
+     * counter, refuses a real duplicate); with D2's policy it is every tenant's rows.
      */
     @Test
-    void theCounterReadsEveryTenantWhereAPlainCountReadsNothing() throws Exception {
+    void theCounterReadsEveryTenantThroughTheOwnerReadPolicy() throws Exception {
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
         try {
             try (Connection su = pg.createConnection("")) {
@@ -193,16 +207,112 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                 try (Connection admin = adminDs.getConnection()) {
                     DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
                     assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections"))))
-                        .as("a plain count(*) by the NOBYPASSRLS owner reads 0: a guard written that way would "
-                            + "call a duplicated registry clean")
+                        .as("premise: a plain count(*) by the NOBYPASSRLS owner reads 0 with no owner-read policy")
                         .isEqualTo(0);
-                    assertThat(duplicates(admin)).as("t1 and t2 each hold one duplicated tuple, t3 none").isEqualTo(2L);
+                    assertThat(duplicates(admin)).as("no policy, no rows, no duplicate seen: the counter lifts nothing")
+                        .isEqualTo(0L);
+                }
+
+                standInOwnerRead(adminDs);
+
+                try (Connection admin = adminDs.getConnection()) {
+                    DSLContext ctx = DSL.using(admin, SQLDialect.POSTGRES);
                     assertThat(ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections"))))
-                        .as("FORCE ROW LEVEL SECURITY is back after the helper: the plain count is blind again")
-                        .isEqualTo(0);
+                        .as("the owner-read policy lets the migration role read every tenant").isEqualTo(8);
+                    assertThat(duplicates(admin)).as("t1 and t2 each hold one duplicated tuple, t3 none (FORCE RLS on)")
+                        .isEqualTo(2L);
                     var rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "catalog_collections");
                     assertThat(rls.enabled()).isTrue();
-                    assertThat(rls.forced()).as("FORCE restored by the helper").isTrue();
+                    assertThat(rls.forced()).as("FORCE ROW LEVEL SECURITY was never lifted").isTrue();
+                }
+            }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    /**
+     * A boot in the cloud must never take ACCESS EXCLUSIVE on the registry, even while a duplicate keeps the index
+     * waiting. A second connection holds ACCESS SHARE on nexus.catalog_collections for the whole walk: any statement
+     * that asks for ACCESS EXCLUSIVE (an ALTER TABLE in the counter) queues behind it and the walk cannot finish.
+     * Every earlier changeset is already applied, so only the changesets from the index on can ask.
+     */
+    @Test
+    void aWalkWithADuplicateTakesNoAccessExclusiveLock() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        ExecutorService walker = Executors.newSingleThreadExecutor();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            }
+            try (HikariDataSource adminDs = adminPool(pg)) {
+                migrateUpTo(adminDs, INDEX_CHANGESET);
+                standInOwnerRead(adminDs);
+                try (Connection su = pg.createConnection("")) {
+                    registerMove(su, MOVE, true);
+                    seed(su, "t1", "docs__a", "docs", "owner-1", MODEL, "", "live", "");
+                    seed(su, "t1", "docs__b", "docs", "owner-1", MODEL, "", "live", "");
+                }
+                try (Connection holder = pg.createConnection("")) {
+                    holder.setAutoCommit(false);
+                    DSL.using(holder, SQLDialect.POSTGRES).execute("LOCK TABLE nexus.catalog_collections IN ACCESS SHARE MODE");
+                    Future<?> walk = walker.submit(() -> {
+                        SchemaMigrator.migrate(adminDs);
+                        return null;
+                    });
+                    try {
+                        walk.get(90, TimeUnit.SECONDS);
+                    } catch (TimeoutException e) {
+                        String waiting;
+                        try (Connection su = pg.createConnection("")) {
+                            waiting = DSL.using(su, SQLDialect.POSTGRES).fetch(
+                                "SELECT l.mode, a.query FROM pg_locks l JOIN pg_stat_activity a USING (pid) "
+                                    + "WHERE NOT l.granted AND l.relation = 'nexus.catalog_collections'::regclass").toString();
+                        }
+                        holder.rollback();
+                        walk.get(60, TimeUnit.SECONDS);
+                        throw new AssertionError("the walk queued behind an ACCESS SHARE lock on the registry: "
+                            + "something asked for ACCESS EXCLUSIVE. Waiting: " + waiting);
+                    }
+                    holder.rollback();
+                }
+                assertWaiting(pg);
+            }
+        } finally {
+            walker.shutdownNow();
+            pg.stop();
+        }
+    }
+
+    /** The changeset file holds no ALTER, in a statement or a comment: the counter that needed one is gone. */
+    @Test
+    void theChangesetFileHoldsNoAlter() throws Exception {
+        String xml;
+        try (InputStream in = getClass().getClassLoader()
+                .getResourceAsStream("db/changelog/collections-001-tuple-unique-index.xml")) {
+            assertThat(in).as("the changelog is on the classpath").isNotNull();
+            xml = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertThat(xml).contains(HELPER_CHANGESET).contains(INDEX_CHANGESET);
+        assertThat(xml).doesNotContainPattern("(?i)\\bALTER\\b");
+    }
+
+    @Test
+    void theCounterIsAPlainSecurityInvokerSqlFunction() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        try {
+            try (Connection su = pg.createConnection("")) {
+                PgContainerHelper.bootstrapNonSuperuserOwner(su, ADMIN_ROLE, ADMIN_PASS);
+            }
+            try (HikariDataSource adminDs = adminPool(pg)) {
+                migrateUpTo(adminDs, INDEX_CHANGESET);
+                try (Connection admin = adminDs.getConnection()) {
+                    var row = DSL.using(admin, SQLDialect.POSTGRES).fetchOne(
+                        "SELECT p.prosecdef, l.lanname FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang "
+                            + "WHERE p.pronamespace = 'nexus'::regnamespace AND p.proname = ?", HELPER);
+                    assertThat(row).isNotNull();
+                    assertThat(row.get(0, Boolean.class)).as("SECURITY INVOKER: it runs as the migration role").isFalse();
+                    assertThat(row.get(1, String.class)).as("a plain SQL function, no plpgsql ALTER").isEqualTo("sql");
                 }
             }
         } finally {
@@ -219,6 +329,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
             }
             try (HikariDataSource adminDs = adminPool(pg)) {
                 migrateUpTo(adminDs, INDEX_CHANGESET);
+                standInOwnerRead(adminDs);
                 try (Connection admin = adminDs.getConnection()) {
                     assertThat(duplicates(admin)).isEqualTo(0L);
                 }
@@ -297,6 +408,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                 // Boot 1: the migration runs before the engine registers the move, so the move is absent.
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
                 assertWaiting(pg);
+                assertThat(CollectionTupleIndexProbe.present(adminDs)).as("the status probe: waiting").isFalse();
 
                 // Between the boots the engine registers the move and its worker completes it (nothing to move on
                 // a fresh install).
@@ -307,6 +419,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                 // Boot 2: both conditions hold.
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
                 assertApplied(pg);
+                assertThat(CollectionTupleIndexProbe.present(adminDs)).as("the status probe: present").isTrue();
 
                 // And a third boot has nothing left to do.
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
@@ -317,9 +430,13 @@ class CollectionTupleUniqueIndexLiquibaseTest {
         }
     }
 
-    /** A precondition that THROWS (the migration role is not the table owner) skips the changeset, never halts. */
+    /**
+     * The migration role does not own the table: the index body is refused ("must be owner"), which with
+     * failOnError="false" skips the changeset unrecorded, never halts the boot. The counter reads nothing as a
+     * role with no owner-read policy and lifts nothing, so it cannot be what throws.
+     */
     @Test
-    void aGuardThatThrows_skipsTheChangeset_itDoesNotHaltTheBoot() throws Exception {
+    void aBodyThatIsRefused_skipsTheChangeset_itDoesNotHaltTheBoot() throws Exception {
         String otherOwner = "ctuple_other_owner";
         PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase(otherOwner);
         try {
@@ -334,13 +451,25 @@ class CollectionTupleUniqueIndexLiquibaseTest {
                     PgContainerHelper.alterTableOwner(su, DSL.table(DSL.name("nexus", "catalog_collections")), otherOwner);
                 }
                 try (Connection admin = adminDs.getConnection()) {
-                    assertThatThrownBy(() -> duplicates(admin))
-                        .as("non-vacuity: the helper really throws for a role that does not own the table")
-                        .hasMessageContaining("must be owner");
+                    assertThat(duplicates(admin))
+                        .as("non-vacuity: the counter passes (0), so the refused index build is what is skipped")
+                        .isEqualTo(0L);
                 }
                 assertThatCode(() -> SchemaMigrator.migrate(adminDs)).doesNotThrowAnyException();
                 assertWaiting(pg);
             }
+        } finally {
+            pg.stop();
+        }
+    }
+
+    @Test
+    void theStatusProbe_isNullWhenItCannotRun() throws Exception {
+        PostgreSQLContainer<?> pg = PgContainerHelper.startEmptyDatabase();
+        try {
+            HikariDataSource closed = adminPool(pg);
+            closed.close();
+            assertThat(CollectionTupleIndexProbe.present(closed)).as("a probe that could not run answers null").isNull();
         } finally {
             pg.stop();
         }
@@ -379,6 +508,22 @@ class CollectionTupleUniqueIndexLiquibaseTest {
     }
 
     // ── fixtures ────────────────────────────────────────────────────────────────
+
+    /**
+     * STAND-IN for D2's changeset vectors-065 (RDR-229 owner-is-source), which is not on this branch: the owner-read
+     * SELECT policy {@code catalog_collections_owner_read} for the migration role, by the same datamove fixture and
+     * guard marlowe's {@code Rdr229ReownRepoStemsMoveIntegrationTest.standIn} uses. When vectors-065 lands the
+     * migration walk creates the policy itself; swap this for the real changeset and delete it.
+     */
+    private static void standInOwnerRead(HikariDataSource adminDs) throws Exception {
+        try (Connection admin = adminDs.getConnection()) {
+            PgContainerHelper.runSuperuserTestChangelog(admin, "datamove/owner-read-policy/policy.xml",
+                "databasechangelog_test_ctuple_owner_read",
+                Map.of("driving_schema", "nexus", "driving_table", "catalog_collections"));
+            assertThat(PgCatalogProbes.policyExists(DSL.using(admin, SQLDialect.POSTGRES), "nexus", "catalog_collections",
+                "catalog_collections_owner_read")).as("the stand-in policy is in place (the guard did not skip it)").isTrue();
+        }
+    }
 
     private static void registerMove(Connection su, String label, boolean completed) {
         DSL.using(su, SQLDialect.POSTGRES).execute(
