@@ -481,12 +481,6 @@ public final class CollectionMint {
         ctx.select(DSL.function("pg_advisory_xact_lock", Object.class, hashed)).fetch();
     }
 
-    /** Every collection's {@code collection_id} by name, for one tenant. */
-    static Map<String, Long> idsByName(DSLContext ctx, String tenant) {
-        return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
-            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).fetchMap(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.COLLECTION_ID);
-    }
-
     /** The name of another live collection of this tuple (the lowest {@code collection_id}), or null. */
     static String heldBy(DSLContext ctx, String tenant, String contentType, String owner, String model, String version,
                          String exceptName) {

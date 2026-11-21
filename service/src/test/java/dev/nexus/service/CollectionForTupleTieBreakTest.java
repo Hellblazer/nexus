@@ -153,7 +153,7 @@ class CollectionForTupleTieBreakTest {
         String owner = "tie-parity";
         seedLive(owner, "p-oldest-high-id", "v1", 9320L, 0);
         seedLive(owner, "p-newest-low-id", "v1", 9310L, 20);
-        var rows = repo.listCollectionsWithIds(TENANT, "knowledge", null).stream()
+        var rows = repo.listCollections(TENANT, "knowledge", null).stream()
             .map(TargetSelection.CollectionRow::fromMap).toList();
         assertThat(rows.stream().filter(r -> owner.equals(r.ownerId())).map(TargetSelection.CollectionRow::collectionId).toList())
             .as("guard: the rows the re-embed selection reads carry their ids").containsExactlyInAnyOrder(9320L, 9310L);
@@ -165,17 +165,12 @@ class CollectionForTupleTieBreakTest {
     }
 
     @Test
-    void theListRouteRowsCarryNoCollectionIdKeyAndTheIdListIsAParallelRead() {
+    void theListRouteRowsCarryTheRegistryId() {
         seedLive("tie-list", "list-row", "v1", 9410L, 0);
-        var plain = repo.listCollections(TENANT, "knowledge", null).stream()
-            .filter(r -> "tie-list".equals(r.get("owner_id"))).toList();
-        var withIds = repo.listCollectionsWithIds(TENANT, "knowledge", null).stream()
+        var rows = repo.listCollections(TENANT, "knowledge", null).stream()
             .filter(r -> "tie-list".equals(r.get("owner_id"))).toList();
 
-        assertThat(plain).hasSize(1);
-        assertThat(plain.get(0)).as("the wire shape of the list route is unchanged").doesNotContainKey("collection_id");
-        assertThat(withIds).hasSize(1);
-        assertThat(withIds.get(0).get("collection_id")).isEqualTo(9410L);
-        assertThat(List.copyOf(withIds.get(0).keySet())).containsAll(plain.get(0).keySet());
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("collection_id")).as("P3.5a: the list route's rows carry the registry id, the re-embed selection reads it there").isEqualTo(9410L);
     }
 }

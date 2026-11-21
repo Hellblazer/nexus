@@ -17,6 +17,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -74,12 +75,17 @@ class CatalogCollectionIdReadTest {
             PgContainerHelper.seedServiceToken(DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "test-bound");
         }
         try (Connection su = pg.createConnection("")) {
-            var row = DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT is_nullable, is_identity FROM information_schema.columns "
-                    + "WHERE table_schema = 'nexus' AND table_name = 'catalog_collections' AND column_name = 'collection_id'");
+            var isIdentity = DSL.field(DSL.name("is_identity"), String.class);
+            var isNullable = DSL.field(DSL.name("is_nullable"), String.class);
+            var row = DSL.using(su, SQLDialect.POSTGRES).select(isNullable, isIdentity)
+                .from(DSL.table(DSL.name("information_schema", "columns")))
+                .where(DSL.field(DSL.name("table_schema"), String.class).eq("nexus"))
+                .and(DSL.field(DSL.name("table_name"), String.class).eq("catalog_collections"))
+                .and(DSL.field(DSL.name("column_name"), String.class).eq("collection_id"))
+                .fetchOne();
             assertThat(row).as("the column exists").isNotNull();
-            idColumnIsIdentity = row.get("is_identity", String.class);
-            idColumnIsNullable = row.get("is_nullable", String.class);
+            idColumnIsIdentity = row.get(isIdentity);
+            idColumnIsNullable = row.get(isNullable);
         }
         var cfg = new com.zaxxer.hikari.HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -102,9 +108,10 @@ class CatalogCollectionIdReadTest {
 
         try (Connection su = pg.createConnection("")) {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            ctx.execute("ALTER TABLE nexus.catalog_collections ALTER COLUMN collection_id DROP IDENTITY");
-            ctx.execute("ALTER TABLE nexus.catalog_collections ALTER COLUMN collection_id DROP NOT NULL");
-            int n = ctx.execute("UPDATE nexus.catalog_collections SET collection_id = NULL WHERE name = '" + DEFENSIVE_NULL + "'");
+            PgContainerHelper.dropIdentity(su, CATALOG_COLLECTIONS, "collection_id"); // no typed DROP IDENTITY in jOOQ 3.20.11
+            ctx.alterTable(CATALOG_COLLECTIONS).alterColumn(CATALOG_COLLECTIONS.COLLECTION_ID).dropNotNull().execute();
+            int n = ctx.update(CATALOG_COLLECTIONS).setNull(CATALOG_COLLECTIONS.COLLECTION_ID)
+                .where(CATALOG_COLLECTIONS.NAME.eq(DEFENSIVE_NULL)).execute();
             assertThat(n).as("guard: exactly one row's id is nulled").isEqualTo(1);
         }
     }
@@ -127,9 +134,9 @@ class CatalogCollectionIdReadTest {
     /** The registry's own value for one row, read straight from the table as the superuser. */
     private Long registryId(String name) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            return DSL.using(su, SQLDialect.POSTGRES).fetchOne(
-                "SELECT collection_id FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?",
-                TENANT, name).get(0, Long.class);
+            return DSL.using(su, SQLDialect.POSTGRES).select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(name))
+                .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
         }
     }
 
