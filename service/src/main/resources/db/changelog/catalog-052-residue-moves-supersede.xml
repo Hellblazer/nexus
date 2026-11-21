@@ -33,8 +33,10 @@
     and a top-level INSERT would be counted as a boot registration. The checks read the registry as the migrating role (nexus.data_moves is admin only).
     A failed old move counts as not complete: its fix is exactly a superseding move (RDR-246). A paused old move is superseded too, and a pause travels with it: catalog-052-4 copies paused_at and paused_by of the old documents move onto the replacement
     (the gate refuses a subselect in a top-level INSERT, and that INSERT must stay INSERT ... VALUES for ShippedMoveRegistrations), so an operator's hold, a down-step window for one, is not lifted by the supersede. The replacement satellites registered by the replacement documents move's
-    on_complete copy the pause of the OLD documents move (that row keeps its paused_at after it is superseded), so they arrive held when the old move was held; resuming the
-    replacement documents move does not resume them, each is resumed by the operator. 052-2 and 052-3 copy the pause of the old satellite they supersede.
+    on_complete take the pause of the REPLACEMENT row at that moment (its paused_at and paused_by when on_complete runs), not the old documents move's: the old row keeps its
+    paused_at after it is superseded, and copying it made the satellites arrive paused from a stale pause, so resuming the replacement (the only move that runs) still left them held. Normally the
+    replacement is not paused when it completes (the operator resumed it), so the satellites arrive unpaused; if on_complete somehow runs while it is paused, they arrive paused with that pause.
+    052-2 and 052-3 copy the pause of the old satellite they supersede (the operator resumes the replacement satellite itself).
 
     VALIDATE AND ORPHANS. None here: the CHECK of each table is validated by that table's stamp move (vectors-070) as its on_complete, once no
     row is left to stamp, and an orphan row (a name no registry row carries) is the stamp's to report. The replacements only stop the residue UPDATE
@@ -133,8 +135,8 @@ $v$SELECT 1
    AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
    AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$v$,
 NULL,
-(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
-(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
+(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-p31-residue-catalog-documents'),
+(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-p31-residue-catalog-documents'),
 'catalog-052-1'),
        ('rdr229-p31-residue-document-highlights',
 $t$UPDATE <driving_table>
@@ -165,8 +167,8 @@ $v$SELECT 1
    AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
    AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$v$,
 NULL,
-(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
-(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
+(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-p31-residue-catalog-documents'),
+(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-p31-residue-catalog-documents'),
 'catalog-052-1')
 $oc$,
 'rdr229-residue-catalog-documents',
