@@ -195,7 +195,7 @@ def _bind_and_sweep(result: IdentityResult, engine: Any, facts: LaunchFacts, sou
         # gone here, and the token files it left in identity/delegated/ are removed.
         # A sweep that ended on a 403 (a credential that may not report gone) deletes no token file (RDR "Retention").
         if not report.forbidden:
-            sweep_delegated(engine, procs, report.delegated_views, host=host, report=report)
+            sweep_delegated(engine, procs, report.delegated_views, host=host, report=report, identity_dir=directory)
         if not report.forbidden:
             clean_delegated_files(directory, procs, host=host)
             clean_delegated_tmp(directory)
