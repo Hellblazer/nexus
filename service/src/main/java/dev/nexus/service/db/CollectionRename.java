@@ -4,11 +4,12 @@ package dev.nexus.service.db;
 
 import org.jooq.DSLContext;
 import org.jooq.Field;
-import org.jooq.Record2;
+import org.jooq.Record4;
 import org.jooq.Record5;
 import org.jooq.impl.DSL;
 
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
@@ -16,13 +17,16 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * The registry half of a collection rename (RDR-229 P3.8, nexus-p2m1x.28): retire the old row X, naming its successor, and
  * register or revive the new row Y. {@link CatalogRepository#renameCollection} (over its size ceiling) delegates here.
  *
- * <p><b>The order is X retired first, then Y written.</b> A rename copies X's attributes onto Y, so Y has the live tuple
+ * <p><b>The order is the tuples locked, X retired, then Y written.</b> A rename copies X's attributes onto Y, so Y has the live tuple
  * {@code (content_type, owner_id, embedding_model, model_version)} that X holds until it is retired. With the partial UNIQUE
  * index {@value CollectionTupleIndexProbe#INDEX} present, inserting Y live while X is still live raises 23505 (an unnamed
  * error, on a plain rename as well as on the way back). And P3.1's {@code catalog_collections_superseded_by_id_check} ties
  * {@code superseded_by = ''} to {@code superseded_by_id IS NULL}, so X cannot be retired with only a name: it needs Y's id
  * before Y has a row. So:
  * <ol>
+ * <li>With the index absent, the advisory locks of X's tuple and Y's tuple, in the sorted order the batch paths take theirs
+ *     ({@link CollectionMint#lockTupleKeys}), before either row is touched: a registration takes a tuple's lock and then
+ *     its row, so a rename that held X's row and then waited for a tuple's lock could meet it head on.</li>
  * <li>Y's id: the id of Y's own tombstone when Y is being revived (a rename back keeps the row and its id), else a fresh draw
  *     from the column's sequence ({@link CollectionMint#drawId}: taken-id check, one forward heal).</li>
  * <li>X is retired: {@code superseded_by = Y's name}, {@code superseded_by_id = that id}.</li>
@@ -30,7 +34,11 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  *     collection ({@link CollectionMint#refuseHeldTuple}, a named 409 in both index states). When Y takes X's own tuple it
  *     replaces X there and nothing is checked.</li>
  * <li>Y is inserted with that id, or revived: {@code superseded_by} and {@code superseded_by_id} cleared, attributes
- *     refreshed from X, its own id kept.</li>
+ *     refreshed from X, its own id kept. Only a RETIRED Y is revived. When another rename of another source registered the
+ *     same new name between this rename's look at Y and its write, Y is live and the write changes nothing: a named 409
+ *     ({@link CatalogRepository.CollectionMergeRefused}) and the transaction, X's retirement included, is gone. Without that,
+ *     this rename's X would name an id of this rename's own draw that no row holds, and the winner's live Y would be
+ *     overwritten.</li>
  * </ol>
  * The child re-homing of the rename (every table that names the collection) follows, in the caller's transaction, once Y
  * has a row for the foreign keys to point at; nothing in it reads X's liveness.
@@ -51,20 +59,31 @@ final class CollectionRename {
     static void retireAndRegister(DSLContext ctx, String tenant, String oldName, String newName,
                                   Field<String> newContentType, Field<String> newOwnerId, Map<String, Integer> counts,
                                   String[] tuple) {
-        long successorId = successorId(ctx, tenant, newName);
-        Record2<String, String> own = ownTuple(ctx, tenant, oldName);
+        Record4<String, String, String, String> own = ownTuple(ctx, tenant, oldName);
         Record5<String, String, String, String, String> source = successorAttributes(ctx, tenant, oldName, newContentType, newOwnerId);
+        if (source != null && own != null && !CollectionMint.tupleIndexExists(ctx)) {
+            // X's tuple and Y's: the same key when Y takes X's own. Sorted, once each, as the batch paths lock theirs.
+            CollectionMint.lockTupleKeys(ctx, Stream.of(
+                CollectionMint.tupleKey(tenant, own.value1(), own.value2(), own.value3(), own.value4()),
+                CollectionMint.tupleKey(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
+        }
+        long successorId = successorId(ctx, tenant, newName);
         counts.put("catalog_collections_superseded", retireSource(ctx, tenant, oldName, newName, successorId));
-        if (source != null && !(source.value1().equals(own.value1()) && source.value2().equals(own.value2()))) {
+        if (source != null && own != null && !(source.value1().equals(own.value1()) && source.value2().equals(own.value2()))) {
             checkSuccessorTuple(ctx, tenant, newName, source, tuple);
         }
-        counts.put("catalog_collections_inserted",
-            writeSuccessor(ctx, tenant, oldName, newName, successorId, newContentType, newOwnerId));
+        int written = writeSuccessor(ctx, tenant, oldName, newName, successorId, newContentType, newOwnerId);
+        if (written == 0) {
+            throw new CatalogRepository.CollectionMergeRefused("renaming " + oldName + " to " + newName + ": "
+                + newName + " was registered by another rename or registration while this one ran, and is live; nothing was "
+                + "renamed, so try again");
+        }
+        counts.put("catalog_collections_inserted", written);
         // RDR-229 P3.1 (R7): Y is the successor that tombstones naming it were waiting for; a revived Y already is, so no row moves
         CollectionTombstones.repointTombstonesNaming(ctx, tenant, java.util.List.of(newName));
     }
 
-    /** Step 1: Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. */
+    /** Y's id: the id of Y's own tombstone when Y is being revived (it keeps it), else a fresh draw from the sequence. */
     static long successorId(DSLContext ctx, String tenant, String newName) {
         Long own = ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(newName)))
@@ -72,12 +91,12 @@ final class CollectionRename {
         return own != null ? own : CollectionMint.drawId(ctx, tenant);
     }
 
-    /** X's own content type and owner (null when X has no row), to tell whether Y's tuple is X's. */
-    private static Record2<String, String> ownTuple(DSLContext ctx, String tenant, String oldName) {
-        Record2<String, String> r = ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID)
+    /** X's own content type, owner, model and version (null when X has no row), to tell whether Y's tuple is X's. */
+    private static Record4<String, String, String, String> ownTuple(DSLContext ctx, String tenant, String oldName) {
+        return ctx.select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION)
             .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName)))
             .fetchOne();
-        return r != null ? r : ctx.newRecord(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID);
     }
 
     /** What Y will hold: content type and owner (the caller's, else X's), X's model and version, X's lifecycle state. */
@@ -89,7 +108,7 @@ final class CollectionRename {
             .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant).and(CATALOG_COLLECTIONS.NAME.eq(oldName))).fetchOne();
     }
 
-    /** Step 2: retire X, naming Y and Y's id (P3.1's CHECK ties the id to the name). Answers the rows updated. */
+    /** Retire X, naming Y and Y's id (P3.1's CHECK ties the id to the name). Answers the rows updated. */
     static int retireSource(DSLContext ctx, String tenant, String oldName, String newName, long successorId) {
         return ctx.update(CATALOG_COLLECTIONS)
             .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
@@ -100,7 +119,7 @@ final class CollectionRename {
     }
 
     /**
-     * Step 3, only when Y's tuple is not X's (the caller named another content type or owner): a live collection holding it
+     * Only when Y's tuple is not X's (the caller named another content type or owner): a live collection holding it
      * would be a second one, refused naming both. When Y takes X's own tuple it replaces X there and nothing is checked, so a
      * rename of one member of D4's accepted pair stays possible. {@code tuple} records Y's tuple for the race recheck.
      */
@@ -112,7 +131,7 @@ final class CollectionRename {
     }
 
     /**
-     * Step 4: write Y with {@code successorId}, copying X's attributes (the content type and owner are the caller's when it
+     * Write Y with {@code successorId}, copying X's attributes (the content type and owner are the caller's when it
      * named them), or revive Y's tombstone. Answers the rows written.
      */
     static int writeSuccessor(DSLContext ctx, String tenant, String oldName, String newName, long successorId,
@@ -156,16 +175,18 @@ final class CollectionRename {
                 .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
                 .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, (Long) null)
                 .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
+                // only a RETIRED Y is revived: a live one is another rename's (or registration's) and is left alone
+                .where(CATALOG_COLLECTIONS.SUPERSEDED_BY.ne(""))
                 .execute();
     }
 
     /**
-     * Step 5, after the children are re-homed and the source URIs are rewritten, still in the rename's transaction: the place
+     * After the children are re-homed and the source URIs are rewritten, still in the rename's transaction: the place
      * where a replaceable legacy owner of {@code newName} (a slug, a dotted or an empty owner) is re-derived from its
      * documents by touching {@code owner_id}, which fires catalog-044's owner trigger. Today it does nothing: catalog-044 has
      * no held-tuple guard on this tree, and X was retired in step 2, before the documents moved, so the trigger that fires
      * at the re-home already sees X as not live. A guard that keeps a legacy owner off a held live tuple (marlowe's
-     * catalog-049) re-derives here once it lands, and must keep that skip.
+     * catalog-051) re-derives here once it lands, and must keep that skip.
      */
     static void rederiveReplaceableOwner(DSLContext ctx, String tenant, String newName) {
         // intentionally empty; see above
