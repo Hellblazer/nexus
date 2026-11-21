@@ -744,6 +744,25 @@ def test_t3_collection_name_bare_prefix_resolves_to_unique_match(
     assert t3_collection_name(prefix, t3=t3) == only_collection
 
 
+class _RowsT3(_FakeT3):
+    """A T3 stand-in whose listing carries each row's content_type, as the engine's does."""
+
+    def __init__(self, rows: dict[str, str]) -> None:
+        super().__init__(set(rows))
+        self._rows = rows
+
+    def list_collections(self) -> list[dict]:
+        return [{"name": n, "content_type": ct} for n, ct in sorted(self._rows.items())]
+
+
+def test_t3_collection_name_bare_knowledge_counts_a_minted_label_by_its_rows_content_type() -> None:
+    """RDR-229 P3.8: a minted knowledge collection is labelled ``c<id>``, so the bare-prefix probe tells a knowledge
+    collection by its row's content_type, not by a ``knowledge__`` name prefix. The one knowledge collection here is
+    minted, so bare ``knowledge`` is its unique match; a probe that read names saw none."""
+    t3 = _RowsT3({"c5": "knowledge", "code__r__voyage-code-3__v1": "code"})
+    assert t3_collection_name("knowledge", t3=t3) == "c5"
+
+
 def test_t3_collection_name_bare_knowledge_still_uses_legacy_fallback() -> None:
     """GH #545 backwards-compat: the existing ``knowledge`` -> ``knowledge__knowledge``
     legacy fallback (#536) must still fire when the bare-prefix probe
