@@ -92,16 +92,14 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${svcRole};
 -- safe to widen here once instead of per-class.
 GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
 
--- RDR-229 P3.8: the collection mint heals a collection_id sequence behind the data with setval, which needs UPDATE on that
--- one sequence; production grants it to nexus_svc by collections-002. Guarded: this changelog also runs against schemas
--- migrated before P3.1 gave the registry its identity column.
+-- RDR-229 P3.8: the collection mint heals a collection_id sequence behind the data through the SECURITY DEFINER function
+-- nexus.collection_id_seq_heal (changeset collections-002); production grants EXECUTE on it to nexus_svc and no UPDATE on the
+-- sequence, so a per-class service role needs the same EXECUTE grant and nothing more. Guarded: this changelog also runs
+-- against schemas migrated before collections-002 existed.
 DO $$
-DECLARE
-    seq text;
 BEGIN
-    seq := pg_get_serial_sequence('nexus.catalog_collections', 'collection_id');
-    IF seq IS NOT NULL THEN
-        EXECUTE format('GRANT UPDATE ON SEQUENCE %s TO ${svcRole}', seq);
+    IF to_regprocedure('nexus.collection_id_seq_heal(bigint)') IS NOT NULL THEN
+        EXECUTE 'GRANT EXECUTE ON FUNCTION nexus.collection_id_seq_heal(bigint) TO ${svcRole}';
     END IF;
 END
 $$;

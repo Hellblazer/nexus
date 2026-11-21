@@ -109,10 +109,30 @@ class CollectionMintHealTest {
         });
     }
 
+    private <T> T svc(Function<DSLContext, T> work) {
+        try (Connection c = svcDs.getConnection()) {
+            return work.apply(DSL.using(c, SQLDialect.POSTGRES));
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     @Test @Order(0)
-    void theProductionEngineRoleHoldsUpdateOnTheSequence_setvalNeedsIt() {
-        boolean held = su(ctx -> CollectionMintSupport.holdsUpdateOnSequence(ctx, "nexus_svc"));
-        assertThat(held).as("collections-002 grants UPDATE on the one sequence to nexus_svc").isTrue();
+    void theEngineRoleHealsThroughADefinerFunctionAndHoldsNoUpdateOnTheSequence() {
+        // nexus_svc is the production role; svc_mint_heal is this class's own login role, which the test changelog grants
+        // exactly what nexus_svc holds. Neither may setval the shared sequence directly (a tenant must not be able to move
+        // the identity every tenant draws from); both may call the one function that moves it forward.
+        boolean prodExecute = su(ctx -> CollectionMintSupport.holdsExecuteOnHeal(ctx, "nexus_svc"));
+        boolean prodUpdate = su(ctx -> CollectionMintSupport.holdsUpdateOnSequence(ctx, "nexus_svc"));
+        boolean classExecute = su(ctx -> CollectionMintSupport.holdsExecuteOnHeal(ctx, SVC_ROLE));
+        boolean classUpdate = su(ctx -> CollectionMintSupport.holdsUpdateOnSequence(ctx, SVC_ROLE));
+        assertThat(prodExecute).as("nexus_svc may EXECUTE " + CollectionMintSupport.HEAL_FUNCTION).isTrue();
+        assertThat(prodUpdate).as("nexus_svc holds no UPDATE on the collection_id sequence").isFalse();
+        assertThat(classExecute).as("the test's service role may EXECUTE the heal function").isTrue();
+        assertThat(classUpdate).as("the test's service role holds no UPDATE on the sequence").isFalse();
+        String definition = su(CollectionMintSupport::healFunctionDefinition);
+        assertThat(definition).as("a definer function with its search_path pinned")
+            .contains("SECURITY DEFINER").containsIgnoringCase("search_path");
     }
 
     @Test @Order(1)
@@ -139,7 +159,49 @@ class CollectionMintHealTest {
         assertThat(nextSequenceValue()).as("the heal left the sequence after the minted id").isEqualTo(next + 7);
     }
 
-    @Test @Order(2)
+    @Test @Order(3)
+    void theHealFunctionOnlyMovesTheSequenceForward() {
+        long next = nextSequenceValue();
+
+        Long raised = svc(ctx -> CollectionMintSupport.callHeal(ctx, next + 100));
+        assertThat(raised).as("a floor above the sequence raises it").isEqualTo(next + 100);
+        assertThat(nextSequenceValue()).isEqualTo(next + 101);
+
+        assertThat(svc(ctx -> CollectionMintSupport.callHeal(ctx, 1L))).as("a lower floor leaves it").isEqualTo(next + 100);
+        assertThat(svc(ctx -> CollectionMintSupport.callHeal(ctx, next + 50))).isEqualTo(next + 100);
+        assertThat(svc(ctx -> CollectionMintSupport.callHeal(ctx, null))).as("no floor leaves it").isEqualTo(next + 100);
+        assertThat(nextSequenceValue()).as("nothing moved it back").isEqualTo(next + 101);
+    }
+
+    @Test @Order(4)
+    void aHealInOneTenantNeverMovesTheSharedSequenceBackAndTheOtherTenantsNextMintDoesNotCollide() {
+        // The identity sequence is one for every tenant; a tenant sees only its own rows (FORCE RLS), so a heal knows its
+        // own tenant's largest id and nothing about the others'. Tenant A holds an id at the sequence's next draw, so
+        // A's mint collides and heals; tenant B holds ids just above, so B's next mint collides and heals in its turn.
+        String other = "mint-heal-tenant-b";
+        long n = nextSequenceValue();
+        seedWithExplicitId("two-a-held", n);
+        su(ctx -> {
+            for (long k = 1; k <= 3; k++) {
+                CollectionMintSupport.insertLiveRow(ctx, other, "two-b-held-" + k, "restored-two-b-" + k, MODEL, n + k);
+            }
+            return null;
+        });
+        long before = n - 1;
+
+        var a = repo.mintCollection(TENANT, attrs("subject-two-a"), true);
+
+        assertThat(id(a)).as("A drew past its own taken id").isEqualTo(n + 1);
+        assertThat(nextSequenceValue() - 1).as("A's heal left the sequence at or above where it was").isGreaterThanOrEqualTo(before);
+
+        var b = repo.mintCollection(other, attrs("subject-two-b"), true);
+
+        assertThat(id(b)).as("B's mint healed to B's own largest id and drew past it").isEqualTo(n + 4);
+        assertThat(b.get("name")).isEqualTo("c" + (n + 4));
+        assertThat(nextSequenceValue() - 1).as("the sequence only moved forward").isGreaterThanOrEqualTo(n + 4);
+    }
+
+    @Test @Order(9)
     void aSecondTakenIdAfterTheHealIsRefusedAsSequenceBehindData() {
         // The sequence cycles over [1, max]: after the heal (setval to max) the next draw wraps to 1, which is a row too.
         su(ctx -> {
