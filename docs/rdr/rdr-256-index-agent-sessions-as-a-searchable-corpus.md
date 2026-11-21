@@ -45,8 +45,9 @@ embedded as a vector for similarity search. A T3 document is a **catalog**
 row (the engine's PostgreSQL index of every indexed file or note), and its
 **manifest** (`document_chunks`) lists its chunks in order. A chunk's id is
 its **chash**, the SHA-256 of its text. Chunks live in **collections**; each
-collection has a **content type** (today one of `code`, `docs`, `rdr`,
-`knowledge`), an **owner** and an embedding model.
+collection has a **content type** (one of `code`, `docs`, `rdr`,
+`knowledge`), an **owner** and an embedding model. A `knowledge` collection
+is named for a **subject**, which is also its owner.
 
 What a session reasoned, tried and rejected lives only in its transcript.
 Nexus reads transcripts today only to count things, and Claude Code deletes
@@ -85,7 +86,7 @@ A transcript holds everything the session saw: command lines, file
 contents, environment output. A scan of all 137 main nexus transcripts found
 44 secret-shaped strings (key prefixes, private-key headers, bearer
 headers), every one in a tool-call input or a tool result
-(256-research-5). A live token reached a subagent transcript on
+(256-research-5, -16). A live token reached a subagent transcript on
 2026-09-25 (`conexus/hooks/scripts/routing/credential_print_guard.py:18-21`).
 Indexing into T3 sends text to the embedder, which is Voyage AI (an outside
 embedding service) on Sam's managed install, and stores it in the managed
@@ -94,15 +95,14 @@ tenant, the cloud database the nexus service keeps for that install
 Nexus's only redactor matches a value after a key word such as `token=`,
 and would miss a bare token (`src/nexus/redact.py:13-15`).
 
-#### Gap 4: No content type fits a session corpus
+#### Gap 4: Nothing keeps a corpus out of default searches
 
 A session corpus searched by default would put conversation chatter into
 every agent's `knowledge` search and into the topic list every subagent
-starts with. The four content types are a closed set, and the only way a
-search skips a live collection today is by its lifecycle state
-(256-research-9). Sessions also belong to a repository the way code and
-docs do, which a `knowledge` subject cannot express. Sam chose a fifth
-content type, `session`, owned per repository (T2
+starts with. The only way a search skips a live collection today is by its
+lifecycle state, and a collection that is not live cannot be searched even
+by name (256-research-9). Sam chose a knowledge subject with a new
+explicit-only collection attribute (T2
 `nexus/sam-ruling-rdr256-session-corpus-2026-11-21`, Q2).
 
 ## Relationship to Prior RDRs
@@ -117,8 +117,8 @@ and RDR-229.
 | RDR-207 Summarization at the T2 Expiry Boundary | Precedent | It took RDR-131's live half and decided that a rollup is an attended command, never a session-end side effect (rdr-207:392), because session end is the worst context for an LLM call (:334-339) and a hallucinated summary is worse than none (:344-346). This RDR makes no LLM call anywhere, in a hook or otherwise. |
 | RDR-240 Procedures as Lua scripts | Origin of the transcript reader | Its `transcripts.sessions` verb owns the file listing and line framing (`src/nexus/lua_runtime/transcripts_read.py`). This RDR reuses those, not the verb: the verb is a read-only count surface and never returns tool results (rdr-240:361-365). It has no active-path walk (256-research-2). |
 | RDR-243 Document sensitivity | Hard constraint | Its LLM-surface table (`src/nexus/tables/llm-surfaces.toml`) gets this RDR's surfaces as rows, and a session the scanner flags is stamped `sensitive`. The flag is not the corpus-wide protection, because it withholds a document from the session model by default (Q1), and agents are this corpus's readers (256-research-8). |
-| RDR-103 / RDR-204 collection names and attributes | Constraint | RDR-103's name grammar and RDR-204's per-content-type embedding profile both enumerate content types; `session` joins them (256-research-12). |
-| RDR-229 The collection name becomes a label | Sequencing dependency | Its Phase 3 is rewriting the client's name grammar and render paths and will make new collections minted `c<id>` labels found by attributes (P3.6, P3.8, in progress). This RDR's content-type step lands after P3.8 (256-research-13). |
+| RDR-103 / RDR-204 collection names and attributes | Considered | A fifth content type would join both RDRs' enumerations of content types; it is the rejected Alternative 3 (256-research-12). |
+| RDR-229 The collection name becomes a label | Adjacent, in flight | Its Phase 3 is moving collections to minted labels found by attributes. The explicit-only attribute is read from the row, never from the name, so it needs no ordering against P3.6 or P3.8; it shares code with P3 at three sites and needs P3.9 to survive a recovery-bundle import (256-research-18). |
 | RDR-171 dchash spans | Considered, not used | Its span does not survive an append or a deleted source (Gap 2). Expansion here uses the manifest's line columns instead. |
 | RDR-223 / RDR-181 document write and embed skip | Reused | A document write replaces its manifest in one write, and the engine skips re-embedding a chunk whose text it already holds (256-research-7). That is the incremental mechanism. |
 | RDR-246 Data moves are background jobs | Constraint | The backfill of existing transcripts is an explicit command, never engine-boot work. |
@@ -151,23 +151,22 @@ it ships redacts image captions, not sessions (256-research-6).
   and every collection embeds through Voyage (256-research-8).
 - New persistent state goes to PostgreSQL through the engine (the
   NO-SQLITE hot rule in `AGENTS.md`).
-- RDR-229 Phase 3 is in flight on the collection registry, the name grammar
-  and the render paths (beads nexus-p2m1x.17, .26 and .28 in progress on
-  2026-11-21; 256-research-13).
+- RDR-229 Phase 3 is in flight on the collection registry (beads
+  nexus-p2m1x.17, .26 and .28 in progress on 2026-11-21; 256-research-13).
 - More terms. **bge** is the embedding model a local install runs on its
   own machine, so nothing leaves it. **Fan-out** is how a search over a
   corpus such as `knowledge` queries every collection of that type and
   merges the results. The **Knowledge Map** is the list of topics injected
   into every subagent's starting context; **taxonomy labelling** names
   those topics with an LLM. A **tumbler** is a catalog document's or
-  owner's hierarchical id (such as `1.1.42`). A **curator** is a catalog
-  owner that is not a repository, used for corpora no repository owns. A
-  **label** is what RDR-229 turns a collection's name into, and a
-  **minted** label is the `c<id>` form the engine gives a new collection
-  once RDR-229's P3.8 lands. **Liquibase** is the tool the engine uses to
-  change its PostgreSQL schema. The **orphan reaper** is the engine job
-  that deletes chunks no manifest names. A **canary** test plants a unique
-  string in the input and asserts it never appears in any output.
+  owner's hierarchical id (such as `1.1.42`). The **knowledge curator** is
+  the catalog owner that knowledge notes are filed under. A **label** is
+  what RDR-229 turns a collection's name into, and a **minted** label is
+  the `c<id>` form the engine gives a new collection once RDR-229's P3.8
+  lands. **Liquibase** is the tool the engine uses to change its
+  PostgreSQL schema. The **orphan reaper** is the engine job that deletes
+  chunks no manifest names. A **canary** test plants a unique string in the
+  input and asserts it never appears in any output.
 
 ## Research Findings
 
@@ -175,10 +174,11 @@ it ships redacts image captions, not sessions (256-research-6).
 
 Read the transcript readers in `src/nexus/lua_runtime/` and
 `src/nexus/memory_curate/`, the indexing write path in
-`src/nexus/doc_indexer.py`, the corpus routing in `src/nexus/corpus.py` and
-`src/nexus/mcp/core.py`, the sensitivity code and tables, the engine's
-embedding-profile classes, and RDR-131, RDR-171, RDR-207, RDR-229, RDR-240
-and RDR-243. Read diderot's `internal/sessiondecode/FORMATS.md`,
+`src/nexus/doc_indexer.py`, the corpus routing in `src/nexus/corpus.py`,
+`src/nexus/mcp_infra.py` and `src/nexus/mcp/core.py`, the sensitivity code
+and tables, the engine's embedding-profile and export classes, and RDR-131,
+RDR-171, RDR-207, RDR-229, RDR-240 and RDR-243. Read diderot's
+`internal/sessiondecode/FORMATS.md`,
 `internal/sessioningest/{summarizer,publish,pushexpand,pushretention}.go`,
 `internal/sessionship/sync.go`, `internal/attachments/files/redact.go`,
 `docs/session-ingest.md` and `docs/design.md`. Ran read-only Python scans
@@ -195,8 +195,8 @@ candidate scanners.
 | Claude Code transcript format | Yes (real files) | Records carry `uuid`, `parentUuid`; `compact_boundary` records carry `logicalParentUuid`, which often names a record absent from the file (256-research-4). No published schema; the format can change without notice. |
 | diderot `sessiondecode` | Yes | Active-path rule, record splitting and id scheme (FORMATS.md:31-62). Fixtures are synthetic (FORMATS.md:33-35). |
 | Engine document write | Yes | One write per document, manifest replaced, re-embed skipped for held text (doc_indexer.py:2384-2389, :2844-2850). |
-| Engine embedding profile | Yes | Content type to model token is a constant map (`EmbeddingProfile.java:65-68`); `embedding_profile` is keyed `(tenant_id, content_type)` (catalog-036). |
-| detect-secrets 1.5.0 | Yes (sdist and a run) | Apache-2.0; `scan_line` in-process; network verification only when its verification filter is configured, which in-process Settings do not do by default (256-research-15). |
+| Client collection row cache | Yes | A fixed key list per collection from `list_collections` (mcp_infra.py:985-996). |
+| detect-secrets 1.5.0 | Yes (sdist and a run) | Apache-2.0; `scan_line` in-process; network verification only when its verification filter is configured, which in-process Settings do not do by default; custom plugins load from a file path (256-research-15, -17). |
 
 ### Key Discoveries
 
@@ -239,15 +239,12 @@ candidate scanners.
 - **✅ Verified** (spike): the five newest nexus transcripts kept their
   earlier bytes unchanged while four of them grew. *Source:
   256-research-11.*
-- **✅ Verified** (source search): the census of sites a fifth content type
-  touches, the "Site list" table under Technical Design. Four client sites
-  fall back to `code` for an unknown prefix without an error, so a missed
-  site embeds or scores sessions as code silently. No live engine name
-  regex and no packaged table enumerates content types. *Source:
-  256-research-12.*
-- **⚠️ Documented** (source search): RDR-229 P3.6 and P3.8 rewrite the name
-  grammar and every render-for-new-collection path; after P3.8 a new
-  collection needs no grammar change. *Source: 256-research-13.*
+- **✅ Verified** (source search): a fifth content type would touch about
+  thirty client and engine sites, four of which silently treat an unknown
+  type as `code`. *Source: 256-research-12.*
+- **⚠️ Documented** (source search): RDR-229 P3.6 and P3.8 are rewriting the
+  name grammar and the render paths a fifth type would need. *Source:
+  256-research-13.*
 - **✅ Verified** (source search): scanner candidates' licences, release
   dates and plugin coverage. *Source: 256-research-14.*
 - **✅ Verified** (spike): detect-secrets without its two entropy plugins
@@ -258,6 +255,10 @@ candidate scanners.
   four nexus plugins, caught 12 of 12 synthetic shapes and flagged no line
   of 42,456 assistant-text lines or 24,256 subagent-report lines from the
   same five sessions. *Source: 256-research-17.*
+- **⚠️ Documented** (source search): an explicit-only attribute read from the
+  collection row needs no ordering against RDR-229 P3.6 or P3.8; it shares
+  three code sites with P3, and before P3.9 a recovery-bundle import drops
+  it. *Source: 256-research-18.*
 
 ### Critical Assumptions
 
@@ -280,26 +281,26 @@ candidate scanners.
   **Method**: Spike (the Minimum Viable Validation's retrieval check).
 - [x] **A4.** Re-sending a grown session's chunks re-embeds only new chunk
   text. **Status**: Verified (256-research-7). **Method**: Source Search.
-- [ ] **A5.** After RDR-229 P3.8, the engine registers a collection with
-  `content_type = session` and finds it by `(content_type, owner_id,
-  embedding_model)` with no further engine change than the embedding
-  token. **Status**: Unverified; the client refuses only an empty content
-  type and no engine vocabulary check was found, but the Java registration
-  path was not read (256-research-12). **Method**: Source Search at Phase 1
-  Step 4.
+- [ ] **A5.** The explicit-only attribute can be one nullable column on
+  `catalog_collections`, returned by the engine's collection listing and so
+  carried in the client's row cache, and exported whole by the tenant
+  backup. **Status**: Unverified; the listing, cache and export shapes were
+  read, the listing's Java query and the export parity test were not
+  (256-research-18). **Method**: Source Search at Phase 1 Step 4.
 - [x] **A6.** detect-secrets scans in-process without a network call when
   its verification filter is not configured. **Status**: Verified; the
-  42,365-line run completed with sockets blocked (256-research-15).
+  runs completed with sockets blocked (256-research-15, -17).
   **Method**: Spike.
 
 ## Proposed Solution
 
 ### Approach
 
-Index the narrative of each main session into a per-repository `session`
-collection, redacted, with no LLM call; record each chunk's JSONL line range
-in the manifest; expand a hit by reading those lines back from the
-transcript. Concretely:
+Index the narrative of each main session into one knowledge subject,
+`agent-sessions`, redacted, with no LLM call; keep the subject out of
+default searches with an explicit-only collection attribute; record each
+chunk's JSONL line range in the manifest; expand a hit by reading those
+lines back from the transcript. Concretely:
 
 1. **What is indexed.** Main transcripts only, active path only, narrative
    only: human-typed prompts, assistant text, plaintext thinking, subagent
@@ -308,15 +309,19 @@ transcript. Concretely:
    target (a file path, the first 160 characters of a command, a query).
    Tool inputs, tool results, harness-injected text (`isMeta`) and
    bookkeeping lines are never embedded; expand returns them.
-2. **Where it lives.** A fifth content type, `session`. A repository's
-   sessions go in one collection whose owner is the repository's tumbler;
-   sessions whose working directory is in no registered repository go in
-   one collection owned by a `sessions` curator. One catalog document per
-   session. A `session` collection is searched only when a caller names it.
-3. **Privacy.** detect-secrets, pinned, runs in-process over every chunk
-   before it is written and over every expand result before it is returned;
-   a match becomes `[redacted:<type>]`. A session with any match is also
-   stamped `sensitive` (RDR-243). Indexing is off until the install gives a
+2. **Where it lives.** The knowledge subject `agent-sessions`, owned by its
+   subject under Sam's owner-is-source ruling (T2
+   `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`). One catalog
+   document per session, filed under the knowledge curator, with the
+   repository it belongs to in its metadata. Every collection of the
+   subject carries the explicit-only attribute, so it is searched only when
+   a caller names it, and the Knowledge Map and automatic taxonomy
+   labelling skip it (Sam, Q2).
+3. **Privacy.** detect-secrets, pinned, with four nexus plugins for the
+   shapes it misses, runs in-process over every chunk before it is written
+   and over every expand result before it is returned; a match becomes
+   `[redacted:<type>]`. A session with any match is also stamped
+   `sensitive` (RDR-243). Indexing is off until the install gives a
    one-time acknowledgement that names where the text goes; on Sam's
    managed install that is Voyage and the tenant (Sam, Q1).
 4. **When.** An explicit `nx index sessions` command. A session written to
@@ -356,97 +361,70 @@ session's title and date so a hit reads in context. The renderer version is
 stored on the document; a change to it re-renders every session at its next
 run, which costs embeds and is announced in the command's output.
 
-**The `session` content type.**
+**Placement.** The subject is typed bare, `agent-sessions`, as
+`docs/collections.md` Rule 3 requires; the catalog renders or mints the
+collection's name, before and after RDR-229 P3.8 alike. The owner is the
+subject. The collection is a `knowledge` collection, so it embeds with
+`voyage-context-3` on a Voyage install and with bge on a bge install, as
+every knowledge collection does; a sensitive session in local mode goes to
+the subject's bge sibling under RDR-243 Q3. Session documents register
+under the knowledge curator, never a repository owner, and carry
+`category=agent_session`; the repository is document metadata (the
+owner tumbler, when `transcripts_projects.py`'s membership rules place the
+session's working directory in a registered repository), which a `where`
+filter can narrow on. Fine distinctions go on the document, not in new
+collections (`docs/collections.md` Rule 1).
 
-- *Name and label.* RDR-103's grammar is
-  `<content_type>__<owner>__<embedding_model>__v<n>`. Under RDR-229 the name
-  becomes a label, and from P3.8 a new collection gets a minted `c<id>`
-  label and is found by its attributes `(content_type, owner_id,
-  embedding_model)` (256-research-13). This RDR registers `session`
-  collections only after P3.8, so it never renders a `session__...` name:
-  the writer looks the collection up by attributes and, when none exists,
-  registers one by attributes and takes the minted label. `session` is
-  still added to `_CONTENT_TYPES`, because that tuple is also the
-  vocabulary `resolve_corpus` accepts as a bare word (`corpus.py:2662`).
-- *Owner is the source.* Per Sam's ruling of 2026-11-21 (T2
-  `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`), the owner is set
-  once at registration and never re-derived. For a session whose recorded
-  working directory belongs to a repository, by the membership rules of
-  `transcripts_projects.py` (main checkout, worktrees, Claude's isolation
-  worktrees), the owner is that repository's catalog owner tumbler; the
-  repository must be registered (it has been indexed with `nx index repo`).
-  Otherwise the owner is a curator named `sessions`, one per tenant
-  (`(name, owner_type)` is unique, `http_catalog_client.py:952`). A session
-  filed under the curator stays there when its repository registers later;
-  `nx sessions forget` and a re-index moves it. Documents register under
-  the same owner as their collection.
-- *Embedder.* The engine's content-type token map
-  (`EmbeddingProfile.java:65-68`) gains `session` with the prose token:
-  `voyage-context-3` on a Voyage install, `bge-768` on a bge install,
-  matching `knowledge` and `docs`. The client's
-  `canonical_embedding_model` (`corpus.py:220`) returns `voyage-context-3`
-  for it.
-- *Explicit corpus only.* Without a per-collection attribute, exclusion is a
-  property of the type: `corpus.py` gains
-  `EXPLICIT_ONLY_CONTENT_TYPES: frozenset[str] = frozenset({"session"})`.
-  The default corpora are literal lists that do not name `session` and stay
-  as they are. The one expansion that enumerates every live content type,
-  `corpus="all"` (`mcp/core.py:4305-4316`), drops the set. Taxonomy's
-  default prefixes do not include it, so no topics, and so no Knowledge Map
-  entries, are made for sessions. Naming `session`, or a session
-  collection's label, searches it. A lint test pins it: every site that
-  iterates `CONTENT_TYPES` or expands `all` either drops
-  `EXPLICIT_ONLY_CONTENT_TYPES` or is listed as addressing a type a caller
-  named.
-- *No aspects.* Aspect extraction (an LLM surface) is selected by content
-  type (`aspect_extractor.py:1081`), and an unregistered type gets none. A
-  test pins that `session` stays unregistered.
+**The explicit-only attribute.**
 
-**Site list.** Every site from the grep census (256-research-12), with what
-it needs. "Add" means `session` joins the set with the prose behaviour;
-"Exclude" means the site must drop it; "Leave" means it stays out by
-design; "Read" means Step 4 reads the site and decides by the rule stated.
-
-| Site | What it does | Disposition |
-| --- | --- | --- |
-| `corpus.py:28`, `:139` | content-type tuple and name-grammar alternation | Add |
-| `corpus.py:220` `canonical_embedding_model` | type to Voyage model; raises on unknown | Add (`voyage-context-3`) |
-| `corpus.py:1134` `voyage_model_for_collection` | name prefix to model; unknown becomes `voyage-code-3` | Add (silent fallback) |
-| `corpus.py:1167` default threshold | unknown becomes code's 0.70 | Add (knowledge's value until calibrated) |
-| `corpus.py:1274` | unknown becomes `code` | Add (silent fallback) |
-| `corpus.py:2662` `resolve_corpus` | bare word matched against row content type | Add, through `_CONTENT_TYPES` |
-| `db/http_vector_client.py:1062` | CCE prefix set | Add |
-| `search_engine.py:793`, `:914` | per-type thresholds and prose over-fetch | Add |
-| `scoring.py:509` | quality boost for curated prose | Leave |
-| `topic_route.py:34` | prose types for taxonomy routing | Leave |
-| `mcp/core.py:4305-4316` | `corpus="all"` expansion | Exclude |
-| `mcp/core.py:5391` | `query(content_type=...)` routing | Add |
-| `mcp/core.py` defaults `:3411`, `:3992`, `:4712`, `:4863`, `:4967`, `:5122`; `commands/search_cmd.py:174`, `:331`; `plans/runner.py:682`; `plans/owner_narrowing.py:87` | default corpora | Leave |
-| `catalog/owner_scope.py:26` | corpus prefixes that take an owner scope | Add (search one repo's sessions) |
-| `plans/evidence.py:639` | corpus words a plan step may name | Add |
-| `plans/owner_narrowing.py:81` | project-owned types | Add |
-| `indexer.py:564`, `:612`, `:624`, `:665`; `repo_identity.py:389` | repo-owned type checks and migration types | Read: add where the check means repo-owned; leave the migration list |
-| `collection_shape.py:417` | repo-type default-owner rule | Add |
-| `commands/taxonomy_cmd.py:2894`, `:3490` | taxonomy prefixes | Leave |
-| `commands/catalog_cmds/collections.py:177` | CLI content-type choice | Add |
-| `aspect_extractor.py:1081` | extractor registry by type | Leave unregistered; test pins it |
-| Engine `vectors/EmbeddingProfile.java:65-68`, `EmbedderRouter.java:236-263` | type to model token, profile seeding | Add (prose token) |
-| Engine `db/TenantExport.java:373-374` | content types seeded for export | Add |
-| Engine `db/CatalogRepository.java:4393` | file-routed types | Leave (a session document's identity is its uuid, not a path) |
-| Engine Liquibase `hygiene-002`, `hygiene-004` | one-off name walks, already applied | Leave (an applied changeset is never edited) |
-| `src/nexus/tables/*.toml` | no table lists content-type values | None |
+- *Schema.* One Liquibase changeset adds `explicit_only BOOLEAN NOT NULL
+  DEFAULT false` to `catalog_collections`. It is a property of the
+  collection, not part of the lookup tuple `(content_type, owner_id,
+  embedding_model)`.
+- *Set, and inherited by siblings.* Registration takes `explicit_only`. The
+  engine also sets it on a newly registered collection when a live row with
+  the same `(tenant_id, content_type, owner_id)` has it, so a model sibling
+  (the bge sibling a sensitive session creates, or one a model change
+  mints) can never drop it. Nothing clears it except a CLI route that takes
+  a reason, like RDR-243's lowering route.
+- *Re-asserted.* Every `nx index sessions` run asserts the attribute on the
+  collections it writes. This covers the one path that can lose it before
+  RDR-229 P3.9 lands: a client recovery-bundle import, which registers the
+  collection without its registry row (256-research-18). `nx doctor` reports
+  a `knowledge` collection owned by `agent-sessions` without the attribute.
+- *Read.* The client row cache (`mcp_infra.py:985-996`) gains the key. The
+  readers that skip a collection with it: bare-corpus fan-out in
+  `resolve_corpus` stage 2 (`corpus.py:2662`), which also serves the
+  default corpora and the `corpus="all"` expansion (`mcp/core.py:4305-4316`);
+  the MCP fan-out listing (`mcp_infra.get_live_collection_names`,
+  `mcp_infra.py:1249`); the Knowledge Map (`nexus.context:generate_context_l1`
+  and `hooks/subagent_start:_knowledge_map_section`, the targets of the
+  Knowledge Map row of `llm-surfaces.toml`); and automatic taxonomy
+  discovery and labelling (`commands/taxonomy_cmd.py`
+  `discover_for_collection` and `_generate_labels_batch`). Naming the
+  collection, or the corpus `knowledge__agent-sessions`, searches it. A lint
+  test in the style of `tests/test_bc7ps_routing_uses_live_listing.py` pins
+  that every fan-out site reads the attribute.
+- *Ordering against RDR-229.* None needed for meaning: the attribute is
+  read from the row, never from the name, so P3.6's label rule and P3.8's
+  minted labels leave it unchanged (256-research-18). Three code sites are
+  shared with P3 work: the row-cache key list, `register_collection`
+  (`catalog/http_catalog_client.py:3685`), which P3.8 rewrites to return
+  the row, and the tenant export (`TenantExport.java:355`). Whichever change
+  lands second carries the attribute; Step 4 checks each against develop
+  when it starts. P3.9 should carry the attribute in the recovery bundle's
+  registry row; until it does, the re-assertion above covers imports.
 
 **Catalog and manifest.**
 
 - Document identity is the session uuid. `source_uri` is
   `claude-session:<session-uuid>` (scheme name provisional; inferred, not
-  read, whether the catalog accepts an unregistered scheme). The catalog
-  document's own `content_type` is `session`. The title is the session's
-  `custom-title` or `agent-name` record when present, else the first typed
-  prompt cut to 80 characters.
-- Document meta: host name, project directory, transcript path, file size
-  and mtime at the last run, decoder and renderer versions, scanner version,
-  record and chunk counts.
+  read, whether the catalog accepts an unregistered scheme). The title is
+  the session's `custom-title` or `agent-name` record when present, else
+  the first typed prompt cut to 80 characters.
+- Document meta: host name, project directory, repository owner tumbler
+  when there is one, transcript path, file size and mtime at the last run,
+  decoder, renderer and scanner versions, record and chunk counts.
 - Each manifest row sets `line_start` and `line_end` to the JSONL line
   numbers (1-based, inclusive) of the first and last record in the chunk.
 
@@ -507,9 +485,9 @@ provider format is a one-line plugin and a test. detect-secrets caches its
 plugin mapping, so the plugins are configured before its first use in the
 process (256-research-17). The verification filter is never configured, so
 no candidate is sent anywhere, and a test runs the scanner with sockets
-blocked. The redactor is `redact(text) -> (text, findings)`; a
-chunk it cannot process is not written, and the run reports it. The choice
-and its trade-offs are argued under Alternatives (Alternative 5).
+blocked. The redactor is `redact(text) -> (text, findings)`; a chunk it
+cannot process is not written, and the run reports it. The choice and its
+trade-offs are argued under Alternatives (Alternative 5).
 
 **Sensitivity for flagged sessions.** A session whose narrative has any
 scanner finding is written with `sensitive=true`; registration can only
@@ -517,10 +495,11 @@ raise the flag (RDR-243 Approach item 1). Its chunks are still redacted.
 Under RDR-243 the session is then withheld from MCP read tools and from
 `nx search` run inside Claude Code, kept from the reranker, and excluded
 from LLM surfaces; a person at a terminal sees it with a `[sensitive]`
-badge. In local mode it routes to the bge sibling of its collection, as
-RDR-243 Q3 does for every sensitive document. In managed mode, where no bge
-sibling exists, the install acknowledgement below is the disclosure RDR-243
-Q3 requires (`--ack-external-embedder`), and its wording says so.
+badge. In local mode it routes to the bge sibling of the subject, as
+RDR-243 Q3 does for every sensitive document, and that sibling inherits
+the explicit-only attribute. In managed mode, where no bge sibling exists,
+the install acknowledgement below is the disclosure RDR-243 Q3 requires
+(`--ack-external-embedder`), and its wording says so.
 
 **Acknowledgement.** Indexing refuses until the install records an
 acknowledgement. The first run prints this text, with the bracketed parts
@@ -574,11 +553,12 @@ ceiling (4,280 of 4,442 lines in `scripts/file-size-exceptions.txt`).
 | Proposed Component | Existing Module | Decision |
 | --- | --- | --- |
 | Project listing, line framing | `src/nexus/lua_runtime/transcripts_read.py` | Reuse: promote `_files`, `_lines` to public names. |
-| Session-to-repository membership | `src/nexus/lua_runtime/transcripts_projects.py` | Reuse. |
+| Session-to-repository membership | `src/nexus/lua_runtime/transcripts_projects.py` | Reuse, for the repository in document meta. |
 | Active-path decoder | none (256-research-2) | New. |
 | Chunk write, embed skip, manifest | `src/nexus/doc_indexer.py` write path | Reuse. |
 | Line-range positions | `catalog_document_chunks.line_start/line_end` | Reuse; no schema change. |
-| Collection lookup and registration by attributes | RDR-229 P3.8 | Reuse once landed. |
+| Collection registration and row cache | `register_collection`, `mcp_infra` row cache | Extend with `explicit_only`. |
+| Fan-out skip | lifecycle-state filter in `corpus.py` | Extend with the attribute. |
 | Orphan cleanup when a tail chunk changes | engine orphan reaper (anti-join on manifest) | Reuse. |
 | Sensitive stamping and routing | RDR-243 write path (`sensitive_write.py`) | Reuse. |
 | Redaction | `src/nexus/redact.py` | Keep for its log use; detect-secrets beside it. |
@@ -593,12 +573,13 @@ narrative is about 1 percent of the bytes, so volume is bounded. The scope
 also follows the secrets: every secret-shaped string found sat in tool
 inputs or results, which are never embedded.
 
-The fifth content type is Sam's choice (Q2). It keeps sessions out of
-default searches by what they are, not by a flag each collection must
-carry, and it gives each repository its own session collection, owned by
-the repository like its code and docs. Registering after RDR-229 P3.8 means
-the type needs vocabulary and routing entries only, not a second rewrite of
-the name grammar P3 is replacing.
+A knowledge subject with one attribute is Sam's choice (Q2), made after the
+census showed what a fifth content type costs (Alternative 3). The subject
+needs no change to the content-type vocabulary, embeds like every other
+knowledge collection, and uses the owner rule that already applies to
+subjects. The attribute is read from the row, so it holds whatever RDR-229
+does to names. Sibling inheritance and the writer's re-assertion close the
+two ways a collection of the subject could appear without it.
 
 Line ranges in the manifest, checked by re-rendering against the chash,
 give expansion a stamp that survives appends, since only the tail chunk's
@@ -623,8 +604,8 @@ the summaries, expand to records.
 - A summary can be wrong, and RDR-207 found a wrong record worse than none.
 
 **Decision**: deferred by Sam on 2026-11-21 ("no summaries for now"; T2
-`nexus/sam-ruling-rdr256-session-corpus-2026-11-21`). Not in this RDR's
-plan. Any summary work needs a later decision from Sam.
+`nexus/sam-ruling-rdr256-session-corpus-2026-11-21`, Q5). Not in this
+RDR's plan. Any summary work needs a later decision from Sam.
 
 ### Alternative 2: Index everything, tool results included
 
@@ -637,7 +618,7 @@ plan. Any summary work needs a later decision from Sam.
 **Cons**:
 
 - About eight times the embedded volume (256-research-3).
-- Every secret-shaped string found is in this part (256-research-5).
+- Every secret-shaped string found is in this part (256-research-5, -16).
 - Duplicates the code and docs corpora, since most tool results are file
   reads.
 
@@ -645,24 +626,31 @@ plan. Any summary work needs a later decision from Sam.
 returns. Sam's Q1 answer also states that tool inputs and results are never
 embedded.
 
-### Alternative 3: A knowledge subject with an explicit-only collection attribute
+### Alternative 3: A fifth content type, `session`, owned per repository
 
-**Description**: One `knowledge` collection, subject `agent-sessions`,
-owned by its subject, kept out of default searches by a new nullable
-collection attribute that fan-out, the Knowledge Map and taxonomy honour.
+**Description**: A new collection content type beside `code`, `docs`,
+`rdr` and `knowledge`; one `session` collection per repository, owned by
+the repository's tumbler, with a curator for sessions outside any
+repository; kept out of default searches as a property of the type.
 
 **Pros**:
 
-- No new content type; one Liquibase column.
+- Exclusion by construction, with no per-collection flag.
+- Per-repository ownership like code and docs.
 
 **Cons**:
 
-- Exclusion is a per-collection flag that every new collection must carry
-  and every fan-out site must remember.
-- No per-repository ownership.
+- The census found about thirty client and engine sites that enumerate
+  content types, four of which silently treat an unknown type as `code`, so
+  a missed site would embed or score sessions as code with no error
+  (256-research-12).
+- It collides with RDR-229 Phase 3: P3.6 and P3.8 are rewriting the name
+  grammar and every render-for-new-collection path the type would need, so
+  the type would have to wait for P3.8 (256-research-13).
 
-**Decision**: rejected by Sam on 2026-11-21 in favour of the fifth content
-type (Q2). This was the first draft's recommendation.
+**Decision**: chosen by Sam first, then rejected by him on 2026-11-21 in
+favour of the knowledge subject, on that census and that collision (T2
+`nexus/sam-ruling-rdr256-session-corpus-2026-11-21`, Q2).
 
 ### Alternative 4: The `sensitive` flag as the corpus-wide protection
 
@@ -678,7 +666,7 @@ sessions the scanner flags, and exclusion for sessions the operator names.
 
 ### Alternative 5: Other secret scanners
 
-All figures from 256-research-14 and -15.
+All figures from 256-research-14, -15 and -17.
 
 - **gitleaks** (MIT, about 150 rules, active): a Go binary with no Python
   package. Shipping it means a per-platform binary inside a Python wheel,
@@ -699,10 +687,11 @@ All figures from 256-research-14 and -15.
 
 **Why detect-secrets.** It is a Python library that runs in-process and
 offline, its Apache-2.0 licence can be combined into an AGPL-3.0 work, its
-two dependencies are already locked, and it covers the most common provider
-formats. The cost is maintenance: its last release is from 2024-05-06,
-though the repository was still being pushed to in 2026. The exact pin and
-the scanner version on each document make an upgrade a visible event.
+two dependencies are already locked, it covers the most common provider
+formats, and it takes custom plugins for the formats it lacks. The cost is
+maintenance: its last release is from 2024-05-06, though the repository
+was still being pushed to in 2026. The exact pin and the scanner version on
+each document make an upgrade a visible event.
 
 **False positives against misses.** With its entropy plugins on, the
 scanner flagged 99.44 percent of assistant-text lines (chashes, commit
@@ -733,8 +722,8 @@ sessions before the first managed-mode run.
 - **A dchash span per chunk**: stale at the next append (Gap 2).
 - **A push server, revisions, quotas (diderot's ingest protocol)**: files
   are local; one user.
-- **Rendering `session__...` names before RDR-229 P3.8**: edits the
-  grammar and render paths P3.6 and P3.8 are rewriting (256-research-13).
+- **A non-live lifecycle state for the subject**: a non-live collection is
+  excluded even when named (256-research-9).
 
 ## Trade-offs
 
@@ -743,27 +732,29 @@ sessions before the first managed-mode run.
 - Positive: past sessions answer questions in seconds; a compacted session
   can find what it said before compaction.
 - Positive: no LLM call and no new model surface beyond the embedder.
-- Positive: each repository's sessions are scoped and owned like its code.
+- Positive: no change to the content-type vocabulary, and no wait on
+  RDR-229.
 - Negative: on a managed install, redacted narrative goes to Voyage and the
   tenant, which is the reason for the acknowledgement.
 - Negative: until the archive RDR lands, verbatim expansion lasts only as
   long as Claude Code keeps the file, about 30 days by default.
-- Negative: a fifth content type adds a row to about thirty client and
-  engine sites, and the content-type step waits for RDR-229 P3.8.
+- Negative: one subject holds every repository's sessions; scoping to one
+  repository is a metadata filter, not a collection.
 - Negative: the decoder depends on an undocumented file format.
 
 ### Risks and Mitigations
 
 - **Risk**: a secret the scanner does not know reaches the embedder.
   **Mitigation**: tool inputs and results, where every measured hit sat,
-  are never embedded; nexus plugins for the formats this project uses;
-  `nx sessions forget`; the canary test plants tokens in narrative.
-- **Risk**: a missed site in the census treats sessions as code (four sites
-  fall back silently). **Mitigation**: a test calls each fallback site with
-  a `session` collection and asserts the prose result; the lint pins the
-  explicit-only rule.
-- **Risk**: RDR-229 P3 slips, holding Step 4. **Mitigation**: Steps 1 to 3
-  do not touch the registry or the name paths and proceed in parallel.
+  are never embedded; four nexus plugins for the formats this project
+  uses; `nx sessions forget`; the canary test plants tokens in narrative.
+- **Risk**: a collection of the subject without the attribute leaks
+  sessions into every default search. **Mitigation**: sibling inheritance at
+  registration, re-assertion on every indexing run, a doctor check, and the
+  fan-out lint.
+- **Risk**: RDR-229 work and this RDR edit the same three sites.
+  **Mitigation**: whichever lands second carries the attribute; Step 4
+  starts by checking each site on develop.
 - **Risk**: detect-secrets stops being maintained. **Mitigation**: exact
   pin; bc-detect-secrets offers the same API.
 - **Risk**: Claude Code changes the transcript format.
@@ -782,6 +773,8 @@ sessions before the first managed-mode run.
   work.
 - The acknowledged endpoints no longer match the install: every run refuses
   and names both lists.
+- The attribute is missing on a collection of the subject: `nx doctor`
+  names it, and the next indexing run sets it.
 - Expansion cannot verify: it says why (`changed`, `source-gone`,
   `other-host`) and returns the chunk text, never silently wrong records.
 - A rewind drops indexed records from the active path: the next run's
@@ -806,8 +799,6 @@ was reasoned before.
 
 - [ ] A2 verified at Step 1, A3 at the Minimum Viable Validation, A5 at
   Step 4.
-- [ ] RDR-229 P3.8 (and P3.6, which it waits for) landed on develop before
-  Step 4 starts.
 
 ### Minimum Viable Validation
 
@@ -819,9 +810,10 @@ from the right session in the top five, and the expand of that chunk must
 verify (`ok`). The check measures retrieval only; its result triggers no
 further feature. Then append a copy of one transcript with new records and
 re-run: the engine's embed count equals the number of new or changed
-chunks. A fixture transcript with planted tokens in assistant text and in a
-subagent report yields no token in any written chunk, expand output, or
-outbound payload, and that session is stamped sensitive.
+chunks. A bare `search(corpus="knowledge")` over the same engine returns no
+session chunk. A fixture transcript with planted tokens in assistant text
+and in a subagent report yields no token in any written chunk, expand
+output, or outbound payload, and that session is stamped sensitive.
 
 ### Phase 1: Code Implementation
 
@@ -830,14 +822,13 @@ outbound payload, and that session is stamped sensitive.
 Tests first, on fixtures built from real transcripts with their text
 replaced: active path with the missing-logical-parent fallback, rewinds,
 duplicate uuids, sidechain lines, oversized lines, and a resumed session
-for A1. Verify A2 on three compacted sessions. Independent of RDR-229.
+for A1. Verify A2 on three compacted sessions.
 
 #### Step 2: Renderer, chunking, chunk-size check
 
 Deterministic rendering and greedy chunking; a test that appending records
 changes only the tail chunk's chash. Measure retrieval at two chunk sizes
 on the validation set and record the chosen size as a research finding.
-Independent of RDR-229.
 
 #### Step 3: Scanner
 
@@ -847,22 +838,24 @@ blocked-socket test; the canary test; flagged-session stamping through the
 RDR-243 write path. Re-run the false-positive count of 256-research-17 over
 the narrative of every project's sessions on Sam's machine, not only
 nexus's, and record it as a research finding before the first managed-mode
-run. Independent of RDR-229.
+run.
 
-#### Step 4: The `session` content type (after RDR-229 P3.8)
+#### Step 4: Explicit-only attribute and the subject
 
-Verify A5 in the engine's registration path. Apply the site list; the
-engine token-map and export changes ship in one engine cut. The lint for
-`EXPLICIT_ONLY_CONTENT_TYPES`, the fallback-site test, the unregistered
-aspect test, the owner rule (repository tumbler or the `sessions`
-curator), and the two `llm-surfaces.toml` rows.
+Verify A5. Check the three sites shared with RDR-229 (row-cache key list,
+`register_collection`, tenant export) on develop and fold in whatever P3
+has landed. The Liquibase changeset, sibling inheritance in the engine's
+registration, the client row-cache key, the fan-out, Knowledge Map and
+taxonomy skips with their lint, the doctor check, and the two
+`llm-surfaces.toml` rows. The engine part ships in an engine cut.
 
 #### Step 5: Commands, acknowledgement and expand
 
-`nx index sessions` with the acknowledgement and its stored block, `nx
-sessions expand` through `TranscriptSource` with `LocalFileSource`,
-`forget` and `list`, with `--dry-run` printing what would be indexed and the
-bytes it would send. Run the Minimum Viable Validation.
+`nx index sessions` with the acknowledgement and its stored block and the
+attribute re-assertion, `nx sessions expand` through `TranscriptSource`
+with `LocalFileSource`, `forget` and `list`, with `--dry-run` printing what
+would be indexed and the bytes it would send. Run the Minimum Viable
+Validation.
 
 ### Phase 2: Operational Activation
 
@@ -891,7 +884,8 @@ MCP read-tool output rules of RDR-243.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| `session` collections (one per repository, one for the `sessions` curator) | In scope (`nx sessions list`, `nx collection list`) | In scope (`list` shows per-session counts, versions, last run) | In scope (`nx sessions forget`; a collection by the usual collection delete) | In scope (`expand` statuses; `list --check` re-verifies a sample) | Existing tenant backup (RDR-248) covers chunks and catalog rows; verbatim records wait for the archive RDR |
+| `agent-sessions` collections (one per embedding model) | In scope (`nx sessions list`, `nx collection list`) | In scope (`list` shows per-session counts, versions, last run; `nx collection list` shows the attribute) | In scope (`nx sessions forget`; a collection by the usual collection delete) | In scope (`expand` statuses; `list --check` re-verifies a sample; doctor checks the attribute) | Tenant backup (RDR-248) carries rows and chunks; a client bundle carries the attribute from RDR-229 P3.9, re-asserted until then; verbatim records wait for the archive RDR |
+| `explicit_only` column | In scope (`nx collection list`) | N/A | In scope (CLI clear with a reason) | In scope (doctor) | With the collection row |
 | `sessions.ack`, `sessions.exclude` config | In scope (`nx config get`) | In scope (the ack block names its endpoints and time) | In scope (unset; indexing then refuses) | In scope (every run compares endpoints) | N/A |
 
 ### New Dependencies
@@ -918,14 +912,17 @@ both already locked; 256-research-14). No other.
 - **Scenario**: install without the acknowledgement, and an install whose
   endpoints changed after it. **Verify**: the command prints the wording
   and writes nothing; the second refuses naming both endpoint lists.
-- **Scenario**: bare `search(corpus="knowledge,code,docs")`, `corpus="all"`
-  and `nx search` with no corpus. **Verify**: no hit from a `session`
-  collection; `corpus="session"` returns hits.
-- **Scenario**: each silent-fallback site called with a `session`
-  collection. **Verify**: prose model, threshold and type, never `code`.
-- **Scenario**: a session in a worktree of a registered repository, and one
-  in a directory with no repository. **Verify**: the first lands in the
-  repository's collection, the second in the `sessions` curator's.
+- **Scenario**: bare `search(corpus="knowledge")`, `corpus="all"`, the
+  default corpus, the Knowledge Map and a taxonomy discover over all
+  collections. **Verify**: no session chunk or topic; naming the collection
+  returns hits.
+- **Scenario**: a sensitive session in local mode creates the bge sibling.
+  **Verify**: the sibling has the attribute without the writer setting it.
+- **Scenario**: the subject's collection registered without the attribute,
+  as a pre-P3.9 bundle import does. **Verify**: doctor names it; the next
+  indexing run sets it.
+- **Scenario**: tenant backup and restore. **Verify**: the attribute
+  survives.
 - **Scenario**: expand after the transcript is deleted, after it is altered,
   and on another host. **Verify**: `source-gone`, `changed`, `other-host`,
   each with the chunk text.
@@ -945,9 +942,9 @@ both already locked; 256-research-14). No other.
    **Expected**: 8 of 12 found in the top five, each expand `ok`.
 2. **Scenario**: the canary over every registered session surface.
    **Expected**: zero planted tokens outbound.
-3. **Scenario**: the explicit-only lint and the fallback-site test.
-   **Expected**: every enumerating site drops `session`; every fallback
-   site maps it to prose.
+3. **Scenario**: the explicit-only lint.
+   **Expected**: every fan-out, Knowledge Map and taxonomy site reads the
+   attribute.
 
 ### Performance Expectations
 
@@ -955,9 +952,8 @@ Decoding a changed file costs about one second per 45 MB (256-research-3);
 the largest nexus transcript, about 260 MB, re-decodes in about six seconds
 (inferred from that rate). The chosen scanner combination took 8.1 s for
 the 42,456 assistant-text lines of five sessions (256-research-17), so it,
-not the decode,
-sets the pace of a first backfill (inferred; the narrative of all 137
-sessions is roughly 110 MB by the 20-session rate).
+not the decode, sets the pace of a first backfill (inferred; the narrative
+of all 137 sessions is roughly 110 MB by the 20-session rate).
 
 ## Finalization Gate
 
@@ -968,10 +964,11 @@ the project's privacy tool, yet the corpus as a whole is not flagged; the
 flag withholds documents from agents, who are the corpus's readers, so the
 design protects by scope, redaction and acknowledgement, and keeps the flag
 for sessions the scanner flags. And the research memo proposed the dchash
-span, diderot's active-path rule and a knowledge collection; the findings
-and Sam's Q2 ruling replace all three. A sequencing tension remains with
-RDR-229 Phase 3, resolved by holding Step 4 until P3.8 lands. No
-contradiction remains between the findings and the proposed solution.
+span and diderot's active-path rule; the findings show both fail on real
+transcripts (256-research-4, -10), so the design departs from the memo
+there. RDR-229 Phase 3 shares three code sites with Step 4 but no meaning,
+so it imposes no order. No contradiction remains between the findings and
+the proposed solution.
 
 ### Assumption Verification
 
@@ -989,17 +986,17 @@ Step 4 before the steps that rely on them.
 | Document write with manifest replace | nexus engine `/v1` via `doc_indexer` | Source Search |
 | Re-embed skip for held chunk text | nexus engine (RDR-181) | Source Search |
 | `line_start`/`line_end` manifest columns | catalog `document_chunks` | Source Search (key table); write path not yet read |
-| Register and find a collection by attributes | nexus engine after RDR-229 P3.8 | Assumed (A5), Step 4 |
+| `explicit_only` in the listing, row cache and export | nexus engine and client | Assumed (A5), Step 4 |
 | `claude-session:` source URI | catalog | Assumed, Step 4 |
-| `scan_line`, `transient_settings`, `RegexBasedDetector` | detect-secrets 1.5.0 | Source Search and Spike |
+| `scan_line`, `transient_settings`, `RegexBasedDetector`, custom-plugin path | detect-secrets 1.5.0 | Source Search and Spike |
 | Transcript record shape | Claude Code (undocumented) | Spike on real files |
 
 ### Scope Verification
 
 The Minimum Viable Validation runs in Phase 1, on a local bge engine, as
 part of Step 5's close: the twelve-question retrieval check, the append
-re-run with its embed count, and the planted-token canary. None of it is
-deferred.
+re-run with its embed count, the bare-search exclusion, and the
+planted-token canary. None of it is deferred.
 
 ### Cross-Cutting Concerns
 
@@ -1011,8 +1008,11 @@ deferred.
 - **Deployment model**: off until acknowledged; local bge sends nothing off
   the machine; managed mode sends redacted narrative to Voyage and the
   tenant after the acknowledgement. Expand reads only the host that holds
-  the transcript until the archive RDR lands. The engine token-map change
-  ships in an engine cut, after RDR-229 P3.8's.
+  the transcript until the archive RDR lands. The Liquibase column and the
+  sibling rule ship in an engine cut; a client that predates them ignores
+  the column, and an engine that predates them leaves the subject in
+  default searches, so the client refuses to index sessions against an
+  engine without the column.
 - **IDE compatibility**: N/A.
 - **Incremental adoption**: per-install acknowledgement, exclusions per
   session and project, `--since` for a partial backfill.
@@ -1027,10 +1027,9 @@ deferred.
 
 ### Proportionality
 
-Phase 1 is one decoder, one renderer, one scanner dependency, one content
-type applied across the site list, and four commands, with no LLM. The site
-list is long because the type is cross-cutting, which is the cost Sam
-accepted with Q2. The alternatives section can shrink at lock time.
+Phase 1 is one decoder, one renderer, one scanner dependency with four
+plugins, one engine column with its readers, and four commands, with no
+LLM. The alternatives section can shrink at lock time.
 
 ## Decisions (Sam)
 
@@ -1040,8 +1039,11 @@ Sam answered the first draft's questions on 2026-11-21 (T2
 1. **Cloud after acknowledgement.** Redacted narrative may go to Voyage and
    the tenant after a one-time acknowledgement that names where it goes;
    tool inputs and results are never embedded.
-2. **Fifth content type**, `session`, owned per repository.
-3. **A Python scanning library**, vetted and pinned: detect-secrets 1.5.0.
+2. **Knowledge subject plus explicit-only attribute.** First answered as a
+   fifth content type, then changed by Sam in the same session after the
+   census and the RDR-229 collision (Alternative 3).
+3. **A Python scanning library**, vetted and pinned: detect-secrets 1.5.0
+   with four nexus plugins.
 4. **A verbatim archive in PostgreSQL**, as its own RDR, next.
 5. **No summaries for now.**
 
@@ -1052,7 +1054,7 @@ No question for Sam remains open in this RDR.
 - T3 `research-diderot-vs-nexus-2026-11-21 (1/2)`, `(2/2)` (collection
   nexus-architecture); T3 `architecture-diderot-overview`
   (distributed-systems).
-- T2 `nexus_rdr/256-research-1` through `-17`;
+- T2 `nexus_rdr/256-research-1` through `-18`;
   `nexus/sam-ruling-rdr229-owner-is-source-2026-11-21`;
   `nexus/sam-ruling-rdr256-session-corpus-2026-11-21`.
 - diderot clone: `docs/session-ingest.md`, `docs/design.md:190-198,
@@ -1062,32 +1064,36 @@ No question for Sam remains open in this RDR.
   `internal/attachments/files/redact.go`.
 - detect-secrets 1.5.0 sdist: `detect_secrets/core/scan.py`,
   `settings.py`, `plugins/base.py`, `filters/common.py`,
-  `core/usage/filters.py`; `docs/plugins.md` (via Context7).
+  `core/usage/filters.py`, `core/plugins/util.py`; `docs/plugins.md` (via
+  Context7).
 - nexus: `src/nexus/lua_runtime/transcripts_read.py`,
   `transcripts_projects.py`, `verbs_transcripts.py`,
   `src/nexus/memory_curate/sessions.py`, `src/nexus/doc_indexer.py`,
-  `src/nexus/corpus.py`, `src/nexus/mcp/core.py`,
+  `src/nexus/corpus.py`, `src/nexus/mcp_infra.py`, `src/nexus/mcp/core.py`,
+  `src/nexus/catalog/http_catalog_client.py`,
   `src/nexus/sensitive_write.py`, `src/nexus/redact.py`,
   `src/nexus/tables/llm-surfaces.toml`,
   `src/nexus/tables/chunk-metadata-keys.toml`, `docs/collections.md`,
   `docs/agents/catalog-t3-split.md`; engine
-  `service/src/main/java/dev/nexus/service/vectors/EmbeddingProfile.java`,
-  `EmbedderRouter.java`, `db/TenantExport.java`, `db/CatalogRepository.java`.
+  `service/src/main/java/dev/nexus/service/db/TenantExport.java`,
+  `vectors/EmbeddingProfile.java`.
 - RDR-103, RDR-131, RDR-171, RDR-204, RDR-207, RDR-229, RDR-240, RDR-243,
   RDR-246.
 
 ## Revision History
 
-- 2026-11-21: drafted (a18cae81d0).
-- 2026-11-21: revised for Sam's decisions. Placement moved from a knowledge
-  subject with an explicit-only attribute (now Alternative 3, rejected by
-  Sam) to a fifth content type `session` owned per repository, with the
-  site census and sequencing after RDR-229 P3.8 (Gap 4 added). Scanner
-  chosen: detect-secrets 1.5.0, with the comparison in Alternative 5. The
-  acknowledgement's wording and storage written out; scanner-flagged
-  sessions stamped sensitive. Expand reads through a `TranscriptSource`
-  interface so the archive RDR can add a source. Summaries removed from the
-  plan (Sam: "no summaries for now"); the validation is a retrieval check
-  only. Research 256-research-12 to -17 added: the Agent-result secret
-  scan (-16) and the measured scanner combination with four nexus plugins
-  (-17).
+- 2026-11-21: drafted.
+- 2026-11-21: revised for Sam's first answers: fifth content
+  type with its census, detect-secrets with four nexus plugins, the
+  acknowledgement's wording and storage, sensitivity for flagged sessions,
+  the `TranscriptSource` interface for the archive RDR, summaries removed
+  from the plan. Research 256-research-12 to -17 added.
+- 2026-11-21: revised for Sam's change to Q2. Placement returns to the
+  knowledge subject `agent-sessions` with an explicit-only collection
+  attribute, owned by its subject; the fifth content type moves to
+  Alternative 3 as rejected by Sam on the census (256-research-12) and the
+  RDR-229 P3.8 collision (256-research-13), and the wait on RDR-229 Phase 3
+  that existed only for it is removed. The attribute's own ordering against
+  RDR-229 was checked (256-research-18): none for meaning, three shared code
+  sites, and a recovery-bundle gap until P3.9, covered by re-assertion.
+  Gap 4 reworded.
