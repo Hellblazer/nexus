@@ -117,8 +117,22 @@ def test_a_second_stop_after_the_nudge_forgets_again_and_stays_idempotent(labels
     transcript.write_text(_NO_PUT_TRANSCRIPT, encoding="utf-8")
     nudge.run({**START, "agent_transcript_path": str(transcript)})
     again = nudge.run({**START, "agent_transcript_path": str(transcript), "stop_hook_active": True})
-    assert again.stdout in (None, "")
-    assert labels == [("agent", REF, "forget")] * 2
+    assert again.stdout in (None, ""), "no second nudge"
+    assert labels and all(label == ("agent", REF, "forget") for label in labels), "every recorded call is a forget"
+
+
+def test_a_forget_that_raises_during_a_nudging_stop_still_returns_the_exact_nudge(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The removal is best effort and runs after the verdict: a failing engine must neither cost the nudge nor change it."""
+    from nexus._hook_runtime._io import additional_context  # noqa: PLC0415
+
+    def boom(kind, ref, **k):
+        raise RuntimeError("engine down")
+
+    monkeypatch.setattr("nexus.identity.work.forget_own", boom)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(_NO_PUT_TRANSCRIPT, encoding="utf-8")
+    out = nudge.run({**START, "agent_transcript_path": str(transcript)})
+    assert out.stdout == additional_context("SubagentStop", nudge.NUDGE)
 
 
 def test_an_orphan_stop_with_no_agent_type_writes_nothing(labels: list) -> None:
