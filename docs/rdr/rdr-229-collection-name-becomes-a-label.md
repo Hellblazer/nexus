@@ -1568,39 +1568,18 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   and `select_config` (`:1024`, `:1039`, `:1041`, `:1073`);
   `scoring.apply_quality_boost`; `search_engine._threshold_for_collection`
   and `_overfetch_multiplier` (`:802`, `:906`);
-  `metadata_schema.chunk_content_type_for_collection` (`:187`); and
+  `metadata_schema.chunk_content_type_for_collection` (`:187`);
+  `catalog/manifest_backfill.py:865`; `commands/taxonomy_cmd.py:95`; and
   the `note_tags_array` rung. `exporter.import_collection` reads through its
-  `db`'s own row resolver. A router that writes, or reads for a write, takes
-  item 1's three outcomes through one helper, `corpus.routing_content_type`:
-  a Row answers with its `content_type`; NoRow (after one cache re-read,
-  bounded to one extra listing per interval) and Unreadable answer with the
-  candidate name's content type (`corpus.candidate_content_type`, the one
-  parse, which P2.2 points at `legacy_names`), one mint entry per caller, all
-  empty at P3.8. A prefix-free label with no row derives nothing and stays
-  unrouted until P3.8's writer uses the registering call's row. The
-  `note_tags_array` rung reads strictly, so a failed listing is not "no
-  strings". A read-only router that sees only a search hit's collection
-  (`scoring._is_code_collection`, `scoring.apply_quality_boost`) reads the
-  row alone: a hit's collection holds chunks, which a row always backs (T2
-  `229-research-36`), so its NoRow is a stale cache and answers "not that
-  type" until the next refresh. `topic_route.is_prose`, which sees the
-  request's collections, takes the NoRow fallback.
+  `db`'s own row resolver.
 - *The `taxonomy__` half of `_BYPASS_SCHEMA_PREFIXES`.* P2.5 moves the
   `quarantine-` half to `lifecycle_state`, and in doing so routes all 12
   sites through one helper, `nexus.db.rows.lifecycle.bypasses_canonical_schema`
-  (P2.5's client commit). The client census's routing class went from 36 to
+  (P2.5's client commit). P2.9 therefore moves the `taxonomy__` half at that
+  one site to the row. The client census's routing class went from 36 to
   25 in that commit (`tests/test_collection_name_parse_census.py`). No writer in `src/nexus` creates a
   `taxonomy__` collection, so the half only ever meets legacy names (T2
-  `229-research-39`), and no row attribute says "taxonomy": a legacy name has
-  no row, and hygiene-002 would give it `content_type='unknown'`. So P2.9 does
-  not move it to the row. That helper's `taxonomy__` test,
-  `catalog/manifest_backfill.py`'s `_TAXONOMY_PREFIX` and
-  `commands/taxonomy_cmd.py:95` are migration-source (a name from an older era
-  with no row), read through `legacy_names` once P2.2 lands; the engine's
-  `ChunkKeyPlan.TAXONOMY_PREFIX` is the same class. P4.3 retires them once a
-  census shows no install holds a `taxonomy__` collection. With them
-  reclassified and the other sites moved, P2.9 measures the routing class at
-  zero (client census 240 -> 228 at develop 303a22d29 with P2.8).
+  `229-research-39`).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -1612,16 +1591,10 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
 - *A live collection in the engine's stale-note repair.*
   `NoteUri.isFileRoutedCollection` is called once, at
   `CatalogRepository.java:4399`, with the row's live `physical_collection`,
-  not a URI segment (T2 `229-research-42`). P2.9 deletes it. Its caller,
+  not a URI segment (T2 `229-research-42`). It takes the content type from
+  `CollectionRegistry.require(ctx, tenant, coll)`. Its caller,
   `classifyStaleNotes`, runs inside `tenantScope.withTenant(tenant, ctx ->
-  ...)`, so it holds `ctx` and `tenant`, and reads each candidate
-  collection's `content_type` from `catalog_collections` in that transaction,
-  not through `CollectionRegistry.require`, whose cache an upsert does not
-  evict (nexus-afkjy). Only a `knowledge` row is a rewrite candidate; docs,
-  rdr and code refuse as `file_routed_collection`, a missing row as
-  `unregistered_collection` and any other type as `unproven_content_type`,
-  and the rewrite re-reads the type under a share lock on the collection
-  row, so a retype cannot land between the census and the UPDATE.
+  ...)`, so it holds `ctx` and `tenant`.
 - *A bundle entry from another install.* `catalog/recovery_bundle.py:92,
   121, 212`, and its `is_note_uri` call at `:101`, read a name that may
   have no row here. They are migration sources, not routing: they read the
@@ -2014,7 +1987,7 @@ its acceptance is that test green plus the census pin it lowers.
   sites (23 and `topic_route.is_prose`) and the `taxonomy__` half of the `_BYPASS_SCHEMA_PREFIXES` tests
   (T2 `229-research-39`, listed in item 12; since P2.5 the 12 tests are one
   helper, `nexus.db.rows.lifecycle.bypasses_canonical_schema`, so this half is
-  one site, and it is migration-source, not routing: item 12), the shipped `"code__*"` exclude
+  one site), the shipped `"code__*"` exclude
   default, and the engine's `isFileRoutedCollection`, which tests a live
   collection. The URI-string classifiers (`NoteUri.isNote`, `canonical`,
   `is_note_uri`, `canonical_note_uri`, `_collection_is_file_routed`,
