@@ -2647,6 +2647,7 @@ nexus-ad624
 nexus-aeceu
 nexus-aeceu.1
 nexus-aedaw
+nexus-afkjy
 nexus-afnht
 nexus-afnht.1
 nexus-afudo
