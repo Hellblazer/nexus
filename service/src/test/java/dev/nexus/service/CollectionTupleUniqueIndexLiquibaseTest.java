@@ -51,7 +51,7 @@ class CollectionTupleUniqueIndexLiquibaseTest {
     static final String HELPER_CHANGESET = "collections-001-1";
     static final String INDEX_CHANGESET = "collections-001-2";
     /** A changeset after collections-001 in the master changelog: the walk went past the skip. */
-    private static final String LATER_CHANGESET = "identity-005-1";
+    private static final String LATER_CHANGESET = "grants-nexus-svc-1";
     /** The label marlowe's re-own move registers under (fixed by the design of record). */
     static final String MOVE = "rdr229-reown-repo-stems-from-curator";
 
