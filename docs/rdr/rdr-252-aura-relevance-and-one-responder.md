@@ -693,6 +693,15 @@ second `escalated` row after an
 `escalated` row from the current owner row alone: the leader if live, else the
 first live member, else no one, with `handoffs` one higher, the row's suspects
 and no deadline; an ack from the row's owner on the row's own tip ends it.
+Matching that ack and finding who is live both read the identity service. If
+that read fails and an ack row on the row's own tip, posted at or after the
+row, exists, the red may be acknowledged and cannot be matched without the
+read, so the stamper posts nothing and the deadline timer retries after 30
+seconds, without end; the twelfth consecutive failure of a topic's hand-off, and
+every twelfth after it, raises the error-level event `board_ack_deadline_stuck`
+(a log event; it posts no row). If that read fails and no such ack row exists,
+the owner has not acknowledged, so the `escalated` row is posted at once with
+`owner` null, as for nobody live.
 Unvalidated: the research found no protocol to copy.
 
 **Claims.** Only for work no owner post names, such as rerunning a flaky shard;
@@ -939,6 +948,11 @@ None.
   throws on every trigger; a restart over such a row re-arms from the row; the
   restart census retries only failed topics and visits tenants without a token
   row.
+- A failing liveness read in the fail-safe: a red with an ack row on its tip is
+  retried every 30 seconds and never escalated, and is escalated once the read
+  recovers if the ack does not match; a red with no ack row is escalated with
+  `owner` null; a deadline that is not yet due, or an escalated or absent row,
+  makes no liveness read.
 - A client `out` or `ack` reply with `from=engine` is refused with 403
   `reserved_dim`, the claim kept; the stamper's owner and clear rows have a null
   sender session.
@@ -1156,3 +1170,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-20: `nx ci ack` and the client stamp of `from` on an ack (nexus-igea9; grant 3): `nx group ack-times` resolves an ack's poster by the sender-session stamp through the session index, a delegated child to its parent (read from the child's identity record, and noted as unresolved when the credential cannot read it), and never reads `from` (see the 2026-11-20 line below for the null stamp); it counts red tips and the engine's own owner and clear rows as the engine does, but it is a client read of the identity service, not the engine's count. The engine counts the sender stamp; a hand ack with a session alias stopped the hand-off on red ae619ef56 and only ack-times missed it.
 - 2026-11-20: `nx group ack-times` counts an ack only when its sender-session stamp maps (nexus-igea9; grant 3, wording matched to the engine's confirmed ack half): an ack with a null stamp, or one that maps to no identity (404 `unknown_session`), counts for nobody whatever its `from` says, and is counted as ignored (`ignored_acks` per red in `--json`, one note on standard error, never in `minutes`) when it is on a red tip inside the red; a stamp that is not a session id, a host with no session route to ask, and a failed or refused lookup are noted as unresolved (counts may be low) and never remembered; the ack counts for nobody in each case. The `from` fallback (an identity id as written, a name through `owner_alias`/`next_alias`, then the identity service's name route) is removed, so a hand-typed `from=<owner id>` no longer counts in ack-times where the engine counts nothing.
 - 2026-11-20: wording matched to the reviewed carry-forward engine code (conexus-lru2; grant 3): a tip's verdict reads the `--done` row's `branch_outcome` (the tip's outcome folded with the latest earlier result of a path-filtered workflow such as Service CI) ahead of `outcome`, so a Service CI red a later sha never re-ran keeps the red episode open; a per-sha failure is never overridden, an unrecognised `branch_outcome` is no verdict, and a row without it whose body carries a null, trimmed or not-all-`success` `carried` list has no verdict for a per-sha success (a carried skipped or neutral does not pass; a body with neither `carried` nor `carried_n` reads as before); the stamper logs `board_done_no_verdict` with the reason `carry_failed`, `carried_not_green`, `cancelled` or `unknown`.
+- 2026-11-21: wording matched to the reviewed fail-safe fix (nexus-igea9; grant 3): when the fail-safe's identity read fails, a red with an ack row on its tip is retried every 30 seconds without end (the twelfth consecutive failure of a topic's hand-off and every twelfth after raises the log event `board_ack_deadline_stuck`), and a red with no ack row is escalated at once with `owner` null; Test Plan line added.

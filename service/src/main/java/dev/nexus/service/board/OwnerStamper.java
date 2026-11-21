@@ -138,16 +138,21 @@ public final class OwnerStamper implements OwnerOutHook {
     /**
      * The timer's hand-off: re-decide from fresh rows, and post a hand-off or the escalation when it is due. If the
      * evaluation throws, the fail-safe still escalates a due row from the current owner row alone, so a deterministic
-     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run, a failed liveness read
-     * included, throws, and the timer tries again after its retry delay.
+     * fault in the decision cannot leave a red with no hand-on. A fail-safe that cannot run throws, with the
+     * evaluation's fault kept as suppressed on what it throws, and the timer tries again after its retry delay.
      */
     public void onDeadline(String tenant, String base) {
         try {
             evaluate(tenant, base, OwnerDecision.Trigger.DEADLINE);
         } catch (Throwable t) {
-            log.warn("event=board_owner_deadline_evaluation_failed tenant={} base={} error={}; posting the fail-safe row",
+            try {
+                failSafe(tenant, base);
+            } catch (Throwable f) {
+                f.addSuppressed(t);
+                throw f;
+            }
+            log.warn("event=board_owner_deadline_evaluation_failed tenant={} base={} error={}; the fail-safe ran",
                 tenant, base, t.getMessage(), t);
-            failSafe(tenant, base);
         }
     }
 
@@ -185,21 +190,33 @@ public final class OwnerStamper implements OwnerOutHook {
     }
 
     /**
-     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. A failed liveness read is
-     * not softened to "nobody is live": that would escalate an acknowledged red with no owner and wake every member, so
-     * it throws and the timer retries.
+     * The row {@link OwnerDecision#failSafe} names, posted and armed under the topic lock. Who is live, and whose ack
+     * an ack row is, come from the identity read, which is made only when an escalation is owed. If that read fails and
+     * an ack row sits on the row's own tip, the red may be acknowledged and cannot be matched without the read, so this
+     * throws and the timer retries; escalating then would wake every member over an acknowledged red. If no such ack
+     * row exists, nobody acknowledged, so the escalation is posted at once with no one named, the row the RDR gives
+     * for nobody live.
      */
     private void failSafe(String tenant, String base) {
         scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
-            // A liveness read that fails propagates: without it the row's owner cannot be matched to its ack, and an
-            // acknowledged red must never escalate. The timer retries after its delay; a read that stays down raises its
-            // stuck event.
-            Identities ids = group == null ? new Identities(Map.of(), Map.of())
-                : liveness.read(identities, tenant, List.of(), owners, group);
-            OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, clock.instant());
+            Instant now = clock.instant();
+            Instant due = OwnerDecision.rowDeadline(group, base, owners);
+            Identities ids = new Identities(Map.of(), Map.of());
+            if (due != null && !now.isBefore(due)) {
+                try {
+                    ids = liveness.read(identities, tenant, List.of(), owners, group);
+                } catch (Throwable t) {
+                    if (OwnerDecision.ackOnTip(owners)) {
+                        throw t;
+                    }
+                    log.warn("event=board_owner_failsafe_liveness_failed tenant={} base={} error={}; no ack row on the tip, "
+                        + "escalating with no owner", tenant, base, t.getMessage());
+                }
+            }
+            OwnerDecision.Decision d = OwnerDecision.failSafe(group, ids, owners, base, now);
             if (d.post() != null) {
                 post(ctx, tenant, base, d.post());
                 log.warn("event=board_owner_failsafe_row tenant={} base={} sha={}", tenant, base, d.post().sha());
