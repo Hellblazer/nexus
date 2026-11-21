@@ -86,6 +86,22 @@ class TestTheSharedHelper:
             assert routing_content_type(_NEW_DOCS) == "docs"
         assert [e["log_level"] for e in logs if e["event"] == "routing_content_type_unreadable"] == ["warning"]
 
+    def test_an_unresolvable_service_endpoint_is_unreadable_too(self, rows, monkeypatch):
+        """A box with no resolvable service (Windows CI, a hook before the engine is up) raises
+        ServiceEndpointUnresolvableError, a sibling of the two listing errors, not a subclass: it is
+        the Unreadable outcome too, so a write router derives from the name instead of raising
+        (the aspect enqueue hook raised here on native Windows)."""
+        from nexus.corpus import routing_content_type
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
+
+        def _unresolvable(name: str, *, refresh: bool = True, strict: bool = False) -> dict | None:
+            raise ServiceEndpointUnresolvableError("no endpoint")
+
+        monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _unresolvable)
+        with capture_logs() as logs:
+            assert routing_content_type(_NEW_KNOW) == "knowledge"
+        assert [e["log_level"] for e in logs if e["event"] == "routing_content_type_unreadable"] == ["warning"]
+
     def test_a_prefix_free_label_with_no_row_derives_nothing(self, rows):
         """P3.8's case: no string rule tells a label's type, so it stays unrouted."""
         from nexus.corpus import routing_content_type
