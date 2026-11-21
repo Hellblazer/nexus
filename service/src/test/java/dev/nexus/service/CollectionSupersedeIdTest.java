@@ -17,7 +17,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -39,7 +38,6 @@ class CollectionSupersedeIdTest {
     private static final String T = "ss-id";
     private static final String SVC_ROLE = "svc_ss_id";
     private static final String SVC_PASS = "svc_ss_id_pass";
-    private static final String COLL_CHECK = "catalog_collections_superseded_by_id_check";
 
     PostgreSQLContainer<?> pg;
     com.zaxxer.hikari.HikariDataSource svcDs;
@@ -119,14 +117,6 @@ class CollectionSupersedeIdTest {
         return id(name) != null;
     }
 
-    private static void ddl(DSLContext ctx, String statement) {
-        ctx.connection(c -> {
-            try (Statement st = c.createStatement()) {
-                st.execute(statement);
-            }
-        });
-    }
-
     // ── supersedeCollection ───────────────────────────────────────────────────
 
     @Test
@@ -200,11 +190,10 @@ class CollectionSupersedeIdTest {
         registerWithDocument(a);
         register(b);
         su(ctx -> {
-            ddl(ctx, "ALTER TABLE nexus.catalog_collections DROP CONSTRAINT " + COLL_CHECK);
+            P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, b)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute();
-            ddl(ctx, "ALTER TABLE nexus.catalog_collections ADD CONSTRAINT " + COLL_CHECK
-                + " CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID");
+            P31CheckReplay.restore(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
             return null;
         });
         assertThat(supersededId(a)).as("precondition: unstamped tombstone naming b").isNull();
@@ -256,7 +245,7 @@ class CollectionSupersedeIdTest {
         String a = name("p1-a"), b = name("p1-b");
         register(a, b);
         su(ctx -> {
-            ddl(ctx, "ALTER TABLE nexus.catalog_collections DROP CONSTRAINT " + COLL_CHECK);
+            P31CheckReplay.lift(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, b)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute();
             return null;
@@ -273,8 +262,7 @@ class CollectionSupersedeIdTest {
         su(ctx -> {
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, id(b))
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.NAME.eq(a)).execute();
-            ddl(ctx, "ALTER TABLE nexus.catalog_collections ADD CONSTRAINT " + COLL_CHECK
-                + " CHECK ((superseded_by = '') = (superseded_by_id IS NULL)) NOT VALID");
+            P31CheckReplay.restore(ctx, P31CheckReplay.COLLECTIONS_SUPERSEDED);
             return null;
         });
         assertInvariant("repaired by hand");
