@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -79,8 +80,7 @@ class Hygiene006SequenceCatchupTest {
                     // Explicit ids, the import's shape: the sequence never moved.
                     ctx.insertInto(TOPICS, TOPICS.ID, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
                                    TOPICS.DOC_COUNT, TOPICS.CREATED_AT)
-                       .values(IMPORTED_TOPIC_ID, TENANT, "imported", COLLECTION, 3,
-                               OffsetDateTime.now())
+                       .values(IMPORTED_TOPIC_ID, TENANT, "imported", COLLECTION, 3, OffsetDateTime.now())
                        .execute();
                     ctx.insertInto(MEMORY, MEMORY.ID, MEMORY.TENANT_ID, MEMORY.PROJECT, MEMORY.TITLE,
                                    MEMORY.CONTENT, MEMORY.TIMESTAMP)
@@ -122,8 +122,8 @@ class Hygiene006SequenceCatchupTest {
 
                     // THE symptom: a serial INSERT after the walk no longer collides.
                     Long fresh = ctx.insertInto(TOPICS, TOPICS.TENANT_ID, TOPICS.LABEL, TOPICS.COLLECTION,
-                                                TOPICS.DOC_COUNT, TOPICS.CREATED_AT)
-                        .values(TENANT, "discovered", COLLECTION, 1, OffsetDateTime.now())
+                            TOPICS.COLLECTION_ID, TOPICS.DOC_COUNT, TOPICS.CREATED_AT)
+                        .values(TENANT, "discovered", COLLECTION, CollectionIds.require(ctx, TENANT, COLLECTION), 1, OffsetDateTime.now())
                         .returningResult(TOPICS.ID)
                         .fetchOne(TOPICS.ID);
                     assertThat(fresh)

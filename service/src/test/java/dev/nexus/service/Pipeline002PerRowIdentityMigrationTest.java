@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
@@ -136,6 +137,7 @@ class Pipeline002PerRowIdentityMigrationTest {
     private static final Field<String> CONTENT_HASH = DSL.field(DSL.name("content_hash"), String.class);
     private static final Field<String> PDF_PATH = DSL.field(DSL.name("pdf_path"), String.class);
     private static final Field<String> COLLECTION = DSL.field(DSL.name("collection"), String.class);
+    private static final Field<Long> COLLECTION_ID = DSL.field(DSL.name("collection_id"), Long.class);
     private static final Field<String> STATUS = DSL.field(DSL.name("status"), String.class);
     private static final Field<String> KEYED_BY = DSL.field(DSL.name("keyed_by"), String.class);
     private static final Field<Long> PIPELINE_ID = DSL.field(DSL.name("pipeline_id"), Long.class);
@@ -239,9 +241,12 @@ class Pipeline002PerRowIdentityMigrationTest {
     private static void seedSecondRunOfSharedBytes(Connection su) {
         DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
         OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
-        Long id = ctx.insertInto(PIPELINE, TENANT_ID, CONTENT_HASH, PDF_PATH, COLLECTION, KEYED_BY,
+        // after the walk (vectors-068 applied) a run names a registered collection, and its id beside it
+        PgContainerHelper.insertCollection(ctx, T1, "knowledge__a");
+        Long id = ctx.insertInto(PIPELINE, TENANT_ID, CONTENT_HASH, PDF_PATH, COLLECTION, COLLECTION_ID, KEYED_BY,
                                  STATUS, STARTED_AT, UPDATED_AT)
-                     .values(T1, SHARED, "/t1/second-copy.pdf", "knowledge__a", "document", "running", now, now)
+                     .values(T1, SHARED, "/t1/second-copy.pdf", "knowledge__a", CollectionIds.require(ctx, T1, "knowledge__a"),
+                         "document", "running", now, now)
                      .returning(PIPELINE_ID)
                      .fetchOne(PIPELINE_ID);
         ctx.insertInto(PAGES, TENANT_ID, PIPELINE_ID, PAGE_INDEX, PAGE_TEXT, CREATED_AT)
