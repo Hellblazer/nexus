@@ -14,6 +14,7 @@ import liquibase.Contexts;
 import liquibase.LabelExpression;
 import liquibase.Liquibase;
 import liquibase.changelog.ChangeSet;
+import liquibase.precondition.core.PreconditionContainer;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
@@ -2070,7 +2071,7 @@ class SchemaMigratorIntegrationTest {
                             if (!cs.isAlwaysRun()
                                     && cs.getPreconditions() != null
                                     && cs.getPreconditions().getOnFail()
-                                        == liquibase.precondition.core.PreconditionContainer.FailOption.CONTINUE) {
+                                        == PreconditionContainer.FailOption.CONTINUE) {
                                 continue;
                             }
                             assertThat(cs.isAlwaysRun())
