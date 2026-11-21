@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-p2m1x.17 (RDR-229 P3.1, review-gate fix round B; P2.10 critique S2, bead comment 2026-11-20 19:10): the P2.10 residue repair
+    moves that are not yet complete when P3.1 lands are superseded by replacements that set the collection id in the same UPDATE as source_uri.
+
+    THE PROBLEM. catalog-049-2 registers rdr229-residue-catalog-documents (over nexus.catalog_documents), and its on_complete registers
+    rdr229-residue-document-aspects and rdr229-residue-document-highlights. Each template UPDATEs source_uri of a row whose collection name is set,
+    and on an install that has not been stamped that row's id column is NULL. P3.1's NOT VALID CHECKs (vectors-068, CHECK (NULLIF(name, '') IS NULL)
+    = (id IS NULL)) are evaluated on every updated row version, so the UPDATE raises 23514, DataMoveFailureClassifier makes it permanent, the
+    documents move fails and its on_complete never registers the satellites. The worker takes the oldest registered_at first and catalog-049-2
+    registered before vectors-070's stamps, so the residue moves meet unstamped rows. Reached by every install whose 049 moves are open when P3.1
+    lands: a skip-upgrade, a 0.1.200 install whose moves are blocked or not yet run, and the cloud if the P3.1 cut precedes the RDR-246 activation
+    (nexus-f3yqd.2.23).
+
+    THE FIX. A registered template is never edited (RDR-246, Changing a move: dml_utils keeps the run's SQL), so the repair is a new move that names the
+    old one in supersedes. A superseded move is no longer open, so the worker never runs it and it never reaches its on_complete. The replacement's
+    template is the old one with the id added to the SET: <id> = COALESCE(t.<id>, c.collection_id), where c is the nexus.catalog_collections row the
+    template already joins on (tenant_id and name). A row whose name resolves to no registry row is not matched at all, the stamps' orphan rule
+    (vectors-070): it is left as it was found. Nothing else changes: the match rule, the verification, the sizing and the held-value rule are P2.10's.
+
+    ONE CHANGESET PER REGISTRY STATE, taken when the walk reaches it, and an old move is superseded only while it is not complete and nothing
+    supersedes it (data_moves.supersedes is UNIQUE and a foreign key, datamoves-001):
+      catalog-052-1  the documents move is open or failed: supersede it and register the replacement documents move, whose on_complete registers the replacement
+                     satellites (rdr229-p31-residue-document-aspects and -highlights) under new labels, since a superseded move never runs its own on_complete and
+                     the old satellite labels are not registered yet (they are registered by the move now superseded). On a fresh install this is the state.
+      catalog-052-2  the old aspects satellite is registered and not complete: supersede it. (Its parent is complete, as the satellites exist only then.)
+      catalog-052-3  the old highlights satellite: the same.
+      catalog-052-4  the pause of a superseded documents move is copied onto its replacement (see below).
+      all complete   none of the three registers or supersedes anything. A completed move is left alone: its rows are repaired, and an unstamped one is
+                     vectors-070's work, not this file's.
+    052-1 is a Liquibase precondition (onFail MARK_RAN) over a top-level INSERT, so a registering include is visible to ShippedMoveRegistrations and a fresh walk's
+    registry equals the set of top-level registrations; 052-2 and 052-3 are DO guards, like vectors-070-30, because a fresh walk never registers the satellites
+    and a top-level INSERT would be counted as a boot registration. The checks read the registry as the migrating role (nexus.data_moves is admin only).
+    A failed old move counts as not complete: its fix is exactly a superseding move (RDR-246). A paused old move is superseded too, and a pause travels with it: catalog-052-4 copies paused_at and paused_by of the old documents move onto the replacement
+    (the gate refuses a subselect in a top-level INSERT, and that INSERT must stay INSERT ... VALUES for ShippedMoveRegistrations), so an operator's hold, a down-step window for one, is not lifted by the supersede. The replacement satellites registered by the replacement documents move's
+    on_complete copy the pause of the OLD documents move (that row keeps its paused_at after it is superseded), so they arrive held when the old move was held; resuming the
+    replacement documents move does not resume them, each is resumed by the operator. 052-2 and 052-3 copy the pause of the old satellite they supersede.
+
+    VALIDATE AND ORPHANS. None here: the CHECK of each table is validated by that table's stamp move (vectors-070) as its on_complete, once no
+    row is left to stamp, and an orphan row (a name no registry row carries) is the stamp's to report. The replacements only stop the residue UPDATE
+    from tripping the CHECK. They create no policy: catalog_documents_owner_read, document_aspects_owner_read and document_highlights_owner_read are
+    catalog-050-1 to -3's, and catalog_collections_owner_read (read by every verification) is vectors-065's (one changeset owns each policy).
+
+    THE ORDER. This file is included after vectors-070. The replacements are registered after the stamps, so the worker runs them after the stamps (oldest first);
+    they set the id themselves, so their correctness does not depend on that order (a stamp that is blocked or failed leaves rows unstamped, and the
+    replacement still repairs them without a 23514). The old moves, once superseded, are never run.
+
+    THE SIZING is P2.10's (T2 nexus/engine-cut-0.1.200, a production PITR fork, 2026-11-20), unchanged: chunk_size 1000, sleep_ms 100 for the documents move and 50 for the
+    satellites, statement_timeout_ms 30000. The bound is the completion transaction's own, a re-check budget (vectors-070's arithmetic): the verification
+    run table-wide plus every listed tenant's run plus a fixed cost per run = 2W + tenants x 50 ms, where W is the warm verification of the table
+    (P3.2 fork, production's row counts, T2 229-p32-fork-results-2026-11-20 section 1; the residue verification reads the same rows through the same
+    registry join and, for the documents move, an anti-join on the live source_uri unique index, which a production table with no residue never probes, so
+    it is taken at the stamp's W): catalog_documents 390 ms, document_aspects and document_highlights under 120 ms (taken as 120), 7 tenants at 50 ms.
+    That is 2 x 390 + 7 x 50 = 1130 ms for the documents move, so 30000 is 26.5x the budget and the bound fits (30000 - 780) / 50 = 584 tenants; and
+    2 x 120 + 7 x 50 = 590 ms for each satellite, so 30000 is 50.8x and fits (30000 - 240) / 50 = 595 tenants. The on_complete of the documents move is two INSERTs
+    into nexus.data_moves and the satellites have none, so lock_timeout min(5 s, half the bound) = 5 s is never waited on.
+
+    NUMBERING. catalog-052 is the next free catalog- number (catalog-049 and -050 are P2.10's, catalog-051 is the curator guard). The file is included after
+    vectors-070 in db.changelog-master.xml; it needs vectors-068's id columns only in the replacement templates, which run after the walk.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-052-1" author="nexus-p2m1x.17">
+        <preConditions onFail="MARK_RAN" onError="HALT">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM nexus.data_moves m WHERE m.label = 'rdr229-residue-catalog-documents' AND m.completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = m.label)</sqlCheck>
+        </preConditions>
+        <comment>Supersede the P2.10 documents move rdr229-residue-catalog-documents while it is not complete (open or failed) and nothing supersedes it, and register the replacement rdr229-p31-residue-catalog-documents (RDR-229 P3.1 fix round B, nexus-p2m1x.17): one INSERT into nexus.data_moves. Its template is the old one with physical_collection_id = COALESCE(t.physical_collection_id, c.collection_id) added to the SET, so a row with a name and no id is repaired without the P3.1 CHECK refusing it (23514); its on_complete registers the replacement satellites rdr229-p31-residue-document-aspects and rdr229-p31-residue-document-highlights with changeset_id catalog-052-1, since the superseded move never runs its own. chunk_size 1000, sleep_ms 100, statement_timeout_ms 30000 (P2.10's): re-check budget 1130 ms = 2 x 390 ms + 7 tenants x 50 ms, so 30000 is 26.5x the budget. A completed documents move is left alone: the precondition is not met and the changeset is recorded as run, registering nothing. DATA EFFECT: at most one row added to the global registry nexus.data_moves (paused by catalog-052-4 where the old move was paused); the old move's row is not changed (it is superseded by the new row's supersedes) and no row of any other table changes at boot. The replacement, run by the engine after it serves, sets source_uri and physical_collection_id of the rows the P2.10 rule matches; the rollback unregisters the replacement and the satellites it registered, and does not undo a repair that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, supersedes, changeset_id)
+VALUES ('rdr229-p31-residue-catalog-documents',
+$t$UPDATE <driving_table>
+   SET source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10),
+       physical_collection_id = COALESCE(t.physical_collection_id, c.collection_id)
+  FROM nexus.catalog_collections c
+ WHERE <chunking_clause>
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.physical_collection
+   AND NOT (starts_with(t.physical_collection, 'rdr__') OR starts_with(t.physical_collection, 'docs__') OR starts_with(t.physical_collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.physical_collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents h
+                   WHERE h.tenant_id = t.tenant_id AND h.deleted_at IS NULL AND h.tumbler <> t.tumbler
+                     AND h.source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10))$t$,
+'nexus', 'catalog_documents', 1000, 100, 30000,
+$v$SELECT 1
+  FROM nexus.catalog_documents t
+  JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.physical_collection
+ WHERE (t.tenant_id = $1 OR $1 IS NULL)
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.physical_collection
+   AND NOT (starts_with(t.physical_collection, 'rdr__') OR starts_with(t.physical_collection, 'docs__') OR starts_with(t.physical_collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.physical_collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND NOT EXISTS (SELECT 1 FROM nexus.catalog_documents h
+                   WHERE h.tenant_id = t.tenant_id AND h.deleted_at IS NULL AND h.tumbler <> t.tumbler
+                     AND h.source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10))$v$,
+$oc$
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, paused_at, paused_by, changeset_id)
+VALUES ('rdr229-p31-residue-document-aspects',
+$t$UPDATE <driving_table>
+   SET source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10),
+       collection_id = COALESCE(t.collection_id, c.collection_id)
+  FROM nexus.catalog_collections c, nexus.catalog_documents d
+ WHERE <chunking_clause>
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$t$,
+'nexus', 'document_aspects', 1000, 50, 30000,
+$v$SELECT 1
+  FROM nexus.document_aspects t
+  JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.collection
+  JOIN nexus.catalog_documents d ON d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+ WHERE (t.tenant_id = $1 OR $1 IS NULL)
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$v$,
+NULL,
+(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
+(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
+'catalog-052-1'),
+       ('rdr229-p31-residue-document-highlights',
+$t$UPDATE <driving_table>
+   SET source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10),
+       collection_id = COALESCE(t.collection_id, c.collection_id)
+  FROM nexus.catalog_collections c, nexus.catalog_documents d
+ WHERE <chunking_clause>
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$t$,
+'nexus', 'document_highlights', 1000, 50, 30000,
+$v$SELECT 1
+  FROM nexus.document_highlights t
+  JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.collection
+  JOIN nexus.catalog_documents d ON d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+ WHERE (t.tenant_id = $1 OR $1 IS NULL)
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$v$,
+NULL,
+(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
+(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-catalog-documents'),
+'catalog-052-1')
+$oc$,
+'rdr229-residue-catalog-documents',
+'catalog-052-1');
+]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label IN ('rdr229-p31-residue-document-highlights', 'rdr229-p31-residue-document-aspects', 'rdr229-p31-residue-catalog-documents')</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-052-2" author="nexus-p2m1x.17">
+        <comment>Supersede the P2.10 satellite move rdr229-residue-document-aspects while it is registered, not complete (open or failed) and not superseded, and register the replacement rdr229-p31-residue-document-aspects (RDR-229 P3.1 fix round B, nexus-p2m1x.17): one INSERT into nexus.data_moves, inside a DO guard that registers nothing when the old move is absent (the documents move is open, so its satellites are not registered yet; catalog-052-1 handles that state) or complete. The template is the old one with collection_id = COALESCE(t.collection_id, c.collection_id) added to the SET, so a row with a name and no id is repaired without the P3.1 CHECK refusing it (23514). chunk_size 1000, sleep_ms 50, statement_timeout_ms 30000 (P2.10's): re-check budget 590 ms = 2 x 120 ms + 7 tenants x 50 ms, so 30000 is 50.8x the budget. DATA EFFECT: at most one row added to the global registry nexus.data_moves (paused where the old move was paused); no existing row of any table changes at boot. The replacement, run by the engine after it serves, sets source_uri and collection_id of the rows the P2.10 rule matches; the rollback unregisters it and does not undo a repair that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $s$
+BEGIN
+    IF EXISTS (SELECT 1 FROM nexus.data_moves m WHERE m.label = 'rdr229-residue-document-aspects' AND m.completed_at IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = 'rdr229-residue-document-aspects') THEN
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, supersedes, paused_at, paused_by, changeset_id)
+VALUES ('rdr229-p31-residue-document-aspects',
+$t$UPDATE <driving_table>
+   SET source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10),
+       collection_id = COALESCE(t.collection_id, c.collection_id)
+  FROM nexus.catalog_collections c, nexus.catalog_documents d
+ WHERE <chunking_clause>
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$t$,
+'nexus', 'document_aspects', 1000, 50, 30000,
+$v$SELECT 1
+  FROM nexus.document_aspects t
+  JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.collection
+  JOIN nexus.catalog_documents d ON d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+ WHERE (t.tenant_id = $1 OR $1 IS NULL)
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$v$,
+NULL,
+'rdr229-residue-document-aspects',
+(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-document-aspects'),
+(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-document-aspects'),
+'catalog-052-2');
+    END IF;
+END
+$s$;
+]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-p31-residue-document-aspects'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-052-3" author="nexus-p2m1x.17">
+        <comment>Supersede the P2.10 satellite move rdr229-residue-document-highlights while it is registered, not complete (open or failed) and not superseded, and register the replacement rdr229-p31-residue-document-highlights (RDR-229 P3.1 fix round B, nexus-p2m1x.17): one INSERT into nexus.data_moves, inside a DO guard that registers nothing when the old move is absent (the documents move is open, so its satellites are not registered yet; catalog-052-1 handles that state) or complete. The template is the old one with collection_id = COALESCE(t.collection_id, c.collection_id) added to the SET, so a row with a name and no id is repaired without the P3.1 CHECK refusing it (23514). chunk_size 1000, sleep_ms 50, statement_timeout_ms 30000 (P2.10's): re-check budget 590 ms = 2 x 120 ms + 7 tenants x 50 ms, so 30000 is 50.8x the budget. DATA EFFECT: at most one row added to the global registry nexus.data_moves (paused where the old move was paused); no existing row of any table changes at boot. The replacement, run by the engine after it serves, sets source_uri and collection_id of the rows the P2.10 rule matches; the rollback unregisters it and does not undo a repair that ran.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $s$
+BEGIN
+    IF EXISTS (SELECT 1 FROM nexus.data_moves m WHERE m.label = 'rdr229-residue-document-highlights' AND m.completed_at IS NULL)
+       AND NOT EXISTS (SELECT 1 FROM nexus.data_moves s WHERE s.supersedes = 'rdr229-residue-document-highlights') THEN
+INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, chunk_size, sleep_ms,
+                              statement_timeout_ms, verification, on_complete, supersedes, paused_at, paused_by, changeset_id)
+VALUES ('rdr229-p31-residue-document-highlights',
+$t$UPDATE <driving_table>
+   SET source_uri = 'chroma://' || c.content_type || '__' || substr(t.source_uri, 10),
+       collection_id = COALESCE(t.collection_id, c.collection_id)
+  FROM nexus.catalog_collections c, nexus.catalog_documents d
+ WHERE <chunking_clause>
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$t$,
+'nexus', 'document_highlights', 1000, 50, 30000,
+$v$SELECT 1
+  FROM nexus.document_highlights t
+  JOIN nexus.catalog_collections c ON c.tenant_id = t.tenant_id AND c.name = t.collection
+  JOIN nexus.catalog_documents d ON d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+ WHERE (t.tenant_id = $1 OR $1 IS NULL)
+   AND starts_with(t.source_uri, 'chroma://')
+   AND strpos(substr(t.source_uri, 10), '/') > 1
+   AND split_part(substr(t.source_uri, 10), '/', 1) = t.collection
+   AND NOT (starts_with(t.collection, 'rdr__') OR starts_with(t.collection, 'docs__') OR starts_with(t.collection, 'code__'))
+   AND c.tenant_id = t.tenant_id AND c.name = t.collection
+   AND c.content_type IN ('code', 'docs', 'rdr')
+   AND d.tenant_id = t.tenant_id AND d.tumbler = t.doc_id
+   AND starts_with(d.source_uri, 'chroma://' || c.content_type || '__' || t.collection || '/')$v$,
+NULL,
+'rdr229-residue-document-highlights',
+(SELECT o.paused_at FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-document-highlights'),
+(SELECT o.paused_by FROM nexus.data_moves o WHERE o.label = 'rdr229-residue-document-highlights'),
+'catalog-052-3');
+    END IF;
+END
+$s$;
+]]></sql>
+        <rollback>
+            <sql>DELETE FROM nexus.data_moves WHERE label = 'rdr229-p31-residue-document-highlights'</sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="catalog-052-4" author="nexus-p2m1x.17">
+        <comment>Carry the pause of a superseded P2.10 documents move onto its replacement (RDR-229 P3.1 fix round B, nexus-p2m1x.17): when rdr229-p31-residue-catalog-documents supersedes a move that has paused_at set, it gets the same paused_at and paused_by, so a supersede does not lift an operator's hold (a down-step window, for one). It is a changeset of its own because the gate refuses a subselect in the documents INSERT of catalog-052-1 (r1.insert-select), and that INSERT has to stay a top-level INSERT ... VALUES for ShippedMoveRegistrations. It writes the registry row catalog-052-1 just registered and nothing else; with no replacement, or an unpaused old move, it changes no row. data-move-exempt: data_moves: the registry's own columns, not a table that grows with user data. DATA EFFECT: at most one row of the global registry nexus.data_moves, the replacement written by catalog-052-1 in the same walk, has paused_at and paused_by set; no row of any other table changes; reversible: the rollback clears the pause of that row.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+DO $s$
+BEGIN
+    UPDATE nexus.data_moves n
+       SET paused_at = o.paused_at, paused_by = o.paused_by
+      FROM nexus.data_moves o
+     WHERE n.label = 'rdr229-p31-residue-catalog-documents' AND n.supersedes = o.label AND o.paused_at IS NOT NULL;
+END
+$s$;
+]]></sql>
+        <rollback>
+            <sql>UPDATE nexus.data_moves SET paused_at = NULL, paused_by = NULL WHERE label = 'rdr229-p31-residue-catalog-documents'</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
