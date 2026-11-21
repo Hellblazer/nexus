@@ -14,7 +14,12 @@ Rules under test (linda's rulings on the bead, Sam's P3.8 ruling):
   attributes maps to that row (an idempotent re-import). A clash refuses that collection only.
 * A non-live row is skipped, counted and named; the rest imports. It is never registered live.
 * A label with no target row is registered with the TARGET's active model and keeps its label; the summary names
-  the model change.
+  the model change. A conformant-shaped label keeps its old model token; the row's model decides what is
+  written (RDR :2432).
+
+New ``ImportSummary`` fields, named like ``links_refused_span`` (a list of dicts, ``error`` for the why):
+``collections_refused_label_clash``, ``collections_skipped_not_live``, ``collections_changed_model``. ``nx catalog
+import`` prints each only when it is nonzero.
 
 The v2 and legacy-name non-stranding tests stay in ``tests/catalog/test_recovery_bundle.py`` (not grown here).
 """
@@ -116,9 +121,9 @@ def test_a_live_label_with_other_attributes_is_refused_naming_both_and_the_other
 
     summary = _import(client, bundle)
 
-    refused = _by_label(summary.collections_refused, clash)
-    assert len(summary.collections_refused) == 1 and len(refused) == 1, summary.collections_refused
-    reason = refused[0]["reason"]
+    refused = _by_label(summary.collections_refused_label_clash, clash)
+    assert len(summary.collections_refused_label_clash) == 1 and len(refused) == 1, summary.collections_refused_label_clash
+    reason = refused[0]["error"]
     # Both sides, by label and attribute: the bundle's (knowledge, p39-bundle-owner) and the target's (docs, p39-target-owner).
     for needle in (clash, "knowledge", _BUNDLE_OWNER, "docs", _TARGET_OWNER):
         assert needle in reason, (needle, reason)
@@ -157,7 +162,7 @@ def test_the_target_never_adopts_the_source_id_even_where_another_collection_hol
 
     summary = _import(client, bundle)
 
-    assert summary.collections_refused == [] and (summary.docs_imported, summary.docs_failed) == (2, 0), summary
+    assert summary.collections_refused_label_clash == [] and (summary.docs_imported, summary.docs_failed) == (2, 0), summary
     assert _id(held) == held_id                              # the holder keeps its id
     assert _id(y) != held_id and _id(z) != far               # neither imported collection adopted a source id
     reader = make_catalog_reader()
@@ -212,7 +217,7 @@ def test_reimporting_a_bundle_onto_its_own_source_maps_every_collection_and_crea
 
     summary = _import(client, bundle)
 
-    assert summary.collections_refused == [], summary.collections_refused
+    assert summary.collections_refused_label_clash == [], summary.collections_refused_label_clash
     assert (summary.docs_imported, summary.docs_failed, summary.docs_uncertain) == (4, 0, 0), summary.doc_failures
     assert {r["name"]: r["collection_id"] for r in reader.list_collections()} == before   # no row, no new id
     for subject, label in labels.items():
@@ -238,10 +243,10 @@ def test_a_non_live_collection_row_is_skipped_counted_and_named_and_the_rest_imp
 
     summary = _import(client, bundle)
 
-    skipped = _by_label(summary.collections_skipped_non_live, dead)
-    assert len(summary.collections_skipped_non_live) == 1 and len(skipped) == 1, summary.collections_skipped_non_live
+    skipped = _by_label(summary.collections_skipped_not_live, dead)
+    assert len(summary.collections_skipped_not_live) == 1 and len(skipped) == 1, summary.collections_skipped_not_live
     assert "quarantine" in json.dumps(skipped[0]) and skipped[0]["docs_skipped"] == 2
-    assert summary.collections_refused == []                 # skipped is not refused: they are counted apart
+    assert summary.collections_refused_label_clash == []                 # skipped is not refused: they are counted apart
     assert (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
     assert _row(dead) is None                                # never registered, and never registered live
     assert make_catalog_reader().by_source_uri(uri_for(dead, "d1")) is None
@@ -265,11 +270,89 @@ def test_a_source_model_the_target_does_not_use_registers_under_the_active_model
     row = _row(label)
     assert row is not None and row["name"] == label         # the label is kept
     assert row["embedding_model"] == active                  # the target's active model, not the row's
-    changed = _by_label(summary.collections_model_changed, label)
-    assert len(changed) == 1, summary.collections_model_changed
+    changed = _by_label(summary.collections_changed_model, label)
+    assert len(changed) == 1, summary.collections_changed_model
     assert {_VOYAGE, active} <= set(changed[0].values())     # names both models
-    assert summary.collections_refused == [] and (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
+    assert summary.collections_refused_label_clash == [] and (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
     assert make_catalog_reader().by_source_uri(uri_for(label, "m1")) is not None
+
+
+@pytest.mark.integration
+def test_a_conformant_label_whose_token_is_the_source_model_imports_and_writes_the_rows_model(t2_service_env, tmp_path):
+    """The RDR states this rule already (Test Plan, docs/rdr/rdr-229-collection-name-becomes-a-label.md:2432-2434,
+    and P1.4's test at :1965-1966): "a collection whose row's model differs from its name's segment is written to
+    -- Verify: chunk metadata carries the row's model". A bundle label of the old four-segment form keeps its
+    token (item 8, :1475: "Existing collections keep their names as labels"); the row, not the token, decides."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    active = _active_model(client)
+    label = f"knowledge__p39tok__{_VOYAGE}__v1"
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(bundle, [_coll(label, _SRC + 8, owner_id="p39tok", model=_VOYAGE)], [_doc(label, _SRC + 8, "t1")])
+
+    summary = _import(client, bundle)
+
+    assert (summary.docs_imported, summary.docs_failed, summary.docs_uncertain) == (1, 0, 0), summary.doc_failures
+    row = _row(label)
+    assert row is not None and row["name"] == label and row["embedding_model"] == active
+    got = client.get_or_create_collection(label).get(include=["metadatas"], limit=50, sensitivity="include")
+    assert got["ids"] and {(m or {}).get("embedding_model") for m in got["metadatas"]} == {active}
+    assert len(_by_label(summary.collections_changed_model, label)) == 1
+
+
+# ── CLI: each new count prints only when nonzero ─────────────────────────────────────────────────────────────
+
+_NEW_FIELDS = {
+    "collections_refused_label_clash": [{"label": "cli-clash-label", "error": "label is live with other attributes",
+                                          "docs_skipped": 2}],
+    "collections_skipped_not_live": [{"label": "cli-dead-label", "lifecycle_state": "quarantine", "docs_skipped": 3}],
+    "collections_changed_model": [{"label": "cli-model-label", "from_model": "src-model-x", "to_model": "dst-model-y"}],
+}
+
+
+def _invoke_cli_import(tmp_path, monkeypatch, summary):
+    """The seam test of ``tests/test_catalog_export_import_cli.py``: the CLI renders a given ImportSummary."""
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    bundle = tmp_path / "recovery.jsonl"
+    bundle.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": 3}) + "\n")
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: object())
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog_writer", lambda: object())
+    monkeypatch.setattr("nexus.catalog.recovery_bundle.import_bundle", lambda r, w, t, p: summary)
+    monkeypatch.setattr("nexus.db.make_t3", lambda: object())
+    return CliRunner().invoke(main, ["catalog", "import", str(bundle)])
+
+
+def test_the_cli_prints_nothing_for_the_new_counts_when_all_are_zero(tmp_path, monkeypatch):
+    from nexus.catalog.recovery_bundle import ImportSummary
+
+    summary = ImportSummary(docs_imported=3)
+    assert all(getattr(summary, f) == [] for f in _NEW_FIELDS), "each new field defaults to empty"
+
+    result = _invoke_cli_import(tmp_path, monkeypatch, summary)
+
+    assert result.exit_code == 0, result.output
+    # The existing two lines only (the header and the docs/links line), as before format 3.
+    assert len(result.output.strip().splitlines()) == 2, result.output
+
+
+@pytest.mark.parametrize("field", sorted(_NEW_FIELDS))
+def test_the_cli_prints_a_new_count_only_when_it_is_nonzero_and_names_each_entry(tmp_path, monkeypatch, field):
+    from nexus.catalog.recovery_bundle import ImportSummary
+
+    summary = ImportSummary(docs_imported=3, **{field: _NEW_FIELDS[field]})
+
+    out = _invoke_cli_import(tmp_path, monkeypatch, summary).output
+
+    entry = _NEW_FIELDS[field][0]
+    assert entry["label"] in out, out
+    for other, entries in _NEW_FIELDS.items():
+        if other != field:
+            assert entries[0]["label"] not in out, (field, other, out)
+    # The count of this class is printed (one entry, so the number 1) on a line that also names the entry's detail.
+    detail = entry.get("docs_skipped", entry.get("to_model"))
+    assert str(detail) in out, out
 
 
 # ── (6) the version gate ─────────────────────────────────────────────────────────────────────────────────────
