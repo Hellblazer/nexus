@@ -100,11 +100,11 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
     /** The registry row exactly as the walk wrote it, and how many rows the walk left. */
     private static Map<String, Object> registered;
     private static int registeredRowsAtBoot;
-    private static int movesAtBoot;
+    private static java.util.Set<String> labelsAtBoot;
 
     @BeforeAll
     void captureRegistration() {
-        movesAtBoot = ctx().fetchCount(table("nexus", "data_moves"));
+        labelsAtBoot = new java.util.TreeSet<>(ctx().select(LABEL_FIELD).from(table("nexus", "data_moves")).fetch(LABEL_FIELD));
         registeredRowsAtBoot = ctx().fetchCount(table("nexus", "data_moves"), LABEL_FIELD.eq(LABEL));
         Record row = ctx().selectFrom(table("nexus", "data_moves")).where(LABEL_FIELD.eq(LABEL)).fetchOne();
         registered = row == null ? null : new LinkedHashMap<>(row.intoMap());
@@ -250,7 +250,10 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
 
     @Test
     void theMoveIsRegisteredExactlyOnce_withTheParametersRdr246Prescribes() {
-        assertThat(movesAtBoot).as("the walk registers one move and no other").isEqualTo(1);
+        // Every registered move the product changelog ships, by label: a new registration must be added here, so a stray
+        // one still fails this test (vectors-067, RDR-229 owner-is-source, is the second).
+        assertThat(labelsAtBoot).as("the walk registers exactly the shipped moves")
+            .containsExactly(LABEL, "rdr229-reown-repo-stems-from-curator");
         assertThat(registeredRowsAtBoot).isEqualTo(1);
         assertThat(registered.get("label").toString()).doesNotContain("/").isEqualTo(LABEL);
         assertThat(registered).containsEntry("driving_schema", "nexus").containsEntry("driving_table", "catalog_collections")
