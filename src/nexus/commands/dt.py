@@ -1101,6 +1101,12 @@ def index_cmd(
     """
     # nexus-tr1rj.14: no flag means the `pdf.extractor` setting, like `nx index pdf`.
     extractor = get_pdf_extractor() if extractor is None else resolve_extractor(extractor, source="--extractor")
+    if collection is None:
+        # nexus-p2m1x.28: refuse before any DEVONthink record is read, so a mixed batch refuses up front and not after
+        # its PDFs were indexed. Without --collection a markdown record goes to docs__<corpus> (a PDF cannot collide,
+        # but the batch's records are not known yet), so the corpus is checked once here.
+        from nexus.corpus import require_corpus_name  # noqa: PLC0415 — command-local import (nexus.corpus)
+        require_corpus_name(corpus)
     if re_embed and not force:
         raise click.UsageError(
             "--re-embed requires --force -- a record the staleness check "

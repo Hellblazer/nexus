@@ -27,9 +27,11 @@ def require_corpus_name(corpus: str) -> str:
     ``docs__{corpus}`` becomes ``docs__<corpus with _ as ->__<model>__v1``, and a repo whose owner tumbler is
     ``1.20`` has the same name for its docs collection (owner segment ``1-20``). A corpus named ``1-20`` (or
     ``1_20``, which folds to it) builds that name, so the corpus and the repo write into one collection by name.
-    This is the one check every corpus-to-collection entry point calls:
-    ``nexus.corpus.docs_leaf_fallback_collection_name`` (the three ``doc_indexer`` fallbacks, the dry-run preview),
-    the ``--corpus`` options of ``nx index md|pdf``, ``nx dt index|capture`` and ``_resolve_dt_collection``.
+    This is the one check behind every corpus-to-collection path. ``nexus.corpus.docs_leaf_fallback_collection_name``
+    is the one builder of a docs name from a corpus and calls it (the three ``doc_indexer`` fallbacks, the dry-run
+    preview, and ``nx dt``'s default markdown name through ``_resolve_dt_collection``); the CLI front doors call it
+    first, before any work, when no ``--collection`` is given: ``nx index md|pdf``, ``nx dt index`` (before any
+    DEVONthink record is read, so a mixed batch refuses up front) and ``nx dt capture`` for a non-PDF capture.
     """
     segment = corpus.replace("_", "-")
     if _OWNER_SEGMENT_SHAPE.fullmatch(segment):
