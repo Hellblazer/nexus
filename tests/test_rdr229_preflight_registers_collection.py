@@ -34,14 +34,20 @@ def test_the_first_document_of_a_new_collection_registers_the_collection_first(t
         assert cat.get_collection(collection) is not None
 
 
-def test_a_refusal_the_client_raises_before_sending_is_the_runs_error_not_a_registration_failure(
+def test_a_refused_registration_leaves_a_collection_that_already_has_its_row_usable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The collection's registration refuses on the client's own checks (a profile that disagrees with the engine's, a
-    retired name, a voyage intent with no key, a bad argument): nothing reached the engine, and the refusal is what the
-    run reports, not a bare 'catalog registration failed' after the engine's 422 for the unregistered collection."""
+    """The registration is best effort: the client's own checks can refuse it (a profile that disagrees with the
+    engine's, a retired name, a voyage intent with no key) for a collection whose row already exists, and the document
+    still registers, since the engine only needs the row. A real refusal is raised again by the chunk write's own
+    registration, with its own message."""
     from nexus.catalog.write_outcome import PreSendArgumentError
+    from tests._catalog_fixture_ops import register_seed_collections
+
     import nexus.doc_indexer as doc_indexer
+
+    collection = "docs__p31preflightrow__bge-base-en-v15-768__v1"
+    register_seed_collections(collection)
 
     def refuse(*_a: object, **_k: object) -> None:
         raise PreSendArgumentError("the client refused before it sent anything")
@@ -50,8 +56,6 @@ def test_a_refusal_the_client_raises_before_sending_is_the_runs_error_not_a_regi
     note = tmp_path / "second.md"
     note.write_text("# Second\n\nbody\n")
 
-    with pytest.raises(PreSendArgumentError):
-        doc_indexer._register_or_lookup_doc_id(
-            note, "p31preflight", content_type="markdown",
-            physical_collection="docs__p31preflight__bge-base-en-v15-768__v1",
-        )
+    assert doc_indexer._register_or_lookup_doc_id(
+        note, "p31preflight", content_type="markdown", physical_collection=collection,
+    )

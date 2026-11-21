@@ -1104,7 +1104,6 @@ def _register_or_lookup_doc_id(
 
     reader = None
     writer = None
-    registration_refusal: BaseException | None = None
 
     def _flag(tumbler: object) -> None:
         if sensitive:
@@ -1131,21 +1130,20 @@ def _register_or_lookup_doc_id(
         # RDR-229 P3.1 (nexus-p2m1x.17): the engine refuses a document under a collection with no registry row (422
         # ``unregistered_collection``), and ``index_markdown`` registers its document HERE, ahead of
         # ``_index_document``'s own registration (``_register_before_read``). Register the collection first, through
-        # the registrar this writer registers with (a name already cached registers nothing more). A refusal the
-        # client raises before it sends anything (a profile the engine will not register, a retired name, a voyage
-        # intent with no key) is the run's error, as it is at the chunk write; any other failure is left to the
-        # document write below, which meets the same engine and reports it.
+        # the registrar this writer registers with (a name already cached registers nothing more). Best effort: a
+        # collection that already has its row needs nothing from this call, and a refusal (the client's own profile,
+        # retired-name and credential checks, or the engine's) is raised again, with its own message, by the chunk
+        # write's registration, so it is logged here and the document write that follows meets the same engine.
         if physical_collection:
             from nexus.catalog.factory import writer_collection_registrar  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
-            from nexus.catalog.write_outcome import client_side_refusals  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
 
             try:
                 ensure_collection_registered(physical_collection, registrar=writer_collection_registrar(writer))
-            except client_side_refusals() as refusal:
-                registration_refusal = refusal
-                raise
-            except Exception:  # noqa: BLE001 — best effort: the document write that follows meets the same failure and reports it
-                _log.debug("preflight_collection_register_failed", collection=physical_collection, exc_info=True)
+            except Exception as exc:  # noqa: BLE001 — best effort: the document write that follows meets the same failure and reports it
+                _log.warning(
+                    "preflight_collection_register_failed", collection=physical_collection,
+                    error_type=type(exc).__name__, error=str(exc)[:300],
+                )
 
         # Owner resolution mirrors _catalog_pdf_hook / _catalog_markdown_hook
         # so a re-index after the post-hook ran for the same file lands on
@@ -1472,9 +1470,7 @@ def _register_or_lookup_doc_id(
         # nexus-y8qtj / nexus-3o4lt: fail-loud rules propagate — never
         # swallowed by the best-effort catch-all below.
         raise
-    except Exception as exc:  # noqa: BLE001 — best-effort/telemetry path; must not crash caller
-        if exc is registration_refusal:
-            raise  # the collection's own client-side refusal (above): the run's error, not a registration failure
+    except Exception:  # noqa: BLE001 — best-effort/telemetry path; must not crash caller
         # nexus-h9f1w / GH #1350 Fix C: a preflight registration failure meant a
         # new file gets no catalog node (orphan chunks) yet the ingest still
         # reports success. Surface it at warning, not debug, so the operator can
