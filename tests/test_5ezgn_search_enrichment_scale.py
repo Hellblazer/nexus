@@ -23,8 +23,6 @@ import pytest
 from nexus import call_deadline
 from nexus.search_engine import SearchResult, _cap_enrichment_pool, search_cross_corpus
 
-pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
-
 N_COLS = 80
 ROWS_PER_COL = 100
 
@@ -143,7 +141,7 @@ def test_search_cross_corpus_hands_its_own_model_resolver_to_the_cut(cloud_mode,
     def resolver(name: str) -> str | None:
         return "voyage-context-3"
 
-    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections, rows=None: resolver)
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections: resolver)
     seen: list[object] = []
     real = se._cap_enrichment_pool
 
@@ -297,7 +295,7 @@ def _degraded_seen_by_the_cut(monkeypatch, t3: _RerankT3) -> list[frozenset]:
     import nexus.search_engine as se  # noqa: PLC0415 — the module under test, patched by attribute
 
     # One model per collection, so each is its own backend call and only one can report a degrade.
-    monkeypatch.setattr(se, "_collection_model_resolver", lambda _t3, cols, rows=None: lambda name: f"model-{name}")
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda _t3, cols: lambda name: f"model-{name}")
     seen: list[frozenset] = []
     real = se._cap_enrichment_pool
 
@@ -436,7 +434,7 @@ def test_search_cross_corpus_hands_its_own_model_resolver_to_the_topic_grouping(
     taxonomy.get_assignments_for_docs.side_effect = lambda ids: dict.fromkeys(ids, 1)
     taxonomy.get_topic_link_pairs.return_value = {}
     taxonomy.get_labels_for_ids.return_value = {1: "t"}
-    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections, rows=None: resolver)
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections: resolver)
     seen: list[object] = []
     real = se._apply_topic_grouping
 
@@ -494,7 +492,7 @@ def test_search_cross_corpus_hands_its_own_model_resolver_to_the_clustering(monk
             rng = np.random.default_rng(len(ids))
             return rng.normal(size=(len(ids), 4)).astype(np.float32)
 
-    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections, rows=None: resolver)
+    monkeypatch.setattr(se, "_collection_model_resolver", lambda t3, collections: resolver)
     seen: list[object] = []
     real = se._apply_clustering
 

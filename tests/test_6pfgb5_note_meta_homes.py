@@ -22,8 +22,6 @@ from nexus.catalog import note_write
 from nexus.catalog.store_hook import catalog_store_hook_tracked, restore_pre_call_stamp
 from nexus.catalog.tumbler import Tumbler
 
-pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
-
 _KEYS = ("tags", "category", "ttl_days", "source_agent")
 _COLLECTION = "knowledge__6pfgb5__bge-base-en-v15-768__v1"
 _CHASH = "ab" * 32

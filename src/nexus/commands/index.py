@@ -2471,8 +2471,7 @@ def _discover_subset(
 def _collections_from_registry_info(info: dict) -> list[str]:
     """Return the registry's tracked collection names for taxonomy +
     projection post-processing, filtered by
-    ``taxonomy.local_exclude_collections`` (label patterns) and
-    ``taxonomy.local_exclude_content_types`` (the collection's row). Empty list when
+    ``taxonomy.local_exclude_collections``. Empty list when
     *info* is ``{}`` or carries no collection keys.
 
     nexus-cxg9: prefer the conformant ``code_collection`` /
@@ -2490,14 +2489,11 @@ def _collections_from_registry_info(info: dict) -> list[str]:
 
     from nexus.config import is_local_mode, load_config as _load_cfg  # noqa: PLC0415 — deliberate function-local import (read at call time; nexus.config does not import the commands surface, so there is no cycle)
 
-    from nexus.collection_route import content_type_excluded, taxonomy_local_exclude_types  # noqa: PLC0415 — deliberate function-local import (nexus.collection_route reaches mcp_infra)
-
     cfg = _load_cfg()
     exclude_patterns = (
         cfg.get("taxonomy", {}).get("local_exclude_collections", [])
         if is_local_mode() else []
     )
-    exclude_types = taxonomy_local_exclude_types()
     code_col = info.get("code_collection") or info.get("collection")
     candidates = [
         code_col,
@@ -2509,7 +2505,7 @@ def _collections_from_registry_info(info: dict) -> list[str]:
     for col in candidates:
         if not col or col in seen:
             continue
-        if any(fnmatch(col, pat) for pat in exclude_patterns) or content_type_excluded(col, exclude_types):
+        if any(fnmatch(col, pat) for pat in exclude_patterns):
             continue
         seen.add(col)
         collections.append(col)
@@ -2692,12 +2688,10 @@ def _spawn_deferred_labeling() -> bool:
             **isolation_popen_kwargs(),
             # nexus-x3m8e: not the caller's cwd (a session worktree deleted
             # mid-run broke every getcwd() the run makes). The run does read
-            # the per-repo ``.nexus.yml`` (``nx taxonomy label`` reads its LLM
-            # backend settings through ``load_config()``; it does not read the
-            # taxonomy exclusion keys, which this process applied before
-            # spawning it), so the caller's directory is handed over as
-            # NEXUS_REPO_ROOT, which load_config reads where it used to read
-            # the cwd.
+            # the per-repo ``.nexus.yml`` (``nx taxonomy label`` calls
+            # ``load_config()`` for ``taxonomy.local_exclude_collections``), so
+            # the caller's directory is handed over as NEXUS_REPO_ROOT, which
+            # load_config reads where it used to read the cwd.
             **detached_spawn_kwargs(project_root=current_project_root()),
         )
         from nexus.daemon.installer import DEFERRED_LABELING_PID_NAME  # noqa: PLC0415 — spawn-only branch

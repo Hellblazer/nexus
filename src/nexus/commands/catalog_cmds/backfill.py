@@ -58,8 +58,8 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     backfill rewrites them to ``nx-note://``, so this verb leaves them alone.
     This verb ONLY rewrites
     rows whose PHYSICAL COLLECTION routes to ``file://`` in
-    ``nexus.aspect_readers.uri_for`` (a collection whose catalog row says
-    ``rdr``, ``docs`` or ``code``, ``is_file_routed_collection``): those rows carry a ``chroma://``
+    ``nexus.aspect_readers.uri_for`` (the ``rdr__``/``docs__``/``code__``
+    prefixes, ``FILE_ROUTED_PREFIXES``): those rows carry a ``chroma://``
     identity ONLY because they were minted by an older ``uri_for`` build
     that predated those prefixes routing to ``file://`` — migration
     residue, not a legitimate origin marker.
@@ -78,7 +78,7 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     """
     from collections import Counter  # noqa: PLC0415 — command-local
 
-    from nexus.aspect_readers import is_file_routed_collection, uri_for  # noqa: PLC0415 — command-local
+    from nexus.aspect_readers import FILE_ROUTED_PREFIXES, uri_for  # noqa: PLC0415 — command-local
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
 
     cat = _cat_cmd._get_catalog()
@@ -95,12 +95,12 @@ def backfill_source_uri_cmd(apply: bool, as_json: bool) -> None:
     census = {
         coll: {
             "count": n,
-            "candidate": is_file_routed_collection(coll),
+            "candidate": coll.startswith(FILE_ROUTED_PREFIXES),
         }
         for coll, n in sorted(by_collection.items())
     }
 
-    candidates = [d for d in chroma_rows if is_file_routed_collection(d.physical_collection)]
+    candidates = [d for d in chroma_rows if d.physical_collection.startswith(FILE_ROUTED_PREFIXES)]
 
     updates: list[tuple[object, str]] = []
     refused: list[tuple[object, str]] = []

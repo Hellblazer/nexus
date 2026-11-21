@@ -12266,9 +12266,9 @@ def _stale_fence_rows(cat: Any, label: str, f: _FenceFacts) -> list[HealthResult
     return [HealthResult(label=label, ok=True, detail="none (no catalog document)")]
 
 
-#: Content types (a listing row's ``content_type``) whose collections can hold PDF chunks. ``code`` never
-#: does, and ``rdr`` holds only RDR markdown; skipping both saves one request each.
-_PDF_STUB_SCAN_CONTENT_TYPES: tuple[str, ...] = ("knowledge", "docs")
+#: Collection prefixes that can hold PDF chunks. ``code__`` never does, and
+#: ``rdr__`` holds only RDR markdown; skipping both saves one request each.
+_PDF_STUB_SCAN_PREFIXES: tuple[str, ...] = ("knowledge__", "docs__")
 #: Pages of chunk rows read per collection before the scan of that collection
 #: stops and is reported as partial. Only PDF documents whose catalog meta
 #: records no extraction_method are looked at (111 placeholder chunks in 2
@@ -12511,29 +12511,19 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
         from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches make_t3
 
         t3 = make_t3()
-        # RDR-229 P2.9: the listing row's own content_type picks the collections, never the name. A
-        # quarantine sibling's row carries its origin's content type, so it is left out by its state
-        # (the name test left it out by its ``quarantine-`` prefix).
-        listing = list(t3.list_collections())
         names = sorted(
-            str(c.get("name", "")) for c in listing
-            if c.get("content_type") in _PDF_STUB_SCAN_CONTENT_TYPES and c.get("lifecycle_state") != "quarantine"
+            str(c.get("name", "")) for c in t3.list_collections()
+            if str(c.get("name", "")).startswith(_PDF_STUB_SCAN_PREFIXES)
         )
-        # A listing row with no content_type has no catalog row behind it: it is not scanned, and it is counted
-        # rather than read as "nothing here" (RDR-229 P2.9).
-        unrowed = sum(1 for c in listing if not c.get("content_type"))
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_pdf_stub_metadata_check_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (T3 unavailable)")]
 
     if not names:
-        gap = f"; {unrowed} collection(s) carry no catalog row and were not scanned" if unrowed else ""
         return [HealthResult(
             label=label, ok=True,
-            detail=f"not applicable (no knowledge or docs collections{gap})",
+            detail="not applicable (no knowledge or docs collections)",
         )]
-    if unrowed:
-        _log.info("doctor_pdf_stub_metadata_unrowed_collections_not_scanned", count=unrowed)
 
     # F30 (nexus-f3yqd.6): an engine with the bounded route (0.1.189) counts every collection it lists in one read;
     # only a collection it does not list is scanned. Without the route the scan runs as before.

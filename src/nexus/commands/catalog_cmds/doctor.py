@@ -1508,7 +1508,7 @@ VISIBLE_CHECK_ROW_BUDGET: int = 5000
 #: worst case of a slow census page followed by a slow probe batch.
 VISIBLE_CHECK_TIME_BUDGET_S: float = 120.0
 
-_VISIBLE_CHECK_CONTENT_TYPE = "knowledge"
+_VISIBLE_CHECK_PREFIX = "knowledge__"
 
 
 def _titles_for_tumblers(tumblers: list[str]) -> dict[str, str]:
@@ -1581,7 +1581,7 @@ def _run_visible_outside_manifest(
     report: dict = {
         "pass": True, "not_applicable": False, "vacuous": False, "inconclusive": False,
         "reason": "", "checked": 0, "total": 0, "findings": [], "collections": [],
-        "collections_total": 0, "collections_unreached": 0, "unrowed_collections": 0,
+        "collections_total": 0, "collections_unreached": 0,
         "truncated": False, "truncated_reason": "",
         "check_errors": [], "elapsed_s": 0.0,
         "row_budget": row_budget, "time_budget_s": time_budget_s,
@@ -1592,14 +1592,10 @@ def _run_visible_outside_manifest(
             from nexus.db import make_t3  # noqa: PLC0415 — command-local import (nexus.db)
 
             t3 = make_t3()
-        listing = list(t3.list_collections())
         names = sorted(
-            c["name"] for c in listing
-            if c.get("content_type") == _VISIBLE_CHECK_CONTENT_TYPE and c.get("lifecycle_state") != "quarantine"
+            c["name"] for c in t3.list_collections()
+            if c["name"].startswith(_VISIBLE_CHECK_PREFIX)
         )
-        # A listing row with no content_type has no catalog row behind it (RDR-229 P2.9): counted, not read as
-        # "no knowledge collection here".
-        report["unrowed_collections"] = sum(1 for c in listing if not c.get("content_type"))
     except Exception as exc:  # noqa: BLE001 — an unreadable T3 is UNKNOWN, never a pass
         report["pass"] = False
         report["error"] = f"Failed to list T3 collections: {exc}"
@@ -1608,10 +1604,6 @@ def _run_visible_outside_manifest(
     if not names:
         report["not_applicable"] = True
         report["reason"] = "no knowledge__ collection on this box; nothing to check"
-        if report["unrowed_collections"]:
-            report["reason"] += (
-                f" ({report['unrowed_collections']} collection(s) carry no catalog row and were not examined)"
-            )
         return report
     report["collections_total"] = len(names)
 

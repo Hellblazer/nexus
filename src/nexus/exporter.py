@@ -58,7 +58,7 @@ import msgpack
 import numpy as np
 import structlog
 
-from nexus.aspect_readers import canonical_note_uri, is_file_routed_collection, is_note_uri, uri_for
+from nexus.aspect_readers import FILE_ROUTED_PREFIXES, canonical_note_uri, is_note_uri, uri_for
 from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
@@ -702,7 +702,6 @@ def _locate_owner_group(
     fallback_title: str,
     fallback_content_type: str,
     target_collection: str,
-    db: Any = None,
 ) -> tuple[dict, int]:
     """Find (or open) the owner group a record belongs to and return it with the record's
     position (nexus-wbfpw.31), accumulated across the WHOLE import file rather than per
@@ -750,7 +749,7 @@ def _locate_owner_group(
         title = owner_meta.get("title") or ""
         content_type = owner_meta.get("content_type") or fallback_content_type
         if not source_uri:
-            source_uri = uri_for(target_collection, title, db=db)
+            source_uri = uri_for(target_collection, title)
         raw_position = owner_meta.get("position")
         if isinstance(raw_position, int) and not isinstance(raw_position, bool):
             position = raw_position
@@ -959,7 +958,6 @@ def _prepass_groups(
     fallback_title: str,
     fallback_content_type: str,
     target_collection: str,
-    db: Any = None,
 ) -> dict[str, dict]:
     """Read the file once and return its owner groups with their record counts (``seen``) and
     highest position (``maxpos``), never the records: memory is one small dict per group, plus the
@@ -984,7 +982,7 @@ def _prepass_groups(
                     group, position = _locate_owner_group(
                         groups, record.get("owner"), fallback_source_uri=fallback_source_uri,
                         fallback_title=fallback_title, fallback_content_type=fallback_content_type,
-                        target_collection=target_collection, db=db)
+                        target_collection=target_collection)
                 group["maxpos"] = max(group.get("maxpos", -1), position)
                 _note_source_evidence(group, meta, position)
     return groups
@@ -1413,7 +1411,7 @@ class _OwnerImport:
         out a file-backed document without a catalog read)."""
         from nexus.catalog.store_hook import imported_note_meta  # noqa: PLC0415 — deferred to avoid import cycle
 
-        if is_file_routed_collection(self.collection_name, db=self.db):
+        if self.collection_name.startswith(FILE_ROUTED_PREFIXES):
             return list(landed)
         entries = None
         error: Exception | None = None
@@ -1839,13 +1837,10 @@ def import_collection(
     collection_name: str = target_collection or source_collection
     # RDR-231 (nexus-bivz3.13/.15): a note import registers owner documents (a title-only owner
     # synthesizes an nx-note:// URI), so it is refused when the serving engine cannot hold one: after the
-    # header names the target, before any register and before any T3 upsert. A file-routed target mints
-    # file:// URIs and no note URI, so the check does not apply to it. RDR-229 P2.9: file-routed is the
-    # row's content type (docs, code or rdr), and for a conformant target no row backs yet (a new import
-    # target holds no chunk) item 1's NoRow derivation reads it from the name's own segment, so it skips
-    # the check as it always did. Only a prefix-free label with no row runs the check (P3.8).
+    # header names the target, before any register and before any T3 upsert. A file-routed target
+    # (docs__, code__, rdr__) mints file:// URIs and no note URI, so the check does not apply to it.
     # Aspect and highlight upserts and the reads are not covered (no unique key on source_uri).
-    if not is_file_routed_collection(collection_name, db=db):
+    if not collection_name.startswith(FILE_ROUTED_PREFIXES):
         from nexus.db.serving_engine_version import require_note_uri_engine  # noqa: PLC0415 — deferred: leaf probe module, rare/branch-local
 
         require_note_uri_engine()
@@ -2032,7 +2027,7 @@ def import_collection(
     prepass = _prepass_groups(
         input_path, fallback_source_uri=file_fallback_source_uri,
         fallback_title=file_fallback_title, fallback_content_type=default_content_type,
-        target_collection=collection_name, db=db)
+        target_collection=collection_name)
     from nexus.sensitive_write import gate_sensitive_import  # noqa: PLC0415 — deferred: sensitive_write is a leaf, read only here
 
     from nexus.sensitive_write import flagged_for_import  # noqa: PLC0415 — deferred: as above
@@ -2126,7 +2121,6 @@ def import_collection(
                                 fallback_title=file_fallback_title,
                                 fallback_content_type=default_content_type,
                                 target_collection=collection_name,
-                                db=db,
                             )
                         page.append(_PageRec(rec_id, doc, meta, emb, group, position))
                         if len(page) >= page_size:

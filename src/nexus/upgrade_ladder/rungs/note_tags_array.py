@@ -37,7 +37,6 @@ from typing import Any
 
 import structlog
 
-from nexus.collection_route import row_content_type
 from nexus.upgrade_ladder.auto_guard import (
     INTERACTIVE_REMEDY,
     completion_recorded_at,
@@ -67,8 +66,7 @@ RUNG_NAME = RUNG_NOTE_TAGS_ARRAY
 #: Notes rewritten per ``converge`` call before it returns RESUMABLE.
 DEFAULT_BATCH_LIMIT = 500
 
-#: Notes live in collections whose catalog row says this content type (RDR-229 P2.9).
-_NOTE_CONTENT_TYPE = "knowledge"
+_NOTE_COLLECTION_PREFIX = "knowledge__"
 
 
 def _default_reader() -> Any:
@@ -130,9 +128,7 @@ class NoteTagsArrayRung:
         examined = 0
         pending: list[tuple[str, str]] = []
         for collection in sorted(reader.distinct_doc_collections() or []):
-            # A strict read: a listing that cannot be read raises out of the scan (a partial listing is not
-            # "no strings"), where the lenient read would answer "no row" and let the rung converge.
-            if row_content_type(collection, strict=True) != _NOTE_CONTENT_TYPE:
+            if not collection.startswith(_NOTE_COLLECTION_PREFIX):
                 continue
             for entry in reader.list_by_collection(collection) or []:
                 if not _is_note(entry) or (entry.physical_collection or collection) != collection:

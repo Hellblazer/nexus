@@ -44,8 +44,6 @@ from nexus.exporter import (
 )
 from tests._chunk_seed import seed_chunks_direct
 
-pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
-
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself
 # and CI's default selection must run these import-owner pins.
 

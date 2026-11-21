@@ -382,25 +382,17 @@ for _site in LEDGER:
 #: ``resolve_corpus`` is not a root of its own. It is still a derived helper, because its typed-value split reaches
 #: ``split_candidate_collection_name``, so its five callers stay counted and are classed mint (item 1: parsing the user's
 #: own input). holdover 29 -> 23, label-pattern 9 -> 10, mint 112 -> 117; no shape moves.
-#:
-#: P2.9 (nexus-p2m1x.14, 2026-11-20), re-measured on develop b19ca8f28 (P2.7's 240): 240 -> 227. The 22 routing
-#: sites that now read the row's content_type left the ledger (const_prefix 14, loop_prefix 7, glob_default 1); the
-#: three ``taxonomy__`` name tests went routing -> migration-source (no row attribute identifies them; P2.2,
-#: nexus-p2m1x.7, moves them into legacy_names); nine callers of the shared NoRow derivation
-#: (``corpus.routing_content_type`` / ``candidate_content_type``) are new mint entries, each empty at P3.8.
-#: routing 25 -> 0, mint 117 -> 126, migration-source 16 -> 19, const_prefix 21 -> 7, loop_prefix 7 -> 0,
-#: primitive_call 181 -> 190, glob_default 1 -> 0.
-PARSE_SITE_PIN: int = 227
+PARSE_SITE_PIN: int = 240
 CLASS_PIN: dict[str, int] = {
-    "mint": 126, "holdover": 23, "diagnostic": 42,
-    "migration-source": 19, "label-pattern": 10, "file-path": 5,
+    "mint": 117, "holdover": 23, "diagnostic": 42, "routing": 25,
+    "migration-source": 16, "label-pattern": 10, "file-path": 5,
     "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 190, "const_prefix": 7, "fnmatch": 14,
-    "strip_prefix": 4, "startswith": 3, "split": 2,
+    "primitive_call": 181, "const_prefix": 21, "fnmatch": 14,
+    "loop_prefix": 7, "strip_prefix": 4, "startswith": 3, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
-    "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
+    "glob_default": 1, "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
 }
 
 #: The three candidate-string PRIMITIVES (RDR-204 Phase 3 repoint,
@@ -821,7 +813,7 @@ def test_pin_matches_documented_total() -> None:
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 227
+    assert PARSE_SITE_PIN == 240
 
 
 # ---------------------------------------------------------------------------
@@ -937,18 +929,18 @@ def test_every_fnmatch_is_labelled_by_what_it_matches() -> None:
 
 
 def test_the_routing_class_is_measured_not_listed() -> None:
-    """RDR-229 P2.9 emptied the routing class: 22 sites read a row now, and the three ``taxonomy__`` name
-    tests left (the lifecycle bypass, ``manifest_backfill``, ``taxonomy_cmd``) are migration sources (a legacy
-    name no row backs and no row can tell apart; P2.2, nexus-p2m1x.7, moves them into legacy_names). Nothing
-    is left to route by name."""
-    assert not _by_class("routing")
-    assert "routing" not in CLASS_PIN  # the class is empty: no pin to keep
-    taxonomy = [s for s in _by_class("migration-source") if "taxonomy__" in s.note and "P2.2" in s.note]
-    assert sum(s.n for s in taxonomy) == 3
-    assert sum(1 for s in taxonomy if s.note == _BYPASS_NOTE) == 1
-    assert all("nexus-p2m1x.7" in s.note for s in taxonomy)
-    norow = [s for s in _by_class("mint") if "routing_content_type" in s.note]
-    assert len(norow) == 9 and all("P3.8" in s.note for s in norow)
+    """RDR-229 P2.9 must empty a class the census counted, over every shape
+    the routing census scans. 25 sites since P2.5 (nexus-p2m1x.10): the 23
+    content-type tests, the shipped ``code__*`` default, and the taxonomy__
+    half of the schema-bypass test, which was 12 sites (229-research-39) until
+    P2.5 gathered them into ``db/rows/lifecycle.py``."""
+    routing = _by_class("routing")
+    assert sum(s.n for s in routing) == CLASS_PIN["routing"] == 25
+    assert {s.shape for s in routing} == {
+        "const_prefix", "loop_prefix", "startswith", "glob_default",
+    }
+    assert sum(1 for s in routing if s.note == _BYPASS_NOTE) == 1
+    assert [s.shape for s in routing if s.shape == "glob_default"] == ["glob_default"]
     # Recovery-bundle classification of ANOTHER install's name is a migration
     # source, never routing (item 1); the URI-string classifiers stay at 2.
     bundle = [s for s in LEDGER if s.rel.endswith("catalog/recovery_bundle.py")]

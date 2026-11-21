@@ -13,8 +13,6 @@ from nexus.db.collection_purge import CascadeCounts
 from nexus.db.http_vector_client import HttpVectorClient
 from tests.conftest import make_vector_test_client
 
-pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
-
 
 @pytest.fixture
 def runner() -> CliRunner:

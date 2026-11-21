@@ -2677,8 +2677,7 @@ taxonomy:
 ```yaml
 taxonomy:
   auto_label: true                    # label with Claude haiku after discover (default: true)
-  local_exclude_content_types: [code] # default: [code], matched against the collection's row — local embeddings cluster poorly on code
-  local_exclude_collections: []       # default: [] — glob patterns on collection labels; setting it (even []) without local_exclude_content_types turns the code default off
+  local_exclude_collections: []       # default: ["code__*"] — local embeddings cluster poorly on code
 ```
 
 **Upgrade path**: Run `nx upgrade` — it converges every pending rung, including the cross-collection projection backfill. Run `nx taxonomy discover --all` to populate topics for new collections.

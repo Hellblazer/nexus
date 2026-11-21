@@ -31,8 +31,6 @@ from unittest.mock import patch
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
-
 # Anchored to the repo root, not the cwd: another test in the same xdist worker
 # can leave the cwd changed, and these reads then miss (seen on hellmini).
 _SRC = Path(__file__).resolve().parents[1] / "src" / "nexus"

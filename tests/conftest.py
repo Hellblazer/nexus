@@ -46,7 +46,6 @@ import sys as _sys  # noqa: E402
 pytest_plugins = [
     "pytester", "tests._env_restore", "tests._storage_touch_guard", "tests._ddl_counter", "tests._tenant_pool",
     "tests._shard_collection_plugin", "tests._signal_fence", "tests._malloc_trim",
-    "tests._named_rows",  # RDR-229 P2.9: the named_collection_rows fixture (prefix-named fixtures get a catalog row)
 ]
 if _sys.platform != "win32":
     pytest_plugins.insert(1, "tests._posix_spawn")

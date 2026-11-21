@@ -1581,7 +1581,6 @@ def test_cli_taxonomy_list_shows_collection_at_root(tmp_path: Path) -> None:
 # ── discover_for_collection + CLI (RDR-070, nexus-2dq) ──────────────────────
 
 
-@pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: the local-mode exclusion reads the collection's row, not through make_t3
 def test_discover_cli_invocation() -> None:
     """nx taxonomy discover --collection <name> exits 0 in local mode.
 

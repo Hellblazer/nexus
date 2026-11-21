@@ -859,8 +859,7 @@ class T3Database:
         # can stamp it through normalize().
         from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
 
-        # This facade is the retired, test-only substrate and has no catalog: the name answers (RDR-229 P2.9).
-        content_type = chunk_content_type_for_collection(collection, catalog=False)
+        content_type = chunk_content_type_for_collection(collection)
 
         # The chunk row is the CHUNK keys only (RDR-236 Phase 4 Step 1): *title*, *tags*, *category*,
         # *ttl_days* and *source_agent* are the document's own facts and belong to its catalog entry, not

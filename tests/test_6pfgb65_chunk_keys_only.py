@@ -34,8 +34,6 @@ from nexus.metadata_schema import (
 from nexus.tables import chunk_metadata_keys as ckm
 from tests.test_6pfgb65_positions_split import _CASES, _RecordingCat, _observe
 
-pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
-
 _CHUNK = ckm.keys_of("CHUNK")
 _ROW = ckm.keys_of("ROW")
 _COLL = "knowledge__subject__bge-base-en-v15-768__v1"
