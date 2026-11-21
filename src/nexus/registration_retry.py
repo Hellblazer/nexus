@@ -82,7 +82,9 @@ def register_collection_for_write(name: str, registrar: "Callable[[], object] | 
     (per-process cache, the client's profile, retired-name and credential checks).
 
     A caller that needs a collection the user typed to be REFUSED when unregistered (an MCP tool, a CLI
-    argument) does not call this: the typed 422 is the right answer there.
+    argument) does not call this: the typed 422 is the right answer there. So do the callers that read the
+    collection from T3's own listing (``orphan_backfill``, the catalog backfill passes) and
+    ``HttpCatalogClient.register_many``, which registers no collection and has no caller in this tree.
     """
     from nexus import corpus  # noqa: PLC0415 — circular-dep avoidance (corpus)
 

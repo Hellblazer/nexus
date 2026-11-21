@@ -1902,11 +1902,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         MAX_BATCH_DOC_IDS cap. A page that fails as a whole falls back to
         per-doc :meth:`register`, preserving the per-file failure isolation the
         caller relies on (a single bad doc must not sink the rest of the run).
-
-        Registers no collection (RDR-229 P3.1, nexus-p2m1x.17): the engine refuses a document whose
-        ``physical_collection`` has no registry row (typed 422 ``unregistered_collection``). A caller that
-        owns the collection registers it first, through ``registration_retry.register_collection_for_write``;
-        one that was handed a name keeps the refusal. No caller in this tree uses this method today.
         """
         if not docs:
             return []
