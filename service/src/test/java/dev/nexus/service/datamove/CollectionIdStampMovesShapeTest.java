@@ -268,7 +268,7 @@ class CollectionIdStampMovesShapeTest {
     // ── the policy the worker needs to read the driving table ───────────────────────────────────────────────
 
     @Test
-    void everyDrivingTableButChunksHasAnOwnerReadPolicyChangesetThatFollowsThePattern_afterItsMoveIsRegistered() throws Exception {
+    void everyDrivingTableButChunksAndTheRegistryHasAnOwnerReadPolicyChangesetThatFollowsThePattern_afterItsMoveIsRegistered() throws Exception {
         List<Element> all = shippedChangesets();
         List<String> order = all.stream().map(cs -> cs.getAttribute("id")).toList();
         String guard = guardOf(patternChangeset());
@@ -276,6 +276,7 @@ class CollectionIdStampMovesShapeTest {
         int policies = 0;
         for (var spec : StampMoveSpecs.SPECS) {
             if (spec.table().equals("chunks")) continue;   // vectors-029's chunks_gate_probe_owner_read, mirrored on the leaves
+            if (spec.table().equals("catalog_collections")) continue;   // D2's vectors-065 owns catalog_collections_owner_read (linda 2026-11-21): see the last assertion
             String policy = spec.table() + "_owner_read";
             Element cs = all.stream().filter(e -> forwardSql(e).contains("POLICY " + policy + " ON nexus." + spec.table())).findFirst().orElse(null);
             assertThat(cs).as("%s: the migrating role needs a policy to read every tenant's rows", spec.table()).isNotNull();
@@ -291,7 +292,10 @@ class CollectionIdStampMovesShapeTest {
             assertThat(sql).as("%s: a post-condition RAISEs unless the policy names exactly the migrating role", spec.table()).contains("RAISE EXCEPTION");
             assertThat(ROW_DML.matcher(withoutLiterals(sql)).results().count()).as("%s: no row DML", spec.table()).isZero();
         }
-        assertThat(policies).as("non-vacuity").isEqualTo(StampMoveSpecs.SPECS.size() - 1);
+        assertThat(policies).as("non-vacuity: 13 policies, all but chunks' and the registry's").isEqualTo(StampMoveSpecs.SPECS.size() - 2);
+        assertThat(all.stream().filter(e -> forwardSql(e).contains("catalog_collections_owner_read")).map(e -> e.getAttribute("id")).toList())
+            .as("two changesets owning one policy break each other's rollback: this file creates none on the registry, vectors-065 owns it")
+            .isEmpty();
     }
 
     private static Element patternChangeset() throws Exception {
