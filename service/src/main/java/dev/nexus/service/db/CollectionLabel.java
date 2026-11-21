@@ -50,6 +50,23 @@ public final class CollectionLabel {
     /** The most UTF-8 bytes a label may hold (RDR-229 item 7). */
     static final int MAX_LABEL_BYTES = 255;
 
+    /** One clause of the label rule: throws {@link IllegalArgumentException} when {@code label} breaks it. */
+    @FunctionalInterface
+    interface Clause {
+        void check(String label);
+    }
+
+    /**
+     * The shape clauses, in the order they are checked. Adding a clause to the rule is adding one method below and
+     * one entry here (the client's twin is {@code _LABEL_CLAUSES} in {@code nexus.corpus}).
+     */
+    private static final java.util.List<Clause> SHAPE_CLAUSES = java.util.List.of(
+        CollectionLabel::nonEmpty,
+        CollectionLabel::validUtf8,
+        CollectionLabel::noControlCharacter,
+        CollectionLabel::withinByteLimit,
+        CollectionLabel::noSlash);
+
     /**
      * Refuses a label a USER supplied, as an {@link IllegalArgumentException} (the engine's 400): the label rule of
      * RDR-229 item 7, twin of the client's {@code validate_collection_name}. The rule is: non-empty, valid UTF-8
@@ -63,9 +80,10 @@ public final class CollectionLabel {
      * label is not a security principal (uniqueness is on the exact string), so a bidi override can no more spoof
      * it than a homoglyph can, which no rule catches either.
      *
-     * <p>Called only where a user's label enters: the client route's registration of a NEW row and the rename
-     * target. The engine's own minter (P3.8) renders its label with {@link #mintedLabel} and never passes through
-     * here, so it stays able to write the form this rule refuses.
+     * <p>Called only where a user's label enters and only for a label that is NEW: the client registration of a new
+     * row, the rename target, a re-embed target and (shape only) an imported new row. An existing row keeps its
+     * label whatever it is (RDR-229 item 8). The engine's own minter (P3.8) renders its label with
+     * {@link #mintedLabel} and never passes through here, so it stays able to write the form this rule refuses.
      */
     public static void validateUserLabel(String label) {
         validateShape(label);
@@ -73,45 +91,80 @@ public final class CollectionLabel {
     }
 
     /**
-     * The label rule minus the minted-form clause: non-empty, valid UTF-8, no control character, at most
-     * {@value #MAX_LABEL_BYTES} bytes, no {@code '/'} while {@link #REFUSE_SLASH} holds. Split out so the
-     * registration route can run it before it reads the database (a NUL bound into a lookup is a database error, not
-     * a 400) while applying {@link #requireNotMinted} to a NEW label only.
+     * The label rule minus the minted-form clause (an import carries the labels of another install, minted ones
+     * included): every clause of {@code SHAPE_CLAUSES}.
      */
-    static void validateShape(String label) {
+    public static void validateShape(String label) {
+        for (Clause clause : SHAPE_CLAUSES) {
+            clause.check(label);
+        }
+    }
+
+    /**
+     * The two refusals that must stand BEFORE the first database read of a registration, because the database cannot
+     * store the label at all: a NUL bound into a lookup is a database error (22021), not a 400, and a lone surrogate
+     * is not valid UTF-8. Null-safe (an absent name is another refusal's). Every other clause waits for the new-row
+     * branch, so an existing row that breaks the rule still re-registers.
+     */
+    public static void requireStorable(String label) {
+        if (label == null) {
+            return;
+        }
+        validUtf8(label);
+        if (label.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("collection label " + quoted(label)
+                + " holds a control character (U+0000)");
+        }
+    }
+
+    /** Refuses a user label of the minted form: the engine reserves {@code c<digits>} for the labels it mints. */
+    public static void requireNotMinted(String label) {
+        if (isMintedForm(label)) {
+            throw new IllegalArgumentException("collection label " + quoted(label) + " is of the minted form (c followed by "
+                + "digits), which the engine reserves for the labels it mints");
+        }
+    }
+
+    private static void nonEmpty(String label) {
         if (label == null || label.isEmpty()) {
             throw new IllegalArgumentException("a collection label must not be empty");
         }
-        int bytes = 0;
+    }
+
+    private static void validUtf8(String label) {
         for (int i = 0; i < label.length(); ) {
             int cp = label.codePointAt(i);
-            int n = Character.charCount(cp);
             if (cp >= Character.MIN_SURROGATE && cp <= Character.MAX_SURROGATE) {
                 throw new IllegalArgumentException("collection label " + quoted(label) + " is not valid UTF-8 "
                     + "(a lone surrogate)");
             }
+            i += Character.charCount(cp);
+        }
+    }
+
+    private static void noControlCharacter(String label) {
+        for (int i = 0; i < label.length(); ) {
+            int cp = label.codePointAt(i);
             int type = Character.getType(cp);
             if (type == Character.CONTROL || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR) {
                 throw new IllegalArgumentException("collection label " + quoted(label)
                     + " holds a control character (U+" + String.format("%04X", cp) + ")");
             }
-            bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
-            i += n;
+            i += Character.charCount(cp);
         }
+    }
+
+    private static void withinByteLimit(String label) {
+        int bytes = label.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         if (bytes > MAX_LABEL_BYTES) {
             throw new IllegalArgumentException("collection label " + quoted(label.length() > 40 ? label.substring(0, 40) : label)
                 + "... is " + bytes + " bytes in UTF-8; the limit is " + MAX_LABEL_BYTES);
         }
-        if (REFUSE_SLASH && label.indexOf('/') >= 0) {
-            throw new IllegalArgumentException("collection label " + quoted(label) + " holds '/', which a label may not hold");
-        }
     }
 
-    /** Refuses a user label of the minted form: the engine reserves {@code c<digits>} for the labels it mints. */
-    static void requireNotMinted(String label) {
-        if (isMintedForm(label)) {
-            throw new IllegalArgumentException("collection label " + quoted(label) + " is of the minted form (c followed by "
-                + "digits), which the engine reserves for the labels it mints");
+    private static void noSlash(String label) {
+        if (REFUSE_SLASH && label.indexOf('/') >= 0) {
+            throw new IllegalArgumentException("collection label " + quoted(label) + " holds '/', which a label may not hold");
         }
     }
 
