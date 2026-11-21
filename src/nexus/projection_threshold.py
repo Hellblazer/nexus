@@ -11,18 +11,13 @@ outcomes, and this reads them in order:
 * **NoRow**: the collection has no catalog row (unregistered, or registered
   but holding no chunk). The legacy name is then the only signal, and
   :func:`nexus.corpus.default_projection_threshold` derives it from the name.
-* **Unreadable**: the row listing itself raised. A taxonomy run never fails on
-  that, so it answers as NoRow does and logs once per outage (a backfill asks
-  once per collection; a line per ask would bury the run, and a read that
-  succeeds again re-arms the line for the next outage).
+* **Unreadable**: the row read itself failed (``resolve_collection`` says so; a
+  service error, or any other read failure but a ``TypeError``, ``AttributeError`` or
+  ``KeyError``, which are bugs and raise). A taxonomy run never fails on that, so it answers
+  as NoRow does; the failure is logged by :func:`nexus.catalog.rows.resolve.resolve_collection`.
 
-:func:`resolve_projection_threshold` says which of the three answered, for the
-one consumer that must not act on a guess: ``--prune-below-threshold`` deletes,
-so it refuses an Unreadable answer. :func:`projection_threshold` is the value
-alone, for the consumers that only compare (project, backfill, audit).
-
-An explicit ``--threshold`` never reaches this module: callers pass it through
-unchanged and call here only when it is absent.
+This module owns the one table; :func:`nexus.corpus.default_projection_threshold`
+(the NoRow name derivation) reads it through :func:`threshold_for_content_type`.
 
 The table (RDR-077 Phase 4a; calibration in
 ``docs/exploration/taxonomy-projection-tuning.md``): knowledge 0.50, docs and
@@ -33,19 +28,12 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import structlog
-
-_log = structlog.get_logger(__name__)
-
 _THRESHOLD_BY_CONTENT_TYPE: dict[str, float] = {
     "knowledge": 0.50,
     "docs": 0.55,
     "rdr": 0.55,
 }
 _FALLBACK_THRESHOLD = 0.70
-
-#: True while an outage has been logged and no read has succeeded since; tests reset it.
-_unreadable_logged = False
 
 
 class ProjectionThreshold(NamedTuple):
@@ -63,34 +51,22 @@ def threshold_for_content_type(content_type: str) -> float:
 def resolve_projection_threshold(collection_name: str) -> ProjectionThreshold:
     """The default projection threshold for *collection_name* and its source: the
     catalog row's ``content_type`` when a row backs it, else the name derivation
-    (``no_row``, or ``unreadable`` when the listing itself raised).
+    (``no_row``, or ``unreadable`` when the row read failed).
 
     Tenant-blind like :func:`nexus.corpus.collection_content_type`: the row
     comes from ``nexus.mcp_infra``'s process-wide cache, the ambient tenant's.
+    It reads no version or model from the row, so a row with a blank
+    ``model_version`` is a Row here.
     """
-    global _unreadable_logged  # noqa: PLW0603 — outage log latch
+    from nexus.catalog.rows.resolve import Row, Unreadable, resolve_collection  # noqa: PLC0415 — circular-dep avoidance (resolve imports corpus lazily; corpus imports this module)
     from nexus.corpus import default_projection_threshold  # noqa: PLC0415 — circular-dep avoidance (corpus)
-    from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
 
-    unreadable = False
-    row = None
-    try:
-        row = get_collection_row(collection_name, strict=True)
-    except Exception:  # noqa: BLE001 — Unreadable must never fail a taxonomy run (RDR-229 item 1); it answers as NoRow, is logged once per outage, and prune refuses it
-        unreadable = True
-        if not _unreadable_logged:
-            _unreadable_logged = True
-            _log.warning(
-                "projection_threshold_row_unreadable",
-                collection=collection_name, exc_info=True,
-            )
-    else:
-        _unreadable_logged = False
-    if row is not None:
-        return ProjectionThreshold(threshold_for_content_type(row["content_type"]), "row")
+    out = resolve_collection(collection_name, need_version=False, strict=True)
+    if isinstance(out, Row):
+        return ProjectionThreshold(threshold_for_content_type(out.attributes.content_type), "row")
     return ProjectionThreshold(
         default_projection_threshold(collection_name),
-        "unreadable" if unreadable else "no_row",
+        "unreadable" if isinstance(out, Unreadable) else "no_row",
     )
 
 

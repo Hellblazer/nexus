@@ -977,12 +977,10 @@ def default_projection_threshold(collection_name: str) -> float:
     docstring for why (this default calibration table is called on the
     same broad, possibly-unregistered collection population).
     """
+    from nexus.projection_threshold import threshold_for_content_type  # noqa: PLC0415 — the one table lives there (RDR-229 P2.4)
+
     content_type = _legacy.split_candidate_collection_name(collection_name)[0]
-    if content_type == "knowledge":
-        return 0.50
-    if content_type in ("docs", "rdr"):
-        return 0.55
-    return 0.70
+    return threshold_for_content_type(content_type)
 
 
 def embedding_model_for_collection(collection_name: str) -> str:

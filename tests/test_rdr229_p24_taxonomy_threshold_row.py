@@ -9,8 +9,8 @@ The contract is RDR-229 Technical Design item 1's three outcomes:
   says otherwise. This is the behavioural change.
 * NoRow   -> the name derivation (today's table); the only signal for an
   unregistered or empty collection.
-* Unreadable (the listing read raised) -> the same name derivation, logged
-  once; a taxonomy run never fails on it.
+* Unreadable (the row read raised; ``resolve_collection`` says so and logs it) -> the same
+  name derivation; a taxonomy run never fails on it.
 
 An explicit ``--threshold`` short-circuits all three. The tests drive the
 real callers (``nx taxonomy project`` single-source, ``--backfill``,
@@ -93,20 +93,17 @@ def test_no_row_falls_back_to_the_name_derivation(name: str, expected: float) ->
     assert projection_threshold(name) == expected
 
 
-def test_unreadable_listing_falls_back_and_logs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unreadable_listing_falls_back_to_the_name_derivation(monkeypatch: pytest.MonkeyPatch) -> None:
     import nexus.projection_threshold as pt
 
     def _boom(name: str, *, refresh: bool = True, strict: bool = False):
         raise RuntimeError("catalog listing unreadable")
 
     monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _boom)
-    monkeypatch.setattr(pt, "_unreadable_logged", False, raising=False)
-    events: list[str] = []
-    monkeypatch.setattr(pt._log, "warning", lambda event, **_kw: events.append(event))
 
     assert pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW) == 0.70  # the name says code
     assert pt.projection_threshold(UNREGISTERED_LEGACY) == 0.55
-    assert events == ["projection_threshold_row_unreadable"], "logged once per process, not per call"
+    assert pt.resolve_projection_threshold(UNREGISTERED_LEGACY).source == "unreadable"
 
 
 # ── the callers ─────────────────────────────────────────────────────────────
@@ -236,7 +233,7 @@ def test_the_real_row_read_reports_an_unreadable_listing_as_unreadable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Through the real ``get_collection_row`` with a listing that raises ``ServiceNotReadyError``:
-    the answer carries ``source == "unreadable"`` (not ``"no_row"``) and the warning fires."""
+    the answer carries ``source == "unreadable"`` (not ``"no_row"``)."""
     import nexus.mcp_infra as mi
     import nexus.projection_threshold as pt
 
@@ -245,14 +242,10 @@ def test_the_real_row_read_reports_an_unreadable_listing_as_unreadable(
 
     monkeypatch.setattr(mi, "get_collection_row", _REAL_GET_COLLECTION_ROW)
     monkeypatch.setattr(mi, "_refresh_collections_cache_if_stale", _down)
-    monkeypatch.setattr(pt, "_unreadable_logged", False, raising=False)
-    events: list[str] = []
-    monkeypatch.setattr(pt._log, "warning", lambda event, **_kw: events.append(event))
 
     answer = pt.resolve_projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
     assert answer.source == "unreadable"
     assert answer.value == 0.70, "the name derivation still answers"
-    assert events == ["projection_threshold_row_unreadable"]
 
 
 def test_resolve_names_where_the_answer_came_from() -> None:
@@ -264,30 +257,34 @@ def test_resolve_names_where_the_answer_came_from() -> None:
     assert (no_row.value, no_row.source) == (0.55, "no_row")
 
 
-def test_a_successful_read_rearms_the_unreadable_log(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A second outage after a recovery logs again (review S9)."""
+def test_a_programming_error_in_the_row_read_is_not_an_unreadable_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``resolve_collection`` raises a ``TypeError``, ``AttributeError`` or ``KeyError`` out of the
+    row read as a bug instead of answering it as Unreadable (and so as a guess)."""
     import nexus.projection_threshold as pt
 
-    up = {"ok": False}
+    def _bug(name: str, *, refresh: bool = True, strict: bool = False):
+        raise TypeError("a bug in the reader")
 
-    def _flaky(name: str, *, refresh: bool = True, strict: bool = False):
-        if not up["ok"]:
-            raise RuntimeError("catalog listing unreadable")
-        return _ROWS.get(name)
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _bug)
+    with pytest.raises(TypeError):
+        pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
 
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", _flaky)
-    monkeypatch.setattr(pt, "_unreadable_logged", False, raising=False)
-    events: list[str] = []
-    monkeypatch.setattr(pt._log, "warning", lambda event, **_kw: events.append(event))
 
-    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
-    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
-    assert events == ["projection_threshold_row_unreadable"]
-    up["ok"] = True
-    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
-    up["ok"] = False
-    pt.projection_threshold(CODE_NAMED_KNOWLEDGE_ROW)
-    assert events == ["projection_threshold_row_unreadable"] * 2
+def test_a_row_and_a_no_row_name_of_the_same_type_give_the_same_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One table: for each content type the table knows (and one it does not), a row of that
+    ``content_type`` and a NoRow name of that prefix answer the same value, so the Row and the
+    NoRow outcomes of item 1 cannot drift apart."""
+    import nexus.projection_threshold as pt
+
+    types = [*pt._THRESHOLD_BY_CONTENT_TYPE, "code", "other"]
+    assert {"knowledge", "docs", "rdr"} <= set(types), "the table lost a type"
+    for ct in types:
+        monkeypatch.setitem(_ROWS, f"{ct}__1-9__bge-base-en-v15-768__v1", {"content_type": ct})
+    for ct in types:
+        with_row = pt.resolve_projection_threshold(f"{ct}__1-9__bge-base-en-v15-768__v1")
+        no_row = pt.resolve_projection_threshold(f"{ct}__legacy-no-row-{ct}")
+        assert (with_row.source, no_row.source) == ("row", "no_row"), ct
+        assert with_row.value == no_row.value == pt.threshold_for_content_type(ct), ct
 
 
 def _catalog_client(handler):
