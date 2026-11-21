@@ -65,6 +65,11 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # that does nothing when the table is absent; skipped while the migration role does not own a kept table. The
     # body names no chunk table, leaf or builder object (RDR-229 P3.1, residual R3).
     ("vectors-068-collection-id-expand.xml", "vectors-068-18"): "aspect queue id column",
+    # CREATE UNIQUE INDEX on nexus.catalog_collections (SHARE on it for one build of a registry of hundreds of rows) and,
+    # in its guard, the counter's ALTER TABLE on that table (ACCESS EXCLUSIVE for one count) plus a read of
+    # nexus.data_moves. No chunk table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds
+    # no lock on the registry, so the build cannot be what either statement waits behind.
+    ("collections-001-tuple-unique-index.xml", "collections-001-2"): "gated live-tuple unique index (RDR-229 P3.8)",
 }
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
