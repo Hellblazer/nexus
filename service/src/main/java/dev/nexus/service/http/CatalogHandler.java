@@ -3154,6 +3154,9 @@ public final class CatalogHandler implements HttpHandler {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         out.put("imported", result.imported());
         out.put("state_corrected", result.stateCorrected());
+        // RDR-229 P3.6 and item 10 (additive): the rows whose label the rule refused, each {name, rule, reason}; the
+        // rest of the batch imported. An older engine omits it, which reads as none.
+        out.put("refused", result.refused());
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(out));
     }
 

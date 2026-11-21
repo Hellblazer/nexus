@@ -60,12 +60,25 @@ public final class CollectionLabel {
      * The shape clauses, in the order they are checked. Adding a clause to the rule is adding one method below and
      * one entry here (the client's twin is {@code _LABEL_CLAUSES} in {@code nexus.corpus}).
      */
-    private static final java.util.List<Clause> SHAPE_CLAUSES = java.util.List.of(
-        CollectionLabel::nonEmpty,
-        CollectionLabel::validUtf8,
-        CollectionLabel::noControlCharacter,
-        CollectionLabel::withinByteLimit,
-        CollectionLabel::noSlash);
+    private static final java.util.List<NamedClause> SHAPE_CLAUSES = java.util.List.of(
+        new NamedClause("non_empty", CollectionLabel::nonEmpty),
+        new NamedClause("valid_utf8", CollectionLabel::validUtf8),
+        new NamedClause("no_control_character", CollectionLabel::noControlCharacter),
+        new NamedClause("within_byte_limit", CollectionLabel::withinByteLimit),
+        new NamedClause("no_slash", CollectionLabel::noSlash));
+
+    /** The clauses {@link #requireStorable} runs, under the names {@code SHAPE_CLAUSES} gives the same two refusals. */
+    private static final java.util.List<NamedClause> STORABLE_CLAUSES = java.util.List.of(
+        new NamedClause("valid_utf8", CollectionLabel::validUtf8),
+        new NamedClause("no_control_character", CollectionLabel::noNul));
+
+    /** A clause and the rule name a report gives it (wire: the import report's {@code rule}). */
+    private record NamedClause(String rule, Clause clause) {
+    }
+
+    /** The clause a label breaks: its rule name and the refusal's own message. */
+    public record Breach(String rule, String reason) {
+    }
 
     /**
      * Refuses a label a USER supplied, as an {@link IllegalArgumentException} (the engine's 400): the label rule of
@@ -95,9 +108,33 @@ public final class CollectionLabel {
      * included): every clause of {@code SHAPE_CLAUSES}.
      */
     public static void validateShape(String label) {
-        for (Clause clause : SHAPE_CLAUSES) {
-            clause.check(label);
+        for (NamedClause named : SHAPE_CLAUSES) {
+            named.clause().check(label);
         }
+    }
+
+    /**
+     * {@link #validateShape} as a value: the first clause {@code label} breaks, or empty. For a caller that refuses
+     * one row and goes on (the ETL collection import, RDR-229 item 10) where {@code validateShape} refuses the call.
+     */
+    public static java.util.Optional<Breach> shapeBreach(String label) {
+        return firstBreach(SHAPE_CLAUSES, label);
+    }
+
+    /** {@link #requireStorable} as a value: the first of its two clauses {@code label} breaks, or empty. */
+    public static java.util.Optional<Breach> storableBreach(String label) {
+        return label == null ? java.util.Optional.empty() : firstBreach(STORABLE_CLAUSES, label);
+    }
+
+    private static java.util.Optional<Breach> firstBreach(java.util.List<NamedClause> clauses, String label) {
+        for (NamedClause named : clauses) {
+            try {
+                named.clause().check(label);
+            } catch (IllegalArgumentException e) {
+                return java.util.Optional.of(new Breach(named.rule(), e.getMessage()));
+            }
+        }
+        return java.util.Optional.empty();
     }
 
     /**
@@ -110,7 +147,12 @@ public final class CollectionLabel {
         if (label == null) {
             return;
         }
-        validUtf8(label);
+        for (NamedClause named : STORABLE_CLAUSES) {
+            named.clause().check(label);
+        }
+    }
+
+    private static void noNul(String label) {
         if (label.indexOf('\0') >= 0) {
             throw new IllegalArgumentException("collection label " + quoted(label)
                 + " holds a control character (U+0000)");
