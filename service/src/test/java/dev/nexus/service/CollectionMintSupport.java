@@ -105,7 +105,7 @@ final class CollectionMintSupport {
     /**
      * Make the sequence cycle over {@code [1, max(collection_id)]} and stand at the max, so every draw after the next one
      * wraps to 1: a row {@code tenant} holds under id 1 is then taken on the first draw AND on the draw after a heal (a
-     * heal sets the sequence to the largest id, and the next draw wraps again). Ensures that row exists.
+     * heal draws forward to the largest id, and the next draw wraps again). Ensures that row exists.
      */
     static void cycleOverTheRows(DSLContext ctx, String tenant, String anchorName, String model) {
         ctx.deleteFrom(CATALOG_COLLECTIONS)
@@ -136,6 +136,33 @@ final class CollectionMintSupport {
     static Long callHeal(DSLContext ctx, Long floor) {
         return ctx.select(DSL.function(DSL.name("nexus", "collection_id_seq_heal"), Long.class, DSL.val(floor, org.jooq.impl.SQLDataType.BIGINT)))
             .fetchOne(0, Long.class);
+    }
+
+    /** {@code n} draws of the {@code collection_id} sequence in ONE statement (the draws a stream of mints would make), in order. */
+    static long[] drawIds(DSLContext ctx, int n) {
+        return ctx.select(DSL.function("nextval", Long.class, sequence())).from(DSL.generateSeries(1, n))
+            .fetch().stream().mapToLong(r -> r.value1()).toArray();
+    }
+
+    /**
+     * {@code n} calls of the heal function in ONE statement, each with a floor of one more than the sequence's value at
+     * that instant: the floor is read microseconds before the function reads the sequence itself, which is the interleaving a
+     * concurrent drawer has to cross. Answers how many calls ran.
+     */
+    static int healAtTheEdge(DSLContext ctx, int n) {
+        Field<Long> floor = DSL.function("pg_sequence_last_value", Long.class, sequence()).plus(1L);
+        return ctx.select(DSL.function(DSL.name("nexus", "collection_id_seq_heal"), Long.class, floor))
+            .from(DSL.generateSeries(1, n)).fetch().size();
+    }
+
+    /** A live row whose id the column's DEFAULT identity assigns, as a mint or a plain insert gets it: the assigned id. */
+    static long insertWithDefaultId(DSLContext ctx, String tenant, String name, String owner, String model) {
+        return ctx.insertInto(CATALOG_COLLECTIONS)
+            .set(CATALOG_COLLECTIONS.TENANT_ID, tenant).set(CATALOG_COLLECTIONS.NAME, name)
+            .set(CATALOG_COLLECTIONS.CONTENT_TYPE, "knowledge").set(CATALOG_COLLECTIONS.OWNER_ID, owner)
+            .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL, model).set(CATALOG_COLLECTIONS.MODEL_VERSION, "v1")
+            .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live")
+            .returning(CATALOG_COLLECTIONS.COLLECTION_ID).fetchOne().getCollectionId();
     }
 
     /** Whether {@code role} holds UPDATE on the {@code collection_id} sequence. */
