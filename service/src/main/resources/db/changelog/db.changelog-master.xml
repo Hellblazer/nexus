@@ -2403,6 +2403,14 @@
     <include file="db/changelog/collections-002-collection-id-seq-heal-function.xml"/>
 
     <!--
+        RDR-229 P3.8 (nexus-p2m1x.28; linda's ruling (a)): nexus.collection_tuple_lock_key answers one of 256 striped keys in
+        one namespace, so a batch that locks many tuples before the live-tuple index exists takes at most 256 advisory locks.
+        Same signature; the catalog-051-2 triggers pick it up as they are. DATA EFFECT: none. Function definition only. After
+        catalog-051 (which first created the function) and collections-002, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/collections-003-tuple-lock-stripes.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

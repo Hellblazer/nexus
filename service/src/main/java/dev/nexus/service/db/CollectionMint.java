@@ -456,29 +456,11 @@ public final class CollectionMint {
     }
 
     /**
-     * The per-tuple advisory lock of the paths that run before the partial UNIQUE index exists (a mint, an import, a
-     * restore): {@code pg_advisory_xact_lock} on a hash of the tuple, held to the end of the caller's transaction.
+     * The tuple advisory lock of the paths that run before the partial UNIQUE index exists (a mint, a named registration):
+     * {@link CollectionTupleLock}, the key catalog-051's triggers also take, held to the end of the caller's transaction.
      */
     static void lockTuple(DSLContext ctx, String tenant, String contentType, String owner, String model, String version) {
-        lockKey(ctx, tupleKey(tenant, contentType, owner, model, version));
-    }
-
-    /**
-     * The advisory locks of several tuples, each once, in sorted key order: the ONE way a path that locks more than one tuple
-     * takes them (an import batch, a rename's source and new tuples), so two such paths cannot wait on each other's second
-     * lock.
-     */
-    static void lockTupleKeys(DSLContext ctx, java.util.stream.Stream<String> keys) {
-        keys.distinct().sorted().forEach(k -> lockKey(ctx, k));
-    }
-
-    static String tupleKey(String tenant, String contentType, String owner, String model, String version) {
-        return String.join("\u0001", tenant, contentType, owner, model, version);
-    }
-
-    static void lockKey(DSLContext ctx, String key) {
-        Field<Long> hashed = DSL.function("hashtextextended", Long.class, DSL.val(key), DSL.val(0L));
-        ctx.select(DSL.function("pg_advisory_xact_lock", Object.class, hashed)).fetch();
+        CollectionTupleLock.lockTuple(ctx, new CollectionTupleLock.Tuple(tenant, contentType, owner, model, version));
     }
 
     /** The name of another live collection of this tuple (the lowest {@code collection_id}), or null. */
@@ -550,7 +532,8 @@ public final class CollectionMint {
             return;
         }
         if (!tupleIndexExists(ctx)) {
-            lockTupleKeys(ctx, live.stream().map(r -> tupleKey(tenant, r[1], r[2], r[3], r[4])));
+            CollectionTupleLock.lock(ctx, live.stream()
+                .map(r -> new CollectionTupleLock.Tuple(tenant, r[1], r[2], r[3], r[4])).toList());
         }
         Map<List<String>, String> seen = new HashMap<>();
         for (String[] r : live) {

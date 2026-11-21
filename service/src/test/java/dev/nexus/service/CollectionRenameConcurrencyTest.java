@@ -214,11 +214,11 @@ class CollectionRenameConcurrencyTest {
 
     // ── lock order, the live-tuple index absent ─────────────────────────────────────────────────
 
-    /** The advisory lock a registration of the tuple takes ({@code CollectionMint.tupleKey}, hashed as {@code CollectionMint.lockKey} does). */
+    /** The advisory lock a registration of the tuple takes: nexus.collection_tuple_lock_key, as CollectionTupleLock reads it. */
     private static Field<Object> tupleLock(String owner) {
-        String key = String.join("\u0001", TENANT, "knowledge", owner, MODEL, "v1");
         return DSL.function("pg_advisory_xact_lock", Object.class,
-            DSL.function("hashtextextended", Long.class, DSL.val(key), DSL.val(0L)));
+            DSL.function(DSL.name("nexus", "collection_tuple_lock_key"), Long.class, DSL.val(TENANT), DSL.val("knowledge"),
+                DSL.val(owner), DSL.val(MODEL), DSL.val("v1")));
     }
 
     @Test

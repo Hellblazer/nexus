@@ -8,8 +8,8 @@ import org.jooq.Record4;
 import org.jooq.Record5;
 import org.jooq.impl.DSL;
 
+import java.util.List;
 import java.util.Map;
-import java.util.stream.Stream;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 
@@ -25,7 +25,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
  * before Y has a row. So:
  * <ol>
  * <li>With the index absent, the advisory locks of X's tuple and Y's tuple, in the sorted order the batch paths take theirs
- *     ({@link CollectionMint#lockTupleKeys}), before either row is touched: a registration takes a tuple's lock and then
+ *     ({@link CollectionTupleLock#lock}), before either row is touched: a registration takes a tuple's lock and then
  *     its row, so a rename that held X's row and then waited for a tuple's lock could meet it head on.</li>
  * <li>Y's id: the id of Y's own tombstone when Y is being revived (a rename back keeps the row and its id), else a fresh draw
  *     from the column's sequence ({@link CollectionMint#drawId}: taken-id check, one forward heal).</li>
@@ -65,9 +65,9 @@ final class CollectionRename {
         Record5<String, String, String, String, String> source = successorAttributes(ctx, tenant, oldName, newContentType, newOwnerId);
         if (source != null && own != null && !CollectionMint.tupleIndexExists(ctx)) {
             // X's tuple and Y's: the same key when Y takes X's own. Sorted, once each, as the batch paths lock theirs.
-            CollectionMint.lockTupleKeys(ctx, Stream.of(
-                CollectionMint.tupleKey(tenant, own.value1(), own.value2(), own.value3(), own.value4()),
-                CollectionMint.tupleKey(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
+            CollectionTupleLock.lock(ctx, List.of(
+                new CollectionTupleLock.Tuple(tenant, own.value1(), own.value2(), own.value3(), own.value4()),
+                new CollectionTupleLock.Tuple(tenant, source.value1(), source.value2(), source.value3(), source.value4())));
         }
         long successorId = successorId(ctx, tenant, newName);
         int retired = CollectionTombstones.supersede(ctx, tenant, oldName, newName, successorId);
