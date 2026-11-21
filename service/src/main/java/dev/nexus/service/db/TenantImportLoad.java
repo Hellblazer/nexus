@@ -192,26 +192,27 @@ final class TenantImportLoad {
      * ({@link CollectionMint#lockTuple}), and then re-read; with it, this replaces its bare unique violation.
      */
     private static void refuseLiveTupleConflicts(DSLContext ctx, String tenant, TablePlan tp, Stage st) {
-        List<String> needed = List.of("name", "content_type", "owner_id", "embedding_model", "model_version",
-            "superseded_by", "lifecycle_state");
-        if (!tp.loadColumns().containsAll(needed)) return;
+        // A file written by an older engine may lack some of these columns: the check reads the row values it has and the
+        // column's default for the rest (what the load itself writes for a column the file lacks), so a file missing one
+        // is still checked and never skipped.
+        if (!tp.loadColumns().contains("name")) return;
         Table<?> a = TenantImportStaging.stageTable(st).as("a");
         Table<?> b = TenantImportStaging.stageTable(st).as("b");
         List<Field<String>> tupleOfA = new ArrayList<>();
         Condition sameTuple = DSL.trueCondition();
         for (String column : List.of("content_type", "owner_id", "embedding_model", "model_version")) {
-            tupleOfA.add(DSL.field(DSL.name("a", column), String.class));
-            sameTuple = sameTuple.and(DSL.field(DSL.name("a", column), String.class).eq(DSL.field(DSL.name("b", column), String.class)));
+            tupleOfA.add(stagedOrDefault(tp, "a", column, ""));
+            sameTuple = sameTuple.and(stagedOrDefault(tp, "a", column, "").eq(stagedOrDefault(tp, "b", column, "")));
         }
         Field<String> aName = DSL.field(DSL.name("a", "name"), String.class);
         Field<String> bName = DSL.field(DSL.name("b", "name"), String.class);
         Condition bothLive = DSL.trueCondition();
         for (String alias : List.of("a", "b")) {
-            bothLive = bothLive.and(DSL.field(DSL.name(alias, "superseded_by"), String.class).eq(""))
-                .and(DSL.field(DSL.name(alias, "lifecycle_state"), String.class).ne("quarantine"));
+            bothLive = bothLive.and(stagedOrDefault(tp, alias, "superseded_by", "").eq(""))
+                .and(stagedOrDefault(tp, alias, "lifecycle_state", "live").ne("quarantine"));
         }
-        Condition aLive = DSL.field(DSL.name("a", "superseded_by"), String.class).eq("")
-            .and(DSL.field(DSL.name("a", "lifecycle_state"), String.class).ne("quarantine"));
+        Condition aLive = stagedOrDefault(tp, "a", "superseded_by", "").eq("")
+            .and(stagedOrDefault(tp, "a", "lifecycle_state", "live").ne("quarantine"));
         if (!CollectionMint.tupleIndexExists(ctx)) {
             ctx.selectDistinct(tupleOfA).from(a).where(aLive).fetch().stream()
                 .map(r -> CollectionMint.tupleKey(tenant, r.get(0, String.class), r.get(1, String.class),
@@ -221,7 +222,7 @@ final class TenantImportLoad {
         Record twin = ctx.select(aName, bName, tupleOfA.get(0), tupleOfA.get(1), tupleOfA.get(2), tupleOfA.get(3))
             .from(a).join(b).on(sameTuple.and(aName.lt(bName))).where(bothLive).limit(1).fetchOne();
         if (twin != null) {
-            throw new LoadFailedException(CollectionMint.conflict(twin.get(1, String.class), twin.get(0, String.class),
+            throw new LoadFailedException(CollectionMint.conflictInBackup(twin.get(1, String.class), twin.get(0, String.class),
                 twin.get(2, String.class), twin.get(3, String.class), twin.get(4, String.class), twin.get(5, String.class))
                 .getMessage());
         }
@@ -233,10 +234,15 @@ final class TenantImportLoad {
                 .and(t.SUPERSEDED_BY.eq("")).and(t.LIFECYCLE_STATE.ne("quarantine")).and(t.NAME.ne(aName)))
             .where(aLive).limit(1).fetchOne();
         if (held != null) {
-            throw new LoadFailedException(CollectionMint.conflict(held.get(0, String.class), held.get(1, String.class),
+            throw new LoadFailedException(CollectionMint.conflictInBackup(held.get(0, String.class), held.get(1, String.class),
                 held.get(2, String.class), held.get(3, String.class), held.get(4, String.class), held.get(5, String.class))
                 .getMessage());
         }
+    }
+
+    /** The staged column of {@code alias}, or, when the file lacks it, the column's default as a constant. */
+    private static Field<String> stagedOrDefault(TablePlan tp, String alias, String column, String fallback) {
+        return tp.loadColumns().contains(column) ? DSL.field(DSL.name(alias, column), String.class) : DSL.inline(fallback);
     }
 
     private static TableResult loadTable(DSLContext ctx, String tenant, TablePlan tp, Map<String, Stage> stages,

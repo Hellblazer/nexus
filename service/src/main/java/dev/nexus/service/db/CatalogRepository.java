@@ -9827,14 +9827,15 @@ public final class CatalogRepository {
      * {@code quarantine-} name (linda 2026-11-20). Engine-internal callers use the two-argument form.
      */
     public void upsertCollection(String tenant, Map<String, Object> coll, boolean clientRoute) {
-        tenantScope.withTenant(tenant, ctx -> {
-            CollectionMint.refuseSuppliedId(coll);
+        CollectionMint.refuseSuppliedId(coll);
+        if (s(coll, "name") == null || s(coll, "name").isBlank()) {
+            // RDR-229 P3.8: no name, the engine mints it (CollectionMint).
+            mintCollection(tenant, coll, clientRoute);
+            return;
+        }
+        String[] tuple = new String[5];
+        CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
             String name           = s(coll, "name");
-            if (name == null || name.isBlank()) {
-                // RDR-229 P3.8: no name, the engine mints it (CollectionMint).
-                CollectionMint.mint(ctx, tenant, coll, clientRoute);
-                return null;
-            }
             // Raw, nullable/blank — used to key the profile lookup; nne() below still fills the written
             // CONTENT_TYPE column with "" as before when absent.
             String contentType    = s(coll, "content_type");
@@ -9861,7 +9862,9 @@ public final class CatalogRepository {
                 CollectionRegistration.requireClientState(requestedState, name);
             }
 
-            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.OWNER_ID)
+            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.OWNER_ID,
+                            CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                            CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.CONTENT_TYPE)
                     .from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
                     .and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -9897,6 +9900,15 @@ public final class CatalogRepository {
                 // Discarded on conflict (EMBEDDING_MODEL is not in the SET list below) —
                 // bound only because the INSERT's VALUES list requires a value.
                 effectiveModel = nne(existingModel);
+                // The SET arm below revives a superseded row and may rewrite its content_type and a placeholder owner, so the
+                // row ends up on the tuple computed here: a live one another collection holds is refused naming both, in both
+                // index states, as it is for a new row. A no-op re-registration of a live row is not checked.
+                String postOwner = existingOwner != null && existingOwner.equals(tenant) ? nne(incomingOwner) : nne(existingOwner);
+                if (!"".equals(existingRow.value5()) || !contentType.equals(existingRow.value6()) || !postOwner.equals(nne(existingOwner))) {
+                    CollectionMint.remember(tuple, name, contentType, postOwner, effectiveModel, nne(existingRow.value3()));
+                    CollectionMint.refuseHeldTuple(ctx, tenant, name, contentType, postOwner, effectiveModel,
+                        nne(existingRow.value3()), nne(existingRow.value4()), "");
+                }
                 // RDR-204 nexus-ft04v.4/.5: lifecycle_state carries a NOT NULL constraint
                 // (hygiene-002) that PostgreSQL enforces on the VALUES tuple of an
                 // INSERT ... ON CONFLICT DO UPDATE BEFORE it resolves the conflict — a
@@ -9916,6 +9928,7 @@ public final class CatalogRepository {
                 effectiveModel     = newModel.model();
                 effectiveDimension = newModel.dimension();
                 lifecycleState = requestedState != null ? requestedState : "live";
+                CollectionMint.remember(tuple, name, contentType, nne(s(coll, "owner_id")), effectiveModel, modelVersion);
                 CollectionMint.refuseHeldTuple(ctx, tenant, name, contentType, nne(s(coll, "owner_id")), effectiveModel, modelVersion, lifecycleState, nne(s(coll, "superseded_by")));
             }
 
@@ -10025,7 +10038,7 @@ public final class CatalogRepository {
                 CollectionTombstones.repointTombstonesNaming(ctx, tenant, List.of(name));
             }
             return null;
-        });
+        }), CollectionMint.recheckOf(tenant, tuple));
     }
 
     /**
@@ -10034,7 +10047,8 @@ public final class CatalogRepository {
      * are {@link CollectionMint#mint}'s.
      */
     public Map<String, Object> mintCollection(String tenant, Map<String, Object> coll, boolean clientRoute) {
-        return tenantScope.withTenant(tenant, ctx -> CollectionMint.mint(ctx, tenant, coll, clientRoute));
+        return CollectionMint.refusingRace(tenantScope, tenant,
+            () -> tenantScope.withTenant(tenant, ctx -> CollectionMint.mint(ctx, tenant, coll, clientRoute)), null);
     }
 
     /**
@@ -10834,8 +10848,10 @@ public final class CatalogRepository {
         // no row yet (a new target) keeps the prefix rule.
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", oldName);
         QuarantineOrigin.requireNotQuarantine(tenantScope, tenant, "rename", newName);
-        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
-            newContentType, newOwnerId, newNameEmbeddingModel);
+        String[] tuple = new String[5];
+        Map<String, Integer> counts = CollectionMint.refusingRace(tenantScope, tenant,
+            () -> renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
+                newNameEmbeddingModel, tuple), CollectionMint.recheckOf(tenant, tuple));
         // Post-commit (nexus-h8rf6 wave review): the rename RETIRES the old registry row —
         // evict it so a later same-named collection re-registers.
         //
@@ -11329,7 +11345,7 @@ public final class CatalogRepository {
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
                                                         String expectedTargetSupersededBy,
                                                         String newContentTypeOrNull, String newOwnerIdOrNull,
-                                                        String newNameEmbeddingModelOrNull) {
+                                                        String newNameEmbeddingModelOrNull, String[] tupleOut) {
         // nexus-wbfpw.66: UPDATEs catalog_document_chunks.collection, which fires
         // vectors-021-3's chunk-locking trigger; whole transaction retried on 40P01. `counts` is
         // built inside the lambda, so each attempt starts from an empty map.
@@ -11488,72 +11504,11 @@ public final class CatalogRepository {
                 ? DSL.val(newOwnerIdOrNull, CATALOG_COLLECTIONS.OWNER_ID)
                 : CATALOG_COLLECTIONS.OWNER_ID;
 
-            // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
-            //    UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is
-            //    Y's own tombstone from an earlier rename Y->X, since a LIVE Y is refused
-            //    above. Renaming back onto that retired name REVIVES it — superseded_by/at
-            //    cleared, metadata refreshed from X — which is exactly what the round trip means.
-            //    A bare INSERT would collide on the (tenant_id, name) PK and abort the re-home.
-            //
-            //    nexus-v6za0 — an EARLIER VERSION OF THIS COMMENT CLAIMED Y's own rename
-            //    tombstone was the ONLY conflict that could reach here. That was false: a
-            //    supersede-marked Y is also non-live, also reaches this upsert, and unlike a
-            //    rename tombstone it still holds every chunk. CatalogHandler now gates the
-            //    revive on the tombstone's identity (superseded_by == oldName) so only the
-            //    round-trip undo arrives here, but do not restore the stronger claim — this
-            //    transaction is not itself the thing enforcing it.
-            counts.put("catalog_collections_inserted",
-                ctx.insertInto(CATALOG_COLLECTIONS,
-                        CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
-                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                        CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
-                        CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                        CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_AT,
-                        CATALOG_COLLECTIONS.CREATED_AT)
-                    .select(ctx.select(
-                            CATALOG_COLLECTIONS.TENANT_ID, DSL.val(newName),
-                            newContentType, newOwnerId,
-                            CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
-                            // RDR-204 nexus-ft04v.4/.5: catalog_collections.dimension and
-                            // lifecycle_state carry a NOT NULL / CHECK constraint (hygiene-002)
-                            // on lifecycle_state, so the fresh-insert arm below must carry X's
-                            // values forward the same way every other attribute does — an
-                            // omitted column here is not "leave it unset", it is a 23502 on
-                            // every rename that takes this branch.
-                            CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                            // nexus-c29vr: the new row is LIVE by construction — never copy the
-                            // source's tombstone markers. This select-list used to carry
-                            // SUPERSEDED_BY/SUPERSEDED_AT straight through, and only the
-                            // DO UPDATE arm below cleared them. On the fresh-insert arm that
-                            // made a retired X rename into a BORN-DEAD Y (superseded_by copied
-                            // from X), permanently invisible to collectionForTuple, with all of
-                            // X's data re-homed onto it. The handler now refuses a retired
-                            // source, but "explicit beats incidental" applies to both arms.
-                            DSL.val("", CATALOG_COLLECTIONS.SUPERSEDED_BY),
-                            DSL.val(null, CATALOG_COLLECTIONS.SUPERSEDED_AT),
-                            CATALOG_COLLECTIONS.CREATED_AT)
-                        .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(oldName)))
-                    .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
-                    .doUpdate()
-                    .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-                    .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
-                    .set(CATALOG_COLLECTIONS.EMBEDDING_MODEL,      DSL.excluded(CATALOG_COLLECTIONS.EMBEDDING_MODEL))
-                    .set(CATALOG_COLLECTIONS.MODEL_VERSION,        DSL.excluded(CATALOG_COLLECTIONS.MODEL_VERSION))
-                    .set(CATALOG_COLLECTIONS.DISPLAY_NAME,         DSL.excluded(CATALOG_COLLECTIONS.DISPLAY_NAME))
-                    .set(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, DSL.excluded(CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED))
-                    .set(CATALOG_COLLECTIONS.DIMENSION,            DSL.excluded(CATALOG_COLLECTIONS.DIMENSION))
-                    .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE,      DSL.excluded(CATALOG_COLLECTIONS.LIFECYCLE_STATE))
-                    // Revive: clear the tombstone markers rather than copying X's (which
-                    // are '' / NULL anyway — the CLI refuses to rename an already-
-                    // superseded row, so X is live). Explicit beats incidental here.
-                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, "")
-                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, DSL.castNull(Long.class))
-                    .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, (java.time.OffsetDateTime) null)
-                    .execute());
-            // RDR-229 P3.1: the new row is the successor that tombstones naming newName were waiting for.
-            CollectionTombstones.repointTombstonesNaming(ctx, tenant, List.of(newName));
+            // 1. RETIRE X, naming Y and Y's id, then register (or revive) Y, copying X's metadata so children can re-home
+            //    onto it. X goes first: Y has X's live tuple, which the partial UNIQUE index refuses while X holds it, and
+            //    P3.1's superseded_by_id CHECK needs Y's id before Y has a row. The whole step, the revive of a retired Y
+            //    (nexus-cecqy, nexus-v6za0) and the order are CollectionRename's.
+            CollectionRename.retireAndRegister(ctx, tenant, oldName, newName, newContentType, newOwnerId, counts, tupleOut);
 
             // 2. Re-home every child denorm-collection table X->Y (Y now exists, FK satisfied).
             //    Driven by COLLECTION_SCOPED_TABLES so this loop and collectionIsEmpty can
@@ -11629,7 +11584,7 @@ public final class CatalogRepository {
             //     per sibling. Sibling NAMES are not renamed: the engine finds a sibling by this tag.
             QuarantineOrigin.retagRowsOf(ctx, tenant, oldName, newName);
 
-            // 3. RETIRE the old registry row X as a superseded tombstone (nexus-cecqy).
+            // 3. (X is RETIRED in step 1.) The old registry row stays as a superseded tombstone (nexus-cecqy).
             //
             // This used to DELETE X. The delete was never required — by this point every
             // RESTRICT child has been re-homed onto Y, so X is childless and free to
@@ -11685,13 +11640,7 @@ public final class CatalogRepository {
                 .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(newName))
                 .and(NoteUri.namesCollection(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldName)).execute());
 
-            counts.put("catalog_collections_superseded",
-                ctx.update(CATALOG_COLLECTIONS)
-                   .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
-                   .set(CATALOG_COLLECTIONS.SUPERSEDED_BY_ID, CollectionIds.idOf(tenant, newName))
-                   .set(CATALOG_COLLECTIONS.SUPERSEDED_AT, DSL.currentOffsetDateTime())
-                   .where(CATALOG_COLLECTIONS.NAME.eq(oldName))
-                   .execute());
+            // (X was retired in step 1, before Y was written: see CollectionRename.)
             // catalog-051-2 (RDR-229): step 2 re-homed the documents while X was still live and held the
             // (content_type, owner_id, embedding_model, model_version) tuple the documents' owner names, so its
             // AFTER trigger's guard kept Y's slug owner. X is retired now; this no-op write names owner_id, which
@@ -13675,10 +13624,10 @@ public final class CatalogRepository {
      * catalog-002-1-temporal-typing (RDR-156 P0.2) converted these columns to timestamptz NULL.
      */
     public void importCollection(String tenant, Map<String, Object> coll) {
-        tenantScope.withTenant(tenant, ctx -> {
+        CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
             doImportCollection(ctx, tenant, coll);
             return null;
-        });
+        }), ctx -> CollectionMint.refuseLiveTupleConflicts(ctx, tenant, List.of(coll)));
     }
 
     /**
@@ -13710,7 +13659,8 @@ public final class CatalogRepository {
     /** {@link #importCollectionsBatch}, also naming the rows whose state it corrected. */
     public ImportCollectionsResult importCollectionsBatchReport(String tenant, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) return new ImportCollectionsResult(0, List.of());
-        return tenantScope.withTenant(tenant, ctx -> {
+        var freshRows = new java.util.concurrent.atomic.AtomicReference<List<Map<String, Object>>>(List.of());
+        return CollectionMint.refusingRace(tenantScope, tenant, () -> tenantScope.withTenant(tenant, ctx -> {
             var unique = new java.util.LinkedHashMap<String, Map<String, Object>>(rows.size());
             for (var coll : rows) {
                 CollectionMint.refuseSuppliedId(coll);
@@ -13739,6 +13689,7 @@ public final class CatalogRepository {
                 deduped.stream().map(c -> s(c, "name")).toList());
             List<Map<String, Object>> fresh = deduped.stream().filter(c -> !existing.contains(s(c, "name"))).toList();
             CollectionRegistration.requireStatesAgreeWithNames(fresh);
+            freshRows.set(fresh);
             CollectionMint.refuseLiveTupleConflicts(ctx, tenant, fresh);
             List<String> corrected = fresh.stream().filter(CollectionRegistration::stateCorrectedOnImport)
                 .map(c -> s(c, "name")).toList();
@@ -13785,7 +13736,7 @@ public final class CatalogRepository {
             }
             corrected.forEach(name -> logStateCorrected(tenant, name));
             return new ImportCollectionsResult(rows.size(), corrected);
-        });
+        }), ctx -> CollectionMint.refuseLiveTupleConflicts(ctx, tenant, freshRows.get()));
     }
 
     private static void logStateCorrected(String tenant, String name) {
