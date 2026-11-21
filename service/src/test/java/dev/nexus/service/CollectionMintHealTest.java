@@ -178,6 +178,44 @@ class CollectionMintHealTest {
         assertThat(nextSequenceValue()).as("the heal left the sequence after the minted id").isEqualTo(next + 7);
     }
 
+    @Test @Order(0)
+    void theTakenFunctionIsADefinerWithAPinnedPathAndOnlyTheEngineRolesMayExecuteIt() {
+        // the id-taken check answers a boolean over every tenant's rows: one gated entry point, never PUBLIC
+        String definition = su(ctx -> CollectionMintSupport.functionDefinition(ctx, CollectionMintSupport.TAKEN_FUNCTION));
+        assertThat(definition).as("a definer function with its search_path pinned")
+            .contains("SECURITY DEFINER").containsIgnoringCase("search_path");
+        boolean prod = su(ctx -> CollectionMintSupport.holdsExecute(ctx, "nexus_svc", CollectionMintSupport.TAKEN_FUNCTION));
+        boolean cls = su(ctx -> CollectionMintSupport.holdsExecute(ctx, SVC_ROLE, CollectionMintSupport.TAKEN_FUNCTION));
+        boolean pub = su(ctx -> CollectionMintSupport.holdsExecute(ctx, "public", CollectionMintSupport.TAKEN_FUNCTION));
+        boolean pubHeal = su(ctx -> CollectionMintSupport.holdsExecute(ctx, "public", CollectionMintSupport.HEAL_FUNCTION));
+        assertThat(prod).as("nexus_svc may EXECUTE it").isTrue();
+        assertThat(cls).as("the test's service role may EXECUTE it").isTrue();
+        assertThat(pub).as("PUBLIC may not").isFalse();
+        assertThat(pubHeal).as("nor the heal").isFalse();
+    }
+
+    @Test @Order(2)
+    void aMintNeverTakesAnIdOnlyAnotherTenantHolds() {
+        // B holds the id the sequence hands out next and A holds nothing at it. A tenant-scoped check of A's own rows says
+        // "free", and A's row would repeat B's id across tenants (the table's UNIQUE is per tenant).
+        String other = "mint-heal-tenant-b";
+        long n = nextSequenceValue();
+        su(ctx -> {
+            CollectionMintSupport.insertLiveRow(ctx, other, "only-b-holds", "restored-only-b", MODEL, n);
+            return null;
+        });
+        boolean heldByB = svc(ctx -> CollectionMintSupport.callTaken(ctx, n));
+        boolean freeId = svc(ctx -> CollectionMintSupport.callTaken(ctx, n + 1_000_000_000L));
+        assertThat(heldByB).as("the id-taken function sees another tenant's row: a boolean, no tenant's data").isTrue();
+        assertThat(freeId).as("and a free id is free").isFalse();
+
+        var a = repo.mintCollection(TENANT, attrs("subject-only-b"), true);
+
+        assertThat(id(a)).as("A drew n, found it held by B, healed and drew the next").isGreaterThan(n);
+        assertThat(a.get("name")).isEqualTo("c" + id(a));
+        assertNoIdIsHeldTwiceAcrossTenants();
+    }
+
     @Test @Order(3)
     void theHealFunctionOnlyMovesTheSequenceForward() {
         long next = nextSequenceValue();
@@ -200,10 +238,12 @@ class CollectionMintHealTest {
     }
 
     @Test @Order(4)
-    void aHealInOneTenantNeverMovesTheSharedSequenceBackAndTheOtherTenantsNextMintDoesNotCollide() {
-        // The identity sequence is one for every tenant; a tenant sees only its own rows (FORCE RLS), so a heal knows its
-        // own tenant's largest id and nothing about the others'. Tenant A holds an id at the sequence's next draw, so
-        // A's mint collides and heals; tenant B holds ids just above, so B's next mint collides and heals in its turn.
+    void aHealInOneTenantNeverMovesTheSharedSequenceBackAndNoTenantsMintTakesAnIdAnotherTenantHolds() {
+        // An id is unique across the installation (RDR-229 item 6; linda's ruling on D-a). The identity sequence is one for
+        // every tenant and a tenant sees only its own rows (FORCE RLS), so the heal's floor and the mint's id-taken check
+        // read through definer functions that answer a number and a boolean across every tenant. Tenant A holds an id at the
+        // sequence's next draw, so A's mint collides and heals; tenant B holds the ids just above. A's heal must clear B's
+        // ids too, or A's next draw is an id B holds.
         String other = "mint-heal-tenant-b";
         long n = nextSequenceValue();
         seedWithExplicitId("two-a-held", n);
@@ -217,14 +257,22 @@ class CollectionMintHealTest {
 
         var a = repo.mintCollection(TENANT, attrs("subject-two-a"), true);
 
-        assertThat(id(a)).as("A drew past its own taken id").isEqualTo(n + 1);
+        assertThat(id(a)).as("A's heal read B's largest id (n+3) and A drew past it: no id B holds").isEqualTo(n + 4);
+        assertThat(a.get("name")).isEqualTo("c" + (n + 4));
         assertThat(nextSequenceValue() - 1).as("A's heal left the sequence at or above where it was").isGreaterThanOrEqualTo(before);
 
         var b = repo.mintCollection(other, attrs("subject-two-b"), true);
 
-        assertThat(id(b)).as("B's mint healed to B's own largest id and drew past it").isEqualTo(n + 4);
-        assertThat(b.get("name")).isEqualTo("c" + (n + 4));
-        assertThat(nextSequenceValue() - 1).as("the sequence only moved forward").isGreaterThanOrEqualTo(n + 4);
+        assertThat(id(b)).as("B's mint drew the next id, past A's").isEqualTo(n + 5);
+        assertThat(b.get("name")).isEqualTo("c" + (n + 5));
+        assertNoIdIsHeldTwiceAcrossTenants();
+    }
+
+    /** No {@code collection_id} is held by two rows, whatever their tenants (the table's own UNIQUE is per tenant). */
+    private void assertNoIdIsHeldTwiceAcrossTenants() {
+        List<Long> repeated = su(ctx -> ctx.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .groupBy(CATALOG_COLLECTIONS.COLLECTION_ID).having(DSL.count().gt(1)).fetch(CATALOG_COLLECTIONS.COLLECTION_ID));
+        assertThat(repeated).as("ids held by more than one row across the tenants").isEmpty();
     }
 
     @Test @Order(5)
@@ -345,8 +393,7 @@ class CollectionMintHealTest {
         // The sequence cycles over [1, max]: the first draw wraps to 1 (a row), the heal draws forward to max, and the next draw
         // wraps to 1 again, which is a row too.
         su(ctx -> {
-            // the cycle spans the largest id of every tenant, and a heal only knows its own tenant's: the other tenant of the
-            // test above goes, so this tenant's largest id is the sequence's largest
+            // the other tenant of the tests above goes, so this tenant's rows alone fix the cycle's span
             ctx.deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.ne(TENANT)).execute();
             CollectionMintSupport.cycleOverTheRows(ctx, TENANT, "cycle-anchor", MODEL);
             return null;
