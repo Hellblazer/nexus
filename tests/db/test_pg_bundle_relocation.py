@@ -52,6 +52,8 @@ from pathlib import Path
 import pytest
 
 from nexus._install.layout_core import exe_name
+from nexus.daemon.pg_bundle_refresh import bundle_has_pg_background
+from nexus.db import pg_bundle
 from tests._child_process import apply_reloadable_throwaway_conf, pg_data_tempdir, stop_and_remove_cluster
 from tests.db._pg_auth import superuser_pgpass
 from nexus.db.pg_provision import (
@@ -475,3 +477,17 @@ class TestPgBackgroundFromRelocated:
         assert ran.returncode == 0 and ran.stdout.strip() == "1", (
             f"a pg_background worker did not return SELECT 1 (rc={ran.returncode}, out={ran.stdout!r}):\n{ran.stderr}"
         )
+
+
+class TestBundleRefreshProbesOnTheRealBundle:
+    """nexus-f3yqd.2.23: the two facts bundle refresh reads from a tree, on the REAL relocated bundle: the major
+    version ``pg_ctl --version`` reports (with the bundle's own libraries, since it carries no RPATH) and where the
+    pg_background control file sits. The synthetic bundles in tests/daemon/test_pg_bundle_refresh.py only mirror them."""
+
+    def test_the_major_probe_reads_the_relocated_tree(self, bins):
+        assert pg_bundle.bundle_major(bins.bin_dir) == int(PG_VERSION_PIN.split(".")[0])
+
+    def test_the_control_file_is_where_the_check_looks(self, tmp_path):
+        assert _ROOT is not None
+        (tmp_path / "bundle").symlink_to(_ROOT, target_is_directory=True)  # an extract root around the real tree
+        assert bundle_has_pg_background(tmp_path)
