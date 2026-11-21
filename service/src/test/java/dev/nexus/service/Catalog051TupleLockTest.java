@@ -33,8 +33,8 @@ import java.util.concurrent.TimeUnit;
  */
 class Catalog051TupleLockTest {
 
-    /** The high 56 bits every key shares (collections-003-1): md5('16:catalog_tuple_lock'), first 64 bits, low byte cleared. */
-    private static final long STRIPE_NAMESPACE = -8534080144102783744L;
+    /** The high 56 bits every key shares (collections-003-1): md5('18:catalog_tuple_lock'), first 64 bits, low byte cleared. */
+    private static final long STRIPE_NAMESPACE = 7645428408315627776L;
 
     /**
      * The length-prefixed encoding's 64-bit hash, computed here in Java, independently of the SQL: md5 of
@@ -62,8 +62,8 @@ class Catalog051TupleLockTest {
             // hash, namespace or stripe count fails here and no two takers can silently part ways. collections-003-1
             // (RDR-229 P3.8, linda's ruling (a)) striped the key: the namespace's high 56 bits, the encoding hash's low 8.
             assertThat(key(su, base)).isEqualTo(k);
-            assertThat(key(su, "t", "docs", "1-2", "m", "v1")).isEqualTo(-8534080144102783556L);
-            assertThat(k).isEqualTo(-8534080144102783525L);
+            assertThat(key(su, "t", "docs", "1-2", "m", "v1")).isEqualTo(7645428408315627964L);
+            assertThat(k).isEqualTo(7645428408315627995L);
             assertThat(encodingHash("t", "docs", "1-2", "m", "v1")).as("catalog-051-1a's pinned per-tuple hash").isEqualTo(-7552408002309144644L);
 
             String[][] tuples = {
