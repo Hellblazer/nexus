@@ -401,6 +401,7 @@ class CollectionRegistryTest {
         String name = "code__cr-race__voyage-code-3__v1";
         String target = "code__cr-race-target__voyage-code-3__v2";
         seedRegisteredWithAttributes(name, "code", "cr-race", "voyage-code-3", 1024, "live");
+        seedRegistered(target);   // RDR-229 P3.1: a tombstone names its successor by registry id
         CollectionRegistry.afterMissReadForTests = () -> catalogRepo.supersedeCollection(TENANT, name, target, "");
         CollectionRow readBeforeTheSupersede;
         try {
@@ -488,6 +489,7 @@ class CollectionRegistryTest {
         assertThat(cachedBefore.supersededBy()).isEmpty();
         assertThat(CollectionRegistry.cached(TENANT, name)).isPresent();
 
+        seedRegistered(target);   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, target, "");
 
         assertThat(CollectionRegistry.cached(TENANT, name))
@@ -548,6 +550,7 @@ class CollectionRegistryTest {
         String name = "code__cr-writable-dead__voyage-code-3__v1";
         String successor = "code__cr-writable-dead__voyage-code-3__v2";
         seedRegisteredWithAttributes(name, "code", "cr-writable-dead", "voyage-code-3", 1024, "live");
+        seedRegistered(successor);   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, successor, "");
 
         assertThatThrownBy(() -> tenantScope.withTenant(TENANT,
@@ -575,6 +578,7 @@ class CollectionRegistryTest {
         CollectionRegistry.lookupWritable(tenantScope, TENANT, name);
         assertThat(CollectionRegistry.isKnown(TENANT, name)).isTrue();
 
+        seedRegistered(successor);   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, successor, "");
 
         assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
@@ -586,6 +590,7 @@ class CollectionRegistryTest {
     void lookupWritable_aRevivedName_isWritableAgain_becauseTheTombstoneWasNeverCached() {
         String name = "code__cr-revive__voyage-code-3__v1";
         seedRegisteredWithAttributes(name, "code", "cr-revive", "voyage-code-3", 1024, "live");
+        seedRegistered("code__cr-revive__voyage-code-3__v2");   // RDR-229 P3.1: a tombstone names its successor by registry id
         catalogRepo.supersedeCollection(TENANT, name, "code__cr-revive__voyage-code-3__v2", "");
         assertThatThrownBy(() -> CollectionRegistry.lookupWritable(tenantScope, TENANT, name))
             .isInstanceOf(CollectionSupersededException.class);

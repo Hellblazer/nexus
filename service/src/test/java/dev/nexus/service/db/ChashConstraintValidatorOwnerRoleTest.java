@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -128,7 +129,8 @@ class ChashConstraintValidatorOwnerRoleTest {
 
     private static void insertChunk(DSLContext ctx, String tenant, byte[] chash, String text) {
         ctx.insertInto(CHUNKS)
-            .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, COLLECTION).set(CHUNKS.CHASH, chash)
+            .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, COLLECTION)).set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, MODEL).set(CHUNKS.CHUNK_TEXT, text)
             .set(CHUNKS.EMBEDDING_768, Vector.of(new float[768])).execute();
     }
@@ -139,7 +141,8 @@ class ChashConstraintValidatorOwnerRoleTest {
         ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
             .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, docId)
             .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
-            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL).execute();
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, COLLECTION)).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL).execute();
     }
 
     /** The owner role's validator, with the service role's tenant scope to count a refused table's bad rows by tenant. */

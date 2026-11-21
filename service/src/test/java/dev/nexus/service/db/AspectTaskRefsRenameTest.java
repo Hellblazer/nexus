@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.db.CollectionIds;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
@@ -594,8 +595,8 @@ class AspectTaskRefsRenameTest {
         seedDocument(tenant, a, "1.8.1");
         su(ctx -> ctx.insertInto(DOCUMENT_ASPECTS, DOCUMENT_ASPECTS.TENANT_ID, DOCUMENT_ASPECTS.COLLECTION,
                 DOCUMENT_ASPECTS.SOURCE_PATH, DOCUMENT_ASPECTS.EXTRACTED_AT, DOCUMENT_ASPECTS.MODEL_VERSION,
-                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI)
-            .values(tenant, a, "p/1.8.1.md", OffsetDateTime.now(), "v1", "docling", "1.8.1", "file:///p/1.8.1.md")
+                DOCUMENT_ASPECTS.EXTRACTOR_NAME, DOCUMENT_ASPECTS.DOC_ID, DOCUMENT_ASPECTS.SOURCE_URI, DOCUMENT_ASPECTS.COLLECTION_ID)
+            .values(tenant, a, "p/1.8.1.md", OffsetDateTime.now(), "v1", "docling", "1.8.1", "file:///p/1.8.1.md", CollectionIds.require(ctx, tenant, a))
             .execute());
         outTask(tenant, a, "1.8.1");
         var claimed = tuples.inp(tenant, "aspects", Map.of("queue", "aspects"), WORKER, 600L).orElseThrow();

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -140,6 +141,7 @@ class ChashConformanceReportIntegrationTest {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, COLLECTION)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, COLLECTION))
             .set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, MODEL)
             .set(CHUNKS.CHUNK_TEXT, text)
@@ -190,6 +192,7 @@ class ChashConformanceReportIntegrationTest {
                     .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
                     .set(CATALOG_DOCUMENT_CHUNKS.CHASH, legacyChash)
                     .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, COLLECTION)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_A, COLLECTION))
                     .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, MODEL)
                     .execute();
             });
@@ -245,6 +248,7 @@ class ChashConformanceReportIntegrationTest {
         var ins = seed.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant)
             .set(CHUNKS.COLLECTION, collection)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(tenant, collection))
             .set(CHUNKS.CHASH, chash)
             .set(CHUNKS.EMBEDDING_MODEL, model)
             .set(CHUNKS.CHUNK_TEXT, text);
@@ -272,8 +276,18 @@ class ChashConformanceReportIntegrationTest {
             .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, position)
             .set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
             .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collection)
+            // RDR-229 P3.1: the id beside the name; a name no registry row backs (the legacy and no-catalog-row
+            // cases) gets one the registry never issued, so the CHECK passes and the foreign key is what refuses.
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, registeredIdOrUnissued(seed, tenant, collection))
             .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, model)
             .execute();
+    }
+
+    private static Long registeredIdOrUnissued(DSLContext seed, String tenant, String collection) {
+        Long id = seed.select(CATALOG_COLLECTIONS.COLLECTION_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(collection))
+            .fetchOne(CATALOG_COLLECTIONS.COLLECTION_ID);
+        return id != null ? id : Long.MAX_VALUE;
     }
 
     private static long total(List<Map<String, Object>> report, String tableName) {
@@ -433,7 +447,8 @@ class ChashConformanceReportIntegrationTest {
             String bge = "knowledge__fkbge__bge-base-en-v15-768__v1";
             PgContainerHelper.insertCollection(d, TENANT_FK, bge);
             assertThatThrownBy(() -> d.insertInto(CHUNKS)
-                .set(CHUNKS.TENANT_ID, TENANT_FK).set(CHUNKS.COLLECTION, bge).set(CHUNKS.CHASH, sha256("wrong model"))
+                .set(CHUNKS.TENANT_ID, TENANT_FK).set(CHUNKS.COLLECTION, bge)
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT_FK, bge)).set(CHUNKS.CHASH, sha256("wrong model"))
                 .set(CHUNKS.EMBEDDING_MODEL, "minilm-l6-v2-384").set(CHUNKS.CHUNK_TEXT, "wrong model")
                 .set(CHUNKS.EMBEDDING_384, vecOf(384)).execute())
                 .hasMessageContaining("chunks_collection_fk");

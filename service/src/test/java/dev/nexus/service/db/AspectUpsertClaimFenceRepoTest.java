@@ -293,6 +293,8 @@ class AspectUpsertClaimFenceRepoTest extends AtomicWriteTestBase {
         seedTask(f);
         var a = claim("wA:0");
         String successor = f.collection().replace("__v1", "__v2");
+        // RDR-229 P3.1: a tombstone names its successor by registry id, so the successor is registered first.
+        admin(ctx -> { dev.nexus.service.PgContainerHelper.insertCollection(ctx, TENANT, successor); return null; });
         assertThat(repo.supersedeCollection(TENANT, f.collection(), successor, "")).isEqualTo(1);
 
         assertThatThrownBy(() -> aspects.upsertAspect(TENANT, aspectBody(f, "x", a.claimId(), "wA:0")))

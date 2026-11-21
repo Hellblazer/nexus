@@ -317,9 +317,9 @@ class GhostSweepDormantMarkingTest {
             case "canary_query_ring" -> ctx.insertInto(CANARY_QUERY_RING, CANARY_QUERY_RING.TENANT_ID,
                                CANARY_QUERY_RING.COLLECTION, CANARY_QUERY_RING.EMBEDDING_MODEL,
                                CANARY_QUERY_RING.EMBEDDING_384, CANARY_QUERY_RING.VECTOR_DIGEST,
-                               CANARY_QUERY_RING.ADDED_AT)
+                               CANARY_QUERY_RING.ADDED_AT, CANARY_QUERY_RING.COLLECTION_ID)
                 .values(TENANT_PARAM, coll, PgContainerHelper.collectionModel(ctx, TENANT_PARAM, coll),
-                        vector(384), chashBytes(coll + "-ring"), OffsetDateTime.now())
+                        vector(384), chashBytes(coll + "-ring"), OffsetDateTime.now(), CollectionIds.require(ctx, TENANT_PARAM, coll))
                 .execute();
             default -> throw new IllegalArgumentException(
                 "no seed case for COLLECTION_SCOPED_TABLES entry '" + countKey + "' -- "

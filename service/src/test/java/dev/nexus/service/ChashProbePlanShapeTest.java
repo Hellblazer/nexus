@@ -1,5 +1,6 @@
 package dev.nexus.service;
 
+import dev.nexus.service.db.CollectionIds;
 import org.jooq.impl.SQLDataType;
 import org.jooq.Field;
 import org.jooq.DSLContext;
@@ -131,10 +132,11 @@ class ChashProbePlanShapeTest {
                     modelFor(dim));
                 var series = DSL.generateSeries(1, CHUNKS_PER_DIM).as("s", "i");
                 Field<String> iText = DSL.cast(series.field("i", Integer.class), SQLDataType.VARCHAR);
-                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.EMBEDDING_MODEL, CHUNKS.CHASH,
-                        CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(dim))
+                ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.COLLECTION_ID, CHUNKS.EMBEDDING_MODEL,
+                        CHUNKS.CHASH, CHUNKS.CHUNK_TEXT, VectorSeeds.chunkEmbedding(dim))
                     .select(ctx.select(DSL.val(TENANT, CHUNKS.TENANT_ID),
                             DSL.val("plan-" + dim, CHUNKS.COLLECTION),
+                            CollectionIds.idOf(TENANT, "plan-" + dim),
                             DSL.val(modelFor(dim), CHUNKS.EMBEDDING_MODEL),
                             DSL.function("decode", SQLDataType.BLOB,
                                 DSL.concat(
@@ -154,6 +156,7 @@ class ChashProbePlanShapeTest {
             ctx.insertInto(CHUNKS)
                 .set(CHUNKS.TENANT_ID, TENANT)
                 .set(CHUNKS.COLLECTION, "plan-384")
+                .set(CHUNKS.COLLECTION_ID, CollectionIds.idOf(TENANT, "plan-384"))
                 .set(CHUNKS.EMBEDDING_MODEL, modelFor(384))
                 .set(CHUNKS.CHASH, java.util.HexFormat.of().parseHex(liveChash(768, 42)))
                 .set(CHUNKS.CHUNK_TEXT, "cross-model copy")
