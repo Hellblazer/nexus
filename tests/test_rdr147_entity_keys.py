@@ -34,6 +34,8 @@ from nexus.entity_keys import (
 )
 from nexus.mcp.core import store_put
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _PATTERN = r"CUST-\d{4}|eid_[0-9a-f]{8}"
 _GLOB = "knowledge__herb-*"
 _HERB = "knowledge__herb-core__bge-base-en-v15-768__v1"

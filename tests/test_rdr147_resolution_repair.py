@@ -53,6 +53,8 @@ from tests.test_rdr232_coverage_repair import (
 )
 from tests.test_rdr232_coverage_wiring import _drive
 
+pytestmark = pytest.mark.usefixtures("rowless_collection_cache")  # RDR-229 P2.9: a tenant-free test takes NoRow without a listing
+
 RECORD_COLL = "knowledge__custs__bge-base-en-v15-768__v1"
 PATTERN = r"CUST-\d{4}"
 #: f1 and f2 are supported by any anchor ("decision"); f3 only by a joined item ("Resolved"), so f3 is the

@@ -864,6 +864,85 @@ def split_candidate_collection_name(name: str) -> tuple[str, str]:
     return m.group(1), m.group(2)
 
 
+def candidate_content_type(name: str) -> str | None:
+    """The content type a candidate NAME carries in its first ``__`` segment, ``None`` when it has none.
+
+    RDR-229 item 1's NoRow derivation, the one parse every write-affecting router shares when no catalog
+    row answers (:func:`routing_content_type`; the search resolvers). A prefix-free label (``c1234``)
+    carries no type in its string, so it derives nothing and stays unrouted: no string rule tells it
+    from a note, which is P3.8's case, not this function's. P2.2 swaps this body for
+    ``legacy_names.candidate_attributes`` (nexus-p2m1x.7); every call site then keeps working.
+    """
+    return split_candidate_collection_name(name)[0] or None
+
+
+#: One re-read of the client row cache per this many seconds, before NoRow is taken: not while the cache
+#: is younger than this (a scan over any number of rowless names pays for at most one extra listing per
+#: interval, and each invalidate also resets the counts cache), and not twice for one name (a hot write
+#: loop over a collection that really has no row must not list the tenant on every call). The unreadable
+#: warning is likewise once per name per interval.
+_NOROW_RECHECK_INTERVAL_S: float = 10.0
+_norow_rechecked: dict[str, float] = {}
+_unreadable_warned: dict[str, float] = {}
+_norow_lock = threading.Lock()
+
+
+def _once_per_interval(seen: dict[str, float], name: str) -> bool:
+    """True the first time *name* is seen in *seen* within the interval (and records it)."""
+    now = time.monotonic()
+    with _norow_lock:
+        last = seen.get(name)
+        if last is not None and now - last < _NOROW_RECHECK_INTERVAL_S:
+            return False
+        seen[name] = now
+        if len(seen) > 4096:
+            seen.clear()
+            seen[name] = now
+        return True
+
+
+def _norow_recheck_due(name: str) -> bool:
+    """Whether to invalidate the row cache and read again before taking NoRow for *name*."""
+    from nexus.mcp_infra import collections_cache_age  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+    age = collections_cache_age()
+    if age is not None and age < _NOROW_RECHECK_INTERVAL_S:
+        return False  # the cache was filled inside the interval: a miss now means no row as of then
+    return _once_per_interval(_norow_rechecked, name)
+
+
+def routing_content_type(name: str, *, db: object = None) -> str | None:
+    """The content type that routes collection *name*, for a router that WRITES or reads for a write
+    (RDR-229 item 1's three outcomes).
+
+    * **Row**: the row's ``content_type``.
+    * **NoRow** (no row backs the name, after one cache invalidate and re-read, so a collection whose first
+      chunk landed after the cache was filled is found): :func:`candidate_content_type`. A collection a write
+      is creating holds no chunk yet and has no row; the name's own segment is what the code always used,
+      so ``uri_for`` still mints ``file://`` and ``select_config`` still picks the docs extractor on a first
+      write. A prefix-free label derives nothing (unrouted, P3.8).
+    * **Unreadable** (the listing raised): the same derivation and a warning, never a silent miss. A
+      read-only scan that must not do this reads ``row_content_type(name, strict=True)`` instead.
+
+    *db* is the caller's own handle (``HttpVectorClient``): its resolver reads the right tenant's rows.
+    Mint-class and ledgered as such: it empties at P3.8 with the rest of item 1's NoRow derivations.
+    """
+    from nexus.collection_route import row_content_type  # noqa: PLC0415 — deferred: collection_route reaches mcp_infra
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance (http_vector_client)
+    from nexus.mcp_infra import ServiceNotReadyError, invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+
+    try:
+        content_type = row_content_type(name, db=db, strict=True)
+        if content_type is None and _norow_recheck_due(name):
+            invalidate_collections_cache()
+            content_type = row_content_type(name, db=db, strict=True)
+    except (ServiceNotReadyError, VectorServiceError) as exc:
+        if _once_per_interval(_unreadable_warned, name):
+            _log.warning("routing_content_type_unreadable", collection=name, error=f"{type(exc).__name__}: {exc}")
+        return candidate_content_type(name)
+    return content_type or candidate_content_type(name)
+
+
 def candidate_knowledge_subject(name: str) -> str:
     """The subject of a ``--collection`` argument when it names a knowledge collection, else ``""`` (GH #1611).
 

@@ -27,6 +27,8 @@ import pytest
 
 from nexus.plans.match import Match
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 
 # The manual per-file T2-singleton eviction this file used to do for
 # itself, then the suite-wide autouse conftest fixture that replaced it

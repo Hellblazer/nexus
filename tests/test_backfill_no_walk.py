@@ -24,6 +24,8 @@ from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
 from nexus.commands import catalog as _cat_cmd
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 DOCUMENTS = 50_000
 
 

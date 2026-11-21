@@ -23,6 +23,8 @@ from nexus import aspect_readers as ar
 from nexus.aspect_readers import ReadFail, ReadOk
 from nexus.commands import enrich as enrich_cmd
 
+pytestmark = pytest.mark.usefixtures("named_collection_rows")  # RDR-229 P2.9: prefix-named fixtures get a catalog row
+
 _COLLECTION = "knowledge__quote-pin"
 _PATH = "notes/a#b?c%d.md"
 _EXPECTED = "nx-note://knowledge__quote-pin/notes/a%23b%3Fc%25d.md"
