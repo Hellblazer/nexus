@@ -39,8 +39,14 @@
     is superseded never counts toward the tuple, so its rewrite is unchanged. Functions replaced, same signatures,
     SECURITY INVOKER, no new function and no new trigger: nexus.catalog_collections_owner_from_docs() (the BEFORE
     trigger on catalog_collections) and nexus.catalog_documents_owner_to_collection() (the AFTER trigger on
-    catalog_documents). The check is a read, so a concurrent registration can still slip past it; the unique
-    index is the backstop for that race, as it is for any other writer.
+    catalog_documents). The check is a read, so two writers onto one free tuple could both pass it, and under the
+    unique index the second would end in a bare 23505. Each function therefore takes
+    pg_advisory_xact_lock(hashtext('catalog_tuple/' || tenant || '/' || content_type || '/' || owner || '/' ||
+    model || '/' || version)) before its holder SELECT, for a row that counts toward the tuple: the second writer
+    waits for the first to commit and then sees the holder (READ COMMITTED gives that SELECT a fresh snapshot). The
+    lock is held to the end of the transaction and is the only new lock; a transaction that already holds
+    collection row locks and then waits on the tuple lock can in principle deadlock with one that holds the tuple
+    lock and waits for one of those rows, which the engine's 40P01 retry covers.
     A collection that keeps its slug owner because of the guard stays replaceable, so each later document insert
     into it runs the owner aggregate again and repeats the NOTICE until the tuple frees or the owner is set by hand.
     NO DATA EFFECT: function bodies only. ROLLBACK of catalog-049-2 restores catalog-044-2's two bodies verbatim.
@@ -94,7 +100,13 @@ BEGIN
        AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
         v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
         IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
-            -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds.
+            -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds. The
+            -- transaction-scoped advisory lock on the tuple makes two writers onto one free tuple take turns, so the
+            -- second one's SELECT sees the first one's committed row instead of racing it into the unique index.
+            IF NEW.lifecycle_state = 'live' AND NEW.superseded_by = '' THEN
+                PERFORM pg_advisory_xact_lock(hashtext('catalog_tuple/' || NEW.tenant_id || '/' || NEW.content_type
+                    || '/' || v_owner || '/' || NEW.embedding_model || '/' || NEW.model_version));
+            END IF;
             SELECT h.name INTO v_holder
               FROM nexus.catalog_collections h
              WHERE NEW.lifecycle_state = 'live' AND NEW.superseded_by = ''
@@ -155,7 +167,12 @@ BEGIN
            AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
             v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
             IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
-                -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds.
+                -- catalog-049-2: a live, unsuperseded row must not land on a tuple another such row holds; the
+                -- advisory lock serialises two writers onto one free tuple (see the BEFORE function above).
+                IF v_ls = 'live' AND v_sb = '' THEN
+                    PERFORM pg_advisory_xact_lock(hashtext('catalog_tuple/' || NEW.tenant_id || '/' || v_ct
+                        || '/' || v_new || '/' || v_em || '/' || v_mv));
+                END IF;
                 SELECT h.name INTO v_holder
                   FROM nexus.catalog_collections h
                  WHERE v_ls = 'live' AND v_sb = ''

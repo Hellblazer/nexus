@@ -117,8 +117,13 @@ registered under a curator keeps it, and documents that arrive later do not
 replace it (`catalog-049` amends `catalog-044`). Only a non-tumbler owner (a
 slug such as `arcaneum-2ad2825c`, an empty value or a placeholder) is still
 derived from the collection's documents, hyphenated (`1-15`, what
-`owner_segment_for_tumbler` gives), when the first document lands. A
-collection with no documents keeps the value it was registered with. A
+`owner_segment_for_tumbler` gives), when the first document lands, unless
+another live collection already holds that owner for the same content
+type, embedding model and version: then the collection keeps its slug and
+the engine logs a notice naming both (`catalog-049`). It takes the
+documents' owner once that place frees, as when a rename or a supersede
+retires the other collection. A collection with no documents keeps the
+value it was registered with. A
 `knowledge` collection is different: its owner is its subject, whatever
 tumbler its documents live under.
 `catalog-044-collection-owner-from-documents.xml` carries the rule and a

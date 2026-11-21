@@ -2206,22 +2206,15 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: a repaired legacy slug collection and the conformant collection of the
-     * same owner now share a (content_type, owner_id, embedding_model) tuple. At equal version
-     * the collection registered first wins (nexus-p2m1x.4; it was the lexically lower name, and
-     * before that the higher). Here the conformant collection is registered first, so it wins,
-     * and a slug registered AFTER it does not; a higher version still wins whatever the name or
-     * the age. The opposite case, a slug registered first, is
-     * {@code collectionForTuple_aLegacySlugOlderThanItsConformantSiblingNowWinsTheTie}. (Named
-     * {@code conformantNameBeatsARepairedSlugAtEqualVersion} while the lower name decided; it
-     * passes under either order, since the conformant row is both older and lower-named; the
-     * flip, tie and parity tests are what catch a revert to name order.)
-     * catalog-049-2 (RDR-229): documents no longer carry a slug row onto a tuple a live collection holds, so the
-     * slug row here keeps its owner at equal version; the tie that remains is the one the direct-registration tests cover,
-     * and the higher-version case below still shares nothing and still wins.
+     * catalog-049-2 (RDR-229), amending nexus-6pbwx: a legacy slug collection whose documents name an owner a live
+     * conformant collection already holds keeps its slug, so it never shares that (content_type, owner_id, model, version)
+     * tuple and is never a {@code collectionForTuple} candidate for it. A slug row on a free tuple (here the next model
+     * version) is still given the documents' owner and, as the higher version, wins the tuple. The equal-version tie between
+     * a conformant row and a repaired slug is no longer reachable through documents; the direct-registration tests
+     * ({@code collectionForTuple_aLegacySlugOlderThanItsConformantSiblingNowWinsTheTie} and the flip and parity tests) cover it.
      */
     @Test @Order(60)
-    void collectionForTuple_aSlugRegisteredAfterTheConformantCollectionDoesNotWinAtEqualVersion() {
+    void collectionOwner_aSlugOnAHeldTupleKeepsItsSlug_andOneOnAFreeHigherVersionTakesTheOwnerAndWins() {
         String tenant = "own6pbwx-tuple-tenant";
         String conformant = "code__1-27__voyage-code-3__v1";
         String slug = "code__zslug-6pbwx__voyage-code-3__v1";
@@ -2231,16 +2224,14 @@ class CatalogRepositoryTest {
         assertThat(ownerOf(tenant, slug)).as("catalog-049-2: the conformant row holds the tuple, so the slug row keeps its owner")
             .isEqualTo("zslug-6pbwx");
 
-        assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
-            .as("equal version: the first registered, conformant collection wins").isEqualTo(conformant);
-
         String slugV2 = "code__zslug-6pbwx__voyage-code-3__v2";
         repo.upsertCollection(tenant, Map.of(
             "name", slugV2, "content_type", "code", "owner_id", "zslug-6pbwx",
             "embedding_model", OWN_MODEL, "model_version", "v2"));
         putDoc(tenant, "1.27.2", "code", slugV2);
+        assertThat(ownerOf(tenant, slugV2)).as("a free tuple (v2) still takes the documents' owner").isEqualTo("1-27");
         assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
-            .as("a higher model_version still wins").isEqualTo(slugV2);
+            .as("a higher model_version wins").isEqualTo(slugV2);
     }
 
     private void registerCollAt(String tenant, String name, String owner, String model, String version,
