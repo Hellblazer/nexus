@@ -179,6 +179,11 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
             f"  collections registered under this install's embedding model: {len(summary.collections_changed_model)}")
         for c in summary.collections_changed_model:
             click.echo(f"    {c['label']!r}: {c['from_model']} -> {c['to_model']}")
+    if summary.collections_relabelled:
+        click.echo(
+            f"  collections imported under this install's own minted label: {len(summary.collections_relabelled)}")
+        for c in summary.collections_relabelled:
+            click.echo(f"    {c['label']!r} -> {c['target_label']!r}")
     if summary.docs_failed:
         click.echo(f"  DOC FAILURES: {summary.docs_failed}")
         for f in summary.doc_failures:

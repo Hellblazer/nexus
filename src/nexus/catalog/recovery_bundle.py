@@ -175,7 +175,9 @@ class ImportSummary:
     * ``collections_skipped_not_live``: the row is not ``live`` (``lifecycle_state``); never registered, its
       ``docs_skipped`` notes left out. Expected, so the exit status is unchanged.
     * ``collections_changed_model``: registered (or mapped) under another embedding model than the bundle's row
-      names (``from_model``, ``to_model``); the notes are re-embedded from text.
+      names (``from_model``, ``to_model``); the notes are re-embedded from text;
+    * ``collections_relabelled``: a label of the minted form (``c<digits>``) is the SOURCE install's own, so it is not
+      kept: the notes went to the label this install minted for the same attributes (``label``, ``target_label``).
     """
 
     docs_imported: int = 0
@@ -190,6 +192,7 @@ class ImportSummary:
     collections_refused_label_clash: list[dict] = field(default_factory=list)
     collections_skipped_not_live: list[dict] = field(default_factory=list)
     collections_changed_model: list[dict] = field(default_factory=list)
+    collections_relabelled: list[dict] = field(default_factory=list)
     doc_failures: list[dict] = field(default_factory=list)
     doc_unverified: list[dict] = field(default_factory=list)
 
@@ -416,37 +419,52 @@ def _row_keys(row: dict) -> dict[str, Any]:
     }
 
 
+def _registry_rows(reader: Any) -> dict[str, dict]:
+    """The registry rows by label, every lifecycle state, from ``list_collections`` (the single-row read
+    carries no ``lifecycle_state``). A catalog without the route (404) has none."""
+    import httpx  # noqa: PLC0415 — deferred, as the module's other lazy imports
+
+    try:
+        return {r["name"]: r for r in reader.list_collections()}
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return {}
+        raise
+
+
 def export_collection_rows(reader: Any, docs: list[dict]) -> list[dict]:
     """One ``collection`` record per collection that holds an exported note (format 3, RDR-229 P3.9), and
     stamp each note record with its collection's ``collection_id``.
 
-    The record is the collection's registry row as the catalog reads it (``collection_id``, label,
+    The record is the collection's registry row as the catalog lists it (``collection_id``, label,
     ``content_type``, ``owner_id``, ``embedding_model``, ``model_version``, ``lifecycle_state``), never a
-    parse of the label. A collection with no row (an engine below P3.1, or a note left under an unregistered
-    name) gets no record and its notes carry ``collection_id: null``; import restores those through the name
+    parse of the label. A collection with no usable row (an engine below P3.1, a note left under an
+    unregistered name, or a row with an empty content_type or owner_id, which import could not register)
+    gets no record and its notes carry ``collection_id: null``; import restores those through the name
     path, as it does a bundle of format 2."""
-    rows: dict[str, dict | None] = {}
+    registry = _registry_rows(reader) if docs else {}
+    records: list[dict] = []
+    ids: dict[str, Any] = {}
     for rec in docs:
         label = rec["collection"]
-        if label not in rows:
-            rows[label] = reader.get_collection(label)
-        row = rows[label]
-        rec["collection_id"] = row.get("collection_id") if row else None
-    records: list[dict] = []
-    for label, row in rows.items():
-        if not row or row.get("collection_id") is None:
-            _log.warning("recovery_export_collection_row_missing", collection=label)
-            continue
-        records.append({
-            "record": "collection",
-            "collection_id": row.get("collection_id"),
-            "label": label,
-            "content_type": row.get("content_type", ""),
-            "owner_id": row.get("owner_id", ""),
-            "embedding_model": row.get("embedding_model", ""),
-            "model_version": row.get("model_version", ""),
-            "lifecycle_state": row.get("lifecycle_state") or "live",
-        })
+        if label not in ids:
+            row = registry.get(label)
+            if not row or row.get("collection_id") is None or not row.get("content_type") or not row.get("owner_id"):
+                _log.warning("recovery_export_collection_row_missing", collection=label)
+                ids[label] = None
+            else:
+                ids[label] = row["collection_id"]
+                records.append({
+                    "record": "collection",
+                    "collection_id": row["collection_id"],
+                    "label": label,
+                    "content_type": row["content_type"],
+                    "owner_id": row["owner_id"],
+                    "embedding_model": row.get("embedding_model", ""),
+                    "model_version": row.get("model_version", ""),
+                    "lifecycle_state": row.get("lifecycle_state") or "live",
+                })
+        rec["collection_id"] = ids[label]
     return records
 
 
@@ -779,7 +797,7 @@ def _importable_entity_key(rec: dict, collection: str) -> str:
 
 
 def _resolve_link_endpoint(
-    reader: Any, t3: Any, uri: str, *, held_back: frozenset[str] = frozenset(), rederive: bool = True,
+    reader: Any, t3: Any, uri: str, *, held_back: frozenset[str] = frozenset(), kept: frozenset[str] = frozenset(),
     remap: dict[str, str] | None = None,
 ) -> Any:
     """``by_source_uri``, with a note-identity re-derivation fallback
@@ -796,8 +814,8 @@ def _resolve_link_endpoint(
     the stored ``nx-note://`` form (Test Plan rows 557 and 564).
 
     Format 3 (RDR-229 P3.9): a note in a collection the import held back (*held_back*: refused or skipped)
-    resolves to nothing, because the same label on this install may be another collection's. And with
-    *rederive* false (the labels were kept) there is no name re-derivation. A note in a collection whose label this
+    resolves to nothing, because the same label on this install may be another collection's. A note in a collection
+    of the bundle's own (*kept*: its label was kept or remapped) is not re-derived by name. A note in a collection whose label this
     install did not keep (*remap*: a minted label, replaced by the one this install minted for the same attributes)
     is looked up under the label it was written to."""
     if not uri or not uri.strip():
@@ -806,14 +824,16 @@ def _resolve_link_endpoint(
     if held_back and uri.startswith(NOTE_URI_SCHEME) and uri[len(NOTE_URI_SCHEME):].partition("/")[0] in held_back:
         return None
     if remap and uri.startswith(NOTE_URI_SCHEME):
-        kept, sep, title = uri[len(NOTE_URI_SCHEME):].partition("/")
-        if sep and title and kept in remap:
-            uri = uri_for(remap[kept], title)
+        source_label, sep, title = uri[len(NOTE_URI_SCHEME):].partition("/")
+        if sep and title and source_label in remap:
+            uri = uri_for(remap[source_label], title)
     entry = reader.by_source_uri(uri)
-    if entry is not None or not rederive or not uri.startswith(NOTE_URI_SCHEME):
+    if entry is not None or not uri.startswith(NOTE_URI_SCHEME):
         return entry
     rest = uri[len(NOTE_URI_SCHEME):]
     collection, sep, title = rest.partition("/")
+    if collection in kept or collection in (remap or {}).values():
+        return None
     if not sep or not title:
         return None
     try:
@@ -911,18 +931,25 @@ def _plan_collections(reader: Any, writer: Any, records: list[dict], summary: Im
     A refusal is that collection's alone. A failure to read or register is caught per collection for the same
     reason (the summary names it) and is never raised."""
     plan = _CollectionPlan()
+    registry: dict[str, dict] | None = None
     for rec in records:
         if rec.get("record") != "collection":
             continue
         source_id, label = rec.get("collection_id"), rec.get("label") or ""
         entry: dict = {"label": label, "docs_skipped": 0}
+        if source_id in plan.target or source_id in plan.held_back:
+            summary.collections_refused_label_clash.append(
+                {**entry, "error": f"collection_id {source_id} repeats an earlier collection record of the bundle"})
+            continue
         state = rec.get("lifecycle_state") or "live"
         if state != "live":
             summary.collections_skipped_not_live.append({**entry, "lifecycle_state": state})
             plan.held_back[source_id] = summary.collections_skipped_not_live[-1]
             continue
         try:
-            resolved = _resolve_collection(reader, writer, rec)
+            if registry is None:
+                registry = _registry_rows(reader)
+            resolved = _resolve_collection(reader, writer, rec, registry)
         except Exception as exc:  # noqa: BLE001 — per-collection fail-loud summary; the import must complete for the rest
             _log.warning("recovery_import_collection_failed", label=label, error=str(exc))
             resolved = _Resolved(refusal=f"could not be registered: {type(exc).__name__}: {exc}")
@@ -934,12 +961,13 @@ def _plan_collections(reader: Any, writer: Any, records: list[dict], summary: Im
         plan.rows[resolved.label] = resolved.row or {}
         if resolved.label != label:
             plan.remap[label] = resolved.label
+            summary.collections_relabelled.append({"label": label, "target_label": resolved.label})
         if resolved.changed_model is not None:
             summary.collections_changed_model.append({"label": label, **resolved.changed_model})
     return plan
 
 
-def _resolve_collection(reader: Any, writer: Any, rec: dict) -> _Resolved:
+def _resolve_collection(reader: Any, writer: Any, rec: dict, registry: dict[str, dict]) -> _Resolved:
     """One live ``collection`` record, resolved against this install (see :func:`_plan_collections`). Raises what the
     catalog raises; the caller counts that as a refusal."""
     from nexus.corpus import effective_embedding_model_for_writes  # noqa: PLC0415 — deferred, as target_collection_for's imports
@@ -949,7 +977,7 @@ def _resolve_collection(reader: Any, writer: Any, rec: dict) -> _Resolved:
     if not (label and content_type and owner_id):
         return _Resolved(refusal="the bundle's registry row for it is incomplete (label, content_type and owner_id are required)")
     minted = _MINTED_LABEL.match(label) is not None
-    existing = None if minted else reader.get_collection(label)
+    existing = None if minted else registry.get(label)
     if existing is not None:
         theirs = _attrs_text(existing.get("content_type", ""), existing.get("owner_id", ""))
         held_state = existing.get("lifecycle_state") or "live"
@@ -988,6 +1016,8 @@ def _resolve_collection(reader: Any, writer: Any, rec: dict) -> _Resolved:
     row = reader.get_collection(label)
     if row is None:
         return _Resolved(refusal="the engine accepted the registration and holds no row for the label")
+    row = {**row, "lifecycle_state": "live"}      # registered live by the client route; the single-row read carries no state
+    registry[label] = row                           # so a repeated label in the bundle maps to it
     return _Resolved(label=label, row=row, changed_model=changed)
 
 
@@ -1057,6 +1087,9 @@ def import_bundle(
                 note_registered(target, plan.rows[target])
                 seeded.add(target)
             rec = {**rec, "target_collection": target}
+            if target != rec.get("collection") and is_note_uri(rec.get("source_uri") or ""):
+                # The bundle's URI names the source install's label; the catalog-flag probe must read this install's note.
+                rec["source_uri"] = uri_for(target, rec.get("title", ""))
         try:
             do_import(t3, rec)
             summary.docs_imported += 1
@@ -1090,9 +1123,10 @@ def import_bundle(
                 error=str(exc),
             )
 
-    # A bundle with collection records kept its labels, so a link endpoint is never re-derived by name.
-    link_kw = {"held_back": plan.held_back_labels, "remap": plan.remap,
-               "rederive": not plan.target and not plan.held_back}
+    # A collection of the bundle's own kept its label (or was remapped), so an endpoint in it is never re-derived
+    # by name; an endpoint in any other collection (a note with no source id, written by the name path) is.
+    bundle_labels = frozenset(r.get("label") or "" for r in records if r.get("record") == "collection")
+    link_kw = {"held_back": plan.held_back_labels, "remap": plan.remap, "kept": bundle_labels}
     for rec in records:
         if rec.get("record") != "link":
             continue

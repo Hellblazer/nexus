@@ -14,7 +14,6 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import httpx
 import pytest
 
 from nexus.aspect_readers import uri_for
@@ -22,96 +21,91 @@ from nexus.catalog.factory import make_catalog_reader
 from nexus.catalog.recovery_bundle import _resolve_link_endpoint, import_bundle
 from nexus.collection_mint import register_by_attributes
 from nexus.db.http_vector_client import HttpVectorClient
-from tests.catalog.test_rdr229_p39_recovery_bundle_v3 import _active_model, _coll, _doc, _label, _write_bundle
+from nexus.catalog.recovery_bundle import ImportSummary
+from tests.catalog.test_rdr229_p39_recovery_bundle_v3 import (
+    _active_model, _coll, _doc, _invoke_cli_import, _label, _write_bundle,
+)
 
 
-def _note(label: str, src_id: int, title: str) -> dict:
-    """A note record with a literal source_uri: ``uri_for`` resolves the label through the catalog, which a test
-    with no tenant must not reach."""
-    return {
-        "record": "knowledge_doc", "source_uri": f"nx-note://{label}/{title}", "collection": label,
-        "collection_id": src_id, "title": title, "tags": [], "category": "", "ttl_days": None,
-        "entity_key": "", "sensitive": False, "content": f"body of {title}"}
+def _run(client, bundle, **kw):
+    reader = make_catalog_reader()
+    with patch("nexus.mcp.core._get_t3", return_value=client):
+        return import_bundle(reader, reader, client, bundle, **kw)
 
 
-class _Catalog:
-    """A registry with a dict of rows: ``get_collection`` and ``register_collection`` of the real client."""
-
-    def __init__(self, rows: dict[str, dict] | None = None, refuse: dict[str, Exception] | None = None) -> None:
-        self.rows, self.refuse, self.registered = dict(rows or {}), dict(refuse or {}), []
-
-    def get_collection(self, label: str) -> dict | None:
-        return self.rows.get(label)
-
-    def register_collection(self, label: str, *, content_type: str, owner_id: str, embedding_model: str,
-                            model_version: str) -> None:
-        if label in self.refuse:
-            raise self.refuse[label]
-        self.registered.append(label)
-        self.rows[label] = {"name": label, "content_type": content_type, "owner_id": owner_id,
-                            "embedding_model": embedding_model, "model_version": model_version,
-                            "lifecycle_state": "live"}
-
-
-def _import(tmp_path, catalog, collections, docs, links=()):
+@pytest.mark.integration
+def test_a_note_whose_source_id_has_no_collection_record_is_a_failure_and_is_never_written(t2_service_env, tmp_path):
+    client = HttpVectorClient(tenant=t2_service_env)
+    model = _active_model(client)
+    known, orphan = _label(client, "p39known"), _label(client, "p39orphan")
     bundle = tmp_path / "b.jsonl"
-    _write_bundle(bundle, collections, docs)
-    if links:
-        with bundle.open("a", encoding="utf-8") as f:
-            for rec in links:
-                f.write(json.dumps(rec) + "\n")
-    seen: list[dict] = []
-    summary = import_bundle(catalog, catalog, None, bundle, import_doc=lambda _t3, rec: seen.append(rec))
-    return summary, seen
+    _write_bundle(
+        bundle, [_coll(known, 7_300_001, owner_id="p39known", model=model)],
+        [_doc(known, 7_300_001, "a"), _doc(orphan, 7_300_002, "b")])
 
+    summary = _run(client, bundle)
 
-def test_a_note_whose_source_id_has_no_collection_record_is_a_failure_and_is_never_written(tmp_path):
-    summary, seen = _import(
-        tmp_path, _Catalog(), [_coll("known", 1, model="m")], [_note("known", 1, "a"), _note("orphan", 2, "b")])
-
-    assert [r["title"] for r in seen] == ["a"] and seen[0]["target_collection"] == "known"
     assert summary.docs_imported == 1 and summary.docs_failed == 1
-    assert "collection_id 2" in summary.doc_failures[0]["error"] and "orphan" in summary.doc_failures[0]["error"]
+    assert "collection_id 7300002" in summary.doc_failures[0]["error"], summary.doc_failures
+    assert make_catalog_reader().by_source_uri(uri_for(orphan, "b")) is None
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize("shape", ["null", "absent"])
-def test_a_note_with_no_source_id_goes_through_the_name_path(tmp_path, shape):
-    doc = _note("legacy__name", 1, "a")
+def test_a_note_with_no_source_id_goes_through_the_name_path(t2_service_env, tmp_path, shape):
+    client = HttpVectorClient(tenant=t2_service_env)
+    doc = _doc("knowledge__p39legacy", 1, "a")
     if shape == "null":
         doc["collection_id"] = None
     else:
         del doc["collection_id"]
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(bundle, [], [doc])
+    seen: list[dict] = []
 
-    summary, seen = _import(tmp_path, _Catalog(), [], [doc])
+    summary = _run(client, bundle, import_doc=lambda _t3, rec: seen.append(rec))
 
     assert summary.docs_imported == 1 and len(seen) == 1
     assert "target_collection" not in seen[0]            # _default_import_doc resolves it by name, as for format 2
 
 
-def test_a_registration_the_engine_refuses_refuses_that_collection_alone_and_names_the_cause(tmp_path):
-    request = httpx.Request("POST", "http://x")
-    response = httpx.Response(400, json={"error": "label 'bad' breaks the label rule"}, request=request)
-    catalog = _Catalog(refuse={"bad": httpx.HTTPStatusError("400", request=request, response=response)})
+@pytest.mark.integration
+def test_a_registration_the_engine_refuses_refuses_that_collection_alone_and_names_the_cause(t2_service_env, tmp_path):
+    """A new client registration of a ``quarantine-`` name is a 400 on this engine: the refusal is that collection's."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    model = _active_model(client)
+    bad, good = "quarantine-p39refused", _label(client, "p39goodone")
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(
+        bundle, [_coll(bad, 7_400_001, owner_id="p39bad", model=model), _coll(good, 7_400_002, owner_id="p39good", model=model)],
+        [_doc(bad, 7_400_001, "b1"), _doc(bad, 7_400_001, "b2"), _doc(good, 7_400_002, "g1")])
 
-    summary, seen = _import(
-        tmp_path, catalog, [_coll("bad", 1, model="m"), _coll("good", 2, model="m")],
-        [_note("bad", 1, "b1"), _note("bad", 1, "b2"), _note("good", 2, "g1")])
-
-    [entry] = summary.collections_refused_label_clash
-    assert entry["label"] == "bad" and entry["docs_skipped"] == 2
-    assert "400" in entry["error"] and "breaks the label rule" in entry["error"]
-    assert [r["title"] for r in seen] == ["g1"] and summary.docs_failed == 0
-
-
-def test_a_collection_the_registry_cannot_read_is_refused_not_raised(tmp_path):
-    class Broken(_Catalog):
-        def get_collection(self, label):
-            raise RuntimeError("the catalog is down")
-
-    summary, seen = _import(tmp_path, Broken(), [_coll("x", 1, model="m")], [_note("x", 1, "a")])
+    summary = _run(client, bundle)
 
     [entry] = summary.collections_refused_label_clash
-    assert "the catalog is down" in entry["error"] and entry["docs_skipped"] == 1 and seen == []
+    assert entry["label"] == bad and entry["docs_skipped"] == 2 and "400" in entry["error"], entry
+    assert (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
+    assert make_catalog_reader().get_collection(bad) is None
+
+
+@pytest.mark.integration
+def test_a_live_label_with_the_same_attributes_maps_to_that_row_and_the_notes_land_in_it(t2_service_env, tmp_path):
+    """The idempotent branch for a hand-named label (a pre-P3.8 install): no new row, no refusal, no re-registration."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    model = _active_model(client)
+    label = _label(client, "p39same")
+    reader = make_catalog_reader()
+    reader.register_collection(label, content_type="knowledge", owner_id="p39same", embedding_model=model, model_version="v1")
+    before = {r["name"]: r["collection_id"] for r in reader.list_collections()}
+    bundle = tmp_path / "b.jsonl"
+    _write_bundle(bundle, [_coll(label, 7_500_001, owner_id="p39same", model=model)], [_doc(label, 7_500_001, "s1")])
+
+    summary = _run(client, bundle)
+
+    assert summary.collections_refused_label_clash == [] and summary.collections_changed_model == []
+    assert (summary.docs_imported, summary.docs_failed) == (1, 0), summary.doc_failures
+    assert {r["name"]: r["collection_id"] for r in reader.list_collections()} == before      # no new row, the same id
+    assert reader.by_source_uri(uri_for(label, "s1")) is not None
 
 
 def test_a_link_into_a_collection_the_import_held_back_resolves_to_nothing():
@@ -136,6 +130,19 @@ def test_a_link_into_a_remapped_collection_is_looked_up_under_the_label_it_was_w
     with patch("nexus.catalog.recovery_bundle.uri_for", side_effect=lambda label, title: f"nx-note://{label}/{title}"):
         assert _resolve_link_endpoint(reader, None, "nx-note://c15/a", remap={"c15": "c97"}) is not None
     assert looked_up == ["nx-note://c97/a"]              # never the other install's c15
+
+
+def test_a_note_in_a_collection_of_the_bundle_is_not_rederived_by_name_and_any_other_is():
+    looked_up: list[str] = []
+    reader = SimpleNamespace(by_source_uri=lambda uri: looked_up.append(uri))   # nothing is found
+
+    with patch("nexus.catalog.recovery_bundle.target_collection_for", return_value="renamed"), \
+            patch("nexus.catalog.recovery_bundle.uri_for", side_effect=lambda label, title: f"nx-note://{label}/{title}"):
+        assert _resolve_link_endpoint(reader, None, "nx-note://inbundle/a", kept=frozenset({"inbundle"})) is None
+        assert looked_up == ["nx-note://inbundle/a"]
+        looked_up.clear()
+        assert _resolve_link_endpoint(reader, None, "nx-note://elsewhere/a", kept=frozenset({"inbundle"})) is None
+        assert looked_up == ["nx-note://elsewhere/a", "nx-note://renamed/a"]    # a note the name path wrote is re-derived
 
 
 @pytest.mark.integration
@@ -196,3 +203,12 @@ def test_a_minted_label_is_not_kept_and_never_clashes_with_this_installs_label_o
     assert reader.by_source_uri(uri_for(landed, "m1")) is not None
     assert reader.by_source_uri(uri_for(held, "m1")) is None         # nothing landed in this install's own c<id>
     assert (summary.links_created, summary.unresolvable_links) == (1, [])
+    assert summary.collections_relabelled == [{"label": held, "target_label": landed}]
+
+
+def test_the_cli_names_a_collection_imported_under_this_installs_own_minted_label(tmp_path, monkeypatch):
+    summary = ImportSummary(docs_imported=2, collections_relabelled=[{"label": "c15", "target_label": "c97"}])
+
+    result = _invoke_cli_import(tmp_path, monkeypatch, summary)
+
+    assert result.exit_code == 0 and "'c15' -> 'c97'" in result.output, result.output

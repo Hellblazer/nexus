@@ -435,7 +435,7 @@ Locked format decisions (design of record: T2
   identity under the target install's collection set (works across an
   embedding-mode change).
 - **Format 3 carries each collection's registry row** (RDR-229 P3.9). Every
-  collection that holds a note gets a `collection` record (`collection_id`,
+  collection that holds a note, when the engine reports its id, gets a `collection` record (`collection_id`,
   label, `content_type`, `owner_id`, `embedding_model`, `model_version`,
   `lifecycle_state`), and each note carries its source `collection_id`. Import
   registers a collection from that row, never from its name, and keeps the
