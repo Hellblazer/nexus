@@ -2303,6 +2303,7 @@
     -->
     <include file="db/changelog/vectors-065-catalog-collections-owner-read.xml"/>
 
+    <!--
         RDR-229 amendment (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): catalog-051-1 replaces
         nexus.catalog_collection_owner_replaceable with catalog-044-1's body minus the curator clause, so a collection registered
         under a curator owner is no longer re-owned from its documents (catalog-044 is immutable). Same signature, grants and
