@@ -36,11 +36,9 @@ import java.util.stream.Collectors;
  * runs here is what ships. It is ONE statement with a data-modifying CTE (lock, INSERT of the missing owners, UPDATE); this
  * class is also the proof that the worker runs such a template to completion.
  *
- * <p>STAND-IN FOR vectors-065. The admin role must read every tenant's {@code catalog_collections} rows (the worker's tenant
- * list, the table-wide verification), which needs the owner-read SELECT policy {@code catalog_collections_owner_read}. RDR-229
- * D2 ships it as vectors-065 and the move's own changeset carries none. Until vectors-065 is on this branch, {@link #standIn}
- * applies the datamove/owner-read-policy/policy.xml fixture (the same pattern, the same name) to catalog_collections; when
- * vectors-065 lands, delete {@code standIn} and the real policy is already there.
+ * <p>The admin role reads every tenant's {@code catalog_collections} rows (the worker's tenant list, the table-wide
+ * verification) through vectors-065's owner-read policy {@code catalog_collections_owner_read} (RDR-229 D2); the move's own
+ * changeset carries none. {@code theRealOwnerReadPolicyIsApplied} pins that the shipped policy, not a test fixture, is in place.
  *
  * <p><b>Where an operator looks for a skipped row.</b> {@code SELECT collection, details FROM nexus.gc_audit WHERE operation =
  * 'rdr229_reown_skipped'}, read with the tenant set (gc_audit is tenant-isolated). {@code details} carries {@code reason},
@@ -61,7 +59,6 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
     private static final String LABEL = "rdr229-reown-repo-stems-from-curator";
     private static final String REGISTER = "db/changelog/vectors-067-reown-repo-stems-register.xml";
-    private static final String POLICY = "datamove/owner-read-policy/policy.xml";
 
     private static final String T = "rdr229-reown-a";
     private static final String U = "rdr229-reown-b";
@@ -78,20 +75,15 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         ctx().deleteFrom(CATALOG_OWNERS).where(CATALOG_OWNERS.TENANT_ID.like("rdr229-reown-%")).execute();
         ctx().deleteFrom(table("nexus", "gc_audit")).where(DSL.field(DSL.name("tenant_id"), String.class).like("rdr229-reown-%"))
             .execute();
-        standIn();
+    }
+
+    @Test
+    void theRealOwnerReadPolicyIsApplied() {
+        assertThat(PgCatalogProbes.policyExists(ctx(), "nexus", "catalog_collections", "catalog_collections_owner_read"))
+            .as("vectors-065's owner-read policy is applied by the product schema").isTrue();
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────────
-
-    /** The stand-in for vectors-065: catalog_collections_owner_read for the migrating role, by the pattern's own changeset. */
-    private void standIn() throws Exception {
-        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
-            PgContainerHelper.runSuperuserTestChangelog(c, POLICY, "databasechangelog_test_reown_policy_" + (++runs),
-                Map.of("driving_schema", "nexus", "driving_table", "catalog_collections"));
-        }
-        assertThat(PgCatalogProbes.policyExists(ctx(), "nexus", "catalog_collections", "catalog_collections_owner_read"))
-            .as("the stand-in policy is in place (the guard did not skip it)").isTrue();
-    }
 
     /** Registers the move by the shipped changeset, as the migrating role, exactly as a boot does. */
     private void register() throws Exception {
