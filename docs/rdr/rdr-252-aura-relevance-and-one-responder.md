@@ -2,7 +2,8 @@
 title: "Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment"
 id: RDR-252
 type: Architecture
-status: accepted
+status: closed
+closed_date: 2026-11-21
 priority: medium
 author: Hal Hildebrand
 reviewed-by: self
@@ -497,7 +498,7 @@ whose develop push runs start concluding skipped or neutral would therefore
 hold every red open until escalation, so any future job-level `if:` that skips
 a whole workflow on push has to be weighed against it; none of the last 100
 completed develop push runs concluded skipped or neutral in any workflow
-(measured 2026-11-20). Nothing watches that assumption. The engine logs
+(measured 2026-11-20). Nothing in this repository watches that assumption. The engine logs
 `board_done_no_verdict ... reason=carried_not_green` at info for a sha row that
 leaves no verdict (`OwnerStamper.afterOut`), and no lint, test or alert in this
 repository reads it; `scripts/check_release_ci_evidence.py` and `tests/test_ci_wait.py`
@@ -507,8 +508,9 @@ carried list. The adapter that writes `carried` is not in this repository (a
 `docs/agents/worktrees.md`, `board-ci.yaml` and `DoneVerdict.java` comments), so
 its metrics were not read here; the close critique r3 reads its `FoldCarryFailed`
 metric as counting read failures, not carried non-success (the critique's
-reading, not read here). The board's maintainers decide, at the 2026-12-20
-review: a lint or an adapter metric on carried non-success conclusions, or the
+reading, not read here). The decision is taken at the 2026-12-20 review, which
+the threads-board thread "RDR-252 calibration and attribution read" carries
+(due 2026-12-20, with the suspect-dropping question below): a lint or an adapter metric on carried non-success conclusions, or the
 one-time measurement stands. The engine does not tell workflows apart: it reads
 each carried entry's conclusion (`DoneVerdict.carryProblem`), and
 `board-ci.yaml` says the fold covers "each workflow that has a push run on the
@@ -996,20 +998,20 @@ then `nx config set auras.ci_develop_red=on` and a restart round.
   `nexus/sam-ruling-rdr-closeout-batch-2026-11-19`, lets a measurement trail a
   close as a dated follow-up). Its precondition is the ack fixes: the client's
   `nx group ack-times` counting an ack by its sender-session stamp and reporting
-  `ignored_acks` (9f14aa59a, f14d51a0d, on develop) and the engine's stamp of an
-  ack's `from` with `--owner` rows kept 35 days (b308e6dc9, b545859c0, on
-  develop; no engine tag contained b308e6dc9 when this was written, so the read
-  waits for a deployed engine that does, inferred, not read). A read before
-  then miscounts acks the stamp does not map and reports an ack tail that does
-  not exist.
+  `ignored_acks` (9f14aa59a, f14d51a0d, first released in client v8.5.4) and the
+  engine's stamp of an ack's `from` with `--owner` rows kept 35 days (b308e6dc9,
+  b545859c0, first carried by engine-service-v0.1.200, serving in the cloud since
+  2026-11-21 15:29Z, T2 `conexus/deploy-engine-v0.1.200-2026-11-21`). A read
+  that counts acks from before that deploy miscounts acks the stamp did not map
+  and reports an ack tail that does not exist.
   The follow-up reads attribution quality as well as ack time (close critique
   r3, S2, `nexus/critique-rdr252-close-2026-11-21-r3`): for each red, whether
   the first owner row named the pusher whose commit caused it or a suspect that
   was green on rerun or fixed by someone else (the misattribution case under
   Known limits), and how often a non-owner fixer had to have the owner ack for
-  them. Owner rows expire after three days until the 35-day `--owner` retention
-  deploys, so reds from before then exist only as T2 snapshots (the critique's
-  observation).
+  them. Owner rows written before the 0.1.200 deploy expired after three days,
+  so reds from before 2026-11-21 15:29Z exist only as T2 snapshots (the
+  critique's observation).
 
 ### New Dependencies
 
@@ -1322,3 +1324,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-21: the fail-safe's hold-off narrowed to the owner's stamped ack (nexus-igea9; grant 3): when the liveness read fails, only an ack row with a sender session whose `from` is the row's owner, on the row's tip and at or after the row, holds the escalation off; a non-owner's ack and an ack with no sender session escalate at once with `owner` null. The known transition (pre-0.1.200 ack rows with a typed `from` escalate with `owner` null under the compound fault) and the check's narrowness against the normal deadline count are recorded in the fail-safe text; the Test Plan line is matched.
 - 2026-11-21: close wording matched to the shipped engine ack half and the close critique r2's follow-ups (nexus-igea9; grant 3): the engine stamps an ack's `from` from the sender session's identity (a delegated one as its parent, left as typed when nothing maps) and `--owner` rows keep 35 days while the base topic and `--push` keep three (cited from `board-ci.yaml`, `BoardCiGuard.stampAckFrom` and `Identities.countedIdentity`); the Day 2 calibration follow-up due 2026-12-20 names the ack fixes as its precondition.
 - 2026-11-21: known limits and Test Plan matched to the close critique r3 (nexus-igea9, nexus-igea9.4; grant 3): a Known limits clause beside "Unvalidated by design" records the live earliest-suspect misattribution at 9f14aa59a and the next-up fixer who cannot stop the deadline, leaves the suspect-dropping question open and Sam's rule standing; the Day 2 calibration read covers attribution quality as well as ack time; the skipped or neutral workflow assumption says what watches it (nothing) and who decides (the board's maintainers, 2026-12-20), with the path-filtered workflows named; four Test Plan lines (carry-forward and `branch_outcome`, the engine's ack-from stamp, `nx ci ack`, `ignored_acks`).
+- 2026-11-21: release carriers named (close critique r3 and r4, S1, `nexus/critique-rdr252-close-2026-11-21-r4`; nexus-igea9; grant 3): the engine half (the ack `from` stamp and 35-day `--owner` retention, b308e6dc9 and b545859c0; the fail-safe's at-once escalation and owner-stamped-ack hold-off, ed7b34fde and a3b2c1220; carry-forward and `branch_outcome`, 6c1c73de9 and d13cba1b1) is first in engine-service-v0.1.200, serving in the cloud since 2026-11-21 15:29Z (T2 `conexus/deploy-engine-v0.1.200-2026-11-21`); the CI board adapter's `FOLD_BRANCH_OUTCOME` was switched on at 16:23Z (T2 `conexus/deploy-ci-board-adapter-fold-branch-outcome-on-2026-11-21`); `nx ci ack` and the sender-stamp count in `nx group ack-times` (9f14aa59a, f14d51a0d) are first in client v8.5.4 (v8.5.3 has no `nx ci ack`). Earlier reds and acks predate all of it.

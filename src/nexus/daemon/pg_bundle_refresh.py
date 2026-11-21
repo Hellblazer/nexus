@@ -307,7 +307,7 @@ def _hold_reason(config_dir: Path, unattended: bool) -> str | None:
         return None
     if unattended:
         return "this is an unattended run, and replacing the bundle restarts PostgreSQL"
-    busy = engine_busy_reason(config_dir)
+    busy = engine_busy_reason(config_dir, moves_can_run=not bundle_lacks_pg_background(config_dir))
     return f"{busy}; replacing the bundle restarts PostgreSQL, which stops that work" if busy else None
 
 
@@ -367,22 +367,34 @@ def _is_parked_move(entry: dict) -> bool:
     in ``boot_work``, and one of these is waiting, not working (a move blocked on a missing pg_background is exactly
     what the bundle swap fixes, so it must not defer the swap). ``working:``, ``queued:``, ``stalled:`` and every
     entry that is not a move (index builds, the worker's own) are work."""
-    ident, what = str(entry.get("id") or ""), str(entry.get("what") or "")
-    return ident.startswith("data-move:") and what.partition(":")[0].strip().lower() in ("blocked", "failed", "paused")
+    what = str(entry.get("what") or "")
+    return _is_data_move(entry) and what.partition(":")[0].strip().lower() in ("blocked", "failed", "paused")
 
 
-def engine_busy_reason(config_dir: Path) -> str | None:
+def _is_data_move(entry: dict) -> bool:
+    return str(entry.get("id") or "").startswith("data-move:")
+
+
+def engine_busy_reason(config_dir: Path, *, moves_can_run: bool = True) -> str | None:
     """Why the stack should not be bounced now, or ``None`` when it is idle.
 
     The idle rule of ``scripts/upgrade_boot_writes.py``: ``/v1/status`` ``boot_work`` empty and no
     index build or vacuum running. A service that is not running has nothing in flight. A running
-    one whose state cannot be read is not idle: unknown is not idle."""
+    one whose state cannot be read is not idle: unknown is not idle.
+
+    ``moves_can_run=False`` is for a bundle that lacks pg_background: no data move can run on it, so a
+    ``queued:`` or ``working:`` move is waiting for the very swap this gate guards, and counting it as work
+    would defer the swap for ever (F33: from 8.2.0 the registered moves were ``queued:`` at the attended
+    ``nx upgrade`` and its bundle swap was deferred on them). Index builds and other entries still count."""
     status = _engine_status()
     if status is None:
         if not _service_up(config_dir):
             return None
         return "the engine is running but its status cannot be read, so whether it is building indexes is unknown"
-    work = [e for e in (status.get("boot_work") or []) if isinstance(e, dict) and not _is_parked_move(e)]
+    work = [
+        e for e in (status.get("boot_work") or [])
+        if isinstance(e, dict) and not _is_parked_move(e) and (moves_can_run or not _is_data_move(e))
+    ]
     if work:
         names = ", ".join(sorted({str(e.get("what") or e.get("id") or "work")[:60] for e in work}))
         return f"the engine reports background work ({names or 'work in progress'})"
@@ -416,7 +428,7 @@ def refresh_when_pg_background_is_missing(
         ]
     if not tag:
         return ["NOTE: the installed PostgreSQL bundle lacks pg_background and no pinned service tag is configured."]
-    busy = engine_busy_reason(config_dir)
+    busy = engine_busy_reason(config_dir, moves_can_run=False)  # this leg runs only for a bundle without pg_background
     if busy:
         return [
             f"NOTE: the PostgreSQL bundle lacks pg_background; replacing it is deferred: {busy}. Replacing it "

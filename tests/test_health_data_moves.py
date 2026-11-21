@@ -6,6 +6,7 @@ one a warning.
 """
 from __future__ import annotations
 
+import nexus.data_moves_health as dmh
 import nexus.db.http_engine_status as http_status
 import nexus.health as health
 from nexus.health import HealthResult
@@ -108,7 +109,8 @@ def _classed(label: str, what: str, reason_class: str | None) -> dict:
     return entry
 
 
-def test_a_move_blocked_on_a_missing_prerequisite_is_a_warning_not_red():
+def test_a_move_blocked_on_a_missing_prerequisite_is_a_warning_not_red(monkeypatch):
+    monkeypatch.setattr(dmh, "_old_bundle_pending", lambda: True)  # the hint's bundle sentence: never this box's bundle
     status = {"boot_work": [_classed("m1", "blocked: m1: pg_background is not installed (blocked since 2026-11-17T01:00:00Z)",
                                      "missing_prerequisite")]}
 
@@ -306,3 +308,13 @@ def test_the_sweeps_row_is_a_check_star_name_so_a_blanket_stub_covers_it(monkeyp
     health.run_health_checks(engine_status={"boot_work": []})
 
     assert "_check_data_moves" in called
+
+
+def test_the_prerequisite_hint_names_the_bundle_upgrade_only_while_the_bundle_lacks_pg_background(monkeypatch):
+    """F33: after the swap the bundle has pg_background; the hint no longer sends the user to nx upgrade for it."""
+    status = {"boot_work": [_classed("m1", "blocked: m1: pg_background is not installed", "missing_prerequisite")]}
+    for pending, named in ((True, True), (False, False)):
+        monkeypatch.setattr(dmh, "_old_bundle_pending", lambda p=pending: p)
+        (row,) = [r for r in check_data_moves(status) if r.label == "Data move m1"]
+        assert ("`nx upgrade` replaces that bundle" in " ".join(row.fix_suggestions)) is named
+        assert "self-managed" in " ".join(row.fix_suggestions)

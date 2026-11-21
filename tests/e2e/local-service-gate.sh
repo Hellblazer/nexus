@@ -1043,9 +1043,9 @@ fi
 
 # The pg_bundle_artifact carve-out (nexus-f3yqd.2). tests/db/test_pg_bundle_relocation.py tests the BUILT
 # portable PostgreSQL bundle, relocated; only the ci.yml CA-3 bundle jobs build one, and they run the file by
-# path and assert its core tests passed (scripts/assert_ca3_ran.py). Here it could only skip, 19 times, against
+# path and assert its core tests passed (scripts/assert_ca3_ran.py). Here it could only skip, 21 times, against
 # this gate's skip budget. Same exact-count discipline as above.
-PG_BUNDLE_ARTIFACT_EXPECTED=19
+PG_BUNDLE_ARTIFACT_EXPECTED=21
 PG_BUNDLE_ARTIFACT_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and pg_bundle_artifact" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$PG_BUNDLE_ARTIFACT_COUNT" -ne "$PG_BUNDLE_ARTIFACT_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: pg_bundle_artifact carve-out is $PG_BUNDLE_ARTIFACT_COUNT tests, expected exactly $PG_BUNDLE_ARTIFACT_EXPECTED" >&2

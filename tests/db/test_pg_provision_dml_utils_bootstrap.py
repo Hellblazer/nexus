@@ -516,3 +516,43 @@ class TestTheFailureLog:
             boot.bootstrap_dml_utils_best_effort(None, 0, "u", via="test")
             (_, fields), = log.named("pg_dml_utils_bootstrap_failed")
             assert fields["stderr"] == ("ERROR: text mode" if isinstance(exc, subprocess.CalledProcessError) else "")
+
+
+class TestStaleMissingPrerequisiteRetriesAreReset:
+    """F33 (Sam's ruling, T2 nexus/sam-ruling-f33-client-reset-2026-11-21): once pg_background is present, the
+    bootstrap clears the retry state a move recorded while it was missing, so the move does not wait out a backoff of
+    up to 15 min for a cause that is gone. Only that reason; and no registry table is no error."""
+
+    _TABLE = (
+        "CREATE SCHEMA IF NOT EXISTS nexus; CREATE TABLE nexus.data_moves (label text PRIMARY KEY, "
+        "transient_retries int NOT NULL DEFAULT 0, last_transient_at timestamptz, last_transient text)"
+    )
+
+    def _row(self, box: _Box, label: str) -> str:
+        return box.q(
+            "SELECT transient_retries || '|' || coalesce(last_transient_at::text, '-') || '|' || coalesce(last_transient, '-') "
+            f"FROM nexus.data_moves WHERE label = '{label}'"
+        ).strip()
+
+    def test_a_pg_background_retry_is_reset_and_another_reason_is_untouched(self, fresh: _Box) -> None:
+        fresh.q(self._TABLE)
+        fresh.q(
+            "INSERT INTO nexus.data_moves VALUES "
+            "('stale', 7, now(), 'pg_background is not installed'), "
+            "('prefixed', 3, now(), 'retry 3, last 2026-11-21T16:16:19Z: pg_background is not installed'), "
+            "('other', 4, now(), 'could not obtain lock on relation nexus.chunks'), "
+            "('clear', 0, NULL, NULL)"
+        )
+        out = fresh.bootstrap()
+        assert out.stale_retries_reset == 2
+        assert self._row(fresh, "stale") == "0|-|-"
+        assert self._row(fresh, "prefixed") == "0|-|-"
+        retries, at, reason = self._row(fresh, "other").split("|")
+        assert (retries, reason) == ("4", "could not obtain lock on relation nexus.chunks") and at != "-"
+        assert self._row(fresh, "clear") == "0|-|-"
+        assert fresh.bootstrap().stale_retries_reset == 0, "a second run finds nothing to reset"
+
+    def test_no_registry_table_is_no_error(self, fresh: _Box) -> None:
+        assert fresh.q("SELECT to_regclass('nexus.data_moves') IS NULL").strip() == "t"
+        out = fresh.bootstrap()
+        assert out.stale_retries_reset == 0 and out.skipped_reason is None

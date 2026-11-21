@@ -268,7 +268,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-249](rdr-249-declarative-auras.md) | Declarative Auras: A Trigger, a Condition and a Display Around a Sandboxed Procedure | Feature | Closed | 2026-11-12 |
 | [RDR-250](rdr-250-multi-hop-answers-past-the-six-chunk-budget.md) | Multi-hop answers read past the six-chunk generator budget | Feature | Closed | 2026-11-15 |
 | [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Deferred | 2026-11-16 |
-| [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment | Architecture | Accepted | 2026-11-16 |
+| [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment | Architecture | Closed | 2026-11-16 |
 | [RDR-253](rdr-253-session-identity.md) | Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State | Architecture | Accepted | 2026-11-16 |
 | [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Accepted | 2026-11-19 |
 

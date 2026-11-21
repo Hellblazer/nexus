@@ -1,3 +1,0 @@
-### Changed
-
-- `--corpus` and the MCP corpus fan-out resolve a short form like `knowledge__foo` or `knowledge__foo__voyage-context-3` by the collection's catalog row first (same content type and owner, same embedding model when the value names one), then by the old name-prefix match when no row matches, so a repo short form such as `code__<repo>-<hash8>` still resolves. Both steps drop a collection whose row is not live (quarantined, dormant, disputed, or superseded by a rename); a name with no row is still matched by its prefix. Before, a short form for such a collection could come back through the name-prefix match. If the row read fails, the value resolves by its name prefix as before. RDR-229 P2.7 (nexus-p2m1x.12).
