@@ -115,6 +115,20 @@ def test_comments_and_rollbacks_are_not_read_as_registrations(guarded):
     assert census.parse_moves(text, "planted.xml") == []
 
 
+def test_a_template_the_scan_cannot_read_over_a_guarded_table_is_flagged_until_someone_reasons_about_it(guarded):
+    cte = "WITH x AS (SELECT 1) UPDATE nexus.document_aspects SET source_uri = 'y' FROM x WHERE true"
+    text = _insert("planted-cte", cte, "document_aspects")
+    assert _flagged(text, guarded) == ["planted-cte"]
+    reason = census.violations(census.parse_moves(text, "planted.xml"), guarded)[0][1]
+    assert "HANDLED" in reason
+
+
+def test_every_handled_label_names_a_move_the_tree_registers():
+    labels = {m.label for m in census.parse_tree(ROOT)}
+    assert census.HANDLED, "non-vacuity: the allowlist is not empty"
+    assert set(census.HANDLED) <= labels, f"stale HANDLED entries: {sorted(set(census.HANDLED) - labels)}"
+
+
 # ---------------------------------------------------------------- the real tree
 
 def test_the_real_tree_has_no_template_that_writes_a_guarded_table_without_the_id(guarded):
