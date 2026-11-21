@@ -26,6 +26,8 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -134,6 +136,17 @@ class CompletionBootWorkTest {
         assertThat(e.what()).isEqualTo("gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), "
             + "so no collection has a valid one");
         assertThat(e.done()).isEqualTo(2L);
+    }
+
+    @Test
+    void whenEveryGateHoldsAndNothingWaitsThereIsNoEntry_boot_workIsWorkInProgress_notAStatusLine() {
+        var registry = new BootWorkRegistry(Clock.systemUTC());
+        var reader = new Fixed(() -> CompletionCheck.evaluate(ctx, new CompletionCheck.ReadSet(List.of(), List.of()),
+            c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of("a"), Set.of())), CompletionCheck.DIRECT));
+        var work = new CompletionBootWork(registry, reader);
+        assertThat(work.publish()).as("every gate holds: no entry, so nx upgrade and nx daemon status print nothing").isZero();
+        assertThat(registry.snapshot()).isEmpty();
+        assertThat(work.latest().gate3()).as("non-vacuity: gate 3 held").isTrue();
     }
 
     // ---- a missing CHECK and the VALIDATE that waits ---------------------------------------------------------------------
