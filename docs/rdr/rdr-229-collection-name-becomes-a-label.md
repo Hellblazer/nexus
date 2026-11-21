@@ -701,9 +701,14 @@ They are not repointed, and they stay at their count (item 12; T2
 Any other site is a defect the census refuses, except the interim `holdover`
 the census carries until Phase 2 moves it: a site no final class fits yet,
 whose ledger note names the P2.n step that moves it (45 at the P1.R re-pin: P2.2
-19, P2.3 11, P2.7 11, P2.4 4; `tests/_collection_name_census_ledger.py`).
-Two non-parse labels cover an `fnmatch`: `label-pattern` (9) and `file-path`
-(5). The client census is a content-anchored per-site ledger pinned by total,
+19, P2.3 11, P2.7 11, P2.4 4; `tests/_collection_name_census_ledger.py`; P2.3
+and P2.7 have since landed and no holdover names either, so the live total is
+23: P2.2 19, P2.4 4).
+Two non-parse labels, `label-pattern` and `file-path` (5), both on `fnmatch`
+sites except one. `label-pattern` is 10 since P2.7: nine `fnmatch` sites and one that is not, the
+`resolve_corpus` stage-3 fallback, a prefix match on the label the user typed
+that decomposes nothing; the census accepts a non-`fnmatch` `label-pattern` site
+only with that one note (`LABEL_TYPED`). The client census is a content-anchored per-site ledger pinned by total,
 class and shape (`tests/test_collection_name_parse_census.py`,
 `PARSE_SITE_PIN`, `CLASS_PIN`, `SHAPE_PIN`): 243 at P1.1 (mint 107, holdover 40,
 routing 36, diagnostic 30, migration-source 14), 244 with the one-off P1.2
