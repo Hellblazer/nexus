@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.write:
         (root / SQL_REL).write_text(sql, encoding="utf-8")
-        print(f"wrote {SQL_REL}: {sql.count('DROP CONSTRAINT')} statements")
+        sys.stdout.write(f"wrote {SQL_REL}: {sql.count('DROP CONSTRAINT')} statements\n")
         return 0
     problems = []
     committed = root / SQL_REL
@@ -139,8 +139,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         problems += runbook_problems(runbook.read_text(encoding="utf-8"), list_text)
     for p in problems:
-        print(p)
-    print(f"rdr229_p31_downstep: {len(problems)} problem(s), {sql.count('DROP CONSTRAINT')} constraints on the list")
+        sys.stdout.write(p + "\n")
+    sys.stdout.write(f"rdr229_p31_downstep: {len(problems)} problem(s), {sql.count('DROP CONSTRAINT')} constraints on the list\n")
     return 1 if problems else 0
 
 
