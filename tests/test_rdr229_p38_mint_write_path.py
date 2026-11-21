@@ -14,8 +14,10 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+import nexus.catalog.factory as factory
 import nexus.corpus as corpus
 import nexus.mcp_infra as mcp_infra
+from nexus import collection_mint
 from nexus.catalog.collection_name import CollectionAttributes
 from nexus.catalog.engine_writes.floors import CollectionMintUnsupportedError
 from nexus.corpus import (
@@ -86,8 +88,6 @@ def _isolated(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(corpus, "_profile_model_for_content_type", lambda ct: None)
     monkeypatch.setattr(mcp_infra, "_refresh_collections_cache_if_stale", lambda *a, **k: None)
     mcp_infra.invalidate_collections_cache()
-    from nexus import collection_mint
-
     collection_mint.forget_all()
     yield
     collection_mint.forget_all()
@@ -275,8 +275,6 @@ def test_a_non_row_answer_is_refused() -> None:
 
 
 def test_a_writer_with_no_store_registers_through_the_default_catalog_writer(monkeypatch: pytest.MonkeyPatch) -> None:
-    import nexus.catalog.factory as factory
-
     writer = _Writer()
     monkeypatch.setattr(factory, "make_catalog_writer", lambda *a, **k: writer)
 
@@ -287,8 +285,6 @@ def test_a_writer_with_no_store_registers_through_the_default_catalog_writer(mon
 
 
 def test_a_writer_with_no_store_finds_the_row_first(monkeypatch: pytest.MonkeyPatch) -> None:
-    import nexus.catalog.factory as factory
-
     writer = _Writer()
     monkeypatch.setattr(factory, "make_catalog_writer", lambda *a, **k: writer)
 
