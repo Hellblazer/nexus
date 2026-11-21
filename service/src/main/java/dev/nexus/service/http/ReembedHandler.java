@@ -225,6 +225,10 @@ public final class ReembedHandler implements HttpHandler {
                 "error", e.getMessage(), "retryable", true)));
         } catch (CatalogRepository.EmbeddingProfileConflictException e) {
             HttpUtil.send(exchange, 422, error(e.getMessage()));
+        } catch (dev.nexus.service.db.CollectionMint.LiveTupleConflict e) {
+            // RDR-229 P3.8: registering or reviving the target would give its tuple a second live collection; the message
+            // names both, and nothing was written.
+            HttpUtil.send(exchange, 409, error(e.getMessage()));
         } catch (Exception e) {
             if (!HttpUtil.sendTypedDbError(exchange, e, log, "reembed_handler", "op=" + op + " tenant=" + tenant)) {
                 log.error("event=reembed_handler_error op={} tenant={} error={}", op, tenant, e.getMessage(), e);
