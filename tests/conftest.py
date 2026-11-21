@@ -3058,6 +3058,32 @@ def _identity_work_reaches_no_real_engine(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _identity_kind_lookup_reaches_no_real_engine(monkeypatch):
+    """gh#1680: ``nexus.identity.notes._kind_of`` asks the identity engine for the caller's ``kind`` (``check_write``, and
+    ``nx brief me`` through ``write_refusal``). A test that holds an identity token file and reaches it without its own
+    ``IdentityClient.from_config`` patch would query a real engine; it answers "unknown" here and FAILS at teardown, naming
+    the seam. A test that wants the lookup patches ``IdentityClient.from_config`` (a fake client) or ``notes.write_refusal`` /
+    ``notes._kind_of``; a later patch of any of them replaces this one."""
+    from nexus.identity import bind_client, notes  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    original_kind_of = notes._kind_of
+    original_from_config = bind_client.IdentityClient.__dict__["from_config"]
+    reached: list[str] = []
+
+    def guarded(identity: str) -> str:
+        if bind_client.IdentityClient.__dict__["from_config"] is original_from_config:
+            reached.append(identity)
+            return ""
+        return original_kind_of(identity)
+
+    monkeypatch.setattr(notes, "_kind_of", guarded)
+    yield
+    assert not reached, ("this test reached nexus.identity.notes._kind_of with the real IdentityClient.from_config: the "
+                         f"identity lookup for {reached} would hit a real engine. Patch IdentityClient.from_config "
+                         "(a fake client) or notes.write_refusal.")
+
+
+@pytest.fixture(autouse=True)
 def _no_engine_restart_taxonomy_deferral(monkeypatch):
     """nexus-tawfg: ``nx index repo`` defers taxonomy work while the engine's
     /version reports ``process_uptime_seconds`` under a threshold. The

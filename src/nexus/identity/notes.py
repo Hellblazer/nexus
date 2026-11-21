@@ -31,7 +31,7 @@ import structlog
 
 from nexus.db.t2.http_memory_store import IDENTITY_PROJECT_PREFIX
 
-__all__ = ["IdentityNotesRefused", "check_write", "reset_cache"]
+__all__ = ["IdentityNotesRefused", "check_write", "reset_cache", "write_refusal"]
 
 _log = structlog.get_logger(__name__)
 
@@ -87,24 +87,34 @@ def _caller() -> str:
     return str(record.identity) if record is not None else ""
 
 
-def check_write(project: str) -> None:
-    """Raise :class:`IdentityNotesRefused` when the caller may not write *project*. A project that is not
-    ``identity/<id>`` costs nothing: no import, no lookup."""
+def write_refusal(project: str) -> tuple[str, str] | None:
+    """``(caller, reason)`` when the caller may not write *project*, else ``None``. Side-effect free apart from the kind
+    lookup it may make: it logs no refusal, so a reader that only wants to know (``nx brief me``) does not leave
+    ``identity_notes_write_refused`` lines for a write nobody tried. :func:`check_write` raises from the same answer, so the
+    two cannot drift. A project that is not ``identity/<id>`` costs nothing: no import, no lookup."""
     if not project.startswith(IDENTITY_PROJECT_PREFIX) or len(project) == len(IDENTITY_PROJECT_PREFIX):
-        return
+        return None
     caller = _caller()
     if os.environ.get("NX_IDENTITY_TOKEN", "").strip():
-        raise _refuse(caller, "a delegated identity keeps no identity notes (they would orphan when the child ends); "
-                              "write the note in project T2")
+        return caller, ("a delegated identity keeps no identity notes (they would orphan when the child ends); "
+                        "write the note in project T2")
     if not caller:
-        return
+        return None
     kind = _kind_of(caller)
     if not kind:
-        raise _refuse(caller, f"could not confirm that {caller} is a seat, so its identity notes are not written "
-                              "(the identity engine did not answer); try again")
+        return caller, (f"could not confirm that {caller} is a seat, so its identity notes are not written "
+                        "(the identity engine did not answer); try again")
     if kind != "seat":
-        raise _refuse(caller, f"this {kind} identity keeps no identity notes (they would orphan when its session ends); "
-                              "only a seat does: write the note in project T2, or start the session with a seat")
+        return caller, (f"this {kind} identity keeps no identity notes (they would orphan when its session ends); "
+                        "only a seat does: write the note in project T2, or start the session with a seat")
     own = f"{IDENTITY_PROJECT_PREFIX}{caller}"
     if project != own:
-        raise _refuse(caller, f"a seat writes only its own identity notes ({own}), not {project}")
+        return caller, f"a seat writes only its own identity notes ({own}), not {project}"
+    return None
+
+
+def check_write(project: str) -> None:
+    """Raise :class:`IdentityNotesRefused` when the caller may not write *project*, logging the refusal."""
+    refusal = write_refusal(project)
+    if refusal is not None:
+        raise _refuse(*refusal)

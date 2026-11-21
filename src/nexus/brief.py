@@ -137,15 +137,19 @@ def _open_memory_store() -> Any:
 
 def _how_to_write_startup_note(project: str) -> str:
     """The hint for an empty startup note, matched to what this caller may write: a seat gets the ``--mine`` command, any
-    other identity (ephemeral, delegated) gets the refusal's own one-line reason, because the same write would be refused
-    to it (gh#1680)."""
-    from nexus.identity import notes  # noqa: PLC0415 — deferred: only an empty note pays for the identity guard
-
+    other identity (ephemeral, delegated) gets the guard's own one-line reason, because the same write would be refused to
+    it (gh#1680). Reads only: :func:`nexus.identity.notes.write_refusal` logs no refusal. Best effort: a failure of the
+    lookup gives a neutral hint and never fails the ``me`` topic."""
+    command = f"`nx memory put --mine --title {STARTUP_TITLE} \"...\"`"
     try:
-        notes.check_write(project)
-    except notes.IdentityNotesRefused as exc:
-        return " ".join(str(exc).split())
-    return f"write one with `nx memory put --mine --title {STARTUP_TITLE} \"...\"` to have it here next time"
+        from nexus.identity import notes  # noqa: PLC0415 — deferred: only an empty note pays for the identity guard
+
+        refusal = notes.write_refusal(project)
+    except Exception:  # noqa: BLE001 — a hint never costs the brief
+        return f"if this identity is a seat, write one with {command} to have it here next time"
+    if refusal is not None:
+        return " ".join(refusal[1].split())
+    return f"write one with {command} to have it here next time"
 
 
 def _me(cwd: str) -> str:  # noqa: ARG001
