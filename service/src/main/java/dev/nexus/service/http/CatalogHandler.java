@@ -11,6 +11,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.CollectionLabel;
 import dev.nexus.service.db.GraphScopeFilter;
 import dev.nexus.service.vectors.ChunkKeyAllowlistCheck;
 import org.slf4j.Logger;
@@ -2824,6 +2825,11 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // RDR-229 P3.6: the rename target is a user-supplied label, so the label rule applies (a 400 through the
+        // route's IllegalArgumentException arm). First of all, before the first read: a NUL bound into the
+        // quarantine lookup below would be a database error, not a 400. A quarantine- label is a legal label, so
+        // the quarantine refusal that follows still answers for it.
+        CollectionLabel.validateUserLabel(newName);
         // nexus-wbfpw.71: refused on a quarantine collection, source or target, before any other check can
         // answer with a different status. CatalogRepository.renameCollection carries the same guard.
         repo.requireNotQuarantine(tenant, "rename", oldName);
