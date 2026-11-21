@@ -1,3 +1,0 @@
-### Fixed
-
-- **The resume line now prints after `/clear`.** The reader asked for a T1 session lease for the new session id only to borrow a token the engine does not need for an identity-scope read, and at SessionStart(clear) that id has no lease yet (the MCP watcher publishes it 0-5 s later), so the read failed with `T1ServerNotFoundError` and logged `outcome=error`. The identity scratch store now sends no `X-Nexus-T1-Session` header (`HttpScratchStore(send_session_token=False)`), so it needs no lease and creates no session; `nx scratch --scope identity` no longer looks up the session's T1 store either. The identity-token fence on writes is unchanged (RDR-253 Step 6 part 2, nexus-hczdo).
