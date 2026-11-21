@@ -71,9 +71,9 @@ class CatalogCollectionsLiveLabelIndexTest {
     void theIndexIsPresent_uniqueAndPartialOverTheLiveRows() throws Exception {
         try (Connection su = pg.createConnection("")) {
             var dsl = DSL.using(su, SQLDialect.POSTGRES);
-            String def = dsl.fetchValue(
+            String def = (String) dsl.fetchValue(
                 "SELECT indexdef FROM pg_indexes WHERE schemaname = 'nexus' AND tablename = 'catalog_collections' "
-                + "AND indexname = ?", INDEX, String.class);
+                + "AND indexname = ?", INDEX);
             assertThat(def).as("the partial UNIQUE index exists").isNotNull();
             assertThat(def).contains("CREATE UNIQUE INDEX").contains("(tenant_id, name)").contains("WHERE");
         }
