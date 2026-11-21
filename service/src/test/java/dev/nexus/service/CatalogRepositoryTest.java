@@ -2279,10 +2279,10 @@ class CatalogRepositoryTest {
 
     private void registerCollAt(String tenant, String name, String owner, String model, String version,
                                 String createdAt, boolean legacyGrandfathered) {
-        repo.upsertCollection(tenant, Map.of(
-            "name", name, "content_type", "code", "owner_id", owner,
-            "embedding_model", model, "model_version", version,
-            "created_at", createdAt, "legacy_grandfathered", legacyGrandfathered));
+        // two live rows of one tuple are D4's accepted duplicate, which a named upsert refuses (RDR-229 P3.8): superuser insert
+        try (Connection su = pg.createConnection("")) {
+            CollectionMintSupport.insertCodeRowAt(DSL.using(su, SQLDialect.POSTGRES), tenant, name, owner, model, version, createdAt, legacyGrandfathered);
+        } catch (java.sql.SQLException e) { throw new IllegalStateException(e); }
     }
 
     /**
@@ -2354,7 +2354,7 @@ class CatalogRepositoryTest {
             "2026-01-01T00:00:00Z", true);
         registerCollAt(tenant, "code__1-47__voyage-code-3__v1", "1-47", OWN_MODEL, "v1",
             "2026-03-01T00:00:00Z", false);
-        var rows = repo.listCollections(tenant, "code", null).stream()
+        var rows = repo.listCollectionsWithIds(tenant, "code", null).stream()
             .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
 
         for (String owner : List.of("1-46", "field-parity", "1-47")) {
@@ -2447,13 +2447,12 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-p2m1x.4: the order is TOTAL and independent of row order. Two rows with the same created_at
-     * fall to the name whichever was inserted first, and a version above both still wins whatever
-     * the age. (The name is the last key only because it is the one column unique within a tenant until
-     * P3.1.)
+     * nexus-p2m1x.4: the order is TOTAL. Two rows with the same created_at fall to the lower collection_id,
+     * the row inserted first (RDR-229 P3.8; the name decided before), and a version above both still wins
+     * whatever the age. (The name is the last key, for a row with no id.)
      */
     @Test @Order(60)
-    void collectionForTuple_equalRegistrationTimeFallsToTheNameInEitherInsertOrder() {
+    void collectionForTuple_equalRegistrationTimeFallsToTheLowerCollectionIdInEitherInsertOrder() {
         String same = "2026-03-01T00:00:00Z";
         String lower = "code__1-41__voyage-code-3__v1";
         String higher = "code__zslug-p2m1x4__voyage-code-3__v1";
@@ -2464,7 +2463,7 @@ class CatalogRepositoryTest {
         registerCollAt(t2, higher, "1-41", OWN_MODEL, "v1", same, false);
         registerCollAt(t2, lower, "1-41", OWN_MODEL, "v1", same, false);
         assertThat(repo.collectionForTuple(t1, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(lower);
-        assertThat(repo.collectionForTuple(t2, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(lower);
+        assertThat(repo.collectionForTuple(t2, "code", "1-41", OWN_MODEL).get("name")).isEqualTo(higher);
 
         // age never beats version: a NEWER row at a higher version wins
         registerCollAt(t1, "code__1-41__voyage-code-3__v2", "1-41", OWN_MODEL, "v2", "2026-04-01T00:00:00Z", false);
@@ -2492,7 +2491,7 @@ class CatalogRepositoryTest {
             registerCollAt(c[0], c[2], c[1], OWN_MODEL, "v1", c[3], false);
             registerCollAt(c[0], c[4], c[1], OWN_MODEL, "v1", c[5], false);
             String sql = (String) repo.collectionForTuple(c[0], "code", c[1], OWN_MODEL).get("name");
-            var rows = repo.listCollections(c[0]).stream()
+            var rows = repo.listCollectionsWithIds(c[0], null, null).stream()
                 .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
             var picked = dev.nexus.service.reembed.TargetSelection.select(rows, "code", c[1], OWN_MODEL);
             assertThat(picked).as("case " + c[0])
@@ -2993,10 +2992,10 @@ class CatalogRepositoryTest {
      * quarantine sibling shares every discriminator column with its origin, so the only
      * thing keeping it from a tuple is the {@code lifecycle_state != 'quarantine'}
      * predicate, and the tie-break that would otherwise decide has changed before (name
-     * DESC until nexus-6pbwx, name ASC until nexus-p2m1x.4, {@code created_at} ascending now).
-     * Whichever key it runs on, a sibling can sit on the winning side of it. Under {@code
-     * created_at} ascending that means a sibling registered BEFORE its origin, which is what
-     * each case builds and guards by assertion, or the case pins nothing.
+     * DESC until nexus-6pbwx, name ASC until nexus-p2m1x.4, {@code created_at} ascending until
+     * P3.8, now the lowest {@code collection_id}). Whichever key it runs on, a sibling can sit on
+     * the winning side of it: here a sibling registered BEFORE its origin with a LOWER id, which is
+     * what each case builds and guards by assertion, or the case pins nothing.
      *
      * <p>The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
      * content_type/owner_id/embedding_model on 8 quarantine rows, making them eligible
@@ -3007,7 +3006,7 @@ class CatalogRepositoryTest {
      *
      * <p>Falsifiability: with the {@code LIFECYCLE_STATE.ne("quarantine")} predicate
      * removed from {@link CatalogRepository#collectionForTuple}, both cases fail: the sibling
-     * is the older row, so it wins the tie.
+     * is the older row with the lower id, so it wins the tie.
      */
     @Test @Order(62)
     void collectionForTuple_neverResolvesToAQuarantineSibling() {
@@ -3031,12 +3030,13 @@ class CatalogRepositoryTest {
             PgContainerHelper.insertCollection(
                 org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
                 TENANT_A, quarantined);
-            // The sibling is the OLDER registration, so the created_at tie-break would pick it
-            // were it a candidate (nexus-p2m1x.4).
+            // The sibling is the OLDER registration with the LOWER collection_id, so the tie-break
+            // would pick it were it a candidate (nexus-p2m1x.4, RDR-229 P3.8: the lowest id wins).
             org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
                 .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
                 .set(org.jooq.impl.DSL.field("created_at", java.time.OffsetDateTime.class),
                      java.time.OffsetDateTime.parse("2026-01-01T00:00:00Z"))
+                .set(org.jooq.impl.DSL.field("collection_id", Long.class), -(long) contentType.length())
                 .where(org.jooq.impl.DSL.field("name", String.class).eq(quarantined))
                 .execute();
         } catch (Exception e) {

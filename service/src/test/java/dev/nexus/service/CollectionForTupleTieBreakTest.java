@@ -141,7 +141,7 @@ class CollectionForTupleTieBreakTest {
     @Test
     void aLowerIdThatIsQuarantinedOrSupersededIsNotACandidate() {
         String owner = "tie-excluded";
-        seed(owner, "quarantined-lowest-id", "v1", 9210L, 0, "quarantine", "");
+        seed(owner, "quarantine-lowest-id", "v1", 9210L, 0, "quarantine", "");
         seed(owner, "superseded-low-id", "v1", 9220L, 0, "live", "somewhere-else");
         seedLive(owner, "the-live-one", "v1", 9230L, 0);
 
