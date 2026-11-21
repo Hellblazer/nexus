@@ -40,7 +40,7 @@ public final class MintedLabel {
     public static final class SequenceBehindDataException extends IllegalStateException {
         public SequenceBehindDataException(long id) {
             super("minting a collection: the drawn collection_id " + id + " is already a row after the collection_id"
-                + " sequence was drawn forward to the tenant's largest collection_id; something is inserting explicit ids"
+                + " sequence was drawn forward to the largest collection_id of any tenant; something is inserting explicit ids"
                 + " concurrently. Check the setval on pg_get_serial_sequence('nexus.catalog_collections','collection_id')");
         }
 
@@ -65,9 +65,11 @@ public final class MintedLabel {
      *
      * <p>{@code idTaken} says whether a row already has the id. The sequence never repeats a value, so a taken id
      * means the sequence is behind the data (an explicit-id insert, as a restore does, with no {@code setval} after
-     * it). Then {@code healSequence} runs ONCE with the colliding id: the caller sets the sequence to
-     * {@code max(collection_id)} (never moving it backward) and logs a WARN
-     * ({@code event=collection_id_sequence_behind_data}, old and new values), and the mint draws again. A second
+     * it). The id is judged across every tenant (an id is unique across the installation). Then {@code healSequence}
+     * runs ONCE with the colliding id: the caller draws the sequence FORWARD with {@code nextval} to the largest
+     * {@code collection_id} of any tenant (never {@code setval}, so it cannot move backward past an id another session
+     * has just drawn) and logs a WARN ({@code event=collection_id_sequence_behind_data}, old and new values), and the
+     * mint draws again. A second
      * taken id refuses (linda's ruling on baton's BY DEFAULT condition, 2026-11-21): never a silent skip, never a raw
      * unique violation, and an install whose restore missed its setval can still create collections.
      *
