@@ -1712,11 +1712,12 @@ has. The routing class is 24 sites plus the `taxonomy__` half of the 12
   Phase 2 integration tree the client census is 217 (7817cd3251, then
   a92f88c6a0: P2.2 -11, P2.4 -3, owner-is-source +2 migration-source, which
   was +3 until `owner_stem` moved into `legacy_names`; migration-source 22,
-  `split` 2). P3.1 (+4 mint) and P3.8 (-2) take it to 219, and P3.6 to
-  217: `validate_collection_name` no longer
+  `split` 2). P3.1 (its register-before-write seams counted once, through
+  one primitive) leaves 215, P3.8 (-2) 213, and P3.6 211:
+  `validate_collection_name` no longer
   reads any part of a name, so it left the derived helper set, and its two
-  `T3Database` callers left the ledger (mint 137 -> 135, primitive_call
-  185 -> 183).
+  `T3Database` callers left the ledger (mint 131 -> 129, primitive_call
+  179 -> 177).
 - *The shipped default exclude pattern.* `config.py:1391`
   (`"local_exclude_collections": ["code__*"]`) excludes code collections
   from local-mode taxonomy by name. P2.9 replaces that default with a
@@ -3108,4 +3109,4 @@ large, and moved under a ratchet.
 - 2026-11-21: the 0.1.200 contents (P2.R step, Versioning), item 5's stem rule and `catalog-051-2` tuple guard with its lock key, the Prerequisites' first registered moves and their deploy-go gate (T2 `nexus/sam-ruling-0200-move-gate-2026-11-21`), and the MVV's numeric Phase 2 pins match the integration tree eb1e4cd42b (grant 3; P2.R critique T2 `nexus/critique-eb1e4cd42b-nexus-p2m1x.16-2026-11-21-r1`, nexus-p2m1x.16).
 - 2026-11-21: item 5's tuple guard and re-own move match a92f88c6a0: one held predicate (unsuperseded and not in quarantine, P3.8's index predicate), the guard on the stored version and the move on the effective one, the move taking the tuple lock for its chunk's tuples in key order, and which paths re-run a 40P01; item 12's client census is 217 with `owner_stem` in `legacy_names` (grant 3; P2.R critique S2, S3, S5, nexus-p2m1x.16).
 - 2026-11-21: P3.8 amendment (grant 3, matching reviewed code, nexus-p2m1x.28): item 8 states the live-tuple UNIQUE and the minted-label collision rule; the two open questions on tuple uniqueness and minted-form collisions (Contradiction Check, Scope Verification) are closed by Sam's ruling T2 `nexus/sam-ruling-rdr229-p38-design-gate-v2-2026-11-21`.
-- 2026-11-21: item 7's label rule matches P3.6 as reviewed: no `/` (Sam's ruling), Cc plus U+2028 and U+2029 refused, Cf allowed, no normalization, the engine as the authority with existing rows keeping their labels, and the label-to-file-path sites encoded rather than audited-open; the client census goes 219 -> 217; the `/` question leaves the Contradiction Check (grant 3; P3.6 review r1 and r2, nexus-p2m1x.26).
+- 2026-11-21: item 7's label rule matches P3.6 as reviewed: no `/` (Sam's ruling), Cc plus U+2028 and U+2029 refused, Cf allowed, no normalization, the engine as the authority with existing rows keeping their labels, and the label-to-file-path sites encoded rather than audited-open; the client census goes 213 -> 211; the `/` question leaves the Contradiction Check (grant 3; P3.6 review r1 and r2, nexus-p2m1x.26).
