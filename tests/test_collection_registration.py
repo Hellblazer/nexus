@@ -1158,6 +1158,12 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
         # ("w.register_collection('<TARGET>'); ..."), never a real call;
         # matches the substring scan below but is not executable code.
         "src/nexus/commands/catalog_cmds/doctor.py",
+        # RDR-229 P3.8 (nexus-p2m1x.28): registration by ATTRIBUTES, with no name. The seam is keyed on a
+        # name (its cache, its row read, its name-derived kwargs), and a collection the engine is about to
+        # name has none yet. collection_mint.register_by_attributes makes the same profile check before the
+        # wire call (EmbeddingProfileMismatchError), then seeds the seam's cache with the minted label so the
+        # write path's own ensure_collection_registered(label) is a hit.
+        "src/nexus/collection_mint.py",
     })
 
     def test_non_seam_register_collection_call_sites_are_the_pinned_set(self) -> None:
