@@ -303,7 +303,9 @@ class TestCollectionMoveBibPreservation:
         """
         slug = _slug()
         old, new = f"docs__old_{slug}", f"docs__new_{slug}"
-        cat.register_collection(old, content_type="docs")
+        cat.register_collection(
+            old, content_type="docs", owner_id="i711w-rename", embedding_model="bge-base-en-v15-768", model_version="v1",
+        )
         tumbler = cat.register(
             owner, "rename-bib doc", content_type="prose",
             file_path=f"{slug}/a.md", physical_collection=old,

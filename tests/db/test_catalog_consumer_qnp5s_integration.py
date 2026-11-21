@@ -318,7 +318,7 @@ def seeded_catalog(cat):
         "knowledge__qnp5s-repo__bge-base-en-v15-768__v1",
         content_type="knowledge",
         owner_id=str(repo_owner_t),
-        embedding_model="bge-base-en-v15-768",
+        embedding_model="bge-base-en-v15-768", model_version="v1",
     )
 
     # Seed links: doc_a -> doc_b (cites), doc_a -> doc_c (relates)
