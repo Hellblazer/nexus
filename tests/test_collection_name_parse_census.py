@@ -412,14 +412,14 @@ for _site in LEDGER:
 #:     holdover 4 -> 0 (the class is empty), mint 134 -> 135, primitive_call 184 -> 181.
 #:   owner-is-source (marlowe), +2: two migration-source sites in ``nxexp_owner.py``, the callers of
 #:     ``legacy_names.owner_stem`` (it reads the name of a recovery bundle's collection, MIG_BUNDLE_STEM; the parse is in the
-#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2. P3.1 (nexus-p2m1x.17), +4 mint, each a registration seam (MINT_REG) that registers the collection BEFORE the first catalog document, since the engine refuses a document under an unregistered one: ``note_write`` (put_note), ``exporter`` (the import pre-pass), ``registration_retry`` (the 422 retry), ``doc_indexer`` (the pre-flight). mint 135 -> 139, primitive_call 183 -> 187, total 217 -> 221.
-PARSE_SITE_PIN: int = 221
+#:     floor, not a site, since owner_stem moved there): migration-source 20 -> 22, primitive_call 181 -> 183, split 2. P3.1 (nexus-p2m1x.17), +4 mint, each a registration seam (MINT_REG) that registers the collection BEFORE the first catalog document, since the engine refuses a document under an unregistered one: ``note_write`` (put_note), ``exporter`` (the import pre-pass), ``registration_retry`` (the 422 retry), ``doc_indexer`` (the pre-flight). mint 135 -> 139, primitive_call 183 -> 187, total 217 -> 221. P3.8 (nexus-p2m1x.28), -2: register_collection derives nothing from the name. mint 139 -> 137, primitive_call 187 -> 185, total 221 -> 219.
+PARSE_SITE_PIN: int = 219
 CLASS_PIN: dict[str, int] = {
-    "mint": 139, "diagnostic": 43, "migration-source": 22,
+    "mint": 137, "diagnostic": 43, "migration-source": 22,
     "label-pattern": 10, "file-path": 5, "uri-classifier": 2,
 }
 SHAPE_PIN: dict[str, int] = {
-    "primitive_call": 187, "const_prefix": 5, "fnmatch": 14,
+    "primitive_call": 185, "const_prefix": 5, "fnmatch": 14,
     "strip_prefix": 4, "startswith": 2, "split": 2,
     "fstring_prefix": 2, "regex_prefix": 1, "in": 1,
     "sql_prefix": 1, "concat_prefix": 1, "endswith": 1,
@@ -843,11 +843,12 @@ def test_pin_matches_documented_total() -> None:
     at P2.9, nexus-p2m1x.14, and 228 -- 229 at its reland; then at P2.4,
     nexus-p2m1x.9, when the taxonomy threshold became a row read; then at P2.2,
     nexus-p2m1x.7, when the read-path model reads became row reads and the name
-    parsers moved to ``legacy_names``) is derived
+    parsers moved to ``legacy_names``; then 217 -- 215 at P3.8,
+    nexus-p2m1x.28, when ``register_collection`` stopped deriving from the name) is derived
     from the same ledger the guards above check against -- this catches a
     hand-edited number drifting from the table it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 221
+    assert PARSE_SITE_PIN == 219
 
 
 # ---------------------------------------------------------------------------

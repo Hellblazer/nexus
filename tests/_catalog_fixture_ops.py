@@ -736,6 +736,12 @@ class _WriteOp:
         elif self._op == "register_many":
             docs = args[1] if len(args) > 1 else kwargs.get("docs", [])
             register_seed_collections(*(d.get("physical_collection", "") for d in docs))
+        if self._op == "register_collection" and args:
+            # RDR-229 P3.8: the client derives nothing from a name any more, so a fixture that registers a
+            # collection by a bare name states the four attributes here, the way the client used to.
+            from nexus.corpus import collection_registration_kwargs
+
+            kwargs = {**collection_registration_kwargs(args[0]), **kwargs}
         writer = make_catalog_writer()
         try:
             return getattr(writer, self._op)(*args, **kwargs)
