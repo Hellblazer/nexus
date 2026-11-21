@@ -61,18 +61,19 @@ public final class MintedLabel {
      * <p>{@code idTaken} says whether a row already has the id. The sequence never repeats a value, so a taken id
      * means the sequence is behind the data (an explicit-id insert, as a restore does, with no {@code setval} after
      * it). Then {@code healSequence} runs ONCE with the colliding id: the caller sets the sequence to
-     * {@code max(collection_id)} under the mint's advisory lock and logs a WARN
+     * {@code max(collection_id)} (never moving it backward) and logs a WARN
      * ({@code event=collection_id_sequence_behind_data}, old and new values), and the mint draws again. A second
      * taken id refuses (linda's ruling on baton's BY DEFAULT condition, 2026-11-21): never a silent skip, never a raw
      * unique violation, and an install whose restore missed its setval can still create collections.
      *
      * @throws SequenceBehindDataException when a drawn id is a row after the heal (a 409 on the route)
-     * @throws IllegalStateException when every draw's label is taken (a 409 on the route)
+     * @throws LabelsTakenException when every draw's label is taken (a 409 on the route)
      */
     public static Choice choose(LongSupplier nextId, LongPredicate idTaken, Predicate<String> labelTaken,
                                 LongConsumer healSequence) {
         boolean healed = false;
         int draws = 0;
+        String firstTaken = null;
         while (draws < MAX_DRAWS) {
             long id = nextId.getAsLong();
             if (idTaken.test(id)) {
@@ -88,8 +89,12 @@ public final class MintedLabel {
             if (!labelTaken.test(label)) {
                 return new Choice(id, label);
             }
+            if (firstTaken == null) {
+                firstTaken = label;
+            }
         }
-        throw new IllegalStateException("minting a collection label: the labels of " + MAX_DRAWS
-            + " drawn collection ids were all live; a live label of the minted form c<digits> is in the way");
+        throw new LabelsTakenException("minting a collection label: the labels of " + MAX_DRAWS
+            + " drawn collection ids were all taken, from " + firstTaken
+            + "; a row named of the minted form c<digits> is in the way. Rename those collections, then try again.");
     }
 }
