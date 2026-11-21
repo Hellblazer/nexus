@@ -4850,13 +4850,13 @@ def _check_recall_canary(engine_status: object = _ENGINE_STATUS_UNSET) -> list[H
     return check_recall_canary(engine_status)
 
 
-def _check_collection_tuples() -> list[HealthResult]:
+def _check_collection_tuples(engine_status: object = None) -> list[HealthResult]:
     """RDR-229 P3.8 (nexus-p2m1x.28): ``nexus.collection_tuple_health.check_collection_tuples``, which names a live
-    collection tuple held by more than one registry row (it holds the engine's unique index back). Named ``_check_*`` here
-    for the same reason as :func:`_check_data_moves`."""
+    collection tuple held by more than one registry row (it holds the engine's unique index back) and an index that waits
+    for no reason the doctor can see. Named ``_check_*`` here for the same reason as :func:`_check_data_moves`."""
     from nexus.collection_tuple_health import check_collection_tuples  # noqa: PLC0415 — deferred: that module imports this one
 
-    return check_collection_tuples()
+    return check_collection_tuples(engine_status=engine_status)
 
 
 def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
@@ -13694,7 +13694,7 @@ def run_health_checks(
     results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
     results.extend(_step("_check_pg_bundle", _check_pg_bundle))  # nexus-f3yqd.2.23: a bundle without pg_background
     results.extend(_step("_check_rdr229_completion", lambda: _check_rdr229_completion(engine_status)))  # nexus-p2m1x.17 (RDR-229 P3.1)
-    results.extend(_step("_check_collection_tuples", lambda: _check_collection_tuples()))  # nexus-p2m1x.28 (RDR-229 P3.8)
+    results.extend(_step("_check_collection_tuples", lambda: _check_collection_tuples(engine_status)))  # nexus-p2m1x.28 (RDR-229 P3.8)
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c
