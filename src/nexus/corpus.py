@@ -1137,13 +1137,7 @@ def voyage_model_for_collection(collection_name: str) -> str:
 
 
 def default_projection_threshold(collection_name: str) -> float:
-    """Return the NAME-derived default projection cosine threshold for *collection_name*.
-
-    RDR-229 P2.4 (nexus-p2m1x.9): this is the NoRow/Unreadable derivation of
-    :func:`nexus.projection_threshold.projection_threshold`, which every
-    taxonomy caller uses and which reads the catalog row's ``content_type``
-    first. Call this directly only for a name no row can answer: an
-    unregistered or empty collection, where the legacy name is the only signal.
+    """Return the NAME-derived projection threshold for *collection_name*: ``projection_threshold``'s NoRow fallback (RDR-229 P2.4).
 
     RDR-077 Phase 4a: per-corpus-type defaults calibrated for the rawness
     of embedding cosine distributions in each corpus type. Explicit
@@ -1164,8 +1158,8 @@ def default_projection_threshold(collection_name: str) -> float:
 
     RDR-204 Phase 3 (nexus-ft04v.26): candidate-string derivation, not the
     row-based collection_content_type -- see voyage_model_for_collection's
-    docstring for why (this table is called on a possibly-unregistered
-    collection population).
+    docstring for why (this default calibration table is called on the
+    same broad, possibly-unregistered collection population).
     """
     content_type = split_candidate_collection_name(collection_name)[0]
     if content_type == "knowledge":
