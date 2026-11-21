@@ -700,10 +700,10 @@ class CollectionTupleUniqueIndexLiquibaseTest {
 
     private static void registerMove(Connection su, String label, boolean completed) {
         DSL.using(su, SQLDialect.POSTGRES).insertInto(DATA_MOVES)
-            .set(DATA_MOVES.LABEL, label).set(DATA_MOVES.TEMPLATE, "SELECT 1")
+            .set(DATA_MOVES.LABEL, label).set(DATA_MOVES.TEMPLATE, "the template text of a move")
             .set(DATA_MOVES.DRIVING_SCHEMA, "nexus").set(DATA_MOVES.DRIVING_TABLE, "catalog_collections")
             .set(DATA_MOVES.CHUNK_SIZE, 100).set(DATA_MOVES.SLEEP_MS, 0).set(DATA_MOVES.STATEMENT_TIMEOUT_MS, 60000)
-            .set(DATA_MOVES.VERIFICATION, "SELECT 1 WHERE false").set(DATA_MOVES.CHANGESET_ID, "test-fixture")
+            .set(DATA_MOVES.VERIFICATION, "the verification query of a move").set(DATA_MOVES.CHANGESET_ID, "test-fixture")
             .set(DATA_MOVES.COMPLETED_AT, completed ? java.time.OffsetDateTime.now() : null)
             .execute();
     }

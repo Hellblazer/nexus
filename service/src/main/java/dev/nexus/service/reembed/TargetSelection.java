@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  * then the first registered ({@code created_at} ascending, compared as instants), then the lexically lower name:
  * {@code collectionForTuple}'s order (RDR-229 P3.8, lead ruling 2026-11-21; the id replaced {@code created_at} as the
  * tie-break, nexus-p2m1x.4 having replaced the name), pinned against it by {@code CollectionForTupleTieBreakTest}.
- * The id comes from {@code CatalogRepository#listCollectionsWithIds}: the list route's own rows do not carry it.
+ * The id comes from {@code CatalogRepository#listCollections}: its rows carry {@code collection_id} (RDR-229 P3.5a).
  *
  * <p><b>Decision</b> ({@link #decide}) turns the selection into one of four outcomes for the job's start:
  * register the target ({@link Register}); use a live row ({@link UseLive}); revive a superseded row

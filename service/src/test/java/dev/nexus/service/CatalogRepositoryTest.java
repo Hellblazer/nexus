@@ -2277,6 +2277,11 @@ class CatalogRepositoryTest {
             .as("a higher model_version wins").isEqualTo(slugV2);
     }
 
+    /** A supersede successor with a model_version of its own: on its source's tuple it is a second live collection, which a named upsert refuses (P3.8). */
+    private void registerSuccessorAt(String name, String owner, String version) {
+        repo.upsertCollection(TENANT_A, Map.of("name", name, "content_type", "code", "owner_id", owner, "embedding_model", "voyage-code-3", "model_version", version));
+    }
+
     private void registerCollAt(String tenant, String name, String owner, String model, String version,
                                 String createdAt, boolean legacyGrandfathered) {
         // two live rows of one tuple are D4's accepted duplicate, which a named upsert refuses (RDR-229 P3.8): superuser insert
@@ -2354,7 +2359,7 @@ class CatalogRepositoryTest {
             "2026-01-01T00:00:00Z", true);
         registerCollAt(tenant, "code__1-47__voyage-code-3__v1", "1-47", OWN_MODEL, "v1",
             "2026-03-01T00:00:00Z", false);
-        var rows = repo.listCollectionsWithIds(tenant, "code", null).stream()
+        var rows = repo.listCollections(tenant, "code", null).stream()
             .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
 
         for (String owner : List.of("1-46", "field-parity", "1-47")) {
@@ -2491,7 +2496,7 @@ class CatalogRepositoryTest {
             registerCollAt(c[0], c[2], c[1], OWN_MODEL, "v1", c[3], false);
             registerCollAt(c[0], c[4], c[1], OWN_MODEL, "v1", c[5], false);
             String sql = (String) repo.collectionForTuple(c[0], "code", c[1], OWN_MODEL).get("name");
-            var rows = repo.listCollectionsWithIds(c[0], null, null).stream()
+            var rows = repo.listCollections(c[0], null, null).stream()
                 .map(dev.nexus.service.reembed.TargetSelection.CollectionRow::fromMap).toList();
             var picked = dev.nexus.service.reembed.TargetSelection.select(rows, "code", c[1], OWN_MODEL);
             assertThat(picked).as("case " + c[0])
@@ -2853,6 +2858,8 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "chainguard", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
+        registerSuccessorAt("code__chainguard__voyage-code-3__v2", "chainguard", "v2");
+        registerSuccessorAt("code__chainguard__voyage-code-3__v3", "chainguard", "v3");
         assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__chainguard__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
@@ -2892,6 +2899,7 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "samestamp", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
+        registerSuccessorAt("code__samestamp__voyage-code-3__v2", "samestamp", "v2");
         assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__samestamp__voyage-code-3__v2", ""))
             .as("guard: the first supersession must land, or the rest proves nothing")
             .isEqualTo(1);
@@ -2920,6 +2928,8 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "concstamp", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
+
+        registerSuccessorAt(target, "concstamp", "v2");
 
         var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
@@ -2964,6 +2974,7 @@ class CatalogRepositoryTest {
             "name", name, "content_type", "code",
             "owner_id", "revive", "embedding_model", "voyage-code-3",
             "model_version", "v1"));
+        registerSuccessorAt("code__revive__voyage-code-3__v2", "revive", "v2");
         assertThat(SupersedeSeeds.supersede(repo, TENANT_A, name, "code__revive__voyage-code-3__v2", ""))
             .isEqualTo(1);
         // NON-VACUITY: the row really is tombstoned before the re-registration.
