@@ -330,6 +330,20 @@ def test_catalog_store_hook_failed_logs_warning(tmp_path, monkeypatch):
             "nexus.catalog.store_hook.catalog_store_hook_tracked",
             MagicMock(side_effect=RuntimeError("simulated catalog failure")),
         )
+        # RDR-229 P3.8: a new subject is registered by attributes before the hook runs; the registration is
+        # answered here so the failure under test is the hook's.
+        from nexus.catalog.collection_name import CollectionAttributes
+
+        def _minting_writer(*_a, **_k):
+            w = MagicMock()
+            w.register_collection.side_effect = lambda *a, **k: CollectionAttributes(
+                collection_id=3, label="c3", content_type=k["content_type"], owner_id=k["owner_id"],
+                embedding_model=k["embedding_model"], model_version=1, dimension=None, lifecycle_state="live",
+            )
+            return w
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_writer", _minting_writer)
+        monkeypatch.setattr("nexus.corpus._profile_model_for_content_type", lambda ct: None)
 
         with capture_logs() as cap:
             result = store_put(
