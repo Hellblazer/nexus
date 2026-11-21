@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.PgActivityProbe;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
@@ -433,11 +434,14 @@ class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
             ageTo(ctx, t, KNOWLEDGE, incoming, DAYS_40);
         });
 
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
-                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-            .values(t, "stamp-up1", 3, bytes(incoming), KNOWLEDGE,
-                PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, t)
+            .set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "stamp-up1")
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 3)
+            .set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(incoming))
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, KNOWLEDGE)
+            .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, CollectionIds.idOf(t, KNOWLEDGE))
+            .set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, PgContainerHelper.collectionModel(ctx, t, KNOWLEDGE))
             .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
             .doUpdate().set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(incoming)).execute());
 
@@ -714,7 +718,9 @@ class ChunkIsReapableIntegrationTest extends ChunkReapableTestBase {
         su(ctx -> {
             assertThat(PgCatalogProbes.columnNames(ctx, "nexus", "chunk_orphaned_at"))
                 // RDR-225: the record carries its chunk's embedding_model (the four-column chunk foreign key).
-                .containsExactlyInAnyOrder("tenant_id", "collection", "chash", "orphaned_at", "embedding_model");
+                // RDR-229 P3.1: and the registry id of its collection (collection_id, vectors-068).
+                .containsExactlyInAnyOrder("tenant_id", "collection", "chash", "orphaned_at", "embedding_model",
+                    "collection_id");
             PgCatalogProbes.RowSecurity rls = PgCatalogProbes.rowSecurity(ctx, "nexus", "chunk_orphaned_at");
             assertThat(rls).as("nexus.chunk_orphaned_at must exist").isNotNull();
             assertThat(rls.enabled()).as("RLS ENABLE").isTrue();
