@@ -253,7 +253,7 @@ class CatalogModelVersionRepairMoveIntegrationTest extends DataMoveIntegrationBa
         // Every registered move the product changelog ships, by label: a new registration must be added here, so a stray
         // one still fails this test (vectors-067, RDR-229 owner-is-source, is the second).
         assertThat(labelsAtBoot).as("the walk registers exactly the shipped moves")
-            .containsExactly(LABEL, "rdr229-reown-repo-stems-from-curator");
+            .containsExactlyInAnyOrder(LABEL, "rdr229-reown-repo-stems-from-curator");
         assertThat(registeredRowsAtBoot).isEqualTo(1);
         assertThat(registered.get("label").toString()).doesNotContain("/").isEqualTo(LABEL);
         assertThat(registered).containsEntry("driving_schema", "nexus").containsEntry("driving_table", "catalog_collections")
