@@ -20,10 +20,10 @@ for you. Where it does not, prefer the broad, boring choice.
 | `rdr` | RDR documents from an indexed repository | `nx index repo`, never by hand |
 | `knowledge` | Everything else: papers, notes, agent findings, imported documents | You, by naming a subject |
 
-`code`, `docs`, and `rdr` collections are owned by a repository. The
-catalog assigns their owner from the repo's tumbler and renders their full
-name. You do not name them, and you do not write into them directly; you
-re-index the repo.
+`code`, `docs`, and `rdr` collections are owned by a repository: their
+owner is the repo's tumbler, set once when `nx index repo` registers them
+(Rule 3). You do not name them, and you do not write into them directly;
+you re-index the repo.
 
 `knowledge` is the only content type a person or agent names. Everything
 below is about that choice.
@@ -65,6 +65,7 @@ Before writing to a new name, list what exists:
 nx collection list
 ```
 
+In the listing, a `knowledge` collection's subject is its owner column.
 If a collection for the subject exists, write into it. Adding the eleventh
 paper on consensus to `distributed-systems` is right; creating
 `consensus-papers` beside it splits one subject's topics in two and makes
@@ -81,71 +82,86 @@ nx index md notes/overview.md --collection vector-search
 nx index pdf --dir ~/papers/oracles --collection augur-oracle-papers
 ```
 
-`distributed-systems` is a subject, not a collection name. `nx` looks the
-collection up by its attributes: content type `knowledge`, owner
-`distributed-systems`, and the embedding model your install actually embeds
-with. If no collection has those attributes, `nx` registers one with them
-and the engine gives it a label. Never type a four-segment name, a model
-token, or a version yourself. A name that encodes a model the install does
-not use is how local collections once ended up labelled with a model that
-never embedded them (GH #667, RDR-109).
+`distributed-systems` is a subject, not a collection name. A subject is
+best lowercase, hyphen-separated, two or three words, ASCII; that is advice
+for choosing one, not a limit on labels. `nx` looks the collection up by its
+**lookup attributes**: content type `knowledge`, owner `distributed-systems`,
+and the embedding model your install actually embeds with. When several
+collections match, the one with the highest model version wins. If none
+matches, `nx` registers one with those attributes and the engine gives it a
+label. Never type a four-segment name, a model token, or a version
+yourself. A name that encodes a model the install does not use is how local
+collections once ended up labelled with a model that never embedded them
+(GH #667, RDR-109). What `--collection <label>` does on a write when the
+value is an existing label rather than a subject is not settled.
 
-**A collection is found by its tuple and identified by its id.** The tuple
-is content type, owner, embedding model and model version. The registry row
-for the collection holds those attributes, its dimension and its lifecycle
-state, and the engine gives it a `collection_id`, a number that is unique
-across the installation. Which model embeds a collection, which content
-type it is and how a search routes to it are read from the row, never from
-the collection's name.
+Everything below on labels, minting and rename holds from the release that
+ships labels (RDR-229 Phase 3).
 
-**The name is a label.** It is the string you type and read in a command,
-and nothing is decided from it. A label is unique among a tenant's live
-collections, so a label in a command names one collection. A superseded
-collection keeps its label taken until RDR-229 Phase 4 drops the name as
-the registry's primary key. A label must be non-empty, valid UTF-8 with no
+**A collection is found by its lookup attributes and identified by its
+id.** The engine's registry holds one row per collection. The row has the
+lookup attributes, the model version, the dimension, the lifecycle state and
+a `collection_id`, a number that is unique across the installation. Search
+routing, the choice of embedding model and every other lookup read the row.
+They do not read the name. The paths that still read a name are migration
+and diagnostic code, the legacy knowledge-name branch that serves a
+two-segment name with no row, and the note-URI classifier, which checks a
+fixed list of prefixes.
+
+**The unique key.** Two live collections cannot share the same **unique
+key**: content type, owner, embedding model and model version. A live
+collection is one that is neither superseded (replaced by a successor) nor
+quarantined (its chunks moved aside by the engine). A conflicting import or
+restore is refused with a 409 (HTTP conflict) error. The engine enforces this
+only after the move that re-owns existing collections has completed and no
+duplicate remains. From the release that adds the check, `nx doctor` names
+each duplicate it is waiting on; until then a duplicate can exist.
+
+**The name is a label.** It is the string you type and read in a command.
+A label is unique among a tenant's live collections (a tenant is the
+isolated space one account's data lives in), so a label in a command names
+one collection. A superseded collection still holds its label, so the
+label cannot be reused yet. A label must be non-empty, valid UTF-8 with no
 control characters, and at most 255 bytes. It may not have the minted form
-`c<digits>` unless the engine minted it, so a label you choose can never
+`c<digits>` unless the engine minted it, so a label you choose cannot
 collide with a later mint. Whether a label may contain `/` is not settled.
 
-**A new collection gets a minted label.** When `nx` registers a collection
-with no label, the engine sets the label to `c` followed by the
-`collection_id` (`c4812`). The label is opaque: it carries no content type,
-owner, model or version. `nx collection list`, the `collection_list` MCP
-tool and `nx catalog show` show the attributes beside it. If the minted
-label is already a live label, the engine takes the next id and retries a
-bounded number of times, then answers 409. Every minted row keeps the
-label `c` plus its `collection_id`. To give a collection a readable label,
-rename it:
+**A new collection gets a minted label.** To mint is to have the engine
+assign one. When `nx` registers a collection with no label, the engine
+gives it the label `c` followed by the `collection_id` (`c4812`). The label
+is opaque: it carries no content type, owner, model or version. `nx
+collection list`, the `collection_list` MCP tool and `nx catalog show` show
+the attributes beside it. If that label is already live, the engine takes
+the next id and retries a bounded number of times, then answers 409. At mint
+the label is `c` plus the `collection_id`; a rename replaces it. To give a
+collection a readable label, rename it:
 
 ```bash
-nx collection rename c4812 distributed-systems-papers
+nx collection rename c4812 distributed-systems
 ```
 
-Existing collections keep their names as labels. Those names are one of the
-shapes older releases rendered: the four-segment
-`<content_type>__<owner>__<embedding_model>__v<n>` and the two-segment
-`<content_type>__<repo>-<hash>`. They survive only as labels, and nothing
-parses them for meaning.
+A new collection is never named by building a name from its attributes.
 
-**The tuple is unique among live collections, once the index exists.** A
-partial unique index over `(tenant_id, content_type, owner_id,
-embedding_model, model_version)` covers the live rows, those not superseded
-and not quarantined. A mint is an insert that does nothing on a conflict,
-followed by a re-read of the row that holds the tuple. An import or restore
-row that conflicts gets a 409. The engine creates the index only after the
-move that re-owns existing collections has completed and no duplicate
-remains. Until then the index is not there, and `nx doctor` names each
-duplicate it is waiting on.
+**Existing labels.** Existing collections keep their names as labels. Most
+are one of the shapes older releases built: the four-segment
+`<content_type>__<owner>__<embedding_model>__v<n>`, where `__` is reserved
+as the segment separator and an owner holds at most a single underscore
+between tokens, and the two-segment `<content_type>__<repo>-<hash>`. Others
+exist too: labels with a `quarantine-` prefix, and labels someone renamed by
+hand.
 
-Subject names are lowercase, hyphen-separated, two or three words, ASCII.
-
-**Owner is the source.** A collection's `owner_id` is set once, when the
-collection is registered, and is never re-derived from its documents. For a
-repo's `code`, `docs` and `rdr` collections it is the repo's tumbler
-segment, hyphenated (`1-15`). For a doc corpus it is the corpus's curator.
-For a `knowledge` collection it is the subject, whatever tumbler its
-documents live under. That is why a subject finds its collection: the
-subject is the owner.
+**Owner is the source.** A collection's owner is its source, set once when
+the collection is registered and never re-derived from its documents. For a
+repo's `code`, `docs` and `rdr` collections it is the first two segments of
+the repo owner's tumbler, joined by a hyphen (`1-15`); a tumbler is the
+catalog's dotted address for an owner or a document. For a doc corpus it is
+the curator, the catalog owner that holds documents imported without a repo.
+A doc corpus here is an older `docs` collection that did not come from a
+repo, owned by the curator who imported it; new ones are not created. For a
+`knowledge` collection the owner is the subject, whatever tumbler its
+documents live under, which is why a subject finds its collection. This
+holds from the release that amends catalog-044; until then the engine may
+still rewrite a repo collection's owner from its documents.
 
 ## Rule 4: a collection holds many documents
 
@@ -238,13 +254,14 @@ The collection is the grain of the fan-out floor, the per-collection
 top-N-then-merge, the dedup boundary (identical text in two collections is
 stored twice and returned twice), per-collection taxonomy (RDR-075 exists
 to project topics across collections), and code-versus-prose scoring by
-prefix. Every one of those inherits your naming choice. RDR-204 moves the
-collection's attributes out of its name and into catalog columns, and its
-Context section names the follow-on work that moves each of those
-mechanisms to the grain it actually wants. Until then, the rules above are
+content type. Every one of those inherits your naming choice. RDR-204 moves
+the collection's attributes out of its name and into catalog columns,
+RDR-229 makes the name a label (Rule 3), and RDR-204's Context section names
+the follow-on work that moves each of those mechanisms to the grain it
+actually wants. Until then, the rules above are
 how to keep the grain from working against you.
 
 See also: [Storage Tiers § Collections](storage-tiers.md#collections) for
-the naming shape and model table, [Repo Indexing](repo-indexing.md) for the
+the registry row and model table, [Repo Indexing](repo-indexing.md) for the
 code, docs, and rdr pipeline, and
 [RDR-204](rdr/rdr-204-embedding-profile-and-collection-authority.md).

@@ -54,19 +54,20 @@ Classification is overridable via `.nexus.yml` (see [Per-Repo Configuration](#ne
 
 Each indexed repository produces two T3 collections. Embedding happens server-side in the nexus-service (local mode: bge-768 by default, Voyage when keyed; managed-cloud: always Voyage AI):
 
-| Collection | Managed-cloud model | Local model, default | Local model, keyed | Contents |
+| Content type | Managed-cloud model | Local model, default | Local model, keyed | Contents |
 |---|---|---|---|---|
-| `code__<owner_id>__voyage-code-3__v1` | `voyage-code-3` | `bge-768` | `voyage-code-3` | Code files |
-| `docs__<owner_id>__voyage-context-3__v1` | `voyage-context-3` (CCE) | `bge-768` | `voyage-context-3` | Prose + PDF files |
+| `code` | `voyage-code-3` | `bge-768` | `voyage-code-3` | Code files |
+| `docs` | `voyage-context-3` (CCE) | `bge-768` | `voyage-context-3` | Prose + PDF files |
 
-Conformant collection names (RDR-103) follow the 4-segment shape
-`<content_type>__<owner_id>__<embedding_model>__v<n>`, where `<owner_id>` is a stable slug
-derived from the repository (e.g. `nexus-1-1`) — see [RDR-103](rdr/rdr-103-catalog-collection-name-authority.md)
-and [Storage Tiers § Collections](storage-tiers.md#collections). Collections created before
-the conformance migration may still carry the legacy 2-segment shape
-(`<content_type>__<repo>-<hash8>`). Collection names are **stable across git
-worktrees** — `git rev-parse --git-common-dir` resolves to the shared `.git` directory,
-so a worktree and its parent produce identical collection names.
+A repo's collections are found by their lookup attributes (content type, the repo's owner and
+the embedding model) and identified by a `collection_id`; the name is a label. A new collection
+gets a minted label (`c4812`). Collections created by earlier releases keep their names as
+labels, usually the four-segment shape
+`<content_type>__<owner_id>__<embedding_model>__v<n>` (RDR-103, e.g. `code__nexus-1-1__voyage-code-3__v1`)
+or the two-segment `<content_type>__<repo>-<hash8>`. See
+[Storage Tiers § Collections](storage-tiers.md#collections). The repo's owner is stable across git
+worktrees: `git rev-parse --git-common-dir` resolves to the shared `.git` directory, so a
+worktree and its parent find the same collections.
 
 Additionally, markdown files under RDR paths (default: `docs/rdr/`) are indexed into a
 separate `rdr__*` collection via the batch markdown indexer.

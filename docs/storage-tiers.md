@@ -260,11 +260,11 @@ start` to bring the stack up and `nx daemon service status` to verify health
 
 ### Collections
 
-A collection is a row in the catalog's registry (`catalog_collections`). The row holds the collection's `collection_id`, a number the engine assigns that is unique across the installation, and its attributes: content type (`code`, `docs`, `rdr`, `knowledge`), owner, embedding model, model version, dimension and lifecycle state. A collection is found by the tuple of content type, owner, embedding model and model version, and identified by its `collection_id`. The service routes by the row: which model embeds a collection, and which content type it is, are read from its attributes (RDR-229).
+A collection is a row in the catalog's registry (`catalog_collections`). The row holds the collection's `collection_id`, a number the engine assigns that is unique across the installation, and its attributes: content type (`code`, `docs`, `rdr`, `knowledge`), owner, embedding model, model version, dimension and lifecycle state. A collection is looked up by its **lookup attributes**, content type, owner and embedding model, and the highest model version wins when several match. It is identified by its `collection_id`. Two live collections cannot share the same **unique key**: the lookup attributes plus the model version. The service reads the row to route a search and to choose the embedding model; it does not read the name for either (RDR-229).
 
-The collection's name is a label, unique among a tenant's live collections. A new collection gets a minted label, `c` followed by its id (`c4812`), and `nx collection rename` sets a readable one. The owner is the collection's source, set once at registration and never re-derived from its documents: the repo tumbler for a repo's collections, the curator for a doc corpus, the subject for `knowledge`. [Choosing and Naming Collections](collections.md) § Rule 3 has the label rule and the tuple's uniqueness.
+From the release that ships labels (RDR-229 Phase 3), the collection's name is a label, unique among a tenant's live collections. A new collection gets a minted label, `c` followed by its id (`c4812`), and `nx collection rename` sets a readable one. The owner is the collection's source, set once at registration: the repo tumbler for a repo's collections, the curator for an older doc corpus, the subject for `knowledge`. That holds from the release that amends catalog-044; until then the engine may still rewrite a repo collection's owner from its documents. [Choosing and Naming Collections](collections.md) (Rule 3) has the label rule, the unique key's enforcement conditions and the open points.
 
-Collections that predate this keep their names as labels. Those names are one of two shapes older releases rendered, and nothing parses them for meaning: the four-segment RDR-103 shape `<content_type>__<owner_id>__<embedding_model>__v<n>`, and the two-segment shape `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`.
+Existing collections keep their names as labels. Most are one of two shapes older releases built, the four-segment RDR-103 shape `<content_type>__<owner_id>__<embedding_model>__v<n>` and the two-segment shape `<content_type>__<repo>-<hash>`, e.g. `code__myrepo-a1b2c3`. `quarantine-` prefixed and hand-renamed labels exist too. A new collection is never named by building a name.
 
 | Content type | Contents | Managed-cloud model | Local model, default | Local model, keyed |
 |--------------|----------|---------------------|-----------------------|---------------------|
@@ -273,11 +273,11 @@ Collections that predate this keep their names as labels. Those names are one of
 | `rdr` | Indexed RDR documents | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 | `knowledge` | Stored agent outputs and notes | voyage-context-3 (CCE) | bge-768 | voyage-context-3 |
 
-`nx index repo` and a `knowledge` subject both find their collection by attributes, never by building a name: a repo by its content type, owner and model, a subject with the subject as owner.
+`nx index repo` and a `knowledge` subject both find their collection by its lookup attributes: a repo by its content type, owner and model, a subject with the subject as owner.
 
 A collection is indexed and queried under the same embedding model: mixing models across one vector space produces near-random similarity scores. The same principle is enforced at query time: multi-collection combined queries are dispatched per embedding-model group by the MCP layer (a corpus spanning `voyage-code-3` and `voyage-context-3` collections issues one query per model and merges results, nexus-3l6gz), and the service rejects a mixed-model collection list outright (`requireHomogeneousModel`, engine-service ≥ 0.1.36).
 
-**TTL and expiry**: `nx store expire` removes expired entries from `knowledge` collections only (content type `knowledge` on the row). Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
+**TTL and expiry**: `nx store expire` removes expired entries from `knowledge__*` collections only. Code, docs, and RDR collections are never expired: they are refreshed via re-indexing.
 
 **Use for**: semantic search across sessions, institutional knowledge.
 
