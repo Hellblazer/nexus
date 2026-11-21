@@ -72,7 +72,7 @@ def sweep_host(client: Any, procs: Processes | Any, *, host: str, own: tuple[int
     (``failed``) and the sweep goes on: one failing row does not stop the rest (RDR-253 Test Plan). An engine that
     cannot be reached at all still ends the sweep, by its own error."""
     report = SweepReport()
-    views = bindings_here(client, procs, host)
+    views = bindings_here(client, host, identity_dir=identity_dir)
     report.listed = len(views)
     report.swept = True
     for v in views:

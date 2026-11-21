@@ -44,7 +44,7 @@ from nexus.identity.bind_client import IdentityApiError, IdentityUnavailableErro
 from nexus.identity.holder import (
     GONE, Processes, RegistryEntry, check_holder, holder_process, read_registry_entry,
 )
-from nexus.identity.hostname import bindings_here, history_here, is_local, local_names
+from nexus.identity.hostname import bindings_here, describe_host, history_here, holder_is_local
 from nexus.identity.token_file import TokenFile, read_token_file, token_path, update_token_file
 
 REGISTRY_WAIT_S: float = 5.0
@@ -212,11 +212,12 @@ class SessionBinder:
 
     def _own_identity(self, facts: LaunchFacts) -> dict[str, Any] | None:
         """The identity this very process holds now (its pid, ``startedAt`` and start time are the holder's)."""
-        for view in bindings_here(self._client, self._procs, facts.host, facts.claude_pid):
+        for view in bindings_here(self._client, facts.host, facts.claude_pid, self._idir):
             holder = view.get("holder") or {}
             if view.get("kind") == "delegated":
                 continue
-            if holder.get("pid") == facts.claude_pid and holder.get("started_at") == facts.started_at:
+            if (holder.get("pid") == facts.claude_pid and holder.get("started_at") == facts.started_at
+                    and holder_is_local(holder, host=facts.host, identity_dir=self._idir, process=(facts.claude_pid, facts.started_at))):
                 return dict(view)
         return None
 
@@ -236,8 +237,10 @@ class SessionBinder:
         string on ``clear``, ``fork``, ``refresh`` and a self-``release``: a process bound before the stable host key
         (:mod:`nexus.identity.hostname`) holds a row under its ``gethostname()``, and goes on speaking under that name until
         a new process binds the identity. Only a name this machine answers to is adopted; any other host stays as it is."""
-        recorded = (own.get("holder") or {}).get("host")
-        if recorded and recorded != facts.host and is_local(recorded, local_names(self._procs, facts.host)):
+        holder = own.get("holder") or {}
+        recorded = holder.get("host")
+        if (recorded and recorded != facts.host and holder_is_local(
+                holder, host=facts.host, identity_dir=self._idir, process=(facts.claude_pid, facts.started_at))):
             return dataclasses.replace(facts, host=recorded)
         return facts
 
@@ -320,7 +323,7 @@ class SessionBinder:
         holder = view.get("holder") or {}
         until = view.get("reserved_until")
         if (view.get("state") != "lapsed" or not holder or not isinstance(until, str)
-                or is_local(holder.get("host"), local_names(self._procs, facts.host))):
+                or holder_is_local(holder, host=facts.host, identity_dir=self._idir)):
             return False
         try:
             return datetime.now(timezone.utc) >= datetime.fromisoformat(until.replace("Z", "+00:00"))
@@ -402,15 +405,14 @@ class SessionBinder:
         identity's state, ``ended`` included, when no other process holds that identity now. Only the most recent
         identity is considered."""
         assert facts.proc_start is not None
-        names = local_names(self._procs, facts.host)
-        for row in history_here(self._client, self._procs, facts.host, facts.claude_pid, facts.proc_start):
+        for row in history_here(self._client, facts.host, facts.claude_pid, facts.proc_start, self._idir):
             if row.get("kind") == "delegated":
                 continue
             # only the most recent identity of the process: an older one belongs to an earlier life of the pid
             state = row.get("state")
             holder = row.get("holder") or {}
             if state in ("live", "lapsed"):
-                ours = (is_local(holder.get("host"), names) and holder.get("pid") == facts.claude_pid
+                ours = (holder_is_local(holder, host=facts.host, identity_dir=self._idir) and holder.get("pid") == facts.claude_pid
                         and holder.get("proc_start") == facts.proc_start)
                 if not ours:
                     return None  # held by another process now
@@ -471,18 +473,23 @@ class SessionBinder:
 
     @staticmethod
     def _held_display_name(facts: LaunchFacts, view: Mapping[str, Any]) -> str | None:
-        """The display name the ephemeral identity of a session that was refused *view*'s seat keeps: the held identity's own
-        (a resumed ephemeral's name is the session's), else the name Claude records for the session. A seat's alias is never
-        copied: the ephemeral beside it must not read as the seat."""
+        """The display name of the ephemeral identity a session falls back to when *view* is held. When *view* is this
+        session's own ephemeral identity (its holder's session id is the one resuming) its display name is the session's, and
+        it is kept; otherwise the name Claude records for the session (a seat's display name, or another session's ephemeral
+        name, is never copied). A seat's alias is never the name either: the ephemeral beside the seat must not read as it."""
+        holder = view.get("holder") or {}
         shown = view.get("display_name")
-        if isinstance(shown, str) and shown.strip():
+        if (view.get("kind") == "ephemeral" and holder.get("session_id") and holder.get("session_id") == facts.session_id
+                and isinstance(shown, str) and shown.strip()):
             return shown.strip()
-        return None if view.get("kind") == "seat" else facts.name
+        if view.get("kind") == "seat" and facts.name == view.get("name"):
+            return None
+        return facts.name
 
     def _held_notice(self, view: Mapping[str, Any], facts: LaunchFacts) -> str:
         name = view.get("name") or view.get("id")
         holder = view.get("holder") or {}
-        who = (f"pid {holder.get('pid')} on {holder.get('host')}" if holder else "another process")
+        who = (f"pid {holder.get('pid')} on {describe_host(holder.get('host'))}" if holder else "another process")
         text = f"identity: seat {name} is held by {who} (generation {view.get('generation')}); this session runs as an ephemeral identity."
         if facts.interactive and view.get("name"):
             text += f" To take it over, run: nx identity claim {view['name']} --take-over"

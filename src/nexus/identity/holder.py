@@ -24,9 +24,8 @@ file names THIS directory; any other holder (or one with no token file) is judge
 compare alone, which do not depend on a directory: gone if the pid is dead or was reused, else unknown, and unknown is
 never reported gone.
 
-A holder on another host is judged by its lease alone and the check says **other_host**. "This host" is every name the
-machine answers to (:func:`nexus.identity.hostname.local_names`): its stable key and, for a binding written before the key
-existed, its ``gethostname()``. A crashed process leaves
+A holder on another host is judged by its lease alone and the check says **other_host**. "This host" is the machine's stable key, or a
+pre-key hostname the machine can prove was its own (:func:`nexus.identity.hostname.holder_is_local`). A crashed process leaves
 its registry file behind, so file presence alone never decides: the probe does.
 """
 from __future__ import annotations
@@ -42,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from nexus.identity import hostname as _hostname
-from nexus.identity.hostname import is_local, local_names
+from nexus.identity.hostname import describe_host, holder_is_local
 
 GONE = "gone"
 RUNNING = "running"
@@ -232,8 +231,8 @@ def check_holder(holder: Mapping[str, Any], *, procs: Processes | Any, host: str
     unknown. A holder that was restarted in place (same pid and start time, a new ``startedAt``) cannot be told
     from a running one without its registry file, so it stays unknown."""
     here = host if host is not None else procs.host
-    if not is_local(holder.get("host"), local_names(procs, here)):
-        return Verdict(OTHER_HOST, f"held on {holder.get('host')}, not on {here}")
+    if not holder_is_local(holder, host=here, identity_dir=identity_dir):
+        return Verdict(OTHER_HOST, f"held on {describe_host(holder.get('host'))}, not on {describe_host(here)}")
     pid = _int(holder.get("pid"))
     if pid is None:
         return Verdict(UNKNOWN, "the binding names no pid")
