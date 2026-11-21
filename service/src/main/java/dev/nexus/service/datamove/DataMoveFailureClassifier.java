@@ -166,12 +166,12 @@ final class DataMoveFailureClassifier {
             // can pass; any other error is the verification text's own (a missing function, an ungranted table): permanent
             case VERIFICATION -> raised == null || transientSession(raised.getSQLState(), false)
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
-            // the completion transaction rolled back whole, so a lock or statement timeout, a deadlock, a serialization failure,
-            // a lost connection, a shutdown or a busy host retries safely; anything else, no error included, is the move's
             // the completion transaction's own re-check: it runs under that transaction's lock_timeout, so the lock and conflict
             // states are transient as for on_complete; a session that carried a tenant (null) is the connection's, as for VERIFICATION
             case RECHECK -> raised == null || transientSession(raised.getSQLState(), true)
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
+            // the completion transaction rolled back whole, so a lock or statement timeout, a deadlock, a serialization failure,
+            // a lost connection, a shutdown or a busy host retries safely; anything else, no error included, is the move's
             case ON_COMPLETE -> raised != null && transientSession(raised.getSQLState(), true)
                 ? Verdict.transientFailure(detail) : Verdict.permanentFailure(detail);
             case PROBE, PASS -> raised != null && transientRaised(raised.getSQLState())

@@ -219,7 +219,7 @@ class DataMoveFailureClassifierTest {
     void aRecheckInTheCompletionTransaction_isClassifiedAsOnCompleteIs_soALockWaitIsNeverPermanent(String sqlstate,
                                                                                                boolean expected) {
         SQLException error = sqlstate == null ? null : raised(sqlstate);
-        assertThat(DataMoveFailureClassifier.classify(Stage.valueOf("RECHECK"), error, List.of(), "the re-check could not run").permanent())
+        assertThat(DataMoveFailureClassifier.classify(Stage.RECHECK, error, List.of(), "the re-check could not run").permanent())
             .isEqualTo(!expected);
     }
 

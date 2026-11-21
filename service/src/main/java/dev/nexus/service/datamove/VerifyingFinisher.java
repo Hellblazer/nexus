@@ -34,7 +34,7 @@ import java.util.function.Consumer;
  *       again), and every one is run so a failure names every tenant that still holds old-shape rows;</li>
  *   <li>if every run returned no rows, the row is read once more (a pause set now still stops it), and the completion
  *       transaction runs: the UPDATE that sets {@code completed_at}, then the verification again, warm now, table-wide and once per
- *       listed tenant (under {@code SET LOCAL nexus.tenant}; a verification that reads a row-security-scoped table is empty
+ *       listed tenant, plus the tenants the catalogs name now (under {@code SET LOCAL nexus.tenant}; a verification that reads a row-security-scoped table is empty
  *       without a tenant, so the tenants' runs are the check), all sharing {@code statement_timeout_ms}, then {@code on_complete} (if any). A write between the two transactions that leaves an
  *       old-shape row is caught by that second run, which rolls the transaction back, so neither {@code completed_at} nor
  *       {@code on_complete} takes effect without the other, or past a non-empty verification.</li>
