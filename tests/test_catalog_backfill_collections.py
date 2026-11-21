@@ -142,9 +142,9 @@ def test_backfill_reports_an_unregistered_quarantine_sibling_and_does_not_count_
     assert f"skipping quarantine-code__1-41__{_CODE_MODEL}__v1: a quarantine sibling" in result.output
 
 
-def test_backfill_marks_legacy_via_projector(catalog, runner):
-    """Non-conformant names land with legacy_grandfathered=True;
-    conformant names land False.
+def test_backfill_no_longer_marks_legacy_via_projector(catalog, runner):
+    """RDR-229 P3.8 (item 11): the registration derives and writes no legacy flag, so a non-conformant name
+    lands with legacy_grandfathered=False like a conformant one (it landed True before).
     """
     fake_t3 = _FakeT3(
         names=[
@@ -157,7 +157,7 @@ def test_backfill_marks_legacy_via_projector(catalog, runner):
         result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
 
     assert result.exit_code == 0, result.output
-    assert catalog.is_legacy_collection("knowledge__delos") is True
+    assert catalog.is_legacy_collection("knowledge__delos") is False
     assert catalog.is_legacy_collection(f"code__1-1__{_CODE_MODEL}__v1") is False
 
 
