@@ -282,7 +282,7 @@ ALTER TABLE nexus.reembed_jobs DROP CONSTRAINT IF EXISTS reembed_jobs_target_col
     </changeSet>
 
     <changeSet id="vectors-068-17" author="nexus-p2m1x.17">
-        <comment>The history tables (relevance_log, search_telemetry, hook_failures, gc_audit) gain a nullable collection_id for joins and keep their name column as the record of the label at the time of the event (RDR-229 item 6). No CHECK and no stamp: an old row keeps a NULL id. The rollback is empty on purpose: the columns stay, an old engine ignores them. DATA EFFECT: none; a nullable ADD COLUMN touches no row.</comment>
+        <comment>The history tables (relevance_log, search_telemetry, hook_failures, gc_audit) gain a nullable collection_id for joins and keep their name column as the record of the label at the time of the event. Source: RDR-229 item 6 (Expand list); the bead's (nexus-p2m1x.17) item 2 list omitted these four tables, and linda accepted the RDR text over the bead's list. No CHECK and no stamp: an old row keeps a NULL id. The rollback is empty on purpose: the columns stay, an old engine ignores them. DATA EFFECT: none; a nullable ADD COLUMN touches no row.</comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE nexus.relevance_log ADD COLUMN IF NOT EXISTS collection_id bigint;
