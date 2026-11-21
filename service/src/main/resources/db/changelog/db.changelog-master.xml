@@ -2303,6 +2303,24 @@
     -->
     <include file="db/changelog/vectors-065-catalog-collections-owner-read.xml"/>
 
+        RDR-229 amendment (Sam 2026-11-21, "Owner is the source"; bead nexus-p2m1x.14): catalog-049-1 replaces
+        nexus.catalog_collection_owner_replaceable with catalog-044-1's body minus the curator clause, so a collection registered
+        under a curator owner is no longer re-owned from its documents (catalog-044 is immutable). Same signature, grants and
+        security posture; function definition only, no DATA EFFECT. After identity-005, before the grants-nexus-svc.xml
+        runAlways block.
+    -->
+    <include file="db/changelog/catalog-049-curator-owner-not-replaceable.xml"/>
+
+    <!--
+        RDR-229 (Sam 2026-11-21; bead nexus-p2m1x.14): the registered data move rdr229-reown-repo-stems-from-curator over
+        nexus.catalog_collections (RDR-246). One INSERT into nexus.data_moves, the registering changeset only; the move re-owns a
+        repo's code__, docs__ and rdr__ collection rows from a curator to the repo owner (inserting the owner when absent), in the
+        worker, after boot. NO owner-read policy here: nexus.catalog_collections' catalog_collections_owner_read is vectors-065
+        (RDR-229 D2), the one copy. After catalog-049 (the trigger no longer undoes a curator-owned row's owner), before the
+        grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-067-reown-repo-stems-register.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
