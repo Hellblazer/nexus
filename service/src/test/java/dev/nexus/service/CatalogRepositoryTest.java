@@ -2079,15 +2079,15 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: the wbfpw.33 import fallback mints an import's documents under the
-     * knowledge CURATOR when the collection has no usable owner, so a curator document can
-     * be the first to land in a slug-owned repo collection. It names the collection's
-     * owner only provisionally: a repo document registered afterwards replaces it, and it
-     * never replaces a repo owner back. Curator documents are not ignored outright, because
-     * a collection with nothing else (docs__default, curator 1.14) still takes 1-14.
+     * nexus-6pbwx, amended by catalog-049 (RDR-229, Sam 2026-11-21 "Owner is the source"): the wbfpw.33 import fallback
+     * mints an import's documents under the knowledge CURATOR, so a curator document can be the first to land in a
+     * slug-owned repo collection. A slug owner is still derived from the documents, so that first curator document names
+     * the owner (docs__default, curator 1.14, still takes 1-14). But 1-22 is then a tumbler-shaped owner, and since
+     * catalog-049 a curator's segment is no longer replaceable: a repo document that lands afterwards does not take the
+     * collection from the curator, and neither do more curator documents or a re-registration.
      */
     @Test @Order(60)
-    void collectionOwner_curatorDocumentsGiveWayToRepoDocuments() {
+    void collectionOwner_aCuratorOwnerOnceSetStandsAgainstLaterRepoDocuments() {
         String tenant = "own6pbwx-curator-tenant";
         putOwner(tenant, "1.22", "knowledge", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
@@ -2095,15 +2095,16 @@ class CatalogRepositoryTest {
         registerColl(tenant, name, "code", "curator-first-6pbwx");
 
         putDoc(tenant, "1.22.1", "code", name);
-        assertThat(ownerOf(tenant, name)).as("curator documents alone still name an owner").isEqualTo("1-22");
+        assertThat(ownerOf(tenant, name)).as("a slug owner is derived: curator documents alone still name an owner")
+            .isEqualTo("1-22");
         putDoc(tenant, "1.23.1", "code", name);
-        assertThat(ownerOf(tenant, name)).as("a repo document replaces the curator's segment").isEqualTo("1-23");
+        assertThat(ownerOf(tenant, name)).as("a repo document does not replace a curator's segment (catalog-049)")
+            .isEqualTo("1-22");
         putDoc(tenant, "1.22.2", "code", name);
-        putDoc(tenant, "1.22.3", "code", name);
-        assertThat(ownerOf(tenant, name)).as("more curator documents never replace a repo owner back")
-            .isEqualTo("1-23");
+        putDoc(tenant, "1.23.2", "code", name);
+        assertThat(ownerOf(tenant, name)).as("nor do further documents of either owner").isEqualTo("1-22");
         registerColl(tenant, name, "code", "curator-first-6pbwx");
-        assertThat(ownerOf(tenant, name)).as("nor does a re-registration").isEqualTo("1-23");
+        assertThat(ownerOf(tenant, name)).as("nor does a re-registration").isEqualTo("1-22");
     }
 
     /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
@@ -2122,12 +2123,13 @@ class CatalogRepositoryTest {
     }
 
     /**
-     * nexus-6pbwx: a registered CURATOR segment is replaceable even though it is
-     * tumbler-shaped, and a curator-only collection settles on the curator's segment
-     * (docs__default under 1.14) and stays there while more curator documents arrive.
+     * nexus-6pbwx, amended by catalog-049 (RDR-229): a curator-only collection settles on the curator's segment
+     * (docs__default under 1.14, derived from the slug "default") and stays there while more curator documents arrive,
+     * and a collection REGISTERED with a curator's segment keeps it when a repo document lands (catalog-049 removed the
+     * curator-replaceable rule: a curator owner a registration set stands).
      */
     @Test @Order(60)
-    void collectionOwner_curatorOnlyCollectionSettlesAndACuratorSegmentIsReplaceable() {
+    void collectionOwner_curatorOnlyCollectionSettlesAndARegisteredCuratorSegmentStands() {
         String tenant = "own6pbwx-default-tenant";
         putOwner(tenant, "1.14", "default", "curator");
         putOwner(tenant, "1.23", "some-repo", "repo");
@@ -2139,12 +2141,19 @@ class CatalogRepositoryTest {
         putDoc(tenant, "1.14.3", "docs", name);
         assertThat(ownerOf(tenant, name)).isEqualTo("1-14");
 
-        // A collection REGISTERED with a curator's segment and then given a repo document.
+        // A collection REGISTERED with a curator's segment and then given a repo document: the registration stands.
         String other = "code__registered-curator-6pbwx__voyage-code-3__v1";
         registerColl(tenant, other, "code", "1-14");
         assertThat(ownerOf(tenant, other)).as("guard: registered with the curator segment").isEqualTo("1-14");
         putDoc(tenant, "1.23.7", "code", other);
-        assertThat(ownerOf(tenant, other)).isEqualTo("1-23");
+        assertThat(ownerOf(tenant, other)).as("a repo document does not re-own a registered curator (catalog-049)")
+            .isEqualTo("1-14");
+
+        // A slug owner (not tumbler-shaped) is still replaceable by a repo document: the legacy case is unchanged.
+        String slug = "code__registered-slug-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, slug, "code", "registered-slug-6pbwx");
+        putDoc(tenant, "1.23.8", "code", slug);
+        assertThat(ownerOf(tenant, slug)).as("a slug owner is still derived from its documents").isEqualTo("1-23");
     }
 
     /**

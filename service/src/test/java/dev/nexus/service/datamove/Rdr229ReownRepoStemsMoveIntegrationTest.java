@@ -15,6 +15,8 @@ import org.junit.jupiter.api.Test;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -34,9 +36,11 @@ import java.util.stream.Collectors;
  * applies the datamove/owner-read-policy/policy.xml fixture (the same pattern, the same name) to catalog_collections; when
  * vectors-065 lands, delete {@code standIn} and the real policy is already there.
  *
- * <p>Falsifiers, by hand: drop the {@code CROSS JOIN lck} and the lock is never taken (no test sees it, which is why the
- * template carries it by construction); make {@code repo_owner} read only {@code ins} and the existing-owner test moves
- * nothing; drop {@code OR EXISTS (...)} from {@code cand} and the chunk-straddle test leaves docs rows on the curator.
+ * <p>Falsifiers, by hand: drop the {@code lck} CTE or its {@code CROSS JOIN lck} and the lock test sees the move complete
+ * while the lock is held; make {@code repo_owner} read only {@code ins} and the existing-owner test moves nothing; drop the
+ * repo-owner arm of {@code cand} and the docs-only-with-an-owner and chunk-straddle tests leave rows on the curator; drop
+ * the {@code skipped} CTE's use in the UPDATE and the occupied-destination test moves the legacy row onto its native twin's
+ * tuple; drop the {@code reported} CTE and the verification blocks the move.
  */
 class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
@@ -57,6 +61,8 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
     void freshCatalog() throws Exception {
         ctx().deleteFrom(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.like("rdr229-reown-%")).execute();
         ctx().deleteFrom(CATALOG_OWNERS).where(CATALOG_OWNERS.TENANT_ID.like("rdr229-reown-%")).execute();
+        ctx().deleteFrom(table("nexus", "gc_audit")).where(DSL.field(DSL.name("tenant_id"), String.class).like("rdr229-reown-%"))
+            .execute();
         standIn();
     }
 
@@ -162,8 +168,9 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
         assertThat(ownerOf(T, WOW_DOCS)).as("a doc corpus keeps its curator").isEqualTo("1-40");
         assertThat(ownerOf(T, "knowledge__distributed-systems__voyage-context-3__v1")).as("knowledge keeps its subject's owner")
             .isEqualTo("1-40");
-        assertThat(ownerOf(T, "quarantine-code__arcaneum-2ad2825c__voyage-code-3__v1")).as("quarantine is not touched")
-            .isEqualTo("1-40");
+        assertThat(ownerOf(T, "quarantine-code__arcaneum-2ad2825c__voyage-code-3__v1"))
+            .as("the origin's quarantine sibling moves with it: QuarantineOrigin.rowsOf matches an untagged sibling by owner_id")
+            .isEqualTo("1-41");
         assertThat(ownerOf(T, "code__arcaneum-2ad2825c__voyage-code-3__v0")).as("a superseded row is not touched")
             .isEqualTo("1-40");
     }
@@ -322,6 +329,158 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends DataMoveIntegrationBase {
 
         assertThat(moved).as("the worker worked the move").isEqualTo(1);
         assertThat(completedAt(LABEL)).as("an empty catalog completes in one pass, so boot 1 completes it").isNotNull();
+    }
+
+    // ── a repo owner that already exists is a repo signal, whatever the stem's rows are ─────────────────────
+
+    @Test
+    void aDocsOnlyStemUnderACurator_whoseHashHasARepoOwner_isReowned_butARowOfAnotherOwnerIsNot() throws Exception {
+        owner(T, "1.40", "knowledge", "curator", null);
+        owner(T, "1.7", "arcaneum-checkout", "repo", "2ad2825c");
+        owner(T, "1.9", "some-repo", "repo", "11112222");
+        collection(T, ARC_DOCS, "1-40");                                            // no code__ row at all
+        collection(T, "rdr__arcaneum-2ad2825c__voyage-context-3__v1", "1-9");     // another repo owner's: not a curator row
+        collection(T, "docs__notes-0badc0de__voyage-context-3__v1", "1-40");     // docs-only hex stem, no owner of that hash
+        register();
+
+        runToCompletion();
+
+        assertThat(ownerOf(T, ARC_DOCS)).as("the stem's hash has a repo owner already: a docs-only stem is that repo's")
+            .isEqualTo("1-7");
+        assertThat(ownerOf(T, "rdr__arcaneum-2ad2825c__voyage-context-3__v1")).as("a row on a non-curator owner is left alone")
+            .isEqualTo("1-9");
+        assertThat(ownerOf(T, "docs__notes-0badc0de__voyage-context-3__v1")).as("no owner of that hash and no code__ row: a corpus")
+            .isEqualTo("1-40");
+        assertThat(ownersOf(T)).as("no owner inserted").hasSize(3);
+    }
+
+    // ── an occupied destination tuple: skipped, reported, the move completes ────────────────────────────────
+
+    /** A native code__1-17 collection of the repo, its restored legacy twin under the curator, and one sibling of each. */
+    private void restoredLegacyBesideNative(String tenant) {
+        owner(tenant, "1.40", "knowledge", "curator", null);
+        owner(tenant, "1.17", "arcaneum", "repo", "2ad2825c");
+        collection(tenant, "code__1-17__voyage-code-3__v1", "1-17");                  // native: holds (code, 1-17, voyage-code-3, v1)
+        collection(tenant, ARC_CODE, "1-40");                                          // legacy: would land on that tuple
+        collection(tenant, ARC_DOCS, "1-40");                                          // legacy docs: its destination is free
+        collection(tenant, "quarantine-" + ARC_CODE, "1-40", "quarantine", "");
+        collection(tenant, "quarantine-" + ARC_DOCS, "1-40", "quarantine", "");
+    }
+
+    private List<String> skipReports(String tenant) {
+        var op = DSL.field(DSL.name("operation"), String.class);
+        return ctx().select(DSL.field(DSL.name("collection"), String.class), DSL.field(DSL.name("details"), String.class))
+            .from(table("nexus", "gc_audit"))
+            .where(DSL.field(DSL.name("tenant_id"), String.class).eq(tenant)).and(op.eq("rdr229_reown_skipped"))
+            .orderBy(DSL.field(DSL.name("id"))).fetch().stream().map(r -> r.value1() + " " + r.value2()).toList();
+    }
+
+    @Test
+    void aRestoredLegacyRowBesideItsNativeTwin_isSkippedAndReportedOnce_theOthersMove_andNoTupleHoldsTwoLiveRows()
+            throws Exception {
+        restoredLegacyBesideNative(T);
+        register();
+        ctx().update(table("nexus", "data_moves"))
+            .set(DSL.field(DSL.name("chunk_size"), Integer.class), 1)   // several chunks: the report must not repeat
+            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).execute();
+
+        runToCompletion();
+
+        assertThat(progress(LABEL).total()).as("non-vacuity: several chunks").isGreaterThanOrEqualTo(4);
+        assertThat(ownerOf(T, ARC_CODE)).as("the legacy row stays on the curator, alone in its own tuple").isEqualTo("1-40");
+        assertThat(ownerOf(T, "code__1-17__voyage-code-3__v1")).as("the native row is untouched").isEqualTo("1-17");
+        assertThat(ownerOf(T, ARC_DOCS)).as("a row whose destination is free moves").isEqualTo("1-17");
+        assertThat(ownerOf(T, "quarantine-" + ARC_CODE)).as("a skipped origin's sibling stays with it").isEqualTo("1-40");
+        assertThat(ownerOf(T, "quarantine-" + ARC_DOCS)).as("a moved origin's sibling moves with it").isEqualTo("1-17");
+        assertThat(ownersOf(T)).as("no owner inserted").containsExactly("1.17=arcaneum/repo/2ad2825c/",
+            "1.40=knowledge/curator//");
+        var reports = skipReports(T);
+        assertThat(reports).as("one report row for the one skipped row, however many chunks ran").hasSize(1);
+        assertThat(reports.get(0)).startsWith(ARC_CODE + " ").contains("code__1-17__voyage-code-3__v1").contains("1-17");
+        var twins = ctx().select(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION, DSL.count())
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(T)).and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("live"))
+            .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(""))
+            .groupBy(CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION)
+            .having(DSL.count().gt(1)).fetch();
+        assertThat(twins).as("P3.8's partial UNIQUE shape: at most one live row per tuple").isEmpty();
+    }
+
+    /** Only the occupied legacy row: a move that does nothing leaves it curator-owned, so the verification alone decides. */
+    private void occupiedLegacyOnlyWithAMoveThatDoesNothing(String tenant) throws Exception {
+        owner(tenant, "1.40", "knowledge", "curator", null);
+        owner(tenant, "1.17", "arcaneum", "repo", "2ad2825c");
+        collection(tenant, "code__1-17__voyage-code-3__v1", "1-17");
+        collection(tenant, ARC_CODE, "1-40");
+        register();
+        ctx().update(table("nexus", "data_moves"))
+            .set(DSL.field(DSL.name("template"), String.class),
+                "UPDATE <driving_table> SET owner_id = t.owner_id WHERE <chunking_clause>")
+            .where(DSL.field(DSL.name("label"), String.class).eq(LABEL)).execute();
+    }
+
+    @Test
+    void anOccupiedRowWithNoReport_blocksCompletion_soASkipIsNeverSilent() throws Exception {
+        occupiedLegacyOnlyWithAMoveThatDoesNothing(T);
+
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher());
+        w.runCycle();
+
+        assertThat(completedAt(LABEL)).as("the verification counts the unreported skip").isNull();
+        assertThat(w.states().state(LABEL).orElseThrow().kind()).isEqualTo(MoveStates.Kind.BLOCKED);
+    }
+
+    @Test
+    void anOccupiedRowWithItsReport_passesTheVerification() throws Exception {
+        occupiedLegacyOnlyWithAMoveThatDoesNothing(T);
+        ctx().insertInto(table("nexus", "gc_audit"), DSL.field(DSL.name("tenant_id"), String.class),
+                DSL.field(DSL.name("operation"), String.class), DSL.field(DSL.name("collection"), String.class))
+            .values(T, "rdr229_reown_skipped", ARC_CODE).execute();
+
+        runToCompletion();
+
+        assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-40");
+    }
+
+    // ── the owner-registration lock ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    void theMoveWaitsForTheOwnerRegistrationLock_andCompletesWhenItIsReleased() throws Exception {
+        gateXr789(T);
+        register();
+        var w = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher());
+        CompletableFuture<Integer> cycle;
+        try (Connection holder = DriverManager.getConnection(pg.getJdbcUrl(), ADMIN, ADMIN_PASSWORD)) {
+            holder.setAutoCommit(false);
+            try (var st = holder.prepareStatement("SELECT pg_advisory_xact_lock(hashtext('catalog_owners/' || CAST(? AS text)))")) {
+                st.setString(1, T);
+                st.execute();
+            }
+            cycle = async(w::runCycle);
+
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            boolean waiting = false;
+            while (!waiting && System.nanoTime() < deadline) {
+                waiting = ctx().fetchCount(table("pg_catalog", "pg_locks"),
+                    DSL.field(DSL.name("locktype"), String.class).eq("advisory")
+                        .and(DSL.field(DSL.name("granted"), Boolean.class).isFalse())) > 0;
+                if (!waiting) {
+                    Thread.sleep(50);
+                }
+            }
+            assertThat(waiting).as("the move's chunk is waiting for the lock upsertOwner takes").isTrue();
+            assertThat(cycle.isDone()).as("the cycle cannot end while the lock is held").isFalse();
+            assertThat(completedAt(LABEL)).isNull();
+            assertThat(ownerOf(T, ARC_CODE)).as("nothing moved while the lock was held").isEqualTo("1-40");
+            holder.rollback();
+        }
+        cycle.get(2, TimeUnit.MINUTES);
+
+        runToCompletion();
+        assertThat(ownerOf(T, ARC_CODE)).isEqualTo("1-41");
+        assertThat(ownerOf(T, ARC_DOCS)).isEqualTo("1-41");
     }
 
     @Test

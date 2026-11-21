@@ -6,30 +6,58 @@
     by nexus-wbfpw.33's import fallback, and catalog-044-3 then froze that. This move gives them the repo owner.
 
     THE RULE, per tenant. A stem S = <slug>-<hash8> (hash8 is eight lowercase hex digits: repo_identity's
-    sha256(main_repo)[:8]) is a REPO when a live code__S__* row exists whose owner_id is a curator (nexus.catalog_owner_is_curator)
-    or is already the repo owner carrying repo_hash = hash8. Only nx index repo mints a code__ collection, so a code__ row is
-    the signal. A docs-only stem (no code__ row for it) is a corpus and is NEVER touched. Every live, unsuperseded code__S__*,
-    docs__S__* and rdr__S__* row of a repo stem is set to the repo owner with repo_hash = hash8 (the segment form, 1.17 -> 1-17):
-    an existing catalog_owners row with that repo_hash is reused, else one is inserted (owner_type 'repo', repo_root '', name <slug>,
-    or <slug>-<hash8> when that name is taken or two stems of one chunk share a slug). Quarantine and superseded rows are not touched.
+    sha256(main_repo)[:8]) is a REPO when EITHER a catalog_owners row of owner_type 'repo' with repo_hash = hash8 already exists
+    in the tenant, OR a live code__S__* row is owned by a curator (nexus.catalog_owner_is_curator). The second arm is the only
+    one that can mint an owner (only nx index repo mints a code__ collection, so a code__ row is the signal); the first arm is
+    what lets a docs-only stem under a curator find a repo owner that already exists, and keeps a stem whole when its code__
+    rows moved in an earlier chunk. A docs-only stem with no such owner and no code__ row is a corpus and is NEVER touched.
+    Every live, unsuperseded code__S__*, docs__S__* and rdr__S__* row of a repo stem that is OWNED BY A CURATOR is set to the
+    repo owner with repo_hash = hash8 (the segment form, 1.17 -> 1-17): a row on any other owner is left alone. An existing
+    catalog_owners row with that repo_hash is reused, else one is inserted (owner_type 'repo', repo_root '', name <slug>, or
+    <slug>-<hash8> when that name is taken or two stems of one chunk share a slug). Superseded rows are not touched.
 
-    ONE STATEMENT, ONE CHUNK. The template is a single statement with a data-modifying CTE: the advisory lock
+    QUARANTINE SIBLINGS. A stem row's quarantine sibling (a lifecycle_state 'quarantine' row named 'quarantine-' || the
+    origin's name, the reaper's sibling) moves with its origin. QuarantineOrigin.rowsOf attributes an untagged quarantine row
+    to its origin either by that exact name or, for the client's sibling, by equal owner_id, embedding_model, model_version
+    and content_type; the owner_id arm stops matching when only the origin is re-owned, so the sibling follows. A sibling named
+    for a collection of a repo stem is the only quarantine row this move touches. (The client's row-derived sibling is shared by
+    every collection of one owner and model and is not named for an origin: it is not moved.)
+
+    OCCUPIED DESTINATION, SKIPPED AND REPORTED. P3.8's partial UNIQUE index holds at most one live, unsuperseded row per
+    (tenant_id, content_type, owner_id, embedding_model, model_version). A curator-owned stem row whose destination tuple
+    (its content_type, embedding_model and model_version on the repo owner's owner_id) is already held by ANOTHER live,
+    unsuperseded, non-quarantine row of the tenant (a native code__1-17__* collection beside a restored legacy
+    code__<slug>-<hash8>__*) is NOT moved: the move would create a duplicate tuple. It stays curator-owned, alone in its own
+    tuple (curator owner, its own owner_id), so the UNIQUE holds, and its quarantine sibling stays with it. Each such row is
+    REPORTED: the statement writes one nexus.gc_audit row per skipped row (operation 'rdr229_reown_skipped', collection = the
+    row's name, details = the reason, its owner_id, the destination owner_id and the name of the row that holds the tuple),
+    once per row, so a rerun adds none. gc_audit is the engine's existing per-tenant audit; the worker keeps nothing per row
+    (dml_utils records only run totals and chunk errors, and a single SQL statement cannot RAISE NOTICE), and the report rows are
+    what an operator reads: SELECT collection, details FROM nexus.gc_audit WHERE operation = 'rdr229_reown_skipped'. Two rows
+    of one chunk that would move onto the SAME tuple are not told apart: the UNIQUE index refuses the second and the chunk
+    fails loud.
+
+    ONE STATEMENT, ONE CHUNK. The template is a single statement with data-modifying CTEs: the advisory lock
     CatalogRepository.upsertOwner takes (pg_advisory_xact_lock(hashtext('catalog_owners/' || tenant)); the CTE is REFERENCED by the
     INSERT's FROM, or PostgreSQL would never run it), the INSERT of the missing owners with the tumbler allocation upsertOwner
-    uses ('1.' || max(second segment) + 1, consecutive for several new owners), and the UPDATE of the driving table. All the
-    sub-statements share one snapshot, so the UPDATE cannot read the INSERT's rows through catalog_owners: it joins the INSERT's
-    RETURNING to the owners already visible. <driving_table> and <chunking_clause> appear once, in the UPDATE; the CTEs read the
-    tenant's catalog rows by name, so each chunk re-derives the tenant's repo stems and the INSERT is a no-op after the first. A
-    stem's rows may fall in different chunks (code__ sorts before docs__), which is why a repo stem is also one whose code__ row
-    is already on the repo owner. The tenant is current_setting('nexus.tenant'): the worker runs the move once per tenant.
+    uses ('1.' || max(second segment) + 1, consecutive for several new owners), the INSERT of the skip reports, and the UPDATE of
+    the driving table. All the sub-statements share one snapshot, so the UPDATE cannot read the INSERT's rows through
+    catalog_owners: it joins the INSERT's RETURNING to the owners already visible. <driving_table> and <chunking_clause> appear
+    once, in the UPDATE (dml_utils requires exactly once); the CTEs read the tenant's catalog rows by name, so each chunk re-derives
+    the tenant's repo stems, the owner INSERT is a no-op after the first, and the report INSERT adds only rows not yet reported.
+    A stem's rows may fall in different chunks (code__ sorts before docs__), which is why a stem whose owner already exists is a
+    repo. The tenant is current_setting('nexus.tenant'): the worker runs the move once per tenant.
 
     RESIDUAL. The statement's snapshot is taken before the lock is granted. A repo owner registered by another session in the
     window between the snapshot and the lock would make the INSERT compute an already-used tumbler; ON CONFLICT DO NOTHING drops
     that owner, the verification below then finds its rows and the move fails (a superseding move re-runs it). It needs a new repo
     registered in the same tenant during the release's first minutes.
 
-    VERIFICATION. No live row of a repo stem is still owned by a curator. It reads catalog_owners, which the table-wide run
-    (no tenant setting) sees empty, so that run passes trivially; the per-tenant runs, which carry the tenant, are the check.
+    VERIFICATION. No live row of a repo stem is still owned by a curator, except a skipped row whose report is written: a
+    curator-owned repo-stem row passes only when its destination tuple is held by another row AND its gc_audit report exists, so
+    a skip that was not reported (or a row that should have moved) blocks completion. It reads catalog_owners and gc_audit, which
+    the table-wide run (no tenant setting) sees empty, so that run passes trivially; the per-tenant runs, which carry the tenant,
+    are the check. Quarantine siblings are not part of the verification.
 
     Reads: the stem is parsed from the collection NAME (split_part on the double-underscore separator): the one name read of
     this move, a migration source (the legacy owner_id was derived from the name), not a runtime parse.
@@ -53,18 +81,23 @@ INSERT INTO nexus.data_moves (label, template, driving_schema, driving_table, ch
 VALUES ('rdr229-reown-repo-stems-from-curator',
         'WITH lck AS (
     SELECT pg_advisory_xact_lock(hashtext(''catalog_owners/'' || current_setting(''nexus.tenant'', true))) AS locked
-), cand AS (
-    SELECT DISTINCT split_part(c.name, ''__'', 2) AS stem
+), stemrows AS (
+    SELECT c.name, c.content_type, c.embedding_model, c.model_version, c.owner_id,
+           split_part(c.name, ''__'', 2) AS stem
       FROM nexus.catalog_collections c
      WHERE c.tenant_id = current_setting(''nexus.tenant'', true)
-       AND c.content_type = ''code'' AND c.lifecycle_state = ''live'' AND c.superseded_by = ''''
-       AND split_part(c.name, ''__'', 1) = ''code''
+       AND c.content_type IN (''code'', ''docs'', ''rdr'') AND c.lifecycle_state = ''live'' AND c.superseded_by = ''''
+       AND split_part(c.name, ''__'', 1) = c.content_type
        AND split_part(c.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
-       AND (nexus.catalog_owner_is_curator(c.tenant_id, c.owner_id)
-            OR EXISTS (SELECT 1 FROM nexus.catalog_owners r
-                        WHERE r.tenant_id = c.tenant_id AND r.owner_type = ''repo''
-                          AND r.tumbler_prefix = replace(c.owner_id, ''-'', ''.'')
-                          AND r.repo_hash = right(split_part(c.name, ''__'', 2), 8)))
+), cand AS (
+    SELECT DISTINCT r.stem
+      FROM stemrows r
+     WHERE EXISTS (SELECT 1 FROM nexus.catalog_owners o
+                    WHERE o.tenant_id = current_setting(''nexus.tenant'', true) AND o.owner_type = ''repo''
+                      AND o.repo_hash = right(r.stem, 8))
+        OR EXISTS (SELECT 1 FROM stemrows k
+                    WHERE k.stem = r.stem AND k.content_type = ''code''
+                      AND nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), k.owner_id))
 ), stems AS (
     SELECT stem, left(stem, length(stem) - 9) AS slug, right(stem, 8) AS hash8,
            row_number() OVER (PARTITION BY left(stem, length(stem) - 9) ORDER BY stem) AS nth
@@ -95,31 +128,72 @@ VALUES ('rdr229-reown-repo-stems-from-curator',
     SELECT i.tumbler_prefix, i.repo_hash FROM ins i
     UNION
     SELECT r.tumbler_prefix, r.repo_hash FROM nexus.catalog_owners r
-     WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.repo_hash IS NOT NULL AND r.repo_hash <> ''''
+     WHERE r.tenant_id = current_setting(''nexus.tenant'', true) AND r.owner_type = ''repo''
+       AND r.repo_hash IS NOT NULL AND r.repo_hash <> ''''
+), skipped AS (
+    SELECT r.name, r.owner_id, r.content_type, w.tumbler_prefix AS dest_prefix, min(h.name) AS occupant
+      FROM stemrows r
+      JOIN stems s ON s.stem = r.stem
+      JOIN repo_owner w ON w.repo_hash = s.hash8
+      JOIN nexus.catalog_collections h
+        ON h.tenant_id = current_setting(''nexus.tenant'', true)
+       AND h.owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
+       AND h.content_type = r.content_type AND h.embedding_model = r.embedding_model
+       AND h.model_version = r.model_version
+       AND h.lifecycle_state = ''live'' AND h.superseded_by = '''' AND h.name <> r.name
+     WHERE nexus.catalog_owner_is_curator(current_setting(''nexus.tenant'', true), r.owner_id)
+     GROUP BY r.name, r.owner_id, r.content_type, w.tumbler_prefix
+), reported AS (
+    INSERT INTO nexus.gc_audit (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    SELECT current_setting(''nexus.tenant'', true), ''rdr229_reown_skipped'', k.name,
+           ''data-move:rdr229-reown-repo-stems-from-curator'', false, 0, ''[]''::jsonb,
+           jsonb_build_object(''reason'', ''the destination tuple is held by another live collection'',
+                              ''owner_id'', k.owner_id, ''destination_owner_id'', replace(k.dest_prefix, ''.'', ''-''),
+                              ''content_type'', k.content_type, ''held_by'', k.occupant)
+      FROM skipped k
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.gc_audit g
+                        WHERE g.tenant_id = current_setting(''nexus.tenant'', true)
+                          AND g.operation = ''rdr229_reown_skipped'' AND g.collection = k.name)
+    RETURNING id
 )
 UPDATE <driving_table>
    SET owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
   FROM stems s JOIN repo_owner w ON w.repo_hash = s.hash8
  WHERE <chunking_clause>
    AND t.tenant_id = current_setting(''nexus.tenant'', true)
-   AND t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state = ''live'' AND t.superseded_by = ''''
-   AND split_part(t.name, ''__'', 1) = t.content_type AND split_part(t.name, ''__'', 2) = s.stem
-   AND t.owner_id IS DISTINCT FROM replace(w.tumbler_prefix, ''.'', ''-'')',
+   AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
+   AND t.owner_id IS DISTINCT FROM replace(w.tumbler_prefix, ''.'', ''-'')
+   AND ((t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state = ''live'' AND t.superseded_by = ''''
+         AND split_part(t.name, ''__'', 1) = t.content_type AND split_part(t.name, ''__'', 2) = s.stem
+         AND NOT EXISTS (SELECT 1 FROM skipped k WHERE k.name = t.name))
+     OR (t.lifecycle_state = ''quarantine''
+         AND EXISTS (SELECT 1 FROM stemrows o WHERE o.stem = s.stem AND t.name = ''quarantine-'' || o.name)
+         AND NOT EXISTS (SELECT 1 FROM skipped k WHERE t.name = ''quarantine-'' || k.name)))',
         'nexus', 'catalog_collections', 1000, 0, 60000,
         'SELECT 1 FROM nexus.catalog_collections t
  WHERE t.content_type IN (''code'', ''docs'', ''rdr'') AND t.lifecycle_state = ''live'' AND t.superseded_by = ''''
    AND split_part(t.name, ''__'', 1) = t.content_type
+   AND split_part(t.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
    AND nexus.catalog_owner_is_curator(t.tenant_id, t.owner_id)
-   AND EXISTS (SELECT 1 FROM nexus.catalog_collections k
-                WHERE k.tenant_id = t.tenant_id AND k.content_type = ''code'' AND k.lifecycle_state = ''live''
-                  AND k.superseded_by = '''' AND split_part(k.name, ''__'', 1) = ''code''
-                  AND split_part(k.name, ''__'', 2) = split_part(t.name, ''__'', 2)
-                  AND split_part(k.name, ''__'', 2) ~ ''^.+-[0-9a-f]{8}$''
-                  AND (nexus.catalog_owner_is_curator(k.tenant_id, k.owner_id)
-                       OR EXISTS (SELECT 1 FROM nexus.catalog_owners r
-                                   WHERE r.tenant_id = k.tenant_id AND r.owner_type = ''repo''
-                                     AND r.tumbler_prefix = replace(k.owner_id, ''-'', ''.'')
-                                     AND r.repo_hash = right(split_part(k.name, ''__'', 2), 8))))
+   AND (EXISTS (SELECT 1 FROM nexus.catalog_owners r
+                 WHERE r.tenant_id = t.tenant_id AND r.owner_type = ''repo''
+                   AND r.repo_hash = right(split_part(t.name, ''__'', 2), 8))
+        OR EXISTS (SELECT 1 FROM nexus.catalog_collections k
+                    WHERE k.tenant_id = t.tenant_id AND k.content_type = ''code'' AND k.lifecycle_state = ''live''
+                      AND k.superseded_by = '''' AND split_part(k.name, ''__'', 1) = ''code''
+                      AND split_part(k.name, ''__'', 2) = split_part(t.name, ''__'', 2)
+                      AND nexus.catalog_owner_is_curator(k.tenant_id, k.owner_id)))
+   AND NOT (EXISTS (SELECT 1 FROM nexus.catalog_owners w
+                      JOIN nexus.catalog_collections h
+                        ON h.tenant_id = w.tenant_id AND h.owner_id = replace(w.tumbler_prefix, ''.'', ''-'')
+                       AND h.content_type = t.content_type AND h.embedding_model = t.embedding_model
+                       AND h.model_version = t.model_version
+                       AND h.lifecycle_state = ''live'' AND h.superseded_by = '''' AND h.name <> t.name
+                     WHERE w.tenant_id = t.tenant_id AND w.owner_type = ''repo''
+                       AND w.repo_hash = right(split_part(t.name, ''__'', 2), 8))
+            AND EXISTS (SELECT 1 FROM nexus.gc_audit g
+                         WHERE g.tenant_id = t.tenant_id AND g.operation = ''rdr229_reown_skipped''
+                           AND g.collection = t.name))
    AND (t.tenant_id = $1 OR $1 IS NULL)',
         NULL, 'vectors-067-1');
         ]]></sql>
