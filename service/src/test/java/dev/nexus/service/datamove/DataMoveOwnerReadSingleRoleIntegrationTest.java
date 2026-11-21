@@ -159,11 +159,23 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
             new DataMoveWorker.Settings(Duration.ofMillis(50), Duration.ofMillis(10), null), "nexus-data-move-sr",
             Clock.systemUTC(), new MoveStates(Clock.systemUTC()), FailureHandler.BLOCK_ALWAYS, MoveFinisher.RUNS_ONLY, true);
         try {
-            assertThat(worker.runCycle()).isEqualTo(1);
-            var blocked = worker.states().state("sr-move").orElseThrow();
-            assertThat(blocked.kind()).isEqualTo(MoveStates.Kind.BLOCKED);
-            assertThat(blocked.reason()).as("the install gate, which comes first in a single-role boot, and no other cause")
-                .contains("the library install has not run");
+            assertThat(worker.runCycle()).as("this move and the first real one, which the walk registered").isEqualTo(2);
+            // nexus-f3yqd.2.23: the real move over catalog_collections is registered here too, its policy changeset
+            // (vectors-065) MARK_RAN by the same guard, and it is blocked the same way and writes nothing
+            for (String label : List.of("sr-move", "repair-catalog-collection-model-version")) {
+                var blocked = worker.states().state(label).orElseThrow();
+                assertThat(blocked.kind()).as(label).isEqualTo(MoveStates.Kind.BLOCKED);
+                assertThat(blocked.reason()).as("%s: the install gate, which comes first in a single-role boot, and no other cause", label)
+                    .contains("the library install has not run");
+            }
+            assertThat(execType("databasechangelog", "vectors-064-1")).as("the real registering changeset has no guard")
+                .isEqualTo("EXECUTED");
+            assertThat(execType("databasechangelog", "vectors-065-1")).as("the real policy changeset: the guard fired")
+                .isEqualTo("MARK_RAN");
+            assertThat(PgCatalogProbes.policyRoles(ctx(), "nexus", "catalog_collections").stream()
+                    .map(PgCatalogProbes.PolicyRoles::toString).toList())
+                .as("catalog_collections keeps only its tenant policy: nexus_svc gains no cross-tenant read")
+                .containsExactly("tenant_isolation roles={public} cmd=ALL");
             assertThat(ctx().fetchCount(DSL.table(DSL.name("dm_ownerread", "rows")),
                 DSL.field(DSL.name("n"), Integer.class).ne(0))).as("nothing moved").isZero();
         } finally {
@@ -179,7 +191,8 @@ class DataMoveOwnerReadSingleRoleIntegrationTest {
                 new AdminDdlSession.Settings("sr-scope", 0L, "test", "nexus", "data_moves", "none"), false)) {
             assertThat(DrivingTableIsolationCheck.registeredDrivingTables(session.ctx()))
                 .as("non-vacuity: the check asked about the move's table")
-                .isEqualTo(List.of(new DrivingTableIsolationCheck.Table("dm_ownerread", "rows")));
+                .containsExactlyInAnyOrder(new DrivingTableIsolationCheck.Table("dm_ownerread", "rows"),
+                    new DrivingTableIsolationCheck.Table("nexus", "catalog_collections"));   // and the first real move's
         }
     }
 }
