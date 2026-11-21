@@ -4,6 +4,7 @@ check and SessionStart policy that read it. Tenant-free: the machine is a ``Fake
 ``tests/identity/fake_engine.py`` (the engine-backed rows are in ``test_session_start_bind.py``)."""
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -231,3 +232,10 @@ def test_a_refused_seat_gives_its_ephemeral_the_session_name_never_the_alias(mon
     out = day.start(101, "startup", "sid-b", name="alpha", os_start=T1)
     assert out.action == "ephemeral"
     assert day.engine.ids_called("create_ephemeral")[-1][0] is None
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "win32"), reason="a Linux box may be a container with no usable machine-id")
+def test_the_real_probe_finds_a_key_on_this_machine() -> None:
+    """The one test that reads the real machine: macOS ``ioreg`` and the Windows registry value are always there."""
+    key = hostname.stable_host()
+    assert key is not None and key.startswith(hostname.KEY_PREFIX) and key == hostname.stable_host()
