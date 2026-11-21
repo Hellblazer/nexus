@@ -153,6 +153,8 @@ if [[ -n "$(detect_bad_exit "$WORKDIR/ctl1.sh")" && -n "$(detect_bad_exit "$WORK
 else
   bad "the skip-path detector is blind to one of its own controls"
 fi
+grep -qE '^export NX_ALLOW_PROD_WRITE' "$GATE" && bad "NX_ALLOW_PROD_WRITE is exported for the whole gate" \
+  || ok "NX_ALLOW_PROD_WRITE is given to the substrate pytest run only, never exported"
 last="$(code_lines "$GATE" | grep -v '^\s*$' | tail -1)"
 [[ "$last" == 'exit "$REPORT_RC"' ]] && ok "the last command is exit \"\$REPORT_RC\"" || bad "the last command is: $last"
 grep -q 'uv run python -I "\$REPO_ROOT/tests/e2e/lib/rdr229_p2r_report.py" report' "$GATE" \
@@ -160,8 +162,8 @@ grep -q 'uv run python -I "\$REPO_ROOT/tests/e2e/lib/rdr229_p2r_report.py" repor
 
 echo "== 5. the report"
 mkdir -p "$WORKDIR/rep"
-census_ok='{"client_live": {"holdover": 0}, "client_pin": {}, "client_pin_total": 0, "client_holdover_by_step": {}, "engine_pins": {}, "problems": []}'
-census_bad='{"client_live": {"holdover": 23}, "client_pin": {}, "client_pin_total": 240, "client_holdover_by_step": {"P2.2": 19, "P2.4": 4}, "engine_pins": {}, "problems": [{"what": "client holdover class is 23, Phase 2 leaves 0", "waits_on": "P2.2 (nexus-p2m1x.7), P2.4 (nexus-p2m1x.9)"}]}'
+census_ok='{"client_live": {"holdover": 0}, "client_pin": {}, "client_pin_total": 0, "client_holdover_by_step": {}, "engine_pins": {"QUARANTINE_LITERAL_TOTAL_CEILING": 0, "COLLECTION_SPLIT_TOTAL_CEILING": 0, "COLLECTION_LITERAL_TOTAL_CEILING": 4, "QUARANTINE_READ_TOTAL_CEILING": 36}, "problems": []}'
+census_bad='{"client_live": {"holdover": 23}, "client_pin": {}, "client_pin_total": 240, "client_holdover_by_step": {"P2.2": 19, "P2.4": 4}, "engine_pins": {"QUARANTINE_LITERAL_TOTAL_CEILING": 0, "COLLECTION_SPLIT_TOTAL_CEILING": 0, "COLLECTION_LITERAL_TOTAL_CEILING": 4, "QUARANTINE_READ_TOTAL_CEILING": 36}, "problems": [{"what": "client holdover class is 23, Phase 2 leaves 0", "waits_on": "P2.2 (nexus-p2m1x.7), P2.4 (nexus-p2m1x.9)"}]}'
 mk_results() {  # <file> <status of 3> [status of 6]; the other checks pass
   "$PY" - "$1" "$2" "${3:-PASS}" <<'PYEOF'
 import json, sys
@@ -193,9 +195,19 @@ rc="$(report "$WORKDIR/rep/six-error.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 
 rc="$(report "$WORKDIR/rep/short.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
 [[ "$rc" == 1 ]] && grep -q "check 3  NOT RUN" "$WORKDIR/rep/out" && ok "a check that never ran: exit 1" || bad "missing check gave rc=$rc"
 rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-ok.json" 0 0 0 3)"
-[[ "$rc" == 1 ]] && ok "a client census gate that ran no test: exit 1" || bad "client n=0 gave rc=$rc"
+[[ "$rc" == 2 ]] && grep -q "GATE ERROR" "$WORKDIR/rep/out" && ok "a client census gate with no test count (an infrastructure fault): exit 2, not a FAIL" \
+  || bad "client n=0 gave rc=$rc"
 rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 1 0)"
-[[ "$rc" == 1 ]] && ok "an engine census gate that failed and ran no test: exit 1" || bad "engine n=0 gave rc=$rc"
+[[ "$rc" == 2 ]] && ok "an engine census gate that failed with no test count (compile error, no report): exit 2" \
+  || bad "engine n=0 gave rc=$rc"
+rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 1 22)"
+[[ "$rc" == 1 ]] && ok "an engine census gate that ran tests and is red: exit 1, a FAIL" || bad "engine red gave rc=$rc"
+rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3)"
+labelled="$(grep -c "pre-satisfied guard" "$WORKDIR/rep/out")"
+[[ "$labelled" == 2 ]] && ok "checks 2 and 4 are labelled pre-satisfied guards, and no other check is" \
+  || bad "the pre-satisfied labels are wrong: $labelled"
+"$PY" "$REPORT" report "$WORKDIR/rep/does-not-exist.jsonl" "$WORKDIR/rep/census-ok.json" 0 7 0 3 > /dev/null 2>&1
+[[ "$?" == 2 ]] && ok "an uncaught exception in the report exits 2" || bad "the report's crash did not exit 2"
 rc="$(report "$WORKDIR/rep/all-pass.jsonl" "$WORKDIR/rep/census-bad.json" 0 7 0 3)"
 [[ "$rc" == 1 ]] && grep -q "P2.2" "$WORKDIR/rep/out" && grep -q "P2.4" "$WORKDIR/rep/out" \
   && ok "a census problem: exit 1, naming P2.2 and P2.4" || bad "census problem gave rc=$rc"

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # This gate self-provisions a THROWAWAY PG + service (the pytest engine substrate: a hermetic PG and the stamped
-# service jar of THIS checkout, a minted tenant per run) and writes only there. The nexus-a2qhz production-write
-# guard needs the reason-bearing opt-in for a dev checkout's subprocess writes. Never production.
-export NX_ALLOW_PROD_WRITE="rdr229-p2r-mvv: self-provisioned throwaway engine substrate, minted tenant, scratch config (nexus-a2qhz)"
+# service jar of THIS checkout, a minted tenant per run) and writes only there, with a scratch NEXUS_CONFIG_DIR.
+# The nexus-a2qhz production-write guard needs a reason-bearing opt-in for a dev checkout's subprocess writes; it is
+# given to the substrate pytest run alone (NX_ALLOW_PROD_WRITE below, on that one command). Never production.
 # RDR-229 P2.R (nexus-p2m1x.16): the Minimum Viable Validation, Phase 2 half, as a self-provisioning gate.
 #
 # The RDR's text: "On a substrate-backed engine (the local-service gate), a fixture tenant with one collection whose
@@ -22,7 +22,9 @@ export NX_ALLOW_PROD_WRITE="rdr229-p2r-mvv: self-provisioned throwaway engine su
 #      boot_work, never a sleep; it needs pg_background in the substrate PG, and its absence is a gate error), and
 #      the backfill verb re-derives moved and repaired residue to file://
 # Checks 1-4 and 6 are tests/e2e/rdr229_p2r_mvv_checks.py on the engine substrate; check 5 and the report are
-# tests/e2e/lib/rdr229_p2r_report.py plus the two gate tests. The final summary lists each FAIL with the Phase 2
+# tests/e2e/lib/rdr229_p2r_report.py plus the two gate tests. Checks 2 and 4 are PRE-SATISFIED GUARDS: they held
+# before Phase 2 (the row-preferred model resolver, nexus-ml9vu; P2.1's non-stranding tests) and guard against a
+# regression, so a PASS there proves no Phase 2 work. The final summary lists each FAIL with the Phase 2
 # step it waits on. A FAIL is the finding: no check is weakened to be green, and the exit is 1 for any FAIL. A check that records ERROR
 # (its own fixture or a dependency, such as pg_background, is wrong) exits 2: that says nothing about the code.
 #
@@ -80,7 +82,8 @@ JUNIT="$SCRATCH/mvv-junit.xml"
 : > "$RESULTS"
 echo "[p2r-mvv] checks 1-4 and 6 on the engine substrate"
 set +e
-P2R_RESULTS="$RESULTS" uv run pytest tests/e2e/rdr229_p2r_mvv_checks.py -p no:cacheprovider -q -rs --color=no \
+NX_ALLOW_PROD_WRITE="rdr229-p2r-mvv: self-provisioned throwaway engine substrate, minted tenant, scratch config (nexus-a2qhz)" \
+  P2R_RESULTS="$RESULTS" uv run pytest tests/e2e/rdr229_p2r_mvv_checks.py -p no:cacheprovider -q -rs --color=no \
   --junitxml="$JUNIT" 2>&1 | tee "$SCRATCH/mvv-pytest.out"
 PYTEST_RC=${PIPESTATUS[0]}
 set -e
@@ -134,8 +137,8 @@ try:
 except Exception:  # noqa: BLE001
     print(0); sys.exit(0)
 suite = root if root.tag == "testsuite" else root.find("testsuite")
-bad = sum(int(suite.get(k, 0)) for k in ("failures", "errors", "skipped"))
-print(0 if bad else int(suite.get("tests", 0)))
+# failures keep the count (rc says the gate is red); a skip or an error means the gate did not really run: 0
+print(0 if int(suite.get("skipped", 0)) or int(suite.get("errors", 0)) else int(suite.get("tests", 0)))
 PY
 }
 CLIENT_N="$(gate_count "$SCRATCH/client-census-junit.xml")"

@@ -32,13 +32,17 @@ ENGINE_GATE = REPO / "service/src/test/java/dev/nexus/service/vectors/Collection
 #: What each check waits on when it is red: the Phase 2 step (RDR-229 Approach, Phase 2) and its bead.
 WAITS = {
     1: "P2.3 write paths take the chunk model from the row (nexus-p2m1x.8)",
-    2: "P2.2 resolve_collection read path (nexus-p2m1x.7) and P2.4 thresholds from the row (nexus-p2m1x.9)",
+    2: "no Phase 2 step: a pre-satisfied guard, red only if the row-preferred model resolver regressed "
+       "(nexus-ml9vu, 7476beecce)",
     3: "P2.5 lifecycle from the row at registration and in the guards (nexus-p2m1x.10), "
        "P2.6 the SQL movers read columns (nexus-p2m1x.11)",
-    4: "P2.1 non-stranding (nexus-p2m1x.6) and P2.2 legacy_names classifies the migration sources (nexus-p2m1x.7)",
+    4: "no Phase 2 step: a pre-satisfied guard, red only if the P2.1 non-stranding behaviour regressed "
+       "(nexus-p2m1x.6)",
     6: "P2.10 URI moves leave chroma:// residue alone, the registered repair moves, the relaxed backfill verb "
        "(nexus-p2m1x.15)",
 }
+#: Checks that held before Phase 2 began: they guard against a regression and prove no Phase 2 work.
+PRE_SATISFIED = frozenset({2, 4})
 STEP_BEAD = {"P2.2": "nexus-p2m1x.7", "P2.4": "nexus-p2m1x.9", "P2.9": "nexus-p2m1x.14", "P2.5": "nexus-p2m1x.10",
              "P2.6": "nexus-p2m1x.11", "P2.10": "nexus-p2m1x.15"}
 
@@ -57,6 +61,7 @@ def _engine_pins() -> dict[str, int]:
 
 def census() -> None:
     sys.path.insert(0, str(REPO))  # the gate runs this isolated (-I): the repo root is not on the path
+    from tests import _collection_name_census_scan as scan  # noqa: PLC0415 -- after the sys.path line above
     from tests.test_collection_name_parse_census import (  # noqa: PLC0415 -- after the sys.path line above: the gate runs isolated (-I)
         CLASS_PIN,
         LEDGER,
@@ -77,6 +82,11 @@ def census() -> None:
         if not ok:
             problems.append({"what": what, "waits_on": waits})
 
+    # Non-vacuity of the two class names this check reads: a class renamed in the census would read as an empty one.
+    need({"holdover", "routing"} <= set(scan.CLASSES) and sum(live.values()) > 0
+         and set(live) <= set(scan.CLASSES),
+         f"the census vocabulary {sorted(scan.CLASSES)} lacks 'holdover' or 'routing', or the ledger holds a class "
+         "outside it: a renamed class would read as an empty one", "whoever renamed the class")
     need(live["holdover"] == 0, f"client holdover class is {live['holdover']}, Phase 2 leaves 0 "
          f"(by step: {dict(holdover_by_step)})",
          ", ".join(f"{s} ({STEP_BEAD.get(s, '?')})" for s in sorted(holdover_by_step)) or "P2.2, P2.4")
@@ -126,7 +136,8 @@ def report(results: Path, census_json: Path, client_gate_rc: int, client_gate_n:
             ok_all = False
             return
         ev = rec["evidence"]
-        out.append(f"check {n}  {rec['status']}  {rec['name']}  [examined={ev.get('examined', 0)}]")
+        label = "  [pre-satisfied guard: held before Phase 2]" if n in PRE_SATISFIED else ""
+        out.append(f"check {n}  {rec['status']}  {rec['name']}{label}  [examined={ev.get('examined', 0)}]")
         brief = {k: v for k, v in ev.items() if k not in ("cli_tail",)}
         out.append("          evidence: " + json.dumps(brief, sort_keys=True, default=str)[:900])
         if rec["status"] == "ERROR":
@@ -141,19 +152,34 @@ def report(results: Path, census_json: Path, client_gate_rc: int, client_gate_n:
     for n in (1, 2, 3, 4):
         show(n)
     # check 5
-    gate_ok = client_gate_rc == 0 and engine_gate_rc == 0 and client_gate_n > 0 and engine_gate_n > 0
+    # A census gate that produced no test count is an infrastructure fault (a compile error, no surefire report, a
+    # failed uv), never a FAIL of the pins: exit 2. A gate that ran tests and went red is a FAIL.
+    infra = [name for name, n in (("client", client_gate_n), ("engine", engine_gate_n)) if n <= 0]
+    if infra:
+        gate_error = True
+        ok_all = False
+        out.append(f"check 5  ERROR  the {' and '.join(infra)} census gate produced no test count "
+                   f"(client rc={client_gate_rc} n={client_gate_n}; engine rc={engine_gate_rc} n={engine_gate_n}): "
+                   "GATE ERROR, not a finding about the pins")
+    gate_ok = client_gate_rc == 0 and engine_gate_rc == 0 and not infra
     census_ok = not cen["problems"]
     status5 = "PASS" if gate_ok and census_ok else "FAIL"
-    out.append(f"check 5  {status5}  both census gates are at their Phase 2 pins  "
-               f"[client gate tests={client_gate_n} rc={client_gate_rc}; engine gate tests={engine_gate_n} rc={engine_gate_rc}]")
+    if not infra:
+        out.append(f"check 5  {status5}  both census gates are at their Phase 2 pins  [client gate tests={client_gate_n} "
+                   f"rc={client_gate_rc}; engine gate tests={engine_gate_n} rc={engine_gate_rc}]")
     out.append("          client ledger " + json.dumps(cen["client_live"], sort_keys=True)
                + f" of {cen['client_pin_total']}; holdover by step " + json.dumps(cen["client_holdover_by_step"], sort_keys=True))
-    out.append("          engine ceilings " + json.dumps(cen["engine_pins"], sort_keys=True))
-    if not gate_ok:
+    eng = cen["engine_pins"]
+    p2 = {k: eng[k] for k in ("QUARANTINE_LITERAL_TOTAL_CEILING", "COLLECTION_SPLIT_TOTAL_CEILING")}
+    info = {k: v for k, v in eng.items() if k not in p2}
+    out.append("          engine Phase 2 pins (both 0 by the lead's ruling) " + json.dumps(p2, sort_keys=True))
+    out.append("          engine ceilings OUTSIDE the Phase 2 pins, printed for the record, not asserted "
+               + json.dumps(info, sort_keys=True))
+    if not gate_ok and not infra:
         ok_all = False
-        failures.append(("check 5 (a gate is red or ran nothing)",
+        failures.append(("check 5 (a gate ran and is red)",
                          "the gate's own pin drifted from its tree: fix the pin or the tree"))
-        out.append(f"          a gate did not run green over at least one test: client rc={client_gate_rc} n={client_gate_n}, "
+        out.append(f"          a gate ran and is red: client rc={client_gate_rc} n={client_gate_n}, "
                    f"engine rc={engine_gate_rc} n={engine_gate_n}")
     for p in cen["problems"]:
         ok_all = False
@@ -170,11 +196,23 @@ def report(results: Path, census_json: Path, client_gate_rc: int, client_gate_n:
     return 2 if gate_error else (0 if ok_all else 1)
 
 
-if __name__ == "__main__":
-    if len(sys.argv) >= 2 and sys.argv[1] == "census":
+def _main(argv: list[str]) -> int:
+    if len(argv) >= 2 and argv[1] == "census":
         census()
-    elif len(sys.argv) == 8 and sys.argv[1] == "report":
-        sys.exit(report(Path(sys.argv[2]), Path(sys.argv[3]), *(int(a) for a in sys.argv[4:8])))
-    else:
-        raise SystemExit("usage: rdr229_p2r_report.py census | report RESULTS CENSUS_JSON "
-                         "CLIENT_RC CLIENT_N ENGINE_RC ENGINE_N")
+        return 0
+    if len(argv) == 8 and argv[1] == "report":
+        return report(Path(argv[2]), Path(argv[3]), *(int(a) for a in argv[4:8]))
+    sys.stderr.write("usage: rdr229_p2r_report.py census | report RESULTS CENSUS_JSON "
+                     "CLIENT_RC CLIENT_N ENGINE_RC ENGINE_N\n")
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        code = _main(sys.argv)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- the gate's own tooling failed: exit 2, never read as a finding
+        sys.stderr.write(f"rdr229_p2r_report.py: GATE ERROR: {type(exc).__name__}: {exc}\n")
+        code = 2
+    sys.exit(code)
