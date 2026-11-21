@@ -29,7 +29,6 @@ class CollectionMintRestoreTest {
     private static final String BGE = "bge-base-en-v15-768";
     private static final String MINILM = "minilm-l6-v2-384";
     private static final String VOYAGE = "voyage-context-3";
-    private static final String INDEX = "catalog_collections_live_tuple_uq";
 
     private ImportTestEnv env;
 
@@ -46,7 +45,10 @@ class CollectionMintRestoreTest {
     @BeforeEach
     void freshSessionsAndNoIndex() {
         env.freshSessions();
-        env.su(ctx -> ctx.execute("DROP INDEX IF EXISTS nexus." + INDEX));
+        env.su(ctx -> {
+            CollectionMintSupport.dropIndex(ctx);
+            return null;
+        });
     }
 
     /**
@@ -94,22 +96,27 @@ class CollectionMintRestoreTest {
         String dst = "t-mint-restore-twin-dst";
         String srcToken = env.newTenant(src);
         seedCollections(src);
-        env.su(ctx -> {
-            // the second live row of one tuple, as an install that predates the index can hold (D4's accepted duplicate)
-            ctx.execute("INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, embedding_model, "
-                + "model_version, lifecycle_state) SELECT tenant_id, 'twin-of-bge-p38', content_type, owner_id, embedding_model, "
-                + "model_version, lifecycle_state FROM nexus.catalog_collections WHERE tenant_id = '" + src
-                + "' AND embedding_model = '" + BGE + "' AND lifecycle_state = 'live' AND name <> 'twin-of-bge-p38' LIMIT 1");
-            return null;
-        });
-        String original = env.su(ctx -> ctx.resultQuery("SELECT name FROM nexus.catalog_collections WHERE tenant_id = '" + src
-            + "' AND embedding_model = '" + BGE + "' AND name <> 'twin-of-bge-p38' ORDER BY name LIMIT 1").fetchOne(0, String.class));
+        // the second live row of one tuple, as an install that predates the index can hold (D4's accepted duplicate)
+        env.su(ctx -> ctx.insertInto(CATALOG_COLLECTIONS, CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME,
+                CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .select(ctx.select(CATALOG_COLLECTIONS.TENANT_ID, DSL.inline("twin-of-bge-p38"), CATALOG_COLLECTIONS.CONTENT_TYPE,
+                    CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
+                    CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                .from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(BGE)).limit(1))
+            .execute());
+        String original = env.su(ctx -> ctx.select(CATALOG_COLLECTIONS.NAME).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.EMBEDDING_MODEL.eq(BGE))
+            .and(CATALOG_COLLECTIONS.NAME.ne("twin-of-bge-p38")).orderBy(CATALOG_COLLECTIONS.NAME).limit(1)
+            .fetchOne(CATALOG_COLLECTIONS.NAME));
         var file = env.export(srcToken);
         // the duplicate leaves the source, then the index can be built (a duplicate anywhere refuses its build)
-        env.su(ctx -> ctx.execute("DELETE FROM nexus.catalog_collections WHERE tenant_id = '" + src + "' AND name = 'twin-of-bge-p38'"));
-        env.su(ctx -> ctx.execute("CREATE UNIQUE INDEX " + INDEX + " ON nexus.catalog_collections "
-            + "(tenant_id, content_type, owner_id, embedding_model, model_version) "
-            + "WHERE superseded_by = '' AND lifecycle_state <> 'quarantine'"));
+        env.su(ctx -> {
+            CollectionMintSupport.deleteRow(ctx, src, "twin-of-bge-p38");
+            CollectionMintSupport.createIndex(ctx);
+            return null;
+        });
         String dstToken = env.newTenant(dst);
 
         JsonNode end = env.restore(dstToken, file);
