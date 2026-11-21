@@ -327,3 +327,31 @@ def test_the_cli_delete_reports_the_refusal_as_one_line_never_a_traceback(monkey
     out = CliRunner().invoke(memory, ["delete", "--project", "identity/i5", "--title", "plan", "--yes"])
     assert out.exit_code == 1 and "ephemeral" in out.output and "Traceback" not in out.output, out.output
     assert wire.posts == []
+
+
+def test_write_refusal_answers_what_check_write_raises_and_logs_no_refusal(monkeypatch, holds) -> None:
+    """gh#1680: ``nx brief me`` asks whether a write would be refused without trying one. ``write_refusal`` is the one
+    predicate ``check_write`` raises from, and it leaves no ``identity_notes_write_refused`` line for a write nobody made."""
+    events: list[str] = []
+
+    class Recorder:
+        def warning(self, event: str, **kw: Any) -> None:
+            events.append(event)
+
+    monkeypatch.setattr(notes, "_log", Recorder())
+    holds("i5")
+    engine(monkeypatch, {"id": "i5", "kind": "ephemeral"})
+    refusal = notes.write_refusal("identity/i5")
+    assert refusal is not None and refusal[0] == "i5" and "keeps no identity notes" in refusal[1]
+    assert events == [], "the predicate logs no refusal"
+    with pytest.raises(IdentityNotesRefused) as exc:
+        notes.check_write("identity/i5")
+    assert str(exc.value) == refusal[1]
+    assert events == ["identity_notes_write_refused"], "check_write logs the refusal it raises"
+
+
+def test_write_refusal_is_none_for_a_seat_and_for_a_project_that_is_not_identity_notes(monkeypatch, holds) -> None:
+    holds("i5")
+    engine(monkeypatch, {"id": "i5", "kind": "seat"})
+    assert notes.write_refusal("identity/i5") is None
+    assert notes.write_refusal("some-project") is None
