@@ -63,7 +63,7 @@ from pathlib import Path
 
 import pytest
 
-from nexus.corpus import is_conformant_collection_name
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 from nexus.db.t3 import T3Database
 from nexus.indexer import _legacy_collection_name
 from nexus.registry import RepoRegistry

@@ -11,7 +11,7 @@ now derives every function that holds a name-decomposing site, or calls
 ``parse_conformant_collection_name``, and counts each call to one. These are the
 21 sites that derivation found on develop 118701321: 8 the review named (5
 ``resolve_corpus`` callers, 3 ``CollectionName.parse`` callers), 12 more by the
-same rule (the callers of ``collection_attributes``, ``_under``,
+same rule (the callers of ``shape_of``, ``_under``,
 ``target_collection_for``, ``_backfill_papers`` / ``_backfill_knowledge``, and the
 one-off census's ``_parse``), and the one-off census's ``_QUARANTINE_RE``.
 """
@@ -33,7 +33,7 @@ RC_LITERAL: str = (
 CN_FALLBACK: str = (
     "P1.4 A's temporary empty-model_version fallback in version_from_for_tuple_row: parses the returned name through "
     "CollectionName.parse because an empty-version row carries no version. The fallback comes out once the P1.2 "
-    "census reads zero empty-version rows; owner P2.2 (legacy_names carries the legacy rows), then P4.3 deletes the parser."
+    "census reads zero empty-version rows; owner P2.2 (legacy_names carries the legacy rows); the fallback is removed once D2's cloud run completes (no bead owns it)."
 )
 CN_CANDIDATE: str = (
     "CollectionName.parse is the one sanctioned parse of a candidate name the write verbs receive; the collection may "
@@ -44,7 +44,7 @@ CN_DIAG: str = (
     "legacy name: a diagnostic of the name (RDR-204 (d)), the same rule as its fallback on the next line."
 )
 CA_DIAG: str = (
-    "Calls collection_attributes, whose name decode is a diagnostic holdout (nexus-ft04v.21): it reads the row first and "
+    "Calls shape_of, whose name decode is a diagnostic holdout (nexus-ft04v.21): it reads the row first and "
     "decodes the name only when the row has no content_type or owner."
 )
 UNDER: str = (
@@ -62,11 +62,8 @@ BACKFILL_TITLE: str = (
 
 SITES: tuple[S, ...] = (
     S('src/nexus/catalog/chunk_quarantine.py',
-      ('# new raw parse sites; tests/test_collection_name_parse_census.py).', 'return collection_attributes({"name": name}).quarantine'),
+      ('# new raw parse sites; tests/test_collection_name_parse_census.py).', 'return shape_of({"name": name}).quarantine'),
       'primitive_call', 'diagnostic', CA_DIAG),
-    S('src/nexus/catalog/collection_name.py',
-      ('try:', 'version = CollectionName.parse(name).model_version  # type: ignore[arg-type]'),
-      'primitive_call', 'migration-source', CN_FALLBACK),
     S('src/nexus/catalog/rdr229/collection_row_census.py',
       ('#: ``quarantine-<origin name>``: the shape ``chunk_quarantine.quarantine_collection_name`` renders.', '_QUARANTINE_RE = re.compile(r"^quarantine-(?P<origin>.+)$", re.DOTALL)'),
       'regex_prefix', 'diagnostic', DIAG_P12),
@@ -86,10 +83,10 @@ SITES: tuple[S, ...] = (
       ('try:', 'token = CollectionName.parse(collection).embedding_model'),
       'primitive_call', 'diagnostic', CN_DIAG),
     S('src/nexus/collection_shape.py',
-      ('name=name,', 'attrs=collection_attributes(row),'),
+      ('name=name,', 'attrs=shape_of(row),'),
       'primitive_call', 'diagnostic', CA_DIAG),
     S('src/nexus/collection_shape.py',
-      ('without adding a second parse site. Never a routing decision."""', 'return collection_attributes({"name": name}).owner_id'),
+      ('without adding a second parse site. Never a routing decision."""', 'return shape_of({"name": name}).owner_id'),
       'primitive_call', 'diagnostic', CA_DIAG),
     S('src/nexus/commands/catalog.py',
       ('click.echo("Pass 2: Paper collections (docs__*)...")', 'paper_count = _backfill_papers(cat, t3, dry_run, repo_collections=repo_collections, writer=writer)'),

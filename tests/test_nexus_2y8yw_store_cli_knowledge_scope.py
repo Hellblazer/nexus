@@ -38,7 +38,7 @@ def scope(monkeypatch):
     monkeypatch.setattr(t3, "list_collections", lambda *a, **k: [dict(r) for r in rows])
     monkeypatch.setattr(
         "nexus.mcp_infra.get_collection_row",
-        lambda name: {"content_type": name.split("__", 1)[0], "lifecycle_state": "live"},
+        lambda name, *, refresh=True, strict=False: {"content_type": name.split("__", 1)[0], "lifecycle_state": "live"},
     )
     monkeypatch.setattr(store_cmd, "_t3", lambda **_: t3)
     monkeypatch.setattr(store_cmd, "_split_note_text", lambda *a, **k: None)  # no catalog: an unsplit note

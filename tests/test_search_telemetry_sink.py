@@ -282,7 +282,7 @@ def mcp_wired(monkeypatch):
     monkeypatch.setattr(core, "_get_catalog", lambda **_kw: None)
     monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
     monkeypatch.setattr(core, "_resolve_corpus_target", lambda corpus, _t3, **_kw: [_COLLECTION])
-    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name: None)
+    monkeypatch.setattr("nexus.mcp_infra.get_collection_row", lambda name, *, refresh=True, strict=False: None)
     monkeypatch.setattr("nexus.config.load_config", lambda **_kw: cfg)
     monkeypatch.setattr("nexus.search_engine.load_config", lambda **_kw: cfg)
     mcp_infra.reset_search_telemetry_sink()

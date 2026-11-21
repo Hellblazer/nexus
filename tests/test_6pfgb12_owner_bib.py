@@ -219,7 +219,7 @@ def _wire_query(monkeypatch, cat: _Catalog, hits: list[SearchResult]) -> None:
     monkeypatch.setattr(core, "_search_taxonomy", lambda: None)
     monkeypatch.setattr(
         mi, "get_collection_row",
-        lambda name: {"content_type": "knowledge", "owner_id": "papers", "embedding_model": "x", "lifecycle_state": "live"},
+        lambda name, *, refresh=True, strict=False: {"content_type": "knowledge", "owner_id": "papers", "embedding_model": "x", "lifecycle_state": "live"},
     )
 
     def fake_cross_corpus(*_a, catalog=None, **_kw):

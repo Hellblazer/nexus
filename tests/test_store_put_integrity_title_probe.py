@@ -55,6 +55,10 @@ class _T3ByTitle:
         self.chash_lookups.append(doc_id)
         return None
 
+    def list_collections(self, *args, **kwargs):
+        """The row read (resolve_collection) lists the registry; this store has no collections."""
+        return []
+
     def find_ids_by_title(self, collection, title):
         self.title_lookups.append(title)
         if title in self._raise:

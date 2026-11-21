@@ -14,10 +14,8 @@ from __future__ import annotations
 import pytest
 
 from nexus.catalog.collection_name import CollectionName
-from nexus.corpus import (
-    CANONICAL_EMBEDDING_MODELS,
-    is_conformant_collection_name,
-)
+from nexus.corpus import CANONICAL_EMBEDDING_MODELS
+from nexus.catalog.rows.legacy_names import is_conformant_collection_name
 
 
 # ── Constant: CANONICAL_EMBEDDING_MODELS ────────────────────────────────────

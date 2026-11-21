@@ -102,8 +102,8 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/nexus/corpus.py",
         (
-            "if is_conformant_collection_name(name):",
-            "segments = parse_conformant_collection_name(name)",
+            "if _legacy.is_conformant_collection_name(name):",
+            "segments = _legacy.parse_conformant_collection_name(name)",
         ),
     ): (
         "collection_type_and_owner (split out of collection_registration_kwargs "
@@ -116,20 +116,6 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
         "model_version explicitly (registration) or read via the funnel "
         "helpers (diagnostics), so this fallback path never fires for them; "
         "out of nexus-ft04v.27's scope."
-    ),
-    (
-        "src/nexus/catalog/collection_name.py",
-        ('"""', "parsed = parse_conformant_collection_name(name)"),
-    ): (
-        "CollectionName.parse: the render path's own parse counterpart. "
-        "Its callers are three: version_from_for_tuple_row's temporary "
-        "fallback for a row with an empty model_version (RDR-229 P1.4, "
-        "nexus-p2m1x.4; http_catalog_client.py's collection_for reads the "
-        "row, no longer the name), sensitivity_doctor._external_embedder and "
-        "sensitive_write._parse_collection. None is checked here (this test "
-        "counts calls to parse_conformant_collection_name); the collection-"
-        "name parse census ledgers each (RDR-229 P1.R, nexus-p2m1x.5). "
-        "Unaffected by nexus-ft04v.27."
     ),
     (
         "src/nexus/commands/collection.py",

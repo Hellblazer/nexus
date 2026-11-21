@@ -59,6 +59,11 @@ def _make_stub_t3():
             # Mirrors T3Database.put: chunk_text_hash[:32] (RDR-108 D1).
             return hashlib.sha256(content.encode()).hexdigest()[:32]
 
+        def list_collections(self, *args, **kwargs):
+            # The note write reads the collection's registry row through the shared listing; this
+            # stub has none (a missing method is a bug in the reader's caller and raises).
+            return []
+
     return lambda: _StubT3()
 
 

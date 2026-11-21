@@ -877,7 +877,8 @@ class TestCollectionMetadata:
         the "__" delimiters), never from a real embedder call."""
         name = "code__nexus-1-1__model-code__v1"
         monkeypatch.setattr(HttpVectorClient, "count", lambda self, c: 42)
-        meta = HttpVectorClient().collection_metadata(name)
+        # No catalog row backs the name (RDR-229 P2.2: the row is read first): the name's own token answers.
+        meta = HttpVectorClient(_row_resolver=lambda n: None).collection_metadata(name)
         assert meta == {
             "name": name,
             "count": 42,

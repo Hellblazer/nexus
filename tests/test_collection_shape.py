@@ -35,7 +35,7 @@ from nexus.collection_shape import (
     THIN_CHUNK_FLOOR,
     AuditReport,
     CollectionFacts,
-    collection_attributes,
+    shape_of,
     gather_facts,
     run_checks,
 )
@@ -89,27 +89,27 @@ def _checks(findings, check: str) -> list:
 
 class TestCollectionAttributes:
     def test_row_columns_win_when_present(self) -> None:
-        a = collection_attributes(_filled("knowledge__vector-search__voyage-context-3__v1"))
+        a = shape_of(_filled("knowledge__vector-search__voyage-context-3__v1"))
         assert (a.content_type, a.owner_id, a.embedding_model, a.model_version) == (
             "knowledge", "vector-search", "voyage-context-3", "v1")
         assert a.source == "row"
 
     def test_blank_row_falls_back_to_the_name_and_says_so(self) -> None:
-        a = collection_attributes(_row("code__1-2__voyage-code-3__v1"))
+        a = shape_of(_row("code__1-2__voyage-code-3__v1"))
         assert (a.content_type, a.owner_id, a.embedding_model) == ("code", "1-2", "voyage-code-3")
         assert a.source == "name"
 
     def test_two_segment_legacy_name(self) -> None:
-        a = collection_attributes(_row("code__myrepo-a1b2c3"))
+        a = shape_of(_row("code__myrepo-a1b2c3"))
         assert (a.content_type, a.owner_id) == ("code", "myrepo-a1b2c3")
         assert a.embedding_model == "" and a.source == "name"
 
     def test_quarantine_prefix_is_a_lifecycle_state_not_a_content_type(self) -> None:
-        a = collection_attributes(_row("quarantine-code__1-1__voyage-code-3__v1"))
+        a = shape_of(_row("quarantine-code__1-1__voyage-code-3__v1"))
         assert a.content_type == "code" and a.quarantine is True
 
     def test_unparseable_name_is_unknown_not_a_crash(self) -> None:
-        a = collection_attributes(_row("weird"))
+        a = shape_of(_row("weird"))
         assert a.source == "unknown" and a.content_type == ""
 
 
@@ -354,7 +354,7 @@ class TestRule6Lifecycle:
         name = "quarantine-code__1-1__voyage-code-3__v1"
         row = _row(name, content_type="code", owner_id="1-1", embedding_model="voyage-code-3",
                    model_version="v1", lifecycle_state="quarantine")
-        assert collection_attributes(row).quarantine is True
+        assert shape_of(row).quarantine is True
         live = _filled("code__1-1__voyage-code-3__v1")
         report = AuditReport.build(
             _facts([row, live], [_stats(name, 2), _stats(live["name"], 500)], {live["name"]: 50}),
