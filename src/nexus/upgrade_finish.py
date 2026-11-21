@@ -2322,7 +2322,7 @@ def converge_engine(
         from nexus.daemon.pg_bundle_refresh import refresh_when_pg_background_is_missing  # noqa: PLC0415 — deferred, CLI startup cost
 
         bundle_actions = refresh_when_pg_background_is_missing(
-            _bundle_tag, config_dir, dry_run=dry_run, acquire=acquire,
+            _bundle_tag, config_dir, dry_run=dry_run, acquire=acquire, unattended=unattended,
         )
         # nexus-4yf4u: the DISK is right — is the PROCESS? A correct on-disk
         # binary with a stale live service needs a RESTART, not a reinstall,
@@ -2551,8 +2551,7 @@ def converge_engine(
             "invocation; not retrying)"
         ]
 
-    from nexus.daemon.pg_bundle_refresh import refresh_for_convergence  # noqa: PLC0415 — deferred, CLI startup cost
-    from nexus.daemon.replace_quiesce import SharedQuiesce  # noqa: PLC0415 — deferred, CLI startup cost
+    from nexus.daemon.pg_bundle_refresh import refresh_bundle_alongside_engine  # noqa: PLC0415 — deferred, CLI startup cost
 
     try:
         # restart_after=False: the install stops a running service for the swap on
@@ -2560,15 +2559,16 @@ def converge_engine(
         # cycle below starts it again AND verifies the version, so the install must
         # not start it first (one stop, one start per upgrade; the cycle's own stop
         # then finds nothing). A failed install still restarts what it stopped.
-        # nexus-f3yqd.2.23: the PG bundle of the same tag joins the same stop, so a
-        # box whose bundle predates pg_background is fixed without a second restart.
-        # A bundle failure never raises: the old bundle stays and the cycle starts it.
-        with SharedQuiesce(config_dir, restart_after=False) as shared:
-            install_binary(
+        # nexus-f3yqd.2.23: the PG bundle of the same tag is downloaded and staged first, then
+        # joins the same single stop; a bundle failure never raises (the old one stays and the
+        # cycle starts it).
+        bundle = refresh_bundle_alongside_engine(
+            tag, config_dir,
+            lambda guard: install_binary(
                 tag, config_dir, installed_by="upgrade-finish engine convergence",
-                restart_after=False, quiesce=shared.guard("engine"),
-            )
-            bundle = refresh_for_convergence(tag, config_dir, shared.guard("pg_bundle"))
+                restart_after=False, quiesce=guard,
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 — code-review HIGH: install_binary
         # can raise more than BinaryVerificationError -- _atomic_copy
         # (binary_install.py) re-raises bare OSError/etc UNWRAPPED on

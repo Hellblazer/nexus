@@ -1399,6 +1399,7 @@ def _install_binary_steps(
         pg_bundle_dest,
     )
     from nexus.daemon.pg_bundle_refresh import install_and_extract_pg_bundle  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
+    from nexus.db.pg_bundle import PgBundleSwapRefused  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     from nexus.daemon.replace_guard import ReplaceBlockedError  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     import lzma  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
     import tarfile  # noqa: PLC0415 — deferred import — CLI startup cost, only needed in this subcommand path
@@ -1428,7 +1429,10 @@ def _install_binary_steps(
     if want_pg_bundle:
         click.echo(f"\nResolving {pg_bundle_asset_name()} from release {tag}…")
 
+        downloaded: list[Path] = []  # the download stage's OSError is not an extraction failure
+
         def _echo_installed(pg_dest: Path, pg_prov: dict) -> None:
+            downloaded.append(pg_dest)
             click.echo(f"Installed {pg_prov['asset']} ({tag})")
             click.echo(f"  -> {pg_dest}")
             click.echo(f"  sha256:  {pg_prov['sha256'][:16]}…")
@@ -1463,7 +1467,13 @@ def _install_binary_steps(
         except ReplaceBlockedError as exc:
             click.echo(f"Error: {exc}", err=True)
             sys.exit(2)
+        except PgBundleSwapRefused as exc:
+            # Refused for what the bundles are, not for a failure: repeating the command gives the same answer.
+            click.echo(f"Error: the PostgreSQL bundle archive installed ({pg_bundle_dest(config_dir)}), {exc}", err=True)
+            sys.exit(2)
         except (RuntimeError, OSError, tarfile.TarError, lzma.LZMAError) as exc:
+            if not downloaded:
+                raise  # the download stage, as before: not an extraction failure
             click.echo(
                 f"Error: the PostgreSQL bundle archive installed ({pg_bundle_dest(config_dir)}), but "
                 f"extracting it failed: {exc}\nRe-run `nx daemon service "

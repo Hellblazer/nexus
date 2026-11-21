@@ -9,23 +9,26 @@ bundle that lacks it, and every RDR-246 data move stayed blocked (nexus-f3yqd.2.
 Two things live here:
 
 * :func:`install_and_extract_pg_bundle`: download the bundle of a tag, verify and place the
-  archive, then extract it under a stop of the stack. ``nx daemon service install-binary`` and
-  engine convergence both call it, so there is one path and one set of error rules.
-* the convergence leg (:func:`refresh_for_convergence`, :func:`refresh_when_pg_background_is_missing`):
-  when the box is local, runs an extracted bundle and either the engine changes or the bundle
-  lacks pg_background, take the pinned tag's bundle and swap it in. A failure leaves the old
-  bundle in place and is reported, never raised.
+  archive, then extract it under a stop of the stack. ``nx daemon service install-binary`` calls
+  it; convergence calls its two halves (:func:`fetch_pg_bundle`, :func:`swap_in_pg_bundle`) so the
+  download and the staging extraction finish before anything stops.
+* the convergence leg, which runs when the box is local, runs an extracted bundle and either the
+  engine changes (:func:`refresh_bundle_alongside_engine`) or the engine is already the pinned one and
+  the bundle lacks pg_background (:func:`refresh_when_pg_background_is_missing`). A failure leaves
+  the old bundle in place and is reported, never raised.
 
 This is a binary swap. No user data is rewritten: a data directory made by PostgreSQL 17 starts
-under any other 17 bundle, and a swap across a major version is refused by
-:func:`nexus.db.pg_bundle.extract_bundle` before anything is stopped.
+under any other 17 bundle, and :func:`nexus.db.pg_bundle.extract_bundle` refuses a swap across a
+major version, or one that would drop pg_background, before anything is stopped.
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -37,22 +40,10 @@ _log = structlog.get_logger(__name__)
 _REFRESH_FAILURES: dict[tuple[str, str], str] = {}
 
 
-def pg_background_control_files(extract_root: Path) -> tuple[Path, ...]:
-    """Where the extension's control file sits in an extracted bundle.
-
-    The real layout puts it beside ``vector.control`` at
-    ``bundle/share/postgresql/extension/`` (PostgreSQL adds ``postgresql`` to the share
-    directory when the prefix does not name it). A build that does not add it is covered by
-    the second entry."""
-    share = extract_root / "bundle" / "share"
-    return (
-        share / "postgresql" / "extension" / "pg_background.control",
-        share / "extension" / "pg_background.control",
-    )
-
-
 def bundle_has_pg_background(extract_root: Path) -> bool:
-    return any(p.is_file() for p in pg_background_control_files(extract_root))
+    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
+
+    return pg_bundle.bundle_has_pg_background(extract_root)
 
 
 def install_and_extract_pg_bundle(
@@ -68,42 +59,74 @@ def install_and_extract_pg_bundle(
     Returns ``(archive, provenance, bin_dir)``. ``binary_install.BinaryVerificationError``
     is the download or verification failing, before anything is stopped; the extraction's
     own errors (``ReplaceBlockedError``, ``RuntimeError``, ``OSError``, ``tarfile.TarError``,
-    ``lzma.LZMAError``, :class:`~nexus.db.pg_bundle.PgBundleMajorChangeError`) propagate
-    as they are. *quiesce* is the stop that guards the swap: a
+    ``lzma.LZMAError``, :class:`~nexus.db.pg_bundle.PgBundleSwapRefused`) propagate as they
+    are. *quiesce* is the stop that guards the swap: a
     :class:`~nexus.daemon.replace_quiesce.SharedQuiesce` guard, so a caller that also
     replaces the engine stops and starts the stack once. A bundle with the bytes already
     extracted enters nothing and stops nothing. *on_installed* runs between the two steps.
     """
-    # Module attributes, read at call time: the callers' tests replace these seams.
+    archive, provenance = fetch_pg_bundle(tag, config_dir, installed_by=installed_by, on_installed=on_installed)
+    return archive, provenance, swap_in_pg_bundle(archive, config_dir, quiesce)
+
+
+def fetch_pg_bundle(
+    tag: str,
+    config_dir: Path,
+    *,
+    installed_by: str,
+    on_installed: Callable[[Path, dict], None] | None = None,
+) -> tuple[Path, dict]:
+    """The download half: fetch, verify and place the archive. Stops nothing."""
+    # Module attribute, read at call time: the callers' tests replace this seam.
     from nexus.daemon import binary_install  # noqa: PLC0415 - deferred, CLI startup cost
-    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
 
     archive, provenance = binary_install.install_pg_bundle(tag, config_dir, installed_by=installed_by)
     if on_installed is not None:
         on_installed(archive, provenance)
-    bin_dir = pg_bundle.extract_bundle(
-        archive, pg_bundle.bundle_extract_root(config_dir), quiesce=quiesce,
-    )
-    return archive, provenance, bin_dir
+    return archive, provenance
+
+
+def swap_in_pg_bundle(
+    archive: Path, config_dir: Path, quiesce: AbstractContextManager[object] | None,
+) -> Path:
+    """The extraction half: extract *archive* (a staged tree from ``pg_bundle.prestage_bundle`` is
+    reused) and swap it in under *quiesce*. Returns the ``bin/`` directory."""
+    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
+
+    return pg_bundle.extract_bundle(archive, pg_bundle.bundle_extract_root(config_dir), quiesce=quiesce)
 
 
 @dataclass(frozen=True)
 class BundleRefresh:
-    """What :func:`refresh_for_convergence` did: ``refreshed`` when a different bundle was
-    swapped in, ``problem`` the reason when it could not be."""
+    """What a bundle refresh did: ``refreshed`` when a different bundle was swapped in, ``problem``
+    the reason when it could not be, and ``next_step`` what an operator can do about it (empty when
+    nothing a person does changes the answer)."""
 
     refreshed: bool = False
     problem: str | None = None
+    next_step: str = ""
 
     def lines(self) -> list[str]:
         if self.refreshed:
             return ["refreshed the PostgreSQL bundle (a different bundle was extracted and swapped in)"]
         if self.problem:
+            tail = f" {self.next_step}" if self.next_step else ""
             return [
                 f"NOTE: the PostgreSQL bundle was not refreshed: {self.problem}. The bundle in place is "
-                "unchanged and the stack keeps running on it; the next `nx upgrade` tries again."
+                f"unchanged and the stack keeps running on it.{tail}"
             ]
         return []
+
+
+@dataclass
+class PreparedBundle:
+    """A refresh with its download and staging done and nothing stopped. ``done`` is set when
+    there is nothing left to apply (not applicable, refused, failed, already current)."""
+
+    tag: str = ""
+    archive: Path | None = None
+    done: BundleRefresh | None = None
+    lacked: bool = False
 
 
 def refresh_applicable(config_dir: Path) -> bool:
@@ -120,65 +143,221 @@ def refresh_applicable(config_dir: Path) -> bool:
 def bundle_lacks_pg_background(config_dir: Path) -> bool:
     from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
 
-    return refresh_applicable(config_dir) and not bundle_has_pg_background(pg_bundle.bundle_extract_root(config_dir))
+    return refresh_applicable(config_dir) and not pg_bundle.bundle_has_pg_background(
+        pg_bundle.bundle_extract_root(config_dir)
+    )
 
 
-def refresh_for_convergence(
-    tag: str, config_dir: Path, quiesce: AbstractContextManager[object] | None,
-) -> BundleRefresh:
-    """Swap in *tag*'s bundle when the box is local and runs an extracted bundle.
-
-    Never raises: a download, extraction or swap failure (and a refused major change) leaves
-    the old bundle in place, is logged and comes back as ``problem``. Nothing is stopped
-    before the download and the staging extraction succeed."""
-    if not refresh_applicable(config_dir):
-        return BundleRefresh()
+def _pinned_bundle_in_place(config_dir: Path, tag: str) -> bool:
+    """The extracted tree was made from the bundle of *tag* (the sidecar of the installed archive names
+    the tag, and the extraction marker names that archive's digest). Reads two small files."""
+    from nexus.daemon import binary_install  # noqa: PLC0415 - deferred, CLI startup cost
     from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
 
+    try:
+        meta = json.loads((config_dir / "service" / binary_install._PG_SIDECAR_NAME).read_text(encoding="utf-8"))  # noqa: SLF001
+        marker = (pg_bundle.bundle_extract_root(config_dir) / pg_bundle._EXTRACT_MARKER).read_text(encoding="utf-8")  # noqa: SLF001
+    except (OSError, ValueError):
+        return False
+    return isinstance(meta, dict) and meta.get("tag") == tag and marker == f"sha256={meta.get('sha256')}\n"
+
+
+def _lacks_text(tag: str) -> str:
+    return (
+        f"the PostgreSQL bundle of {tag} does not contain pg_background, so data moves stay blocked: the "
+        "release's own bundle is missing it"
+    )
+
+
+def prepare_refresh(tag: str, config_dir: Path) -> PreparedBundle:
+    """Download and stage *tag*'s bundle with the stack still running; never raises.
+
+    The return carries what :func:`apply_refresh` still has to do, or ``done`` when nothing is
+    left. A bundle that lacks pg_background and was already made from this tag is not downloaded
+    again: the release's own bundle is what is missing it."""
+    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
+
+    prep = PreparedBundle(tag=tag)
+    if not refresh_applicable(config_dir):
+        prep.done = BundleRefresh()
+        return prep
+    root = pg_bundle.bundle_extract_root(config_dir)
+    prep.lacked = not pg_bundle.bundle_has_pg_background(root)
+    if prep.lacked and _pinned_bundle_in_place(config_dir, tag):
+        prep.done = BundleRefresh(problem=_lacks_text(tag))
+        return prep
     key = (str(config_dir), tag)
     if key in _REFRESH_FAILURES:
-        return BundleRefresh(problem=f"{_REFRESH_FAILURES[key]} (already tried in this run)")
-    marker = pg_bundle.bundle_extract_root(config_dir) / pg_bundle._EXTRACT_MARKER  # noqa: SLF001 - the module's own marker
+        prep.done = BundleRefresh(problem=f"{_REFRESH_FAILURES[key]} (already tried in this run)")
+        return prep
+    try:
+        archive, _prov = fetch_pg_bundle(tag, config_dir, installed_by="upgrade-finish engine convergence")
+        pg_bundle.prestage_bundle(archive, root)
+    except pg_bundle.PgBundleSwapRefused as exc:
+        _log.warning("pg_bundle_refresh_refused", tag=tag, error=str(exc))
+        prep.done = BundleRefresh(problem=str(exc))
+        return prep
+    except Exception as exc:  # noqa: BLE001 - "never raises": every failure here leaves the old bundle
+        _log.warning("pg_bundle_refresh_failed", tag=tag, stage="prepare", error=str(exc), exc_info=True)
+        _REFRESH_FAILURES[key] = str(exc)
+        prep.done = BundleRefresh(problem=str(exc), next_step=_retry_text(config_dir, tag))
+        return prep
+    prep.archive = archive
+    return prep
+
+
+def _retry_text(config_dir: Path, tag: str) -> str:
+    """The command that retries a failed refresh: `nx upgrade` while the bundle lacks pg_background
+    (the convergence leg fires on that), else the explicit install."""
+    if bundle_lacks_pg_background(config_dir):
+        return "Run `nx upgrade` again to try again."
+    return f"`nx daemon service install-binary {tag}` tries again."
+
+
+def apply_refresh(
+    prep: PreparedBundle, config_dir: Path, quiesce: AbstractContextManager[object] | None,
+) -> BundleRefresh:
+    """Swap the prepared bundle in under *quiesce*; never raises. A swap that fails leaves the old
+    bundle in place. After it, pg_background is looked for: a bundle that still lacks it is reported."""
+    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
+
+    if prep.done is not None:
+        return prep.done
+    assert prep.archive is not None
+    root = pg_bundle.bundle_extract_root(config_dir)
+    marker = root / pg_bundle._EXTRACT_MARKER  # noqa: SLF001 - the module's own marker
     before = marker.read_text(encoding="utf-8") if marker.is_file() else ""
     try:
-        install_and_extract_pg_bundle(
-            tag, config_dir, installed_by="upgrade-finish engine convergence", quiesce=quiesce,
-        )
-    except Exception as exc:  # noqa: BLE001 - "never raises": every failure here leaves the old bundle
-        _log.warning("pg_bundle_refresh_failed", tag=tag, error=str(exc), exc_info=True)
-        _REFRESH_FAILURES[key] = str(exc)
+        swap_in_pg_bundle(prep.archive, config_dir, quiesce)
+    except pg_bundle.PgBundleSwapRefused as exc:
+        _log.warning("pg_bundle_refresh_refused", tag=prep.tag, error=str(exc))
         return BundleRefresh(problem=str(exc))
-    after = marker.read_text(encoding="utf-8") if marker.is_file() else ""
-    return BundleRefresh(refreshed=after != before)
+    except Exception as exc:  # noqa: BLE001 - "never raises": every failure here leaves the old bundle
+        _log.warning("pg_bundle_refresh_failed", tag=prep.tag, stage="swap", error=str(exc), exc_info=True)
+        _REFRESH_FAILURES[(str(config_dir), prep.tag)] = str(exc)
+        return BundleRefresh(problem=str(exc), next_step=_retry_text(config_dir, prep.tag))
+    refreshed = (marker.read_text(encoding="utf-8") if marker.is_file() else "") != before
+    if (prep.lacked or refreshed) and not pg_bundle.bundle_has_pg_background(root):
+        return BundleRefresh(refreshed=False, problem=_lacks_text(prep.tag))
+    return BundleRefresh(refreshed=refreshed)
+
+
+def refresh_bundle_alongside_engine(
+    tag: str, config_dir: Path, install_engine: Callable[[AbstractContextManager[Any]], object],
+) -> BundleRefresh:
+    """The engine-change path: the bundle is downloaded and staged first, with the stack still up;
+    then ONE stop covers the engine swap (*install_engine*, handed its guard) and the bundle swap,
+    and nothing starts until the caller's restart-and-verify does. An exception from
+    *install_engine* propagates (the stack is started again, as before); the bundle's never does."""
+    from nexus.daemon.replace_quiesce import SharedQuiesce  # noqa: PLC0415 - deferred, CLI startup cost
+    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
+
+    prep = prepare_refresh(tag, config_dir)
+    try:
+        with SharedQuiesce(config_dir, restart_after=False) as shared:
+            install_engine(shared.guard("engine"))
+            return apply_refresh(prep, config_dir, shared.guard("pg_bundle"))
+    finally:
+        pg_bundle.discard_staging(pg_bundle.bundle_extract_root(config_dir))
+
+
+# -- the idle gate of the converged-engine leg ---------------------------------------------------------
+
+
+def _engine_status() -> dict | None:
+    from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 - deferred, CLI startup cost
+
+    return fetch_engine_status()
+
+
+def _service_up(config_dir: Path) -> bool:
+    from nexus.db.service_endpoint import discover_lease  # noqa: PLC0415 - deferred, CLI startup cost
+
+    return discover_lease()[0] is not None
+
+
+def _progress_rows(config_dir: Path) -> int | None:
+    """Rows in ``pg_stat_progress_create_index`` and ``pg_stat_progress_vacuum`` (an index build or a
+    vacuum in flight), or ``None`` when they cannot be read."""
+    try:
+        from nexus.db.pg_provision import CREDENTIALS_FILENAME, _read_credentials, discover_pg_binaries  # noqa: PLC0415 - deferred, heavy
+        from nexus.health import _run_psql  # noqa: PLC0415 - deferred, heavy
+
+        creds = _read_credentials(config_dir / CREDENTIALS_FILENAME)
+        url = creds.get("NX_DB_ADMIN_URL", "")
+        proc = _run_psql(
+            discover_pg_binaries(config_dir).psql, "127.0.0.1", int(creds["PG_PORT"]),
+            url.rstrip("/").rsplit("/", 1)[-1] if "/" in url else "nexus",
+            creds.get("NX_DB_ADMIN_USER", "nexus_admin"), creds.get("NX_DB_ADMIN_PASS", ""),
+            "SELECT (SELECT count(*) FROM pg_stat_progress_create_index) + "
+            "(SELECT count(*) FROM pg_stat_progress_vacuum);",
+            timeout=20.0,
+        )
+        return int(proc.stdout.strip()) if proc.returncode == 0 else None
+    except Exception as exc:  # noqa: BLE001 - unreadable is reported as unknown, never as idle
+        _log.debug("pg_bundle_refresh_progress_probe_failed", error=str(exc))
+        return None
+
+
+def engine_busy_reason(config_dir: Path) -> str | None:
+    """Why the stack should not be bounced now, or ``None`` when it is idle.
+
+    The idle rule of ``scripts/upgrade_boot_writes.py``: ``/v1/status`` ``boot_work`` empty and no
+    index build or vacuum running. A service that is not running has nothing in flight. A running
+    one whose state cannot be read is not idle: unknown is not idle."""
+    status = _engine_status()
+    if status is None:
+        if not _service_up(config_dir):
+            return None
+        return "the engine is running but its status cannot be read, so whether it is building indexes is unknown"
+    work = status.get("boot_work")
+    if isinstance(work, list) and work:
+        names = ", ".join(sorted({str(e.get("what") or e.get("id") or "work")[:60] for e in work if isinstance(e, dict)}))
+        return f"the engine reports background work ({names or 'work in progress'})"
+    rows = _progress_rows(config_dir)
+    if rows is None:
+        return "the engine is running but its index builds cannot be read, so whether one is in flight is unknown"
+    if rows:
+        return f"{rows} index build or vacuum is running"
+    return None
 
 
 def refresh_when_pg_background_is_missing(
-    tag: str | None, config_dir: Path, *, dry_run: bool, acquire: bool,
+    tag: str | None, config_dir: Path, *, dry_run: bool, acquire: bool, unattended: bool = False,
 ) -> list[str]:
     """The convergence leg for an engine that is already the pinned one: a bundle without
     pg_background is replaced. ``[]`` when there is nothing to do.
 
-    ``dry_run`` and ``acquire=False`` (the report-only passes) say what is missing and change
-    nothing. Otherwise the stack is stopped once for the swap and started again, and a
-    restart that fails is reported, never raised."""
+    ``dry_run``, ``acquire=False`` (the report-only passes) and ``unattended`` say what is missing and
+    change nothing: this leg stops PostgreSQL, which kills an index build in flight, so it never runs
+    unprompted. It also defers while the engine reports boot work or an index build. Otherwise the
+    stack is stopped once for the swap and started again; a restart that fails is reported, never raised."""
     if not bundle_lacks_pg_background(config_dir):
         return []
     if dry_run:
-        return ["would refresh the PostgreSQL bundle: the one installed lacks pg_background"]
-    if not acquire:
+        return ["pending: the installed PostgreSQL bundle lacks pg_background; `nx upgrade` replaces it (it stops and restarts PostgreSQL and the storage service)"]
+    if not acquire or unattended:
         return [
             "NOTE: the installed PostgreSQL bundle lacks pg_background, so data moves stay blocked. "
             "Nothing was changed. Run `nx upgrade` when you can spare a few minutes: it replaces the "
-            "bundle and restarts the storage service."
+            "bundle and restarts PostgreSQL and the storage service."
         ]
     if not tag:
         return ["NOTE: the installed PostgreSQL bundle lacks pg_background and no pinned service tag is configured."]
+    busy = engine_busy_reason(config_dir)
+    if busy:
+        return [
+            f"NOTE: the PostgreSQL bundle lacks pg_background; replacing it is deferred: {busy}. Replacing it "
+            "restarts PostgreSQL, which stops that work. Run `nx upgrade` again when the engine is idle."
+        ]
     from nexus.daemon.replace_quiesce import RestartAfterReplaceError, SharedQuiesce  # noqa: PLC0415 - deferred, CLI startup cost
+    from nexus.db import pg_bundle  # noqa: PLC0415 - deferred, CLI startup cost
 
+    prep = prepare_refresh(tag, config_dir)  # the download and the staging, with the stack still up
     shared = SharedQuiesce(config_dir)
     try:
         with shared:
-            result = refresh_for_convergence(tag, config_dir, shared.guard("pg_bundle"))
+            result = apply_refresh(prep, config_dir, shared.guard("pg_bundle"))
     except RestartAfterReplaceError as exc:
         return [
             f"NEEDS HUMAN: the PostgreSQL bundle was refreshed but the stack could not be started again: {exc}"
@@ -186,4 +365,30 @@ def refresh_when_pg_background_is_missing(
     except Exception as exc:  # noqa: BLE001 - "never raises"
         _log.warning("pg_bundle_refresh_stack_failed", error=str(exc), exc_info=True)
         return [f"NOTE: the PostgreSQL bundle was not refreshed: {exc}"]
+    finally:
+        pg_bundle.discard_staging(pg_bundle.bundle_extract_root(config_dir))
     return result.lines()
+
+
+def check_pg_bundle(config_dir: Path | None = None) -> list[Any]:
+    """``nx doctor``'s row for the extracted PostgreSQL bundle: a warning while a local install's bundle lacks
+    pg_background. Nothing for cloud mode, an install on its own PostgreSQL, or a bundle that has it."""
+    from nexus.config import nexus_config_dir  # noqa: PLC0415 - deferred, CLI startup cost
+    from nexus.engine_version import REQUIRED_ENGINE_VERSION  # noqa: PLC0415 - deferred, CLI startup cost
+    from nexus.health import HealthResult  # noqa: PLC0415 - deferred: that module is heavy
+
+    config_dir = config_dir if config_dir is not None else nexus_config_dir()
+    if not bundle_lacks_pg_background(config_dir):
+        return []
+    tag = "engine-service-v" + ".".join(str(p) for p in REQUIRED_ENGINE_VERSION)
+    if _pinned_bundle_in_place(config_dir, tag):
+        return [HealthResult(
+            label="PostgreSQL bundle", ok=False, warn=True,
+            detail="the extracted PostgreSQL bundle has no pg_background, and it is the one this release pins",
+            fix_suggestions=[f"The release's own bundle ({tag}) is missing the extension: report it. Data moves stay blocked until a bundle has it"],
+        )]
+    return [HealthResult(
+        label="PostgreSQL bundle", ok=False, warn=True,
+        detail="the extracted PostgreSQL bundle has no pg_background, so every registered data move stays blocked",
+        fix_suggestions=["nx upgrade replaces the bundle (it restarts PostgreSQL and the storage service; `nx upgrade --dry-run` lists it)"],
+    )]

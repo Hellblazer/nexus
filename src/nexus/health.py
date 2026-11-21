@@ -4818,6 +4818,13 @@ def _status_int(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
+def _check_pg_bundle() -> list[HealthResult]:
+    """nexus-f3yqd.2.23: ``nexus.daemon.pg_bundle_refresh.check_pg_bundle`` (a warning while the extracted bundle lacks pg_background)."""
+    from nexus.daemon.pg_bundle_refresh import check_pg_bundle  # noqa: PLC0415 — deferred: that module imports this one
+
+    return check_pg_bundle()
+
+
 def _check_data_moves(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """RDR-246 data moves (nexus-f3yqd.2.17): ``nexus.data_moves_health.check_data_moves``. Named ``_check_*`` here, like
     every other row of the sweep, so a test that steps over the sweep's ``_check_*`` rows steps over this one too instead
@@ -13655,6 +13662,7 @@ def run_health_checks(
     results.extend(_step("_check_engine_convergence", lambda: _check_engine_convergence()))
     results.extend(_step("_check_ownerless_writes", lambda: _check_ownerless_writes(engine_status)))  # nexus-20onx
     results.extend(_step("_check_data_moves", lambda: _check_data_moves(engine_status)))  # nexus-f3yqd.2.17 (RDR-246)
+    results.extend(_step("_check_pg_bundle", _check_pg_bundle))  # nexus-f3yqd.2.23: a bundle without pg_background
     results.extend(_step("_check_engine_reaper", lambda: _check_engine_reaper(engine_status)))  # nexus-wbfpw.56
     results.extend(_step("_check_per_collection_indexes", lambda: _check_per_collection_indexes(engine_status)))  # nexus-43ulx.24
     results.extend(_step("_check_chunks_leaf_bloat", lambda: _check_chunks_leaf_bloat(engine_status, verbose=verbose)))  # nexus-dxsjc, nexus-i827c
