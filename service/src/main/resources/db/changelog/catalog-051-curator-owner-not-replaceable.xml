@@ -54,6 +54,8 @@
     chunk imports. A plain document registration (upsertDocument, registerDocument), upsertCollection and
     supersedeCollection are not wrapped, so a victim there surfaces as the 40P01 error to its caller; the data move
     worker classifies 40P01 as transient and retries the chunk (DataMoveFailureClassifier).
+    A document registration touches one collection, so the trigger takes one tuple lock in it and cannot deadlock
+    against itself; a deadlock there needs a second lock the caller took first, and surfaces to that caller.
 
     THE LOCK KEY, catalog-051-1a (a new function, nexus.collection_tuple_lock_key, in its own changeSet before 049-2).
     Every writer that serialises on a tuple must derive the SAME key, or two writers on one tuple do not wait for each
