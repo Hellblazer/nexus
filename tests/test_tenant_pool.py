@@ -26,6 +26,8 @@ from typing import Any
 
 import httpx
 import pytest
+import structlog
+import structlog.testing
 from structlog.testing import capture_logs
 
 import nexus.aspect_extractor as aspect_extractor
@@ -1076,3 +1078,95 @@ def test_the_end_of_session_line_breaks_a_lease_down_by_step(
     line = _tenant_pool.summary_line(merged)
     assert "per_lease[" in line and all(f"{step}=" in line for step in pool.step_s), line
     assert "per_lease[" not in _tenant_pool.summary_line(_tenant_pool.merge_reports([]) | {"leases": 0}), "no leases, no breakdown"
+
+
+# -- drop_test_tenant retries a drop that gave up on its lock waits, and only that -------------------------------------
+
+_GAVE_UP = ("ERROR:  nexus.drop_tenant_partitions(t): gave up after 5 attempts: a search, a manifest write, an index "
+            "build or a vacuum on this tenant's partitions held a lock it needs")
+
+
+def _scripted_drop(monkeypatch: pytest.MonkeyPatch, replies: list[tuple[int, str]]) -> tuple[list[str], list[float]]:
+    """Run drop_test_tenant against psql replies (returncode, stderr), one per call; the holder query answers one row.
+    Returns the SQL each call ran and the backoff sleeps taken."""
+    from tests import _engine_substrate as es  # noqa: PLC0415
+
+    sqls: list[str] = []
+
+    class _Proc:
+        def __init__(self, rc: int, err: str, out: str = "") -> None:
+            self.returncode, self.stderr, self.stdout = rc, err, out
+
+    def fake_run(cmd: Any, *, input: str, **kwargs: Any) -> _Proc:  # noqa: A002 - subprocess.run's own name
+        sqls.append(input)
+        if "pg_locks" in input:
+            return _Proc(0, "", "4242 autovacuum worker active ShareUpdateExclusiveLock nexus.catalog_document_chunks")
+        rc, err = replies.pop(0)
+        return _Proc(rc, err)
+
+    monkeypatch.setattr(es, "_REAL_SUBPROCESS_RUN", fake_run)
+    slept: list[float] = []
+    state = {"pg_bin": "/x", "pg_port": 1, "pg_user": "u", "pg_dbname": "d"}
+    sqls.append(f"result={es.drop_test_tenant(state, 't', sleep=slept.append)}")
+    return sqls, slept
+
+
+def test_a_drop_that_gave_up_on_its_locks_is_retried_until_it_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI shard 4 on 2773105b83: nexus.drop_tenant_partitions gave up after five lock waits and 8 leaves were left
+    under a retired tenant (the holder was not identified). A lock give-up is now retried with backoff."""
+    sqls, slept = _scripted_drop(monkeypatch, [(1, _GAVE_UP), (1, _GAVE_UP), (0, "")])
+    assert [s for s in sqls if "drop_tenant_partitions" in s and "pg_locks" not in s] == [sqls[0]] * 3
+    assert slept == [1.0, 2.0] and sqls[-1] == "result=True"
+
+
+def test_a_lock_give_up_that_never_clears_is_tried_four_times_and_names_the_holders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with structlog.testing.capture_logs() as logs:
+        sqls, slept = _scripted_drop(monkeypatch, [(1, _GAVE_UP)] * 4)
+    assert slept == [1.0, 2.0, 4.0] and sqls[-1] == "result=False"
+    assert sum("pg_locks" in s for s in sqls) == 1, "one holder query, after the last give-up"
+    holders = [e["holders"] for e in logs if e["event"] == "test_tenant_drop_lock_holders"]
+    assert holders == [["4242 autovacuum worker active ShareUpdateExclusiveLock nexus.catalog_document_chunks"]]
+
+
+def test_any_other_drop_failure_fails_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A permanent failure (a missing role, the default-tenant refusal) is not a lock wait: no retry, no backoff."""
+    sqls, slept = _scripted_drop(monkeypatch, [(1, "ERROR:  role \"u\" does not exist")])
+    assert slept == [] and sqls[-1] == "result=False"
+    assert not any("pg_locks" in s for s in sqls)
+
+
+def test_a_held_lock_makes_the_drop_give_up_name_the_holder_and_then_drop_once_released(
+    state: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The flake, on demand: a session holding SHARE UPDATE EXCLUSIVE on a table the drop locks (what an autovacuum
+    takes) makes nexus.drop_tenant_partitions give up; drop_test_tenant logs that session as a holder, and once the
+    lock is released the drop leaves no leaf behind."""
+    from tests._child_process import popen_in_group, stop_group  # noqa: PLC0415
+
+    tenant, _ = mint_test_tenant(state)
+    holder = popen_in_group(
+        [str(Path(state["pg_bin"]) / "psql"), "-X", "-q", "-t", "-A", "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "PGAPPNAME": "pool_drop_lock_holder"},
+    )
+    try:
+        assert holder.stdin is not None and holder.stdout is not None
+        holder.stdin.write("BEGIN;\nLOCK TABLE nexus.catalog_document_chunks IN SHARE UPDATE EXCLUSIVE MODE;\n"
+                           "SELECT 'locked';\nSELECT pg_catalog.pg_sleep(120);\n")
+        holder.stdin.flush()
+        assert holder.stdout.readline().strip() == "locked", "the holder took its lock"
+        monkeypatch.setattr(_engine_substrate, "DROP_LOCK_RETRY_DELAYS_S", ())
+        with structlog.testing.capture_logs() as logs:
+            assert drop_test_tenant(state, tenant) is False, "the held lock makes the drop give up"
+        holders = [h for e in logs if e["event"] == "test_tenant_drop_lock_holders" for h in e["holders"]]
+        assert any("ShareUpdateExclusiveLock nexus.catalog_document_chunks" in h for h in holders), holders
+    finally:
+        _sql(state, "SELECT count(pg_catalog.pg_terminate_backend(pid)) FROM pg_catalog.pg_stat_activity "
+                    "WHERE application_name = 'pool_drop_lock_holder';")
+        stop_group(holder)
+    assert drop_test_tenant(state, tenant) is True
+    assert _sql(state, "SELECT count(*) FROM pg_catalog.pg_class c WHERE c.relispartition "
+                       "AND nexus.partition_bound_value(c.oid) = :'tenant';", tenant=tenant) == "0"
