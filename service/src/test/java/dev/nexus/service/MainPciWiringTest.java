@@ -504,6 +504,49 @@ class MainPciWiringTest {
         return out.toString();
     }
 
+    /**
+     * RDR-229 P3.3b (nexus-p2m1x.20): the per-leaf id unique-index pass is started once, at main's top level, after the completion check
+     * it reads, handed that check's LATEST read of gate 1 (a null read holds nothing), and closed in the shutdown steps; and its method
+     * returns null while {@code Rdr229SwapMove.PLACEHOLDER} is true, before it builds the pass.
+     */
+    @Test
+    void theLeafIndexPassStartsAfterTheCompletionCheck_readsItsLatestGate1_closesInTheShutdownSteps_andIsGuardedByThePlaceholder() throws Exception {
+        String src = code(main());
+        int check = src.indexOf("var completionCheck = startCompletionBootWork(");
+        int start = src.indexOf("var leafIndexPass = startLeafIndexPass(");
+        int hook = shutdownSteps(src);
+        int close = src.indexOf("leafIndexPass.close();", hook);
+        int reaper = src.indexOf("BackendReaper.terminateAtShutdown(", hook);
+
+        assertThat(check).isPositive();
+        assertThat(start).as("started after the completion check it reads").isGreaterThan(check);
+        assertThat(src.indexOf("var leafIndexPass = startLeafIndexPass(", start + 1)).as("started once").isNegative();
+        int mainDepth = depthAt(src, src.indexOf("var ds = new HikariDataSource(hikari);"));
+        assertThat(depthAt(src, start)).as("a top-level statement of main, whatever NX_SEARCH_PCI says").isEqualTo(mainDepth);
+        assertThat(precedingToken(src, start)).isIn(";", "}");
+        assertThat(src).as("handed the check the engine built").contains("startLeafIndexPass(bootWork, adminConnection, completionCheck)");
+        assertThat(close).as("closed in the shared shutdown steps").isGreaterThan(hook);
+        assertThat(close).as("before the reaper").isLessThan(reaper);
+        assertThat(depthAt(src, close)).as("a statement of the null guard inside the steps")
+            .isEqualTo(depthAt(src, src.indexOf("service.stop();", hook)) + 1);
+        assertThat(src.substring(src.lastIndexOf("if (leafIndexPass != null)", close), close)).doesNotContain("else");
+
+        int method = src.indexOf("static dev.nexus.service.vectors.LeafIndexPass startLeafIndexPass(");
+        assertThat(method).isPositive();
+        int body = src.indexOf('{', src.indexOf(')', src.indexOf("completionCheck)", method)));
+        String text = src.substring(body, matchingClose(src, body));
+        int guard = text.indexOf("if (dev.nexus.service.vectors.Rdr229SwapMove.PLACEHOLDER) {");
+        int noCheck = text.indexOf("if (completionCheck == null) {");
+        int build = text.indexOf("new dev.nexus.service.vectors.LeafIndexPass(");
+        assertThat(guard).as("the placeholder guard").isNotNegative();
+        assertThat(text.substring(guard, text.indexOf('}', guard))).as("the guard returns null").contains("return null;");
+        assertThat(noCheck).as("no completion check, no pass: and said so").isGreaterThan(guard);
+        assertThat(text.substring(noCheck, text.indexOf('}', noCheck))).contains("leaf_index_pass_not_started").contains("return null;");
+        assertThat(build).as("the pass is built after both guards").isGreaterThan(noCheck);
+        assertThat(text).as("the gate is the check's latest read; null holds nothing")
+            .contains("completionCheck.latest()").contains("latest != null && latest.gate1()");
+    }
+
     /** Index just past the string or char literal that opens at {@code start}. */
     private static int literalEnd(String src, int start) {
         char quote = src.charAt(start);
