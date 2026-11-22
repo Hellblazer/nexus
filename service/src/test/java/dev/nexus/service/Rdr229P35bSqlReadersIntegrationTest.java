@@ -329,6 +329,76 @@ class Rdr229P35bSqlReadersIntegrationTest {
         }
     }
 
+    // ---- T4: canary_query_ring_upsert matches by id and stays one row under a race ---------------------------------------
+
+    /**
+     * Form A's canary_query_ring_upsert (vectors-078-8) no longer arbitrates on the name key: it UPDATEs the ring row by
+     * collection_id and INSERTs only when none exists, refreshing on a unique_violation. Two writers race on one digest: A
+     * inserts and holds its transaction open, B's INSERT waits on A's row, A commits, B takes the unique_violation and refreshes.
+     * Both report one entry written and the ring holds one row for the digest, carrying the registry's id (linda 2026-11-22).
+     */
+    @Test
+    @Order(8)
+    void stampsComplete_canaryUpsert_twoWritersOneDigest_endInOneRow() throws Exception {
+        completeStampsAndMigrate();
+        String model;
+        long halfId;
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            model = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT)).and(CATALOG_COLLECTIONS.NAME.eq(HALF))
+                .fetchOne(CATALOG_COLLECTIONS.EMBEDDING_MODEL);
+            halfId = registryId(ctx, HALF);
+        }
+        String vector = "[" + String.join(",", java.util.Collections.nCopies(384, "0.5")) + "]";
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest("p35b-canary-race".getBytes(StandardCharsets.UTF_8));
+        String call = "SELECT nexus.canary_query_ring_upsert(?, ARRAY[?]::text[], ARRAY[?]::text[], ARRAY[?]::text[], ARRAY[?]::bytea[])";
+        try (Connection a = pg.createConnection(""); Connection b = pg.createConnection("")) {
+            a.setAutoCommit(false);
+            b.setAutoCommit(false);
+            int wroteA = upsertCanary(a, call, model, vector, digest);
+            var bResult = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                try {
+                    int n = upsertCanary(b, call, model, vector, digest);
+                    b.commit();
+                    return n;
+                } catch (Exception e) {
+                    throw new java.util.concurrent.CompletionException(e);
+                }
+            });
+            // non-vacuity: B is waiting on A's uncommitted ring row, so the race reaches the INSERT
+            Thread.sleep(500);
+            assertThat(bResult).as("B's INSERT waits on A's uncommitted row with the same digest").isNotDone();
+            a.commit();
+            int wroteB = bResult.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(wroteA).as("A wrote its entry").isEqualTo(1);
+            assertThat(wroteB).as("B's unique_violation is caught and refreshes the row, as ON CONFLICT DO UPDATE did").isEqualTo(1);
+        }
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            var ring = DSL.table(DSL.name("nexus", "canary_query_ring"));
+            var cond = DSL.field(DSL.name("tenant_id"), String.class).eq(TENANT)
+                .and(DSL.field(DSL.name("vector_digest"), byte[].class).eq(digest));
+            assertThat(ctx.fetchCount(ring, cond)).as("two writers, one digest: one ring row").isEqualTo(1);
+            assertThat(ctx.fetchCount(ring, cond.and(DSL.field(DSL.name("collection_id"), Long.class).eq(halfId))))
+                .as("and it carries the registry's id").isEqualTo(1);
+        }
+    }
+
+    private static int upsertCanary(Connection c, String call, String model, String vector, byte[] digest) throws Exception {
+        try (var ps = c.prepareStatement(call)) {
+            ps.setString(1, TENANT);
+            ps.setString(2, HALF);
+            ps.setString(3, model);
+            ps.setString(4, vector);
+            ps.setBytes(5, digest);
+            try (var rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
+        }
+    }
+
     /** "view nexus.v" or "trigger nexus.t.name" for every view rule and trigger that pg_depend records as depending on one of the columns. */
     private static List<String> nameColumnDependents(DSLContext ctx, List<String[]> columns) {
         List<String> out = new ArrayList<>();
