@@ -37,7 +37,7 @@ from nexus import mcp_infra
 from nexus.db import http_vector_client
 from nexus.mcp import plan_cache_registry
 from nexus.service_handles import SharedClientSlot
-from tests import _ddl_counter, _engine_substrate, _storage_touch_guard, _tenant_pool
+from tests import _ddl_counter, _engine_substrate, _storage_touch_guard, _tenant_drop, _tenant_pool
 from tests._engine_substrate import drop_test_tenant, ensure_engine, mint_test_tenant
 from tests._tenant_pool import TenantLeakError, TenantLeaseBusyError, TenantPool
 
@@ -1089,7 +1089,7 @@ _GAVE_UP = ("ERROR:  nexus.drop_tenant_partitions(t): gave up after 5 attempts: 
 def _scripted_drop(monkeypatch: pytest.MonkeyPatch, replies: list[tuple[int, str]]) -> tuple[list[str], list[float]]:
     """Run drop_test_tenant against psql replies (returncode, stderr), one per call; the holder query answers one row.
     Returns the SQL each call ran and the backoff sleeps taken."""
-    from tests import _engine_substrate as es  # noqa: PLC0415
+    from tests import _tenant_drop as es  # noqa: PLC0415
 
     sqls: list[str] = []
 
@@ -1158,7 +1158,7 @@ def test_a_held_lock_makes_the_drop_give_up_name_the_holder_and_then_drop_once_r
                            "SELECT 'locked';\nSELECT pg_catalog.pg_sleep(120);\n")
         holder.stdin.flush()
         assert holder.stdout.readline().strip() == "locked", "the holder took its lock"
-        monkeypatch.setattr(_engine_substrate, "DROP_LOCK_RETRY_DELAYS_S", ())
+        monkeypatch.setattr(_tenant_drop, "DROP_LOCK_RETRY_DELAYS_S", ())
         with structlog.testing.capture_logs() as logs:
             assert drop_test_tenant(state, tenant) is False, "the held lock makes the drop give up"
         holders = [h for e in logs if e["event"] == "test_tenant_drop_lock_holders" for h in e["holders"]]
