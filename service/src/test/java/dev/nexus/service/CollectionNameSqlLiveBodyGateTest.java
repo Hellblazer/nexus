@@ -156,7 +156,9 @@ class CollectionNameSqlLiveBodyGateTest {
      * {@code starts_with(m.label, ...)} and compares collection names only by equality against {@code catalog_collections.name}, so
      * {@link #NAME_PARSING_CENSUS} is unchanged.
      */
-    static final int LIVE_FUNCTIONS_PIN = 124;
+    // 124 -> 162: nexus-p2m1x.24 (RDR-229 P3.5b), vectors-077 adds 38 id twins (<name>_by_id: 37 search functions, no
+    // hybrid_search twin, and chunk_live_owners_by_id); the name functions they twin stay live until P4.1.
+    static final int LIVE_FUNCTIONS_PIN = 162;
 
     // ── model ───────────────────────────────────────────────────────────
 
