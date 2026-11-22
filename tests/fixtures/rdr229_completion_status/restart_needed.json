@@ -1,0 +1,29 @@
+{
+  "boot_work": [
+    {
+      "id": "rdr229-restart",
+      "what": "restart the engine once: it applies the P3.5b changesets that a collection rename waits for (12 of 12 not applied yet)",
+      "started_at": "2026-11-22T12:00:00Z",
+      "done": null,
+      "total": null,
+      "unit": null,
+      "safe_to_stop": true,
+      "on_stop": "nothing is lost: the restart is the step that applies them",
+      "step": null
+    }
+  ],
+  "rdr229_completion": {
+    "gate1": true,
+    "gate2": true,
+    "gate3": false,
+    "gates_holding": 2,
+    "gates_total": 3,
+    "summary": "gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), so no collection has a valid one",
+    "gate3_why": "this release builds no id-predicate index (P3.4), so no collection has a valid one",
+    "labels_total": 16,
+    "labels_incomplete": [],
+    "checks_missing": [],
+    "validate_waits": [],
+    "rename_missing": "restart"
+  }
+}
