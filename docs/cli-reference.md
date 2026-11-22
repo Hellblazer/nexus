@@ -3123,8 +3123,10 @@ Click's own usage errors (a missing sha, `--timeout` out of range) exit 2, as fo
 ### nx ci ack
 
 ```
-nx ci ack <sha> [--topic nexus-develop--owner] [--not-mine [--note TEXT]]
+nx ci ack <sha> [--base BASE | --topic BASE--owner] [--not-mine [--note TEXT]]
 ```
+
+`--base` names the board of any repo (`--base halcyon-main` acks on `board/ci/halcyon-main--owner`); with neither `--base` nor `--topic` the board is `nexus-develop`, as before. `--topic` is the same post spelled whole, and giving both is refused. The ack, the disclaim and the `nx group ack-times` display read whatever board they are pointed at and name no repo.
 
 `--not-mine` says the red is not yours instead of acknowledging it. The row is `kind=disclaim` (same subspace, same sha handling, same owner check, same `from=<your identity id>`), and `--note` adds one line (at most 200 printable characters, no control characters) as the row's body. A disclaim is recorded only until the engine cut that reads it: from that cut on, a disclaim from the red's current owner hands the red on at once, as a missed deadline does (reason `disclaimed`), and a disclaim from anyone else is ignored (so the verb refuses a caller who is not the owner). An ack only says "seen"; a disclaim says "someone else should take this". `nx group ack-times` lists a red's disclaims (`disclaims` in `--json`, one `disclaimed by` line each) and never counts one as an ack.
 

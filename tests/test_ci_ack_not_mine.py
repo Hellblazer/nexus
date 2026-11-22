@@ -163,6 +163,60 @@ def test_a_disclaim_on_another_subspace_is_not_restamped(wire: _Wire, identity: 
     assert wire.sent[0]["dims"]["from"] == "marginalia"
 
 
+# ── any repo's board: --base names it (Sam, T2 nexus/sam-ruling-generalize-252-2026-11-22) ─────────────────────
+
+
+@pytest.mark.parametrize("flags", [[], ["--not-mine"]], ids=["ack", "not-mine"])
+def test_base_names_another_repos_board_and_the_default_is_nexus_develop(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch, flags: list[str],
+) -> None:
+    _open_red(wire)
+    assert _run([*flags, SHA[:7], "--base", "halcyon-main"], wire, monkeypatch).exit_code == 0
+    assert wire.sent[-1]["subspace"] == "board/ci/halcyon-main--owner"
+    assert wire.sent[-1]["keys"] == {"topic": "halcyon-main--owner"}
+    assert _run([*flags, SHA[:7]], wire, monkeypatch).exit_code == 0
+    assert wire.sent[-1]["subspace"] == OWNER_SUBSPACE, "no --base: today's board"
+
+
+def test_base_and_topic_together_are_refused_and_a_base_must_be_a_bare_base(
+    wire: _Wire, identity: list[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _open_red(wire)
+    both = _run([SHA[:7], "--base", "halcyon-main", "--topic", "halcyon-main--owner"], wire, monkeypatch)
+    assert both.exit_code != 0 and "--base" in both.output and "--topic" in both.output
+    for bad in ("halcyon-main--owner", "a/b", "", "-x"):
+        result = _run([SHA[:7], "--base", bad], wire, monkeypatch)
+        assert result.exit_code != 0, bad
+    assert wire.sent == []
+
+
+def test_no_repo_is_hardcoded_in_the_ack_the_reds_split_or_the_ack_times_display() -> None:
+    """Only the one default in ci_cmd names a board; ci_ack, ci_reds and the ack-times code read what the topic gives."""
+    from pathlib import Path  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parent.parent / "src" / "nexus"
+    for name in ("ci_ack.py", "ci_reds.py"):
+        assert "nexus-develop" not in (root / name).read_text(encoding="utf-8"), name
+    cmd = (root / "commands" / "ci_cmd.py").read_text(encoding="utf-8")
+    assert cmd.count('DEFAULT_BASE = "nexus-develop"') == 1
+    ack_src = cmd.split('@ci_group.command(name="ack")')[1]
+    assert "nexus-develop" not in ack_src.replace("DEFAULT_BASE", ""), "the ack verb names its board through DEFAULT_BASE only"
+
+
+def test_a_disclaim_on_another_boards_red_is_split_and_shown_like_any_other() -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from nexus import ci_reds  # noqa: PLC0415
+
+    def row(kind: str, at: str, who: str, **body: Any) -> Any:
+        return SimpleNamespace(id=f"{kind}{at}", created_at=at, dims={"from": who, "kind": kind, "sha": SHA},
+                               body=json.dumps(body) if kind == "owner" else "mine no more", sender_session=None)
+
+    reds, _ = ci_reds.split([row("owner", "2026-11-20T10:00:00Z", "engine", owner="i5", episode_at=EP),
+                             row("disclaim", "2026-11-20T10:02:00Z", "i5")])
+    assert len(reds) == 1 and [r.body for _, r in reds[0].disclaims] == ["mine no more"]
+
+
 def test_the_help_says_what_it_does_now_and_after_the_engine_cut() -> None:
     result = CliRunner().invoke(ci_cmd.ci_group, ["ack", "--help"])
     text = " ".join(result.output.split())

@@ -18,6 +18,9 @@ _GH_REPO = re.compile(r"[\w.-]+/[\w.-]+")
 _OWNER_TOPIC = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*--owner")
 #: Rows of the owner subspace one ``nx ci ack`` reads, newest first: far more than one red writes.
 _ACK_READ_ROWS = 300
+#: The board base `nx ci ack` reads when neither --base nor --topic names one: nexus's own develop. The one place a
+#: board is named; every other repo passes --base.
+DEFAULT_BASE = "nexus-develop"
 #: The longest note a disclaim carries: one line a threads entry or a terminal shows whole.
 _NOTE_MAX = 200
 #: The clock the unknown-subspace fallback measures the board wait with (a seam for tests).
@@ -249,8 +252,12 @@ def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | Non
 
 @ci_group.command(name="ack")
 @click.argument("sha")
-@click.option("--topic", default="nexus-develop--owner", show_default=True,
-              help="The owner post to acknowledge on: board/ci/<TOPIC>. A base topic, a double dash and `owner`.")
+@click.option("--base", default=None,
+              help=f"The board base whose red this is, for a repo other than nexus: the owner post is "
+                   f"board/ci/<BASE>--owner [default: {DEFAULT_BASE}].")
+@click.option("--topic", default=None,
+              help=f"The whole owner post, board/ci/<TOPIC>: a base, a double dash and `owner` (the same as --base "
+                   f"with `--owner` added; give one of the two) [default: {DEFAULT_BASE}--owner].")
 @click.option("--not-mine", "not_mine", is_flag=True,
               help="Say the red is not yours instead of acknowledging it: post a `disclaim` row for SHA. The engine "
                    "does not act on it yet, so it is recorded only; from the engine cut that reads it, a disclaim "
@@ -259,7 +266,7 @@ def _current_red(store: Any, subspace: str, topic: str) -> ci_reds.Episode | Non
 @click.option("--note", default=None,
               help=f"With --not-mine, a line saying why or who has it (at most {_NOTE_MAX} characters, no control "
                    "characters). Shown by `nx group ack-times`.")
-def ci_ack_cmd(sha: str, topic: str, not_mine: bool, note: str | None) -> None:
+def ci_ack_cmd(sha: str, base: str | None, topic: str | None, not_mine: bool, note: str | None) -> None:
     """Acknowledge a red develop: post the owner's ack for SHA, signed with this session's identity id.
 
     With --not-mine the row is a `disclaim` instead: "this red is not mine". It is recorded only until the engine cut
@@ -282,8 +289,15 @@ def ci_ack_cmd(sha: str, topic: str, not_mine: bool, note: str | None) -> None:
         raise click.ClickException(f"the note must be a single line of printable characters, at most {_NOTE_MAX} long")
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", sha):
         raise click.ClickException(f"{sha!r} is not a commit sha: give 7 to 40 hex digits")
+    if base is not None and topic is not None:
+        raise click.ClickException("give --base or --topic, not both: --topic is the base with `--owner` added")
+    if base is not None:
+        if base.endswith("--owner") or not _OWNER_TOPIC.fullmatch(f"{base}--owner"):
+            raise click.ClickException(f"{base!r} is not a board base: give the bare base, as in {DEFAULT_BASE}")
+        topic = f"{base}--owner"
+    topic = topic if topic is not None else f"{DEFAULT_BASE}--owner"
     if not _OWNER_TOPIC.fullmatch(topic):
-        raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in nexus-develop--owner")
+        raise click.ClickException(f"{topic!r} is not an owner post: name it <base topic>--owner, as in {DEFAULT_BASE}--owner")
     try:
         identity = ci_ack.counted_identity()
     except ValueError as exc:
