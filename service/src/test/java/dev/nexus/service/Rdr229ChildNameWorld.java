@@ -106,7 +106,11 @@ final class Rdr229ChildNameWorld {
 
     /** A chunk of {@code coll} (registered under {@code id}); its chash is the hash of its collection and tag, so the world's chunks are all distinct. */
     static byte[] chunk(DSLContext ctx, String tenant, String coll, long id, String model, int dim, String tag) {
-        byte[] hash = Chash.ofText(coll + "/" + tag).toBytes();
+        return chunk(ctx, tenant, coll, id, model, dim, tag, Chash.ofText(coll + "/" + tag).toBytes());
+    }
+
+    /** As above with the chash given: for the tests that hold the same chash under another tenant, model or label. */
+    static byte[] chunk(DSLContext ctx, String tenant, String coll, long id, String model, int dim, String tag, byte[] hash) {
         ctx.insertInto(CHUNKS)
             .set(CHUNKS.TENANT_ID, tenant).set(CHUNKS.COLLECTION, coll).set(CHUNKS.CHASH, hash)
             .set(CHUNKS.EMBEDDING_MODEL, model).set(CHUNKS.CHUNK_TEXT, tag + " text")
