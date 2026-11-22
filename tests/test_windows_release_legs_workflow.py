@@ -939,3 +939,28 @@ def test_every_module_the_windows_test_set_ignores_is_posix_only() -> None:
         assert module_skip.search(path.read_text(encoding="utf-8")), (
             f"{rel} is left out of the Windows test set, so it must skip its whole module on win32"
         )
+
+
+def test_the_p36_label_test_runs_against_the_real_engine_with_a_floor() -> None:
+    """nexus-21kr3: the label test is `integration` and needs the engine, so the conformance step (substrate none,
+    default addopts) would deselect it without a word. Its own job selects it and requires it to have PASSED."""
+    target = "tests/integration/test_rdr229_p36_label_windows.py"
+    conformance = next(s["run"] for s in _doc(REHEARSAL)["jobs"]["conformance"]["steps"] if "pytest" in s.get("run", ""))
+    assert target not in conformance, "the conformance step deselects integration tests; the label test runs here"
+    job = _doc(REHEARSAL)["jobs"]["label-windows"]
+    assert job["runs-on"] == LABEL
+    assert "NX_TEST_T2_SUBSTRATE" not in job.get("env", {}), "the label test needs the engine substrate"
+    steps = job["steps"]
+    assert any("build-gate-jar.sh" in s.get("run", "") for s in steps), "the substrate needs the gate jar"
+    assert any("setup-graalvm" in s.get("uses", "") for s in steps), "the substrate needs java on PATH"
+    run = next(s["run"] for s in steps if "pytest" in s.get("run", ""))
+    assert target in run and "-m integration" in run and "--junitxml=label-windows-junit.xml" in run
+    floor = next(s["run"] for s in steps if "check_junit_floor.py" in s.get("run", ""))
+    assert "label-windows-junit.xml" in floor and "--max-skipped 0" in floor
+    test_name = re.search(r"--require-passed (\S+)", floor).group(1)
+    assert f"def {test_name}(" in (Path(__file__).parent / "integration" / Path(target).name).read_text(encoding="utf-8")
+    paths = _triggers(_doc(REHEARSAL))["push"]["paths"]
+    for path in ("src/nexus/corpus.py", "src/nexus/collection_rename.py",
+                 "service/src/main/java/dev/nexus/service/db/CollectionLabel.java",
+                 "tests/_chunk_seed.py", "tests/_catalog_fixture_ops.py"):
+        assert path in paths, path
