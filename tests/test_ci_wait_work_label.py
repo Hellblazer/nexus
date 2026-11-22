@@ -10,6 +10,12 @@ from click.testing import CliRunner
 from nexus import ci_wait
 from nexus.commands import ci_cmd
 from nexus.commands.ci_cmd import ci_group
+
+
+@pytest.fixture(autouse=True)
+def _origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`nx ci wait` reads the repo from the origin remote and has no default repo: these tests are nexus's."""
+    monkeypatch.setattr(ci_cmd, "_origin_url", lambda: "git@github.com:Hellblazer/nexus.git")
 from nexus.identity.work import Label
 
 SHA = "a0dc17ec284ffce6d4ff5264a626b7ef8e1a293a"
