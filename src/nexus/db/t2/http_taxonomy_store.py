@@ -196,7 +196,7 @@ def _uniform_embedding_matrix(
 #: Remedy line for the rebuild read: a partial old set is worse than a refusal,
 #: because it transfers operator labels for some centroids and silently marks
 #: the rest pending.
-#: ``{collection}`` is substituted by :func:`_uniform_embedding_matrix`, which
+#: ``{quoted_collection}`` is substituted, with :func:`shlex.quote`, by :func:`_uniform_embedding_matrix`, which
 #: is the only caller and does have the name in hand. The first version left a
 #: literal ``<collection>`` in the text: a remedy naming a real verb that the
 #: operator still has to fill in by hand is only half-reachable, and calling
