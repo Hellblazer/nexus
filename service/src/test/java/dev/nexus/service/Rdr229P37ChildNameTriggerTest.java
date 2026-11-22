@@ -50,7 +50,7 @@ class Rdr229P37ChildNameTriggerTest {
         String t = "trg_catalog_document_chunks_name_from_chunk";
         assertThatThrownBy(() -> w.withoutTrigger("catalog_document_chunks", t, () -> w.run(w.manifestInsert("cn.m1.d0", 0, w.newName, w.ex[0]))))
             .as("control: without the trigger the chunk name key refuses a manifest row for an existing chunk under the new label")
-            .hasMessageContaining("fk_catalog_chunks_chunk");
+            .hasStackTraceContaining("fk_catalog_chunks_chunk");
 
         w.run(w.manifestInsert("cn.m1.d0", 0, w.newName, w.ex[0]), w.manifestInsert("cn.m1.d1", 0, w.newName, w.nw[0]));
 
@@ -64,7 +64,7 @@ class Rdr229P37ChildNameTriggerTest {
         var w = world("o1");
         String t = "trg_chunk_orphaned_at_name_from_chunk";
         assertThatThrownBy(() -> w.withoutTrigger("chunk_orphaned_at", t, () -> w.run(w.orphanedInsert(w.newName, w.ex[0]))))
-            .as("control: without the trigger the key refuses it").hasMessageContaining("chunk_orphaned_at_chunk_fk");
+            .as("control: without the trigger the key refuses it").hasStackTraceContaining("chunk_orphaned_at_chunk_fk");
 
         w.run(w.orphanedInsert(w.newName, w.ex[0], w.nw[0]));
 
@@ -81,7 +81,7 @@ class Rdr229P37ChildNameTriggerTest {
         var w = world("t1");
         String t = "trg_topic_assignments_name_from_chunk";
         assertThatThrownBy(() -> w.withoutTrigger("topic_assignments", t, () -> w.run(w.assignmentInsert(w.newName, w.ex[0]))))
-            .as("control: without the trigger the key refuses it").hasMessageContaining("topic_assignments_chunk_fk");
+            .as("control: without the trigger the key refuses it").hasStackTraceContaining("topic_assignments_chunk_fk");
 
         w.run(w.assignmentInsert(w.newName, w.ex[0], w.nw[0]));
 
