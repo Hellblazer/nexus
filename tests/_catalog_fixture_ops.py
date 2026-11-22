@@ -309,6 +309,7 @@ def _run_psql(sql: str) -> None:
     Shared by :func:`bypass_fk_seed_chunk` and
     :func:`fk_dropped_for_dangling_seed`.
     """
+    import os
     import subprocess
 
     from tests._engine_substrate import _DBNAME, ensure_engine
@@ -317,7 +318,8 @@ def _run_psql(sql: str) -> None:
     proc = subprocess.run(
         [str(state["pg_bin"] / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", _DBNAME, "-v", "ON_ERROR_STOP=1", "-1", "-f", "-"],
-        input=sql, capture_output=True, text=True,
+        input=sql, capture_output=True, text=True, encoding="utf-8",
+        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
     )
     if proc.returncode != 0:
         raise RuntimeError(f"_run_psql: psql failed: {proc.stderr}\nSQL: {sql}")
