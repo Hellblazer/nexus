@@ -15,6 +15,7 @@ from nexus.tuple_directory import (
     check_from_address_is_own,
     from_address_not_own_message,
     resolve_default_from,
+    resolve_default_sender,
     resolve_send,
     validate_from_address,
 )
@@ -61,6 +62,44 @@ class TestResolveDefaultFrom:
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         with pytest.raises(DirectoryResolutionError, match="no resolvable session id"):
             resolve_default_from(state_dir=tmp_path, claude_pid=4242)
+
+
+class TestResolveDefaultSender:
+    """RDR-253 Phase 2: a send's default ``from`` is the sender's own identity when it is bound, so a reply to it reaches
+    the sender (a session id is no longer an address). With no identity it is :func:`resolve_default_from`'s answer."""
+
+    def test_a_bound_sender_defaults_to_its_identity(self, tmp_path, monkeypatch) -> None:
+        import nexus.tuple_directory as td  # noqa: PLC0415
+
+        write_session_marker(tmp_path, 4242, "marker-session-id")
+        monkeypatch.setattr(td, "_own_identity", lambda _sd, _pid: "i12")
+        assert resolve_default_sender(state_dir=tmp_path, claude_pid=4242) == "i12"
+
+    def test_an_unbound_sender_defaults_to_the_session_as_before(self, tmp_path, monkeypatch) -> None:
+        import nexus.tuple_directory as td  # noqa: PLC0415
+
+        write_session_marker(tmp_path, 4242, "marker-session-id")
+        monkeypatch.setattr(td, "_own_identity", lambda _sd, _pid: "")
+        assert resolve_default_sender(state_dir=tmp_path, claude_pid=4242) == "marker-session-id"
+
+    def test_with_neither_an_identity_nor_a_session_it_refuses_as_before(self, tmp_path, monkeypatch) -> None:
+        import nexus.tuple_directory as td  # noqa: PLC0415
+
+        monkeypatch.setattr(td, "_own_identity", lambda _sd, _pid: "")
+        monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
+        monkeypatch.delenv("NX_SESSION_ID", raising=False)
+        with pytest.raises(DirectoryResolutionError, match="no resolvable session id"):
+            resolve_default_sender(state_dir=tmp_path, claude_pid=4242)
+
+    def test_an_identity_lookup_that_raises_falls_back_to_the_session(self, tmp_path, monkeypatch) -> None:
+        import nexus.tuple_directory as td  # noqa: PLC0415
+
+        def boom(_sd, _pid):
+            raise OSError("unreadable token files")
+
+        write_session_marker(tmp_path, 4242, "marker-session-id")
+        monkeypatch.setattr(td, "_own_identity", boom)
+        assert resolve_default_sender(state_dir=tmp_path, claude_pid=4242) == "marker-session-id"
 
 
 class TestCheckFromAddressIsOwn:

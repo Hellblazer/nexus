@@ -422,3 +422,22 @@ def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | Non
         return env_id
 
     raise DirectoryResolutionError(no_session_id_message())
+
+
+def resolve_default_sender(*, state_dir: Path | None = None, claude_pid: int | None = None) -> str:
+    """Default ``from`` of a send (``mailbox_send``, a ``tuple_ack`` reply): this sender's own identity when it is bound,
+    else :func:`resolve_default_from`'s session id (RDR-253 Phase 2).
+
+    A session id is not a mail address, so a recipient replying to a session-id ``from`` was refused; an identity is one.
+    An identity lookup that fails is "no identity" and falls back, never a failed send. :func:`resolve_default_from`
+    itself stays the session reader (``nx ask`` and the sender-session comparisons want the session)."""
+    from nexus import config as _nx_config  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+    from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
+
+    sd = state_dir if state_dir is not None else _nx_config.nexus_config_dir()
+    pid = claude_pid if claude_pid is not None else find_immediate_claude_pid()
+    try:
+        identity = _own_identity(sd, pid)
+    except Exception:  # noqa: BLE001 -- an unreadable token file or an unreachable index is no identity
+        identity = ""
+    return identity or resolve_default_from(state_dir=sd, claude_pid=pid)

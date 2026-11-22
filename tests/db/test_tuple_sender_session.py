@@ -579,7 +579,7 @@ class TestDefaultReplyFrom:
     def _own(self, monkeypatch) -> None:
         import nexus.mcp.core as core
 
-        monkeypatch.setattr(core, "resolve_default_from", lambda: self.OWN)
+        monkeypatch.setattr(core, "resolve_default_sender", lambda: self.OWN)
 
     def _fill(self, reply):
         from nexus.mcp.core import _default_reply_from
@@ -616,6 +616,6 @@ class TestDefaultReplyFrom:
         def _raise():
             raise DirectoryResolutionError("no session")
 
-        monkeypatch.setattr(core, "resolve_default_from", _raise)
+        monkeypatch.setattr(core, "resolve_default_sender", _raise)
         reply = {"subspace": "mailbox/x", "keys": {"to": "x"}, "dims": {"kind": "ack"}}
         assert self._fill(reply) is reply

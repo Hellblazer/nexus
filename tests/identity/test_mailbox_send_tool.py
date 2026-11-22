@@ -51,7 +51,7 @@ def wired(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(core, "identity_alias_lookup", lambda: alias)
     monkeypatch.setattr(core, "identity_session_lookup", lambda: session)
-    monkeypatch.setattr(core, "resolve_default_from", lambda: SENDER)
+    monkeypatch.setattr(core, "resolve_default_sender", lambda: SENDER)
     monkeypatch.setattr(core, "_t2_index_write", lambda fn, op="": fn(type("Db", (), {"tuples": tuples})()))
     return tuples, asked, answers, sessions
 
@@ -112,3 +112,31 @@ def test_an_agent_id_is_mailed_in_its_own_mailbox(wired) -> None:
     result = core.mailbox_send("a0123456789abcdef", body="hi")
     assert (result["to"], result["address_kind"]) == ("a0123456789abcdef", "agent")
     assert tuples.written[0][0] == "mailbox/a0123456789abcdef"
+
+
+def test_a_reply_to_a_default_from_message_from_a_bound_sender_reaches_the_senders_identity_mailbox(
+    wired, monkeypatch, tmp_path,
+) -> None:
+    """RDR-253 Phase 2: the default ``from`` of a bound sender is its identity, so the recipient's reply (``to`` =
+    that ``from``) lands in ``mailbox/<sender identity>``. With a session-id ``from`` the same reply is refused."""
+    import nexus.tuple_directory as td  # noqa: PLC0415
+
+    tuples, _asked, answers, sessions = wired
+    answers["bob"] = {"identity": "i7", "identity_state": "live", "state": "live"}
+    sessions[SENDER] = "i12"
+    # the real default-from chain; only the sender's token-file identity is stubbed
+    monkeypatch.setattr(td, "_own_identity", lambda _sd, _pid: "i12")
+    monkeypatch.setattr(core, "resolve_default_sender", lambda: td.resolve_default_sender(state_dir=tmp_path, claude_pid=4242))
+
+    sent = core.mailbox_send("bob", body="question")
+    assert sent["from"] == "i12", sent
+    assert tuples.written[-1][0] == "mailbox/i7"
+
+    reply_to = tuples.written[-1][2]["from"]  # what the recipient reads in the row, and answers to
+    reply = core.mailbox_send(reply_to, body="answer", from_address="a0123456789abcdef")
+    assert reply["to"] == "i12" and reply["address_kind"] == "identity", reply
+    assert tuples.written[-1][0] == "mailbox/i12"
+
+    # and the unbound sender's session-id `from` is what that reply could not have reached
+    refused = core.mailbox_send(SENDER, body="answer", from_address="a0123456789abcdef")
+    assert "is a session id" in refused["error"] and "i12" in refused["error"]

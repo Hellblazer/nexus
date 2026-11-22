@@ -127,7 +127,7 @@ from nexus.tuple_directory import (
     DirectoryResolutionError,
     check_from_address_is_own,
     no_session_id_message,
-    resolve_default_from,
+    resolve_default_sender,
     resolve_env_session_id,
     identity_alias_lookup,
     identity_session_lookup,
@@ -9288,10 +9288,10 @@ _REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
 
 
 def _default_reply_from(reply: dict[str, Any] | None) -> dict[str, Any] | None:
-    """A mailbox reply whose dims omit ``from`` is sent as this session
-    (nexus-g2ckl): the same id ``mailbox_send`` defaults to, which is also the
-    session the engine stamps the reply with, so a genuine reply reads
-    unlabelled. Returns a copy; any other reply, or no resolvable session,
+    """A mailbox reply whose dims omit ``from`` is sent as this sender
+    (nexus-g2ckl): the same address ``mailbox_send`` defaults to (the bound
+    identity, else the session the engine stamps the reply with), so a
+    genuine reply reads unlabelled. Returns a copy; any other reply, or no resolvable session,
     passes through untouched and the engine judges it as before."""
     if not isinstance(reply, dict) or not str(reply.get("subspace", "")).startswith("mailbox/"):
         return reply
@@ -9301,7 +9301,7 @@ def _default_reply_from(reply: dict[str, Any] | None) -> dict[str, Any] | None:
     if dims and dims.get("from"):
         return reply
     try:
-        own = resolve_default_from()
+        own = resolve_default_sender()
     except DirectoryResolutionError:
         return reply
     return {**reply, "dims": {**(dims or {}), "from": own}}
@@ -9607,8 +9607,8 @@ def mailbox_send(
     from_address: Annotated[str | None, Field(
         description=(
             "Optional sender override -- this session's own id, its own "
-            "identity, or an agent id. Defaults to this MCP server's own "
-            "current session."
+            "identity, or an agent id. Defaults to this server's own "
+            "identity when bound, else its current session."
         ),
     )] = None,
 ) -> dict:
@@ -9633,8 +9633,9 @@ def mailbox_send(
     <new> on <date>". `from_address`, when given, must be an
     agent id, this server's own session id or its own identity (any other session id or identity is
     refused; `from` is a claim, JDR-002). With no `from_address`, the sender
-    defaults to this MCP server's own current session, and is refused
-    when that cannot be resolved. A missing or blank `body` is refused too.
+    defaults to this server's own identity when it is bound (so a reply to
+    the message reaches it), else its own current session, and is refused
+    when neither can be resolved. A missing or blank `body` is refused too.
     Each refusal writes nothing.
     """
     if body is None or not body.strip():
@@ -9647,7 +9648,7 @@ def mailbox_send(
     try:
         from_id = (
             check_from_address_is_own(from_address) if from_address
-            else resolve_default_from()
+            else resolve_default_sender()
         )
 
         target = resolve_send(to, identity_alias_lookup(), identity_session_lookup())
