@@ -169,10 +169,10 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
 12. **Verified (source search).** Sam's corrections already reach later
     sessions as writing guidance: his global instructions and the auto-memory
     index load into every session and the feedback files are read on demand,
-    and `site-page` §3 (lines 34-47) lists register rules for both of its
+    and `site-page` §3 (starts at line 36 of `.claude/skills/site-page/SKILL.md`) lists register rules for both of its
     genres. The voice pass in §5 item 3 is
     cut-only, runs in parallel with two other passes, and its findings are
-    applied in one pass (lines 62-70).
+    applied in one pass (item 3 of §5 is at line 69).
 13. **Verified (source search).** Every worktree of this repo shares one git
     common directory: `git rev-parse --path-format=absolute --git-common-dir`
     prints the primary's `.git` from the primary and from every worktree (the
@@ -223,20 +223,23 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
 - [x] **Voice kept.** Sam judges edited essays still in his voice. —
   **Status**: Verified, Sam 2026-10-25 judged the edited essay still in his
   voice (`nexus_rdr/221-phase2-results`). One essay. — **Method**: Phase 2
-- [x] **Memory helps.** A rejected edit is not proposed again, and a
-  style-sheet entry is applied on the next document. — **Status**: Measured,
-  narrowly (nexus-ger02.16): the same change at the same place is not shown
-  again after one rerun in which the author rejected every shown edit: 0 of 57
-  rejected edits in 13 measurable runs on two documents (a no-memory editor
-  repeats 92.6% on the small one and 38.3% on the storage one), and 0 of 20 in
-  10 runs on the small one with two edits rejected and the rest held. Not
+- [x] **Memory helps, first half: a rejected edit is not proposed again.**
+  — **Status**: Measured, narrowly (nexus-ger02.16): the same change at the
+  same place is not shown again after one rerun in which the author rejected
+  every shown edit: 0 of 57 rejected edits in 13 measurable runs on two
+  documents (a no-memory editor repeats 92.6% on the small one and 38.3% on the
+  storage one), and 0 of 20 in 10 runs on the small one with two edits rejected
+  and the rest held. The pre-registered floor is 10 measurable runs per
+  document; the small document had 4 and the storage one 9 in the first batch
+  (`tests/prose_edit/acceptance/README.md`, line 175), so the storage document
+  missed the floor by one; the second batch added 10 on the small one. Not
   measured: a class of change (another em dash is proposed again, by design), a
-  different change at the same spot, several reruns, a document changed
-  between runs (scripted test only), and the style-sheet half. In the first
-  batch the small document had 4 measurable runs and the storage one 9, short
-  of the 10 the decision asks for; the second batch added 10 on the small one.
-  — **Method**:
-  Phase 1 test, Phase 2 observation
+  different change at the same spot, several reruns, and a document changed
+  between runs (scripted test only). — **Method**: Phase 1 test, Phase 2
+  observation
+- [waived: not measured] **Memory helps, second half: a style-sheet entry is
+  applied on the next document.** — **Status**: Not measured in any run
+  (nexus-ger02.16 measured the first half only). — **Method**: none
 - [x] **Readable in Typora.** Typora renders inline `<del>` and `<ins>` in a
   Markdown file, and Sam finds the marked-up copy workable. — **Status**:
   Verified — **Method**: Spike (2026-09-28). No longer load-bearing: the
@@ -348,7 +351,8 @@ lengthening clause of section 6 applies.
     writes, accepts);
   - density the voice card lists as deliberate.
 
-`line-editor.md` rules change in two places. The standing rule (line 62)
+`line-editor.md` rules change in two places. The standing rule (line 62 when this was written; its replacement is line 68 of
+`prose-edit/agents/line-editor.md`)
 "Prefer cutting. A cut has an empty new string. Never put in a claim, number,
 name, source or example the text does not contain." becomes:
 
@@ -375,7 +379,7 @@ lint or mechanical check, any sweep of existing documents, and a separate parse
 pass. The accepted text demoted a prefix that failed the Step 1a.4 tally to
 query-only by a repo or document style-sheet entry that Sam approves. The
 tally was dropped on 2026-11-22, so the demotion mechanism (nexus-b0b40,
-deferred) is not active, and no demotion is planned. The
+closed as moot) is not active, and no demotion is planned. The
 `site-page` section 3 query-only list was never that mechanism: it is keyed on
 section 3 bullets.
 
@@ -656,7 +660,11 @@ Suggestions in the MarkupEditor app (the chat for a stdin run), the rejection
 filter before display, accept in the app or by number, exact-match apply, session record, the offer to add a correction to
 the style sheet.
 
-**Exit**: the Test Plan scenarios below pass.
+**Exit**: the Test Plan scenarios below pass. What that exit does not claim is
+listed in `tests/prose_edit/acceptance/README.md`, "What Phase 1 exit does not
+claim": no batch ran at the final tree; the review loop was not re-run on the
+MarkupEditor route; scenarios 7, 8, 12 and 14 are covered by unit tests only;
+and the stand-in harness (nexus-scmcs.3) is still in progress.
 
 ### Phase 1a: Unpack compression (Amendment A1, nexus-r9ze7)
 
@@ -670,7 +678,7 @@ Phase 2's accept rate is measured on one editor.
 Failing pins first, in `tests/prose_edit/test_brief.py` and
 `tests/prose_edit/test_brief_review.py`: the new section 6 heading and text,
 the parse row and its genre and cut-only limits, the five reason prefixes, the
-query-prefix rule, the optional-word rule, the new line 62 with its guard
+query-prefix rule, the optional-word rule, the new rule (now line 68 of `line-editor.md`) with its guard
 against invented content, and the absence of the old "Prefer cutting." rule.
 Then the text in `brief.py` and `line-editor.md`, and the skill description in
 `SKILL.md`.
@@ -717,7 +725,7 @@ it"). The accepted text counted, over Sam's next five `/prose-edit` runs on
 published docs, the lengthening edits shown for each reason prefix (accepted,
 rejected and held, from the session log) and those the filter dropped, and
 demoted a prefix with at least 5 such edits and fewer than half accepted to
-query-only (nexus-b0b40, deferred, not active). No tally was run. The seeded
+query-only (nexus-b0b40, closed as moot, not active). No tally was run. The seeded
 fixture is the only measured evidence for the unpack feature (see Critical
 Assumptions).
 
@@ -779,11 +787,12 @@ not apply (Amendment A1).
 
 #### Step 3.2: Remaining genres
 
-Exemplars for `how-to` and `commit-message`. Not done: the T2 project
-`nexus_prose` holds genre records for `rdr`, `reference-doc`, `changelog` and
-`exploration-essay` only (read 2026-11-22). Both names exist in the code's
-genre list (`memory.py`, `GENRES`), and a genre with no exemplars runs on the
-style sheet alone (plugin README).
+Exemplars for `how-to` and `commit-message`. Dropped, not done: Sam decided
+on 2026-11-22 ("Drop them"). The T2 project `nexus_prose` holds genre records
+for `rdr`, `reference-doc`, `changelog` and `exploration-essay` only (read
+2026-11-22). Both names exist in the code's genre list (`memory.py`, `GENRES`),
+and a genre with no exemplars runs on the style sheet alone (plugin README).
+Bead nexus-ger02.13's notes carry the correction to its earlier "Done".
 
 #### Step 3.3: Plugin decision
 
@@ -864,17 +873,32 @@ records the source of the tally design).
 Sam's ruling, T2 `nexus/sam-ruling-rdr221-close-2026-11-22`, after the close
 critique `nexus/critique-3616b9868f-none-2026-11-22`.
 
-- **Gap 1, no standing line editor: partly solved.** Genres exist for `rdr`,
-  `reference-doc`, `changelog` and `exploration-essay`; there is no how-to or
-  commit-message genre with exemplars (Step 3.2). The 80-word sentence in
-  `docs/storage-tiers.md` and the long CHANGELOG entries were not exercised: the
-  changelog trial was one short entry, and no stdin or commit-message run was
-  made (the close critique's finding, T2 `nexus/critique-3616b9868f-none-2026-11-22`).
-- **Gap 2, corrections are guidance, never an edit pass: solved.**
+- **Gap 1, no standing line editor: partly solved.** Genres with exemplars
+  exist for `rdr`, `reference-doc`, `changelog` and `exploration-essay`. The
+  `how-to` and `commit-message` genres were dropped (Sam, 2026-11-22, "Drop
+  them"; Step 3.2), and no stdin or commit-message run was made. The editor ran
+  on `docs/storage-tiers.md` in Phase 2 on 2026-10-05, before Amendment A1
+  (2 edits, 5 queries, 1 paragraph cut), and left the 78-word "Domain split
+  (RDR-063...)" sentence untouched (now `docs/storage-tiers.md:194`); no A1 run
+  has been made on it. The changelog trial was one short entry (`CHANGELOG.md:17`),
+  and the long CHANGELOG entries were not exercised (T2
+  `nexus/critique-3616b9868f-none-2026-11-22`, `nexus_rdr/221-phase2-results`).
+- **Gap 2, corrections are guidance, never an edit pass: mechanism solved,
+  coverage partial.** The style-sheet mechanism exists and runs: the T2 style
+  sheet `nexus_prose/stylesheet` holds 8 diagnostics (em dash in new prose,
+  "load-bearing", aphorism or restating closing line, bold-label paragraphs,
+  argument in bullets, unsourced claims, runs of same-length sentences, filler
+  words), and `site-page` §3 adds its register rules for the `how-to` and
+  `exploration-essay` genres. Discovery 3 counts more than twenty corrections.
+  Of the four Gap 2 names, the em dash rule is in the style sheet and "lead
+  with the point" is in `site-page` §3; "no trope headings" and "one term per
+  concept" are in `site-page` §3 only, so they reach `how-to` and
+  `exploration-essay` runs and no `rdr`, `reference-doc` or `changelog` run.
 - **Gap 3, review adds and nothing cuts: accepted as reduced** (Sam,
   2026-11-22). The editor cuts filler words only and turns every other
   qualifier into a query. The `site-page` voice pass, now `prose-cut`, remains
-  the only automated cutter, and it covers `web/` pages and essays only.
+  the only cutter applied without a per-edit accept, and it covers `web/` pages
+  and essays only.
 - **Gap 4, voice has no anchor outside one skill: solved.**
 
 ### Scope Verification
@@ -897,7 +921,7 @@ its out-of-scope list is in the Amendment A1 paragraph of the Technical Design.
 Sized to one editor, its memory and a review loop. Anything larger waits for
 Phase 2. Amendment A1 changes three texts and adds one fixture and one scorer
 kind; it adds no lint, store or pass. The demotion mechanism (nexus-b0b40) is
-deferred and not active, since the tally it served was dropped.
+closed as moot and not active, since the tally it served was dropped.
 
 ## References
 
@@ -930,7 +954,7 @@ deferred and not active, since the tally it served was dropped.
 - 2026-10-25: Step 1a.2 text aligned with the fixture as built: no seeded sentence comes from the paper's Table 2, and `run-scenario.sh` has no kind registry (stacked review B4/B5). The section 6 heading stays unconditional; the brief drops the unpack clause for changelog and commit-message.
 - 2026-10-25: Phase 2 PASSED (Sam): 10 of 10 editor edits accepted across the four documents, the essay still in Sam's voice, yes to reaching for it again on all four, comparison accept rates tied at 100% (editor 6/6, brief 14/14). Record: T2 `nexus_rdr/221-phase2-results`. Phase 1a lands on `develop` after this.
 - 2026-11-01: Step 3.1 aligned with cut-only as shipped in conexus 7.91.0 (nexus-ger02.10, amended on Sam's go, nexus-scmcs.5): a second skill, `prose-cut`, in place of a `/prose-edit` mode; the word budget a target, not a cap; the gate fixes first and then applies the cuts with `prose-cut decide`, in place of applying them alongside the other findings. The stale `site-page` line cites are gone from the step. Discovery 12's line cites are left as they read when verified. The review-loop text (marked-up copy, viewer) still matches `develop`; the MarkupEditor review is amended with its branch (nexus-scmcs.4).
-- 2026-11-16: Review loop aligned with the MarkupEditor review as shipped in conexus 8.3.0 (nexus-scmcs, landed at `f2542acfa`; amended under grant 3, nexus-scmcs.2): a path run sends its sentence edits to the MarkupEditor app as suggestions and reads the author's decisions back from it; a stdin run answers in the chat; the Typora viewer, the marked-up copy and the `prose/viewer` record are gone. "Readable in Typora" stays verified and is no longer load-bearing. Step 1.5 and the Technical Environment follow.
+- 2026-11-16: Review loop aligned with the MarkupEditor review as shipped in conexus 8.3.0 (nexus-scmcs, landed at `f2542acfa`; amended under grant 3, nexus-scmcs.2): a path run sends its sentence edits to the MarkupEditor app as suggestions and reads the author's decisions back from it; a stdin run answers in the chat; the Typora viewer and the marked-up copy are gone (the `prose/viewer` T2 record still exists). "Readable in Typora" stays verified and is no longer load-bearing. Step 1.5 and the Technical Environment follow.
 - 2026-11-22: Text amended to match what shipped, before the close (nexus-ger02; Sam's ruling, T2 `nexus/sam-ruling-rdr221-close-2026-11-22`, after the close critique `nexus/critique-3616b9868f-none-2026-11-22`, which found the body describing behaviour that did not ship). Status unchanged; the close waits for a re-critique.
   - Step 1a.4 tally dropped (nexus-zhdxx closed, Sam); the demotion mechanism (nexus-b0b40) is deferred and not active; "Unpacking is accepted" is closed unverified, resting on the seeded fixture alone.
   - The qualifier rule and Test Plan scenario 4 follow Sam's 2026-09-30 ruling as shipped (only filler words are cut; every other qualifier is a query); this records the deviation the 2026-10-03 entry deferred to a post-mortem.
@@ -938,3 +962,4 @@ deferred and not active, since the tally it served was dropped.
   - The marked-up copy and viewer are gone (conexus 8.3.0); Step 1.1, Failure Modes, Day 2, the Test Plan and the Risks mitigation follow. Filter drops are listed in the chat.
   - Critical Assumptions "Worth accepting" and "Voice kept" ticked on the Phase 2 pass; "Memory helps" ticked on its narrow measurement; all four boxes dispositioned.
   - A "Gap disposition" block in the Finalization Gate: Gap 2 solved, Gap 4 solved, Gap 3 accepted as reduced, Gap 1 partly solved.
+- 2026-11-22 (second commit, after the re-critique `nexus/critique-85a121250a-none-2026-11-22-r2`: 0 Critical, 5 Significant, all evidence overclaims): the Gap 1 disposition says the storage-tiers sentence was exercised pre-A1 and untouched, and that the how-to and commit-message genres were dropped by Sam ("Drop them"); Gap 2 reads "mechanism solved, coverage partial" with the corrections not carried; "Memory helps" is split into two boxes (first half ticked with its missed 10-run floor, second half waived as not measured); the Phase 1 exit points at what it does not claim; the stale cites (`line-editor.md` rule now line 68, Discovery 12's `site-page` lines 36 and 69) and the `prose/viewer` claim are corrected; nexus-b0b40 is closed as moot; "the only automated cutter" now reads "the only cutter applied without a per-edit accept".
