@@ -422,7 +422,7 @@ class TestCheckTupleTableBloat:
         missing = tmp_path / "pg_credentials"
         with patch("nexus.config.is_local_mode", return_value=False):
             r = h._check_tuple_table_bloat(creds_path=missing)[0]
-        assert r.ok is False and r.warn is True
+        assert (r.ok, r.skipped, r.warn) == (True, True, False)
         assert r.detail.startswith("managed deployment")
         assert "store operator" in r.detail
 

@@ -52,8 +52,8 @@ _SOFT_WARN = "⚠"
 # database through local credentials (Storage service health, Schema
 # migrations, RLS policies, tuples.dead_tuple_ratio, tuples.sweep_freshness
 # and the three RDR-225 partition rows). A managed box renders it through
-# ``_managed_not_probeable`` (a warning, never a checkmark); a local box with
-# no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (also a warning).
+# ``_managed_not_probeable`` (informational, not applicable: ``[ ]``, never a checkmark and never a warning,
+# Sam 2026-11-22); a local box with no pg_credentials through ``_LOCAL_MODE_NOT_CONFIGURED_DETAIL`` (a warning).
 _MANAGED_NOT_PROBEABLE_DETAIL = (
     "managed deployment — not probeable from this client, so this check was not run: it reads the database "
     "with local admin credentials, which a managed deployment keeps with the store operator, and the "
@@ -64,22 +64,23 @@ _LOCAL_MODE_NOT_CONFIGURED_DETAIL = "service mode not configured (pg_credentials
 
 
 def _managed_not_probeable(label: str) -> HealthResult:
-    """The one rendering of "this row reads local pg_credentials and a managed deployment has none"
-    (nexus-njn1a finding 10; Sam's decision of 2026-10-28, recorded on nexus-g7ijj).
+    """The one rendering of "this row reads local pg_credentials and a managed deployment has none".
 
-    A soft warning, ``ok=False, warn=True``, never a checkmark: the check was not performed, and doctor's
-    checkmark must never render for an unperformed check. A pass here is how a gate that reads these rows
-    (``upgrade_finish._poison_probe``) would take an unverified store for a clean one. Before this the five
-    storage rows warned on every cloud box while the three partition rows, for the same fact, passed as
-    "not applicable". The reason is :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, the same on all eight; recognise it
-    with :func:`is_managed_not_probeable`. A local box with no ``pg_credentials`` is a different fact (service
-    mode is not configured) and keeps its own text.
+    Sam's ruling of 2026-11-22 (T2 nexus/sam-ruling-doctor-cleanup-2026-11-22, superseding the 2026-10-28 decision
+    on nexus-g7ijj that rendered these as a warning): on a managed deployment the check does not apply to this
+    client, so the row is informational, ``ok=True, skipped=True``. It renders ``[ ]`` ("not checked", JSON status
+    ``skipped``), never a checkmark (an unperformed check must not look like a pass) and never ``⚠``, and it is
+    left out of the warning count and the verdict, so a managed box can reach a green doctor. The reason is
+    :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, the same on all eight rows; recognise it with
+    :func:`is_managed_not_probeable`, which is how a gate that must not take an unverified store for a clean one
+    (``upgrade_finish._poison_probe``) still tells this row from a pass. A local box with no ``pg_credentials`` is
+    a different fact (service mode is not configured) and keeps its own text and its warning.
     """
-    return HealthResult(label=label, ok=False, warn=True, detail=_MANAGED_NOT_PROBEABLE_DETAIL)
+    return HealthResult(label=label, ok=True, skipped=True, detail=_MANAGED_NOT_PROBEABLE_DETAIL)
 
 
 def is_managed_not_probeable(row: HealthResult) -> bool:
-    """True for a row that is the managed "check not run from this client" warning, whatever its ok/warn
+    """True for a row that is the managed "check not run from this client" row, whatever its ok/warn/skipped
     rendering: the reason text is the marker, so a gate keyed on it does not depend on how the row is drawn."""
     return row.detail == _MANAGED_NOT_PROBEABLE_DETAIL
 
@@ -6244,14 +6245,14 @@ def _settle_setup_row(results: list[HealthResult]) -> list[HealthResult]:
 
 
 def _benign_warning(row: HealthResult) -> bool:
-    """A soft warning that says nothing is wrong: a managed deployment's row that cannot be probed from a
-    client by design (nexus-y3wuu), which warns on every cloud box. Without this a cloud box never reaches the
-    "every other row is fine" that lets the setup row stand down.
+    """A row that says nothing is wrong: a managed deployment's row that cannot be probed from a client by
+    design (nexus-y3wuu). It was a warning on every cloud box until 2026-11-22, when it became an ok, skipped
+    row; the marker is kept so a row built the old way still stands down the setup row.
 
     nexus-8qnuk: only that kind. The rows nexus-9b0ih made ok=False (two OpenCV builds, a warning off Linux
     and a failure on it; a Windows box missing the PDF runtime; a dependency-lock rebuild owed) are not benign: each names a fix the user
     still owes, and a failed setup run can be their cause, so they keep the setup warning up."""
-    return row.warn and not row.ok and is_managed_not_probeable(row)
+    return is_managed_not_probeable(row)
 
 
 def _setup_failed_row(status: dict, log: Path) -> HealthResult:
@@ -7825,9 +7826,11 @@ ORDER BY 1, 2, 3;
 """.strip()
 
 
-def _partition_rows(ok: bool, detail: str, *, warn: bool = False) -> list[HealthResult]:
+def _partition_rows(
+    ok: bool, detail: str, *, warn: bool = False, skipped: bool = False,
+) -> list[HealthResult]:
     """The same verdict on all three partition rows (not applicable, or a probe that could not run)."""
-    return [HealthResult(label=lab, ok=ok, warn=warn, detail=detail) for lab in _PARTITION_LABELS]
+    return [HealthResult(label=lab, ok=ok, warn=warn, skipped=skipped, detail=detail) for lab in _PARTITION_LABELS]
 
 
 def _sql_literal(value: str) -> str:
@@ -7854,9 +7857,9 @@ def _check_tenant_model_partitions(
     involved. These rows run on a local install only: a managed deployment has no ``pg_credentials`` here and the
     engine has no server-side equivalent (its boot check, ``ChunksIsolationCheck``, covers the RLS structure of
     both trees and nothing about token tenants or registered models), so on a managed install all three are a
-    warning, ``ok=False, warn=True`` with the shared :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, because the check was
-    not run (Sam, 2026-10-28, nexus-g7ijj: a checkmark never renders for an unperformed check); the comparison is
-    conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
+    informational, ``ok=True, skipped=True`` (``[ ]``, no warning) with the shared
+    :data:`_MANAGED_NOT_PROBEABLE_DETAIL`, because the check does not apply to this client (Sam, 2026-11-22; a
+    checkmark never renders for an unperformed check); the comparison is conexus's read-only query (docs/runbooks/rdr-225-cloud-deploy.md). Not applicable (ok, "not applicable: ...",
     never a warning) where there is nothing to compare: no ``pg_credentials`` on a local box (a virgin box),
     parents that are not partitioned (an engine that predates RDR-225), no token tenant, or no
     registered model. A finding is evaluated first; not applicable replaces only the outcome "nothing to
@@ -7871,7 +7874,7 @@ def _check_tenant_model_partitions(
         from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
 
         if not is_local_mode():
-            return _partition_rows(False, _MANAGED_NOT_PROBEABLE_DETAIL, warn=True)
+            return _partition_rows(True, _MANAGED_NOT_PROBEABLE_DETAIL, skipped=True)
         return _partition_rows(True, f"not applicable: {_LOCAL_MODE_NOT_CONFIGURED_DETAIL}")
 
     from nexus.db.pg_provision import (  # noqa: PLC0415 — deferred to avoid circular import
@@ -9832,6 +9835,10 @@ _CLAUDE_CODE_LOG_TAIL_BYTES = 2 * 1024 * 1024
 #: verdict-less siblings).
 _CLAUDE_CODE_LOG_FILES_EXAMINED = 40
 
+#: A log whose last write is older than this is not judged (2026-11-22): a failure from weeks ago says nothing
+#: about the connection Claude Code makes today, and the row reports "no recent connection log" instead.
+_CLAUDE_CODE_LOG_MAX_AGE_SECONDS = 7 * 24 * 3600
+
 #: Claude Code truncates a project directory name at this many characters and
 #: appends ``-<hash>``.
 _CLAUDE_CODE_PROJECT_NAME_MAX = 200
@@ -9930,8 +9937,25 @@ def _claude_code_log_verdict(lines: list[str]) -> tuple[str | None, str | None, 
     return verdict, failure, session_id
 
 
+def _newest_nexus_logs(project_dirs: list[Path], *, cutoff: float) -> tuple[list[Path], Path | None]:
+    """``(recent, newest_stale)``: the nexus server's log files under *project_dirs* that were written to at or
+    after *cutoff* (newest name first, at most :data:`_CLAUDE_CODE_LOG_FILES_EXAMINED`), and the newest name among
+    those that were not. Recency is the file's mtime, not its name: a reconnect appends to the file of the
+    session's first connection."""
+    recent: list[Path] = []
+    stale: list[Path] = []
+    for f in {f for p in project_dirs for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (p / d).glob("*.jsonl")}:
+        try:
+            (recent if f.stat().st_mtime >= cutoff else stale).append(f)
+        except OSError:
+            continue
+    recent.sort(key=lambda f: f.name, reverse=True)
+    stale.sort(key=lambda f: f.name, reverse=True)
+    return recent[:_CLAUDE_CODE_LOG_FILES_EXAMINED], (stale[0] if stale else None)
+
+
 def _check_claude_code_mcp_connection(
-    *, cache_root: Path | None = None, cwd: Path | None = None,
+    *, cache_root: Path | None = None, cwd: Path | None = None, now: float | None = None,
 ) -> list[HealthResult]:
     """Claude Code's own record of its latest connection to the nexus MCP
     server (nexus-w4l00 follow-on).
@@ -9950,9 +9974,16 @@ def _check_claude_code_mcp_connection(
     The file is the newest one that carries a verdict (a ``claude -p`` worker
     or subagent writes verdict-less siblings), or, when
     ``CLAUDE_CODE_SESSION_ID`` names this session, the newest of this
-    session's own files. Not applicable where no Claude Code log directory
-    exists for the current directory or one above it. *cache_root* and *cwd*
-    are test seams.
+    session's own files. The directories searched are those of the current
+    directory and the ones above it; when they hold no recent log (a session
+    started elsewhere, or a worktree whose only ancestor directory is ``/``,
+    whose log directory keeps whatever an old run left), every project
+    directory under the cache root is searched, so the newest log for the nexus
+    server is found wherever Claude Code wrote it. A log last written more than
+    :data:`_CLAUDE_CODE_LOG_MAX_AGE_SECONDS` ago is not judged: the row is
+    informational, "no recent connection log" (2026-11-22: a 2026-10-01 failure
+    was reported as the latest connection). Not applicable where no log exists
+    at all. *cache_root*, *cwd* and *now* (epoch seconds) are test seams.
     """
     label = _CLAUDE_CODE_MCP_CONNECTION_LABEL
     na = lambda why: [HealthResult(label=label, ok=True, detail=f"informational — {why}")]  # noqa: E731
@@ -9964,12 +9995,22 @@ def _check_claude_code_mcp_connection(
         directories = _claude_code_project_dirs(cache_root, cwd if cwd is not None else Path.cwd())
     except (OSError, RuntimeError) as exc:  # a deleted cwd, or no resolvable home
         return na(f"could not derive the Claude Code log location ({exc})")
-    files = sorted(
-        {f for p in directories for d in _CLAUDE_CODE_NEXUS_LOG_DIRS for f in (p / d).glob("*.jsonl")},
-        key=lambda f: f.name, reverse=True,
-    )[:_CLAUDE_CODE_LOG_FILES_EXAMINED]
+    cutoff = (time.time() if now is None else now) - _CLAUDE_CODE_LOG_MAX_AGE_SECONDS
+    files, newest_stale = _newest_nexus_logs(directories, cutoff=cutoff)
     if not files:
-        return na("no Claude Code MCP log for the nexus server under this directory")
+        try:
+            everywhere = [d for d in cache_root.iterdir() if d.is_dir()]
+        except OSError:
+            everywhere = []
+        files, any_stale = _newest_nexus_logs(everywhere, cutoff=cutoff)
+        newest_stale = max(filter(None, (newest_stale, any_stale)), key=lambda f: f.name, default=None)
+    if not files:
+        if newest_stale is None:
+            return na("no Claude Code MCP log for the nexus server under this directory")
+        return na(
+            f"no recent connection log: the newest Claude Code MCP log for the nexus server ({newest_stale.name}) "
+            f"was last written more than {_CLAUDE_CODE_LOG_MAX_AGE_SECONDS // 86400} days ago, so it is not judged"
+        )
 
     scanned: list[tuple[Path, str | None, str | None, str | None]] = []
     unreadable: str | None = None

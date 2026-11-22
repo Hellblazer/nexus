@@ -298,8 +298,8 @@ def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning
 ) -> None:
     """Review I1: in cloud mode the storage row always warns that it cannot probe the managed store, so a
     rule that every other row be ok never let a cloud box's setup warning stand down. The row comes from the
-    real check in managed mode, not a copy of its text. nexus-njn1a: every managed not-probeable row warns
-    now (all eight, the partition rows included), and the benign test covers each of them."""
+    real check in managed mode, not a copy of its text. Every managed not-probeable row is n/a now (all eight,
+    the partition rows included; Sam 2026-11-22, it was a warning before), and the setup row stands down on each."""
     import nexus.config  # noqa: PLC0415
     import nexus.health as health  # noqa: PLC0415
 
@@ -315,7 +315,7 @@ def test_the_managed_storage_row_that_cannot_be_probed_does_not_hold_the_warning
         *health._check_tuple_sweep_freshness(),
         *health._check_tenant_model_partitions(),
     ]
-    assert len(storage) == 8 and all(r.warn and not r.ok for r in storage), "premise: the managed rows warn"
+    assert len(storage) == 8 and all(r.ok and r.skipped and not r.warn for r in storage), "premise: the managed rows are n/a"
     row = _row(build_setup_dir(tmp_path, CASES[name]))
     (settled,) = [r for r in _settle_setup_row([_FINE, *storage, row]) if r.label == _LABEL]
     assert settled.ok is True, settled.detail

@@ -4314,8 +4314,8 @@ from it).
 **Partition rows (RDR-225, nexus-3wh8d.16).** Four `nx doctor` rows cover the per-model, per-tenant layout of
 `nexus.chunks` and `nexus.taxonomy_centroids`. They read the engine's PostgreSQL through the same local admin
 `psql` path as "RLS policies", so they need no engine route. A managed deployment has no `pg_credentials` on the
-client, so on one all three rows are a warning (`⚠`) that says the check was not run from this client; they never
-show a checkmark for a check nobody performed.
+client, so on one all three rows render as not applicable (`[ ]`, JSON status `skipped`, no warning) with a line
+saying the check was not run from this client; they never show a checkmark for a check nobody performed.
 
 - "RLS policies" also walks both partition trees and is fatal on any model partition or leaf whose
   row security is off or not forced, or whose permissive policies are not the parent's.
@@ -4333,9 +4333,10 @@ show a checkmark for a check nobody performed.
 The new rows read "not applicable" (green, never a warning) where there is nothing to compare: no
 `pg_credentials` on a local box (a virgin box), tables that are not partitioned (an engine that predates
 RDR-225), no token tenant, or no registered model. A finding is evaluated first. On a managed deployment the
-rows are not "not applicable" but a warning, the same one `Storage service health`, `Schema migrations`,
-`RLS policies`, `tuples.dead_tuple_ratio` and `tuples.sweep_freshness` show there: the check was not
-run from this client, and the operator's read-only query is in `docs/runbooks/rdr-225-cloud-deploy.md`.
+rows show the same `[ ]` line as `Storage service health`, `Schema migrations`, `RLS policies`,
+`tuples.dead_tuple_ratio` and `tuples.sweep_freshness`: the check was not run from this client, it is in
+neither the warning count nor the verdict, and the operator's read-only query is in
+`docs/runbooks/rdr-225-cloud-deploy.md`.
 
 After the ownerless-write release, restart every long-lived `nx-mcp` server and hook-spawned `nx`; the steps are under [`nx upgrade`](#nx-upgrade).
 
