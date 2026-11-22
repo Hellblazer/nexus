@@ -85,13 +85,9 @@ def test_the_start_path_survives_a_lease_that_cannot_be_imported_and_says_so(lea
 
 def test_the_exit_path_survives_a_lease_that_cannot_be_imported(
         lease_unimportable: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(core, "_release_session_names_now", lambda: None)
-    monkeypatch.setattr(core, "_NAME_RELEASE_THREAD", None)       # monkeypatch restores both after the test, so the
-    monkeypatch.setattr(core, "_NAME_RELEASE_DEADLINE", 0.0)      # thread and deadline this sets never reach a later test
-    thread = core._start_session_name_release()
-    core._await_session_name_release(thread)                # both raised ModuleNotFoundError on exit before the guard
-    if thread is not None:
-        thread.join(timeout=5)
+    monkeypatch.setattr(core, "_t1_shutdown", lambda: None)
+    monkeypatch.setattr(core, "_remove_aura_state_files", lambda: None)
+    core._exit_teardown()                                   # raised ModuleNotFoundError on exit before the guard
 
 
 @pytest.mark.asyncio

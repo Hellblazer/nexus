@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-249 acceptance test 10's wiring (nexus-mdbds.11.1): the server's name
-resolver reports every resolve to the aura loader, the 60 s re-resolve on the
-lease thread included, and the load runs on the waiter's loop."""
+"""RDR-249 acceptance test 10's wiring (nexus-mdbds.11.1): the server's name watch reports every registry resolve to
+the aura loader, the 60 s re-resolve included, and the load runs on the waiter's loop. (RDR-253 Phase 2: the watch is a
+thread of its own; the name lease it used to ride on is gone.)"""
 
 from __future__ import annotations
 
@@ -16,22 +16,10 @@ from tests.auras._support import minimal
 from tests.test_mcp_channel import _FakeSender, _FakeTupleStore, _fake_store_factory
 
 
-class _StubSubs:
-    """Stands in for SubscriptionSet.arm_session_name: keeps the resolver the lease thread would re-run."""
-
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
-        self.resolve = None
-
-    def arm_session_name(self, name, *, store_factory, resolve) -> bool:
-        self.resolve = resolve
-        return False
-
-
-def test_a_startup_miss_then_the_lease_threads_re_resolve_loads_on_the_loop(monkeypatch) -> None:
+def test_a_startup_miss_then_the_watchs_re_resolve_loads_on_the_loop(monkeypatch) -> None:
     sid = str(uuid.uuid4())
-    names = iter([None, "tamsin"])
-    monkeypatch.setattr(core, "_session_name_resolver", lambda _sid: lambda: next(names))
+    names = iter([None, "tamsin", "tamsin", "tamsin"])
+    monkeypatch.setattr(core, "_registry_name_reader", lambda _sid: lambda: next(names, "tamsin"))
     subs = SubscriptionSet(session_id=sid)
     attached: list = []
     loop_threads: list[bool] = []
@@ -51,20 +39,23 @@ def test_a_startup_miss_then_the_lease_threads_re_resolve_loads_on_the_loop(monk
     )
 
     async def scenario() -> None:
-        stub = _StubSubs(sid)
-        core._arm_session_name(stub, on_loop(loader, asyncio.get_running_loop()))  # noqa: SLF001
-        await asyncio.sleep(0.05)
-        assert not loader.loaded and attached == []  # the startup resolve missed
-        assert stub.resolve is not None
-        assert await asyncio.to_thread(stub.resolve) == "tamsin"  # the lease thread's re-resolve
-        for _ in range(100):
-            if loader.loaded:
-                break
-            await asyncio.sleep(0.01)
+        waiter = channel.ChannelWaiter(sid, _fake_store_factory(_FakeTupleStore()), subs, sender=_FakeSender())
+        channel.register_active_waiter(waiter)
+        try:
+            thread = core._watch_session_name(waiter, on_loop(loader, asyncio.get_running_loop()), poll_s=0.02)
+            assert thread is not None
+            for _ in range(200):
+                if loader.loaded:
+                    break
+                await asyncio.sleep(0.01)
+            await asyncio.to_thread(thread.join, 5.0)
+            assert not thread.is_alive(), "the watch ends once the loader has loaded"
+        finally:
+            channel.unregister_active_waiter(sid)
 
     asyncio.run(scenario())
     assert loader.loaded and [[a.name for a in r] for r in attached] == [["red"]]
-    assert loop_threads == [True], "the load must run on the waiter's loop, not the lease thread"
+    assert loop_threads == [True], "the load must run on the waiter's loop, not the watch thread"
     assert subs.aura_topics() == ["board/topic"]
 
 

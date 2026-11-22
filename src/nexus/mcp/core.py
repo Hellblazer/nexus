@@ -1135,53 +1135,59 @@ def _waiter_session_id() -> str:
         return ""
 
 
-def _session_name_resolver(session_id: str) -> Callable[[], str | None]:
-    """A resolver for :meth:`SubscriptionSet.arm_session_name` that reads
-    Claude Code's session registry for *session_id* and logs a miss once per
-    run of misses (INFO ``session_name_unresolved``), not on every 60 s
-    re-read."""
+#: Seconds between re-reads of Claude Code's session registry for this session's name, until the auras are loaded.
+SESSION_NAME_POLL_S: float = 60.0
+
+
+def _registry_name_reader(session_id: str) -> Callable[[], str | None]:
+    """A reader of Claude Code's session registry for *session_id*'s name that logs a miss once per run of misses
+    (INFO ``session_name_unresolved``), not on every re-read."""
     missed = False
 
-    def _resolve() -> str | None:
+    def _read() -> str | None:
         nonlocal missed
         name = _subscriptions.resolve_session_name(session_id, log_miss=not missed)
         missed = name is None
         return name
 
-    return _resolve
+    return _read
 
 
-def _arm_session_name(subs: Any, on_name: Callable[[str | None], None] | None = None) -> None:
-    """Lease this session's `directory/<name>` row from the name Claude Code
-    already knows (nexus-u839f), so `mailbox_send(to=<name>)` resolves after a
-    restart or `--resume` without the model calling `tuple_subscribe`. Called
-    from :func:`_start_channel_waiter`, which runs at server start, after a
-    deferred T1 mint and after a `/clear` handoff for the new id, on the
-    asyncio loop: the registry read is local file I/O, and the engine write
-    is the lease thread's first tick, never this call's. The lease thread
-    re-reads the registry every 60 s and swaps the row on a `/rename`, or
-    arms one a startup miss did not find. Best-effort: no name or an
-    unreadable registry is a logged miss (`session_name_unresolved`), and an
-    explicit `tuple_subscribe` still works (and replaces an auto-armed
-    name).
+def _watch_session_name(
+    waiter: Any, on_name: Callable[[str | None], None], *,
+    poll_s: float | None = None, clock: Any = None,
+) -> threading.Thread | None:
+    """Report this session's registry name to *on_name* (RDR-249: the aura loader loads once the registry names the
+    session), at once and then every *poll_s* seconds on a daemon thread, until the loader says it has loaded
+    (``on_name.loaded()``) or *waiter* is no longer the session's active one. Replaces the name lease's 60 s re-resolve
+    (RDR-253 Phase 2 retired the lease itself: nothing is written to the engine here). Best-effort: a failed read is
+    logged and the next poll tries again; None when the thread cannot start."""
+    from nexus.clock import SYSTEM, wait as clock_wait  # noqa: PLC0415 -- deferred: startup cost, one call site
 
-    *on_name* (RDR-249, nexus-mdbds.11.1) is called with every resolve's result, the 60 s re-resolve
-    included, so auras load when the registry first names the session."""
+    clock = clock or SYSTEM
+    poll = SESSION_NAME_POLL_S if poll_s is None else poll_s
+    read = _registry_name_reader(waiter.session_id)
+    done = getattr(on_name, "loaded", lambda: False)
+    stop = threading.Event()
+
+    def _run() -> None:
+        wait_s = 0.0
+        while not clock_wait(clock, stop, wait_s):
+            wait_s = poll
+            if done() or _channel.active_waiter(waiter.session_id) is not waiter:
+                return
+            try:
+                on_name(read())
+            except Exception as e:  # noqa: BLE001 -- background thread boundary; a failed read never ends the watch
+                _log.warning("session_name_watch_failed", session_id=waiter.session_id, error=str(e))
+
+    thread = threading.Thread(target=_run, name="nx-mcp-session-name-watch", daemon=True)
     try:
-        resolve = _session_name_resolver(subs.session_id)
-        if on_name is not None:
-            plain = resolve
-
-            def resolve() -> str | None:
-                found = plain()
-                on_name(found)
-                return found
-
-        name = resolve()
-        if subs.arm_session_name(name, store_factory=_t2_ctx, resolve=resolve):
-            _log.info("session_name_armed", name=name, session_id=subs.session_id)
-    except Exception as e:  # noqa: BLE001 — best-effort convenience; never blocks the waiter
-        _log.warning("session_name_arm_failed", session_id=getattr(subs, "session_id", ""), error=str(e))
+        thread.start()
+    except Exception as e:  # noqa: BLE001 -- RuntimeError "can't start new thread": the auras simply do not load
+        _log.warning("session_name_watch_not_started", session_id=waiter.session_id, error=str(e))
+        return None
+    return thread
 
 
 def _aura_loader(waiter: Any, subs: Any) -> Callable[[str | None], None] | None:
@@ -1249,9 +1255,10 @@ def _start_channel_waiter() -> None:
             session_id, _t2_ctx, subs,
             state_dir=nexus_config_dir(),
         )
-        _arm_session_name(subs, _aura_loader(waiter, subs))
         _channel.register_active_waiter(waiter)
         waiter.start()
+        if (on_name := _aura_loader(waiter, subs)) is not None:
+            _watch_session_name(waiter, on_name)
     except Exception as e:  # noqa: BLE001 — best-effort; see docstring
         import structlog as _sl  # noqa: PLC0415 — rare/branch-local path; stdlib-adjacent import deferred to call site
 
@@ -1769,12 +1776,10 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # nexus-kdxyv: the channel waiter and the subscription set are keyed by
     # session id and were built for the OLD one at spawn (or at the last
     # handoff). Left alone they park on the old mailbox for the rest of
-    # this process, keep the old instance name's directory lease alive,
-    # write their status under the old id, and are never cancelled at
+    # this process, write their status under the old id, and are never cancelled at
     # teardown (which looks the waiter up by the CURRENT id). Cancel the
     # old waiter (its own `finally` records alive=false under the old id),
-    # shut the old set down (releasing its directory row within about a
-    # second, RDR-208), drop it from the cache, and start a waiter for the
+    # drop the old set from the cache, and start a waiter for the
     # new id once the env names it (below). `/branch` reaches here too
     # (source "fork" is a handoff source), which is what keeps the parent's
     # mail with the parent instead of pushed into the fork.
@@ -1785,8 +1790,8 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
     # but a raise here would strand the handoff with the marker neither
     # consumed nor reinstated, and nothing would retry it. The delivery
     # consequence of a failure is bounded and self-healing -- a stale waiter
-    # until the process ends, a directory row until its 300 s TTL -- which is
-    # strictly better than a wedged session identity.
+    # until the process ends -- which is strictly better than a wedged
+    # session identity.
     if old_session_id is not None:
         try:
             old_waiter = _channel.active_waiter(old_session_id)
@@ -1926,31 +1931,26 @@ def _warn_if_harness_oauth_grant_present() -> None:
 
 @asynccontextmanager
 async def _t1_lifespan(_app: Any):
-    """The MCP server lifespan: :func:`_t1_lifespan_body`, then release
-    this process's peer-directory names (nexus-tu84w).
+    """The MCP server lifespan: :func:`_t1_lifespan_body`, then the identity lease's shutdown.
 
-    The body has four branches, each with its own yield and teardown; the
-    release wraps them all so no branch can leave a name live for one
-    ``DIRECTORY_TTL_S`` after a clean exit. It starts on its own thread
-    when the body's yield returns, so it runs alongside the body's T1
-    teardown (and before the token revoke, which would cost the release a
-    401 retry), and is awaited after it, up to its deadline.
+    The body has four branches, each with its own yield and teardown; the identity shutdown wraps them all. It starts
+    on its own thread when the body's yield returns, so it runs alongside the body's T1 teardown (and before the token
+    revoke, which would cost it a 401 retry), and is awaited after it, up to its own deadline.
     """
     import asyncio  # noqa: PLC0415 — stdlib, deferred like this module's other lifespan imports
 
     started = False
-    release: threading.Thread | None = None
     try:
         async with _t1_lifespan_body(_app):
             try:
                 yield
             finally:
                 started = True
-                release = _start_session_name_release()
+                identity_seam.start_shutdown()
     finally:
         if not started:  # the body failed before or without yielding
-            release = _start_session_name_release()
-        await asyncio.to_thread(_await_session_name_release, release)
+            identity_seam.start_shutdown()
+        await asyncio.to_thread(identity_seam.await_shutdown)
 
 
 @asynccontextmanager
@@ -2751,86 +2751,15 @@ def _t1_shutdown() -> None:
     _t1_session_shutdown()
 
 
-#: How long an exit path waits for the peer-directory name release
-#: (nexus-tu84w). The release runs in its own thread, alongside the T1
-#: teardown, so this bounds the exit's added delay; a release still in
-#: flight at the deadline is abandoned and its row lapses by TTL.
-_NAME_RELEASE_TIMEOUT_S: float = 3.0
-
-#: The release thread in flight, if any, so a second exit path (SIGTERM
-#: landing during the lifespan's release) waits for it instead of finding
-#: the cache already drained and exiting under it. Plain assignment, no
-#: lock: a signal handler on the main thread must never block on one.
-_NAME_RELEASE_THREAD: threading.Thread | None = None
-
-#: The monotonic deadline of that release, set once when it starts, so
-#: every exit path that waits on it (the lifespan, then atexit) shares one
-#: bound instead of each waiting a fresh :data:`_NAME_RELEASE_TIMEOUT_S`.
-_NAME_RELEASE_DEADLINE: float = 0.0
-
-
-def _release_session_names_now() -> None:
-    """Release every ``directory/<name>`` row this process leases
-    (nexus-tu84w): each lease's own nonce re-sent with a one-second TTL,
-    so only the row this process wrote lapses. Without it an exit left
-    the row live for one ``DIRECTORY_TTL_S`` (300 s), and a session
-    restarted inside that window shared its name with its own dead
-    predecessor, so ``mailbox_send`` by name was refused as ambiguous.
-    Never raises: a failure is logged and the row lapses by TTL, as a
-    crash's row does. Runs on the release thread only, so the cache and
-    lease locks it takes are never waited on by the main thread, where a
-    signal handler runs.
-    """
-    try:
-        _subscriptions.reset_cache()
-    except Exception as e:  # noqa: BLE001 — best-effort on exit; the row lapses by TTL
-        _log.warning("session_name_release_on_exit_failed", error=str(e))
-
-
-def _start_session_name_release() -> threading.Thread | None:
-    """Start the release on a daemon thread and set its deadline, or
-    return the one in flight. ``None`` when no thread could be started
-    (resource exhaustion): the caller's exit goes on and the rows lapse
-    by TTL."""
-    global _NAME_RELEASE_THREAD, _NAME_RELEASE_DEADLINE
-    identity_seam.start_shutdown()
-    running = _NAME_RELEASE_THREAD
-    if running is not None and running.is_alive():
-        return running
-    thread = threading.Thread(
-        target=_release_session_names_now, name="nx-mcp-name-release", daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception as e:  # noqa: BLE001 — RuntimeError "can't start new thread"; never block the exit
-        _log.warning("session_name_release_on_exit_not_started", error=str(e))
-        return None
-    _NAME_RELEASE_DEADLINE = time.monotonic() + _NAME_RELEASE_TIMEOUT_S
-    _NAME_RELEASE_THREAD = thread
-    return thread
-
-
-def _await_session_name_release(thread: threading.Thread | None) -> None:
-    """Wait for *thread* until the release's shared deadline, then give up; and for the identity shutdown until its own."""
-    identity_seam.await_shutdown()
-    if thread is None:
-        return
-    thread.join(max(0.0, _NAME_RELEASE_DEADLINE - time.monotonic()))
-    if thread.is_alive():
-        _log.warning("session_name_release_on_exit_incomplete", timeout_s=_NAME_RELEASE_TIMEOUT_S)
-
-
 def _exit_teardown() -> None:
-    """The process-exit teardown shared by :func:`_sigterm_handler` and
-    :mod:`atexit`: the name release (nexus-tu84w) runs alongside
-    :func:`_t1_shutdown` (the flagged-row drain and token revoke, each
-    bounded on its own) and is awaited after it, up to its deadline.
-    Starting it first and awaiting it last keeps it from delaying the
-    data-bearing T1 steps, and a failure to start it skips nothing."""
-    release = _start_session_name_release()
+    """The process-exit teardown shared by :func:`_sigterm_handler` and :mod:`atexit`: the identity lease's shutdown
+    runs alongside :func:`_t1_shutdown` (the flagged-row drain and token revoke, each bounded on its own) and is awaited
+    after it, up to its own deadline. Starting it first and awaiting it last keeps it from delaying the data-bearing T1
+    steps."""
+    identity_seam.start_shutdown()
     _t1_shutdown()
     _remove_aura_state_files()
-    _await_session_name_release(release)
+    identity_seam.await_shutdown()
 
 
 def _remove_aura_state_files() -> None:
@@ -2845,8 +2774,8 @@ def _remove_aura_state_files() -> None:
 
 
 def _sigterm_handler(_signo: int, _frame: Any) -> None:
-    """Run the shutdown path (:func:`_exit_teardown`: the peer-directory
-    name release alongside :func:`_t1_shutdown`) then exit.
+    """Run the shutdown path (:func:`_exit_teardown`: the identity lease's
+    shutdown alongside :func:`_t1_shutdown`) then exit.
 
     When invoked while the lifespan finally is already running cleanup
     (stdin-EOF + SIGTERM race observed in production after 4.12.0
@@ -2886,9 +2815,9 @@ def _install_exit_handlers(
     ``kill-server``, a closed terminal window or a dropped ssh session
     hangs up the session's pty, and the kernel sends SIGHUP to its
     foreground process group, this server included. Its default action
-    ends the process with no teardown, so the T1 token, its lease file and
-    the peer-directory name were left behind until they lapsed (measured on
-    a scratch-HOME session, nexus-xwijj). An inherited ignore is kept: a
+    ends the process with no teardown, so the T1 token and its lease file
+    were left behind until they lapsed (measured on a scratch-HOME session,
+    nexus-xwijj). An inherited ignore is kept: a
     session started under ``nohup`` ignores SIGHUP, and this server, its
     child, must outlive a hangup with it rather than die alone.
     *register* and *set_signal* default to ``atexit.register`` and
@@ -9140,7 +9069,7 @@ def tuple_out(
         description=(
             "Caller-minted nonce, its own parameter: never a key or a dim. Required "
             "when the template's id_from is keys+nonce (mailbox/<address>, "
-            "board/<topic>, board/ci/<topic>, queue/<name>, directory/<name>, "
+            "board/<topic>, board/ci/<topic>, queue/<name>, "
             "aspects); omit "
             "for a keys-only one (lock/<resource>). An id ingredient only, never echoed "
             "back on a read."
@@ -9770,8 +9699,8 @@ def _current_subscription_session_id() -> str:
 def tuple_subscribe(
     subspace: Annotated[str, Field(
         description=(
-            "A board topic (`board/<topic>`), or, once, this session's own "
-            "name (`mailbox/<name>`) to register in the peer directory."
+            "A board topic (`board/<topic>`). A `mailbox/<name>` is refused: mail "
+            "goes to the session's identity, which needs no subscribe call."
         ),
     )],
 ) -> str:
@@ -9785,9 +9714,9 @@ def tuple_subscribe(
     With the plugin's hooks loaded, the notification fires `UserPromptSubmit`
     and the drain hook claims, acks and renders the body with that prompt, so
     the session claims only rows it did not render. `tuple_subscriptions`
-    lists the set. Only board topics and the own mailbox are delivered: a
-    queue or a lock is refused naming `in`, and a second `mailbox/<name>` is
-    refused once this session leases a name. At most 32 board topics.
+    lists the set. Only board topics and the identity mailbox are delivered: a
+    queue or a lock is refused naming `in`, and so is any `mailbox/<name>`
+    (the name lease is retired, RDR-253 Phase 2). At most 32 board topics.
 
     A board subscription starts 30 seconds before the subscribe call (clock
     skew): posts from then on are pushed, at most 100 per wait, one
@@ -9797,13 +9726,9 @@ def tuple_subscribe(
     is claimed or expires, each row announced at most 5 times
     (`max_announces`, 150 s apart).
 
-    Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>` lease so
-    `mailbox_send` resolves that name to this session; nothing is pushed or
-    drained for it. A `/resume` (same session id) restores this list; a
-    `/clear` (new session id) starts clean.
+    A `/resume` (same session id) restores this list; a `/clear` (new session
+    id) starts clean.
     """
-    # RDR-208 Phase 3 (bead nexus-galkv.20): a leased name stopped being a
-    # second delivered mailbox here -- see SubscriptionSet's own docstring.
     try:
         session_id = _current_subscription_session_id()
         if not session_id:
@@ -9831,10 +9756,9 @@ def tuple_unsubscribe(
     """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
 
     The identity's mailbox can never be unsubscribed -- it is the
-    floor's address. Unsubscribing `mailbox/<name>` for the name this
-    session leases stops its `directory/<name>` lease. Unsubscribing a
-    board topic, or a subspace not currently subscribed or leased, is
-    otherwise a plain removal (a no-op when it was never subscribed).
+    floor's address. Unsubscribing a board topic, or a subspace not
+    currently subscribed, is a plain removal (a no-op when it was never
+    subscribed).
     """
     try:
         session_id = _current_subscription_session_id()
@@ -9861,10 +9785,7 @@ def tuple_subscriptions() -> list[dict]:
     """List this session's MCP server's subscription set (RDR-211).
 
     The identity's mailbox first (none while the session is bound to no
-    identity), then subscribed board topics.
-    A leased name never appears here: it is not a delivered mailbox, only
-    a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
-    Phase 3). There is no cursor: the engine keeps
+    identity), then subscribed board topics. There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
     per-subscriber stamp for a board). A board entry carries `since`,
     the time of the subscribe call; push delivery starts 30 seconds
@@ -17225,8 +17146,8 @@ def main():
     # the MCP-owned cleanup path simply doesn't run. So we install
     # the signal handlers for SIGTERM, SIGINT and SIGHUP (a terminal
     # hangup, as a tmux kill-server sends; nexus-xwijj) to run
-    # _exit_teardown (the name release alongside _t1_shutdown,
-    # nexus-tu84w) directly. atexit stays as the third
+    # _exit_teardown (the identity shutdown alongside _t1_shutdown)
+    # directly. atexit stays as the third
     # belt-and-braces for clean exits via stdin EOF / SystemExit.
     # Both steps are idempotent so all three paths can fire
     # without double-cleaning.

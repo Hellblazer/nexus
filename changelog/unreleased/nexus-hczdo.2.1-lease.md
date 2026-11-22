@@ -1,0 +1,3 @@
+### Removed
+
+- **The `directory/<name>` name lease is gone from the client.** The MCP server no longer writes a `directory/<name>` row for the session's `ListAgents` name, renews it every minute or releases it at exit, and `tuple_subscribe("mailbox/<name>")` is refused with a message saying mail goes to the session's identity mailbox (RDR-253 Phase 2, nexus-hczdo.2.1). The server still reads Claude Code's session registry once a minute, only to tell the aura loader when the session is named; nothing is written to the engine. The `directory` template stays in the engine until a later engine release retires it.

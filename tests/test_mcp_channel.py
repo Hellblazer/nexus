@@ -1150,16 +1150,13 @@ class TestChannelWaiterRealEngine:
     loses a row under concurrent writers (T2 `nexus_rdr/213-waiter-deep-
     analysis-2026-09-17` (2/2) section E, stop rule 1)."""
 
-    def test_a_leased_name_is_never_referenced_by_the_waiter(self, t2_service_env, tmp_path) -> None:
-        """RDR-208 Phase 3 (bead nexus-galkv.20), the Transition Test
-        Plan's "then stops" half at the waiter itself: a genuine
-        `subscribe("mailbox/<name>")` call arms the name's
-        `directory/<name>` lease through the REAL engine, but the waiter
-        never builds a `WaitSpec` for it and never references a message
-        sent to `mailbox/<name>` -- only this session's OWN mailbox is
-        ever referenced. THE FALSIFIER: reverting `entries()` to include
-        the leased name (this bead's actual code change) makes this fail,
-        since the fake sender would then also see the leaked address."""
+    def test_a_mailbox_that_is_not_the_identitys_is_refused_and_never_referenced_by_the_waiter(
+        self, t2_service_env, tmp_path,
+    ) -> None:
+        """RDR-253 Phase 2 at the waiter itself: `subscribe("mailbox/<name>")` is refused (the name lease is gone), so
+        the waiter builds no `WaitSpec` for it and never references a message sent to `mailbox/<name>` or to the
+        session id -- only the identity's mailbox is ever referenced."""
+        from nexus.db.t2.http_tuple_store import SchemaViolationError  # noqa: PLC0415
         from nexus.mcp.core import tuple_out
         from nexus.mcp.subscriptions import SubscriptionSet
         from nexus.mcp_infra import t2_ctx
@@ -1167,25 +1164,23 @@ class TestChannelWaiterRealEngine:
         session_id = str(uuid.uuid4())
         subs = SubscriptionSet(session_id=session_id, identity=session_id)
         name = f"inst-{uuid.uuid4().hex[:8]}"
-        try:
+        with pytest.raises(SchemaViolationError):
             subs.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
-            tuple_out(
-                f"mailbox/{name}", {"to": name}, {"from": "sender-leaked"},
-                "should never be referenced", nonce=uuid.uuid4().hex,
-            )
-            tuple_out(
-                subs.identity_mailbox, {"to": session_id}, {"from": "sender-own"},
-                "own mailbox", nonce=uuid.uuid4().hex,
-            )
+        tuple_out(
+            f"mailbox/{name}", {"to": name}, {"from": "sender-leaked"},
+            "should never be referenced", nonce=uuid.uuid4().hex,
+        )
+        tuple_out(
+            subs.identity_mailbox, {"to": session_id}, {"from": "sender-own"},
+            "own mailbox", nonce=uuid.uuid4().hex,
+        )
 
-            sender = _FakeSender()
-            waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
-            asyncio.run(waiter.tick())
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, t2_ctx, subs, sender=sender, wait_timeout_s=1)
+        asyncio.run(waiter.tick())
 
-            subspaces_referenced = {m.get("subspace") for _c, m in sender.calls}
-            assert subspaces_referenced == {subs.identity_mailbox}
-        finally:
-            subs.shutdown()
+        subspaces_referenced = {m.get("subspace") for _c, m in sender.calls}
+        assert subspaces_referenced == {subs.identity_mailbox}
 
     def test_wait_returns_claimed_and_dead_rows_not_just_available_ones(self, t2_service_env) -> None:
         """Engine-fact check, confirmed against the real engine

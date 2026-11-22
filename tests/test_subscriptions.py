@@ -1,32 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): ``SubscriptionSet``
-validation, mutation, the change-observer signal, the name lease
-(RDR-208 Phase 3, bead nexus-galkv.20), and T1 persistence across a
-resume vs. a clear.
+validation, mutation, the change-observer signal, T1 persistence across a
+resume vs. a clear, and (kept for the aura loader) the read of Claude Code's
+session registry.
 
-Validation-only tests (queue/lock refusal naming ``in``, the 32-topic
-bound, a malformed subspace, the observer, plain unsubscribe) never touch
-a real store: a POISON ``store_factory`` that raises if ever called is the
-falsifier proving the refusal happens before any engine call. The name
-lease, the directory-lease send/re-send, and the resume/clear persistence
-tests run against the real engine substrate (``t2_service_env``) and a
-real T1 handle, mirroring ``tests/test_mcp_tuple_tools.py``'s own
-fixtures.
+RDR-253 Phase 2 (bead nexus-hczdo.2.1) retired the ``directory/<name>`` name
+lease and the session mailbox: the one delivered mailbox is the identity's, a
+``mailbox/<name>`` subscribe is refused, and nothing here writes to the
+engine, so every set below is exercised with a POISON ``store_factory`` that
+raises if ever called. The resume/clear persistence test runs against the real
+engine substrate (``t2_service_env``) and a real T1 handle.
 """
 from __future__ import annotations
 
 import time
 import uuid
-from contextlib import contextmanager
 from datetime import datetime
 
 import pytest
 
 from nexus.db.t2.http_tuple_store import SchemaViolationError
-from tests._settle import FakeClock, settle
 from nexus.mcp.subscriptions import (
-    DIRECTORY_TTL_S,
     MAX_BOARD_TOPICS,
     SubscriptionSet,
     load,
@@ -39,32 +34,10 @@ IDENT = "i5"
 
 def _poison_store_factory():
     """A store_factory that fails the test if ever invoked -- the
-    falsifier for "this refusal happens before any engine call"."""
+    falsifier for "this path makes no engine call"."""
     def _boom():
-        raise AssertionError("store_factory must not be called on this refusal path")
+        raise AssertionError("store_factory must not be called on this path")
     return _boom
-
-
-class _FakeTuples:
-    """A minimal HttpTupleStore-shaped stand-in: records every `out()` call
-    instead of hitting a real engine, for tests that need the instance-
-    mailbox takeover's synchronous first arm to actually happen, but do
-    not need to prove real engine behavior (that is the substrate-backed
-    class below)."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple] = []
-
-    def out(self, subspace, keys, dims=None, body=None, *, nonce=None, ttl_seconds=None):
-        self.calls.append((subspace, keys, dims, nonce, ttl_seconds))
-        return "fake-tuple-id"
-
-
-@contextmanager
-def _fake_store_factory(fake: _FakeTuples):
-    class _Db:
-        tuples = fake
-    yield _Db()
 
 
 #: A small fixture registry: enough for `_take_enabled`'s literal-before-
@@ -117,64 +90,40 @@ class TestSubscribeValidation:
         with pytest.raises(SchemaViolationError):
             s.subscribe("mailbox/", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
 
-    def test_mailbox_name_with_a_newline_is_refused_before_any_write_or_lease(self, tmp_path):
-        """Code review Minor 6: an instance name outside the mailbox
-        address charset must be refused loudly (`SchemaViolationError`),
-        before the `directory/<name>` lease -- `_poison_store_factory` is
-        the falsifier that no lease was ever started."""
+
+
+class TestMailboxSubscribeIsRefused:
+    """RDR-253 Phase 2: no ``mailbox/<name>`` is subscribable; a refusal makes no engine call and writes no file."""
+
+    @pytest.mark.parametrize("subspace", ["mailbox/nexus-23", "mailbox/evil\nname", "mailbox/evil/name", "mailbox/" + str(uuid.uuid4())])
+    def test_a_mailbox_that_is_not_the_identitys_is_refused_with_no_engine_call_or_file(self, tmp_path, subspace):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        with pytest.raises(SchemaViolationError):
-            s.subscribe(
-                "mailbox/evil\nname", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
-            )
+        with pytest.raises(SchemaViolationError, match="not subscribable.*identity mailbox"):
+            s.subscribe(subspace, templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
         assert list(tmp_path.rglob("*")) == []
+        assert s.entries() == [{"subspace": "mailbox/i5"}] and s.version == 0
 
-    def test_mailbox_name_with_a_slash_is_refused_before_any_write_or_lease(self, tmp_path):
+    def test_the_refusal_before_a_bind_says_the_identity_mailbox_comes_once_the_session_is_bound(self):
+        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        with pytest.raises(SchemaViolationError, match="once the session is bound"):
+            s.subscribe("mailbox/anything", templates=[])
+
+    def test_subscribing_the_identity_mailbox_itself_is_a_noop(self):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        with pytest.raises(SchemaViolationError):
-            s.subscribe(
-                "mailbox/evil/name", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
-            )
-        assert list(tmp_path.rglob("*")) == []
+        s.subscribe("mailbox/i5", templates=[])
+        assert s.version == 0 and s.entries() == [{"subspace": "mailbox/i5"}]
 
-    def test_subscribing_the_sessions_own_mailbox_is_a_noop(self, tmp_path):
-        sid = str(uuid.uuid4())
-        s = SubscriptionSet(session_id=sid)
-        s.subscribe(
-            f"mailbox/{sid}", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
+    def test_a_set_has_no_lease_surface(self):
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
+        for gone in ("leased_name", "arm_session_name", "shutdown", "session_mailbox"):
+            assert not hasattr(s, gone), gone
+
+    def test_a_record_written_with_a_leased_name_still_loads_and_the_name_is_dropped(self):
+        restored = SubscriptionSet.from_json(
+            {"session_id": "sess-a", "leased_name": "nexus-9", "board": ["board/x"]}
         )
-        assert s.leased_name is None
-        assert s.version == 0
-
-    def test_a_second_leased_name_is_refused(self, tmp_path):
-        fake = _FakeTuples()
-        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        s.subscribe(
-            "mailbox/name-a", templates=[], store_factory=lambda: _fake_store_factory(fake),
-            state_dir=tmp_path,
-        )
-        try:
-            assert s.leased_name == "name-a"
-            with pytest.raises(SchemaViolationError):
-                s.subscribe(
-                    "mailbox/name-b", templates=[], store_factory=_poison_store_factory(),
-                    state_dir=tmp_path,
-                )
-            assert s.leased_name == "name-a"
-        finally:
-            s.shutdown()
-
-    def test_re_subscribing_the_same_instance_mailbox_is_idempotent(self, tmp_path):
-        fake = _FakeTuples()
-        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local, one use site
-        s.subscribe("mailbox/name-a", templates=[], store_factory=factory, state_dir=tmp_path)
-        try:
-            version_after_first = s.version
-            s.subscribe("mailbox/name-a", templates=[], store_factory=factory, state_dir=tmp_path)
-            assert s.version == version_after_first  # a no-op does not bump version
-        finally:
-            s.shutdown()
+        assert [e["subspace"] for e in restored.entries()] == ["board/x"]
+        assert "leased_name" not in restored.to_json()
 
     def test_thirty_second_board_topic_accepted_thirty_third_refused(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
@@ -194,6 +143,7 @@ class TestSubscribeValidation:
         s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
         assert s.version == version_after_first
         assert len(s.entries()) == 2
+
 
 
 class TestObserver:
@@ -243,193 +193,6 @@ class TestUnsubscribe:
         s.unsubscribe("board/never-subscribed")  # must not raise
 
 
-class TestNameLease:
-    """Real engine (t2_service_env): the directory lease's shape and
-    re-send cadence, unsubscribe stopping it, and -- RDR-208 Phase 3, bead
-    nexus-galkv.20, pinning the Transition Test Plan's "then stops" half
-    -- that arming a name writes NO per-session registration file any
-    more and is NEVER a delivered mailbox (never listed by `entries()`,
-    which is the one place the channel waiter and `tuple_subscriptions`
-    both read)."""
-
-    def test_arms_the_directory_lease_and_writes_no_registration_file(
-        self, t2_service_env, tmp_path,
-    ) -> None:
-        from nexus.mcp_infra import t2_ctx
-
-        sid = str(uuid.uuid4())
-        s = SubscriptionSet(session_id=sid)
-        name = f"inst-{uuid.uuid4().hex[:8]}"
-        try:
-            s.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
-            assert s.leased_name == name
-
-            # THE "THEN STOPS" HALF: no per-session registration file is
-            # written under state_dir any more -- the old drain-hook floor
-            # for a registered instance name is gone outright, not merely
-            # relocated. Checked as a specific path, not "state_dir holds
-            # nothing at all": under the full suite (nexus-6qp25 xdist),
-            # `tmp_path` doubles as this worker's `NEXUS_CONFIG_DIR`
-            # sub-path (the autouse `_isolate_config_dir` fixture), and a
-            # worker's FIRST substrate call may cache an unrelated
-            # data-token lease file there -- legitimate T2 plumbing this
-            # test has nothing to say about.
-            assert not (tmp_path / "tuple-watch").exists()
-
-            # A leased name is never a delivered mailbox.
-            assert {"subspace": f"mailbox/{name}"} not in s.entries()
-
-            with t2_ctx() as db:
-                rows = db.tuples.rd(f"directory/{name}", {"name": name})
-            assert len(rows) == 1
-            assert rows[0].dims["session_id"] == sid
-            created = datetime.fromisoformat(rows[0].created_at)
-            expires = datetime.fromisoformat(rows[0].expires_at)
-            assert abs((expires - created).total_seconds() - DIRECTORY_TTL_S) < 5
-        finally:
-            s.shutdown()
-
-    def test_refused_for_any_other_name(self, t2_service_env, tmp_path) -> None:
-        from nexus.mcp_infra import t2_ctx
-
-        sid = str(uuid.uuid4())
-        s = SubscriptionSet(session_id=sid)
-        try:
-            s.subscribe(
-                f"mailbox/inst-{uuid.uuid4().hex[:8]}", templates=[],
-                store_factory=t2_ctx, state_dir=tmp_path,
-            )
-            with pytest.raises(SchemaViolationError):
-                s.subscribe(
-                    f"mailbox/other-{uuid.uuid4().hex[:8]}", templates=[],
-                    store_factory=t2_ctx, state_dir=tmp_path,
-                )
-        finally:
-            s.shutdown()
-
-    def test_unsubscribe_stops_the_lease(self, t2_service_env, tmp_path) -> None:
-        from nexus.mcp_infra import t2_ctx
-
-        sid = str(uuid.uuid4())
-        s = SubscriptionSet(session_id=sid)
-        name = f"inst-{uuid.uuid4().hex[:8]}"
-        s.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
-        assert s._lease_thread is not None
-        s.unsubscribe(f"mailbox/{name}")
-        assert s.leased_name is None
-        assert s._lease_thread is None
-
-    def test_re_sends_on_the_configured_interval(self, t2_service_env, tmp_path) -> None:
-        from nexus.mcp_infra import t2_ctx
-
-        sid = str(uuid.uuid4())
-        s = SubscriptionSet(session_id=sid)
-        name = f"inst-{uuid.uuid4().hex[:8]}"
-        calls: list[float] = []
-
-        @contextmanager
-        def counting_store_factory():
-            with t2_ctx() as db:
-                original_out = db.tuples.out
-
-                def _counting_out(*a, **kw):
-                    calls.append(time.monotonic())
-                    return original_out(*a, **kw)
-
-                db.tuples.out = _counting_out
-                yield db
-
-        try:
-            s.subscribe(
-                f"mailbox/{name}", templates=[], store_factory=counting_store_factory,
-                state_dir=tmp_path, directory_ttl_s=2.0, directory_heartbeat_s=0.2, lease_poll_s=0.05,
-            )
-            assert len(calls) == 1  # the synchronous first arm
-            settle(lambda: len(calls) < 2 and f"{len(calls)} send(s)", what="the background re-send")
-            # the heartbeat decides on time.time(), so no virtual clock: bound the gap by the 2 s TTL,
-            # which a re-send must beat or the row lapses between sends
-            assert calls[1] - calls[0] < 2.0, f"re-sent {calls[1] - calls[0]:.2f} s apart, past the 2 s TTL"
-        finally:
-            s.shutdown()
-
-
-class TestDirectoryRelease:
-    """nexus-kdxyv (RDR-208 test plan: "a /clear self-stop releases the
-    watcher's entry within about a second; an ordinary exit leaves it for
-    one TTL", amended by nexus-tu84w: a clean exit now releases too). Stopping a lease on purpose -- ``unsubscribe`` of the
-    leased name, or ``shutdown`` on a handoff -- re-sends the SAME
-    nonce with ``ttl_seconds=1`` so the ``directory/<name>`` row lapses
-    within about a second instead of at the 300 s TTL. The idempotent
-    tuple id (keys + nonce) makes that an update of the live row, never a
-    second row. The clean-exit release is tested in
-    tests/mcp/test_exit_releases_session_name.py (nexus-tu84w)."""
-
-    def _armed(self, tmp_path):
-        fake = _FakeTuples()
-        s = SubscriptionSet(session_id="sess-1")
-        s.subscribe("mailbox/inst-a", templates=_FIXTURE_TEMPLATES,
-                    store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
-        assert len(fake.calls) == 1
-        return s, fake
-
-    def test_shutdown_releases_the_entry_with_the_same_nonce_and_ttl_one(self, tmp_path):
-        s, fake = self._armed(tmp_path)
-        arm_subspace, arm_keys, arm_dims, arm_nonce, arm_ttl = fake.calls[0]
-        assert arm_ttl == int(DIRECTORY_TTL_S)
-        s.shutdown()
-        assert len(fake.calls) == 2, fake.calls
-        subspace, keys, dims, nonce, ttl = fake.calls[1]
-        assert (subspace, keys, dims) == (arm_subspace, arm_keys, arm_dims)
-        assert nonce == arm_nonce
-        assert ttl == 1
-
-    def test_unsubscribe_releases_the_entry(self, tmp_path):
-        s, fake = self._armed(tmp_path)
-        s.unsubscribe("mailbox/inst-a")
-        assert len(fake.calls) == 2, fake.calls
-        assert fake.calls[1][4] == 1
-        assert fake.calls[1][3] == fake.calls[0][3]
-
-    def test_shutdown_twice_releases_once(self, tmp_path):
-        s, fake = self._armed(tmp_path)
-        s.shutdown()
-        s.shutdown()
-        assert len(fake.calls) == 2
-
-    def test_shutdown_with_no_lease_writes_nothing(self, tmp_path):
-        s = SubscriptionSet(session_id="sess-1")
-        s.subscribe("board/t", templates=_FIXTURE_TEMPLATES,
-                    store_factory=_poison_store_factory(), state_dir=tmp_path)
-        s.shutdown()  # the poison factory proves no out() happened
-
-    def test_a_failed_release_is_swallowed(self, tmp_path):
-        s, fake = self._armed(tmp_path)
-
-        def _boom(*a, **kw):
-            raise RuntimeError("engine gone")
-        fake.out = _boom
-        s.shutdown()  # logged, never raised: a handoff must not die on this
-        assert s._lease_thread is None
-
-    def test_on_the_real_engine_the_row_lapses_within_seconds(self, t2_service_env, tmp_path) -> None:
-        from nexus.mcp_infra import t2_ctx
-
-        sid = str(uuid.uuid4())
-        s = SubscriptionSet(session_id=sid)
-        name = f"inst-{uuid.uuid4().hex[:8]}"
-        s.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
-        with t2_ctx() as db:
-            assert len(db.tuples.rd(f"directory/{name}", {"name": name})) == 1
-        s.unsubscribe(f"mailbox/{name}")
-
-        def _rows():
-            with t2_ctx() as db:
-                return db.tuples.rd(f"directory/{name}", {"name": name})
-
-        # a row that only lapsed by its TTL would take 300 s
-        settle(_rows, deadline=10.0, interval=0.25, what="the released directory row")
-
-
 class TestPersistenceAcrossResumeAndClear:
     def test_resume_restores_the_list_and_a_clear_starts_fresh(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -447,46 +210,13 @@ class TestPersistenceAcrossResumeAndClear:
             "board/release-notes", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
         )
         persist(t1_a, subs)
-        subs.shutdown()
 
         # A FRESH set instance for the SAME session id loads it back -- the
         # resume path (a new process, same session id).
         fresh_a = load(t1_a, session_a)
-        try:
-            names = {e["subspace"] for e in fresh_a.entries()}
-            assert "board/release-notes" in names
-            assert "mailbox/i5" not in names, "the identity is read from the token file at each load, never stored"
-        finally:
-            fresh_a.shutdown()
-
-        # nexus-kdxyv: the leased name is NOT restored on resume. The
-        # ListAgents name changes at every process start (RDR-208), so the
-        # resumed session subscribes its NEW name (RDR-211: "a /resume
-        # under a new name repeats it, and the old name's mail strands");
-        # restoring the old one re-armed a stale lease and made that
-        # subscribe refuse as a second leased name.
-        fake = _FakeTuples()
-        subs2 = load(t1_a, session_a)
-        subs2.subscribe("mailbox/name-before-resume", templates=[],
-                        store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
-        persist(t1_a, subs2)
-        subs2.shutdown()
-        resumed = load(t1_a, session_a, store_factory=lambda: _fake_store_factory(fake))
-        try:
-            assert resumed.leased_name is None
-            assert "board/release-notes" in {e["subspace"] for e in resumed.entries()}
-            before = len(fake.calls)
-            resumed.subscribe("mailbox/name-after-resume", templates=[],
-                              store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
-            assert resumed.leased_name == "name-after-resume"
-            # Assert WHICH names were written, not how many writes happened: a
-            # heartbeat thread may tick under a loaded box, and a count would
-            # make this test fail for a reason it does not name.
-            after = [c[0] for c in fake.calls[before:]]
-            assert "directory/name-after-resume" in after, after
-            assert "directory/name-before-resume" not in after, after
-        finally:
-            resumed.shutdown()
+        names = {e["subspace"] for e in fresh_a.entries()}
+        assert "board/release-notes" in names
+        assert "mailbox/i5" not in names, "the identity is read from the token file at each load, never stored"
 
         # A DIFFERENT session id (the clear path) sees an empty list: T1 itself
         # is session-scoped, so it never finds session A's persisted row at all.
@@ -496,11 +226,7 @@ class TestPersistenceAcrossResumeAndClear:
         monkeypatch.setenv("NX_T1_SESSION_ID", session_b)
         t1_b = get_t1_database()
 
-        fresh_b = load(t1_b, session_b)
-        try:
-            assert fresh_b.entries() == []
-        finally:
-            fresh_b.shutdown()
+        assert load(t1_b, session_b).entries() == []
 
 
 # ── bead nexus-zxthy: a board topic's start position ─────────────────────
@@ -722,94 +448,13 @@ class TestResolveSessionName:
         assert resolve_session_name(sid, pid_alive=self._alive(51)) == "from-env"
 
 
-class TestArmSessionName:
-    """`arm_session_name` takes the name Claude Code already knows through
-    the SAME `_arm_name_lease` an explicit `tuple_subscribe` uses, so the
-    existing lease thread renews it. It is a convenience: it never beats an
-    explicit choice and never makes one fail."""
-
-    def test_arms_the_directory_lease_with_this_sessions_id(self) -> None:
-        fake = _FakeTuples()
-        s = SubscriptionSet(session_id="sess-auto")
-        try:
-            assert s.arm_session_name("nexus_3dc", store_factory=lambda: _fake_store_factory(fake)) is True
-            assert s.leased_name == "nexus_3dc"
-            assert _wait_for(lambda: len(fake.calls) == 1)
-            [(subspace, keys, dims, _nonce, ttl)] = fake.calls
-            assert (subspace, keys, dims) == ("directory/nexus_3dc", {"name": "nexus_3dc"}, {"session_id": "sess-auto"})
-            assert ttl == int(DIRECTORY_TTL_S)
-            assert s._lease_thread is not None and s._lease_thread.is_alive()  # noqa: SLF001 — the existing renewal thread
-            assert s.entries() == []  # still never a delivered mailbox
-        finally:
-            s.shutdown()
-
-    def test_an_unsafe_name_or_the_session_id_itself_is_a_quiet_no_op(self) -> None:
-        s = SubscriptionSet(session_id="sess-auto")
-        for bad in ("", "has space", "../x", "-lead", "sess-auto", "line\nbreak"):
-            assert s.arm_session_name(bad, store_factory=_poison_store_factory()) is False
-        assert s.leased_name is None
-
-    def test_an_explicit_name_already_held_is_not_overridden(self, tmp_path) -> None:
-        fake = _FakeTuples()
-        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
-        s = SubscriptionSet(session_id="sess-auto")
-        s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
-        try:
-            assert s.arm_session_name("from-registry", store_factory=_poison_store_factory()) is False
-            assert s.leased_name == "chosen"
-        finally:
-            s.shutdown()
-
-    def test_an_explicit_subscribe_of_another_name_replaces_the_auto_name(self, tmp_path) -> None:
-        fake = _FakeTuples()
-        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
-        s = SubscriptionSet(session_id="sess-auto")
-        s.arm_session_name("from-registry", store_factory=factory)
-        try:
-            assert _wait_for(lambda: len(fake.calls) == 1)
-            s.subscribe("mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path)
-            assert s.leased_name == "chosen"
-            released = [c for c in fake.calls if c[0] == "directory/from-registry" and c[4] == 1]
-            assert released, "the replaced auto name's row is released, not left to its TTL"
-            # the explicit name is now a choice: a second explicit name is refused again
-            with pytest.raises(SchemaViolationError):
-                s.subscribe("mailbox/third", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
-        finally:
-            s.shutdown()
-
-    def test_an_explicit_subscribe_of_the_same_name_is_idempotent_and_leaves_it_auto(self, tmp_path) -> None:
-        fake = _FakeTuples()
-        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
-        s = SubscriptionSet(session_id="sess-auto")
-        s.arm_session_name("same", store_factory=factory)
-        try:
-            assert _wait_for(lambda: len(fake.calls) == 1)
-            before = len(fake.calls)
-            s.subscribe("mailbox/same", templates=[], store_factory=factory, state_dir=tmp_path)
-            assert len(fake.calls) == before  # no second arm
-            # still auto: a different explicit name replaces it rather than being refused
-            s.subscribe("mailbox/other", templates=[], store_factory=factory, state_dir=tmp_path)
-            assert s.leased_name == "other"
-        finally:
-            s.shutdown()
-
-    def test_a_second_auto_arm_is_a_no_op(self) -> None:
-        fake = _FakeTuples()
-        s = SubscriptionSet(session_id="sess-auto")
-        try:
-            assert s.arm_session_name("n", store_factory=lambda: _fake_store_factory(fake)) is True
-            assert s.arm_session_name("n", store_factory=_poison_store_factory()) is False
-            assert _wait_for(lambda: len(fake.calls) == 1)
-            assert len(fake.calls) == 1
-        finally:
-            s.shutdown()
+# ── RDR-249: the server reports the registry's name to the aura loader, with no lease ─────────────────────────────
 
 
-class TestWaiterStartArmsTheSessionName:
-    """nexus-u839f: the arm happens where the server starts its
-    session-scoped background work, `_start_channel_waiter`, so server
-    start, a deferred T1 mint and a `/clear` handoff (which calls the same
-    function for the new id) all re-arm the name without a model step."""
+class TestTheServerWatchesTheRegistryNameForTheAuras:
+    """``_start_channel_waiter`` starts a name watch, not a name lease (RDR-253 Phase 2): the registry name is read at
+    once and every 60 s until the loader has decided or the waiter is no longer the session's, and nothing is written
+    to the engine."""
 
     @pytest.fixture
     def server(self, tmp_path, monkeypatch):
@@ -818,8 +463,8 @@ class TestWaiterStartArmsTheSessionName:
         from nexus.mcp import core as _core
 
         sid = str(uuid.uuid4())
-        fake = _FakeTuples()
         started: list[object] = []
+        names: list = []
 
         class _T1:
             def list_entries(self):
@@ -832,49 +477,75 @@ class TestWaiterStartArmsTheSessionName:
             def start(self) -> None:
                 started.append(self)
 
+        class _OnName:
+            loaded_flag = False
+
+            def __call__(self, name) -> None:
+                names.append(name)
+
+            def loaded(self) -> bool:
+                return self.loaded_flag
+
+        on_name = _OnName()
         monkeypatch.delenv("NX_MCP_PROBE", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.setenv("NX_T1_SESSION_ID", sid)
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
         monkeypatch.setattr(_core, "_DEFERRED_T1_MINT", {})
         monkeypatch.setattr(_core, "_get_t1", lambda: (_T1(), None))
-        monkeypatch.setattr(_core, "_t2_ctx", lambda: _fake_store_factory(fake))
+        monkeypatch.setattr(_core, "_t2_ctx", _poison_store_factory())
+        monkeypatch.setattr(_core, "_aura_loader", lambda _w, _s: on_name)
         monkeypatch.setattr(_core._channel, "ChannelWaiter", _Waiter)
         sessions = tmp_path / "claude" / "sessions"
         # this process's own pid: alive, so the default liveness check passes
         _write_session_file(sessions, os.getpid(), sessionId=sid, name="nexus_3dc")
         try:
-            yield _core, sid, fake, started
+            yield _core, sid, started, names, on_name
         finally:
             _core._channel.unregister_active_waiter(sid)
             _core._subscriptions.reset_cache(sid)
 
-    def test_starting_the_waiter_arms_the_name_from_the_sessions_registry(self, server) -> None:
-        core, sid, fake, started = server
+    def test_starting_the_waiter_reports_the_registry_name_and_writes_nothing(self, server) -> None:
+        core, sid, started, names, _on_name = server
         core._start_channel_waiter()
         assert len(started) == 1
-        assert _wait_for(lambda: len(fake.calls) == 1)
-        assert [(c[0], c[2]) for c in fake.calls] == [("directory/nexus_3dc", {"session_id": sid})]
-        assert core._subscriptions._CACHE[sid].leased_name == "nexus_3dc"  # noqa: SLF001
+        assert _wait_for(lambda: names == ["nexus_3dc"])  # _t2_ctx is a poison factory: an engine write would raise
 
-    def test_a_second_start_with_a_live_waiter_arms_nothing_more(self, server) -> None:
-        core, _sid, fake, started = server
-        core._start_channel_waiter()
-        core._channel.register_active_waiter(started[0])
-        assert _wait_for(lambda: len(fake.calls) == 1)
-        core._start_channel_waiter()
-        # the live-waiter guard returns before building a second waiter, so nothing waits to be seen
-        assert len(started) == 1 and len(fake.calls) == 1
-
-    def test_no_registry_entry_still_starts_the_waiter_and_writes_nothing(self, server, tmp_path, monkeypatch) -> None:
-        core, _sid, fake, started = server
+    def test_a_miss_is_reported_as_none_and_retried_on_the_next_poll(self, server, tmp_path, monkeypatch) -> None:
+        core, sid, started, names, _on_name = server
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "no-such-claude-dir"))
         core._start_channel_waiter()
         assert len(started) == 1
-        assert fake.calls == []
+        assert _wait_for(lambda: names == [None])
 
-    def test_a_resolver_failure_never_stops_the_waiter(self, server, monkeypatch) -> None:
-        core, _sid, fake, started = server
+    def test_the_watch_re_reads_until_the_loader_has_loaded_then_stops(self, server, tmp_path, monkeypatch) -> None:
+        core, sid, started, names, on_name = server
+        monkeypatch.setattr(core, "SESSION_NAME_POLL_S", 0.02)
+        core._start_channel_waiter()
+        core._channel.register_active_waiter(started[0])
+        assert _wait_for(lambda: len(names) >= 3), "re-read on every poll while the loader has not decided"
+        on_name.loaded_flag = True
+        count = len(names)
+        time.sleep(0.2)
+        assert len(names) <= count + 1, "stopped once the loader said it had loaded"
+
+    def test_the_watch_stops_when_its_waiter_is_no_longer_the_active_one(self, server, monkeypatch) -> None:
+        core, sid, started, names, on_name = server
+        monkeypatch.setattr(core, "SESSION_NAME_POLL_S", 0.02)
+        thread = core._watch_session_name(started and started[0] or type("W", (), {"session_id": sid})(), on_name, poll_s=0.02)
+        assert thread is not None
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "an unregistered waiter ends the watch at its first check"
+
+    def test_a_second_start_with_a_live_waiter_starts_nothing_more(self, server) -> None:
+        core, _sid, started, names, _on_name = server
+        core._start_channel_waiter()
+        core._channel.register_active_waiter(started[0])
+        core._start_channel_waiter()
+        assert len(started) == 1
+
+    def test_a_reader_failure_never_stops_the_waiter_or_the_watch(self, server, monkeypatch) -> None:
+        core, _sid, started, names, _on_name = server
 
         def _boom(*_a, **_k):
             raise RuntimeError("registry exploded")
@@ -882,247 +553,9 @@ class TestWaiterStartArmsTheSessionName:
         monkeypatch.setattr(core._subscriptions, "resolve_session_name", _boom)
         core._start_channel_waiter()
         assert len(started) == 1
-        assert fake.calls == []
 
 
-class TestArmDoesNoEngineWorkOnTheCallingThread:
-    """The registry arm can be called from the asyncio loop (server start,
-    the deferred-mint callback, the `/clear` handoff tick), and `store.out`
-    is a blocking HTTP call with a 30 s client timeout. The first send is
-    the lease thread's first tick, never the caller's."""
-
-    def test_the_store_is_never_touched_on_the_calling_thread(self) -> None:
-        import threading
-
-        main = threading.get_ident()
-        touched_on: list[int] = []
-
-        class _ThreadRecordingTuples(_FakeTuples):
-            def out(self, *a, **k):
-                touched_on.append(threading.get_ident())
-                return super().out(*a, **k)
-
-        fake = _ThreadRecordingTuples()
-
-        @contextmanager
-        def factory():
-            touched_on.append(threading.get_ident())
-            yield type("_Db", (), {"tuples": fake})()
-
-        s = SubscriptionSet(session_id="sess-loop")
-        try:
-            assert s.arm_session_name("loop-safe", store_factory=factory) is True
-            assert _wait_for(lambda: len(fake.calls) == 1)
-            assert len(touched_on) >= 2  # the factory and the out(), both on the lease thread
-            assert main not in touched_on, "the engine was touched on the calling (asyncio loop) thread"
-        finally:
-            s.shutdown()
-
-    def test_an_explicit_subscribe_still_arms_synchronously(self, tmp_path) -> None:
-        fake = _FakeTuples()
-        s = SubscriptionSet(session_id="sess-explicit")
-        try:
-            s.subscribe("mailbox/chosen", templates=[], store_factory=lambda: _fake_store_factory(fake), state_dir=tmp_path)
-            assert len(fake.calls) == 1, "tuple_subscribe's first arm stays synchronous"
-        finally:
-            s.shutdown()
-
-    def test_an_engine_down_at_the_first_tick_is_retried_by_the_thread(self) -> None:
-        fake = _FakeTuples()
-        attempts = []
-
-        class _Flaky(_FakeTuples):
-            def out(self, *a, **k):
-                attempts.append(1)
-                if len(attempts) == 1:
-                    raise ConnectionError("engine down")
-                return super().out(*a, **k)
-
-        flaky = _Flaky()
-        s = SubscriptionSet(session_id="sess-retry")
-        try:
-            s.arm_session_name("retry-me", store_factory=lambda: _fake_store_factory(flaky), lease_poll_s=0.01)
-            assert _wait_for(lambda: len(flaky.calls) == 1), "the heartbeat re-sends after the engine comes back"
-        finally:
-            s.shutdown()
-        del fake
-
-
-def test_the_registry_is_not_re_read_before_the_interval() -> None:
-    # NAME_RESOLVE_INTERVAL_S at its real 60 s, on a virtual clock: polls before it read nothing.
-    fake, reads, clock = _FakeTuples(), [], FakeClock()
-    s = SubscriptionSet(session_id="sess-cadence", clock=clock)
-    try:
-        s.arm_session_name(
-            "steady", store_factory=lambda: _fake_store_factory(fake),
-            resolve=lambda: reads.append(1) or "steady", lease_poll_s=1.0,
-        )
-        for _ in range(30):  # 30 polls, 30 s of virtual time
-            clock.step(1.0)
-        assert reads == []
-        clock.step(30.0)  # the poll at 60 s re-reads the registry
-        assert reads == [1]
-    finally:
-        s.shutdown()
-
-
-class TestNameFollowsTheRegistry:
-    """The lease thread re-reads the registry (at most once per
-    NAME_RESOLVE_INTERVAL_S, patched to 0 here) so a `/rename`, or a name the
-    startup read missed, reaches the directory without the model."""
-
-    @pytest.fixture(autouse=True)
-    def _fast_resolve(self, monkeypatch):
-        import nexus.mcp.subscriptions as m
-
-        monkeypatch.setattr(m, "NAME_RESOLVE_INTERVAL_S", 0.0)
-
-    class _Registry:
-        def __init__(self, name) -> None:
-            self.name = name
-            self.reads = 0
-
-        def __call__(self):
-            self.reads += 1
-            return self.name
-
-    def _arm(self, s, fake, registry, name):
-        return s.arm_session_name(
-            name, store_factory=lambda: _fake_store_factory(fake), resolve=registry, lease_poll_s=0.01,
-        )
-
-    def test_a_rename_releases_the_old_row_and_arms_the_new_one(self) -> None:
-        fake, registry = _FakeTuples(), self._Registry("first")
-        s = SubscriptionSet(session_id="sess-rn")
-        try:
-            assert self._arm(s, fake, registry, "first") is True
-            assert _wait_for(lambda: any(c[0] == "directory/first" for c in fake.calls))
-            registry.name = "second"
-            assert _wait_for(lambda: any(c[0] == "directory/second" and c[4] != 1 for c in fake.calls))
-            assert any(c[0] == "directory/first" and c[4] == 1 for c in fake.calls), "old row released, not left to its TTL"
-            assert s.leased_name == "second"
-        finally:
-            s.shutdown()
-        assert any(c[0] == "directory/second" and c[4] == 1 for c in fake.calls), "shutdown releases the CURRENT name"
-
-    def test_a_startup_miss_is_retried_and_arms_the_late_name(self) -> None:
-        fake, registry = _FakeTuples(), self._Registry(None)
-        s = SubscriptionSet(session_id="sess-late")
-        try:
-            assert self._arm(s, fake, registry, None) is False
-            assert s.leased_name is None and fake.calls == []
-            # a repeat auto-arm while tracking is a no-op, not a second thread
-            assert self._arm(s, fake, registry, None) is False
-            registry.name = "late-name"
-            assert _wait_for(lambda: s.leased_name == "late-name")
-            assert _wait_for(lambda: any(c[0] == "directory/late-name" for c in fake.calls))
-        finally:
-            s.shutdown()
-
-    def test_a_miss_or_an_unsafe_name_keeps_the_held_row(self) -> None:
-        fake, registry = _FakeTuples(), self._Registry("held")
-        s = SubscriptionSet(session_id="sess-keep")
-        try:
-            self._arm(s, fake, registry, "held")
-            assert _wait_for(lambda: len(fake.calls) >= 1)
-            for value in (None, "has space", "sess-keep"):
-                registry.name = value
-                reads = registry.reads
-                assert _wait_for(lambda: registry.reads >= reads + 2)
-            assert s.leased_name == "held"
-            assert not any(c[4] == 1 for c in fake.calls), "nothing was released"
-        finally:
-            s.shutdown()
-
-    def test_an_explicit_name_is_never_swapped(self, tmp_path) -> None:
-        fake, registry, clock = _FakeTuples(), self._Registry("auto-name"), FakeClock()
-        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
-        s = SubscriptionSet(session_id="sess-expl", clock=clock)
-        try:
-            self._arm(s, fake, registry, "auto-name")
-            assert _wait_for(lambda: len(fake.calls) >= 1)
-            s.subscribe(
-                "mailbox/chosen", templates=[], store_factory=factory, state_dir=tmp_path, lease_poll_s=1.0,
-            )
-            registry.name = "renamed-later"
-            reads = registry.reads
-            for _ in range(5):  # five rounds of the chosen name's lease thread
-                clock.step(1.0)
-            assert registry.reads == reads, "no resolver runs once the name is a choice"
-            assert s.leased_name == "chosen"
-            assert not any(c[0] == "directory/renamed-later" for c in fake.calls)
-        finally:
-            s.shutdown()
-
-    def test_an_explicit_subscribe_of_the_same_name_keeps_following_the_registry(self, tmp_path) -> None:
-        # The SessionStart line asks every model to subscribe the name it already holds;
-        # that must not pin it, or a /rename is never followed (nexus-u839f).
-        fake, registry = _FakeTuples(), self._Registry("same")
-        factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local
-        s = SubscriptionSet(session_id="sess-same")
-        try:
-            self._arm(s, fake, registry, "same")
-            assert _wait_for(lambda: len(fake.calls) >= 1)
-            s.subscribe("mailbox/same", templates=[], store_factory=factory, state_dir=tmp_path)
-            registry.name = "renamed-later"
-            assert _wait_for(lambda: s.leased_name == "renamed-later")
-            assert any(c[0] == "directory/renamed-later" for c in fake.calls)
-        finally:
-            s.shutdown()
-
-    def test_a_store_that_cannot_open_during_the_swap_keeps_the_held_row_and_retries(self) -> None:
-        registry = self._Registry("old")
-        state = {"down": False}
-        fake = _FakeTuples()
-
-        @contextmanager
-        def factory():
-            if state["down"]:
-                raise ConnectionError("engine down")
-            yield type("_Db", (), {"tuples": fake})()
-
-        s = SubscriptionSet(session_id="sess-eng")
-        try:
-            s.arm_session_name("old", store_factory=factory, resolve=registry, lease_poll_s=0.01)
-            assert _wait_for(lambda: len(fake.calls) >= 1)
-            registry.name = "new"
-            state["down"] = True
-            reads = registry.reads
-            assert _wait_for(lambda: registry.reads >= reads + 2)
-            assert s.leased_name == "old"
-            state["down"] = False
-            assert _wait_for(lambda: s.leased_name == "new")
-            assert _wait_for(lambda: any(c[0] == "directory/new" for c in fake.calls))
-        finally:
-            s.shutdown()
-
-    def test_an_engine_write_failure_during_the_swap_is_re_sent_by_the_heartbeat(self) -> None:
-        registry = self._Registry("old")
-        state = {"fail": False}
-
-        class _Tuples(_FakeTuples):
-            def out(self, *a, **k):
-                if state["fail"]:
-                    raise ConnectionError("engine down")
-                return super().out(*a, **k)
-
-        fake = _Tuples()
-        s = SubscriptionSet(session_id="sess-eng2")
-        try:
-            self._arm(s, fake, registry, "old")
-            assert _wait_for(lambda: len(fake.calls) >= 1)
-            registry.name = "new"
-            state["fail"] = True
-            assert _wait_for(lambda: s.leased_name == "new")
-            state["fail"] = False
-            assert _wait_for(lambda: any(c[0] == "directory/new" and c[4] != 1 for c in fake.calls)), (
-                "the new row is armed by the next 5 s heartbeat once the engine answers"
-            )
-        finally:
-            s.shutdown()
-
-
-class TestResolverLogsAMissOncePerRun:
+class TestRegistryNameReaderLogsAMissOncePerRun:
     def test_session_name_unresolved_is_not_repeated_by_the_sixty_second_re_read(self, tmp_path, monkeypatch) -> None:
         from structlog.testing import capture_logs
 
@@ -1132,7 +565,7 @@ class TestResolverLogsAMissOncePerRun:
         sid = str(uuid.uuid4())
         _write_session_file(tmp_path / "sessions", 91, sessionId=str(uuid.uuid4()), name="other")
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-        resolve = _core._session_name_resolver(sid)
+        resolve = _core._registry_name_reader(sid)
         with capture_logs() as logs:
             assert resolve() is None
             assert resolve() is None
@@ -1150,16 +583,6 @@ class TestResolverLogsAMissOncePerRun:
             assert resolve() is None
             assert resolve() is None
         assert [e["event"] for e in logs].count("session_name_unresolved") == 1
-
-    def test_an_unsafe_registry_name_is_a_debug_line_and_no_arm(self) -> None:
-        from structlog.testing import capture_logs
-
-        _log_everything()
-        s = SubscriptionSet(session_id="sess-unsafe")
-        with capture_logs() as logs:
-            assert s.arm_session_name("has space", store_factory=_poison_store_factory()) is False
-        [line] = [e for e in logs if e["event"] == "session_name_unsafe"]
-        assert line["log_level"] == "debug" and line["session_id"] == "sess-unsafe"
 
 
 # --- RDR-253 Phase 2: the identity mailbox is the one delivered mailbox --------------------------------

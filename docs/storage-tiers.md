@@ -323,7 +323,7 @@ nx store import myrepo-backup.nxexp --collection code__newname
 The tuple space is the ninth T2 store (`db.tuples`, `HttpTupleStore`), for cross-agent and cross-instance coordination metadata (a mailbox, a work queue, a lock), not for notes or search hits. Seven templates ship today:
 
 - **`mailbox/<address>`**: messages to an agent id or a session id, 7-day retention.
-- **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention.
+- **`directory/<name>`** (RDR-208 Phase 1 Step 1): read-only session-directory lease entries, 7-day retention. Nothing in the client writes or reads it since RDR-253 Phase 2; the template leaves with a later engine release.
 - **`board/<topic>`**, **`queue/<name>`** and **`lock/<resource>`** (RDR-211): a broadcast board (7 days), a shared work queue (2 days) and a mutual-exclusion lock (7 days when idle).
 - **`board/ci/<topic>`** (RDR-220): CI status posts, 3-day retention.
 - **`aspects`** (RDR-235, a one-segment literal name): the one aspect-extraction queue per tenant, the collection in the task body, 90-day retention.

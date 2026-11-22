@@ -823,9 +823,8 @@ class ChannelWaiter:
     `sender` defaults to :func:`send_channel_notification`; tests inject
     a fake recording calls instead of touching a real stdio connection.
 
-    `store_factory` (never a bare `HttpTupleStore` handle) for the same
-    reason :func:`~nexus.mcp.subscriptions._directory_heartbeat` takes
-    one: a store handle obtained inside one `with _t2_ctx() as db:`
+    `store_factory` (never a bare `HttpTupleStore` handle), because
+    a store handle obtained inside one `with _t2_ctx() as db:`
     block is CLOSED when that block exits (`T2Database.__exit__` ->
     `close()` -> `self.tuples.close()`), so this waiter -- which
     outlives any single call by the whole session -- opens a fresh

@@ -143,29 +143,29 @@ An idle lock still expires at its `out` time plus the template's 7-day retention
 
 ## Cross-instance request and ack
 
-A request from one session to another is the same mailbox, addressed by session id. The sender does not type the id: `mailbox_send(to="conexus-58", ...)` looks the name up in `directory/conexus-58` and writes to `mailbox/<that session id>` (instance-name addressing was retired at RDR-208 Phase 3). Both sessions on the box mint against one tenant, so each mailbox is reachable from the other. The requester parks an `in` on its own mailbox, which is its own session id, for the ack. The peer answers with `ack(reply=...)` (RDR-206): the reply lands in the requester's mailbox and the request is consumed, in one transaction, so there is no longer a separate `out` call that a crash could land between. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
+A request from one session to another is the same mailbox, addressed by identity (RDR-253 Phase 2: a session id and the `directory/<name>` name lease are no longer addresses). The sender does not type the id: `mailbox_send(to="conexus", ...)` resolves a seat's name through `alias/conexus` and writes to `mailbox/<that seat's identity id>`. Both sessions on the box mint against one tenant, so each mailbox is reachable from the other. The requester parks an `in` on its own identity's mailbox for the ack. The peer answers with `ack(reply=...)` (RDR-206): the reply lands in the requester's mailbox and the request is consumed, in one transaction, so there is no longer a separate `out` call that a crash could land between. See [What it is not for](tuple-space.md#what-it-is-not-for) for the scope this stays inside.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant N as nexus-a6 session (requester, id S-a6)
+    participant N as nexus-a6 session (requester, identity i6)
     participant E as Engine (shared tenant)
-    participant C as conexus-58 session (peer, id S-58)
+    participant C as conexus session (peer, identity i58)
 
-    N->>E: mailbox_send to conexus-58: rd directory/conexus-58
-    E-->>N: session_id S-58
-    N->>E: out mailbox/S-58 kind request correlation_id r-41 nonce r-41
+    N->>E: mailbox_send to conexus: GET alias/conexus
+    E-->>N: identity i58
+    N->>E: out mailbox/i58 kind request correlation_id r-41 nonce r-41
     E-->>N: tuple_id
     loop until an ack or the caller's own deadline
-        N->>E: in mailbox/S-a6 to S-a6 claimant=S-a6 timeout_s=25
+        N->>E: in mailbox/i6 to i6 claimant=i6 timeout_s=25
         E-->>N: None at the 25 s cap, probe result, loop
     end
-    C->>E: in mailbox/S-58 to S-58 claimant=S-58 lease_s=300
+    C->>E: in mailbox/i58 to i58 claimant=i58 lease_s=300
     E-->>C: the request tuple, claim c9
     C->>C: deploy engine, re-gate
-    C->>E: ack c9 reply: subspace mailbox/S-a6, keys {to S-a6}, dims {kind ack, correlation_id r-41}
+    C->>E: ack c9 reply: subspace mailbox/i6, keys {to i6}, dims {kind ack, correlation_id r-41}
     Note over E: c9 consumed and the reply written in the SAME transaction (RDR-206). The reply's nonce is the engine's own, hex(request tuple id), never the caller's, and its id is digested under its own label, so no out can reproduce it (nexus-b747g)
-    E->>E: signal waiters on mailbox/S-a6
+    E->>E: signal waiters on mailbox/i6
     E-->>N: the ack tuple, claim c10
     N->>E: ack c10
 ```
@@ -174,7 +174,7 @@ A wait of minutes is a loop of parked calls, never one long park. Each call park
 
 ## Push delivery: the channel
 
-The session's own nexus MCP server (the delivery endpoint, RDR-211 nexus-rplay.14) and the drain hook (`nx-hook mailbox-drain`, `nexus.hooks.mailbox_drain`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session's own mailbox, subscribed automatically from MCP-server startup -- no subscribe call is needed for it. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
+The session's own nexus MCP server (the delivery endpoint, RDR-211 nexus-rplay.14) and the drain hook (`nx-hook mailbox-drain`, `nexus.hooks.mailbox_drain`) are two renderers of one row that never wait on each other. This follows one message arriving at an idle session's identity mailbox, delivered once the session is bound -- no subscribe call is needed for it. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ```mermaid
 sequenceDiagram
@@ -186,28 +186,28 @@ sequenceDiagram
     participant M as Session (idle, no user input)
     participant D as Drain hook (UserPromptSubmit)
 
-    Note over M,S: mailbox/<name> subscribed earlier via tuple_subscribe, per the SessionStart instruction
+    Note over M,S: the session is bound to its identity: mailbox/<identity> is delivered with no subscribe call
     S->>E: wait over subscribed mailboxes/topics, timeout_s=25
-    Sn->>E: out mailbox/[session] keys to dims from kind nonce msg-9 body
+    Sn->>E: out mailbox/[identity] keys to dims from kind nonce msg-9 body
     E-->>S: the new row, available -- the waiter never claims it
     S->>H: notifications/claude/channel: subspace, tuple_id -- no body, no claim
     H-->>M: channel notification, a wake: fires UserPromptSubmit for this same prompt
     alt plugin hooks loaded
         M->>D: UserPromptSubmit runs
-        D->>E: tuple_in mailbox/[session]
+        D->>E: tuple_in mailbox/[identity]
         E-->>D: the tuple and a claim, body included
         D->>E: ack the claim
         E-->>D: consumed
         D-->>M: body rendered with this prompt
         Note over M: acts on the rendered body, claims nothing
     else no plugin hooks in this session
-        M->>E: tuple_in mailbox/[session], claiming the reference the notification named
+        M->>E: tuple_in mailbox/[identity], claiming the reference the notification named
         E-->>M: the tuple and a claim, body included
         M->>E: ack the claim (mcp tuple_ack), or nack if it failed, or release if only deferring
         E-->>M: consumed (ack/nack), or available again (release)
     end
     Note over M: nothing left for the next UserPromptSubmit's drain hook -- the row was already resolved
-    Sn->>E: out mailbox/[session] keys to dims from kind nonce msg-10 body
+    Sn->>E: out mailbox/[identity] keys to dims from kind nonce msg-10 body
     E-->>S: the new row, available, one wake apart, not gated on msg-9's ack
     S->>H: notifications/claude/channel: subspace, tuple_id, msg-10's own reference
 ```
@@ -216,7 +216,7 @@ The notification itself carries no content, only the reference (Sam, T2 `nexus_r
 
 When the channel is unreached at all (the session was not launched with the development-channel flag, or it subscribed too late) the row is still delivered: the next prompt fires `nx-hook mailbox-drain`, which probes independently, claims, acks and renders the same row inline in that prompt's context. The drain hook is the unconditional floor and never depends on whether the channel delivered anything first. A session that cannot carry the flag (the Claude Desktop Code tab) can also run `nx tuple wait` in the background to be woken without a prompt (draft RDR-233, [Tuple space](tuple-space.md#without-the-channel-nx-tuple-wait-rdr-233)).
 
-A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) -- its own mailbox is delivered from startup -- and re-leases its own name once the model calls `tuple_subscribe` per the new SessionStart instruction. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
+A `/clear` or `/resume` puts the conversation on a new session id; the new session's own MCP server loads a fresh subscription set for that id (T1-scoped) -- its identity mailbox is delivered once the session is bound, and the identity (so every message waiting in its mailbox) does not change with the session id. See [Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel) for that handoff.
 
 ## How a blocking read parks
 

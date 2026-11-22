@@ -97,8 +97,8 @@ async def test_valid_marker_rekeys_the_channel_waiter_and_subscriptions(monkeypa
     """nexus-kdxyv: a consumed handoff (``/clear``, ``/resume``, ``/branch``)
     moves the SESSION this process serves, so the channel waiter registered
     under the old id is cancelled (its own ``finally`` then records
-    ``alive=false`` under that id), the old subscription set is shut down
-    (releasing its directory lease) and dropped from the process cache, and
+    ``alive=false`` under that id), the old subscription set is dropped from
+    the process cache, and
     a waiter starts under the new id. Before this, the old waiter kept
     parking on the old mailbox for the rest of the process, no record was
     ever written for the new id, and teardown (which looks the waiter up by
@@ -125,8 +125,7 @@ async def test_valid_marker_rekeys_the_channel_waiter_and_subscriptions(monkeypa
             events.append(("cancel", os.environ.get("NX_T1_SESSION_ID", "")))
 
     class _Subs:
-        def shutdown(self) -> None:
-            events.append(("shutdown", os.environ.get("NX_T1_SESSION_ID", "")))
+        _identity_listener = None
 
     monkeypatch.setattr(core._channel, "_ACTIVE", {"old-sess": _Waiter()})
     monkeypatch.setattr(core._subscriptions, "_CACHE", {"old-sess": _Subs()})
@@ -139,42 +138,32 @@ async def test_valid_marker_rekeys_the_channel_waiter_and_subscriptions(monkeypa
 
     assert os.environ["NX_T1_SESSION_ID"] == "new-sess"
     assert ("cancel", "old-sess") in events, events   # cancelled while still findable under the old id
-    assert ("shutdown", "old-sess") in events, events
     assert events[-1] == ("start", "new-sess"), events  # the new waiter starts AFTER the swap
     assert "old-sess" not in core._channel._ACTIVE
     assert "old-sess" not in core._subscriptions._CACHE
 
 
-# ── nexus-u839f: a /clear moves the directory name with the session ──────────
+# ── nexus-u839f: a /clear moves the registry name watch with the session ─────
 
 
 @pytest.mark.asyncio
-async def test_a_clear_handoff_releases_the_old_name_and_arms_the_new_sessions_name(
+async def test_a_clear_handoff_drops_the_old_set_and_the_new_sessions_name_watch_reports_its_name(
     monkeypatch, tmp_path,
 ) -> None:
-    """The old id's set releases its `directory/<old name>` row (nexus-kdxyv)
-    and the REAL `_start_channel_waiter` that the tick calls for the new id
-    arms the name Claude Code's registry now shows for it (nexus-u839f), so a
-    `/clear` does not leave the session unreachable by name until the model
-    happens to re-subscribe."""
+    """The old id's set is dropped (nexus-kdxyv) and the REAL `_start_channel_waiter` that the tick calls for the new
+    id starts the name watch, which reports the name Claude Code's registry now shows for it to the aura loader
+    (nexus-u839f, RDR-249). Nothing is written to the engine: the `directory/<name>` lease is gone (RDR-253 Phase 2)."""
     import time
     import uuid
-    from contextlib import contextmanager
 
     from nexus.db import t1 as t1_mod
     from nexus.mcp.subscriptions import SubscriptionSet
 
     new_sid = str(uuid.uuid4())  # the env tier of the session-id resolver wants a UUID
-    calls: list[tuple] = []
+    names: list = []
 
-    class _Tuples:
-        def out(self, subspace, keys, dims=None, body=None, *, nonce=None, ttl_seconds=None):
-            calls.append((subspace, dims["session_id"], ttl_seconds))
-            return "id"
-
-    @contextmanager
-    def _store():
-        yield type("_Db", (), {"tuples": _Tuples()})()
+    def _poison_store():
+        raise AssertionError("the handoff must not touch the engine's tuple space")
 
     class _T1:
         def list_entries(self):
@@ -200,35 +189,27 @@ async def test_a_clear_handoff_releases_the_old_name_and_arms_the_new_sessions_n
     monkeypatch.setattr("nexus.session.find_immediate_claude_pid", lambda start_pid=None: _CLAUDE_PID)
     monkeypatch.setattr(core, "_start_channel_waiter", _REAL_START_CHANNEL_WAITER)
     monkeypatch.setattr(core, "_get_t1", lambda: (_T1(), None))
-    monkeypatch.setattr(core, "_t2_ctx", _store)
+    monkeypatch.setattr(core, "_t2_ctx", _poison_store)
     monkeypatch.setattr(core._channel, "ChannelWaiter", _Waiter)
     monkeypatch.setattr(core._channel, "_ACTIVE", {})
     monkeypatch.setattr(core._subscriptions, "_CACHE", {})
+    monkeypatch.setattr(core, "_aura_loader", lambda _w, _s: names.append)
 
     write_handoff_marker(
         _MCP_PID, new_session_id=new_sid, claude_pid=_CLAUDE_PID, config_dir=nexus_config_dir(),
     )
     os.environ["NX_T1_SESSION_ID"] = "old-sess"
     os.environ["NX_T1_SESSION"] = "old-token"
-    old = SubscriptionSet(session_id="old-sess")
-    old.arm_session_name("before-clear", store_factory=_store)
-    core._subscriptions._CACHE["old-sess"] = old
+    core._subscriptions._CACHE["old-sess"] = SubscriptionSet(session_id="old-sess")
     try:
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not calls:
-            time.sleep(0.01)
-        assert ("directory/before-clear", "old-sess", int(300)) in calls, calls  # armed under the old id
-
         await core._t1_handoff_tick(_MCP_PID, MagicMock())
 
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and not any(c[0] == "directory/after-clear" for c in calls):
+        while time.monotonic() < deadline and "after-clear" not in names:
             time.sleep(0.01)
-        assert ("directory/before-clear", "old-sess", 1) in calls, calls  # released, not left to its TTL
-        armed = [c for c in calls if c[0] == "directory/after-clear"]
-        assert armed and armed[0][1] == new_sid, calls
+        assert "after-clear" in names, names
         assert "old-sess" not in core._subscriptions._CACHE
-        assert core._subscriptions._CACHE[new_sid].leased_name == "after-clear"
+        assert new_sid in core._subscriptions._CACHE
     finally:
         core._subscriptions.reset_cache()
         core._channel.unregister_active_waiter(new_sid)

@@ -80,8 +80,8 @@ def row_the_lease_starts_from_cores_start_path_adopts_a_marker_through_the_hando
             assert world.events(alpha) == ["start", "clear"]
 
             monkeypatch.setattr(service_registry, "pid_alive", lambda pid, **kw: False)     # Claude has exited
-            thread = core._start_session_name_release()                        # the exit path: name release + identity shutdown
-            core._await_session_name_release(thread)
+            core.identity_seam.start_shutdown()                                # the exit path's identity shutdown
+            core.identity_seam.await_shutdown()
             assert world.identity(alpha)["state"] == "ended" and world.events(alpha)[-1] == "end"
             assert not token_path(config_dir / "identity", me, 5_000_000).exists()
             assert identity_lease.current() is None and not token_header._LEASE_OWNER

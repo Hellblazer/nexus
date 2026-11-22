@@ -45,7 +45,6 @@ def _stubs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(core, "_SHUTDOWN_IN_FLIGHT", False)
     monkeypatch.setattr(core, "_flush_search_telemetry_at_exit", lambda: None)
     monkeypatch.setattr(core, "_t1_shutdown", lambda: order.append("t1_shutdown"))
-    monkeypatch.setattr(core, "_start_session_name_release", lambda: None)
 
     def _fake_exit(code: int) -> None:
         order.append(f"exit {code}")

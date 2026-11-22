@@ -749,8 +749,9 @@ NOTICE_TIMEOUT_S: float = 35.0
 
 def on_loop(loader: AuraLoader, loop: Any) -> Callable[[str | None], None]:
     """A callback for each registry resolve that runs :meth:`AuraLoader.on_resolve_async` on *loop*: the 60 s
-    re-resolve runs on the lease thread, and the subscription set is read on the waiter's loop. The loader's reads
-    (files, process walk, membership and group reads) run on a worker thread; only the commit is on the loop."""
+    re-resolve runs on the server's name-watch thread, and the subscription set is read on the waiter's loop. The
+    loader's reads (files, process walk, membership and group reads) run on a worker thread; only the commit is on the
+    loop. The callback's ``loaded()`` says the loader has decided, so the watch can stop."""
     tasks: set[Any] = set()
 
     def call(name: str | None) -> None:
@@ -761,4 +762,5 @@ def on_loop(loader: AuraLoader, loop: Any) -> Callable[[str | None], None]:
         except RuntimeError:  # the loop is closed: the waiter is gone
             pass
 
+    call.loaded = lambda: loader.loaded  # type: ignore[attr-defined] -- read by the server's name watch
     return call

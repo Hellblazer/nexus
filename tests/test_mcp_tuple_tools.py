@@ -862,46 +862,22 @@ class TestTupleSubscriptions:
         entries = tuple_subscriptions()
         assert "board/release-notes" not in {e["subspace"] for e in entries}
 
-    def test_name_lease_arms_the_directory_and_is_never_a_delivered_mailbox(
+    def test_a_name_subscribe_is_refused_and_arms_nothing(
         self, t2_service_env, tmp_path, monkeypatch,
     ) -> None:
-        """RDR-208 Phase 3 (bead nexus-galkv.20): subscribing a name arms
-        its `directory/<name>` lease (so `mailbox_send` resolves it), but
-        writes no per-session registration file any more and never
-        appears in `tuple_subscriptions`'s own listing -- it is not a
-        second delivered mailbox."""
-        import os
-
+        """RDR-253 Phase 2: the `directory/<name>` lease is gone, so subscribing `mailbox/<name>` is refused: no
+        directory row, no registration file, nothing in `tuple_subscriptions`. An unsubscribe of it is a plain no-op."""
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        session_id = os.environ["NX_T1_SESSION_ID"]
         name = f"inst-{uuid.uuid4().hex[:8]}"
 
-        msg = tuple_subscribe(f"mailbox/{name}")
-        assert "Subscribed" in msg
+        refusal = tuple_subscribe(f"mailbox/{name}")
+        assert "Error" in refusal and "not subscribable" in refusal
 
-        # THE "THEN STOPS" HALF (Transition Test Plan): no registration
-        # file is written under the config dir any more. Checked as a
-        # specific path, not "the config dir holds nothing at all": this
-        # same dir is now NEXUS_CONFIG_DIR, so an unrelated data-token
-        # lease this call's own T2 access legitimately caches there is not
-        # this test's concern.
         assert not (tmp_path / "tuple-watch").exists()
+        assert tuple_rd(f"directory/{name}", {"name": name}) == []
+        assert f"mailbox/{name}" not in {e["subspace"] for e in tuple_subscriptions()}
 
-        rows = tuple_rd(f"directory/{name}", {"name": name})
-        assert len(rows) == 1
-        assert rows[0]["dims"]["session_id"] == session_id
-
-        entries = tuple_subscriptions()
-        assert f"mailbox/{name}" not in {e["subspace"] for e in entries}
-
-        other = f"other-{uuid.uuid4().hex[:8]}"
-        refusal = tuple_subscribe(f"mailbox/{other}")
-        assert "Error" in refusal
-
-        msg = tuple_unsubscribe(f"mailbox/{name}")
-        assert "Unsubscribed" in msg
-        entries = tuple_subscriptions()
-        assert f"mailbox/{name}" not in {e["subspace"] for e in entries}
+        assert "Unsubscribed" in tuple_unsubscribe(f"mailbox/{name}")
 
     def test_subscriptions_lists_entries_without_a_cursor(self, t2_service_env) -> None:
         entries = tuple_subscriptions()

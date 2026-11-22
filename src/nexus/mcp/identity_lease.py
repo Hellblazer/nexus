@@ -24,8 +24,7 @@ server, which is the one process that outlives every ``/clear``:
   process is refused, and deletes its token file.
 
 One thread per server (:func:`start`); :meth:`IdentityLease.tick` is one heartbeat and holds the logic, so a test
-drives it with a fixed clock and no thread. This module does not use ``subscriptions._lease_loop``: that loop runs
-only while a ``directory/<name>`` lease is armed, and identity must be renewed for a server with no name.
+drives it with a fixed clock and no thread.
 """
 from __future__ import annotations
 
