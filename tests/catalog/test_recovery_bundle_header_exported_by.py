@@ -62,11 +62,28 @@ def test_exported_by_takes_the_installed_client_and_whatever_engine_version_the_
     assert exported_by(reader) == {"client": dist_version("conexus"), "engine": engine}
 
 
-def test_a_reader_ignores_exported_by(tmp_path):
+def test_a_reader_ignores_exported_by_and_any_other_unknown_header_key(tmp_path):
     bundle = tmp_path / "b.jsonl"
-    write_bundle(bundle, [], [], ExportSummary(), exported_by={"client": "1", "engine": ""})
+    bundle.write_text(json.dumps({"format": "nexus-recovery-bundle", "format_version": MAX_SUPPORTED_RECOVERY_FORMAT_VERSION,
+                                  "exported_by": {"client": "1", "engine": ""}, "a_key_from_the_future": [1, 2]}) + "\n",
+                      encoding="utf-8")
     header, records = read_bundle(bundle)
     assert header["format_version"] == MAX_SUPPORTED_RECOVERY_FORMAT_VERSION and records == []
+
+
+def test_write_bundle_without_exported_by_still_records_the_client(tmp_path):
+    bundle = tmp_path / "b.jsonl"
+    write_bundle(bundle, [], [], ExportSummary())
+    assert _header(bundle)["exported_by"] == {"client": dist_version("conexus"), "engine": ""}
+
+
+def test_the_cli_turns_a_malformed_header_into_one_message(tmp_path, monkeypatch):
+    bundle = tmp_path / "bad.jsonl"
+    bundle.write_text("{not json\n", encoding="utf-8")
+    monkeypatch.setattr("nexus.commands.catalog._get_catalog", lambda: pytest.fail("connected before the header check"))
+    result = CliRunner().invoke(main, ["catalog", "import", str(bundle)])
+    assert result.exit_code == 1, result.output
+    assert "is not a readable recovery bundle" in result.output and "Traceback" not in result.output
 
 
 def _future_bundle(tmp_path):

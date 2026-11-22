@@ -19,6 +19,7 @@ Fixture census mirrors the audited classifier legs (nx_plan_audit rounds
 from __future__ import annotations
 
 import json
+from importlib.metadata import version
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -108,6 +109,7 @@ class _State:
         self.created_links: list[dict] = []
         self.docs_for_chashes_requests: list[list[str]] = []
         self.link_page_size_forced: int | None = None  # test hook
+        self.release_version: str | None = None  # GET /version's release_version; None serves no field
 
     def manifests_chash_universe(self) -> list[str]:
         return [r["chash"] for rows in self.manifests.values() for r in rows]
@@ -129,6 +131,9 @@ def _make_handler(state: _State):
         def do_GET(self):  # noqa: N802
             u = urlparse(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query).items()}
+            if u.path.endswith("/version") and not u.path.startswith("/v1/catalog"):
+                self._send({"release_version": state.release_version} if state.release_version else {})
+                return
             op = u.path.removeprefix("/v1/catalog")
             if op == "/list":
                 state.list_requests += 1
@@ -502,6 +507,17 @@ def test_bundle_is_plain_jsonl(fake_catalog, tmp_path):
     # the legacy doc's link endpoint carries the DERIVED identity
     derived = [l for l in links if l["link_type"] == "relates"]
     assert derived and derived[0]["from_source_uri"].startswith("nx-note://")
+    # RDR-229 P3.9 G2: the header names what wrote it; this fake engine reports no release_version
+    assert parsed[0]["exported_by"] == {"client": version("conexus"), "engine": ""}
+
+
+def test_export_writes_the_engines_release_version_into_exported_by(fake_catalog, tmp_path):
+    url, state = fake_catalog
+    state.release_version = "0.1.299"
+    with _client(url) as reader:
+        export_bundle(reader, _FakeT3(), tmp_path / "b.jsonl")
+    header = json.loads((tmp_path / "b.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert header["exported_by"] == {"client": version("conexus"), "engine": "0.1.299"}
 
 
 # ── import ──────────────────────────────────────────────────────────────────
