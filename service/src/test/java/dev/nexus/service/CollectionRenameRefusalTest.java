@@ -215,7 +215,8 @@ class CollectionRenameRefusalTest {
     /**
      * linda's ruling 5 (2026-11-22): "every response carrying {@code ids_stable} also carries {@code catalog_epoch}", from
      * baton's {@code CatalogEpoch.of(ctx, tenant)} (the first 16 hex characters of a sha256 over the cluster's system
-     * identifier, timeline and the tenant's restore marker). On a stock cluster the engine role can read the pg_control
+     * identifier, timeline, postmaster start time and the tenant's restore marker; empty unless read inside the rename's
+     * {@code withTenant} scope). On a stock cluster the engine role can read the pg_control
      * functions, so the epoch is there, beside {@code ids_stable}, in the two states a rename answers 200 in: gate 3 not
      * holding and the drop move missing, and gate 3 holding with the window closed. The value is a function of the cluster and
      * the tenant, so two renames with nothing changed between them answer the same one. The test reads the epoch only through
