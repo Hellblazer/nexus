@@ -189,6 +189,17 @@ def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
+def _echo_relabelled(entries: object, total: object = None) -> None:
+    """One line per collection the restore relabelled (RDR-229 item 10): a label of the minted form (``c<digits>``) is the
+    backup's installation's own, so the restored collection took the label minted for its new id. *total* is the engine's
+    count when the list is the marker's, which is bounded."""
+    listed = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    for e in listed:
+        click.echo(f"  Collection relabelled: {e.get('label')} -> {e.get('target_label')}")
+    if isinstance(total, int) and total > len(listed):
+        click.echo(f"  ... and {total - len(listed)} more collections relabelled")
+
+
 def _cloud_backup(to: Path | None) -> None:
     """Managed mode: export the caller's own tenant (RDR-248 "Client")."""
     try:
@@ -371,6 +382,7 @@ def _print_restore(file: Path, result: cloud_import.RestoreResult) -> None:
         if isinstance(counts, dict) and counts:
             total = sum(int(v) for v in counts.values() if isinstance(v, int))
             click.echo(f"  {_plural(total, 'row')} in {_plural(len(counts), 'table')} per the marker")
+        _echo_relabelled(out.marker.get("collections_relabelled"), out.marker.get("collections_relabelled_count"))
     skipped_report = report.get("skipped_tables")
     skipped = {**result.skipped_at_open, **(skipped_report if isinstance(skipped_report, dict) else {})}
     for name, why in sorted(skipped.items()):
@@ -384,5 +396,6 @@ def _print_restore(file: Path, result: cloud_import.RestoreResult) -> None:
         if remapped or passed or negated:
             why = " (the rows they named were gone before the backup)" if negated else ""
             click.echo(f"  {s.get('column')}: {remapped} remapped, {passed} passed through, {negated} negated{why}")
+    _echo_relabelled(report.get("collections_relabelled"))
     for note in dict.fromkeys([*result.open_notes, *out.notes]):
         click.echo(f"  Note: {note}")
