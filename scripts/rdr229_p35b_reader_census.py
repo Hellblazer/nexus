@@ -32,6 +32,8 @@ from __future__ import annotations
 import collections
 import pathlib
 import re
+
+import changelog_text  # scripts/ is on sys.path when a script here is run or imported by the tests
 import sys
 
 ROOT = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else pathlib.Path(".").resolve()
@@ -265,10 +267,7 @@ for inc in includes:
     if not p.exists():
         continue
     raw = p.read_text()
-    # comments first: a header comment that names "<rollback>" in prose must not open a rollback match (vectors-069's did,
-    # and hid vectors-069-1's forward definition of gc_quarantine_orphans behind it)
-    text = re.sub(r"<!--.*?-->", blank, raw, flags=re.S)
-    text = re.sub(r"<rollback>.*?</rollback>", blank, text, flags=re.S)
+    text = changelog_text.strip_noise(raw)  # comments before rollbacks; the order lives in scripts/changelog_text.py
     fname = inc.split("/")[-1]
     ev = []
     for mm in FN_RE.finditer(text):
