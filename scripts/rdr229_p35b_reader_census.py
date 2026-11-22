@@ -23,9 +23,14 @@ What it does not read: SQL the engine builds in Java (P3.5a and P3.5c), and obje
 engine test Rdr229P35bReaderCensusLiveCatalogTest compares this file's object set with pg_catalog of a migrated
 database, so an object this parse misses fails there.
 
-Usage: rdr229_p35b_reader_census.py <tree-root> [--write] [--check]
+THE BASELINE. The committed file is P3.5b's surface: the readers as they stand before P3.5b's own changelogs
+(P35B_OWN, vectors-077 and vectors-078), which the dispositions file disposes one by one. --live reads the whole tree,
+P3.5b's redefinitions included, and prints that census to stdout; tests/test_rdr229_p35b_reader_census.py checks it:
+after P3.5b a form A object reads no name column but the registry's label, so P4.1's drop meets none of them.
+
+Usage: rdr229_p35b_reader_census.py <tree-root> [--write] [--check] [--live]
   default: print totals; --write rewrites service/src/test/resources/rdr229/p35b-reader-census.tsv;
-  --check exits 1 when the committed file differs from a fresh run.
+  --check exits 1 when the committed file differs from a fresh run; --live prints the whole-tree census, writes nothing.
 """
 from __future__ import annotations
 
@@ -218,6 +223,10 @@ def reads(stmt):
 # ---------------------------------------------------------------- live objects
 master = re.sub(r"<!--.*?-->", "", (RES / "db/changelog/db.changelog-master.xml").read_text(), flags=re.S)
 includes = re.findall(r'<include\s+file="([^"]+)"', master)
+# P3.5b's own redefinitions: left out of the baseline (the surface it disposes), read by --live
+P35B_OWN = {"db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml"}
+if "--live" not in sys.argv:
+    includes = [i for i in includes if i not in P35B_OWN]
 FN_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(nexus\.[a-z0-9_]+)\s*\(", re.I)
 FN_DROP = re.compile(r"DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(nexus\.[a-z0-9_]+)", re.I)
 VIEW_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?(MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(nexus\.[a-z0-9_]+)", re.I)
@@ -342,6 +351,9 @@ text += "# form B: the object names a chunk-family table (read both shapes, plai
 text += "# parse: the body parses a collection name (split_part on '__', a 'quarantine-' prefix). Writes (INSERT column lists, SET targets) are P3.1's.\n"
 text += "\t".join(HEAD) + "\n" + "".join("\t".join(r) + "\n" for r in rows)
 
+if __name__ == "__main__" and "--live" in sys.argv:
+    sys.stdout.write(text)
+    sys.exit(0)
 if __name__ == "__main__":
     objs = collections.Counter(r[0] for r in {(r[0], r[1]) for r in rows})
     print("rows", len(rows), "objects", sum(objs.values()), dict(objs))
