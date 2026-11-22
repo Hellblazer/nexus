@@ -148,6 +148,8 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
         read_bundle_header(bundle)
     except RecoveryBundleFormatTooNewError as exc:
         raise click.ClickException(str(exc)) from exc
+    except (ValueError, TypeError) as exc:  # a malformed header (bad JSON, wrong format, a non-integer version)
+        raise click.ClickException(f"{bundle} is not a readable recovery bundle: {exc}") from exc
 
     reader = _cat_cmd._get_catalog()
     writer = _cat_cmd._get_catalog_writer()
