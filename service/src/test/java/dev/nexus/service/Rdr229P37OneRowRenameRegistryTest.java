@@ -113,7 +113,7 @@ class Rdr229P37OneRowRenameRegistryTest {
         String tenant = "p37-undo";
         String token = engine.newTenant(tenant);
         String oldName = coll("p37undo", 1);
-        String newName = coll("p37undo", 2);
+        String newName = coll("p37undob", 2);   // another owner: a tuple has one live collection, and the tombstone is seeded as a second row
         engine.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, tenant, oldName);
             return null;
@@ -142,7 +142,7 @@ class Rdr229P37OneRowRenameRegistryTest {
     void aTombstoneThatNamedTheOldLabelNamesTheNewOneAndStillPointsAtTheSameRow() throws Exception {
         String tenant = "p37-chain";
         String token = engine.newTenant(tenant);
-        String ancient = coll("p37chain", 1);
+        String ancient = coll("p37chaina", 1);   // another owner than current's: a tuple has one live collection
         String current = coll("p37chain", 2);
         String renamed = coll("p37chain", 3);
         engine.su(ctx -> {

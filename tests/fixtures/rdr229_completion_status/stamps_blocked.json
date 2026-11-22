@@ -82,6 +82,7 @@
       "why" : "open"
     } ],
     "checks_missing" : [ ],
-    "validate_waits" : [ ]
+    "validate_waits" : [ ],
+    "rename_missing" : "none"
   }
 }
