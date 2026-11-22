@@ -162,6 +162,20 @@ public final class StatusHandler implements HttpHandler {
         return this;
     }
 
+    private volatile Supplier<Boolean> liveLabelIndex;                    // nullable — key omitted
+
+    /**
+     * RDR-229 P3.12 (nexus-p2m1x.32), [additive]: {@code live_label_index_present} (bool): whether the partial UNIQUE
+     * index {@code idx_catalog_collections_live_label} on the collection registry (catalog-053-1) exists and is valid.
+     * That changeset is {@code failOnError="false"}, so {@code false} means it never built (or was left invalid) on this
+     * install. Absent = an engine that predates the field, or a probe that could not run; a client must not read an
+     * absent key as false. One boolean, no tenant, collection or label text.
+     */
+    public StatusHandler liveLabelIndex(Supplier<Boolean> liveLabelIndex) {
+        this.liveLabelIndex = liveLabelIndex;
+        return this;
+    }
+
     private volatile Supplier<java.util.List<dev.nexus.service.BootWorkRegistry.Entry>> bootWork;   // null: always []
 
     /**
@@ -704,6 +718,15 @@ public final class StatusHandler implements HttpHandler {
             Boolean present = tupleIndex.get();
             if (present != null) {
                 body.append(",\"collection_tuple_index_present\":").append(present);
+            }
+        }
+
+        // RDR-229 P3.12 (nexus-p2m1x.32), [additive]: is the live-label unique index built and valid? Absent = cannot tell.
+        Supplier<Boolean> labelIndex = liveLabelIndex;
+        if (labelIndex != null) {
+            Boolean present = labelIndex.get();
+            if (present != null) {
+                body.append(",\"live_label_index_present\":").append(present);
             }
         }
 
