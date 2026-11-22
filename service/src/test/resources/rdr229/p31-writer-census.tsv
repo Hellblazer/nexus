@@ -54,7 +54,7 @@ aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRe
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/CatalogRepository.java	12095	update	helper	collection	collection_id	yes	COLLECTION_SCOPED_TABLES loop (rename/re-home)
 aspects	document_highlights	service/src/main/java/dev/nexus/service/db/TenantImportLoad.java	335	insert	by-name	collection	collection_id	yes	TenantImportLoad by-name INSERT ... SELECT over TenantExport.TABLES
 catalog	catalog_collections	nexus.catalog_documents_owner_to_collection [vectors-069-collection-id-dual-write-functions.xml:7628]	7570	update	sql_function	superseded_by	superseded_by_id	yes	
-catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-040-gc-audit-labels-by-text-and-manifest.xml:192]	48	insert	sql_function	-	superseded_by_id	yes	
+catalog	catalog_collections	nexus.gc_quarantine_orphans [vectors-069-collection-id-dual-write-functions.xml:193]	49	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_quarantine_orphans_bounded [vectors-069-collection-id-dual-write-functions.xml:677]	551	insert	sql_function	superseded_by	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_restore_rereferenced [vectors-069-collection-id-dual-write-functions.xml:1877]	1769	insert	sql_function	-	superseded_by_id	yes	
 catalog	catalog_collections	nexus.gc_restore_rereferenced_bounded [vectors-069-collection-id-dual-write-functions.xml:2263]	2144	insert	sql_function	-	superseded_by_id	yes	
@@ -146,7 +146,7 @@ catalog	chunk_orphaned_at	nexus.stamp_chunks_on_manifest_update [vectors-069-col
 catalog	chunk_orphaned_at	rdr229-stamp-chunk_orphaned_at [vectors-070-collection-id-stamp-moves.xml:254]	251	update	data_move	-	collection_id	yes	sets collection_id
 catalog	chunk_orphaned_at	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	116	update	jooq	-	collection_id	yes	
 catalog	chunk_orphaned_at	service/src/main/java/dev/nexus/service/db/CatalogIdStamps.java	137	update	jooq	-	collection_id	yes	
-chunks	chunks	nexus.gc_quarantine_orphans [vectors-040-gc-audit-labels-by-text-and-manifest.xml:209]	48	insert	sql_function	collection	collection_id	yes	
+chunks	chunks	nexus.gc_quarantine_orphans [vectors-069-collection-id-dual-write-functions.xml:215]	49	insert	sql_function	collection	collection_id	yes	
 chunks	chunks	nexus.gc_quarantine_orphans_bounded [vectors-069-collection-id-dual-write-functions.xml:700]	551	insert	sql_function	collection	collection_id	yes	
 chunks	chunks	nexus.gc_quarantine_orphans_floored [vectors-069-collection-id-dual-write-functions.xml:1157]	1015	update	sql_function	collection	collection_id	yes	
 chunks	chunks	nexus.gc_restore_rereferenced [vectors-069-collection-id-dual-write-functions.xml:1894]	1769	insert	sql_function	collection	collection_id	yes	
@@ -169,7 +169,7 @@ ops	chash_remap	rdr229-stamp-chash_remap [vectors-070-collection-id-stamp-moves.
 ops	chash_remap	service/src/main/java/dev/nexus/service/db/RemapRepository.java	143	insert	jooq	source_collection,target_collection	source_collection_id,target_collection_id	yes	
 ops	gc_audit	nexus.gc_expire_quarantine [vectors-069-collection-id-dual-write-functions.xml:3501]	3414	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_expire_quarantine_bounded [vectors-069-collection-id-dual-write-functions.xml:3791]	3635	insert	sql_function	collection	collection_id	no	
-ops	gc_audit	nexus.gc_quarantine_orphans [vectors-040-gc-audit-labels-by-text-and-manifest.xml:270]	48	insert	sql_function	collection	collection_id	no	
+ops	gc_audit	nexus.gc_quarantine_orphans [vectors-069-collection-id-dual-write-functions.xml:280]	49	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_quarantine_orphans_bounded [vectors-069-collection-id-dual-write-functions.xml:765]	551	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_quarantine_orphans_floored [vectors-069-collection-id-dual-write-functions.xml:1110]	1015	insert	sql_function	collection	collection_id	no	
 ops	gc_audit	nexus.gc_restore_rereferenced [vectors-069-collection-id-dual-write-functions.xml:1934]	1769	insert	sql_function	collection	collection_id	no	
