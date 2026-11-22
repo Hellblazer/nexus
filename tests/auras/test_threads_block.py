@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """RDR-249 Technical Design 1, display.threads (nexus-mdbds.11.1 part F, rules
-15 to 22): the host finds the entry by its session: line through the board's
-own reader, never creates one, refuses to guess between two, writes one
+15 to 22): the host finds the entry by its identity: line (RDR-253 Phase 2: never
+the session: line) through the board's own reader, never creates one, refuses to guess between two, writes one
 heading and one capped state: line, and replaces or removes only its block."""
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ import pytest
 from nexus.auras.threads_block import ThreadsBlockWriter, sanitize_state
 
 _SID = "11111111-2222-3333-4444-555555555555"
-_ENTRY = f"session: {_SID}\n\n## Some work\nref: nexus-x\nstate: going\nwaiting_on: none\nneeds_sam: none\n"
+_IDENT = "i12"
+_ENTRY = f"identity: {_IDENT}\n\n## Some work\nref: nexus-x\nstate: going\nwaiting_on: none\nneeds_sam: none\n"
 
 
 class _Io:
@@ -32,7 +33,7 @@ class _Io:
 
 
 def _writer(io: _Io) -> ThreadsBlockWriter:
-    return ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put)
+    return ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity=_IDENT)
 
 
 def test_a_block_is_one_heading_and_one_state_line_appended_to_the_session_entry() -> None:
@@ -57,9 +58,9 @@ def test_the_latest_fire_replaces_only_its_own_block() -> None:
     assert "## Some work\nref: nexus-x" in content
 
 
-def test_the_entry_is_found_by_its_session_line_never_by_title() -> None:
+def test_the_entry_is_found_by_its_identity_line_never_by_title() -> None:
     io = _Io([
-        {"title": "tamsin", "content": "session: someone-else\n", "tags": ""},
+        {"title": "tamsin", "content": "identity: i7\n", "tags": ""},
         {"title": "handle-7", "content": _ENTRY, "tags": ""},
     ])
     assert _writer(io).set_block("a", "x", "y")
@@ -67,7 +68,7 @@ def test_the_entry_is_found_by_its_session_line_never_by_title() -> None:
 
 
 def test_no_entry_carrying_the_line_writes_nothing() -> None:
-    io = _Io([{"title": "tamsin", "content": "no session line here\n", "tags": ""}])
+    io = _Io([{"title": "tamsin", "content": "no identity line here\n", "tags": ""}])
     assert not _writer(io).set_block("a", "x", "y")
     assert io.puts == []
 
@@ -161,34 +162,42 @@ def test_a_clear_keeps_text_an_agent_wrote_after_the_block() -> None:
     assert "an agent's own note under the block" in content and "## Some work\nref: nexus-x" in content
 
 
-# --- RDR-253 Step 5: the aura threads block reads the identity line ----------------------------------
+# --- RDR-253 Phase 2: the aura threads block reads the identity line, and only it -----------------------
 
 
 def test_the_block_goes_to_the_entry_whose_identity_line_names_the_seat_after_clear() -> None:
     stale = "99999999-8888-4777-8666-555555555555"  # the session id the entry was written under, before /clear
-    io = _Io([{"title": "tamsin", "content": _ENTRY.replace(_SID, stale).replace("\n", "\nidentity: i12\n", 1), "tags": "board"}])
-    writer = ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12")
+    io = _Io([{"title": "tamsin", "content": f"session: {stale}\n" + _ENTRY, "tags": "board"}])
+    writer = ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity=_IDENT)
     assert writer.set_block("ci_develop_red", "develop CI red", "develop red at abc1234")
     assert io.puts and io.puts[0][0] == "tamsin"
 
 
-def test_an_entry_owned_by_another_identity_is_never_written_and_a_legacy_twin_does_not_make_it_ambiguous() -> None:
-    io = _Io([{"title": "other", "content": "identity: i7\n" + _ENTRY, "tags": "board"}])
-    assert not ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12").set_block("a", "A", "x")
+def test_an_identity_only_entry_is_found_and_a_session_only_entry_is_not() -> None:
+    only_identity = _Io([{"title": "tamsin", "content": _ENTRY, "tags": "board"}])
+    assert "session:" not in _ENTRY and _writer(only_identity).set_block("a", "A", "x")
+    older = _Io([{"title": "tamsin", "content": _ENTRY.replace(f"identity: {_IDENT}", f"session: {_SID}"), "tags": "board"}])
+    assert not _writer(older).set_block("a", "A", "x"), "the session: line is not a key"
+    assert older.puts == []
+
+
+def test_an_entry_owned_by_another_identity_is_never_written_and_an_older_twin_does_not_make_it_ambiguous() -> None:
+    io = _Io([{"title": "other", "content": f"session: {_SID}\nidentity: i7\n" + _ENTRY.split("\n", 1)[1], "tags": "board"}])
+    assert not _writer(io).set_block("a", "A", "x")
     assert io.puts == []
     io = _Io([
-        {"title": "tamsin", "content": "identity: i12\n" + _ENTRY, "tags": "board"},
-        {"title": "tamsin-old", "content": _ENTRY, "tags": "board"},
+        {"title": "tamsin", "content": _ENTRY, "tags": "board"},
+        {"title": "tamsin-old", "content": _ENTRY.replace(f"identity: {_IDENT}", f"session: {_SID}"), "tags": "board"},
     ])
-    assert ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity="i12").set_block("a", "A", "x")
+    assert _writer(io).set_block("a", "A", "x")
     assert [p[0] for p in io.puts] == ["tamsin"]
 
 
 def test_a_writer_built_before_the_binding_asks_for_the_identity_at_write_time() -> None:
     stale = "99999999-8888-4777-8666-555555555555"
-    io = _Io([{"title": "tamsin", "content": f"identity: i12\nsession: {stale}\n## W\nstate: x\n", "tags": "board"}])
+    io = _Io([{"title": "tamsin", "content": f"identity: {_IDENT}\nsession: {stale}\n## W\nstate: x\n", "tags": "board"}])
     known: list[str] = [""]
     writer = ThreadsBlockWriter(_SID, read_entries=io.read, put=io.put, identity_source=lambda: known[0])
-    assert not writer.set_block("a", "A", "x"), "no identity yet, and the entry is another seat's as far as we know"
-    known[0] = "i12"
+    assert not writer.set_block("a", "A", "x"), "no identity yet, so no entry is ours"
+    known[0] = _IDENT
     assert writer.set_block("a", "A", "x") and io.puts[-1][0] == "tamsin"

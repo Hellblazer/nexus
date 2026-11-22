@@ -60,7 +60,7 @@ Turning an aura on in the global config turns it on for every Claude session on 
 
 ## What you see when it fires
 
-**The threads entry.** The block goes into your own entry in T2 project `threads`, the one whose first line is `session: <your session id>` (the [cross-session board](agents/threads-board.md), shown in `nx console`, Threads tab). The block is always two lines: the heading `## aura: <name>` and one `state:` line of at most 200 printable ASCII characters. A later fire replaces it. The aura never creates an entry: with no entry carrying your session line, or with two, nothing is written and the server logs why.
+**The threads entry.** The block goes into your own entry in T2 project `threads`, the one whose first line is `identity: i<n>` (the id `nx identity show` names; the [cross-session board](agents/threads-board.md), shown in `nx console`, Threads tab). The block is always two lines: the heading `## aura: <name>` and one `state:` line of at most 200 printable ASCII characters. A later fire replaces it. The aura never creates an entry: with no entry carrying your identity line, or with two, nothing is written and the server logs why.
 
 **The channel.** When the aura's file sets `display.channel = true`, the session also gets a channel notice on every fire. It is a fixed template and never carries the procedure's text:
 

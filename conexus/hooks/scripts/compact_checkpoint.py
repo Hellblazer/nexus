@@ -19,9 +19,9 @@ script writes that state down before the compaction and puts it back after it.
 A payload carrying ``agent_id`` (a hook fired inside a subagent or teammate) is ignored by
 all three modes. PRE writes ``<nexus config dir>/compact-checkpoints/<session_id>.md`` (mode 0600,
 atomic): a header (session id, trigger, UTC time), then, in cut-proof order, the
-session's ``threads`` board entry (the entry whose body has a ``session: <session id>`` line, found by one
-full-text search; failing that, the one titled exactly the session's name; the judgment half of a
-session lives there and a hook cannot write it), the branch and HEAD, the
+session's ``threads`` board entry (the entry whose body has the session's ``identity: i<n>`` line, found by one
+full-text search; failing that, the one titled exactly the session's name when its own ``identity:`` line matches; the
+judgment half of a session lives there and a hook cannot write it), the branch and HEAD, the
 in-progress beads, the uncommitted files, the open PRs and the recent commits from
 ``nx command-context continuation``. Ready beads and memory titles are not kept: a
 session loads them on demand with ``nx brief beads`` and ``nx brief memory``. Continuation runs
@@ -136,16 +136,16 @@ def _load_siblings() -> None:
 #: Wall clock for ``nx command-context continuation`` (measured 5.4 s); hooks.json gives
 #: this hook 45 s, so the whole of pre (budget below) stays inside it.
 _NX_TIMEOUT_S = 25.0
-#: Bound on the whole board lookup (session-line search and its fetches, then the title fallback's
+#: Bound on the whole board lookup (identity-line search and its fetches, then the title fallback's
 #: list and get), end to end, and the budget the whole pre run spends on ``nx`` calls.
 _BOARD_TIMEOUT_S = 6.0
-#: Cap on the session-line search. The search and the fetches of its hits share the first
+#: Cap on the identity-line search. The search and the fetches of its hits share the first
 #: ``_SESSION_PHASE_S`` of the lookup, so the title fallback keeps the rest.
 _SEARCH_TIMEOUT_S = 2.0
 _SESSION_PHASE_S = 4.0
 #: A call with less budget than this left is not made (``_run_nx`` raises a shorter timeout to 0.5 s).
 _MIN_CALL_S = 0.5
-#: Search hits fetched and checked for a ``session:`` line.
+#: Search hits fetched and checked for an ``identity:`` line.
 _SESSION_CANDIDATES = 4
 #: Bound on ``git worktree list``, run before the continuation call.
 _GIT_TIMEOUT_S = 3.0
@@ -510,14 +510,6 @@ def _shape_state(state: str) -> str:
     return "\n\n".join(x for x in [preamble, *(p.strip() for p in ordered)] if x)
 
 
-def _has_session_line(body: str, session_id: str) -> bool:
-    """True when *body* has a ``session: <session_id>`` line, anywhere (the board rule puts one on the
-    entry's first line; a block-level line matches too). The id must be the whole value."""
-    return re.search(
-        rf"(?mi)^[ \t]*(?:[-*][ \t]+)?session[ \t]*:[ \t]*{re.escape(session_id)}[ \t]*\r?$", body
-    ) is not None
-
-
 def _mono() -> float:
     """Monotonic seconds; the board lookup's clock, a seam for tests."""
     return time.monotonic()
@@ -551,7 +543,7 @@ def _board_by_title(
     so a session ``linda`` with no entry would get ``linda_2``'s board. The listing is read
     for the exact title and the entry is fetched by its id. The listing and the get share
     *timeout*: neither is started with less than ``_MIN_CALL_S`` left. *missing* leads the
-    error for an absent title (it names the session-line lookup that failed first).
+    error for an absent title (it names the identity-line lookup that failed first).
     """
     started = _mono()
     if timeout < _MIN_CALL_S:
@@ -576,24 +568,26 @@ def _identity_line(body: str) -> str:
 
 
 def _board_entry(
-    session_id: str, name: str | None, cwd: str | None, timeout: float, identity: str = "",
+    name: str | None, cwd: str | None, timeout: float, identity: str = "",
 ) -> tuple[str, str, str, str | None]:
-    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``identity``, ``session id`` or
-    ``exact title`` (empty when nothing was found).
+    """The session's ``threads`` entry as ``(title, body, how, error)``; *how* is ``identity`` or ``exact title``
+    (empty when nothing was found).
 
-    RDR-253 Step 5: with *identity* (from the token files) the search is for the identity first, and an entry whose
-    ``identity:`` line names it wins whatever its ``session:`` line says, so the entry is found after ``/clear``. An
-    entry whose identity line names another seat is never this session's, even with a matching session line.
+    RDR-253 Phase 2: an entry is this session's only when its ``identity:`` line names *identity* (from the token
+    files: the identity the session's id is bound to). The ``session:`` line is not read, so an entry that has one and no
+    ``identity:`` line is not found, and a session no token file binds (*identity* empty) finds no entry. The identity
+    outlives ``/clear`` and restart, so the entry is found after either.
 
-    A Desktop session's handle differs from its name, and the board entry is filed under the
-    handle (nexus-3lcda), so the name cannot find it. Board entries carry a ``session: <id>``
-    line: one full-text search of ``threads`` for the id (at most ``_SEARCH_TIMEOUT_S``), then the
-    first few hits are fetched, newest first by the listing's timestamp, and the first whose body
-    really has that line wins (a peer's entry can mention the id; two entries can carry it). That
-    phase ends by ``_SESSION_PHASE_S``. With no such entry, the entry titled exactly *name* is the
-    fallback, and spends what is left of *timeout*: the whole lookup is inside *timeout*, no call
-    is started with less than ``_MIN_CALL_S`` of it left, and each call gets at most what is left.
+    One full-text search of ``threads`` for ``identity: <id>`` (at most ``_SEARCH_TIMEOUT_S``), then the first few hits
+    are fetched, newest first by the listing's timestamp, and the first whose body really has that line wins (a peer's
+    entry can mention it). That phase ends by ``_SESSION_PHASE_S``. With no such entry, the entry titled exactly *name*
+    is the fallback, taken only when its own ``identity:`` line matches; it spends what is left of *timeout*: the whole
+    lookup is inside *timeout*, no call is started with less than ``_MIN_CALL_S`` of it left, and each call gets at
+    most what is left.
     """
+    if not identity:
+        return "", "", "", ("no token file binds this session to an identity, and a board entry is found by its "
+                            "identity: line")
     started = _mono()
 
     def left() -> float:
@@ -602,30 +596,30 @@ def _board_entry(
     def phase_left() -> float:
         return min(left(), _SESSION_PHASE_S - (_mono() - started))
 
-    error: str | None = None
-    # the identity phase searches for both words of the line (full-text: "identity" AND the id), which keeps most prose
-    # mentions out of the candidates; a hit is taken only when its body really has the line
-    for query, how in (((f"identity: {identity}", "identity"),) if identity else ()) + ((session_id, "session id"),):
-        found, error = _search_phase(query, how, session_id, identity, cwd, phase_left)
-        if found is not None:
-            return found
+    # the search is for both words of the line (full-text: "identity" AND the id), which keeps most prose mentions out
+    # of the candidates; a hit is taken only when its body really has the line
+    found, error = _search_phase(f"identity: {identity}", identity, cwd, phase_left)
+    if found is not None:
+        return found
     if not name:
-        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries a session: line for this session id"
-    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `session: {session_id}` and "
+        return "", "", "", error or f"no {_BOARD_PROJECT} entry carries `identity: {identity}`"
+    missing = "" if error else f"no {_BOARD_PROJECT} entry carries `identity: {identity}` and "
     body, title_error = _board_by_title(name, cwd, left(), missing)
-    if body.strip() and identity and _identity_line(body) not in ("", identity):
-        # a same-named entry of another seat is not ours (two sessions with one display name)
-        return "", "", "", f"the entry titled {name!r} names another identity ({_identity_line(body)})"
+    if body.strip() and _identity_line(body) != identity:
+        # a same-named entry that is not this identity's (another seat, or an older entry with no identity: line)
+        own = _identity_line(body)
+        return "", "", "", (f"the entry titled {name!r} names another identity ({own})" if own
+                            else f"the entry titled {name!r} has no identity: line")
     if title_error and error:
-        title_error = f"{title_error} (the session-line search also failed: {error})"
+        title_error = f"{title_error} (the identity-line search also failed: {error})"
     return (name, body, "exact title", title_error) if body.strip() else ("", body, "", title_error)
 
 
 def _search_phase(
-    query: str, how: str, session_id: str, identity: str, cwd: str | None, phase_left,
+    query: str, identity: str, cwd: str | None, phase_left,
 ) -> tuple[tuple[str, str, str, None] | None, str | None]:
-    """One full-text search of ``threads`` for *query*, its first hits fetched newest first; the first body that is
-    this session's wins. Returns ``(found, error)``."""
+    """One full-text search of ``threads`` for *query*, its first hits fetched newest first; the first body whose
+    ``identity:`` line is *identity* wins. Returns ``(found, error)``."""
     error: str | None = None
     if phase_left() >= _MIN_CALL_S:
         listing, error = _run_nx(
@@ -647,18 +641,13 @@ def _search_phase(
                 if get_error:
                     unfetched.append(f"[{row_id}] {get_error}")
                     continue
-                own = _identity_line(body)
-                if how == "identity" and own == identity:
+                if _identity_line(body) == identity:
                     return (title, body, "identity", None), None
-                # identity known: an entry naming another seat is never ours; unknown (a Desktop session with no
-                # token file): our own session line is trusted whatever identity the entry names
-                if how == "session id" and _has_session_line(body, session_id) and (not identity or own in ("", identity)):
-                    return (title, body, "session id", None), None
             if unfetched:
                 # Hits that were never read cannot be called absent (review r2 L2).
-                error = "the session-line search found hits that could not be fetched: " + "; ".join(unfetched)
+                error = "the identity-line search found hits that could not be fetched: " + "; ".join(unfetched)
     else:
-        error = "the board lookup's time budget left no room for the session-line search"
+        error = "the board lookup's time budget left no room for the identity-line search"
     return None, error
 
 
@@ -1053,7 +1042,7 @@ def run_pre(payload: dict) -> str:
     name = _session_name(session_id)
     # The board is read first: its ref: lines choose between the session's worktrees.
     identity = _identity_lookup.lookup(session_id, _config_dir())[0] if _identity_lookup is not None else ""
-    board_title, board, board_how, board_error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S, identity)
+    board_title, board, board_how, board_error = _board_entry(name, cwd, _BOARD_TIMEOUT_S, identity)
     if board_error and name:
         _log("WARNING", f"pre: board entry for {name!r}: {board_error}")
     elif board_error:
@@ -1153,7 +1142,7 @@ def run_end(payload: dict) -> str:
     cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) else None
     name = _session_name(session_id)
     identity = _identity_lookup.lookup(session_id, _config_dir())[0] if _identity_lookup is not None else ""
-    _title, board, _how, _error = _board_entry(session_id, name, cwd, _BOARD_TIMEOUT_S, identity)
+    _title, board, _how, _error = _board_entry(name, cwd, _BOARD_TIMEOUT_S, identity)
     worktree, _others = _session_worktrees(name, cwd, board)
     return f"resume pointer: {_write_resume_pointer(board, '', worktree, cwd or worktree, started, _END_DEADLINE_S, 'end')}"
 
@@ -1260,7 +1249,7 @@ def _emit_context(context: str) -> None:
     sys.stdout.flush()
 
 
-def _no_restore_notice(session_id: str) -> str:
+def _no_restore_notice() -> str:
     """The context a compact start gets when there is no checkpoint to restore (nexus-2v7da).
 
     Without it the resumed session cannot tell "nothing was lost" from "nothing was saved". A few
@@ -1270,8 +1259,7 @@ def _no_restore_notice(session_id: str) -> str:
         "The conexus PreCompact hook has no working-state checkpoint for this compaction (its pre step "
         "did not run or failed), so nothing is restored here and the compact summary is all you have. "
         "Recover your state before acting on it: read your threads board entry (project threads: the entry "
-        "whose `identity:` line names your identity, `nx identity show` prints it; else the one titled "
-        f"with your session name, or whose `session:` line is `{session_id}`), then check "
+        "whose `identity:` line names your identity, `nx identity show` prints it), then check "
         "git status, the branch and `bd list --status=in_progress`.\n\n"
         f"{_RESUME_DIRECTIVE}\n"
     )
@@ -1299,7 +1287,7 @@ def run_inject(payload: dict) -> str:
         if compact:
             # Live, inject runs before post, so a compaction whose pre did not run has no stub yet:
             # the file is simply absent. Only a start that says it is a compact one is told.
-            _emit_context(_no_restore_notice(session_id))
+            _emit_context(_no_restore_notice())
             return "emitted: no restore (no checkpoint file)"
         return "skipped: no checkpoint file"
     except OSError as exc:
@@ -1316,14 +1304,14 @@ def run_inject(payload: dict) -> str:
         # record, and a later compaction whose pre also failed is owed the same notice.
         _log("INFO", f"inject: {path} is a stub (no pre-compaction checkpoint for this compaction); "
                      "emitting the no-restore notice")
-        _emit_context(_no_restore_notice(session_id))
+        _emit_context(_no_restore_notice())
         return "emitted: no restore (stub)"
     if age is None:
         if compact:
             # An earlier compaction's checkpoint older than seven days: pre did not run for this one.
             _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                          "or missing); emitting the no-restore notice")
-            _emit_context(_no_restore_notice(session_id))
+            _emit_context(_no_restore_notice())
             return "emitted: no restore (no usable written: stamp)"
         _log("INFO", f"inject: {path} has no usable written: stamp (older than {_MAX_AGE_S / 3600:.0f} h, "
                      "or missing); nothing injected")
@@ -1344,7 +1332,7 @@ def run_inject(payload: dict) -> str:
             # belongs to an earlier compaction, so the session is told there is nothing to restore.
             _log("INFO", f"inject: {path} (written {written}) was already injected by an earlier compaction; "
                          "emitting the no-restore notice")
-            _emit_context(_no_restore_notice(session_id))
+            _emit_context(_no_restore_notice())
             return "emitted: no restore (already injected)"
         _log("INFO", f"inject: {path} (written {written}) was already injected"
                      f"{' moments ago, by this compaction' if compact else ' by an earlier compaction'}; "

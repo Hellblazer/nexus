@@ -58,8 +58,8 @@ BATCH_WORDS_MAX = 2000
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CANONICAL_UUID = re.compile(_UUID)
-#: An answer record's title: ``<asker>/<ask id>/<version>``, the asker an identity id (RDR-253 Step 5, when the entry has an
-#: ``identity:`` line) or a session id (an entry without one, or a pre-Step-5 writer). See ``threads.answer_title``.
+#: An answer record's title: ``<asker>/<ask id>/<version>``, the asker an identity id (RDR-253: the entry's ``identity:``
+#: line) or, for a record a pre-Step-5 ``nx ask`` wrote in the digest window, a session id. See ``threads.answer_title``.
 _ANSWER_TITLE = re.compile(rf"({_UUID}|i[0-9]+)/([a-z0-9-]{{1,40}})/([0-9a-f]{{16}})")
 _NUMBER = re.compile(r"[0-9]+")
 _GROUPS = ("interrupt", "batch", "quiet", "conditional", "answered")
@@ -274,13 +274,6 @@ def _all_asks(rows: list[dict[str, Any]]) -> list[tuple[Ask, datetime | None]]:
     return found
 
 
-def _session_of(row: dict[str, Any]) -> str:
-    try:
-        return parse_session(str(row.get("title", "")), str(row.get("content", ""))).session_id.lower()
-    except Exception:  # noqa: BLE001 -- an unreadable entry carries no session we can name
-        return ""
-
-
 def _ref(ask: Ask) -> str:
     return f"{ask.entry}/{ask.id}"
 
@@ -314,7 +307,6 @@ def _ask_json(ask: Ask, group: str = "", mark: str = "") -> dict[str, Any]:
         "id": ask.id,
         "entry": ask.entry,
         "version": ask.version,
-        "session_id": ask.session_id,
         "identity": ask.identity,
         "thread": ask.thread,
         "refs": list(ask.refs),
@@ -655,7 +647,7 @@ def _closed_answer(rec: dict[str, Any] | None) -> dict[str, Any] | None:
 @click.option("--json", "as_json", is_flag=True, help="The ask as one JSON object, with the entry age and its answer record.")
 @click.pass_context
 def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
-    """Every field of one ask: numbered options, the recommendation, version, asker session, entry age."""
+    """Every field of one ask: numbered options, the recommendation, version, asker identity, entry age."""
     s = _seams(ctx)
     now = s.now()
     ask, stamp = _resolve(_all_asks(_read_rows(s)), ref)
@@ -673,7 +665,6 @@ def show_cmd(ctx: click.Context, ref: str, as_json: bool) -> None:
         _c(_ref(ask)),
         f"version: {_c(ask.version)}",
         f"asker identity: {_c(ask.identity) or '(none: the entry has no identity: line)'}",
-        f"asker session: {_c(ask.session_id) or '(none: the entry has no session: line)'}",
         f"entry: {_c(ask.entry)} (updated {age})",
         f"thread: {_c(ask.thread)}",
     ]
@@ -877,19 +868,12 @@ def answer_cmd(
         )
     if ask.conditional:
         raise _refuse(f"{_c(_ref(ask))} has after: {ask.after!r}: it is not answerable until the asker deletes that line")
-    if ask.identity:
-        # RDR-253 Step 5: the identity line routes the answer; it outlives /clear, the session line does not.
-        carrying = sorted({str(r.get("title", "")) for r in rows if identity_of(str(r.get("content", ""))) == ask.identity})
-        if len(carrying) > 1:
-            raise _refuse(f"identity {ask.identity} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
-    else:
-        if not ask.session_id:
-            raise _refuse(f"the entry {ask.entry!r} has no identity: or session: line, so the answer cannot be routed")
-        if not _CANONICAL_UUID.fullmatch(ask.session_id):
-            raise _refuse(f"session: {ask.session_id!r} is not a lower-case canonical UUID, so the answer cannot be routed")
-        carrying = sorted({str(r.get("title", "")) for r in rows if _session_of(r) == ask.session_id})
-        if len(carrying) > 1:
-            raise _refuse(f"session {ask.session_id} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
+    if not ask.identity:
+        raise _refuse(f"the entry {ask.entry!r} has no identity: line, so the answer cannot be routed")
+    # RDR-253: the identity line routes the answer; it outlives /clear. An entry's session: line is not read.
+    carrying = sorted({str(r.get("title", "")) for r in rows if identity_of(str(r.get("content", ""))) == ask.identity})
+    if len(carrying) > 1:
+        raise _refuse(f"identity {ask.identity} is carried by more than one entry ({', '.join(_c(t) for t in carrying)}); no answer is routed")
 
     choice: int | None = None
     if _NUMBER.fullmatch(stripped):
@@ -932,7 +916,6 @@ def answer_cmd(
 
     title = answer_title(ask)
     for existing in answer_titles(ask):
-        # a pre-Step-5 nx ask keyed the record by session id: an answer there is an answer to this ask too
         _gate_existing(s.t2.get(project=ASKS_PROJECT, title=existing), now, replace, existing)
 
     batch_title: str | None = None
@@ -988,13 +971,13 @@ def answer_cmd(
             click.echo(_out(f"warning: the batch record {batch_title} was not updated: {exc}"), err=True)
 
     try:
-        to = ask.identity or ask.session_id
+        to = ask.identity
         tuple_id = s.tuple_out(
             f"mailbox/{to}",
             {"to": to},
             {
                 "from": sender,
-                "address_kind": "identity" if ask.identity else "session",
+                "address_kind": "identity",
                 "kind": "reply",
                 "correlation_id": f"ask:{ask.id}@{ask.version}",
             },

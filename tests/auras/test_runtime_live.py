@@ -91,8 +91,12 @@ def _sid() -> str:
     return str(uuid.uuid4())
 
 
+_IDENT = "i7"  # RDR-253 Phase 2: the entry's identity: line is the only key; the writer is built with the same identity
+
+
 def _entry_text(sid: str) -> str:
-    return f"session: {sid}\n\n## Work\nref: nexus-x\nstate: going\nwaiting_on: none\nneeds_sam: none\n"
+    """The seat's threads entry. *sid* names nobody: the entry is found by its identity line, never its session's."""
+    return f"identity: {_IDENT}\n\n## Work\nref: nexus-x\nstate: going\nwaiting_on: none\nneeds_sam: none\n"
 
 
 class _Threads:
@@ -157,7 +161,7 @@ def _runtime(sid: str, procedure: str, notices: list[str] | None = None, *, slee
     read, put = _Threads.read, _Threads.put
     aura = parse_aura(_aura_text("red", procedure).encode(), name="red")
     return AuraRuntime(
-        [aura], writer=ThreadsBlockWriter(sid, read_entries=read, put=put), run=_counting_run,
+        [aura], writer=ThreadsBlockWriter(sid, read_entries=read, put=put, identity=_IDENT), run=_counting_run,
         notify=(lambda text, meta: notices.append(text)) if notices is not None else None,
         **({"sleep": sleep} if sleep is not None else {}),
     )
@@ -304,6 +308,8 @@ def test_6_and_glue_the_server_path_loads_fires_and_notifies(repo: Path, tmp_pat
     (under its own pid and session id), so it is the nearer owner and nothing loads."""
     sid, title = _sid(), f"s-{uuid.uuid4().hex[:8]}"
     _seed_entry(title, sid)
+    # RDR-253 Phase 2: the entry is the seat's, found by its identity line; this server's writer asks for that identity
+    monkeypatch.setattr("nexus.auras.session._own_identity", lambda _sid: _IDENT)
     (repo / ".nexus" / "procedures" / "red.aura.toml").write_text(_aura_text("red", "red_notice"), encoding="utf-8")
     (repo / ".nexus.yml").write_text("auras:\n  red: on\n", encoding="utf-8")
     claude = tmp_path / "claude"
@@ -601,7 +607,7 @@ def test_the_shipped_ci_develop_red_fires_and_clears_through_the_real_worker(rep
     owner_subspace = aura.subspace
     assert owner_subspace == "board/ci/nexus-develop--owner"
     rt = AuraRuntime(
-        [aura], writer=ThreadsBlockWriter(sid, read_entries=_Threads.read, put=_Threads.put), run=_counting_run,
+        [aura], writer=ThreadsBlockWriter(sid, read_entries=_Threads.read, put=_Threads.put, identity=_IDENT), run=_counting_run,
         notify=lambda text, meta: notices.append(text), identity="i7",
     )
     sha = "8b30c161bdb23adab27171f3185c2b52f158b736"

@@ -2,10 +2,9 @@
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 """RDR-253 Step 5: the ``identity:`` line of a threads-board entry.
 
-A threads entry carries ``identity: i<n>`` beside its ``session: <id>`` line through Phase 1. The identity outlives
-``/clear`` and restart; the session id does not. Every board reader (the compaction checkpoint, ``nx ask`` answer
-routing, the console, the due-date hook, the aura threads block) finds an entry by its identity first and falls back
-to the ``session:`` line for an entry written before the identity line existed.
+A threads entry carries ``identity: i<n>``. The identity outlives ``/clear`` and restart; the session id does not.
+Every board reader (the compaction checkpoint, ``nx ask`` answer routing, the console, the due-date hook, the aura
+threads block) finds an entry by its identity line only (Phase 2): an older entry's ``session:`` line is not read.
 
 The line is read exactly as the engine's fence reads it (``service/.../db/IdentityLine.java``): lower-case
 ``identity:`` at the start of a line, then ``i`` and digits, nothing else on the line. A line the engine would not
@@ -21,7 +20,6 @@ from typing import Any
 
 #: The engine's pattern (IdentityLine.LINE), applied per line.
 _LINE = re.compile(r"^identity:[ \t]*(i[0-9]+)[ \t\r]*$", re.MULTILINE)
-_SESSION = re.compile(r"^\s*session:\s*(\S+)\s*$", re.MULTILINE | re.IGNORECASE)
 #: An identity id as it is written and sent: ``i`` and digits.
 IDENTITY_ID = re.compile(r"i[0-9]+")
 
@@ -33,12 +31,6 @@ def is_identity_id(value: str) -> bool:
 def identity_of(content: str) -> str:
     """The entry's identity (the first fenced ``identity:`` line), or ``""`` when it has none."""
     m = _LINE.search(content or "")
-    return m.group(1) if m else ""
-
-
-def session_of(content: str) -> str:
-    """The entry's first ``session:`` value, or ``""``."""
-    m = _SESSION.search(content or "")
     return m.group(1) if m else ""
 
 

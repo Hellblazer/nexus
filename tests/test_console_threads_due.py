@@ -12,8 +12,9 @@ from nexus.hooks.board_due import HEADING, due_lines, session_name
 
 PST = timezone(timedelta(hours=-8))
 SID = "f1b056f7-28cb-4c4e-8a76-cbcf9a50a212"
+IDENT = "i12"  # the identity the token files bind SID to (RDR-253 Phase 2: the entry's identity: line is the only key)
 
-ENTRY = f"""session: {SID}
+ENTRY = f"""identity: {IDENT}
 ## RDR-230 readings
 ref: nexus-4lnn1.1.8
 state: A1 green
@@ -140,8 +141,8 @@ def _search(rows):
 
 def test_session_start_prints_one_line_per_due_thread() -> None:
     search, calls = _search([{"title": "marlowe", "content": ENTRY}])
-    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
-    assert calls == [SID]
+    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT)
+    assert calls == [f"identity: {IDENT}"]
     assert lines == [
         HEADING.format(entry="marlowe"),
         "- RDR-230 readings: due 2026-11-14 (ref nexus-4lnn1.1.8; worktree /Users/x/git/nexus-wt/marlowe-a6)",
@@ -156,31 +157,30 @@ def test_session_start_prints_nothing_when_nothing_is_due() -> None:
     search, _ = _search([{"title": "marlowe", "content": ENTRY}])
     clean = ENTRY.replace("due: next tuesday", "due: none")
     search, _ = _search([{"title": "marlowe", "content": clean}])
-    assert due_lines(SID, datetime(2026, 11, 13, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="") == []
+    assert due_lines(SID, datetime(2026, 11, 13, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT) == []
 
 
-def test_only_the_entry_whose_session_line_matches_counts() -> None:
-    # Another session's entry that merely mentions this id (in a note) must not be read as ours.
-    other = f"session: 0000aaaa-0000-0000-0000-000000000000\n## Theirs\nstate: mentions {SID}\ndue: 2026-01-01\n"
+def test_only_the_entry_whose_identity_line_matches_counts() -> None:
+    # Another seat's entry that merely mentions this identity (in a note) must not be read as ours.
+    other = f"identity: i9\n## Theirs\nstate: mentions {IDENT}\ndue: 2026-01-01\n"
     search, _ = _search([{"title": "bob", "content": other}])
-    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="") == []
+    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT) == []
 
 
 def test_a_failing_search_or_no_session_id_prints_nothing() -> None:
     def boom(_q: str):
         raise OSError("engine down")
 
-    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=boom, by_title=NO_TITLE, name="") == []
+    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=boom, by_title=NO_TITLE, name="", identity=IDENT) == []
     search, calls = _search([])
-    assert due_lines("", datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="") == []
+    assert due_lines("", datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT) == []
     assert calls == []
 
 
-def test_after_a_restart_the_entry_is_found_by_the_session_name() -> None:
-    # A restart, /clear, resume or fork gives a new session id; the entry's session: line still names the old one.
+def test_when_the_search_finds_nothing_the_entry_is_found_by_the_session_name_if_its_identity_matches() -> None:
+    # A restart, /clear, resume or fork gives a new session id; the identity line still names the seat.
     new_sid = "11111111-2222-3333-4444-555555555555"
-    rows = [{"title": "marlowe", "content": ENTRY}]
-    search, calls = _search(rows)
+    search, calls = _search([])  # the search finds nothing (an index lag, say): the exact title is the fallback
     titles: list[str] = []
 
     def by_title(t: str):
@@ -188,29 +188,29 @@ def test_after_a_restart_the_entry_is_found_by_the_session_name() -> None:
         return {"title": "marlowe", "content": ENTRY} if t == "marlowe" else None
 
     now = datetime(2026, 11, 14, 9, 0, tzinfo=PST)
-    lines = due_lines(new_sid, now, search=search, by_title=by_title, name="marlowe")
-    assert calls == [new_sid] and titles == ["marlowe"]
+    lines = due_lines(new_sid, now, search=search, by_title=by_title, name="marlowe", identity=IDENT)
+    assert calls == [f"identity: {IDENT}"] and titles == ["marlowe"]
     assert lines[1].startswith("- RDR-230 readings: due 2026-11-14")
     # no name: nothing to fall back to
-    assert due_lines(new_sid, now, search=search, by_title=by_title, name="") == []
+    assert due_lines(new_sid, now, search=search, by_title=by_title, name="", identity=IDENT) == []
     # a prefix match from the store is not the session's entry
     assert due_lines(new_sid, now, search=search, by_title=lambda t: {"title": "marlowe2", "content": ENTRY},
-                     name="marlowe") == []
+                     name="marlowe", identity=IDENT) == []
 
 
-def test_the_session_line_match_wins_and_the_title_is_not_read() -> None:
+def test_the_identity_line_match_wins_and_the_title_is_not_read() -> None:
     search, _ = _search([{"title": "marlowe", "content": ENTRY}])
     titles: list[str] = []
     due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search,
-              by_title=lambda t: titles.append(t), name="marlowe")
+              by_title=lambda t: titles.append(t), name="marlowe", identity=IDENT)
     assert titles == []
 
 
-def test_every_entry_carrying_the_session_line_is_read() -> None:
-    second = f"session: {SID}\n## Other\ndue: 2026-11-01\n"
-    search, _ = _search([{"title": "marlowe", "content": f"session: {SID}\n## Q\nstate: x\n"},
+def test_every_entry_carrying_the_identity_line_is_read() -> None:
+    second = f"identity: {IDENT}\n## Other\ndue: 2026-11-01\n"
+    search, _ = _search([{"title": "marlowe", "content": f"identity: {IDENT}\n## Q\nstate: x\n"},
                          {"title": "marlowe_old", "content": second}])
-    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
+    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT)
     assert lines[0] == HEADING.format(entry="marlowe_old") and lines[1] == "- Other: due 2026-11-01"
 
 
@@ -288,7 +288,7 @@ def test_the_lookup_returns_within_its_budget_whatever_the_engine_does() -> None
     t0 = time.monotonic()
     try:
         assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=hang, by_title=NO_TITLE, name="",
-                         budget_s=0.5) == []
+                         budget_s=0.5, identity=IDENT) == []
         assert time.monotonic() - t0 < 2.0
     finally:
         release.set()
@@ -320,9 +320,9 @@ def test_the_real_wiring_builds_the_store_and_searches_threads_silently(monkeypa
     monkeypatch.setattr(_io, "configure_hook_logging", lambda: None)
     monkeypatch.setenv("NX_BOARD_DUE_TIMEOUT_S", "1.5")
     _FakeStore.made = []
-    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), name="")
+    lines = due_lines(SID, datetime(2026, 11, 18, 9, 0, tzinfo=PST), name="", identity=IDENT)
     assert lines and lines[0] == HEADING.format(entry="marlowe")
-    assert _FakeStore.made == [{"timeout": 1.5}, {"search": (SID, "threads", "silent", 1.5, False)}]
+    assert _FakeStore.made == [{"timeout": 1.5}, {"search": (f"identity: {IDENT}", "threads", "silent", 1.5, False)}]
     assert capsys.readouterr().out == ""  # the hook's stdout carries only what run() returns
 
 
@@ -339,9 +339,9 @@ def test_board_due_calls_match_the_real_store_signatures() -> None:
 
 
 def test_a_long_line_is_cut() -> None:
-    content = f"session: {SID}\n## {'x' * 1000}\ndue: 2026-01-01\n"
+    content = f"identity: {IDENT}\n## {'x' * 1000}\ndue: 2026-01-01\n"
     search, _ = _search([{"title": "m", "content": content}])
-    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
+    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT)
     assert len(lines[1]) == 300 and lines[1].endswith("…")
 
 
@@ -355,7 +355,7 @@ def test_the_mint_deadline_is_set_inside_the_lookup_thread() -> None:
         seen.append(deadline_left())
         return []
 
-    due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", budget_s=2.0)
+    due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", budget_s=2.0, identity=IDENT)
     assert seen and seen[0] is not None and 0 < seen[0] <= 2.0
 
 
@@ -365,34 +365,50 @@ def test_the_last_due_line_of_a_thread_counts() -> None:
 
 
 def test_many_due_threads_are_capped_with_a_count() -> None:
-    content = f"session: {SID}\n" + "".join(f"## T{i}\ndue: 2026-01-01\n" for i in range(25))
+    content = f"identity: {IDENT}\n" + "".join(f"## T{i}\ndue: 2026-01-01\n" for i in range(25))
     search, _ = _search([{"title": "m", "content": content}])
-    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="")
+    lines = due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity=IDENT)
     assert len(lines) == 1 + 20 + 1 + 1
     assert lines[21] == "- … and 5 more; read the entry"
 
 
-# --- RDR-253 Step 5: the entry is found by its identity line ------------------------------------------
+# --- RDR-253 Phase 2: the entry is found by its identity line, and by nothing else ------------------------
 
 
-def test_due_items_are_found_by_the_identity_line_when_the_session_line_is_stale() -> None:
-    """After /clear the payload's session id is new and the entry's session: line names the old one; the identity:
-    line still names the seat, so the reminder is printed with no name to fall back on."""
+def test_due_items_are_found_by_the_identity_line_with_no_name_to_fall_back_on() -> None:
+    """After /clear the payload's session id is new; the identity: line still names the seat, so the reminder is
+    printed with no name to fall back on, and an identity-only entry (no session: line) is found."""
     new_sid = "11111111-2222-3333-4444-555555555555"
-    search, calls = _search([{"title": "marlowe", "content": "identity: i12\n" + ENTRY}])
+    search, calls = _search([{"title": "marlowe", "content": ENTRY}])
+    assert "session:" not in ENTRY
     lines = due_lines(new_sid, datetime(2026, 11, 14, 9, 0, tzinfo=PST), search=search, by_title=NO_TITLE, name="",
-                      identity="i12")
-    assert calls == ["identity: i12"]
+                      identity=IDENT)
+    assert calls == [f"identity: {IDENT}"]
     assert lines[1].startswith("- RDR-230 readings: due 2026-11-14")
 
 
 def test_an_entry_owned_by_another_identity_is_not_ours_even_with_our_session_line() -> None:
-    search, _ = _search([{"title": "bob", "content": "identity: i7\n" + ENTRY}])
+    search, _ = _search([{"title": "bob", "content": f"session: {SID}\nidentity: i7\n" + ENTRY.split("\n", 1)[1]}])
     assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="",
-                     identity="i12") == []
-    # with no identity of our own, the session line still finds an entry that has no identity line (Phase 1)
-    search, _ = _search([{"title": "marlowe", "content": ENTRY}])
-    assert due_lines(SID, datetime(2026, 11, 18, tzinfo=PST), search=search, by_title=NO_TITLE, name="", identity="")
+                     identity=IDENT) == []
+
+
+def test_an_entry_with_only_a_session_line_is_not_found() -> None:
+    """The ``session:`` line is not a key: not by the search, not by the title fallback, with an identity or without."""
+    older = ENTRY.replace(f"identity: {IDENT}", f"session: {SID}")
+    now = datetime(2026, 11, 14, 9, 0, tzinfo=PST)
+    search, _ = _search([{"title": "marlowe", "content": older}])
+    assert due_lines(SID, now, search=search, by_title=lambda t: {"title": t, "content": older}, name="marlowe",
+                     identity=IDENT) == []
+    assert due_lines(SID, now, search=search, by_title=lambda t: {"title": t, "content": older}, name="marlowe",
+                     identity="") == []
+
+
+def test_with_no_identity_of_our_own_nothing_is_searched_or_found() -> None:
+    search, calls = _search([{"title": "marlowe", "content": ENTRY}])
+    assert due_lines(SID, datetime(2026, 11, 14, 9, 0, tzinfo=PST), search=search,
+                     by_title=lambda t: {"title": t, "content": ENTRY}, name="marlowe", identity="") == []
+    assert calls == []
 
 
 def test_identity_for_session_reads_the_token_files_including_held_session_ids(tmp_path) -> None:
@@ -420,8 +436,8 @@ def test_identity_for_session_reads_the_token_files_including_held_session_ids(t
 
 def test_the_title_fallback_never_takes_an_entry_naming_another_identity() -> None:
     search, _ = _search([])
-    theirs = {"title": "marlowe", "content": "identity: i7\n" + ENTRY}
+    theirs = {"title": "marlowe", "content": "identity: i7\n" + ENTRY.split("\n", 1)[1]}
     now = datetime(2026, 11, 14, 9, 0, tzinfo=PST)
-    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity="i12") == []
-    # with no identity of our own the title still finds it (a Desktop session, Phase 1)
-    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity="")
+    assert due_lines(SID, now, search=search, by_title=lambda t: theirs, name="marlowe", identity=IDENT) == []
+    ours = {"title": "marlowe", "content": ENTRY}
+    assert due_lines(SID, now, search=search, by_title=lambda t: ours, name="marlowe", identity=IDENT)

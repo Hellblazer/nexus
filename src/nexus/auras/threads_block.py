@@ -3,9 +3,10 @@
 """An aura's block in this session's threads entry (RDR-249 Technical Design 1, display.threads; bead
 nexus-mdbds.11.1).
 
-The entry is the one in T2 project ``threads`` whose ``session:`` line names this session, read with the board's
-own reader (:func:`nexus.console.threads.parse_session`), never found by title. The host never creates an entry,
-and when two carry the line (the board's duplicate-session finding) it writes nothing. The block is the heading
+The entry is the one in T2 project ``threads`` whose ``identity:`` line names this seat's identity (RDR-253 Phase 2:
+the ``session:`` line is not read), read with the board's own reader (:func:`nexus.console.threads.parse_session`),
+never found by title. The host never creates an entry, and when two carry the line (the board's duplicate-identity
+finding) it writes nothing. The block is the heading
 ``## aura: <threads value>`` and one line, ``state: <text>``, with the text kept to printable ASCII on one line and
 cut to 200 characters, so procedure text cannot open a heading, an ``ask:`` line or another field.
 
@@ -83,8 +84,9 @@ class ThreadsBlockWriter:
     def __init__(self, session_id: str, *, read_entries: ReadEntries, put: PutEntry, identity: str = "",
                  identity_source: Callable[[], str] | None = None) -> None:
         self.session_id = session_id
-        #: RDR-253 Step 5: the seat's identity finds the entry first, across /clear. *identity_source* is asked at
-        #: each write while no identity is known (the binding usually arrives after the runtime is built).
+        #: RDR-253: the seat's identity finds the entry, across /clear. *identity_source* is asked at
+        #: each write while no identity is known (the binding usually arrives after the runtime is built). *session_id*
+        #: only labels the log lines.
         self.identity = identity
         self._identity_source = identity_source
         self._read = read_entries
@@ -94,26 +96,18 @@ class ThreadsBlockWriter:
         if not self.identity and self._identity_source is not None:
             try:
                 self.identity = self._identity_source() or ""
-            except Exception:  # noqa: BLE001 -- no identity yet: the session line decides, as before Step 5
+            except Exception:  # noqa: BLE001 -- no identity yet: no entry is found
                 return ""
         return self.identity
 
     def _mine(self, row: Mapping[str, Any], mine: str) -> bool:
-        session = parse_session(str(row.get("title", "")), str(row.get("content", "")))
-        if session.identity and mine:
-            return session.identity == mine
-        # no identity line (Phase 1), or no identity of our own (a Desktop session): our session line decides
-        return session.session_id == self.session_id
+        """True when the row's ``identity:`` line is *mine*; with no identity of our own, or no line, nothing is ours."""
+        return bool(mine) and parse_session(str(row.get("title", "")), str(row.get("content", ""))).identity == mine
 
     def _entry(self, aura: str) -> Mapping[str, Any] | None:
         rows = list(self._read())
         own = self._current_identity()  # once per write: with no identity yet it reads the token directory
         mine = [row for row in rows if self._mine(row, own)]
-        if own and any(
-            self.identity == parse_session("", str(r.get("content", ""))).identity for r in mine
-        ):
-            # the identity-lined entry is the seat's; a legacy entry still carrying the session line is not a second one
-            mine = [r for r in mine if parse_session("", str(r.get("content", ""))).identity == self.identity]
         if not mine:
             _log.warning("aura_threads_no_entry", aura=aura, session_id=self.session_id)
             return None

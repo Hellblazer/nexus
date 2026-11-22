@@ -36,14 +36,16 @@ from nexus.console.threads import Bead, BeadsResult, answer_title, parse_session
 FIXTURES = Path(__file__).parent / "fixtures" / "asks"
 NOW = datetime(2026, 11, 5, 20, 15, 3, tzinfo=timezone.utc)
 ENTRY_STAMP = "2026-11-05T20:00:00Z"
-HALCYON_SESSION = "3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17"
+HALCYON_IDENTITY = "i12"  # the identity: line of tests/fixtures/asks/halcyon.txt (RDR-253 Phase 2: the only key)
+OTHER_IDENTITY = "i7"  # the identity: line of tests/fixtures/asks/classes.txt
+#: an asker session id a pre-Step-5 ``nx ask`` keyed answer records by; the digest still lists such a record
 OTHER_SESSION = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 MEDIATOR = "8b0e1d42-6c3a-4f19-a2d7-5e9f0c1b3a64"
 CLI_SENDER = "c11c11c1-1c11-4c11-8c11-c11c11c11c11"
 VERSION = "f22ca640c6bfa3d2"
 ASK_ID = "d1105-k9kr9-keying"
 REF = f"halcyon/{ASK_ID}"
-TITLE = f"{HALCYON_SESSION}/{ASK_ID}/{VERSION}"
+TITLE = f"{HALCYON_IDENTITY}/{ASK_ID}/{VERSION}"
 TUPLE_ID = "7d3f0a52-91c4-4e6b-8a1f-2c5b9e0d4f68"
 
 
@@ -281,7 +283,7 @@ def test_first_record_wins_when_the_read_back_is_not_ours(world: World) -> None:
 
 
 def other_entry(world: World, title: str = "linda") -> None:
-    content = text("halcyon.txt").replace(HALCYON_SESSION, OTHER_SESSION)
+    content = text("halcyon.txt").replace(HALCYON_IDENTITY, OTHER_IDENTITY)
     world.t2.add("threads", title, content)
 
 
@@ -298,7 +300,7 @@ def test_entry_slash_id_is_accepted_when_the_bare_id_is_ambiguous(world: World) 
     other_entry(world)
     r = world.run(*mediator_args())
     assert r.exit_code == 0, r.output
-    assert world.tuples.calls[0]["subspace"] == f"mailbox/{HALCYON_SESSION}"
+    assert world.tuples.calls[0]["subspace"] == f"mailbox/{HALCYON_IDENTITY}"
 
 
 def test_a_bare_id_held_by_one_entry_is_accepted(world: World) -> None:
@@ -311,32 +313,30 @@ def test_an_unknown_ask_is_refused(world: World) -> None:
     assert r.exit_code != 0 and "nope" in r.output
 
 
-def test_a_session_id_carried_by_two_entries_is_refused(world: World) -> None:
+def test_an_identity_carried_by_two_entries_is_refused(world: World) -> None:
     world.t2.add("threads", "halcyon-copy", text("halcyon.txt"))
     r = world.run(*mediator_args())
-    assert r.exit_code != 0 and "halcyon-copy" in r.output and HALCYON_SESSION in r.output
+    assert r.exit_code != 0 and "halcyon-copy" in r.output and HALCYON_IDENTITY in r.output
     untouched(world)
 
 
-def test_an_ask_in_an_entry_with_no_session_line_is_refused(world: World) -> None:
-    content = text("halcyon.txt").replace(f"session: {HALCYON_SESSION}\n", "")
+def test_an_ask_in_an_entry_with_no_identity_line_is_refused(world: World) -> None:
+    content = text("halcyon.txt").replace(f"identity: {HALCYON_IDENTITY}\n", "")
     world.t2.add("threads", "halcyon", content)
     version = parse_session("halcyon", content).threads[0].asks[0].version
     r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--sam-words", "x")
-    assert r.exit_code != 0 and "session" in r.output
+    assert r.exit_code != 0 and "identity: line" in r.output
     untouched(world)
 
 
-@pytest.mark.parametrize(
-    "bad",
-    [HALCYON_SESSION.upper(), HALCYON_SESSION.replace("-", ""), "not-a-uuid"],
-)
-def test_an_asker_session_that_is_not_a_lower_case_canonical_uuid_is_refused(world: World, bad: str) -> None:
-    content = text("halcyon.txt").replace(HALCYON_SESSION, bad)
+def test_an_ask_in_an_entry_with_only_a_session_line_is_refused_and_no_mail_goes_to_the_session(world: World) -> None:
+    """RDR-253 Phase 2: the ``session:`` line routes nothing; an older entry has to carry an identity: line."""
+    content = text("halcyon.txt").replace(f"identity: {HALCYON_IDENTITY}\n", f"session: {OTHER_SESSION}\n")
     world.t2.add("threads", "halcyon", content)
     version = parse_session("halcyon", content).threads[0].asks[0].version
     r = world.run("answer", REF, "1", "--expect", version, "--via", "mediator", "--sam-words", "x")
-    assert r.exit_code != 0 and "canonical" in r.output
+    assert r.exit_code != 0 and "identity: line" in r.output
+    assert world.tuples.calls == []
     untouched(world)
 
 
@@ -491,12 +491,12 @@ def test_the_tuple_body_is_the_closed_grammar_and_the_dims_are_the_contract(
     assert r.exit_code == 0, r.output
     (call,) = world.tuples.calls
     assert call["body"] == text(mail)
-    assert call["subspace"] == f"mailbox/{HALCYON_SESSION}"
-    assert call["keys"] == {"to": HALCYON_SESSION}
+    assert call["subspace"] == f"mailbox/{HALCYON_IDENTITY}"
+    assert call["keys"] == {"to": HALCYON_IDENTITY}
     sender = CLI_SENDER if "--via" not in args else MEDIATOR
     assert call["dims"] == {
         "from": sender,
-        "address_kind": "session",
+        "address_kind": "identity",
         "kind": "reply",
         "correlation_id": f"ask:{ASK_ID}@{VERSION}",
     }
@@ -523,7 +523,7 @@ def test_a_tuple_write_that_fails_marks_the_record_failed_and_says_so(world: Wor
 
 def test_a_second_call_with_the_same_batch_words_joins_the_same_batch_record(world: World) -> None:
     other_entry(world)
-    other_title = f"{OTHER_SESSION}/{ASK_ID}/{VERSION}"
+    other_title = f"{OTHER_IDENTITY}/{ASK_ID}/{VERSION}"
     words = "Yes to both"
     assert world.run(*mediator_args("--batch-words", words)).exit_code == 0
     world.now = NOW + timedelta(minutes=2)
@@ -556,7 +556,7 @@ def test_the_cli_sender_id_is_minted_once_and_kept(tmp_path: Path, monkeypatch: 
 LIST_NOW = datetime(2026, 11, 5, 21, 0, 0, tzinfo=timezone.utc)
 FRESH = "2026-11-05T20:30:00Z"
 STALE = "2026-11-04T09:00:00Z"
-CLASSES_SESSION = OTHER_SESSION
+CLASSES_IDENTITY = OTHER_IDENTITY
 
 
 def listing_world() -> World:
@@ -571,16 +571,16 @@ def listing_world() -> World:
     w.t2.add(
         "threads",
         "sleeper",
-        "session: 11111111-2222-4333-8444-555555555555\n\n## Idle\nask: sleepy-one\nasked: 2026-11-04T08:00Z\n"
+        "identity: i21\n\n## Idle\nask: sleepy-one\nasked: 2026-11-04T08:00Z\n"
         "question: Rename it?\ncontext: Cosmetic.\noption: Yes\noption: No\nreversible: yes\nblocking: no\n",
         STALE,
     )
-    w.t2.add("threads", "broken", "session: 99999999-2222-4333-8444-555555555555\n\n## Bad\nask: half-done\nquestion: q\n", FRESH)
+    w.t2.add("threads", "broken", "identity: i22\n\n## Bad\nask: half-done\nquestion: q\n", FRESH)
     w.beads = BeadsResult((Bead("nexus-k9kr9", "Retry-safe keying for quarantine restore", 2, "Constantine"),))
     # digest rows: one 3 hours old, one 3 days old, one 8 days old
-    w.t2.add("asks", f"{OTHER_SESSION}/a-new/0000000000000001", json.dumps({**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z"}))
-    w.t2.add("asks", f"{OTHER_SESSION}/a-mid/0000000000000002", json.dumps({**js("answer_record_v1_cli.json"), "time": "2026-11-02T18:00:00Z"}))
-    w.t2.add("asks", f"{OTHER_SESSION}/a-old/0000000000000003", json.dumps({**js("answer_record_v1_note_only.json"), "time": "2026-10-28T18:00:00Z"}))
+    w.t2.add("asks", f"{OTHER_IDENTITY}/a-new/0000000000000001", json.dumps({**js("answer_record_v1.json"), "time": "2026-11-05T18:00:00Z"}))
+    w.t2.add("asks", f"{OTHER_IDENTITY}/a-mid/0000000000000002", json.dumps({**js("answer_record_v1_cli.json"), "time": "2026-11-02T18:00:00Z"}))
+    w.t2.add("asks", f"{OTHER_IDENTITY}/a-old/0000000000000003", json.dumps({**js("answer_record_v1_note_only.json"), "time": "2026-10-28T18:00:00Z"}))
     return w
 
 
@@ -660,7 +660,7 @@ def test_list_json_carries_every_field_the_version_and_the_groups() -> None:
     halcyon = batch[f"halcyon/{ASK_ID}"]
     assert halcyon["version"] == VERSION
     assert halcyon["question"].startswith("Retry-safe keying")
-    assert halcyon["session_id"] == HALCYON_SESSION
+    assert halcyon["identity"] == HALCYON_IDENTITY and "session_id" not in halcyon
     assert halcyon["options"][1] == {
         "n": 2,
         "text": "Build option B at P3 (one transaction per keyed call, engine change plus one client line)",
@@ -674,7 +674,7 @@ def test_list_json_carries_every_field_the_version_and_the_groups() -> None:
     assert [a["ref"] for a in data["conditional"]] == ["classes/engine-deploy-go"]
     assert [a["ref"] for a in data["answered"]] == ["classes/already-answered"]
     assert any(f["ask"] == "half-done" for f in data["lint"])
-    assert data["legacy"] and "session" in data["legacy"][0]
+    assert data["legacy"]
     assert len(data["digest"]) == 2  # the 3-hour-old row and the answered ask's own record
 
 
@@ -708,7 +708,7 @@ def test_show_prints_every_field_numbered_options_the_recommendation_version_ses
     r = world.run("show", REF)
     assert r.exit_code == 0, r.output
     out = r.output
-    assert VERSION in out and HALCYON_SESSION in out
+    assert VERSION in out and f"asker identity: {HALCYON_IDENTITY}" in out and "asker session" not in out
     assert "15 min ago" in out
     assert "1. Accept the gap and close the bead" in out
     assert re.search(r"1\. Accept the gap and close the bead.*recommended", out)
@@ -729,7 +729,7 @@ def test_show_json_is_the_ask_with_version_age_and_answer(world: World) -> None:
     world.t2.add("asks", TITLE, text("answer_record_v1.json"))
     data = json.loads(world.run("show", REF, "--json").stdout)
     assert data["ref"] == REF and data["version"] == VERSION
-    assert data["session_id"] == HALCYON_SESSION
+    assert data["identity"] == HALCYON_IDENTITY and "session_id" not in data
     assert data["entry_age"] == "15 min ago"
     assert data["answer"]["status"] == "sent"
     assert [o["n"] for o in data["options"]] == [1, 2]
@@ -752,7 +752,7 @@ def test_show_of_an_ambiguous_bare_id_is_refused(world: World) -> None:
 def test_digest_lists_the_last_seven_days_newest_first_with_every_part() -> None:
     w = listing_world()
     w.t2.add("asks", f"batch/{MEDIATOR}/20261105T201500Z", text("batch_record_v1.json"))
-    w.t2.add("asks", f"{HALCYON_SESSION}/failed/0000000000000004", json.dumps(
+    w.t2.add("asks", f"{HALCYON_IDENTITY}/failed/0000000000000004", json.dumps(
         {**js("answer_record_v1_failed.json"), "time": "2026-11-05T19:00:00Z"}))
     r = w.run("digest")
     assert r.exit_code == 0, r.output
@@ -983,7 +983,7 @@ def test_a_batch_record_without_a_time_is_not_reused(world: World) -> None:
 
 def test_list_names_a_malformed_ask_in_text_and_json() -> None:
     w = listing_world()
-    w.t2.add("threads", "bad", "session: 88888888-2222-4333-8444-555555555555\n\n## T\nask: Bad_Id\nquestion: Lost?\ncontext: c\n", FRESH)
+    w.t2.add("threads", "bad", "identity: i23\n\n## T\nask: Bad_Id\nquestion: Lost?\ncontext: c\n", FRESH)
     text_out = w.run("list").output
     assert "Malformed asks (1)" in text_out and "bad/Bad_Id" in text_out and "Lost?" in text_out
     data = json.loads(w.run("list", "--json").stdout)
@@ -1181,7 +1181,7 @@ def test_the_batch_join_rereads_the_record_so_a_title_added_in_between_is_kept(w
 # --- show: repeated, bad_values, lines; list: answer state -----------------------------------------
 
 DEFECTIVE = (
-    "session: 3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17\n\n## Defective\n"
+    "identity: i12\n\n## Defective\n"
     "ask: defect-one\nasked: 2026-11-05T10:15Z\nquestion: Which one?\ncontext: Because.\n"
     "option: A\noption: B\nrec: banana\nwhy: first\nwhy: second\nreversible: maybe\nblocking: no\nblocking: yes\n"
 )
@@ -1579,15 +1579,10 @@ def test_the_outcome_walk_ends_on_a_cycle_and_reads_it_as_definite() -> None:
 # --- RDR-253 Step 5: the identity line routes the answer --------------------------------------------
 
 
-def _identity_world(world: World, identity: str = "i12") -> World:
-    world.t2.add("threads", "halcyon", f"identity: {identity}\n" + text("halcyon.txt"))
-    return world
-
-
 def test_an_answer_reaches_the_asking_seats_identity_mailbox(world: World) -> None:
-    """The asker's entry carries an identity: line, so the answer goes to mailbox/<id>: the identity outlives /clear,
-    the session: line does not. The mail is an ordinary tuple_out; it needs no identity token."""
-    r = _identity_world(world).run(*mediator_args())
+    """The asker's entry carries an identity: line, so the answer goes to mailbox/<id>: the identity outlives /clear.
+    The mail is an ordinary tuple_out; it needs no identity token."""
+    r = world.run(*mediator_args())
     assert r.exit_code == 0, r.output
     (call,) = world.tuples.calls
     assert call["subspace"] == "mailbox/i12"
@@ -1596,16 +1591,7 @@ def test_an_answer_reaches_the_asking_seats_identity_mailbox(world: World) -> No
     assert world.t2.record(f"i12/{ASK_ID}/{VERSION}")["status"] == "sent"
 
 
-def test_an_answer_recorded_under_the_session_key_by_an_old_client_still_counts(world: World) -> None:
-    _identity_world(world)
-    world.t2.add("asks", TITLE, json.dumps({**js("answer_record_v1.json"), "status": "sent"}))
-    r = world.run(*mediator_args())
-    assert r.exit_code != 0 and "already answered" in r.output
-    untouched(world)
-
-
 def test_one_identity_on_two_entries_routes_no_answer(world: World) -> None:
-    _identity_world(world)
     world.t2.add("threads", "other", "identity: i12\n## X\nstate: y\n")
     r = world.run(*mediator_args())
     assert r.exit_code != 0 and "identity i12 is carried by more than one entry" in r.output

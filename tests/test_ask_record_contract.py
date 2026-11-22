@@ -18,8 +18,9 @@ import pytest
 from nexus.console.threads import answer_title, parse_session, parse_timestamp
 
 FIXTURES = Path(__file__).parent / "fixtures" / "asks"
-HALCYON_SESSION = "3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17"
+HALCYON_IDENTITY = "i12"
 
+ASKER = r"i[0-9]+"  # an answer title's asker is the entry's identity (RDR-253 Phase 2)
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 STAMP = r"[0-9]{8}T[0-9]{6}Z"
 #: Every answer-record fixture, with the mail that goes with it (None: a failed send posts no mail).
@@ -160,28 +161,26 @@ def test_sending_has_no_tuple_yet_and_failed_carries_an_error() -> None:
     assert _json("answer_record_v1.json")["tuple_id"] and _json("answer_record_v1.json")["error"] is None
 
 
-def test_answer_title_is_asker_session_ask_version_from_the_parsed_ask() -> None:
+def test_answer_title_is_asker_identity_ask_version_from_the_parsed_ask() -> None:
     session, ask = _halcyon_ask()
     title = answer_title(ask)
-    assert title == f"{session.session_id}/{ask.id}/{ask.version}"
+    assert title == f"{session.identity}/{ask.id}/{ask.version}" and session.identity == HALCYON_IDENTITY
     batch = _json("batch_record_v1.json")
     assert title in batch["answer_titles"]
-    assert re.fullmatch(rf"{UUID}/[a-z0-9-]{{1,40}}/[0-9a-f]{{16}}", title)
+    assert re.fullmatch(rf"{ASKER}/[a-z0-9-]{{1,40}}/[0-9a-f]{{16}}", title)
 
 
-def test_answer_title_for_an_upper_case_session_line_is_the_lower_case_record_title() -> None:
-    text = (FIXTURES / "halcyon.txt").read_text(encoding="utf-8")
-    upper = parse_session("halcyon", text.replace(HALCYON_SESSION, HALCYON_SESSION.upper()))
-    ask = upper.threads[0].asks[0]
-    assert upper.session_id == HALCYON_SESSION.upper()
-    assert answer_title(ask) == answer_title(_halcyon_ask()[1])
-    assert re.fullmatch(rf"{UUID}/.*", answer_title(ask))
-
-
-def test_answer_title_is_empty_when_the_entry_has_no_session_line() -> None:
-    text = (FIXTURES / "halcyon.txt").read_text(encoding="utf-8").replace(f"session: {HALCYON_SESSION}\n", "")
+def test_answer_title_is_empty_when_the_entry_has_no_identity_line() -> None:
+    text = (FIXTURES / "halcyon.txt").read_text(encoding="utf-8").replace(f"identity: {HALCYON_IDENTITY}\n", "")
     ask = parse_session("halcyon", text).threads[0].asks[0]
-    assert ask.session_id == ""
+    assert ask.identity == ""
+    assert answer_title(ask) == ""
+
+
+def test_answer_title_ignores_an_older_session_line() -> None:
+    text = (FIXTURES / "halcyon.txt").read_text(encoding="utf-8").replace(
+        f"identity: {HALCYON_IDENTITY}\n", "session: 3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17\n")
+    ask = parse_session("halcyon", text).threads[0].asks[0]
     assert answer_title(ask) == ""
 
 
@@ -217,10 +216,10 @@ def test_batch_title_prefix_cannot_be_an_answer_title() -> None:
     assert answer["batch_title"] == f"batch/{mediator}/{stamp.strftime('%Y%m%dT%H%M%SZ')}"
     assert re.fullmatch(rf"batch/{UUID}/{STAMP}", answer["batch_title"])
     assert not re.fullmatch(rf"batch/{UUID}/{STAMP}", "batch/" + UUID + "/2026-11-05")
-    # an answer title starts with the asker's session id, never the word "batch"
+    # an answer title starts with the asker's identity, never the word "batch"
     for title in batch["answer_titles"]:
         assert not title.startswith("batch/")
-        assert re.match(rf"{UUID}/", title)
+        assert re.match(rf"{ASKER}/", title)
 
 
 # --- mail body -----------------------------------------------------------------------

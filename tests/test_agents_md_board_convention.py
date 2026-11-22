@@ -144,7 +144,7 @@ _NOW = datetime(2026, 11, 5, 20, 15, 3, tzinfo=timezone.utc)
 #: Written field by field from the AGENTS.md sentence: ask (id), asked, question, context, option lines,
 #: rec, why, reversible, blocking; plus the pointer line and `waiting_on: sam` the text asks for.
 _HALCYON = """\
-session: 3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17
+identity: i12
 
 ## Quarantine restore keying (RDR-222)
 ref: nexus-k9kr9, RDR-222

@@ -8,7 +8,8 @@ the identity, its token, the current session id and every session id the identit
 ``nexus.identity.board.identity_for_session`` does; the two are kept to one rule by
 ``tests/hooks/test_identity_lookup_parity.py``.
 
-Never raises: a hook that cannot read a token file falls back to the ``session:`` line, as an old client does.
+Never raises: a hook that cannot read a token file has no identity, and finds no board entry (RDR-253 Phase 2: the
+``session:`` line is not read).
 """
 from __future__ import annotations
 

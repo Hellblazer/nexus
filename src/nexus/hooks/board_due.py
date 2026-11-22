@@ -2,17 +2,17 @@
 """SessionStart: one line per threads-board thread of this session whose ``due:`` has come (nexus-ct74m item 6).
 
 The session's board entry is found in the same two steps as the PreCompact checkpoint's (``compact_checkpoint._board_entry``),
-except that step 1 reads every matching entry where the checkpoint takes the first:
+except that step 1 reads every matching entry where the checkpoint takes the first (RDR-253 Phase 2: the entry's
+``session:`` line is never read, so an entry that has one and no ``identity:`` line is not found, and neither is any
+entry for a session no token file binds to an identity):
 
-1. every ``threads`` entry whose own ``session:`` line names the payload's session id, by one full-text search of
-   project ``threads`` for the id (another entry that merely mentions the id does not count);
+1. every ``threads`` entry whose own ``identity:`` line names the identity the session's id is bound to, by one full-text
+   search of project ``threads`` for ``identity: <id>`` (another entry that merely mentions it does not count);
 2. when none does, the entry titled exactly the session's name, read from Claude Code's
-   ``<config dir>/sessions/<pid>.json`` (``sessionId`` and ``name``).
+   ``<config dir>/sessions/<pid>.json`` (``sessionId`` and ``name``), taken only when its own ``identity:`` line matches.
 
-Step 2 is what finds the entry when the session's id has changed and the entry's ``session:`` line still names the
-old one (a fresh start under the same name; ``/clear`` and fork, untested here, depend on Claude Code writing the new
-id to the sessions file before the hook runs). A session with no name, a renamed one whose entry keeps the old
-title, and a Desktop session filed under a handle get no reminder then.
+A session with no name, a renamed one whose entry keeps the old title, and a Desktop session filed under a handle get no
+reminder when the search finds nothing.
 
 The whole lookup has one hard budget (``NX_BOARD_DUE_BUDGET_S``, default 3 s): it runs in a daemon thread that
 the hook stops waiting for when the budget is spent, so the store's own waits (an endpoint re-resolve, gateway
@@ -101,32 +101,24 @@ def _engine() -> tuple[Search, ByTitle]:
     return search, by_title
 
 
-def _entries(
-    session_id: str, name: str, search: Search, by_title: ByTitle, identity: str = ""
-) -> list[tuple[str, Session]]:
-    found = []
-    if identity:
-        # RDR-253 Step 5: the entry's identity: line finds it across /clear and restart, whatever its session: line says
-        for row in search(f"identity: {identity}"):  # full-text on both words; the parsed line decides
-            title = str(row.get("title", ""))
-            session = parse_session(title, str(row.get("content", "")))
-            if session.identity == identity:
-                found.append((title, session))
-        if found:
-            return found
-    for row in search(session_id):
+def _entries(name: str, search: Search, by_title: ByTitle, identity: str = "") -> list[tuple[str, Session]]:
+    """The entries whose ``identity:`` line is *identity* (RDR-253 Phase 2): found across ``/clear`` and restart. A
+    session no token file binds to an identity (empty *identity*) finds none, and an entry with only a ``session:`` line
+    is not found."""
+    found: list[tuple[str, Session]] = []
+    if not identity:
+        return found
+    for row in search(f"identity: {identity}"):  # full-text on both words; the parsed line decides
         title = str(row.get("title", ""))
         session = parse_session(title, str(row.get("content", "")))
-        # with our identity known, an entry naming another seat is that seat's, even with our session line; with it
-        # unknown (no token file: a Desktop session), our own session line is trusted whatever identity it names
-        if session.session_id == session_id and (not identity or session.identity in ("", identity)):
+        if session.identity == identity:
             found.append((title, session))
     if found or not name:
         return found
     row = by_title(name)
     if row is not None and str(row.get("title", "")) == name:
         session = parse_session(name, str(row.get("content", "")))
-        if not identity or session.identity in ("", identity):  # a same-named entry of another seat is not ours
+        if session.identity == identity:  # a same-named entry that is not this identity's is not ours
             found.append((name, session))
     return found
 
@@ -161,7 +153,7 @@ def _lookup(
         identity = identity_for_session(session_id)
     clock = now or datetime.now().astimezone()
     out: list[str] = []
-    for title, session in _entries(session_id, resolved, search, by_title, identity):
+    for title, session in _entries(resolved, search, by_title, identity):
         out.extend(_section(title, session, clock))
     return out
 
@@ -181,7 +173,7 @@ def due_lines(
 
     *now* defaults to local time, so a ``due:`` date comes due at the operator's midnight. *search* and *by_title*
     default to the engine's ``threads`` project; *name* defaults to :func:`session_name`; *identity* defaults to the
-    one a token file binds *session_id* to (RDR-253 Step 5), and finds the entry first. Returns within *budget_s*
+    one a token file binds *session_id* to (RDR-253), and finds the entry. Returns within *budget_s*
     (default ``NX_BOARD_DUE_BUDGET_S``) plus thread start-up, whatever the engine does.
     """
     if not session_id:

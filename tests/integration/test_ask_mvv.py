@@ -52,7 +52,8 @@ pytestmark = pytest.mark.integration
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "asks"
 DRAIN_HOOK = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
 
-ASKER = "3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17"  # the session: line of tests/fixtures/asks/halcyon.txt
+#: the session the asker's drain hook runs as; its token file binds it to the asker's identity (see ``_drain``)
+ASKER_SESSION = "3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17"
 ASK_ID = "d1105-k9kr9-keying"
 ENTRY = "halcyon"
 REF = f"{ENTRY}/{ASK_ID}"
@@ -164,9 +165,41 @@ def _mediator_call(ref: str, version: str) -> list[str]:
     return ["ask", "answer", ref, "1", "--expect", version, "--via", "mediator", "--sam-words", WORDS]
 
 
+@pytest.fixture()
+def asker(t2_service_env, tmp_path, monkeypatch) -> str:
+    """The asker's identity (RDR-253 Phase 2: the entry's ``identity:`` line is the only key): a seat made in this
+    test's tenant and bound to ``ASKER_SESSION`` by the real binder, as a session start does. The engine refuses a threads
+    entry whose identity line names no identity, and one written with no identity token, so the test process writes with
+    the seat's token (its token file lives in the config dir the drain hook reads: ``tmp_path / "config"``)."""
+    import time  # noqa: PLC0415
+
+    from nexus.identity import token_header  # noqa: PLC0415
+    from nexus.identity.token_file import token_path  # noqa: PLC0415
+    from tests._engine_substrate import ensure_engine  # noqa: PLC0415 -- heavy import, needed once per test
+    from tests.identity.conftest import World  # noqa: PLC0415
+
+    world = World(tmp_path, t2_service_env, ensure_engine(), os.environ["NX_SERVICE_URL"], os.environ["NX_SERVICE_TOKEN"])
+    world.now = time.time()  # the engine's tokens live one real hour
+    identity = world.seat("halcyon-asker")
+    world.process(100, name="halcyon-asker")
+    assert world.hook(100, "startup", ASKER_SESSION).identity == identity
+    monkeypatch.setattr(token_header, "_discover", lambda: token_path(world.identity_dir, 100, 100_000))
+    token_header.reset_for_tests()
+    yield identity
+    token_header.reset_for_tests()
+    world.client.close()
+
+
+def _halcyon(asker: str) -> str:
+    """tests/fixtures/asks/halcyon.txt with its identity line naming *asker*."""
+    text = _fixture("halcyon.txt")
+    assert text.startswith("identity: i12\n")
+    return text.replace("identity: i12\n", f"identity: {asker}\n", 1)
+
+
 def _drain(tmp_path: Path, session: str) -> tuple[str, str]:
-    """The asker's UserPromptSubmit hook once, against the engine, with a tmp config dir and without the
-    production-write opt-in. Returns ``(stdout, diagnostic)``; the hook must exit 0 and log no SKIP."""
+    """The asker's UserPromptSubmit hook once, against the engine, with a tmp config dir (which holds the token file
+    that binds *session* to the asker's identity) and without the production-write opt-in. Returns ``(stdout, diagnostic)``; the hook must exit 0 and log no SKIP."""
     r = subprocess.run(
         [sys.executable, str(DRAIN_HOOK)],
         input=json.dumps({"session_id": session, "hook_event_name": "UserPromptSubmit", "prompt": "status", "cwd": str(tmp_path)}),
@@ -221,10 +254,10 @@ def test_the_only_declared_skip_is_the_windows_pty_one() -> None:
 
 
 @posix_only("the pty module: a real terminal as stdin for the --via cli path")
-def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_service_env, tmp_path) -> None:
+def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(asker, tmp_path) -> None:
     env = _nx_env(tmp_path)  # no T1 session of any kind: Sam at a bare terminal
-    halcyon = _fixture("halcyon.txt")
-    assert halcyon.startswith(f"session: {ASKER}\n")
+    halcyon = _halcyon(asker)
+    assert halcyon.startswith(f"identity: {asker}\n")
     version = _version_of(halcyon)
     assert _HEX16.fullmatch(version)
 
@@ -234,17 +267,17 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     assert _groups_of(data, REF) == ["batch"], "an unanswered, non-blocking, unconditional ask waits in the batch"
     ask = next(a for a in data["batch"] if a["ref"] == REF)
     assert ask["version"] == version
-    assert ask["session_id"] == ASKER and ask["question"].startswith("Retry-safe keying for quarantine restore")
+    assert ask["identity"] == asker and ask["question"].startswith("Retry-safe keying for quarantine restore")
     assert [o["n"] for o in ask["options"]] == [1, 2] and ask["options"][1]["irreversible"] is True
     assert ask["reversible"] is False and ask["conditional"] is False and ask["after"] == ""
-    assert _rows("asks") == [] and _mailbox(ASKER) == [], "nothing is answered or mailed yet"
-    answer_title = f"{ASKER}/{ASK_ID}/{version}"
+    assert _rows("asks") == [] and _mailbox(asker) == [], "nothing is answered or mailed yet"
+    answer_title = f"{asker}/{ASK_ID}/{version}"
 
     # Step 2: without a TTY the call is refused and writes nothing, so the pty below is what lets it through.
     answer = ["ask", "answer", REF, "1", "--expect", version, "--via", "cli", "--note", "accept the gap"]
     refused = _nx(answer, env, tmp_path)  # stdin is /dev/null
     assert refused.returncode != 0 and "tty" in refused.stderr.lower(), refused.stderr  # the RDR: "stdin must be a TTY"
-    assert _rows("asks") == [] and _mailbox(ASKER) == []
+    assert _rows("asks") == [] and _mailbox(asker) == []
 
     # ... under a pty it writes exactly one `sent` record and exactly one mailbox tuple.
     sent = _nx_under_pty(answer, env, tmp_path)
@@ -256,14 +289,14 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     assert record["note"] == "accept the gap" and record["sam_words"] == "accept the gap"
     assert record["tty"], "the record names the terminal it was typed at"
     assert record["error"] is None and record["batch_title"] is None
-    tuples = _mailbox(ASKER)
+    tuples = _mailbox(asker)
     assert len(tuples) == 1, [t.id for t in tuples]
     mail = tuples[0]
     assert record["tuple_id"] == mail.id
-    assert mail.subspace == f"mailbox/{ASKER}" and mail.keys == {"to": ASKER}
+    assert mail.subspace == f"mailbox/{asker}" and mail.keys == {"to": asker}
     cli_sender = str(mail.dims.get("from"))
-    assert str(uuid.UUID(cli_sender)) == cli_sender != ASKER, "the cli sender is a canonical UUID, not the asker's own id"
-    assert mail.dims.get("address_kind") == "session"
+    assert str(uuid.UUID(cli_sender)) == cli_sender != ASKER_SESSION, "the cli sender is a canonical UUID, not the asker's id"
+    assert mail.dims.get("address_kind") == "identity"
     assert mail.dims.get("kind") == "reply" and mail.dims.get("correlation_id") == f"ask:{ASK_ID}@{version}"
     assert mail.body == (
         f"nx-ask-answer v1\nask: {ASK_ID}\nversion: {version}\nchoice: 1\nvia: cli\nanswer: {record['answer_id']}\n"
@@ -275,10 +308,10 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     assert _groups_of(_list(env, tmp_path), REF) == ["answered"], "the answered ask moves to the answered group"
 
     # Step 3: the asker's drain hook renders the unverified-claim frame from the RECORD.
-    out, diag = _drain(tmp_path, ASKER)
+    out, diag = _drain(tmp_path, ASKER_SESSION)
     mail_version = _check_frame(out, diag, version=version, option="1", via="cli", stamp="no stamp", words="accept the gap")
     assert mail.id not in out, diag
-    assert _mailbox(ASKER) == [], "the drain consumed (acked) the mail"
+    assert _mailbox(asker) == [], "the drain consumed (acked) the mail"
     assert len(_rows("asks")) == 1, "draining does not touch the answer record"
 
     # Step 4: the ask block is edited, so the asker's re-read reports a version the frame does not carry.
@@ -298,7 +331,7 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     # The RDR requires the refusal to name both versions and to print the ask's current text.
     assert mail_version in stale.stderr and after["version"] in stale.stderr, stale.stderr
     assert after["question"] in stale.stderr and after["options"][0]["text"] in stale.stderr, stale.stderr
-    assert len(_rows("asks")) == 1 and _mailbox(ASKER) == [], "the refused call wrote no record and no tuple"
+    assert len(_rows("asks")) == 1 and _mailbox(asker) == [], "the refused call wrote no record and no tuple"
 
     # ... and when the ask block is gone altogether, the asker's re-read says so.
     gone = edited.split("\nask: ")[0].replace(f"needs_sam: ask {ASK_ID}\n", "") + "\n"
@@ -313,7 +346,7 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
     _put("threads", ENTRY, edited)
     again = _nx_under_pty(["ask", "answer", REF, "1", "--expect", after["version"], "--via", "cli"], env, tmp_path)
     assert again.returncode == 0, again.stderr
-    second = _mailbox(ASKER)
+    second = _mailbox(asker)
     assert len(second) == 1 and second[0].id != mail.id, [t.id for t in second]
     assert second[0].dims.get("from") == cli_sender, "the cli sender id is minted once per config dir, not per call"
     assert len(_rows("asks")) == 2
@@ -322,48 +355,48 @@ def test_steps_1_to_4_cli_answer_under_a_pty_reaches_the_asker_drain_hook(t2_ser
 # --- the mediator path and the stamp control ----------------------------------------------------
 
 
-def _mediator_roundtrip(tmp_path: Path, session: dict[str, str]) -> tuple[TupleRow, str, str, str]:
+def _mediator_roundtrip(tmp_path: Path, session: dict[str, str], asker: str) -> tuple[TupleRow, str, str, str]:
     """Put the ask on the board, answer it ``--via mediator`` with *session* in the env and no ``--note``,
     drain the asker. Returns ``(mail, drained stdout, diagnostic, version)``."""
     env = _nx_env(tmp_path, session)
-    halcyon = _fixture("halcyon.txt")
+    halcyon = _halcyon(asker)
     version = _version_of(halcyon)
     _put("threads", ENTRY, halcyon)
     sent = _nx(_mediator_call(REF, version), env, tmp_path)
     assert sent.returncode == 0, sent.stderr
     records = _rows("asks")
-    assert [r["title"] for r in records] == [f"{ASKER}/{ASK_ID}/{version}"]
+    assert [r["title"] for r in records] == [f"{asker}/{ASK_ID}/{version}"]
     record = json.loads(records[0]["content"])
     mediator = session["NX_T1_SESSION_ID"]
     assert record["status"] == "sent" and record["choice"] == 1 and record["via"] == f"mediator:{mediator}"
     assert record["sam_words"] == WORDS and record["note"] == "" and record["tty"] is None
-    tuples = _mailbox(ASKER)
+    tuples = _mailbox(asker)
     assert len(tuples) == 1 and record["tuple_id"] == tuples[0].id
     mail = tuples[0]
     assert mail.body == (
         f"nx-ask-answer v1\nask: {ASK_ID}\nversion: {version}\nchoice: 1\nvia: mediator:{mediator}\nanswer: {record['answer_id']}\n"
     )
-    assert mail.dims.get("from") == mediator and mail.dims.get("address_kind") == "session" and mail.dims.get("kind") == "reply"
+    assert mail.dims.get("from") == mediator and mail.dims.get("address_kind") == "identity" and mail.dims.get("kind") == "reply"
     assert WORDS not in (mail.body or "")
-    out, diag = _drain(tmp_path, ASKER)
+    out, diag = _drain(tmp_path, ASKER_SESSION)
     return mail, out, diag, version
 
 
-def test_mediator_answer_words_come_from_the_record_not_a_note(t2_service_env, tmp_path) -> None:
+def test_mediator_answer_words_come_from_the_record_not_a_note(asker, tmp_path) -> None:
     mediator = str(uuid.uuid4())
-    mail, out, diag, version = _mediator_roundtrip(tmp_path, {"NX_T1_SESSION_ID": mediator})
+    mail, out, diag, version = _mediator_roundtrip(tmp_path, {"NX_T1_SESSION_ID": mediator}, asker)
     assert not mail.sender_session, f"no T1 token was presented, so no stamp: {mail.sender_session!r}"
     # No --note was given, so the fenced words can only have been read from the record's sam_words.
     _check_frame(out, diag, version=version, option="1", via=f"mediator:{mediator}", stamp="no stamp", words=WORDS)
 
 
-def test_a_session_carrying_a_t1_token_is_stamped_and_the_frame_prints_the_stamp(t2_service_env, tmp_path) -> None:
+def test_a_session_carrying_a_t1_token_is_stamped_and_the_frame_prints_the_stamp(asker, tmp_path) -> None:
     """The stamp control: the same call as above from a process holding the fixture's T1 token. If the
     engine did not stamp, this fails, and "no stamp" in the other tests would prove nothing."""
     token, session_id = os.environ.get("NX_T1_SESSION", ""), os.environ.get("NX_T1_SESSION_ID", "")
     assert token and session_id, "the tenant fixture mints no T1 session in this substrate mode"
     stamp = str(uuid.UUID(session_id))
-    mail, out, diag, version = _mediator_roundtrip(tmp_path, {"NX_T1_SESSION": token, "NX_T1_SESSION_ID": session_id})
+    mail, out, diag, version = _mediator_roundtrip(tmp_path, {"NX_T1_SESSION": token, "NX_T1_SESSION_ID": session_id}, asker)
     assert mail.sender_session == stamp, f"the engine did not stamp the minted session: {mail.sender_session!r}"
     _check_frame(out, diag, version=version, option="1", via=f"mediator:{session_id}", stamp=stamp, words=WORDS)
     assert "no stamp" not in out, diag
@@ -372,10 +405,10 @@ def test_a_session_carrying_a_t1_token_is_stamped_and_the_frame_prints_the_stamp
 # --- step 5 -------------------------------------------------------------------------------------
 
 
-def test_step_5_an_ask_with_an_after_line_is_refused_and_writes_nothing(t2_service_env, tmp_path) -> None:
-    mediator, other = str(uuid.uuid4()), str(uuid.uuid4())
+def test_step_5_an_ask_with_an_after_line_is_refused_and_writes_nothing(asker, tmp_path) -> None:
+    mediator = str(uuid.uuid4())
     env = _nx_env(tmp_path, {"NX_T1_SESSION_ID": mediator})
-    plain = _fixture("halcyon.txt").replace(ASKER, other)
+    plain = _halcyon(asker)
     conditional = plain.rstrip("\n") + "\nafter: engine 0.1.180 deploys\n"
     ref = f"halcyon-after/{ASK_ID}"
     _put("threads", "halcyon-after", conditional)
@@ -383,22 +416,22 @@ def test_step_5_an_ask_with_an_after_line_is_refused_and_writes_nothing(t2_servi
     data = _list(env, tmp_path)
     assert _groups_of(data, ref) == ["conditional"], "the ask with after: is listed as conditional"
     ask = next(a for a in data["conditional"] if a["ref"] == ref)
-    assert ask["conditional"] is True and ask["after"] == "engine 0.1.180 deploys" and ask["session_id"] == other
+    assert ask["conditional"] is True and ask["after"] == "engine 0.1.180 deploys" and ask["identity"] == asker
     assert ask["version"] == _version_of(conditional)
-    assert _rows("asks") == [] and _mailbox(other) == []
+    assert _rows("asks") == [] and _mailbox(asker) == []
 
     refused = _nx(_mediator_call(ref, ask["version"]), env, tmp_path)
     assert refused.returncode != 0
     assert "after" in refused.stderr and "engine 0.1.180 deploys" in refused.stderr, refused.stderr
     assert _rows("asks") == [], "the refusal wrote no answer record"
-    assert _mailbox(other) == [], "the refusal wrote no tuple"
+    assert _mailbox(asker) == [], "the refusal wrote no tuple"
 
     # The cli route, without a pty: after: is checked before the TTY, so the refusal is the after: one and not
     # the missing-terminal one. A reordering would show the TTY refusal here (or, under a pty, a send).
     cli = _nx(["ask", "answer", ref, "1", "--expect", ask["version"], "--via", "cli"], env, tmp_path)
     assert cli.returncode != 0
     assert "after" in cli.stderr and "engine 0.1.180 deploys" in cli.stderr and "tty" not in cli.stderr.lower(), cli.stderr
-    assert _rows("asks") == [] and _mailbox(other) == [], "the cli refusal wrote nothing either"
+    assert _rows("asks") == [] and _mailbox(asker) == [], "the cli refusal wrote nothing either"
 
     # Positive control: with the line gone (a new version) the same call goes through, so the empty reads above
     # were measurements of a working record store and mailbox.
@@ -409,6 +442,6 @@ def test_step_5_an_ask_with_an_after_line_is_refused_and_writes_nothing(t2_servi
     ok = _nx(_mediator_call(ref, fresh["version"]), env, tmp_path)
     assert ok.returncode == 0, ok.stderr
     records = _rows("asks")
-    assert [r["title"] for r in records] == [f"{other}/{ASK_ID}/{fresh['version']}"]
+    assert [r["title"] for r in records] == [f"{asker}/{ASK_ID}/{fresh['version']}"]
     assert json.loads(records[0]["content"])["status"] == "sent"
-    assert len(_mailbox(other)) == 1
+    assert len(_mailbox(asker)) == 1

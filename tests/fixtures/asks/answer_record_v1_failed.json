@@ -16,5 +16,5 @@
   "time": "2026-11-05T20:21:00Z",
   "status": "failed",
   "tuple_id": null,
-  "error": "tuple_out refused: mailbox/3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17 is not a known address"
+  "error": "tuple_out refused: mailbox/i12 is not a known address"
 }

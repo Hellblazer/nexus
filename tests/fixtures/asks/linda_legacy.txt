@@ -1,4 +1,4 @@
-session: 82180959-b94a-4da8-9878-2fdf7d8da0ca
+identity: i9
 
 ## Retire the aspect queue table (RDR-235 step B)
 ref: nexus-hbnml; resume record T2 nexus/hbnml-resume-2026-11-05; branch worktree-agent-aec98b1be7b87b75c d4418bc0c (not pushed); side worktree ../nexus-wt/linda-revive

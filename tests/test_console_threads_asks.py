@@ -21,6 +21,7 @@ from nexus.console.threads import (
     Ask,
     Bead,
     answer_title,
+    answer_titles,
     ask_version,
     build_board,
     classify,
@@ -31,12 +32,12 @@ from nexus.console.threads import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "asks"
 NOW = datetime(2026, 11, 5, 20, 0, tzinfo=timezone.utc)
-SESSION = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+IDENTITY = "i7"
 FRESH = (NOW - timedelta(hours=1)).isoformat()
 OLD = (NOW - timedelta(hours=30)).isoformat()
 
 HALCYON_VERSION = "f22ca640c6bfa3d2"
-HALCYON_SESSION = "3f2a9c1e-5b7d-4e2a-9c31-0d8e6f4a2b17"
+HALCYON_IDENTITY = "i12"
 
 
 def fixture(name: str) -> str:
@@ -73,8 +74,8 @@ def ask_text(ask_id: str = "a1", /, **over: object) -> str:
     return "\n".join(lines)
 
 
-def entry_text(*blocks: str, session: str | None = SESSION, heading: str = "## Thread", thread_lines: str = "") -> str:
-    head = [f"session: {session}", ""] if session is not None else []
+def entry_text(*blocks: str, identity: str | None = IDENTITY, heading: str = "## Thread", thread_lines: str = "") -> str:
+    head = [f"identity: {identity}", ""] if identity is not None else []
     return "\n".join([*head, heading, thread_lines, *blocks, ""])
 
 
@@ -89,7 +90,7 @@ def only_ask(content: str):
 
 def test_halcyon_every_field_is_read() -> None:
     s = parse_session("halcyon", fixture("halcyon.txt"))
-    assert s.session_id == HALCYON_SESSION
+    assert s.identity == HALCYON_IDENTITY
     assert len(s.threads) == 1
     t = s.threads[0]
     assert t.title == "Quarantine restore keying (RDR-222)"
@@ -113,7 +114,7 @@ def test_halcyon_every_field_is_read() -> None:
     assert a.by == ""
     assert a.version == HALCYON_VERSION
     assert a.entry == "halcyon"
-    assert a.session_id == HALCYON_SESSION
+    assert a.identity == HALCYON_IDENTITY
     assert a.thread == t.title
     assert a.refs == ("nexus-k9kr9", "RDR-222")
     assert a.missing == ()
@@ -244,22 +245,25 @@ def test_the_none_valued_needs_sam_survives_when_the_pointer_is_dropped() -> Non
 
 
 def test_ask_lines_before_any_heading_belong_to_the_session_named_thread() -> None:
-    content = f"session: {SESSION}\n" + ask_text("a1")
+    content = f"identity: {IDENTITY}\n" + ask_text("a1")
     s = parse_session("solo", content)
     assert [t.title for t in s.threads] == ["solo"]
     assert s.threads[0].asks[0].id == "a1"
 
 
-def test_the_session_line_is_read_and_adds_no_thread_or_note() -> None:
-    s = parse_session("e", f"session: {SESSION}\n")
-    assert s.session_id == SESSION
+def test_the_identity_line_is_read_and_adds_no_thread_or_note() -> None:
+    s = parse_session("e", f"identity: {IDENTITY}\n")
+    assert s.identity == IDENTITY
     assert s.threads == () and s.notes == ()
 
 
-def test_the_first_session_line_wins() -> None:
-    s = parse_session("e", "session: first\n## T\nsession: second\n")
-    assert s.session_id == "first"
-    assert s.threads[0].notes == ()
+def test_an_older_session_line_is_skipped_and_is_never_a_key() -> None:
+    """RDR-253 Phase 2: a ``session:`` line adds no thread or note and names nobody; its ask has no asker."""
+    s = parse_session("e", "session: first\n## T\nsession: second\n" + ask_text("a1"))
+    assert s.identity == ""
+    assert s.notes == () and s.threads[0].notes == ()
+    assert s.threads[0].asks[0].identity == ""
+    assert not hasattr(s, "session_id") and not hasattr(s.threads[0].asks[0], "session_id")
 
 
 def test_freshness_still_comes_from_the_row_not_the_session_line() -> None:
@@ -270,7 +274,7 @@ def test_freshness_still_comes_from_the_row_not_the_session_line() -> None:
 
 def test_legacy_entry_parses_as_before() -> None:
     s = parse_session("linda", fixture("linda_legacy.txt"))
-    assert s.session_id == "82180959-b94a-4da8-9878-2fdf7d8da0ca"
+    assert s.identity == "i9"
     assert s.notes == ()
     assert [t.title for t in s.threads] == [
         "Retire the aspect queue table (RDR-235 step B)",
@@ -380,8 +384,7 @@ def test_lint_flags_an_id_repeated_in_the_entry() -> None:
 
 
 def test_the_same_id_in_two_entries_is_not_a_repeat() -> None:
-    other = "11111111-2222-4333-8444-555555555555"
-    found = findings(row("e1", entry_text(ask_text("a1"))), row("e2", entry_text(ask_text("a1"), session=other)))
+    found = findings(row("e1", entry_text(ask_text("a1"))), row("e2", entry_text(ask_text("a1"), identity="i8")))
     assert found == ()
 
 
@@ -441,27 +444,22 @@ def test_lint_flags_a_field_given_twice() -> None:
     assert pairs(findings(row("e", content))) == {("repeated-field", "a1")}
 
 
-def test_lint_flags_no_session_line_on_an_entry_with_asks() -> None:
-    found = findings(row("e", entry_text(ask_text(), session=None)))
-    assert pairs(found) == {("no-session", "")}
+def test_lint_flags_no_identity_line_on_an_entry_with_asks() -> None:
+    found = findings(row("e", entry_text(ask_text(), identity=None)))
+    assert pairs(found) == {("no-identity", "")}
     assert found[0].entry == "e"
 
 
-def test_a_legacy_entry_without_a_session_line_is_not_flagged() -> None:
+def test_an_older_session_line_does_not_route_an_ask() -> None:
+    """RDR-253 Phase 2: an entry with a ``session:`` line and no ``identity:`` line is as unroutable as one with neither."""
+    content = "session: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d\n\n## Thread\n" + ask_text("a1") + "\n"
+    assert pairs(findings(row("e", content))) == {("no-identity", "")}
+    (a,) = parse_session("e", content).threads[0].asks
+    assert answer_title(a) == ""
+
+
+def test_a_legacy_entry_without_an_identity_line_is_not_flagged() -> None:
     assert findings(row("old", "## T\nstate: x\nneeds_sam: pick\n")) == ()
-
-
-def test_lint_flags_two_entries_carrying_the_same_session_id() -> None:
-    found = findings(row("e1", entry_text(ask_text("a1"))), row("e2", entry_text(ask_text("a2"))), row("e3", entry_text(session="other-id")))
-    assert {(f.rule, f.entry) for f in found} == {("duplicate-session", "e1"), ("duplicate-session", "e2")}
-
-
-def test_session_ids_are_compared_case_insensitively() -> None:
-    found = findings(
-        row("e1", entry_text(ask_text("a1"))),
-        row("e2", entry_text(ask_text("a2"), session=SESSION.upper())),
-    )
-    assert {f.rule for f in found} == {"duplicate-session"}
 
 
 def test_every_finding_names_the_entry_and_the_ask() -> None:
@@ -496,8 +494,8 @@ def ids(group) -> list[str]:
     return [c.ask.id for c in group]
 
 
-def record_title(ask_id: str, version: str, session: str = SESSION) -> str:
-    return f"{session}/{ask_id}/{version}"
+def record_title(ask_id: str, version: str, asker: str = IDENTITY) -> str:
+    return f"{asker}/{ask_id}/{version}"
 
 
 def version_of(ask_id: str) -> str:
@@ -810,29 +808,21 @@ def test_the_marker_is_case_insensitive_and_needs_no_space_before_it(text: str) 
 # --- answer_title ---------------------------------------------------------------------
 
 
-def test_answer_title_is_session_ask_version() -> None:
+def test_answer_title_is_identity_ask_version() -> None:
     a = only_ask(fixture("halcyon.txt"))
-    assert answer_title(a) == f"{HALCYON_SESSION}/d1105-k9kr9-keying/{HALCYON_VERSION}"
+    assert answer_title(a) == f"{HALCYON_IDENTITY}/d1105-k9kr9-keying/{HALCYON_VERSION}"
+    assert answer_titles(a) == (answer_title(a),)
 
 
-def test_answer_title_lower_cases_an_upper_case_session_line_to_the_record_title() -> None:
-    upper = fixture("halcyon.txt").replace(HALCYON_SESSION, HALCYON_SESSION.upper())
-    a = only_ask(upper)
-    assert a.session_id == HALCYON_SESSION.upper()
-    assert answer_title(a) == f"{HALCYON_SESSION}/d1105-k9kr9-keying/{HALCYON_VERSION}"
-    c = classify([row("halcyon", upper)], NOW, {answer_title(a): {"status": "sent"}})
-    assert ids(c.answered) == ["d1105-k9kr9-keying"]
-
-
-def test_answer_title_is_empty_for_an_ask_with_no_session_line_so_no_record_can_match() -> None:
-    a = only_ask(entry_text(ask_text("a1"), session=None))
-    assert answer_title(a) == ""
-    c = classify([row("e", entry_text(ask_text("a1"), session=None))], NOW, {"/a1/" + a.version: {"status": "sent"}})
+def test_answer_title_is_empty_for_an_ask_with_no_identity_line_so_no_record_can_match() -> None:
+    a = only_ask(entry_text(ask_text("a1"), identity=None))
+    assert answer_title(a) == "" and answer_titles(a) == ()
+    c = classify([row("e", entry_text(ask_text("a1"), identity=None))], NOW, {"/a1/" + a.version: {"status": "sent"}})
     assert ids(c.answered) == [] and ids(c.batch) == ["a1"]
 
 
 def test_answer_title_takes_a_bare_ask() -> None:
-    assert answer_title(Ask(id="x", version="0123456789abcdef", session_id="S")) == "s/x/0123456789abcdef"
+    assert answer_title(Ask(id="x", version="0123456789abcdef", identity="i5")) == "i5/x/0123456789abcdef"
 
 
 # --- version vectors --------------------------------------------------------------------

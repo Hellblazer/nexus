@@ -52,7 +52,7 @@ A `reversible: yes` ask whose option text reads as irreversible (a delete, a tag
 
 ## Refusals
 
-`nx ask answer` refuses when `--expect` is not the current version (it prints the current text: show it to the user, echo back again, and send only with their confirmation), when the ask has `after:`, when two entries carry the asker's `session:` id, and when `--sam-words` is empty or over 500 characters. `--via cli` needs a TTY; you never use it. A `sent` answer already exists for that version: do not add `--replace` unless the user is changing it. Report every refusal as it is; do not retry with different words.
+`nx ask answer` refuses when `--expect` is not the current version (it prints the current text: show it to the user, echo back again, and send only with their confirmation), when the ask has `after:`, when the entry has no `identity:` line, when two entries carry the asker's `identity:` id, and when `--sam-words` is empty or over 500 characters. `--via cli` needs a TTY; you never use it. A `sent` answer already exists for that version: do not add `--replace` unless the user is changing it. Report every refusal as it is; do not retry with different words.
 
 ## Success Criteria
 

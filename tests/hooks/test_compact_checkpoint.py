@@ -47,6 +47,8 @@ SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" /
 HOOKS_JSON = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "hooks.json"
 
 SID = "11111111-2222-3333-4444-555555555555"
+IDENT = "i12"  # the identity the token file bound to SID in ``env`` names; the board entry's identity: line is the only key
+SEARCH = f"memory search identity: {IDENT} --project threads"  # the one full-text search the board lookup makes
 OTHER_SID = "99999999-8888-7777-6666-555555555555"
 NAME = "linda"
 
@@ -84,8 +86,8 @@ _STANDIN = textwrap.dedent(
         for i, t in enumerate(TITLES):
             print(f"[{101 + i}] threads/{t}  (-, 2026-10-31T21:46:51Z)")
     elif args[:2] == ["memory", "search"]:
-        # nexus-3lcda: FTS for the session id. "hit" finds the entry whose body carries a session: line;
-        # "decoy_first" lists an entry that only mentions the id before it; "decoy_only" lists the decoy alone.
+        # FTS for the identity line (RDR-253 Phase 2). "hit" finds the entry whose body carries the identity: line;
+        # "decoy_first" lists an entry that only mentions the identity before it; "decoy_only" lists the decoy alone.
         # "fail" exits 1, "hang" never answers; "tie_*" list two entries that both carry the line, 208
         # written 2026-11-01 and 207 written 2026-11-03, in the order the name says.
         mode, sid = os.environ.get("FAKE_SEARCH", "none"), args[2]
@@ -106,11 +108,11 @@ _STANDIN = textwrap.dedent(
     elif args[:2] == ["memory", "get"] and args[2].isdigit() and int(args[2]) >= 200:
         sid = os.environ["FAKE_SID"]
         if int(args[2]) in (207, 208):
-            print(f"session: {sid}\\n## board of {'newer' if int(args[2]) == 207 else 'older'}\\nref: nexus-3lqxv")
+            print(f"identity: i12\\n## board of {'newer' if int(args[2]) == 207 else 'older'}\\nref: nexus-3lqxv")
         elif int(args[2]) == 205:
-            print(f"ref: nexus-3lqxv\\nsession: {sid}\\n## board of bullock\\nstate: building")
-        else:  # mentions the id but is not this session's entry
-            print(f"session: someone-else\\n## decoy board\\nwaiting_on: session: {sid}\\nref: nexus-zz9yx")
+            print(f"ref: nexus-3lqxv\\nidentity: i12\\n## board of bullock\\nstate: building")
+        else:  # mentions the identity but is not this session's entry
+            print(f"identity: i7\\n## decoy board\\nwaiting_on: identity: i12\\nref: nexus-zz9yx")
     elif args[:2] == ["memory", "get"]:
         if "--title" in args:  # the real CLI: exact, then a unique prefix
             want = args[args.index("--title") + 1]
@@ -121,7 +123,7 @@ _STANDIN = textwrap.dedent(
             title = hits[0]
         else:
             title = TITLES[int(args[2]) - 101]
-        print(f"## board of {title}\\nref: nexus-3lqxv\\nstate: building")
+        print(f"identity: i12\\n## board of {title}\\nref: nexus-3lqxv\\nstate: building")
     """
 )
 
@@ -144,6 +146,10 @@ def env(tmp_path: Path, monkeypatch, mod):
     (claude / "sessions").mkdir(parents=True)
     (claude / "sessions" / "4242.json").write_text(json.dumps({"pid": 4242, "sessionId": SID, "name": NAME}), encoding="utf-8")
     (claude / "sessions" / "4243.json").write_text(json.dumps({"pid": 4243, "sessionId": OTHER_SID, "name": "other"}), encoding="utf-8")
+    (config / "identity").mkdir(parents=True)  # the token file that binds SID to IDENT (what the hook reads)
+    (config / "identity" / "4242.1.token").write_text(json.dumps({
+        "identity": IDENT, "generation": 1, "token": "tok", "session_id": SID, "session_ids": [SID], "pid": 4242,
+        "started_at": 1}), encoding="utf-8")
     standin = tmp_path / "fake_nx.py"
     standin.write_text(_STANDIN, encoding="utf-8")
     nx_log = tmp_path / "nx.log"
@@ -215,7 +221,7 @@ class TestPre:
         assert "### In-progress beads" in text and "P2 Auto-continuation" in text
         assert f"## Threads board entry (threads/{NAME})" in text and "state: building" in text
         assert nx_calls(env) == [  # the board first: its ref lines choose the worktree
-            f"memory search {SID} --project threads",  # by session id; no hit, so the exact title
+            SEARCH,  # by the identity line; no hit, so the exact title
             "memory list --project threads", "memory get 101 --project threads", "command-context continuation"
         ]
 
@@ -243,9 +249,9 @@ class TestPre:
         assert "board of linda_2" not in text and "[no board entry:" in text and "titled exactly" in text
         assert not any(c.startswith("memory get") for c in nx_calls(env))
 
-    def test_the_board_is_found_by_its_session_line_when_the_name_is_not_its_title(self, mod, env, monkeypatch) -> None:
+    def test_the_board_is_found_by_its_identity_line_when_the_name_is_not_its_title(self, mod, env, monkeypatch) -> None:
         """Desktop seats keep their board under a handle (``bullock``) that is not the session's name
-        (nexus-3lcda). The entry whose body carries ``session: <id>`` is found by full-text search."""
+        (nexus-3lcda). The entry whose body carries the seat's ``identity: i<n>`` line is found by full-text search."""
         monkeypatch.setenv("FAKE_SEARCH", "hit")
         monkeypatch.setenv("FAKE_BOARD", "missing")
         run(mod, monkeypatch, "pre", pre_payload())
@@ -253,12 +259,12 @@ class TestPre:
         assert "## Threads board entry (threads/bullock)" in text and "## board of bullock" in text
         assert "[no board entry" not in text
         assert nx_calls(env) == [
-            f"memory search {SID} --project threads", "memory get 205 --project threads", "command-context continuation"
+            SEARCH, "memory get 205 --project threads", "command-context continuation"
         ], "one search and one get: no listing of the project"
         # the board's ref: line still filters the in-progress beads
         assert "nexus-zz9yx" not in mod._in_progress_section(text)
 
-    def test_the_session_line_is_found_without_a_session_name(self, mod, env, monkeypatch) -> None:
+    def test_the_identity_line_is_found_without_a_session_name(self, mod, env, monkeypatch) -> None:
         (env.claude / "sessions" / "4242.json").unlink()
         monkeypatch.setenv("FAKE_SEARCH", "hit")
         run(mod, monkeypatch, "pre", pre_payload())
@@ -271,27 +277,27 @@ class TestPre:
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert "board of bullock" in text and "decoy" not in text
         assert nx_calls(env)[:3] == [
-            f"memory search {SID} --project threads", "memory get 206 --project threads", "memory get 205 --project threads"
+            SEARCH, "memory get 206 --project threads", "memory get 205 --project threads"
         ]
 
-    def test_without_a_session_line_the_exact_title_is_the_fallback(self, mod, env, monkeypatch) -> None:
+    def test_without_an_identity_line_hit_the_exact_title_is_the_fallback(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_SEARCH", "decoy_only")  # a hit that is not ours
         run(mod, monkeypatch, "pre", pre_payload())
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert f"## Threads board entry (threads/{NAME})" in text and f"board of {NAME}" in text and "decoy" not in text
         assert nx_calls(env) == [
-            f"memory search {SID} --project threads", "memory get 206 --project threads",
+            SEARCH, "memory get 206 --project threads",
             "memory list --project threads", "memory get 101 --project threads", "command-context continuation",
         ]
 
     @pytest.mark.parametrize("order", ["tie_old_first", "tie_new_first"])
-    def test_when_two_entries_carry_the_session_line_the_newest_wins(self, mod, env, monkeypatch, order) -> None:
+    def test_when_two_entries_carry_the_identity_line_the_newest_wins(self, mod, env, monkeypatch, order) -> None:
         """Both bodies pass the line check; the listing's timestamp decides, not the search rank."""
         monkeypatch.setenv("FAKE_SEARCH", order)
         run(mod, monkeypatch, "pre", pre_payload())
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert "## Threads board entry (threads/newer)" in text and "board of older" not in text
-        assert nx_calls(env)[:2] == [f"memory search {SID} --project threads", "memory get 207 --project threads"]
+        assert nx_calls(env)[:2] == [SEARCH, "memory get 207 --project threads"]
 
     def test_a_failing_search_falls_back_to_the_exact_title(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_SEARCH", "fail")
@@ -299,7 +305,7 @@ class TestPre:
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert f"## Threads board entry (threads/{NAME})" in text and f"board of {NAME}" in text
         assert nx_calls(env)[:3] == [
-            f"memory search {SID} --project threads", "memory list --project threads", "memory get 101 --project threads"
+            SEARCH, "memory list --project threads", "memory get 101 --project threads"
         ]
 
     def test_a_search_that_times_out_falls_back_to_the_exact_title_inside_the_budget(self, mod, env, monkeypatch) -> None:
@@ -321,28 +327,11 @@ class TestPre:
         log = env.hook_log.read_text(encoding="utf-8")
         assert "also failed" in log and "titled exactly 'linda'" in log
 
-    def test_no_entry_at_all_names_the_session_line_and_the_title_in_the_warning(self, mod, env, monkeypatch) -> None:
+    def test_no_entry_at_all_names_the_identity_line_and_the_title_in_the_warning(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_BOARD", "missing")
         run(mod, monkeypatch, "pre", pre_payload())
         warning = next(ln for ln in env.hook_log.read_text(encoding="utf-8").splitlines() if " WARNING " in ln)
-        assert f"no threads entry carries `session: {SID}` and none is titled exactly 'linda'" in warning
-
-    @pytest.mark.parametrize(
-        ("body", "found"),
-        [
-            (f"session: {SID}\n## A\nstate: x", True),  # the entry's first line
-            (f"## A\nstate: x\nsession: {SID}", True),  # a block-level line
-            (f"  Session:   {SID}  \n", True),
-            (f"- session: {SID}\n", True),
-            (f"session: {SID}-2\n", False),  # a longer id
-            (f"session: x{SID}\n", False),
-            (f"waiting_on: session: {SID}\n", False),  # mentions it in another field
-            (f"session: {OTHER_SID}\nref: {SID}\n", False),
-            ("", False),
-        ],
-    )
-    def test_the_session_line_matcher(self, mod, body, found) -> None:
-        assert mod._has_session_line(body, SID) is found
+        assert f"no threads entry carries `identity: {IDENT}` and none is titled exactly 'linda'" in warning
 
     def test_a_key_file_is_not_a_session_source(self, mod, env, monkeypatch) -> None:
         third = "33333333-3333-3333-3333-333333333333"
@@ -350,7 +339,7 @@ class TestPre:
         run(mod, monkeypatch, "pre", pre_payload(session_id=third))
         text = (env.checkpoints / f"{third}.md").read_text(encoding="utf-8")
         assert "from_the_key" not in text and "- session name:" not in text
-        assert nx_calls(env) == [f"memory search {third} --project threads", "command-context continuation"]
+        assert nx_calls(env) == ["command-context continuation"], "no token file binds it, so no identity and no board lookup"
 
     def test_no_matching_sessions_file_is_logged(self, mod, env, monkeypatch) -> None:
         (env.claude / "sessions" / "4242.json").unlink()
@@ -368,7 +357,7 @@ class TestPre:
         run(mod, monkeypatch, "pre", pre_payload())
         text = (env.checkpoints / f"{SID}.md").read_text(encoding="utf-8")
         assert "Threads board entry" not in text and "- session name:" not in text
-        assert nx_calls(env) == [f"memory search {SID} --project threads", "command-context continuation"]
+        assert nx_calls(env) == [SEARCH, "command-context continuation"]
 
     def test_a_missing_board_entry_is_recorded_not_fatal(self, mod, env, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_BOARD", "missing")
@@ -640,7 +629,8 @@ class TestPre:
             run(mod, monkeypatch, "post", {"session_id": bad, "compact_summary": "x"})
         outside = [
             p for p in env.config.rglob("*")
-            if p.is_file() and env.checkpoints not in p.parents and "logs" not in p.relative_to(env.config).parts
+            if p.is_file() and env.checkpoints not in p.parents
+            and not {"logs", "identity"} & set(p.relative_to(env.config).parts)  # identity: the fixture's own token file
         ]
         assert outside == [], outside
         assert not env.checkpoints.exists() or not any(env.checkpoints.iterdir())
@@ -852,7 +842,7 @@ class TestInject:
         assert code == 0
         ctx = self._ctx(out)
         assert "no working-state checkpoint" in ctx and "nothing is restored" in ctx
-        assert "threads" in ctx and SID in ctx and "git" in ctx
+        assert "threads" in ctx and "`identity:` line" in ctx and "session:" not in ctx and "git" in ctx
         assert "SUMMARY-SENTINEL" not in ctx, "the summary is already in the new context"
         assert len(ctx.encode("utf-8")) < 1024, "a notice, not a checkpoint"
 
@@ -1276,14 +1266,14 @@ class TestBoardBudget:
             return out, None
 
         monkeypatch.setattr(mod, "_run_nx", fake)
-        result = mod._board_entry(SID, NAME, None, mod._BOARD_TIMEOUT_S)
+        result = mod._board_entry(NAME, None, mod._BOARD_TIMEOUT_S, IDENT)
         return result, calls, clock[0]
 
     TITLE_ROW = "[101] threads/linda  (-, 2026-10-31T21:46:51Z)"
 
     def test_a_hung_search_is_capped_and_the_title_fallback_is_reached(self, mod, monkeypatch) -> None:
         def behave(kind, args):
-            return {"search": (None, ""), "list": (0.3, self.TITLE_ROW), "get": (0.3, "## board of linda")}[kind]
+            return {"search": (None, ""), "list": (0.3, self.TITLE_ROW), "get": (0.3, "identity: i12\n## board of linda")}[kind]
 
         (title, body, how, error), calls, elapsed = self.drive(mod, monkeypatch, behave)
         assert [c[0] for c in calls] == ["search", "list", "get"]
@@ -1308,10 +1298,10 @@ class TestBoardBudget:
                 return 0.2, hits
             if kind == "get" and args[2].isdigit() and int(args[2]) >= 200:
                 return None, ""
-            return {"list": (0.3, self.TITLE_ROW), "get": (0.3, "## board of linda")}[kind]
+            return {"list": (0.3, self.TITLE_ROW), "get": (0.3, "identity: i12\n## board of linda")}[kind]
 
         (title, body, how, error), calls, elapsed = self.drive(mod, monkeypatch, behave)
-        assert [c[0] for c in calls] == ["search", "get", "list", "get"], "the first hung fetch ends the session-line phase"
+        assert [c[0] for c in calls] == ["search", "get", "list", "get"], "the first hung fetch ends the identity-line phase"
         assert (title, how, error) == (NAME, "exact title", None) and "board of linda" in body
         assert elapsed <= mod._BOARD_TIMEOUT_S
 
@@ -1329,7 +1319,7 @@ class TestBoardBudget:
 
         (_title, body, _how, error), _calls, elapsed = self.drive(mod, monkeypatch, behave)
         assert body == "" and error
-        assert "carries `session:" not in error, error
+        assert "carries `identity:" not in error, error
         assert "could not be fetched" in error and "timed out" in error, error
         assert elapsed <= mod._BOARD_TIMEOUT_S
 
@@ -1393,7 +1383,7 @@ class TestProbe:
         run(mod, monkeypatch, "pre", pre_payload())
         run(mod, monkeypatch, "pre", {"hook_event_name": "PreCompact", "trigger": "manual"})
         by_id, bad = self.lines(env)
-        assert "board: session id" in by_id
+        assert "board: identity" in by_id
         assert "outcome=skipped: no usable session id" in bad
 
     def test_only_four_values_are_logged_and_only_when_str_or_bool(self, mod, env, monkeypatch) -> None:
