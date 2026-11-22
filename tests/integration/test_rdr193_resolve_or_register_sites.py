@@ -19,7 +19,8 @@ from pathlib import Path
 import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
-from nexus.catalog.store_hook import catalog_store_hook_tracked
+from tests._catalog_fixture_ops import catalog_store_hook_tracked_seeded as catalog_store_hook_tracked  # RDR-229 P3.1: registers the collection first, as put_note does
+from tests._catalog_fixture_ops import register_seed_collections
 from nexus.doc_indexer import _register_or_lookup_doc_id
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 
@@ -81,6 +82,7 @@ def test_a_ghost_of_the_same_title_is_reused_and_takes_the_source_uri(wire) -> N
     cat = HttpCatalogClient()
     try:
         owner = cat.register_owner("knowledge", "curator")
+        register_seed_collections("knowledge__old")  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
         ghost = str(cat.register(owner, "Ghost Note", content_type="knowledge", physical_collection="knowledge__old"))
     finally:
         cat.close()
@@ -148,6 +150,7 @@ def test_the_preflight_resolves_onto_a_row_another_owner_holds_and_does_not_mint
     cat = HttpCatalogClient()
     try:
         other = cat.register_owner("sites-other", "curator")
+        register_seed_collections("docs__other")  # RDR-229 P3.1: the engine refuses a document under an unregistered collection
         held = str(cat.register(other, "Held", content_type="prose", file_path=str(f.resolve()),
                                 physical_collection="docs__other", source_uri="file://" + str(f.resolve())))
     finally:

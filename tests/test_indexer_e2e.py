@@ -122,7 +122,7 @@ def registry(tmp_path: Path, mini_repo: Path) -> RepoRegistry:
 
 
 @pytest.fixture(autouse=True)
-def _legacy_vector_backend(monkeypatch):
+def _legacy_vector_backend(monkeypatch, double_topology_mints_profile_model):
     # nexus-o06g4: these e2e tests wire a raw-Chroma EphemeralClient ``local_t3``
     # + ``mock_voyage_client`` and exercise the CLIENT-embed indexing path. Pin
     # the vector backend off the 6.0 service default (is_vector_service_mode()
@@ -131,6 +131,11 @@ def _legacy_vector_backend(monkeypatch):
     # raw chromadb rejects with "IndexError: list index out of range in upsert"
     # (normalize_insert_record_set). The service-mode indexing path is covered
     # by the unit seam-B tests + the live service smokes, not here.
+    #
+    # RDR-229 P3.1 (nexus-p2m1x.17): the run registers its collections with the
+    # engine before the catalog hook, so the double names them under the
+    # tenant's profile model (double_topology_mints_profile_model); its
+    # vectors never reach the engine.
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "local")
 
 

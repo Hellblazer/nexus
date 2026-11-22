@@ -471,6 +471,61 @@ def _same_file(fd: int, lock_path: Path) -> bool:
     return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
 
 
+def _register_run_collections(
+    targets: "tuple[tuple[str | None, str], ...]", *, vectors_on_engine: bool,
+) -> None:
+    """Register each ``(name, model)`` target of an index run with the engine before the run reads or files under it.
+
+    RDR-229 P3.1 (nexus-p2m1x.17): a catalog write needs a registry row, so this runs whatever the vector backend is.
+    *model* is the one the run resolved for the target (the row's, else the name's own token), so the registration
+    kwargs agree with what the run stamps by construction. A target of ``None`` is a content type with no files.
+
+    With the engine as the vector backend (*vectors_on_engine*) every failure propagates, as the write path's own
+    registration does. With a client-embedding T3 double only the catalog hook ever files a document, and the hook
+    reports a catalog it cannot write to (``catalog_hook_failed``, per file) instead of raising, so a registration
+    that fails because the registry is unreachable or refuses the name (a profile mismatch) is logged and left to the
+    hook to report. A retired name is a stop in either topology: the upsert would un-retire it (nexus-wwuzp).
+    """
+    from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415  — circular-dep avoidance
+    from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+        collection_registration_kwargs,
+        ensure_collection_registered,
+        refuse_if_superseded,
+    )
+
+    for name, model in targets:
+        if name is None:
+            continue
+        # nexus-wwuzp: this registration passes explicit kwargs, so its upsert clears ``superseded_by``. After a
+        # failed Phase-4 migration (``phase4_migration_failed``) the name here can be a legacy name an earlier run
+        # already retired; read first and stop loudly rather than silently un-retire it. Chosen over a legacy-shape
+        # read-first because the hazard is this caller's own stale name, whatever its shape, and every other explicit
+        # registrar (reindex, backfill) registers on purpose.
+        refuse_if_superseded(
+            name,
+            remedy=(
+                "The repo's registry still names the collection it was "
+                "renamed away from (a Phase-4 migration or `nx collection "
+                "rename` retired it), so the run stops rather than "
+                "un-retire it. Re-run `nx index repo <repo>`: the migration "
+                "retries on each run and moves the repo onto {successor!r}. "
+                "If it stops here again, `nx catalog doctor "
+                "--collections-drift` reports the retired name and `nx "
+                "collection info {successor}` shows where the data lives."
+            ),
+        )
+        try:
+            kwargs = collection_registration_kwargs(name)
+            kwargs["embedding_model"] = model
+            ensure_collection_registered(name, kwargs=kwargs)
+        except SupersededCollectionWriteError:
+            raise
+        except Exception:  # noqa: BLE001 — a double topology leaves an unreachable or refusing registry to the hook's own report
+            if vectors_on_engine:
+                raise
+            _log.warning("run_collection_registration_failed", collection=name, exc_info=True)
+
+
 def _repo_target_model(db: object, collection_name: str, *, legacy_model: str | None) -> tuple[str, bool]:
     """The model a repo run stamps *collection_name*'s chunks with and compares the
     unchanged-content skip against, and whether the catalog row was read to decide it.
@@ -5682,55 +5737,31 @@ def _run_index(
     # made the engine's profile refuse (EmbeddingProfileMismatchError: the
     # row held the row's model, not the token).
     #
-    # Release-battery finding (7.39.0 local-service gate, 35 reds): this
-    # loop runs only when the vector backend is the engine. The write path
-    # it fronts registers from INSIDE HttpVectorClient, so with
-    # NX_STORAGE_BACKEND_VECTORS opted out (a client-embedding T3 double
-    # injected by tests, the only non-service topology left) no write ever
-    # registered anything, and there is no engine-side collection to
-    # register: the name carries the double's own model token
-    # (minilm-l6-v2-384) and the engine 422s it against the tenant's real
-    # profile. Gated on the same is_vector_service_mode() that chose `db`
-    # above, so the loop and the client it registers for agree by
-    # construction.
-    from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
-        collection_registration_kwargs,
-        ensure_collection_registered,
-        refuse_if_superseded,
-    )
+    # The rule (RDR-229 P3.1, nexus-p2m1x.17): a catalog write needs a registry
+    # row, so every collection this run files documents under is registered
+    # before the hook runs, whichever backend holds the vectors. The engine
+    # refuses a document under an unregistered collection (422
+    # ``unregistered_collection``). With the engine as the vector backend the
+    # write path registers too (HttpVectorClient), and a failure here stops the
+    # run as it always has. With a client-embedding T3 double (the test-only
+    # ``NX_STORAGE_BACKEND_VECTORS`` opt-out) nothing else registers, so this is
+    # the only registration, and it meets the engine's profile check like any
+    # other: the double's collection names carry the tenant's profile model (the
+    # test substrate mints them so), never a model the profile would refuse. The
+    # hook builds its writer with ``make_catalog_writer()`` and, when the catalog
+    # cannot be reached, fails per file as ``catalog_hook_failed`` rather than
+    # raising; the double topology's registration answers an unreachable (or
+    # refusing) registry the same way and leaves the hook to report it.
     from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
 
-    if _reg_service_mode():
-        for _name, _registered_model in (
+    _register_run_collections(
+        (
             (code_collection if have_code_files else None, code_model),
             (docs_collection if have_docs_files else None, docs_model),
             (rdr_col_name, rdr_model),
-        ):
-            if _name is not None:
-                # nexus-wwuzp: this registration passes explicit kwargs, so its
-                # upsert clears ``superseded_by``. After a failed Phase-4
-                # migration (``phase4_migration_failed``) the name here can be
-                # a legacy name an earlier run already retired; read first and
-                # stop loudly rather than silently un-retiring it. Chosen over
-                # a legacy-shape read-first because the hazard is this caller's
-                # own stale name, whatever its shape, and every other explicit
-                # registrar (reindex, backfill) registers on purpose.
-                refuse_if_superseded(
-                    _name,
-                    remedy=(
-                        "The repo's registry still names the collection it was "
-                        "renamed away from (a Phase-4 migration or `nx collection "
-                        "rename` retired it), so the run stops rather than "
-                        "un-retire it. Re-run `nx index repo <repo>`: the migration "
-                        "retries on each run and moves the repo onto {successor!r}. "
-                        "If it stops here again, `nx catalog doctor "
-                        "--collections-drift` reports the retired name and `nx "
-                        "collection info {successor}` shows where the data lives."
-                    ),
-                )
-                _reg_kwargs = collection_registration_kwargs(_name)
-                _reg_kwargs["embedding_model"] = _registered_model
-                ensure_collection_registered(_name, kwargs=_reg_kwargs)
+        ),
+        vectors_on_engine=_reg_service_mode(),
+    )
 
     # ── Pre-index catalog registration (RDR-101 Phase 3 PR δ Stage B) ───────
     # Register catalog entries BEFORE per-file indexing so the prose

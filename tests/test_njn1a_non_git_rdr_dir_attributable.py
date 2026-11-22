@@ -192,7 +192,8 @@ def test_a_rerun_adopts_and_backfills_a_document_registered_with_a_relative_path
 def test_the_markdown_hook_finds_the_preflight_document_and_backfills_a_legacy_one(tmp_path):
     """`_catalog_markdown_hook` runs after the pre-flight with the same base_path: it must look the
     document up by the same identity, or it mints a second one under the relative path."""
-    from nexus.doc_indexer import _catalog_markdown_hook
+    # RDR-229 P3.1: registers the collection first, as the run's pre-flight does before the hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
 
     root, f = _non_git_rdr_dir(tmp_path)
     cat = ActiveCatalog()
@@ -211,7 +212,8 @@ def test_the_markdown_hook_finds_the_preflight_document_and_backfills_a_legacy_o
 
 @pytest.mark.t2_tenant
 def test_the_markdown_hook_alone_registers_the_absolute_path(tmp_path):
-    from nexus.doc_indexer import _catalog_markdown_hook
+    # RDR-229 P3.1: registers the collection first, as the run's pre-flight does before the hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
 
     root, f = _non_git_rdr_dir(tmp_path, f"hook dir é-{_next()}")
     corpus = f"plain-{_next()}"
@@ -296,7 +298,8 @@ def test_a_non_git_directory_that_later_becomes_a_git_repo_converges_on_the_same
 def test_the_markdown_hook_still_updates_the_chunk_count_when_the_source_uri_stamp_collides(tmp_path):
     """The source_uri stamp is advisory: a second live document already holding that URI
     (catalog-016) must not stop chunk_count / indexed_at from being written."""
-    from nexus.doc_indexer import _catalog_markdown_hook
+    # RDR-229 P3.1: registers the collection first, as the run's pre-flight does before the hook
+    from tests._catalog_fixture_ops import catalog_markdown_hook_seeded as _catalog_markdown_hook
 
     root, f = _non_git_rdr_dir(tmp_path)
     cat = ActiveCatalog()

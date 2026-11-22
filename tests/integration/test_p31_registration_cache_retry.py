@@ -198,10 +198,26 @@ def test_a_422_for_another_reason_is_not_retried(tmp_path, fake_pdf) -> None:
 
 
 def test_a_name_this_process_never_cached_keeps_its_422(tmp_path) -> None:
+    """The retry registers a name only when this process had cached it. A document written straight to the catalog under
+    a cold name (no pre-flight: the pre-flight is the next test) is refused and stays refused."""
     assert _COLLECTION not in corpus._REGISTERED_COLLECTIONS
-    with _watch() as seen:
-        outcome = _register_document(tmp_path, "cold")
+    with _watch() as seen, HttpCatalogClient() as cat:
+        owner = cat.register_owner("p31retry-cold-owner", "curator")
+        with pytest.raises(httpx.HTTPStatusError) as refused:
+            cat.register(owner, "cold doc", content_type="paper", physical_collection=_COLLECTION)
 
-    assert outcome == ("", False), "the document registration failed, as it did before"
+    assert refused.value.response.status_code == 422, "the document registration failed, as it did before"
     assert len(seen["refusals"]) == 1 and seen["registrations"] == [], "no resend, no registration"
     assert not _row_exists()
+
+
+def test_the_pre_flight_registers_a_cold_collection_before_its_document(tmp_path) -> None:
+    """``_register_or_lookup_doc_id`` registers the collection first (RDR-229 P3.1), so a cold name is registered
+    by that call and the document lands without a refusal."""
+    assert _COLLECTION not in corpus._REGISTERED_COLLECTIONS
+    with _watch() as seen:
+        outcome = _register_document(tmp_path, "cold-preflight")
+
+    assert outcome[0] and outcome[1] is True, "the document registered"
+    assert seen["refusals"] == [] and len(seen["registrations"]) == 1, seen
+    assert _row_exists()

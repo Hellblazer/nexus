@@ -25,6 +25,7 @@ from click.testing import CliRunner
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.cli import main
+from tests._catalog_fixture_ops import register_seed_collections
 
 pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
@@ -162,6 +163,8 @@ def test_an_owner_move_from_a_worktree_folds_the_new_owner_into_the_old_one(tmp_
         a = cat.register_owner("move-owner-a", "repo", repo_hash="0ldh0me0", repo_root=old_root)
         b = cat.register_owner("move-owner-b", "repo", repo_hash=_hash8(new_root), repo_root=new_root)
         docs = {}
+        # RDR-229 P3.1: the engine refuses a document under an unregistered collection.
+        register_seed_collections("code__movea__test-embed-768__v1", "code__moveb__test-embed-768__v1")
         for owner, tag in ((a, "a"), (b, "b")):
             for rel in ("src/one.py", "src/two.py"):
                 docs[(tag, rel)] = str(cat.register(

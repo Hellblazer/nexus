@@ -271,6 +271,20 @@ def seeded_catalog(cat):
         repo_root="/Users/hal/git/qnp5s-repo-2",
     )
 
+    # Register a collection under the repo owner (used by collections_by_owner test), BEFORE the documents under
+    # it: RDR-229 P3.1, the engine refuses a document under a collection with no registry row.
+    # RDR-204 (nexus-f5wwx): this fixture's java_service is a pure ONNX local
+    # engine (no voyage key) -- its embedding_profile for every content type
+    # is bge-base-en-v15-768 (EmbedderRouter.contentTypeModelTokens, local
+    # mode), so a literal voyage-context-3 here 422s regardless of client
+    # posture; the name segment is renamed to match.
+    cat.register_collection(
+        "knowledge__qnp5s-repo__bge-base-en-v15-768__v1",
+        content_type="knowledge",
+        owner_id=str(repo_owner_t),
+        embedding_model="bge-base-en-v15-768", model_version="v1",
+    )
+
     # Register documents under the repo owner.
     #
     # source_uri MUST nest under the owner's repo_root
@@ -306,19 +320,6 @@ def seeded_catalog(cat):
         corpus="knowledge",
         source_uri="file:///Users/hal/git/qnp5s-repo/doc-c.md",
         # chunk_count omitted — stored as 0 by Java service
-    )
-
-    # Register a collection under the repo owner (used by collections_by_owner test).
-    # RDR-204 (nexus-f5wwx): this fixture's java_service is a pure ONNX local
-    # engine (no voyage key) -- its embedding_profile for every content type
-    # is bge-base-en-v15-768 (EmbedderRouter.contentTypeModelTokens, local
-    # mode), so a literal voyage-context-3 here 422s regardless of client
-    # posture; the name segment is renamed to match.
-    cat.register_collection(
-        "knowledge__qnp5s-repo__bge-base-en-v15-768__v1",
-        content_type="knowledge",
-        owner_id=str(repo_owner_t),
-        embedding_model="bge-base-en-v15-768", model_version="v1",
     )
 
     # Seed links: doc_a -> doc_b (cites), doc_a -> doc_c (relates)

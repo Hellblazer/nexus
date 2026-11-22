@@ -4885,9 +4885,89 @@ def make_vector_test_client():
     from nexus.db.inmemory_vector_store import InMemoryVectorClient
     from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction
 
+    _watch_the_double_wire()
     return InMemoryVectorClient(
         default_embedding_function=MiniLMDirectEmbeddingFunction()
     )
+
+
+#: The shared double's wire guard (RDR-229 P3.1, nexus-p2m1x.17; linda 2026-11-22). The double embeds with MiniLM
+#: while its collections may be named for the tenant's bge profile model (``double_topology_mints_profile_model``),
+#: which is safe only because its vectors never reach the engine. ``make_vector_test_client`` is the one construction
+#: point of the double (``local_t3`` and every file's own ``local_t3`` fixture build on it), so it starts watching
+#: the engine wire for the rest of that test, and ``_the_double_never_sends_vectors_to_the_engine`` fails the test if
+#: a request to ``/v1/vectors`` carried ``embeddings``. A test that never made a double is not watched: the engine's
+#: own client tests send vectors on purpose.
+_DOUBLE_WIRE_STATE: dict[str, object] = {"armed": False, "installed": False, "leaks": []}
+
+
+def _watch_the_double_wire() -> None:
+    """Arm the watch for the rest of this test; install the wrapper once per process (a wrapper installed and undone
+    per test could be left in place by a test's own patch of ``_request``, and the next install would chain onto it)."""
+    _DOUBLE_WIRE_STATE["armed"] = True
+    if _DOUBLE_WIRE_STATE["installed"]:
+        return
+    import nexus.db.http_vector_client as hvc
+
+    real_request = hvc._request
+
+    def _watched(method, path, *args, **kwargs):  # noqa: ANN001, ANN202
+        body = kwargs.get("body")
+        if (
+            _DOUBLE_WIRE_STATE["armed"] and str(path).startswith("/v1/vectors")
+            and isinstance(body, dict) and body.get("embeddings")
+        ):
+            _DOUBLE_WIRE_STATE["leaks"].append(str(path))
+        return real_request(method, path, *args, **kwargs)
+
+    hvc._request = _watched
+    _DOUBLE_WIRE_STATE["installed"] = True
+
+
+@pytest.fixture(autouse=True)
+def _the_double_never_sends_vectors_to_the_engine():
+    _DOUBLE_WIRE_STATE["armed"] = False
+    _DOUBLE_WIRE_STATE["leaks"] = []
+    yield
+    _DOUBLE_WIRE_STATE["armed"] = False
+    leaks = list(_DOUBLE_WIRE_STATE["leaks"])
+    _DOUBLE_WIRE_STATE["leaks"] = []
+    assert not leaks, (
+        "a test that built the shared vector double sent vectors to the engine "
+        f"({leaks!r}): the double embeds with MiniLM under whatever model its names carry, so its "
+        "vectors must never leave the process (RDR-229 P3.1)"
+    )
+
+
+@pytest.fixture
+def double_topology_mints_profile_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client-embedding double names its collections under the tenant's profile model (RDR-229 P3.1).
+
+    A run on the double (``NX_STORAGE_BACKEND_VECTORS`` opted out) mints names from the local embedder's token
+    (``minilm-l6-v2-384`` without the ``[local]`` extra), and the engine refuses to register such a name against the
+    tenant's bge profile (``EmbeddingProfileMismatchError``). The double's vectors never reach the engine
+    (``_the_double_never_sends_vectors_to_the_engine``), so the model in its names is only a label, and this fixture
+    makes the label the profile's: what ``nexus.corpus._profile_model_for_content_type`` answers, or the engine's own
+    tier-1 embedder when the tenant has no row yet (the engine seeds the profile from it on the first registration).
+    Nothing loosens: ``ensure_collection_registered`` still compares the name's model with the profile. Service mode
+    is untouched. Opt-in: the files whose runs file a document through the engine's catalog from a double.
+    """
+    import nexus.corpus as corpus
+    from nexus.db.http_vector_client import is_vector_service_mode
+    from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
+
+    real = corpus._write_intent_embedding_model
+
+    def _profile_model(content_type: str) -> str:
+        if is_vector_service_mode():
+            return real(content_type)
+        try:
+            profile = corpus._profile_model_for_content_type(content_type)
+        except Exception:  # noqa: BLE001 — no readable profile (no tenant bound): the engine's tier-1 embedder is what it seeds
+            profile = None
+        return profile or _MODEL_TOKENS[_TIER1_MODEL]
+
+    monkeypatch.setattr(corpus, "_write_intent_embedding_model", _profile_model)
 
 
 #: RDR-204 Phase 3 fixture-seam fix (nexus-ft04v.26, coordinator ruling

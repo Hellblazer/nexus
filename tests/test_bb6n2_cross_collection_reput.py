@@ -82,8 +82,13 @@ def _put_note(client, *, collection: str, title: str, content: str):
         note_pieces,
     )
 
+    from tests._catalog_fixture_ops import register_seed_collections
+
     pieces = note_pieces(content, collection)
     doc_id, manifest_metadatas = note_manifest_metadata(pieces)
+    # RDR-229 P3.1: put_note registers the collection before its document (the engine refuses a document under an
+    # unregistered one); this mirror does the same, through the same client call.
+    register_seed_collections(collection)
     tumbler, created = catalog_store_hook_tracked(
         title=title, doc_id=doc_id, collection_name=collection,
     )

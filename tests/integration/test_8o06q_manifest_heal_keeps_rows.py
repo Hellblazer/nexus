@@ -35,6 +35,7 @@ from nexus.cli import main
 from nexus.db import make_t3
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
 from nexus.repo_identity import _repo_identity
+from tests._catalog_fixture_ops import register_seed_collections
 from tests._chunk_seed import seed_chunks_direct
 from tests.conftest import fake_credentials
 
@@ -98,6 +99,10 @@ class _Doc:
         self.a_collection = a_collection or self.collection
         self.h_a, self.h_b = _chash(f"{tag}-file-a"), _chash(f"{tag}-file-b")
         self.ch = {n: _chash(f"{tag}-{n}") for n in chunks}
+        # RDR-229 P3.1: the engine refuses a document under an unregistered collection. A registered collection with no
+        # chunk is still absent from the service's listing (the listing is built from chunks), so a ``_gone`` name
+        # stays a collection the heal cannot find.
+        register_seed_collections(self.collection, self.a_collection)
         with HttpCatalogClient() as cat:
             owner = cat.register_owner(f"{tag}-owner", "repo", repo_hash=f"{tag}-hash")
             self.a = str(cat.register(
@@ -504,6 +509,7 @@ def test_a_lost_manifestless_document_is_marked_for_re_index() -> None:
 
 def test_a_manifestless_document_in_a_collection_that_does_not_exist_is_marked() -> None:
     d = _Doc("v9xwj-gone", ["s"], {}, 2, other_hash=("s",))
+    register_seed_collections("docs__v9xwj-no-such-collection__bge-base-en-v15-768__v1")
     with HttpCatalogClient() as cat:
         gone = str(cat.register(
             cat.register_owner("v9xwj-gone-owner", "repo", repo_hash="v9xwj-gone-hash"),

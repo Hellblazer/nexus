@@ -25,10 +25,9 @@ from nexus.catalog import factory
 from nexus.catalog.types import RDR_FRONTMATTER_ID_META_KEY as KEY
 from nexus.db.t2 import T2Database
 from nexus.doc_indexer import _register_or_lookup_doc_id
-from nexus.indexer import _catalog_hook
 from nexus.plans.evidence import OwnerResolution, SourceRef
 from nexus.plans.primary_evidence import recorded_frontmatter_id, resolve_named_sources
-from tests._catalog_fixture_ops import ActiveCatalog, active_reader
+from tests._catalog_fixture_ops import ActiveCatalog, active_reader, catalog_hook_seeded
 
 pytestmark = [pytest.mark.integration, pytest.mark.t2_tenant]
 
@@ -65,7 +64,8 @@ def _write_repo(root: Path) -> list[tuple[Path, str, str]]:
 
 
 def _hook(root: Path, files: list[tuple[Path, str, str]], head: str = "aaa") -> None:
-    _catalog_hook(repo=root, repo_name="nexus", repo_hash=REPO_HASH, head_hash=head, indexed_files=files)
+    # RDR-229 P3.1: the collections are registered first, as ``_run_index`` does before it calls the hook.
+    catalog_hook_seeded(repo=root, repo_name="nexus", repo_hash=REPO_HASH, head_hash=head, indexed_files=files)
 
 
 def _entry(cat: ActiveCatalog, rel: str):
