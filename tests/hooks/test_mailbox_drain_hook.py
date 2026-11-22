@@ -66,11 +66,16 @@ def _bind_identity(config_dir: Path, session_id: str = SESSION_ID, identity: str
     directory = config_dir / "identity"
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{abs(hash(session_id)) % 10**6}.1.token"
+    body = json.dumps({"identity": identity, "generation": 1, "pid": 1, "started_at": 1,
+                       "session_id": session_id, "session_ids": [session_id]})
+    try:
+        if target.read_text(encoding="utf-8") == body:
+            return  # already bound: a rewrite would race a concurrent run, and Windows refuses a replace onto an open file
+    except OSError:
+        pass
     scratch = directory / f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-    scratch.write_text(
-        json.dumps({"identity": identity, "generation": 1, "pid": 1, "started_at": 1,
-                    "session_id": session_id, "session_ids": [session_id]}), encoding="utf-8")
-    os.replace(scratch, target)  # atomic: two concurrent runs rebind the same file and a reader never sees it half written
+    scratch.write_text(body, encoding="utf-8")
+    os.replace(scratch, target)  # atomic: a reader never sees it half written
 
 
 def _payload(**overrides: str) -> str:
