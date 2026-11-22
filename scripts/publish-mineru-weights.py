@@ -27,6 +27,9 @@ warns that the repo's text differs, and uploads only the ones the release lacks.
 release when it is absent (at ``--target``, default ``main``; not marked latest), uploads only the missing assets
 and never overwrites.
 
+``--verify-only --upload`` also refuses when a staged license or notice differs from its source in this checkout
+(stage again first). A ``--stage-dir`` containing ``#`` is a usage error.
+
 Exit 0 on success, 1 when a file or asset does not verify or the release cannot be read, 2 on a usage error."""
 
 from __future__ import annotations
@@ -329,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.dry_run and not args.upload:
         ap.error("--dry-run needs --upload")
+    if "#" in str(args.stage_dir):
+        ap.error("--stage-dir must not contain '#': it breaks the asset URLs the gate serves and the paths gh is given")
 
     problems = verify_stage(args.stage_dir) if args.verify_only else stage(args.stage_dir)
     if not problems:
@@ -337,8 +342,14 @@ def main(argv: list[str] | None = None) -> int:
         for line in problems:
             print(f"FAIL: {line}", file=sys.stderr)
         return 1
-    for line in static_warnings(args.stage_dir):
+    stale = static_warnings(args.stage_dir)
+    for line in stale:
         print(f"WARNING: {line}", file=sys.stderr)
+    if stale and args.upload:
+        # --verify-only does not re-stage, so the stale license or notice is exactly what would go up.
+        for line in stale:
+            print(f"FAIL: refusing to upload a stale static asset: {line}", file=sys.stderr)
+        return 1
     total = sum(f.size for f in mw.MANIFEST)
     print(f"OK: {len(mw.MANIFEST)} files ({total} bytes) verified against the manifest in {args.stage_dir}")
     if args.upload:

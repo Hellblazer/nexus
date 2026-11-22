@@ -248,3 +248,25 @@ def test_a_staged_notice_that_differs_from_the_repo_is_a_warning_not_a_refusal(e
     assert any("THIRD-PARTY-NOTICES.md" in w for w in publish.static_warnings(stage))
     assert publish.main(["--stage-dir", str(stage), "--verify-only"]) == 0
     assert "WARNING" in capsys.readouterr().err
+
+
+def test_a_stage_dir_with_a_hash_is_a_usage_error(env, publish, tmp_path):
+    with pytest.raises(SystemExit) as info:
+        publish.main(["--stage-dir", str(tmp_path / "a#b")])
+    assert info.value.code == 2
+
+
+def test_verify_only_with_upload_refuses_a_stale_static_asset_and_uploads_nothing(env, publish, tmp_path, monkeypatch, capsys):
+    env.hub.fill(_CONTENT)
+    stage = tmp_path / "stage"
+    assert publish.main(["--stage-dir", str(stage)]) == 0
+    (stage / "THIRD-PARTY-NOTICES.md").write_text("an older wording")
+    reached: list = []
+    monkeypatch.setattr(publish, "upload", lambda *a, **k: reached.append(a) or 0)
+    assert publish.main(["--stage-dir", str(stage), "--verify-only", "--upload"]) == 1
+    assert reached == []
+    err = capsys.readouterr().err
+    assert "refusing to upload a stale static asset" in err and "THIRD-PARTY-NOTICES.md" in err
+    # staging again refreshes it, and the same upload then proceeds
+    assert publish.main(["--stage-dir", str(stage), "--upload"]) == 0
+    assert len(reached) == 1

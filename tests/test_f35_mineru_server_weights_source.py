@@ -44,13 +44,22 @@ def test_a_server_started_before_the_root_was_complete_is_stale_once_it_is(env):
     assert not server_weights_stale(url, None)
 
 
-def test_a_server_on_the_nexus_root_is_stale_when_the_user_then_chooses_local(env, monkeypatch):
+def test_a_server_already_on_the_nexus_root_is_never_cycled_back(env, monkeypatch):
+    """Staleness goes one way: None -> root. A caller whose environment says ``local`` or the Chinese-formula opt-in
+    must not flap a machine-shared server that is already on nexus's copy."""
     from nexus._mineru_health import server_weights_stale  # noqa: PLC0415
 
     _complete_root(env)
     info = {"pid": 4242, "port": 8123, "weights_root": str(_root())}
-    monkeypatch.setenv("MINERU_MODEL_SOURCE", "local")
-    assert server_weights_stale("http://127.0.0.1:8123", info)
+    url = "http://127.0.0.1:8123"
+    assert not server_weights_stale(url, info)
+    with monkeypatch.context() as m:
+        m.setenv("MINERU_MODEL_SOURCE", "local")
+        assert not server_weights_stale(url, info), "one caller choosing local does not cycle the server"
+    with monkeypatch.context() as m:
+        m.setenv("MINERU_FORMULA_CH_SUPPORT", "1")
+        assert not server_weights_stale(url, info), "nor does the Chinese-formula opt-in"
+    assert not server_weights_stale(url, {**info, "weights_root": "/some/other/root"})
 
 
 def test_the_extractor_cycles_a_stale_server_once_and_leaves_a_current_one(env, monkeypatch, tmp_path):

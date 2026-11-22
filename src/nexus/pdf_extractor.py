@@ -2580,8 +2580,8 @@ class PDFExtractor:
             _log.debug("mineru_cwd_check_failed", exc_info=True)
 
     def _replace_server_with_stale_weights(self, url: str) -> None:
-        """F35 (nexus-7t3w1): a healthy registered server started on a different weights source than a spawn
-        gets now (:func:`nexus._mineru_health.server_weights_stale`) is replaced once, before any page is sent
+        """F35 (nexus-7t3w1): a healthy registered server started on MinerU's own weights source while nexus's
+        copy is now complete (:func:`nexus._mineru_health.server_weights_stale`, one direction only) is replaced once, before any page is sent
         to it, so it reads nexus's verified copy and never downloads inside a page budget. Same bounded restart
         as the deleted-working-directory case (budget, cooldown, spawn policy); when the restart is refused the
         server is kept as found. Best-effort: nothing here may break extraction."""

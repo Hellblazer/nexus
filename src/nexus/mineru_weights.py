@@ -381,7 +381,8 @@ def prefetch_is_noop() -> bool:
     PDFs are all current must not cost a seeding or a 1.2 GB download. Nothing to do when the fetch is skipped,
     the MinerU server is on another host, the user chose ``MINERU_MODEL_SOURCE=local``, nexus's own copy is
     complete (default formula model), or, with ``MINERU_FORMULA_CH_SUPPORT``, MinerU's own source is not
-    ``huggingface`` or its Hugging Face cache already holds the weights."""
+    ``huggingface`` or its Hugging Face cache already holds the weights. (With a usable fallback, a refuse run
+    that cannot seed everything also does nothing; the gate then calls ensure, which holds no PDF.)"""
     if os.environ.get(SKIP_ENV) == "1" or _remote_server_configured():
         return True
     source = os.environ.get("MINERU_MODEL_SOURCE", "huggingface")
@@ -416,12 +417,14 @@ def ensure_pipeline_weights(
     into place. The ``.complete`` marker is written after the last file. A second process waits on a lock and
     finds the work done. *fetch* replaces the downloader in tests.
 
-    When some files remain and MinerU's own Hugging Face cache is usable (:func:`_hf_weights_cached`), nexus keeps
-    its pre-F35 behaviour for that machine instead of failing: under *allow_fetch* False (a background run under
-    ``NX_PDF_STACK=refuse``) it does nothing and returns False, and an interactive run that cannot download the
-    rest says so and returns False. In both, the root stays incomplete, :func:`child_env` stays empty and
-    MinerU reads its Hugging Face cache. With no usable Hugging Face cache, *allow_fetch* False or a failed
-    download raises :class:`WeightsFetchError`.
+    When some files remain and MinerU can read its own source (:func:`_fallback_usable`: a complete Hugging Face
+    cache, or ``MINERU_MODEL_SOURCE=modelscope``), nexus keeps its pre-F35 behaviour for that machine instead of
+    failing. Under *allow_fetch* False (a background run under ``NX_PDF_STACK=refuse``) the run seeds only when
+    local copies supply every missing file; otherwise it does nothing and returns False, and it never waits for
+    the root lock (another run holding it counts the same way). An interactive run that cannot download the rest
+    says so and returns False. In both, the root stays incomplete, :func:`child_env` stays empty and MinerU reads
+    its own source. With no usable fallback, *allow_fetch* False, a lock held by another run, or a failed download
+    raises :class:`WeightsFetchError`.
 
     With ``MINERU_FORMULA_CH_SUPPORT`` on, the formula model is one the manifest does not carry: F34's Hugging
     Face fetch (:func:`_ensure_from_huggingface`, with *download* standing in for
@@ -551,20 +554,72 @@ def _human(nbytes: int) -> str:
     return f"{nbytes / 1e6:.1f} MB" if nbytes >= 1e6 else f"{max(nbytes / 1e3, 0.1):.1f} KB"
 
 
+def _fallback_usable() -> bool:
+    """Can MinerU read its own source on this machine, as it did before F35? A complete Hugging Face cache, or
+    ``MINERU_MODEL_SOURCE=modelscope`` (MinerU fetches from ModelScope itself, which F34 left alone). When it can,
+    nexus's copy failing to complete is never a reason to hold PDFs or exit 75."""
+    return os.environ.get("MINERU_MODEL_SOURCE") == "modelscope" or _hf_weights_cached()
+
+
+def _fallback_name() -> str:
+    return "ModelScope source" if os.environ.get("MINERU_MODEL_SOURCE") == "modelscope" else "Hugging Face cache"
+
+
+def _acquire_root_lock(root: Path, *, blocking: bool) -> int:
+    """Exclusive advisory lock on *root* (the directory itself on POSIX, ``root/.lock`` on Windows, as
+    :func:`nexus._locking.acquire_directory_lock`). Non-blocking raises ``BlockingIOError`` when another run holds it."""
+    import sys  # noqa: PLC0415 — stdlib, deferred
+
+    from nexus._locking import lock_fd  # noqa: PLC0415 — deferred local import — avoids import-time cost
+
+    fd = os.open(str(root / ".lock"), os.O_RDWR | os.O_CREAT, 0o644) if sys.platform == "win32" else os.open(str(root), os.O_RDONLY)
+    try:
+        lock_fd(fd, blocking=blocking)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _sweep_stale_work_dirs(root: Path) -> None:
+    """Remove ``dl-*`` download work dirs a killed run left behind. Only called under the root lock, so no live
+    run is using one."""
+    try:
+        for stale in root.glob("dl-*"):
+            if stale.is_dir():
+                shutil.rmtree(stale, ignore_errors=True)
+    except OSError:
+        pass
+
+
 def _ensure_nexus_root(say: Callable[[str], None], *, fetch: Fetch | None, allow_fetch: bool) -> bool:
     root = weights_root()
     if _root_complete(root):
         return False
-    from nexus._locking import acquire_directory_lock, release_lock  # noqa: PLC0415 — deferred local import — avoids import-time cost
+    from nexus._locking import release_lock  # noqa: PLC0415 — deferred local import — avoids import-time cost
 
     try:
         root.mkdir(parents=True, exist_ok=True)
-        token = acquire_directory_lock(root)
+        # A background run (refuse) never waits behind a download another run is doing: it takes the lock without
+        # blocking, and when it cannot it does what it does for any other missing file.
+        token = _acquire_root_lock(root, blocking=allow_fetch)
+    except BlockingIOError as exc:
+        if _fallback_usable():
+            _log.info("mineru_weights_lock_held_fallback_in_use", root=str(root))
+            return False
+        raise WeightsFetchError(
+            f"another nx run is fetching MinerU's pipeline weights into {root} right now; this run does not wait "
+            "for it. Run the command again when that one finishes."
+        ) from exc
     except OSError as exc:
+        _log.warning("mineru_weights_lock_failed", root=str(root), error=str(exc), error_type=type(exc).__name__)
+        if _fallback_usable():
+            return False
         raise WeightsFetchError(
             f"preparing MinerU's pipeline weights under {root} failed: {type(exc).__name__}: {exc}. {retry_advice()}"
         ) from exc
     try:
+        _sweep_stale_work_dirs(root)
         if _root_complete(root):  # another process finished while this one waited on the lock
             return False
         return _fill_nexus_root(root, say, fetch=fetch, allow_fetch=allow_fetch)
@@ -590,12 +645,13 @@ def _fill_nexus_root(root: Path, say: Callable[[str], None], *, fetch: Fetch | N
         raise WeightsFetchError(
             f"preparing MinerU's pipeline weights under {root} failed: {type(exc).__name__}: {exc}. {retry_advice()}"
         ) from exc
-    # Files remain and MinerU can already read its own Hugging Face cache: the machine works as it did before
-    # F35, so a background run does nothing and a failed download is a warning, never exit 75.
-    hf_usable = bool(todo) and _hf_weights_cached()
+    # Files remain and MinerU can already read its own source (a complete Hugging Face cache, or ModelScope): the
+    # machine works as it did before F35, so a background run does nothing and a failed download is a warning,
+    # never exit 75.
+    fallback = bool(todo) and _fallback_usable()
     if todo and not allow_fetch:
-        if hf_usable:
-            _log.info("mineru_weights_nexus_copy_incomplete_hf_cache_in_use", missing=len(todo))
+        if fallback:
+            _log.info("mineru_weights_nexus_copy_incomplete_fallback_in_use", missing=len(todo), source=_fallback_name())
             return False
         raise WeightsFetchError(
             "MinerU's pipeline weights are not on this machine yet, and this run does not download them "
@@ -629,10 +685,10 @@ def _fill_nexus_root(root: Path, say: Callable[[str], None], *, fetch: Fetch | N
                     _download_asset(entry, work_dir, root, base, downloader)
                 except Exception as exc:  # noqa: BLE001 — any fetch failure is the same retry for the user
                     _log.warning("mineru_weights_fetch_failed", asset=entry.asset, error=str(exc), error_type=type(exc).__name__)
-                    if hf_usable:
+                    if fallback:
                         say(
                             f"nx: warning: fetching MinerU's pipeline weights failed at {entry.asset} "
-                            f"({type(exc).__name__}: {exc}). MinerU will read its own Hugging Face cache, as before; "
+                            f"({type(exc).__name__}: {exc}). MinerU will read its own {_fallback_name()}, as before; "
                             f"run the command again to finish nexus's copy. {retry_advice()}"
                         )
                         return False

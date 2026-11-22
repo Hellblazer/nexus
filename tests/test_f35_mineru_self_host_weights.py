@@ -670,3 +670,110 @@ def test_the_nexus_mineru_json_is_private_and_an_unparsable_user_config_is_logge
     assert any(e.get("event") == "mineru_user_config_unreadable" for e in logs), logs
     assert json.loads(config.read_text()) == {"models-dir": {"pipeline": str(_root())}}
     assert not list(config.parent.glob("*.tmp")), "the unique temp name is renamed away"
+
+
+# ── the root lock under refuse; ModelScope as a fallback; stale work dirs ────────────────────────────────────
+
+
+def _hold_root_lock(env):
+    """Another nx run, as far as the lock can tell: a separate descriptor holding it."""
+    _root().mkdir(parents=True, exist_ok=True)
+    return mw._acquire_root_lock(_root(), blocking=True)
+
+
+def test_under_refuse_a_lock_held_by_another_run_is_not_waited_for_and_counts_as_the_fallback(env, monkeypatch):
+    from nexus._locking import release_lock  # noqa: PLC0415
+
+    token = _hold_root_lock(env)
+    try:
+        _hf_usable(monkeypatch)
+        assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets, allow_fetch=False) is False
+        assert env.assets.urls == []
+    finally:
+        release_lock(token)
+
+
+def test_under_refuse_a_lock_held_by_another_run_with_no_fallback_names_it(env):
+    from nexus._locking import release_lock  # noqa: PLC0415
+
+    token = _hold_root_lock(env)
+    try:
+        with pytest.raises(mw.WeightsFetchError, match="another nx run is fetching"):
+            mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets, allow_fetch=False)
+    finally:
+        release_lock(token)
+
+
+def test_an_interactive_run_waits_for_the_lock_and_finds_the_work_done(env):
+    """The blocking side of the same lock: released by the holder, the waiter proceeds (here, to nothing left to do)."""
+    import time  # noqa: PLC0415
+
+    from nexus._locking import release_lock  # noqa: PLC0415
+
+    token = _hold_root_lock(env)
+    results: list[bool] = []
+    t = threading.Thread(target=lambda: results.append(mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)))
+    t.start()
+    time.sleep(0.2)
+    assert t.is_alive() and results == [], "it is blocked behind the lock, not past it"
+    release_lock(token)
+    t.join(timeout=30)
+    assert results == [True] and mw.nexus_weights_ready()
+
+
+@pytest.mark.parametrize("fallback", [True, False])
+def test_a_lock_that_cannot_be_taken_at_all_falls_back_or_exits_named(env, monkeypatch, fallback):
+    """A filesystem with no flock: the same fallback before exit 75."""
+    _hf_usable(monkeypatch, fallback)
+
+    def _no_flock(root, *, blocking):
+        raise OSError(38, "Function not implemented")
+
+    monkeypatch.setattr(mw, "_acquire_root_lock", _no_flock)
+    if fallback:
+        assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets, allow_fetch=False) is False
+    else:
+        with pytest.raises(mw.WeightsFetchError, match="Function not implemented"):
+            mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets, allow_fetch=False)
+    assert env.assets.urls == []
+
+
+def test_under_modelscope_a_refuse_run_with_files_missing_does_nothing_and_does_not_raise(env, monkeypatch):
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    lines, say = _lines()
+    assert mw.ensure_pipeline_weights(say, fetch=env.assets, allow_fetch=False) is False
+    assert env.assets.urls == [] and lines == []
+    assert mw.child_env() == {}, "MinerU keeps reading its own ModelScope source"
+
+
+def test_under_modelscope_a_failed_download_warns_and_returns_false(env, monkeypatch):
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    env.assets.override[mw.asset_name("models/TabRec/SlanetPlus/slanet-plus.onnx")] = b"nope"
+    lines, say = _lines()
+    assert mw.ensure_pipeline_weights(say, fetch=env.assets) is False
+    warning = [ln for ln in lines if "warning" in ln]
+    assert len(warning) == 1 and "ModelScope source" in warning[0] and "size mismatch" in warning[0]
+    assert not (_root() / mw.COMPLETE_MARKER).exists() and mw.child_env() == {}
+
+
+def test_under_modelscope_a_successful_download_still_moves_minerus_children_onto_the_root(env, monkeypatch):
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets) is True
+    assert mw.child_env()["MINERU_MODEL_SOURCE"] == "local"
+
+
+def test_prefetch_is_noop_stays_false_for_modelscope_until_the_root_is_complete(env, monkeypatch):
+    """The gate must still reach ensure under modelscope (it seeds or downloads, and holds nothing on failure)."""
+    monkeypatch.setenv("MINERU_MODEL_SOURCE", "modelscope")
+    assert not mw.prefetch_is_noop()
+    mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets)
+    assert mw.prefetch_is_noop()
+
+
+def test_a_work_dir_a_killed_run_left_behind_is_swept_under_the_lock(env):
+    stale = _root() / "dl-killedrun"
+    stale.mkdir(parents=True)
+    (stale / "Layout__x").write_bytes(b"half a download")
+    assert mw.ensure_pipeline_weights(lambda _l: None, fetch=env.assets) is True
+    assert not stale.exists()
+    assert [p.name for p in _root().glob("dl-*")] == []

@@ -26,11 +26,12 @@ Each Hugging Face link above is the model's upstream home; the copy published he
 
 ## Copyright lines
 
-From the upstream license files, as recorded in nexus's license review of 2026-11-21:
+From the upstream license files:
 
 - UniMERNet: Copyright 2024 OpenDataLab.
 - PaddleOCR: Copyright (c) 2016 PaddlePaddle Authors. PaddleOCR carries no NOTICE file.
-- TableStructureRec (the RapidAI project that hosts `unet.onnx`): Copyright 2021 RapidAI.
+- TableStructureRec (the RapidAI project that hosts `unet.onnx`): Copyright (c) 2021 RapidAI Authors
+  (<https://github.com/RapidAI/TableStructureRec/blob/main/LICENSE>).
 
 ## Open items
 

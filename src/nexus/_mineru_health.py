@@ -388,7 +388,7 @@ def server_weights_stale(url: str, info: dict[str, Any] | None) -> bool:
     (F35, nexus-7t3w1). A server's model source is fixed in its environment at spawn, and its pid file records
     it (``weights_root``: the nexus root's path, or None for MinerU's own source). One spawned before nexus's
     copy was complete (an old install, or the upgrade restart pass that skips the fetch) reads the Hugging Face
-    cache, and downloads into it inside a page budget on a machine that has none. Same ownership rule as
+    cache, and downloads into it inside a page budget on a machine that has none. Only that direction counts. Same ownership rule as
     :func:`server_is_broken`: only the registered, same-namespace server on loopback is ours to cycle."""
     if not info or not isinstance(info.get("pid"), int):
         return False
@@ -397,7 +397,10 @@ def server_weights_stale(url: str, info: dict[str, Any] | None) -> bool:
 
     if pid_file_from_other_namespace(info) or not _is_registered_server_url(url, info):
         return False
-    return info.get("weights_root") != mineru_weights.weights_state()
+    # One way only: a server with no recorded root (MinerU's own source, or a pid file that predates the field) is
+    # cycled onto the nexus root. A server already on the root is never cycled back because one caller's
+    # environment says ``local`` or the Chinese-formula opt-in: that would flap a machine-shared server.
+    return not info.get("weights_root") and mineru_weights.weights_state() is not None
 
 
 def server_is_broken(url: str, error_text: str, info: dict[str, Any] | None) -> bool:
