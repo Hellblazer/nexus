@@ -186,7 +186,7 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
 - **Documented** (source): a file moved inside one repository is already
   recognised by content hash. Every row `nx index repo` sends to the engine's
   reconcile carries the file's sha256 as `content_hash` and in its
-  `base_metadata` (`indexer.py:1567-1568`). On a complete walk only
+  `base_metadata` (`indexer.py:1603-1604`). On a complete walk only
   (`catalog-048-reconcile.xml:224`, `:635`), the commit takes each of the
   owner's live rows that the walk did not see, and if a present row has the
   same `metadata.content_hash` it classes the old row `rename` (`:637-654`):
@@ -199,7 +199,7 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
 - **Documented** (source): the tenant-wide `same-as` linker
   (`nexus.catalog_link_same_content`, created by `content_hash_dedup`) links
   live pdf and paper rows that share a content hash. It runs from
-  `nx index repo` (`indexer.py:1748`) and from the catalog links command, not
+  `nx index repo` (`_relink_changed_pdfs`, `indexer.py:1896`) and from the catalog links command, not
   from `nx index pdf`, so a moved curator PDF gets no `same-as` link to its old
   row unless the user runs that command.
 
@@ -209,10 +209,10 @@ Both tests are committed on branch `fix/gh1571-moved-pdf-identity` (8380e2e27).
 - **Verified** (source): an owner's name is unique per tenant and owner type
   (`catalog_owners_unique_name_type`, `catalog-001-baseline.xml:47`), and its
   repo hash is unique among non-blank hashes (`:51`). A repo owner is
-  registered at four sites. `ensure_owner_for_repo`
+  registered at three sites. `ensure_owner_for_repo`
   (`http_catalog_client.py:851`) is called by `nx index repo` for a path not yet
-  in the local registry (`commands/index.py:107`, `:1145`; errors swallowed),
-  on a docs-collection update (`:125`), and by an in-repo `nx index md` or `rdr`
+  in the local registry (`commands/index.py:120`, `:1158`; errors swallowed),
+  on a docs-collection update (`:138`), and by an in-repo `nx index md` or `rdr`
   (`doc_indexer.py:982`; a PDF keeps its curator owner, `:933`). It looks the owner up by repo hash
   (`owner_for_repo`) and, on a miss, upserts with the folder's base name; the
   engine then matches that name first (`resolveOwnerAddress`), which is where a
@@ -332,7 +332,15 @@ for a document that is not a live curator document. Both forms print the
 same counts, as a dry run and after a write: rows re-pointed, rows absorbed,
 rows trashed, rows skipped, aspect and highlight rows rewritten. The report
 also lists every absorbed tumbler, since an absorb cannot be fully undone
-(below).
+(below). For an owner fold it counts the folded owners (`owners folded`) and
+the folded owner's rows with no counterpart (`trashed`) but does not name
+them; naming them is not built. A dry run ends with the exact command that
+writes (`... --no-dry-run --confirm`). The client waits up to 300 s for a move
+(`MOVE_TIMEOUT_S`, `engine_writes/move.py`) and never resends one; on a write, a timeout
+or an unreadable answer says the move may have completed and that a dry run
+shows what is left. The client code is `catalog/engine_writes/move.py` (the
+writer), `catalog/engine_writes/floors.py` (the floor) and
+`commands/catalog_cmds/owner_move.py` (the command).
 
 The engine gets two routes, each one transaction:
 
@@ -443,8 +451,10 @@ collection.
 back. An absorbed row restored from trash comes back without its
 `source_uri`, links and highlights, which now belong to S, and a folded owner
 reactivated with `--execute reactivate` comes back with no repo hash and its
-documents trashed. The dry run is therefore the safeguard, and the report's
-list of absorbed tumblers is the record.
+documents trashed. The dry run is therefore the safeguard. The report's list
+of absorbed tumblers is the record for those rows; for an owner fold the
+report names neither the folded owner nor its trashed rows, so the record of
+those is the owner named in the command and the catalog's trash.
 
 **Size and locking.** A move rewrites catalog, aspect and highlight rows
 only, never T3. Measured on a local engine (gate jar 0.1.199, Postgres 17.5
@@ -746,7 +756,10 @@ from a deleted file, so the same probe is used only to print a hint.
   owner: the case heals, with one full re-registration of the loser. A full
   close needs an engine-side refusal of a by-name upsert that would change an
   existing owner's non-blank hash and root. That refusal is not built; it is the
-  named residual of Gap 4.
+  named residual of Gap 4. Sam ruled on 2026-11-21 that the RDR closes with it
+  (ask `rdr254-first-registration-race`, option A): a refusal of that shape
+  would also refuse the Gap 3 re-root of a moved clone, so it needs its own
+  design.
 - A large owner move is one transaction of about 15,000 row writes (measured:
   15,442 for 7,200 and 3,100 documents; see Size and locking), holding row
   locks on two owners' documents for seconds (1.7 to 8.4 s measured). An index
@@ -801,7 +814,7 @@ from a deleted file, so the same probe is used only to print a hint.
 - [x] Critical Assumptions verified or settled by decision.
 - [x] An engine release carrying the two move routes: engine-service-v0.1.199
   (deployed 2026-11-20). The aspect-queue race fix and the deadlock retry
-  below ride engine-service-v0.1.200.
+  below shipped in engine-service-v0.1.200 (cut and deployed 2026-11-21).
 
 ### Minimum Viable Validation
 
@@ -958,7 +971,10 @@ What each test file covers:
   gone-root cases against the real engine, by calling `ensure_owner_for_repo`
   directly (not `nx index repo`). It has no symlink case and is marked
   `integration`, so the default selection and develop CI's unit run do not
-  collect it; it runs by hand.
+  collect it; it runs by hand. Its first recorded run, with the other five
+  RDR-254 real-engine files (move hints, the GH #1571 MVV, the owners-move
+  journey, the curator hint, the repo hints), was 34 passed, 0 skipped, 0
+  failed on 9b801e0ff2's gate jar (T2 `nexus_rdr/254-close-real-engine-run`).
 - `tests/test_rdr232_lifecycle_stream.py`: a second clone's owner reads the
   `<repo basename>_rdr` project from its recorded root.
 
@@ -1078,5 +1094,6 @@ else.
 - 2026-11-19: Gate round 2 — PASSED (0 Critical, 3 Significant, 0 ship-blocker(s)); blob `c2ff1151086d`; critique `nexus_rdr/254-gate-critique-2026-11-19-r2`.
 - 2026-11-20: Move hints wording matched to the reviewed Phase 3 code (grant 3; reviews `nexus_rdr/254-p3-review-r1`, `nexus/confirm-afba69e8d-none-2026-11-20-r3`): alias rows excluded, per-run bounds and the closing note, fail-open and `ClickException` printing, the engine's outside-root rule, the two-hash minimum, the census move line for healthy owners only, and the `nx catalog search` lookup.
 - 2026-11-21: Wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-aspect-race-fix-review`, `nexus/review-2dcd8ae85-none-2026-11-21`, `nexus/review-d26105450-rdr254-aspect-deadlock-retry-2026-11-21-r1`): the move floor is engine 0.1.199 (1274c4ea5f), the aspect-queue race fix covers trashed and alias documents (41a4edd0ae, d26ac3fcc2, 348cef2712), the deadlock edge it opens is accepted by Sam with a retry follow-up that is built as `DeadlockRetry` around the aspect upsert (97a0676f57, 53e1f30709, 44813b9c12), and the minimum viable validation ran (8c70440a7b, fed4c979f8). No decision or criterion changed.
-- 2026-11-21: Phase 4 (Gap 4) landed: a second live clone with the same folder name registers under `<folder>-<repo hash>` through one rule, `repo_owner_name`, called by `ensure_owner_for_repo` and the two direct `register_owner` sites (tests first in 37b6888c9e, the rule and its docs in a25d9eb195); the Phase 4 step records what was built. No decision or criterion changed.
+- 2026-11-21: Phase 4 (Gap 4) landed: a second live clone with the same folder name registers under `<folder>-<repo hash>` through one rule, `repo_owner_name`, called by `ensure_owner_for_repo` and the two direct `register_owner` sites (tests first in 9521b4b874, the rule and its docs in 5e4f49f726); the Phase 4 step records what was built. No decision or criterion changed.
 - 2026-11-21: Phase 4 wording matched to the reviewed code (grant 3; reviews `nexus_rdr/254-phase4-review`, `nexus_rdr/254-phase4-critique`): an owner two clones already share gives the other clone its own owner and collection on its next registration; a root another machine recorded, a container path or an unmounted volume reads as gone; first registrations that race can both claim the plain name (named residual, engine refusal not built); only a permission error reads a root as unreadable; a suffix another owner holds grows to the full root hash; the lifecycle project comes from the root basename; `differently cased` holds on a case-insensitive filesystem; the Built step says what each test file covers. No decision or criterion changed.
+- 2026-11-21: Close critique (partial: 0 Critical, 3 Significant, 0 ship-blockers) fixed under grant 3: the owner-fold report and Undo say the fold counts its folded owner and trashed rows without naming them, the dry run's last line, the 300 s move timeout and the client modules are named, the Phase 4 real-engine file's first run is recorded (34 passed with the other five real-engine files), the 0.1.200 prerequisite is in the past tense, and the first-registration race cites Sam's ruling; stale line anchors in Key Discoveries are updated and "four sites" reads three. No decision or criterion changed.
