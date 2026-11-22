@@ -123,6 +123,29 @@ class TenantImportPlanTest {
     }
 
     @Test
+    void aChildIdKeyTwinThatAFileFromBeforeP31LacksIsFilledNotRefused() {
+        // RDR-229 P3.3c: catalog_document_chunks.collection_id is the reference of its child id key into the chunks id key,
+        // and the import computes it (RestoreIdFill), so a backup taken before P3.1 loads without it. The name columns of
+        // the chunks key beside it are still required.
+        List<Column> older = List.of(new Column("tenant_id", "text"), new Column("doc_id", "text"),
+            new Column("position", "integer"), new Column("collection", "text"), new Column("chash", "bytea"),
+            new Column("embedding_model", "text"));
+        List<TargetColumn> live = new ArrayList<>();
+        for (Column c : older) live.add(new TargetColumn(c.name(), c.type(), true, false));
+        live.add(new TargetColumn("collection_id", "bigint", false, false));
+        Map<String, List<TargetColumn>> t = Map.of("catalog_document_chunks", live);
+        Plan plan = TenantImportPlan.analyze(List.of(new FileTable("catalog_document_chunks", older)), t, List.of());
+        assertThat(plan.refusals()).isEmpty();
+        assertThat(plan.tables().get("catalog_document_chunks").loads()).isTrue();
+        assertThat(plan.tables().get("catalog_document_chunks").defaultedColumns()).containsExactly("collection_id");
+
+        List<Column> noChash = older.stream().filter(c -> !c.name().equals("chash")).toList();
+        Plan refused = TenantImportPlan.analyze(List.of(new FileTable("catalog_document_chunks", noChash)), t, List.of());
+        assertThat(refused.refusals()).singleElement().asString().contains("catalog_document_chunks.chash")
+            .contains("key or reference");
+    }
+
+    @Test
     void aKeyColumnTheFileLacksIsRefusedEvenWhenTheTargetWouldDefaultIt() {
         List<Column> noId = new ArrayList<>(MEMORY);
         noId.removeIf(c -> c.name().equals("id"));
