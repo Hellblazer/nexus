@@ -80,7 +80,7 @@ class Rdr229RestoreMintedRelabelTest {
      * site, {@code notes} the note-URI rows per table, both by the file's label; {@code untouched} the URIs that must survive.
      */
     private record Prepared(ImportTestEnv.BackupFile file, List<String> oldLabels, String plain,
-                            Map<String, Map<Site, Long>> expected, Map<String, Map<String, Long>> notes,
+                            Map<String, Map<Site, Long>> expected, Map<String, Map<String, List<String>>> notes,
                             List<String> untouched, List<Tuple> tuples) {
     }
 
@@ -242,7 +242,7 @@ class Rdr229RestoreMintedRelabelTest {
 
         // note URIs: the renamed collections' rows get nx-note:// URIs; two documents get a URI the relabel must leave alone
         Set<String> renamed = new LinkedHashSet<>(newLabels);
-        Map<String, Map<String, Long>> notes = new LinkedHashMap<>();
+        Map<String, Map<String, List<String>>> notes = new LinkedHashMap<>();
         List<String> untouched = new ArrayList<>();
         for (Map.Entry<String, String> e : URI_TABLES.entrySet()) {
             String table = e.getKey();
@@ -262,8 +262,9 @@ class Rdr229RestoreMintedRelabelTest {
                     uri = "nxexp://p311/chroma://" + label + "/exported";
                     untouched.add(uri);
                 } else {
-                    uri = NOTE + label + "/title-" + table + "-" + k;
-                    notes.computeIfAbsent(label, x -> new LinkedHashMap<>()).merge(table, 1L, Long::sum);
+                    String title = "title-" + table + "-" + k;
+                    uri = NOTE + label + "/" + title;
+                    notes.computeIfAbsent(label, x -> new LinkedHashMap<>()).computeIfAbsent(table, x -> new ArrayList<>()).add(title);
                 }
                 return with(r, uriAt, utf8(uri));
             }).toList());
@@ -334,6 +335,12 @@ class Rdr229RestoreMintedRelabelTest {
         return env.su(ctx -> (long) ctx.fetchCount(DSL.table(DSL.name("nexus", site.table())).as("t"),
             txt("tenant_id").eq(tenant), txt(site.nameColumn()).eq(row.label()),
             DSL.field(DSL.name("t", site.idColumn()), SQLDataType.BIGINT).isDistinctFrom(row.id())));
+    }
+
+    /** The exact {@code source_uri} values of {@code table} that open with {@code prefix}. */
+    private java.util.Set<String> noteUris(String tenant, String table, String prefix) {
+        return env.su(ctx -> new java.util.TreeSet<>(ctx.select(txt("source_uri")).from(DSL.table(DSL.name("nexus", table)).as("t"))
+            .where(txt("tenant_id").eq(tenant), txt("source_uri").startsWith(prefix)).fetchSet(txt("source_uri"))));
     }
 
     private long uriRows(String tenant, String table, String prefix) {
@@ -436,11 +443,14 @@ class Rdr229RestoreMintedRelabelTest {
         long noteRows = 0;
         java.util.Set<String> tablesWithNotes = new java.util.TreeSet<>();
         for (int i = 0; i < rows.size(); i++) {
-            for (Map.Entry<String, Long> e : p.notes().getOrDefault(p.oldLabels().get(i), Map.of()).entrySet()) {
-                assertThat(uriRows(tenant, e.getKey(), NOTE + rows.get(i).label() + "/"))
-                    .as("%s rows with an nx-note URI in %s (from %s)", e.getKey(), rows.get(i).label(), p.oldLabels().get(i))
-                    .isEqualTo(e.getValue());
-                noteRows += e.getValue();
+            for (Map.Entry<String, List<String>> e : p.notes().getOrDefault(p.oldLabels().get(i), Map.of()).entrySet()) {
+                java.util.Set<String> want = new java.util.TreeSet<>();
+                String label = rows.get(i).label();
+                e.getValue().forEach(title -> want.add(NOTE + label + "/" + title));
+                assertThat(noteUris(tenant, e.getKey(), NOTE + rows.get(i).label() + "/"))
+                    .as("the nx-note URIs of %s in %s (from %s)", e.getKey(), rows.get(i).label(), p.oldLabels().get(i))
+                    .isEqualTo(want);
+                noteRows += want.size();
                 tablesWithNotes.add(e.getKey());
             }
         }
@@ -466,6 +476,12 @@ class Rdr229RestoreMintedRelabelTest {
         assertThat(ImportTestEnv.json(found).get("documents").toString()).as("the note is found by its new-label URI")
             .contains(note.value1());
         assertThat(noteRows).isPositive();
+
+        // the restore marker (what the engine keeps after it forgets the session) lists the same relabels, with their count
+        JsonNode marker = ImportTestEnv.json(env.call("GET", "/v1/tenant/import-marker", token)).get("marker");
+        JsonNode reported = end.get("report").get("collections_relabelled");
+        assertThat(marker.get("collections_relabelled")).as("the marker lists the relabels the report does").isEqualTo(reported);
+        assertThat(marker.get("collections_relabelled_count").asInt()).isEqualTo(reported.size()).isPositive();
 
         // the report names each label that changed, and no other
         List<Restored> changed = new ArrayList<>();
