@@ -125,6 +125,30 @@ check () { # name, command...
   fi
 }
 
+# mineru_weights_record RC OUTPUT: the mineru-weights-published leg's verdict from
+# `publish-mineru-weights.py --check-published` (F35). Only the script's own codes map:
+# 0 PASS; 2 (the network gave no answer) SKIP, so the run ends UNVERIFIED; 1 (the tag or an
+# asset is absent: an upload fixes it) and 3 (the tag serves other bytes: an upload never
+# overwrites, so a new tag and pins) FAIL with their own remedy; anything else (a crash, a
+# failed `uv run`) FAIL as a broken check. Defined above the source-only return so the
+# mapping is tested by calling it (tests/test_f35_mineru_publish_script.py).
+mineru_weights_record () {
+  local rc="$1" out="$2"
+  case $rc in
+    0) record PASS "mineru-weights-published" "" ;;
+    2) record SKIP "mineru-weights-published" "UNVERIFIED: $(first_line "$out")" ;;
+    1)
+      printf '%s\n' "$out" | sed -e 's/^/      /'
+      record FAIL "mineru-weights-published" "weights tag absent: run scripts/publish-mineru-weights.py --stage-dir <dir> --upload (release skill step 8b) under the release's go" ;;
+    3)
+      printf '%s\n' "$out" | sed -e 's/^/      /'
+      record FAIL "mineru-weights-published" "weights tag serves other bytes than the pins: publish a new tag and bump WEIGHTS_ASSET_TAG and the pins (step 8b); never re-upload" ;;
+    *)
+      printf '%s\n' "$out" | sed -e 's/^/      /'
+      record FAIL "mineru-weights-published" "the check itself failed (exit $rc): see its output above" ;;
+  esac
+}
+
 # Sourced with RELEASE_PREFLIGHT_SOURCE_ONLY=1, the script defines its helpers and
 # stops (tests/test_release_preflight_lease_detail.py drives `check` that way).
 [ "${RELEASE_PREFLIGHT_SOURCE_ONLY:-}" = 1 ] && [ "${BASH_SOURCE[0]}" != "$0" ] && return 0
@@ -233,13 +257,7 @@ wire_ledger_shipped_leg
 mineru_weights_published_leg () {
   local out rc
   out="$(uv run python scripts/publish-mineru-weights.py --check-published 2>&1)"; rc=$?
-  case $rc in
-    0) record PASS "mineru-weights-published" "" ;;
-    2) record SKIP "mineru-weights-published" "UNVERIFIED: $(first_line "$out")" ;;
-    *)
-      printf '%s\n' "$out" | sed -e 's/^/      /'
-      record FAIL "mineru-weights-published" "weights tag absent or not the pinned manifest: run scripts/publish-mineru-weights.py --stage-dir <dir> --upload (release skill step 8b) under the release's go" ;;
-  esac
+  mineru_weights_record "$rc" "$out"
 }
 mineru_weights_published_leg
 check "ruff-src"                  uv run ruff check src

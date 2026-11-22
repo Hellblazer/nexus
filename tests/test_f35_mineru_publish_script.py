@@ -275,7 +275,7 @@ def test_verify_only_with_upload_refuses_a_stale_static_asset_and_uploads_nothin
 # ── --check-published: the release-preflight leg ───────────────────────────────────────────────────
 
 
-def _served(publish, *, manifest: bytes | None = None, missing: str | None = None, sizes: dict[str, int] | None = None):
+def _served(publish, *, manifest: bytes | None = None, missing: str | None = None, sizes: dict | None = None, boom: str | None = None):
     body = publish.manifest_tsv().encode() if manifest is None else manifest
 
     def get(url: str):
@@ -284,6 +284,8 @@ def _served(publish, *, manifest: bytes | None = None, missing: str | None = Non
 
     def head(url: str):
         name = url.rsplit("/", 1)[1]
+        if name == boom:
+            raise OSError("connection reset")
         if name == missing:
             return 404, None
         entry = next(f for f in mw.MANIFEST if f.asset == name)
@@ -302,39 +304,82 @@ def test_check_published_fails_when_the_tag_is_absent(publish):
     assert rc == publish.PUBLISHED_ABSENT and mw.WEIGHTS_ASSET_TAG in problems[0]
 
 
-def test_check_published_fails_on_another_manifest(publish):
+def test_another_manifest_is_a_mismatch_not_an_absent_tag(publish):
     get, head = _served(publish, manifest=publish.manifest_tsv().replace(mw.MANIFEST[0].sha256, "0" * 64).encode())
     rc, problems = publish.check_published(get=get, head=head)
-    assert rc == publish.PUBLISHED_ABSENT and "does not match" in problems[0]
+    assert rc == publish.PUBLISHED_MISMATCH and "does not match" in problems[0]
 
 
-def test_check_published_fails_on_a_missing_or_wrong_size_asset(publish):
+def test_a_page_that_is_not_a_manifest_is_unverified(publish):
+    get, head = _served(publish, manifest=b"<html>sign in to the network</html>")
+    assert publish.check_published(get=get, head=head)[0] == publish.PUBLISHED_UNREADABLE
+
+
+def test_a_missing_asset_is_absent_and_a_wrong_size_is_a_mismatch(publish):
     last = mw.MANIFEST[-1].asset
     get, head = _served(publish, missing=last)
-    rc, problems = publish.check_published(get=get, head=head)
-    assert rc == publish.PUBLISHED_ABSENT and problems == [f"{last} is not on {mw.WEIGHTS_ASSET_TAG} (HTTP 404)"]
+    assert publish.check_published(get=get, head=head) == (
+        publish.PUBLISHED_ABSENT, [f"{last} is not on {mw.WEIGHTS_ASSET_TAG} (HTTP 404)"],
+    )
     first = mw.MANIFEST[0]
     get, head = _served(publish, sizes={first.asset: first.size - 1})
     rc, problems = publish.check_published(get=get, head=head)
-    assert rc == publish.PUBLISHED_ABSENT and "pinned" in problems[0]
+    assert rc == publish.PUBLISHED_MISMATCH and "pinned" in problems[0]
 
 
-def test_check_published_is_unverified_when_the_network_gives_no_answer(publish):
+def test_an_asset_without_a_content_length_is_unverified_never_a_pass(publish):
+    first = mw.MANIFEST[0]
+    get, head = _served(publish, sizes={first.asset: None})
+    rc, problems = publish.check_published(get=get, head=head)
+    assert rc == publish.PUBLISHED_UNREADABLE and "Content-Length" in problems[0]
+
+
+def test_the_network_giving_no_answer_is_unverified(publish):
     def boom(url):
         raise OSError("network is unreachable")
 
     rc, problems = publish.check_published(get=boom, head=boom)
     assert rc == publish.PUBLISHED_UNREADABLE and "network is unreachable" in problems[0]
+    get, head = _served(publish, boom=mw.MANIFEST[0].asset)
+    assert publish.check_published(get=get, head=head)[0] == publish.PUBLISHED_UNREADABLE
+    assert publish.check_published(get=lambda url: (503, b""), head=head)[0] == publish.PUBLISHED_UNREADABLE
+
+
+def test_a_definite_problem_outranks_an_unreadable_one(publish):
+    get, head = _served(publish, missing=mw.MANIFEST[-1].asset, boom=mw.MANIFEST[0].asset)
+    assert publish.check_published(get=get, head=head)[0] == publish.PUBLISHED_ABSENT
 
 
 def test_check_published_ignores_the_mirror_override(publish, monkeypatch):
+    monkeypatch.delenv(mw.BASE_URL_ENV, raising=False)
+    assert publish.published_base_url() == mw.asset_base_url()
     monkeypatch.setenv(mw.BASE_URL_ENV, "http://127.0.0.1:1/mirror")
+    assert publish.published_base_url() != mw.asset_base_url()
     assert publish.published_base_url().endswith(f"/releases/download/{mw.WEIGHTS_ASSET_TAG}")
 
 
-def test_the_release_preflight_runs_the_check_and_reads_exit_2_as_unverified():
-    text = (REPO_ROOT / "tests" / "e2e" / "release-preflight.sh").read_text()
+PREFLIGHT = REPO_ROOT / "tests" / "e2e" / "release-preflight.sh"
+
+
+def _record(rc: int) -> str:
+    """Source the preflight helpers and call the leg's mapping with *rc*: the recorded status."""
+    proc = subprocess.run(
+        ["bash", "-c", '. "$1"; mineru_weights_record "$2" "out line"; printf "%s\\n" "${RESULTS[@]}"', "bash", str(PREFLIGHT), str(rc)],
+        env={**__import__("os").environ, "RELEASE_PREFLIGHT_SOURCE_ONLY": "1"},
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    return proc.stdout.strip().splitlines()[-1]
+
+
+@pytest.mark.parametrize(("rc", "status", "fix"), [
+    (0, "PASS", ""), (2, "SKIP", "UNVERIFIED"), (1, "FAIL", "--upload"), (3, "FAIL", "new tag"), (137, "FAIL", "exit 137"),
+])
+def test_the_preflight_maps_each_exit_code_of_the_check(rc, status, fix):
+    line = _record(rc)
+    assert line.startswith(f"{status}|mineru-weights-published|") and fix in line
+
+
+def test_the_release_preflight_runs_the_check_through_the_mapping():
+    text = PREFLIGHT.read_text()
     leg = text[text.index("mineru_weights_published_leg () {"):text.index("\nmineru_weights_published_leg\n")]
-    assert "scripts/publish-mineru-weights.py --check-published" in leg
-    assert 'record SKIP "mineru-weights-published"' in leg and "2)" in leg
-    assert "--upload" in leg  # the FAIL line names the fix
+    assert "scripts/publish-mineru-weights.py --check-published" in leg and 'mineru_weights_record "$rc" "$out"' in leg

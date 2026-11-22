@@ -158,14 +158,17 @@ def mineru_json_path() -> Path:
     return weights_root().parent / "mineru.json"
 
 
-def asset_base_url() -> str:
-    """Where the asset files are: :data:`BASE_URL_ENV`, else the release tag's download URL."""
-    override = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
-    if override:
-        return override
+def default_asset_base_url() -> str:
+    """The release tag's public download URL, with no mirror override."""
     from nexus.db.service_bge_model import _ASSET_DOWNLOAD_BASE  # noqa: PLC0415 — deferred local import — one release base
 
     return f"{_ASSET_DOWNLOAD_BASE}/{WEIGHTS_ASSET_TAG}"
+
+
+def asset_base_url() -> str:
+    """Where the asset files are: :data:`BASE_URL_ENV`, else :func:`default_asset_base_url`."""
+    override = os.environ.get(BASE_URL_ENV, "").strip().rstrip("/")
+    return override or default_asset_base_url()
 
 
 def _size_ok(path: Path, size: int) -> bool:

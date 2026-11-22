@@ -128,6 +128,10 @@ surfaces the whole fix list. The checks:
 - the pin sweep -- the pin tests that are not lint-marked,
   `check_wire_contract_pairing.py`, and `ruff check src`. The lint-marked ones run
   in PR CI's `test-lint`; a lint red shows there about 12 minutes into the PR's run.
+- `mineru-weights-published` -- the MinerU weights tag (`WEIGHTS_ASSET_TAG`, F35) serves this tree's pinned
+  `MANIFEST.tsv` and every asset at its pinned size: one GET and one HEAD per asset against the public download
+  URL, so it needs the network (offline reads UNVERIFIED). An absent tag or asset FAILS with step 8b's upload as
+  the fix; a tag serving other bytes FAILS with "new tag and pins" as the fix, since the upload never overwrites.
 
 WHY (the 7.15.0 cut, 2026-08-22). The battery was ordered expensive-first and
 abort-on-first-red, so each blocker cost a full replay and hid every other one.
@@ -878,10 +882,12 @@ Tradeoff: extra commit on main, but guards against the case where someone could 
 
 ### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
 
-The preflight's `mineru-weights-published` leg (step 0c) fails every cut, plugin-only lane included, until this
-has run once: a client cut from develop without the tag would ship broken fresh installs. When it is red, run this
-step first (dry run, then the upload under the release's go) and re-run the preflight. Once the tag carries every
-asset the leg passes and this step is a no-op.
+The preflight's `mineru-weights-published` leg (step 0c) fails on any tree that carries it until this step has run
+once, because a client cut without the tag ships broken fresh installs. The first client cut that ships the leg
+therefore meets it red at step 0c: run this step then (dry run, then the upload under the release's go) and re-run
+the preflight. Once the tag carries every asset the leg passes and this step is a no-op. A plugin-only lane runs the
+preflight its base tag carries, so a lane off a tag older than F35 has no such leg, and a lane off a later tag finds
+the weights already published.
 
 A fresh install fetches MinerU's pipeline weights (about 1.2 GB) from the release assets of the immutable tag
 `mineru-pipeline-ed6b654c` (`WEIGHTS_ASSET_TAG` in `src/nexus/mineru_weights.py`), never from Hugging Face. The

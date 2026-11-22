@@ -321,16 +321,16 @@ def upload(
     return 0
 
 
-#: A published asset set a client could not use (exit 1) vs one this run could not read (exit 2).
-PUBLISHED_ABSENT, PUBLISHED_UNREADABLE = 1, 2
+#: Exit codes of --check-published: the tag or an asset is absent (an upload fixes it), the run could not read the
+#: tag (could not check is not fine), or the tag serves other bytes than this client pins (an upload never
+#: overwrites an asset on the immutable tag: the fix is a new tag and pins).
+PUBLISHED_ABSENT, PUBLISHED_UNREADABLE, PUBLISHED_MISMATCH = 1, 2, 3
 
 
 def published_base_url() -> str:
     """The release tag's public download URL: what a client fetches when no mirror is set.
     :data:`nexus.mineru_weights.BASE_URL_ENV` is ignored on purpose: the check is about the real tag."""
-    from nexus.db.service_bge_model import _ASSET_DOWNLOAD_BASE  # noqa: PLC0415 — one release base
-
-    return f"{_ASSET_DOWNLOAD_BASE}/{mw.WEIGHTS_ASSET_TAG}"
+    return mw.default_asset_base_url()
 
 
 Getter = Callable[[str], tuple[int, bytes]]
@@ -347,16 +347,17 @@ def _http_get(url: str) -> tuple[int, bytes]:
 def _http_head(url: str) -> tuple[int, int | None]:
     import httpx  # noqa: PLC0415 — deferred: only the check needs it
 
-    r = httpx.head(url, follow_redirects=True, timeout=30.0)
+    # identity: a compressed Content-Length would not be the pinned raw size.
+    r = httpx.head(url, follow_redirects=True, timeout=30.0, headers={"Accept-Encoding": "identity"})
     length = r.headers.get("content-length")
     return r.status_code, int(length) if length and length.isdigit() else None
 
 
 def check_published(*, get: Getter = _http_get, head: Header = _http_head) -> tuple[int, list[str]]:
     """Whether the release tag serves what this checkout's client pins: ``MANIFEST.tsv`` byte for byte, and
-    every weight asset at its pinned size. Returns ``(0, [])``, ``(PUBLISHED_ABSENT, problems)`` when the tag
-    or an asset is missing or differs (a client cut from this tree would fail its fresh installs), or
-    ``(PUBLISHED_UNREADABLE, problems)`` when the network gave no answer (could not check is not fine)."""
+    every weight asset at its pinned size. Returns ``(0, [])`` or one of :data:`PUBLISHED_ABSENT`,
+    :data:`PUBLISHED_MISMATCH`, :data:`PUBLISHED_UNREADABLE` with the problems found. A definite problem (absent
+    or mismatched) outranks an unreadable one: a run that saw a 404 has seen enough to fail."""
     base = published_base_url()
     try:
         status, body = get(f"{base}/{MANIFEST_ASSET}")
@@ -366,10 +367,13 @@ def check_published(*, get: Getter = _http_get, head: Header = _http_head) -> tu
         return PUBLISHED_ABSENT, [f"release tag {mw.WEIGHTS_ASSET_TAG} is absent or carries no {MANIFEST_ASSET} (HTTP 404)"]
     if status != 200:
         return PUBLISHED_UNREADABLE, [f"{base}/{MANIFEST_ASSET} answered HTTP {status}"]
-    if body.decode("utf-8", "replace") != manifest_tsv():
-        return PUBLISHED_ABSENT, [f"the published {MANIFEST_ASSET} on {mw.WEIGHTS_ASSET_TAG} does not match this client's pins"]
+    text = body.decode("utf-8", "replace")
+    if text != manifest_tsv():
+        if not text.startswith("models/"):  # an HTML page from a proxy or captive portal is not a manifest
+            return PUBLISHED_UNREADABLE, [f"{base}/{MANIFEST_ASSET} answered with something that is not a manifest"]
+        return PUBLISHED_MISMATCH, [f"the published {MANIFEST_ASSET} on {mw.WEIGHTS_ASSET_TAG} does not match this client's pins"]
     problems: list[str] = []
-    unreadable = False
+    absent = mismatch = unreadable = False
     for entry in mw.MANIFEST:
         try:
             status, length = head(f"{base}/{entry.asset}")
@@ -378,16 +382,24 @@ def check_published(*, get: Getter = _http_get, head: Header = _http_head) -> tu
             problems.append(f"could not read {entry.asset}: {type(exc).__name__}: {exc}")
             continue
         if status == 404:
+            absent = True
             problems.append(f"{entry.asset} is not on {mw.WEIGHTS_ASSET_TAG} (HTTP 404)")
         elif status != 200:
             unreadable = True
             problems.append(f"{entry.asset} answered HTTP {status}")
-        elif length is not None and length != entry.size:
+        elif length is None:
+            unreadable = True
+            problems.append(f"{entry.asset} answered without a Content-Length, so its size is unchecked")
+        elif length != entry.size:
+            mismatch = True
             problems.append(f"{entry.asset} is {length} bytes on the tag, pinned {entry.size}")
-    if not problems:
-        return 0, []
-    absent = any("HTTP 404" in p or "bytes on the tag" in p for p in problems)
-    return (PUBLISHED_ABSENT if absent or not unreadable else PUBLISHED_UNREADABLE), problems
+    if absent:
+        return PUBLISHED_ABSENT, problems
+    if mismatch:
+        return PUBLISHED_MISMATCH, problems
+    if unreadable:
+        return PUBLISHED_UNREADABLE, problems
+    return 0, []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -407,13 +419,21 @@ def main(argv: list[str] | None = None) -> int:
         if args.upload or args.verify_only or args.dry_run:
             ap.error("--check-published takes no other mode")
         rc, problems = check_published()
+        label = {PUBLISHED_ABSENT: "FAIL", PUBLISHED_MISMATCH: "FAIL"}.get(rc, "UNVERIFIED")
         for line in problems:
-            print(f"FAIL: {line}" if rc == PUBLISHED_ABSENT else f"UNVERIFIED: {line}", file=sys.stderr)
+            print(f"{label}: {line}", file=sys.stderr)
         if rc == PUBLISHED_ABSENT:
             print(
-                f"MINERU WEIGHTS NOT PUBLISHED: a client cut from this tree fails fresh installs (404, exit 75). "
-                f"Fix: scripts/publish-mineru-weights.py --stage-dir <dir> --upload (release skill step 8b), "
-                f"under the release's go.",
+                "MINERU WEIGHTS NOT PUBLISHED: a client cut from this tree fails fresh installs (404, exit 75). "
+                "Fix: scripts/publish-mineru-weights.py --stage-dir <dir> --upload (release skill step 8b), "
+                "under the release's go.",
+                file=sys.stderr,
+            )
+        elif rc == PUBLISHED_MISMATCH:
+            print(
+                f"MINERU WEIGHTS TAG MISMATCH: {mw.WEIGHTS_ASSET_TAG} serves other bytes than this client pins. "
+                "An upload never overwrites an asset on the immutable tag: publish a new tag, bump WEIGHTS_ASSET_TAG "
+                "and the pins (release skill step 8b), never re-upload under the old one.",
                 file=sys.stderr,
             )
         elif rc == 0:
