@@ -84,6 +84,32 @@ def strip_sql(s):
     return "".join(out)
 
 
+def strip_comments_keep_literals(s):
+    """Blank -- and /* */ comments outside '...' literals, keeping the literals (a parse is often a literal: 'quarantine-%')."""
+    out, i, n = [], 0, len(s)
+    while i < n:
+        if s[i] == "'":
+            j = i + 1
+            while j < n and not (s[j] == "'" and (j + 1 >= n or s[j + 1] != "'")):
+                j += 2 if s[j] == "'" else 1
+            out.append(s[i:j + 1])
+            i = j + 1
+        elif s.startswith("--", i):
+            j = s.find("\n", i)
+            j = n if j < 0 else j
+            out.append(" " * (j - i))
+            i = j
+        elif s.startswith("/*", i):
+            j = s.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            out.append(re.sub(r"[^\n]", " ", s[i:j]))
+            i = j
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
 def statements(body):
     """(offset, text) of each ';'-separated statement of a stripped body, at paren depth 0."""
     out, depth, start = [], 0, 0
@@ -286,11 +312,12 @@ parse_count = 0
 for key in sorted(live):
     kind, obj, f, cline, bline, body = live[key]
     raw_body = body
-    form = "B" if CHUNK_FAMILY.search(raw_body) else "A"
+    code = strip_comments_keep_literals(body)  # a parse named in a -- comment is not a parse
+    form = "B" if CHUNK_FAMILY.search(code) else "A"
     parse = []
-    if re.search(r"split_part\s*\([^;]*?'__'", raw_body, re.I | re.S):
+    if re.search(r"split_part\s*\([^;]*?'__'", code, re.I | re.S):
         parse.append("split_part")
-    if re.search(r"quarantine-", raw_body):
+    if re.search(r"'quarantine-", code):
         parse.append("quarantine")
     parse_count += len(parse)
     sbody = strip_sql(body)
