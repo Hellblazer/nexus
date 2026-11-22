@@ -136,7 +136,7 @@ def test_a_foreign_machine_path_that_raises_einval_is_not_live_and_keeps_the_nam
     """A root another machine recorded can hold characters this OS rejects (a Mac path with ':' read on Windows):
     ``os.stat`` raises ``EINVAL`` there, which is not a permission error and not a live clone."""
     second = _clone(tmp_path, "scratch")
-    foreign = "/Users/other:machine/work/nexus"
+    foreign = "/Users/you:machine/work/nexus"
     real_stat = os.stat
 
     def stat(path, *args, **kwargs):
