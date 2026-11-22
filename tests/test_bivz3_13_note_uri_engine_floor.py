@@ -299,7 +299,9 @@ class TestEveryWriterRefuses:
             {"record": "knowledge_doc", "collection": "c", "title": f"t{i}", "content": f"body {i}", "tags": "",
              "category": "", "ttl_days": None} for i in range(3)]))
         bundle = tmp_path / "b.jsonl"
-        bundle.write_text("{}\n")
+        # a well-formed format-3 header: nx catalog import reads the header before it connects (RDR-229 P3.9), and this
+        # test is about the engine floor the first note meets, not about the header
+        bundle.write_text('{"format": "nexus-recovery-bundle", "format_version": 3}\n')
         with patch("nexus.commands.catalog._get_catalog", return_value=object()), \
              patch("nexus.commands.catalog._get_catalog_writer", return_value=object()), \
              patch("nexus.db.make_t3", return_value=object()):
