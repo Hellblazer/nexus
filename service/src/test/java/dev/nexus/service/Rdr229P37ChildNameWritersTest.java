@@ -147,7 +147,7 @@ class Rdr229P37ChildNameWritersTest {
     void quarantineRestoreChunks_reattachesAManifestRowToTheRestoredChunkOfTheRenamedCollection() throws Exception {
         var w = Rdr229ChildNameWorld.renamed(engine, "qr", Rdr229ChildNameWorld.MODEL_768, 768);
         String sibling = "quarantine-" + w.newName;
-        String doc = "cn.qr.d0";
+        String doc = "cn.qr.restore";
         byte[][] held = new byte[1][];
         engine.su(ctx -> {
             PgContainerHelper.insertCollection(ctx, w.tenant, sibling);
