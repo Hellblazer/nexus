@@ -374,7 +374,7 @@ final class ImportTestEnv implements AutoCloseable {
                                                              List<dev.nexus.service.db.TenantExport.Retired> retired,
                                                              java.util.function.Supplier<Long> engineChangesets) {
         var sessions = new dev.nexus.service.db.TenantImportSessions(service::exportSessions, ds, config,
-            dev.nexus.service.db.CollectionRegistry::evictTenant, service.importWiring()::singletonLockHeld, engineChangesets, retired);
+            dev.nexus.service.db.CollectionRegistry.shared()::evictTenant, service.importWiring()::singletonLockHeld, engineChangesets, retired);
         service.importWiring().sessions(sessions);
         return sessions;
     }
