@@ -71,7 +71,9 @@ class Rdr229CompletionTenantCountsRouteTest {
 
     /** The keys of the field that are bookkeeping about the engine's own state, not about any tenant's data. */
     private static final Set<String> STATUS_KEYS = Set.of("gate1", "gate2", "gate3", "gates_holding", "gates_total", "summary", "gate3_why",
-        "labels_total", "labels_incomplete", "checks_missing", "validate_waits");
+        "labels_total", "labels_incomplete", "checks_missing", "validate_waits",
+        // RDR-229 P3.4: two install-wide booleans (the latch row exists; an id-predicate index is INVALID), no tenant count or name
+        "gate3_latched", "id_index_invalid");
     private static final Set<String> NUMERIC_STATUS_KEYS = Set.of("gates_holding", "gates_total", "labels_total");
     /** A number in front of what it counts: the shape of every tenant count the old text carried. */
     private static final Pattern TENANT_COUNT_TEXT = Pattern.compile("\\d+\\s+(orphan|unstamped|registry|collection|tombstone|live|row)", Pattern.CASE_INSENSITIVE);
