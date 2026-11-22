@@ -58,6 +58,27 @@ def _engine_model_mismatch_detail(exc: Exception) -> str | None:
     return str(body.get("error") or COLLECTION_MODEL_MISMATCH_REASON)
 
 
+def _engine_refusal_detail(exc: Exception) -> str | None:
+    """The status line and the engine's reason when *exc* is a 4xx whose JSON body carries ``error`` (nexus-02454),
+    else ``None``. ``str(HTTPStatusError)`` is only httpx's status line, so a label the engine refused read as
+    ``400 Bad Request`` with no reason. A 5xx body is the engine's own failure (the server log has it), not a reason
+    to show."""
+    import json  # noqa: PLC0415 — stdlib, branch-local
+
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int) or not 400 <= status < 500:
+        return None
+    try:
+        body = json.loads(response.text)
+    except Exception:  # noqa: BLE001 — an unparseable body carries no reason
+        return None
+    reason = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(reason, str) or not reason:
+        return None
+    return f"{exc}: {reason}"
+
+
 def rename_collection_data_plane(
     old: str,
     new: str,
@@ -194,7 +215,7 @@ def rename_collection_data_plane(
                 old, new, check_model_token=False,
             )
     except Exception as exc:
-        detail = _engine_model_mismatch_detail(exc) or str(exc)
+        detail = _engine_model_mismatch_detail(exc) or _engine_refusal_detail(exc) or str(exc)
         raise click.ClickException(
             f"service rename failed -- collection {old!r} is unchanged "
             f"(the re-home is atomic). Fix the error and retry:\n  {detail}"
