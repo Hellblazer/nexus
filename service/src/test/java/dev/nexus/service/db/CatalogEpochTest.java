@@ -26,9 +26,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -321,8 +318,8 @@ class CatalogEpochTest {
         server.createContext("/v1/status", new StatusHandler(null).catalogEpoch(CatalogEpochStatus.statusSupplier(svcDs)));
         server.start();
         try {
-            HttpResponse<String> resp = HttpClient.newHttpClient().send(
-                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/status")).GET().build(),
+            HttpResponse<String> resp = dev.nexus.service.TestHttp.client().send(
+                dev.nexus.service.TestHttp.request("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/status").GET().build(),
                 HttpResponse.BodyHandlers.ofString());
             assertThat(resp.statusCode()).isEqualTo(200);
             return MAPPER.readTree(resp.body());
