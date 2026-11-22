@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import dev.nexus.service.datamove.Gate3;
+
 import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.CollectionRegistry;
 import dev.nexus.service.db.CollectionRow;
@@ -82,9 +84,22 @@ public final class TaxonomyCentroidRepository {
     public record AnnHit(long topicId, double similarity) {}
 
     private final TenantScope tenantScope;
+    /**
+     * RDR-229 P3.5c (nexus-p2m1x.25): the gate-3 signal this repository's name-key upsert switches to the id key on.
+     * STUB: stored, not read yet; the P3.5c code commit makes the upsert read {@link Gate3#holds()} per call. Until then
+     * every constructor leaves it {@link Gate3#never()}.
+     */
+    private Gate3 gate3 = Gate3.never();
+
 
     public TaxonomyCentroidRepository(TenantScope tenantScope) {
         this.tenantScope = tenantScope;
+    }
+
+    /** {@link #TaxonomyCentroidRepository(TenantScope)} with the gate-3 signal (RDR-229 P3.5c; a stub until the code commit). */
+    public TaxonomyCentroidRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope);
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /**
