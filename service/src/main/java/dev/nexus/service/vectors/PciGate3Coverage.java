@@ -6,6 +6,7 @@ import dev.nexus.service.datamove.CompletionCheck;
 import dev.nexus.service.db.PgSession.PciSettings;
 import dev.nexus.service.vectors.PciCatalog.Index;
 import dev.nexus.service.vectors.PciCatalog.Leaf;
+import dev.nexus.service.db.PgSession;
 import org.jooq.DSLContext;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -207,36 +208,31 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
         if (kept != null && Duration.between(kept.at(), now).compareTo(VACUITY_TTL) < 0) {
             return kept.qualifies();
         }
-        boolean qualifies = false;
-        String before = ctx.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("statement_timeout")))
-            .fetchOne(0, String.class);
-        ctx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("statement_timeout"),
-            DSL.val(Long.toString(PciReconciler.COUNT_TIMEOUT.toMillis())), DSL.inline(false))).fetch();
-        try {
+        // One short transaction bounds the probes: PgSession.setLocal sets the statement bound and its matching network timeout, and the
+        // transaction's end resets both, so nothing is left on the check's session (NetworkBoundStatementTimeoutGateTest).
+        boolean qualifies = ctx.transactionResult(cfg -> {
+            DSLContext tx = DSL.using(cfg);
+            PgSession.setLocal(tx, "statement_timeout", Long.toString(PciReconciler.COUNT_TIMEOUT.toMillis()));
             int b = settings.buildMinRows();
-            leaves:
             for (Leaf leaf : snapshot.leaves()) {
                 if (leaf.model() == null || leaf.tenant() == null) {
                     continue;
                 }
-                Integer dim = ctx.select(EMBEDDING_MODELS.DIMENSION).from(EMBEDDING_MODELS)
+                Integer dim = tx.select(EMBEDDING_MODELS.DIMENSION).from(EMBEDDING_MODELS)
                     .where(EMBEDDING_MODELS.EMBEDDING_MODEL.eq(leaf.model())).fetchOne(EMBEDDING_MODELS.DIMENSION);
                 if (dim == null) {
                     continue;
                 }
-                for (String name : buildable(ctx, leaf)) {
-                    Integer n = PgVectorRepository.probeSelectedRowsQuery(ctx, dim, new String[] {name},
+                for (String name : buildable(tx, leaf)) {
+                    Integer n = PgVectorRepository.probeSelectedRowsQuery(tx, dim, new String[] {name},
                             leaf.model(), leaf.tenant(), b).fetchOne(0, Integer.class);
                     if (n != null && n >= b) {
-                        qualifies = true;
-                        break leaves;
+                        return true;
                     }
                 }
             }
-        } finally {
-            ctx.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("statement_timeout"), DSL.val(before),
-                DSL.inline(false))).fetch();
-        }
+            return false;
+        });
         vacuity = new Vacuity(qualifies, now);
         return qualifies;
     }
