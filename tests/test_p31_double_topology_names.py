@@ -66,9 +66,9 @@ def test_the_check_is_not_loosened_a_name_off_the_profile_is_still_refused(
 
     with pytest.raises(EmbeddingProfileMismatchError):
         corpus.ensure_collection_registered(
-            "code__r-1234abcd__voyage-code-3__v1",
+            "code__r-1234abcd__minilm-l6-v2-384__v1",
             registrar=_Registrar, kwargs={**corpus.collection_registration_kwargs("code__r-1234abcd__x__v1"),
-                                          "embedding_model": "voyage-code-3"},
+                                          "embedding_model": "minilm-l6-v2-384"},
         )
 
 
