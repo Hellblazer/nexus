@@ -115,7 +115,8 @@ public final class TenantImportPlan {
      * Columns the file carries and the load drops, because the engine assigns them: {@code catalog_collections.collection_id}
      * comes from the column's own sequence on every restored row (RDR-229 P3.8: no route accepts a client-supplied id, and
      * the engine role cannot {@code setval} past one, the doctrine of every other serial key here). The column is staged
-     * and reported as skipped. P3.11 decides how a bundle carries the id.
+     * and reported as skipped. P3.11: the staged value is the SOURCE id of the restore's by-id map ({@link RestoreIdFill}), kept on a
+     * stage column before the engine's drawn id replaces it; it is never loaded.
      */
     static final Map<String, Set<String>> SERVER_ASSIGNED = Map.of("catalog_collections", Set.of("collection_id"));
 

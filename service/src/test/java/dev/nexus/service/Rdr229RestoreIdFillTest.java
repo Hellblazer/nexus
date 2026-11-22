@@ -235,10 +235,16 @@ class Rdr229RestoreIdFillTest {
 
     // ── a file's ids are never trusted ──────────────────────────────────────────────────────────
 
+    /**
+     * A file's registry ids are the source's and are never written: the restored registry draws its own, whatever the file held
+     * (here the same value in every row, and a successor id on live rows). Since P3.11 a child's id is mapped through the file's
+     * registry ids rather than refilled by name, so a child twin the registry does not hold is a refusal
+     * ({@code Rdr229RestoreByIdTest#t3_aTwinThatNamesNoRegistryRowOfTheFileIsRefusedBeforeAnyWrite}), and this file's children
+     * have no twin and are filled by name.
+     */
     @Test
-    void aFileWhoseIdsAreAnotherInstallationsIsRefilledByNameAndNeverTrusted() throws Exception {
+    void aFileWhoseRegistryIdsAreAnotherInstallationsIsNeverTrusted() throws Exception {
         ImportTestEnv.BackupFile poisoned = fixture()
-            .withColumn("chunks", "collection_id", "bigint", bigint(4242))
             .withColumn("catalog_collections", "collection_id", "bigint", bigint(4243))
             .withColumn("catalog_collections", "superseded_by_id", "bigint", bigint(4244)).seal();
         String tenant = "t-p31-fill-poisoned";
@@ -247,7 +253,7 @@ class Rdr229RestoreIdFillTest {
 
         Site chunks = new Site("chunks", "collection", "collection_id");
         assertThat(num(ctx -> examined(ctx, tenant, chunks))).isPositive();
-        assertThat(num(ctx -> wrongIds(ctx, tenant, chunks))).as("chunks carry the registry rows' ids, not the file's 4242").isZero();
+        assertThat(num(ctx -> wrongIds(ctx, tenant, chunks))).as("chunks carry the registry rows' ids").isZero();
         assertThat(num(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections")),
             DSL.field(DSL.name("tenant_id"), String.class).eq(tenant),
             DSL.field(DSL.name("collection_id"), Long.class).in(4243L, 4244L)))).isZero();
@@ -258,13 +264,14 @@ class Rdr229RestoreIdFillTest {
     }
 
     /**
-     * Code review F6: a quarantined chunk's metadata carries the origin collection by name and, since P3.1, by id
-     * ({@code QuarantineOrigin.ORIGIN_ID_KEY}, {@code origin_collection_id}). The id is the SOURCE installation's: a restore
-     * mints new ids, so a foreign one left in the jsonb names another collection or none. The load refills it from the restored
-     * registry row of the tag's name, or strips it when the name has no row (or the tag has none), and keeps every other key.
+     * Code review F6, and P3.11's rule: a quarantined chunk's metadata carries the origin collection by name and, since P3.1, by id
+     * ({@code QuarantineOrigin.ORIGIN_ID_KEY}, {@code origin_collection_id}). The id is the SOURCE installation's: a restore mints new
+     * ids, so one the file's registry does not hold (this file has no ids at all) is stripped, whatever name sits beside it (a name
+     * may be stale from P3.7). Every other key of the metadata is kept. A tag with the id key mapped is
+     * {@code Rdr229RestoreByIdTest#t1_aRenamedCollectionsRowsStayOnItWhenAnotherCollectionTookTheOldLabel}.
      */
     @Test
-    void aChunksOriginIdTagIsRefilledByNameOrStripped_neverLeftAsTheSourcesId() throws Exception {
+    void aChunksOriginIdTagThatTheFilesRegistryDoesNotHoldIsStripped_neverLeftAsTheSourcesId() throws Exception {
         ImportTestEnv.BackupFile file = fixture();
         int metadataAt = file.columnIndex("chunks", "metadata");
         int collectionAt = file.columnIndex("chunks", "collection");
@@ -299,15 +306,12 @@ class Rdr229RestoreIdFillTest {
         assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
             originId.in("9999991", "9999992", "9999993"))))
             .as("no row keeps the backup's foreign origin id").isZero();
-        // the tag whose name resolves is refilled with the restored registry row's id ...
-        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
-            DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection")).eq(origin),
-            originId.eq(CollectionIds.idOf(text("c", "tenant_id"), DSL.val(origin)).cast(SQLDataType.VARCHAR)))))
-            .as("the origin tag whose name resolves names the restored registry row's id").isEqualTo(1);
-        // ... and the one whose name has no registry row, or no name, carries no id at all
         assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
             DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("keep")).eq("yes"),
-            originId.isNull()))).as("the unresolved and the nameless tags lose the id key").isEqualTo(2);
+            originId.isNull()))).as("every tagged row lost the id key, the one whose name resolves included").isEqualTo(3);
+        assertThat(num(ctx -> ctx.fetchCount(chunks, text("c", "tenant_id").eq(tenant),
+            DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection")).eq(origin))))
+            .as("the name tag is kept as it was").isEqualTo(1);
     }
 
     @Test

@@ -89,9 +89,14 @@ final class ByIdRestoreSupport {
         return DSL.field(DSL.name(name));
     }
 
+    /** The referenced columns of a foreign key definition into {@code catalog_collections}: {@code (tenant_id, name, ...)}. */
+    private static final java.util.regex.Pattern REFERENCED = java.util.regex.Pattern
+        .compile("REFERENCES\\s+\\S*catalog_collections\\s*\\(([^)]*)\\)");
+
     /**
-     * Drops every foreign key that references {@code nexus.catalog_collections} (the name keys), the move RDR-229 P3.7's
-     * name-key drop makes before its one-row rename. A partition's inherited copy is left to its parent's drop. Returns
+     * Drops every foreign key that references the NAME of {@code nexus.catalog_collections}, the move RDR-229 P3.7's name-key
+     * drop makes before its one-row rename. A key onto the registry's id (P3.3a's and P3.3c's twins) is kept, so it still guards
+     * the rows if those branches meet this one. A partition's inherited copy is left to its parent's drop. Returns
      * {@code table.constraint} of each key dropped, so a test can name them.
      */
     static List<String> dropRegistryNameKeys(ImportTestEnv env) {
@@ -107,7 +112,8 @@ final class ByIdRestoreSupport {
             Field<Long> conParent = DSL.field(DSL.name("con", "conparentid"), Object.class).cast(SQLDataType.BIGINT);
             List<String[]> keys = new ArrayList<>();
             for (Record r : ctx.select(DSL.field(DSL.name("cns", "nspname"), String.class),
-                        DSL.field(DSL.name("child", "relname"), String.class), DSL.field(DSL.name("con", "conname"), String.class))
+                        DSL.field(DSL.name("child", "relname"), String.class), DSL.field(DSL.name("con", "conname"), String.class),
+                        DSL.function("pg_get_constraintdef", SQLDataType.VARCHAR, DSL.field(DSL.name("con", "oid"), Long.class)))
                     .from(con)
                     .join(child).on(DSL.field(DSL.name("child", "oid"), Long.class).eq(conRel))
                     .join(parent).on(DSL.field(DSL.name("parent", "oid"), Long.class).eq(conRef))
@@ -117,7 +123,10 @@ final class ByIdRestoreSupport {
                     .and(DSL.field(DSL.name("pns", "nspname"), String.class).eq("nexus"))
                     .and(conKind.eq("f")).and(conParent.eq(0L))
                     .fetch()) {
-                keys.add(new String[] {r.get(0, String.class), r.get(1, String.class), r.get(2, String.class)});
+                java.util.regex.Matcher m = REFERENCED.matcher(r.get(3, String.class));
+                boolean namesAName = m.find() && java.util.Arrays.stream(m.group(1).split(","))
+                    .map(String::trim).anyMatch(c -> c.equals("name"));
+                if (namesAName) keys.add(new String[] {r.get(0, String.class), r.get(1, String.class), r.get(2, String.class)});
             }
             List<String> dropped = new ArrayList<>();
             for (String[] k : keys) {
@@ -259,6 +268,29 @@ final class ByIdRestoreSupport {
                     DSL.field(DSL.name("t", s.nameColumn()), String.class).ne(""),
                     DSL.field(DSL.name("t", idName), Long.class).isNull());
                 if (n > 0) out.add(s.table() + "." + idName + ": " + n);
+            }
+            return out;
+        });
+    }
+
+    /**
+     * Non-history rows of {@code tenant} whose name column is not the current name of the registry row their id names, per site:
+     * what a name foreign key kept by the target would refuse. Empty when the restore wrote each row's collection's own name.
+     */
+    static List<String> rowsNamedOtherwiseThanTheirCollection(ImportTestEnv env, String tenant) {
+        return env.su(ctx -> {
+            List<String> out = new ArrayList<>();
+            for (CollectionIdSites.Site s : CollectionIdSites.exportedSites()) {
+                if (s.history()) continue;
+                String idName = CollectionIdSites.idColumn(ctx, s);
+                Table<?> t = table(s.table()).as("t");
+                var c = CATALOG_COLLECTIONS.as("c");
+                Field<String> rowTenant = DSL.field(DSL.name("t", "tenant_id"), String.class);
+                int n = ctx.selectCount().from(t).join(c)
+                    .on(c.TENANT_ID.eq(rowTenant)).and(c.COLLECTION_ID.eq(DSL.field(DSL.name("t", idName), Long.class)))
+                    .where(rowTenant.eq(tenant)).and(DSL.field(DSL.name("t", s.nameColumn()), String.class).ne(c.NAME))
+                    .fetchOne(0, int.class);
+                if (n > 0) out.add(s.table() + "." + s.nameColumn() + ": " + n);
             }
             return out;
         });

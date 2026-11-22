@@ -426,7 +426,9 @@ class Rdr229RestoreMintedRelabelTest {
         assertThat(plainRow.value2()).as("and its superseded_by_id is the successor's new id").isEqualTo(successor.id());
         assertThat(num(ctx -> CollectionTombstones.invariantViolations(ctx, tenant))).as("R7").isZero();
 
-        // the chunk's origin tag names the new label and id of the first renamed collection; every other key is kept
+        // the chunk's origin tag names the new label of the first renamed collection; its id key, one the file's registry does
+        // not hold (this file has no ids), is stripped and never resolved by the name (P3.11's rule, Rdr229RestoreIdFillTest);
+        // every other key is kept
         Field<JSONB> metadata = DSL.field(DSL.name("c", "metadata"), SQLDataType.JSONB);
         var chunkTable = DSL.table(DSL.name("nexus", "chunks")).as("c");
         Field<String> origin = DSL.function("jsonb_extract_path_text", SQLDataType.VARCHAR, metadata, DSL.val("origin_collection"));
@@ -436,8 +438,8 @@ class Rdr229RestoreMintedRelabelTest {
         assertThat(num(ctx -> ctx.fetchCount(chunkTable, chunkTenant.eq(tenant), keep.eq("yes"))))
             .as("non-vacuity: the tagged chunk restored").isEqualTo(1);
         assertThat(num(ctx -> ctx.fetchCount(chunkTable, chunkTenant.eq(tenant), keep.eq("yes"), origin.eq(successor.label()),
-            originId.eq(Long.toString(successor.id())))))
-            .as("the tag names the new label and the new id of the relabelled collection").isEqualTo(1);
+            originId.isNull())))
+            .as("the tag names the new label of the relabelled collection and no longer carries the source's id").isEqualTo(1);
 
         // note URIs follow their collection: the rows the file held under each old label are under the new one, in one pass
         long noteRows = 0;
