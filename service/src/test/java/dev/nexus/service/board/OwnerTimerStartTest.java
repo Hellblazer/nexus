@@ -44,6 +44,8 @@ class OwnerTimerStartTest {
     private static final String BOOT = "boot-owner-timer-start";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Duration DEADLINE = Duration.ofMinutes(20);
+    /** The timer wakes first at half the deadline, for next up's nudge (RDR-252 audit S2); the deadline follows it. */
+    private static final Duration NUDGE = DEADLINE.dividedBy(2);
 
     StamperEnv se;
     NexusService service;
@@ -168,7 +170,7 @@ class OwnerTimerStartTest {
 
         assertThat(consulted).as("the rebuild consulted the tenants supplier").hasValue(1);
         assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the open red's deadline is armed")
-            .isEqualTo(episode.plus(DEADLINE));
+            .isEqualTo(episode.plus(NUDGE));
         assertThat(scheduler.deadlines()).hasSize(1);
 
         // The timer is the stamper's: a red evaluated by the wiring's stamper after start arms it too.
@@ -203,7 +205,7 @@ class OwnerTimerStartTest {
         scheduler.secondsCalls().get(1).task().run();
 
         assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the retry armed the open red's deadline")
-            .isEqualTo(episode.plus(DEADLINE));
+            .isEqualTo(episode.plus(NUDGE));
         assertThat(scheduler.secondsCalls()).as("a full census ends the retries").hasSize(2);
     }
 
@@ -329,7 +331,7 @@ class OwnerTimerStartTest {
 
         assertThat(armed).as("the live engine's stamper armed a deadline after the red --done write").hasSizeGreaterThan(before);
         assertThat(armed.getLast().millis()).as("the group's 20-minute deadline, counted from the episode")
-            .isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
+            .isBetween(Duration.ofMinutes(9).toMillis(), NUDGE.toMillis());
     }
 
     @Test
@@ -347,7 +349,7 @@ class OwnerTimerStartTest {
         var own = deadlinesArmedFor(f[0]);
         assertThat(own).as("the rebuild read the engine's tenants and armed this tenant's open red, once").hasSize(1);
         assertThat(own.getFirst().millis()).as("this tenant's deadline, not the stale tenant the rebuild visits last")
-            .isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
+            .isBetween(Duration.ofMinutes(9).toMillis(), NUDGE.toMillis());
     }
 
     @Test
@@ -363,7 +365,7 @@ class OwnerTimerStartTest {
         var own = deadlinesArmedFor(f[0]);
         assertThat(own).as("the rebuild reached a tenant with owner rows and no token, and armed its red once").hasSize(1);
         assertThat(own.getFirst().millis()).as("this tenant's deadline, not the stale tenant the rebuild visits last")
-            .isBetween(Duration.ofMinutes(19).toMillis(), DEADLINE.toMillis());
+            .isBetween(Duration.ofMinutes(9).toMillis(), NUDGE.toMillis());
     }
 
     @Test

@@ -39,7 +39,7 @@ class AckDeadlineTimerRestartTest {
     @Test
     void aRestartAfterARefreshKeepsTheOriginalDeadline() {
         OwnerFixture f = openRed();
-        f.push("Z", "Y", "A").done("Z", "failure");
+        f.push("Z", "Y", "C").done("Z", "failure");   // C pushes: the owner A has not, so no ack counts
         f.recordNow(f.decide());   // the refreshed row, same episode
         f.now(EPISODE.plus(Duration.ofMinutes(10)));
 
@@ -70,7 +70,8 @@ class AckDeadlineTimerRestartTest {
 
         OwnerFixture acked = openRed();
         acked.ack("A", "Y");
-        assertThat(acked.decide().deadline()).as("a counting ack closes it").isNull();
+        assertThat(acked.decide().deadline()).as("a counting ack ends the hand-off deadline: the stall deadline replaces it")
+            .isEqualTo(acked.owners.getLast().createdAt().plus(Duration.ofMinutes(60)));
     }
 
     @Test

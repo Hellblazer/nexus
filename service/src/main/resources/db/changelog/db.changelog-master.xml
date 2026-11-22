@@ -2263,6 +2263,12 @@
     <include file="db/changelog/group-001-records.xml"/>
 
     <!--
+        Bead nexus-igea9 (RDR-252 post-close audit S1c): group_records.stall_factor, the number of acknowledgement
+        deadlines an acknowledged red may stay open. One additive column with a default; nothing is backfilled.
+    -->
+    <include file="db/changelog/group-002-stall-factor.xml"/>
+
+    <!--
         RDR-253 amendment (Sam 2026-11-19, option 2): identity_records_creator_ck also admits identity:i<n>, the
         creator a data-credential seat create is stamped with. DDL only (the CHECK widened, no row mutated). After
         identity-001 and group-001, before the grants-nexus-svc.xml runAlways block.

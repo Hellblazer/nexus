@@ -79,8 +79,8 @@ doc:
   writers:
     - the ci-board-adapter AWS Lambda in the conexus repo, with a board-scoped token that can write only this template, not --owner or --push (403)
     - the develop push script, a kind=push row to --push
-    - the owner stamper, kind=owner and kind=clear rows to --owner
-    - a session, its kind=ack row to --owner
+    - the owner stamper, kind=owner, clear and nudge rows to --owner
+    - a session, its kind=ack or kind=disclaim row to --owner
   readers:
     - a session that called tuple_subscribe on board/ci/nexus-develop gets a ping per post
     - a session that called tuple_subscribe on board/ci/nexus-develop--done gets a best-effort wake per completed develop sha
@@ -95,17 +95,19 @@ doc:
     kind:
       run: a workflow run changed state
       job: a job in a run changed state
-      sha: every push run for a sha has completed, cancelled included; a best-effort wake on the --done topic
+      sha: every push run for a sha has completed, cancelled included
       push: a push of develop, on --push
       owner: develop is red; the owner named, on --owner
       clear: develop is green again, on --owner
       ack: the owner acknowledges, on --owner; from is the counted id
-    sha: the 40-hex head sha; present when kind is sha, push, owner, clear or ack; absent before the adapter's FOLD_RESULT_DIMS switch (so is outcome)
+      disclaim: the owner says not mine, on --owner; hands the red on at once
+      nudge: next up is told at half the deadline, once, on --owner
+    sha: the 40-hex head sha; present when kind is sha, push, owner, clear, ack, disclaim or nudge
     outcome:
       success: kind sha; every run concluded success, neutral or skipped
       failure: kind sha; any run concluded failure, timed_out, startup_failure or action_required
       cancelled: kind sha; no run failed and any concluded cancelled or stale
-    branch_outcome: kind sha; outcome plus the latest earlier run of each workflow absent on this sha; read before outcome; needs FOLD_BRANCH_OUTCOME
+    branch_outcome: kind sha; outcome plus the latest earlier run of each workflow absent on this sha; read before outcome
   body:
     state: queued, in_progress or completed; concluded when kind is sha
     conclusion: GitHub's conclusion or null while not completed; absent when kind is sha
@@ -113,22 +115,23 @@ doc:
     job: job name, cut to 64 characters; present only when kind is job
     sha: 40 hex or blank
     run: GitHub run id, an integer; absent when kind is sha
-    n: kind sha, the number of runs in the fold (more than runs lists when entries were dropped); kind push, commits pushed
+    n: kind sha, the number of runs in the fold; kind push, commits pushed
     base: kind push only; develop's sha before the push
     owner: kind owner only; the owner's identity id or null
     owner_alias: kind owner only; the owner's live alias at stamp time; absent when it has none
     next: kind owner only; next-up identity id, or null (none qualifies; handoff, escalated, stamper_error)
     next_alias: kind owner only; next up's live alias at stamp time; absent when it has none
-    reason: kind owner only; earliest_suspect, owner_unleased, owner_not_live, owner_not_member, no_record, chain_gap, handoff, escalated or stamper_error
+    reason: kind owner only; earliest_suspect, owner_unleased, owner_not_live, owner_not_member, no_record, chain_gap, handoff, disclaimed, escalated or stamper_error
+    stalled: kind owner only; true on an escalated row for a red acknowledged and still open
     suspects: kind owner only; shas pushed since the last green, at most ten (suspects_total counts them)
     episode_at: kind owner only; UTC start of the red episode
     refresh: kind owner only; true when the owner is kept
     handoffs: kind owner only; hand-offs so far
-    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters, conclusion GitHub's or null; rows before nexus-1d6pz.11.1 hold [run id, attempt]; trailing entries drop past 1024 bytes
+    runs: kind sha only; one [run id, attempt, workflow, conclusion] per run, sorted; workflow cut to 64 characters, conclusion GitHub's or null; trailing entries drop past 1024 bytes
     carried: kind sha; one [workflow, run id, conclusion, sha] per carried workflow, passing only on success; null if the carry read failed
     carried_n: kind sha; the count before trimming
     attempt: run attempt, an integer; absent when kind is sha
-    url: the run's GitHub actions URL, with an optional job and attempt suffix, or blank
+    url: the run's GitHub actions URL, or blank
   example:
     subspace: board/ci/example-branch
     nonce: 00000000-0000-0000-0000-000000000004

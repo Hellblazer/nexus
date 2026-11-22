@@ -1,0 +1,3 @@
+### Fixed
+
+- **The develop-red owner is no longer handed off from a red its owner is fixing, and an acknowledged red can stall to Sam.** The engine now counts the owner's own stamped push after the red tip as an implicit ack, hands a red on at once when the owner posts a `disclaim` row (reason `disclaimed`), escalates an acknowledged red still open after `stall_factor` (new group setting, 1 to 10, default 3) deadlines from the last ack or push (reason `escalated`, `stalled: true`), posts one `nudge` row to next up at half the deadline when nothing is acknowledged, and logs and counts tips whose `--done` row has no push record (`unrecorded_tips` on the group read). RDR-252 post-close audit S1 to S3 (nexus-igea9).

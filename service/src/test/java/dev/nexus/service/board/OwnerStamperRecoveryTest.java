@@ -409,7 +409,8 @@ class OwnerStamperRecoveryTest {
 
         BoardOwnerWiring wiring = restart(f[0]);
 
-        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("the first wake is next up's nudge, at half the deadline")
+            .isEqualTo(episode.plus(Duration.ofMinutes(10)));
     }
 
     @Test
@@ -418,17 +419,18 @@ class OwnerStamperRecoveryTest {
         se.done(f[0], StamperEnv.BASE, "Y", "failure");
         Instant episode = Instant.parse((String) se.ownerRows(f[0], StamperEnv.BASE).getFirst().get("episode_at"));
         se.env.ids.clock.advance(Duration.ofMinutes(4));
-        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
+        se.push(f[0], StamperEnv.BASE, "Z", "Y", "sess-carol");   // not the owner's push: no implicit ack
         se.done(f[0], StamperEnv.BASE, "Z", "failure");
         assertThat(se.ownerRows(f[0], StamperEnv.BASE).getLast().body()).containsEntry("refresh", true);
 
         BoardOwnerWiring wiring = restart(f[0]);
 
-        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).isEqualTo(episode.plus(Duration.ofMinutes(20)));
+        assertThat(wiring.timer().armedAt(f[0], StamperEnv.BASE)).as("still the original episode's nudge time")
+            .isEqualTo(episode.plus(Duration.ofMinutes(10)));
     }
 
     @Test
-    void noDeadlineIsRevivedForAClearedAnAckedOrAnEscalatedRed() {
+    void noHandOffDeadlineIsRevivedForAClearedAnAckedOrAnEscalatedRed() {
         String[] cleared = redOnY();
         se.done(cleared[0], StamperEnv.BASE, "Y", "failure");
         se.push(cleared[0], StamperEnv.BASE, "Z", "Y", "sess-alpha");
@@ -438,7 +440,9 @@ class OwnerStamperRecoveryTest {
         String[] acked = redOnY();
         se.done(acked[0], StamperEnv.BASE, "Y", "failure");
         se.ack(acked[0], StamperEnv.BASE, "Y", "sess-alpha");
-        assertThat(restart(acked[0]).timer().armedAt(acked[0], StamperEnv.BASE)).isNull();
+        assertThat(restart(acked[0]).timer().armedAt(acked[0], StamperEnv.BASE))
+            .as("an ack ends the hand-off deadline and the nudge; the stall deadline, an hour from the ack, is what is armed")
+            .isAfter(Instant.now().plus(Duration.ofMinutes(55))).isBefore(Instant.now().plus(Duration.ofMinutes(61)));
 
         String[] escalated = redOnY();
         se.done(escalated[0], StamperEnv.BASE, "Y", "failure");

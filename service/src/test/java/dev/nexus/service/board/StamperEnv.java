@@ -118,6 +118,17 @@ final class StamperEnv implements AutoCloseable {
             Map.of("from", stamp, "kind", "ack", "sha", sha), "{}", UUID.randomUUID().toString(), null, stamp);
     }
 
+    /** A {@code disclaim} row on the owner subspace, stamped with the session of the disclaiming identity, and the hook after it. */
+    void disclaim(String tenant, String base, String sha, String stamp) {
+        String topic = base + "--owner";
+        Map<String, String> dims = new LinkedHashMap<>();
+        dims.put("from", stamp);
+        dims.put("kind", "disclaim");
+        dims.put("sha", sha);
+        tuples.out(tenant, "board/ci/" + topic, Map.of("topic", topic), dims, "{}", UUID.randomUUID().toString(), null, stamp);
+        stamper.afterOut(tenant, "board/ci/" + topic, dims, "{}");
+    }
+
     /**
      * An ack row as the engine stores it after stamping: {@code from} an identity id, {@code stamp} the sender session,
      * or null for a row with no session (a raw client, or a hand-typed {@code from}).
@@ -128,10 +139,10 @@ final class StamperEnv implements AutoCloseable {
             Map.of("from", from, "kind", "ack", "sha", sha), "{}", UUID.randomUUID().toString(), null, stamp);
     }
 
-    /** The owner and clear rows of a topic, oldest first. */
+    /** The owner, clear and nudge rows of a topic, oldest first (the sessions' ack and disclaim rows are left out). */
     List<Row> ownerRows(String tenant, String base) {
         return tuples.rdp(tenant, "board/ci/" + base + "--owner", Map.of(), 200, null).stream()
-            .filter(r -> !"ack".equals(r.dims().get("kind")))
+            .filter(r -> !"ack".equals(r.dims().get("kind")) && !"disclaim".equals(r.dims().get("kind")))
             .map(r -> new Row(r.dims().get("kind"), r.dims().get("sha"), r.dims().get("from"), parse(r.body()))).toList();
     }
 

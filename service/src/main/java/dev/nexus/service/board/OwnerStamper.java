@@ -34,6 +34,7 @@ public final class OwnerStamper implements OwnerOutHook {
     private static final Logger log = LoggerFactory.getLogger(OwnerStamper.class);
     private static final String PREFIX = "board/ci/";
     private static final String DONE = "--done";
+    private static final String OWNER = "--owner";
 
     private final TenantScope scope;
     private final TupleRepository tuples;
@@ -98,6 +99,13 @@ public final class OwnerStamper implements OwnerOutHook {
     @Override
     public void afterOut(String tenant, String subspace, Map<String, String> dims, String body) {
         try {
+            String ownerBase = ownerBase(subspace);
+            if (ownerBase != null) {
+                if ("disclaim".equals(dims.get("kind"))) {
+                    onDisclaim(tenant, ownerBase);
+                }
+                return;
+            }
             String base = doneBase(subspace);
             if (base == null) {
                 return;
@@ -114,7 +122,7 @@ public final class OwnerStamper implements OwnerOutHook {
                 return;
             }
             try {
-                evaluate(tenant, base, OwnerDecision.Trigger.DONE);
+                evaluate(tenant, base, OwnerDecision.Trigger.DONE, v.sha());
             } catch (Throwable t) {
                 log.warn("event=board_owner_stamper_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
                 if (DoneVerdict.RED.equals(v.outcome())) {
@@ -124,6 +132,28 @@ public final class OwnerStamper implements OwnerOutHook {
         } catch (Throwable t) {
             log.warn("event=board_owner_stamper_hook_failed error={}", t.getMessage(), t);
         }
+    }
+
+    /**
+     * A {@code disclaim} row on the owner subspace (RDR-252 audit S1b): re-evaluates the topic at once, so the owner's
+     * "not mine" is handed on without waiting for the deadline. The decision, not this hook, judges whose disclaim it
+     * is. A failed evaluation is logged and left to the deadline, which hands the red on anyway.
+     */
+    private void onDisclaim(String tenant, String base) {
+        try {
+            evaluate(tenant, base, OwnerDecision.Trigger.DONE, null);
+        } catch (Throwable t) {
+            log.warn("event=board_owner_disclaim_failed tenant={} base={} error={}", tenant, base, t.getMessage(), t);
+        }
+    }
+
+    /** The base topic of {@code board/ci/<base>--owner}, or null for any other subspace. */
+    static String ownerBase(String subspace) {
+        if (subspace == null || !subspace.startsWith(PREFIX) || !subspace.endsWith(OWNER)) {
+            return null;
+        }
+        String base = subspace.substring(PREFIX.length(), subspace.length() - OWNER.length());
+        return base.isEmpty() || base.contains("--") ? null : base;
     }
 
     /** The base topic of {@code board/ci/<base>--done}, or null for any other subspace. */
@@ -231,10 +261,21 @@ public final class OwnerStamper implements OwnerOutHook {
     // ── one evaluation ───────────────────────────────────────────────────────
 
     private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger) {
+        evaluate(tenant, base, trigger, null);
+    }
+
+    /** {@code doneSha}: the tip of the {@code --done} write that triggered this evaluation, or null. */
+    private void evaluate(String tenant, String base, OwnerDecision.Trigger trigger, String doneSha) {
         scope.withTenant(tenant, ctx -> {
             BoardTopicLock.lock(ctx, tenant, base);
             List<BoardRow> pushes = BoardReads.rows(ctx, tenant, base, "push");
             List<BoardRow> dones = BoardReads.rows(ctx, tenant, base, "done");
+            if (doneSha != null && pushes.stream().noneMatch(p -> doneSha.equals(p.sha()))) {
+                // RDR-252 audit S3: a tip with no push record has no pusher, so an earliest suspect among them hands the
+                // red to the leader as no_record. The push script's failure is silent; this makes it countable.
+                log.warn("event=board_done_tip_unrecorded tenant={} base={} sha={} unrecorded_tips={}", tenant, base, doneSha,
+                    UnrecordedTips.missing(pushes, dones).size());
+            }
             List<BoardRow> owners = BoardReads.rows(ctx, tenant, base, "owner");
             GroupView group = BoardReads.group(groups, identities, tenant, base);
             Identities ids = group == null && owners.isEmpty()
@@ -248,7 +289,7 @@ public final class OwnerStamper implements OwnerOutHook {
             }
             // Armed under the lock, so an older evaluation cannot overwrite a newer one's deadline.
             if (timer != null) {
-                timer.arm(tenant, base, decision.deadline());
+                timer.arm(tenant, base, decision.wakeAt());
             }
             return decision;
         });

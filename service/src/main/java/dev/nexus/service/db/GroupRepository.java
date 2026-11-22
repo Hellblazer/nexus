@@ -49,7 +49,7 @@ import static dev.nexus.service.jooq.nexus.Tables.GROUP_RECORDS;
 public final class GroupRepository {
 
     private static final Set<String> SET_FIELDS =
-        Set.of("leader", "ends", "ended_at", "ack_deadline", "ack_deadline_by_topic", "serves");
+        Set.of("leader", "ends", "ended_at", "ack_deadline", "ack_deadline_by_topic", "serves", "stall_factor");
 
     private final TenantScope scope;
     private final Clock clock;
@@ -71,7 +71,12 @@ public final class GroupRepository {
             if (rec == null) {
                 throw unknown(name);
             }
-            return view(rec, OffsetDateTime.now(clock));
+            Map<String, Object> out = view(rec, OffsetDateTime.now(clock));
+            // RDR-252 audit S3: the tips in the served topics' --done rows that no push record names, so a push record
+            // the script failed to write is a number on the read and not only a line on one session's stderr.
+            out.put("unrecorded_tips",
+                dev.nexus.service.board.UnrecordedTips.count(ctx, tenant, GroupInput.servesOf(rec.getServes())));
+            return out;
         });
     }
 
@@ -119,6 +124,8 @@ public final class GroupRepository {
         OffsetDateTime ends = GroupInput.instant(body.get("ends"), "ends");
         int ackDeadline = body.get("ack_deadline") == null ? GroupInput.DEFAULT_DEADLINE
             : GroupInput.deadline(body.get("ack_deadline"), "ack_deadline");
+        int stallFactor = body.get("stall_factor") == null ? GroupInput.DEFAULT_STALL_FACTOR
+            : GroupInput.stallFactor(body.get("stall_factor"));
         List<String> serves = body.get("serves") == null ? List.of() : GroupInput.serves(body.get("serves"));
         Map<String, Integer> byTopic = body.get("ack_deadline_by_topic") == null ? Map.of()
             : GroupInput.byTopic(body.get("ack_deadline_by_topic"));
@@ -135,6 +142,7 @@ public final class GroupRepository {
                 .set(GROUP_RECORDS.PURPOSE, purpose).set(GROUP_RECORDS.REQUESTED_BY, requestedBy)
                 .set(GROUP_RECORDS.FORMED_AT, now).set(GROUP_RECORDS.ENDS, ends)
                 .set(GROUP_RECORDS.ACK_DEADLINE, ackDeadline).set(GROUP_RECORDS.ACK_DEADLINE_BY_TOPIC, json)
+                .set(GROUP_RECORDS.STALL_FACTOR, stallFactor)
                 .set(GROUP_RECORDS.SERVES, GroupInput.servesJson(serves))
                 .onConflict(GROUP_RECORDS.TENANT_ID, GROUP_RECORDS.NAME).doNothing().execute();
             Map<String, Object> reformed = null;
@@ -159,6 +167,7 @@ public final class GroupRepository {
                 old.setEnds(ends);
                 old.setEndedAt(null);
                 old.setAckDeadline(ackDeadline);
+                old.setStallFactor(stallFactor);
                 old.setAckDeadlineByTopic(json);
                 old.setServes(GroupInput.servesJson(serves));
                 old.update();
@@ -216,6 +225,7 @@ public final class GroupRepository {
         boolean setEnds = body.containsKey("ends");
         OffsetDateTime ends = setEnds ? GroupInput.instant(body.get("ends"), "ends") : null;
         Integer ack = body.containsKey("ack_deadline") ? GroupInput.deadline(body.get("ack_deadline"), "ack_deadline") : null;
+        Integer stall = body.containsKey("stall_factor") ? GroupInput.stallFactor(body.get("stall_factor")) : null;
         List<String> serves = body.containsKey("serves") ? GroupInput.serves(body.get("serves")) : null;
         Map<String, Integer> byTopic = body.containsKey("ack_deadline_by_topic")
             ? GroupInput.byTopic(body.get("ack_deadline_by_topic")) : null;
@@ -246,6 +256,9 @@ public final class GroupRepository {
             }
             if (ack != null) {
                 rec.setAckDeadline(ack);
+            }
+            if (stall != null) {
+                rec.setStallFactor(stall);
             }
             rec.setServes(GroupInput.servesJson(newServes));
             rec.setAckDeadlineByTopic(IdentityRows.json(new LinkedHashMap<String, Object>(newByTopic)));
@@ -518,6 +531,7 @@ public final class GroupRepository {
         m.put("ended_at", IdentityRows.str(r.getEndedAt()));
         m.put("ack_deadline", r.getAckDeadline());
         m.put("ack_deadline_by_topic", IdentityRows.parse(r.getAckDeadlineByTopic()));
+        m.put("stall_factor", r.getStallFactor());
         m.put("serves", new ArrayList<>(GroupInput.servesOf(r.getServes())));
         return m;
     }

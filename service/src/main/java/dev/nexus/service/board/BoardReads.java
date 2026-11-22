@@ -72,7 +72,9 @@ final class BoardReads {
         if (rec.get("ack_deadline_by_topic") instanceof Map<?, ?> m) {
             m.forEach((k, v) -> byTopic.put(String.valueOf(k), ((Number) v).intValue()));
         }
-        return new GroupView(name, (String) rec.get("leader"), members, ((Number) rec.get("ack_deadline")).intValue(), byTopic);
+        int stall = rec.get("stall_factor") instanceof Number n ? n.intValue() : GroupView.DEFAULT_STALL_FACTOR;
+        return new GroupView(name, (String) rec.get("leader"), members, ((Number) rec.get("ack_deadline")).intValue(), byTopic,
+            stall);
     }
 
     /**
@@ -83,7 +85,7 @@ final class BoardReads {
                                  List<BoardRow> owners, GroupView group) {
         Set<String> stamps = new LinkedHashSet<>();
         pushes.forEach(r -> addStamp(stamps, r));
-        owners.stream().filter(r -> "ack".equals(r.kind())).forEach(r -> addStamp(stamps, r));
+        owners.stream().filter(r -> "ack".equals(r.kind()) || "disclaim".equals(r.kind())).forEach(r -> addStamp(stamps, r));
         Map<String, String> rawIdentity = new LinkedHashMap<>();
         for (String stamp : stamps) {
             identities.sessionIdentity(tenant, stamp).ifPresent(s -> rawIdentity.put(stamp, s.identity()));

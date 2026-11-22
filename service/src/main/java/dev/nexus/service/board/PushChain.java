@@ -108,7 +108,7 @@ public final class PushChain {
         }
     }
 
-    private static String baseOf(BoardRow push) {
+    static String baseOf(BoardRow push) {
         try {
             JsonNode body = push.body() == null ? null : MAPPER.readTree(push.body());
             return body != null && body.hasNonNull("base") ? body.get("base").asText() : null;
