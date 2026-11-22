@@ -28,6 +28,9 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -77,6 +80,11 @@ class Rdr229P35bIdTwinIntegrationTest {
     /** The rest of the leaf: the shared leaf index sees both collections. */
     static final String OTHER = "knowledge__p35b-twin-other__minilm-l6-v2-384__v1";
     static final String ID_INDEX = "pci_p35b_twin_own_id";
+    /** The second collection's id index, and each collection's name index (the original's per-collection index). */
+    static final String ID_INDEX_OTHER = "pci_p35b_twin_other_id";
+    static final String NAME_INDEX = "pci_p35b_twin_own_name";
+    static final String NAME_INDEX_OTHER = "pci_p35b_twin_other_name";
+    static final Set<String> PER_COLLECTION_INDEXES = Set.of(ID_INDEX, ID_INDEX_OTHER, NAME_INDEX, NAME_INDEX_OTHER);
     static final String ADMIN_ROLE = "p35b_twin_admin";
     static final String ADMIN_PASS = "p35b_twin_admin_pass";
     static final int ROWS = 6000;
@@ -95,6 +103,7 @@ class Rdr229P35bIdTwinIntegrationTest {
     TenantScope explainScope;
     String leaf;
     long ownId;
+    long otherId;
     Vector query;
     final AtomicInteger sentinel = new AtomicInteger();
 
@@ -181,9 +190,13 @@ class Rdr229P35bIdTwinIntegrationTest {
                 seedCollection(ctx, c, rnd);
             }
             ownId = CollectionIds.require(ctx, TENANT, OWN);
+            otherId = CollectionIds.require(ctx, TENANT, OTHER);
             // Serial build (nexus-zpd9o): a parallel HNSW build does not fit a container's default /dev/shm.
             ctx.set(DSL.name("max_parallel_maintenance_workers"), DSL.inline(0)).execute();
             PgContainerHelper.createLeafHnswIndexOnId(su, "nexus", leaf, ID_INDEX, "embedding_384", ownId);
+            PgContainerHelper.createLeafHnswIndexOnId(su, "nexus", leaf, ID_INDEX_OTHER, "embedding_384", otherId);
+            PgContainerHelper.createLeafHnswIndex(su, "nexus", leaf, NAME_INDEX, "embedding_384", OWN);
+            PgContainerHelper.createLeafHnswIndex(su, "nexus", leaf, NAME_INDEX_OTHER, "embedding_384", OTHER);
             PgContainerHelper.analyzeTable(su, DSL.table(DSL.name("nexus", leaf)));
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
@@ -360,5 +373,96 @@ class Rdr229P35bIdTwinIntegrationTest {
                     .contains("using " + ID_INDEX + " on " + leaf);
             }
         }
+    }
+
+    // -- several collections in one call --------------------------------------------------------------
+
+    /**
+     * The chunks-leaf access path of a logged plan, as a kind: the per-collection index (any of the four partial ones), the
+     * leaf's own unpredicated index, or the node type of a non-index read. A partial index on one collection's id or name
+     * is implied only by a predicate that names that one collection (the kinds rank per-collection index, then the
+     * leaf's unpredicated vector index, then a btree index of the leaf, then the node type of a read without an index): under a custom plan {@code collection_id = ANY('{a,b}')}
+     * becomes {@code a OR b} for the proof and implies neither, and so does {@code collection = ANY('{x,y}')}.
+     */
+    static String accessKind(String plan, String leafName) {
+        Matcher m = Pattern.compile("(Index Only Scan|Index Scan|Bitmap Heap Scan|Bitmap Index Scan|Seq Scan)(?: Backward)?"
+            + "(?: using (\\S+))? on " + Pattern.quote(leafName) + "\\b").matcher(plan);
+        List<String> rank = List.of("per-collection index", "leaf vector index", "leaf btree index");
+        String kind = null;
+        while (m.find()) {
+            String index = m.group(2);
+            String k = index == null ? m.group(1)
+                : PER_COLLECTION_INDEXES.contains(index) ? "per-collection index"
+                : index.contains("embedding") ? "leaf vector index" : "leaf btree index";
+            int r = rank.indexOf(k);
+            if (kind == null || (r >= 0 && (rank.indexOf(kind) < 0 || r < rank.indexOf(kind)))) kind = k;
+        }
+        return kind == null ? "no read of " + leafName : kind;
+    }
+
+    private Table<?> byNames(Family family, String[] colls) {
+        return switch (family) {
+            case PLAIN -> PLAIN_SEARCH_384.call(query, colls, null, null, K, MODEL, TENANT, true);
+            case SCOPED -> SEARCH_METADATA_SCOPED_384.call(query, colls, null, null, null, null, null, null, null, null, K,
+                MODEL, TENANT, true);
+            default -> throw new IllegalArgumentException(family.name());
+        };
+    }
+
+    private Table<?> byIds(Family family, Long[] ids) {
+        return switch (family) {
+            case PLAIN -> PLAIN_SEARCH_384_BY_ID.call(query, ids, null, null, K, MODEL, TENANT, true);
+            case SCOPED -> SEARCH_METADATA_SCOPED_384_BY_ID.call(query, ids, null, null, null, null, null, null, null, null, K,
+                MODEL, TENANT, true);
+            default -> throw new IllegalArgumentException(family.name());
+        };
+    }
+
+    private static String originalName(Family family) {
+        return twinName(family).replace("_by_id", "");
+    }
+
+    /** The access kinds of calls 6..10 of one session of {@code fn}, read from auto_explain. */
+    private List<String> sessionKinds(Table<?> fn, String logged) throws Exception {
+        int from = PgContainerHelper.serverLog(pg).length();
+        for (int i = 0; i < CALLS; i++) {
+            assertThat(servingCall(fn, true)).as("%s: call %d finds rows", logged, i + 1).isPositive();
+        }
+        List<String> plans = new ArrayList<>();
+        for (String p : loggedPlans(from, logged)) {
+            if (!logged.endsWith("_by_id") && p.contains(logged + "_by_id")) continue;
+            plans.add(p);
+        }
+        assertThat(plans).as("%s: auto_explain logged a plan for each of the %d calls", logged, CALLS).hasSize(CALLS);
+        List<String> kinds = new ArrayList<>();
+        for (int call = FIRST_GENERIC_CANDIDATE; call <= CALLS; call++) {
+            kinds.add(accessKind(plans.get(call - 1), leaf));
+        }
+        System.out.printf("p35b-twin %s, calls %d..%d: %s%n%s%n", logged, FIRST_GENERIC_CANDIDATE, CALLS, kinds,
+            plans.get(CALLS - 1));
+        return kinds;
+    }
+
+    @ParameterizedTest(name = "{0}: two ids take the same kind of access path as two names")
+    @EnumSource(value = Family.class, names = {"PLAIN", "SCOPED"})
+    void twoCollectionsInOneCall_theTwinsAccessPathIsTheOriginalsKind(Family family) throws Exception {
+        List<String> named = sessionKinds(byNames(family, new String[] {OWN, OTHER}), originalName(family));
+        List<String> twin = sessionKinds(byIds(family, new Long[] {ownId, otherId}), twinName(family));
+        assertThat(twin).as("%s: calls %d..%d of a session, two ids vs two names", family, FIRST_GENERIC_CANDIDATE, CALLS)
+            .isEqualTo(named);
+        assertThat(named).as("%s: non-vacuity, the plans name a read of the chunks leaf", family)
+            .noneMatch(k -> k.startsWith("no read"));
+    }
+
+    @org.junit.jupiter.api.Test
+    void accessKind_tellsThePerCollectionIndexFromTheLeafIndexAndAScan() {
+        String l = "chunks_m1_t_2";
+        assertThat(accessKind("->  Index Scan using " + ID_INDEX + " on " + l + " c  (cost=1)", l)).isEqualTo("per-collection index");
+        assertThat(accessKind("->  Index Scan using " + l + "_embedding_384_idx on " + l + " c  (cost=1)", l)).isEqualTo("leaf vector index");
+        assertThat(accessKind("->  Bitmap Index Scan on " + l + "_cid_uq  (cost=1)\n->  Index Scan using " + l
+            + "_embedding_384_idx on " + l + " c", l)).isEqualTo("leaf vector index");
+        assertThat(accessKind("->  Index Scan using " + l + "_cid_uq on " + l + " c  (cost=1)", l)).isEqualTo("leaf btree index");
+        assertThat(accessKind("->  Seq Scan on " + l + " c  (cost=1)", l)).isEqualTo("Seq Scan");
+        assertThat(accessKind("->  Seq Scan on other c", l)).startsWith("no read");
     }
 }
