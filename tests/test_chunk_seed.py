@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -53,7 +54,8 @@ def _stored_row(tenant: str, chash: str) -> tuple[str, dict, list[float]]:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-1", "-f", "-"],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
+        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
     )
     assert proc.returncode == 0, proc.stderr
     row = json.loads(proc.stdout.strip())
@@ -140,7 +142,8 @@ def _psql_rows(sql: str) -> list:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-A", "-t", "-1", "-f", "-"],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
+        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
     )
     assert proc.returncode == 0, proc.stderr
     return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
@@ -151,7 +154,8 @@ def _exec(sql: str) -> None:
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-1", "-f", "-"],
-        input=sql, capture_output=True, text=True, timeout=60,
+        input=sql, capture_output=True, text=True, encoding="utf-8", timeout=60,
+        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
     )
     assert proc.returncode == 0, proc.stderr
 
