@@ -609,8 +609,16 @@ public final class Main {
         // nexus-wym0l: fix and log the fan-out arm cap against the pool this process runs with.
         pgVectorRepo.startupFanoutArmPermits();
 
+        // RDR-229 P3.5a: the gate-3 signal the registry and the rename refusal read, and what a rename from gate 3 waits for.
+        // Both read the completion check, which starts after the service (it needs the admin connection and the boot-work
+        // registry), so they go through this holder and read false (not consulted) until it is set. One read per call, no cache.
+        var completionRef = new java.util.concurrent.atomic.AtomicReference<dev.nexus.service.datamove.CompletionBootWork>();
+        dev.nexus.service.datamove.Gate3 gate3 = () -> completionRef.get() != null && completionRef.get().gate3().holds();
+        dev.nexus.service.datamove.RenameReadiness renameReadiness = () -> completionRef.get() == null
+                ? dev.nexus.service.datamove.RenameReadiness.Missing.NONE : completionRef.get().renameReadiness().missing();
         var service = new NexusService(port, token, ds, docEmbedRouter, pgVectorRepo, reranker,
-                localEmbedActivitySupplier, tupleTemplateRegistry);
+                localEmbedActivitySupplier, tupleTemplateRegistry, null, System::getenv,
+                () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, gate3, renameReadiness);
         // RDR-210 Step 4 (nexus-un7vj): /version and /v1/status report the profile, the reranker and any
         // degraded-boot description beside the embedding mode. Bound before the listener starts.
         service.embedPosture(dev.nexus.service.http.EmbedPosture.of(plan, reranker));
@@ -688,6 +696,7 @@ public final class Main {
         var completionCheck = startCompletionBootWork(bootWork, adminConnection);
         // The check reads again when a worker's move completes and when a reconciler pass ends; its 60 s poll backs those up.
         if (completionCheck != null) {
+            completionRef.set(completionCheck);
             if (dataMoveWorker != null) {
                 dataMoveWorker.onMoveCompleted(completionCheck::onMoveCompleted);
             }
