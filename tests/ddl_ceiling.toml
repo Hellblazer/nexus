@@ -258,7 +258,7 @@ migration_wal_bytes_per_worker = 12143000
 # 2841 -> 2843 (2026-11-22, nexus-p2m1x.22, RDR-229 P3.4): vectors-080-1 creates nexus.rdr229_gate_latch, the install-wide gate 3 latch
 # (linda's allocation): the CREATE TABLE and its primary key's index, +2. No row changed. P3.4's id indexes are runtime DDL after gate 2 and are not counted here.
 # Measured: chas lab-m via lab-remote, 2026-11-22, scoped substrate run of tests/test_scenario_journeys.py::test_store_put_is_searchable_and_catalogued on
-# 9712dd4513 (bob's 3bdb8a5b72 + P3.4; gate jar rebuilt in the same command): ddl: migration=2843. Under Sam's 2860 cap.
+# 4b0d995718 (P3.4 on the Phase 3 stack b7e58b6c5f; gate jar rebuilt in the same command): ddl: migration=2843, as on 9712dd4513 before the rebase. Under Sam's 2860 cap.
 migration_ddl_per_worker = 2843
 migration_ddl_per_worker_tolerance = 0.0
 
