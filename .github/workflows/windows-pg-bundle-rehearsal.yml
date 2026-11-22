@@ -576,14 +576,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path target\nexus-service-1.0-SNAPSHOT.jar)) { throw 'the package build wrote no shaded jar' }
 
+      # The label test (integration) and the psql seed helpers' own tests (not integration), which the conformance
+      # step cannot run either, since they need the engine substrate: 1 + 14 cases, so -m keeps both markers.
       - name: Label test
         run: |
-          uv run --python 3.13 --frozen pytest tests/integration/test_rdr229_p36_label_windows.py -m integration -p no:cacheprovider -q -rs --junitxml=label-windows-junit.xml
+          uv run --python 3.13 --frozen pytest tests/integration/test_rdr229_p36_label_windows.py tests/test_chunk_seed.py -m "not lint and not slow" -p no:cacheprovider -q -rs --junitxml=label-windows-junit.xml
 
       - name: Non-vacuity floor
         if: ${{ !cancelled() }}
         run: |
-          uv run --python 3.13 --frozen python scripts/check_junit_floor.py label-windows-junit.xml --min-passed 1 --max-skipped 0 --require-passed test_a_label_with_a_space_percent_colon_and_non_ascii_registers_lists_searches_and_renames
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py label-windows-junit.xml --min-passed 15 --max-skipped 0 --require-passed test_a_label_with_a_space_percent_colon_and_non_ascii_registers_lists_searches_and_renames
 
       - name: Stop stray engine and Postgres processes (always)
         if: always()
