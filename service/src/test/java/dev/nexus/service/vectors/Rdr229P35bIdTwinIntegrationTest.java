@@ -36,8 +36,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
-import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_384;
-import static dev.nexus.service.jooq.nexus.Tables.HYBRID_SEARCH_384_BY_ID;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384;
 import static dev.nexus.service.jooq.nexus.Tables.MANIFEST_SEARCH_384_BY_ID;
 import static dev.nexus.service.jooq.nexus.Tables.PLAIN_SEARCH_384;
@@ -52,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-229 P3.5b (nexus-p2m1x.24, linda 2026-11-22): the id-path twins {@code <name>_by_id} vectors-077 adds.
  *
  * <p><b>Same rows.</b> Over a stamped store (every chunk and manifest row carries its collection id), one twin of each family
- * (plain, hybrid, manifest, scoped, text-gated) returns exactly the rows its name function returns for the same collection,
+ * (plain, manifest, scoped, text-gated; hybrid_search has no engine caller and no twin) returns exactly the rows its name function returns for the same collection,
  * in the same order. Both run on the exact route (index scans off), so neither result is an approximate HNSW walk and the
  * comparison is of the functions, not of two graph walks. Every result is non-empty and the sensitive test is on.
  *
@@ -64,8 +62,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code plan_cache_mode = force_custom_plan}), and the plans {@code auto_explain} logs for the sixth to tenth calls must walk
  * the id index. The scan alternatives are penalised (enable_seqscan, enable_bitmapscan, enable_sort, enable_hashjoin off), so
  * the planner takes the id index whenever it can prove it and the shared leaf index otherwise: the assertion tells the two
- * apart. hybrid_search ranks with window functions and walks no index; for it the sixth call's plan must carry the id as a
- * constant ({@code '{<id>}'::bigint[]}), which is what proves a partial index.
+ * apart.
  *
  * <p>A dedicated container (PgContainerHelper#startDedicated's roster): {@code auto_explain} on {@code nexus_svc} is
  * cluster-wide and the plans are read from the container's own server log.
@@ -107,7 +104,7 @@ class Rdr229P35bIdTwinIntegrationTest {
     Vector query;
     final AtomicInteger sentinel = new AtomicInteger();
 
-    enum Family { PLAIN, HYBRID, MANIFEST, SCOPED, TEXT_GATED }
+    enum Family { PLAIN, MANIFEST, SCOPED, TEXT_GATED }
 
     @BeforeAll
     void startAll() throws Exception {
@@ -255,7 +252,6 @@ class Rdr229P35bIdTwinIntegrationTest {
         String[] colls = {OWN};
         return switch (family) {
             case PLAIN -> PLAIN_SEARCH_384.call(query, colls, null, null, K, MODEL, TENANT, true);
-            case HYBRID -> HYBRID_SEARCH_384.call(query, WORD, colls, null, K, true);
             case MANIFEST -> MANIFEST_SEARCH_384.call(query, null, null, colls, null, null, null, null, K, MODEL, TENANT, true);
             case SCOPED -> SEARCH_METADATA_SCOPED_384.call(query, colls, null, null, null, null, null, null, null, null, K,
                 MODEL, TENANT, true);
@@ -268,7 +264,6 @@ class Rdr229P35bIdTwinIntegrationTest {
         Long[] ids = {ownId};
         return switch (family) {
             case PLAIN -> PLAIN_SEARCH_384_BY_ID.call(query, ids, null, null, K, MODEL, TENANT, true);
-            case HYBRID -> HYBRID_SEARCH_384_BY_ID.call(query, WORD, ids, null, K, true);
             case MANIFEST -> MANIFEST_SEARCH_384_BY_ID.call(query, null, null, ids, null, null, null, null, K, MODEL, TENANT,
                 true);
             case SCOPED -> SEARCH_METADATA_SCOPED_384_BY_ID.call(query, ids, null, null, null, null, null, null, null, null, K,
@@ -281,7 +276,6 @@ class Rdr229P35bIdTwinIntegrationTest {
     private static String twinName(Family family) {
         return switch (family) {
             case PLAIN -> "plain_search_384_by_id";
-            case HYBRID -> "hybrid_search_384_by_id";
             case MANIFEST -> "manifest_search_384_by_id";
             case SCOPED -> "search_metadata_scoped_384_by_id";
             case TEXT_GATED -> "text_gated_search_hnsw_first_384_by_id";
@@ -355,23 +349,16 @@ class Rdr229P35bIdTwinIntegrationTest {
     @ParameterizedTest(name = "{0}: the sixth call of a session proves the id index")
     @EnumSource(Family.class)
     void theSixthCallOfASession_provesThePerCollectionIdIndex(Family family) throws Exception {
-        boolean hybrid = family == Family.HYBRID;
         int from = PgContainerHelper.serverLog(pg).length();
         for (int i = 0; i < CALLS; i++) {
-            assertThat(servingCall(byId(family), !hybrid)).as("%s: call %d finds rows", family, i + 1).isPositive();
+            assertThat(servingCall(byId(family), true)).as("%s: call %d finds rows", family, i + 1).isPositive();
         }
         List<String> plans = loggedPlans(from, twinName(family));
         assertThat(plans).as("%s: auto_explain logged a plan for each of the %d calls", family, CALLS).hasSize(CALLS);
-        String constant = "'{" + ownId + "}'::bigint[]";
         for (int call = FIRST_GENERIC_CANDIDATE; call <= CALLS; call++) {
             String plan = plans.get(call - 1);
-            if (hybrid) {
-                assertThat(plan).as("%s: call %d is planned with the id as a constant%n%s", family, call, plan)
-                    .contains(constant);
-            } else {
-                assertThat(plan).as("%s: call %d walks the per-collection id index%n%s", family, call, plan)
-                    .contains("using " + ID_INDEX + " on " + leaf);
-            }
+            assertThat(plan).as("%s: call %d walks the per-collection id index%n%s", family, call, plan)
+                .contains("using " + ID_INDEX + " on " + leaf);
         }
     }
 
