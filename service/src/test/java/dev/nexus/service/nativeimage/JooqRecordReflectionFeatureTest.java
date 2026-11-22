@@ -324,7 +324,8 @@ class JooqRecordReflectionFeatureTest {
     // record type (GroupRecordsRecord), +1.
     // 150 -> 151: nexus-p2m1x.22 (RDR-229 P3.4), vectors-080-rdr229-gate-latch.xml added the table nexus.rdr229_gate_latch, one generated
     // record type (Rdr229GateLatchRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 151;
+    // 151 -> 191: nexus-p2m1x.24 (RDR-229 P3.5b), vectors-077-100..139 added 40 id twins (<name>_by_id), 37 RETURNS TABLE and three SETOF bytea, one generated record type each, +40.
+    private static final int EXPECTED_RECORD_TYPES = 191;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

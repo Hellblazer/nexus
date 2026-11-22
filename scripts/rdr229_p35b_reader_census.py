@@ -223,10 +223,11 @@ def reads(stmt):
 # ---------------------------------------------------------------- live objects
 master = re.sub(r"<!--.*?-->", "", (RES / "db/changelog/db.changelog-master.xml").read_text(), flags=re.S)
 includes = re.findall(r'<include\s+file="([^"]+)"', master)
-# P3.5b's own redefinitions: left out of the baseline (the surface it disposes), read by --live
+# P3.5b's own redefinitions: left out of the baseline (the surface it disposes), read by --live. An object P3.5b's files
+# create that no earlier changeset defines (the id twins <name>_by_id, linda 2026-11-22) is in the baseline all the same:
+# it is a live reader the dispositions must name, and it has no earlier text to be disposed instead of.
 P35B_OWN = {"db/changelog/vectors-077-rdr229-p35b-readers-both.xml", "db/changelog/vectors-078-rdr229-p35b-readers-continue.xml"}
-if "--live" not in sys.argv:
-    includes = [i for i in includes if i not in P35B_OWN]
+BASELINE = "--live" not in sys.argv
 FN_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(nexus\.[a-z0-9_]+)\s*\(", re.I)
 FN_DROP = re.compile(r"DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(nexus\.[a-z0-9_]+)", re.I)
 VIEW_RE = re.compile(r"CREATE\s+(?:OR\s+REPLACE\s+)?(MATERIALIZED\s+)?VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?(nexus\.[a-z0-9_]+)", re.I)
@@ -272,6 +273,7 @@ def stmt_end(text, start):
 
 live = {}  # key -> (kind, object, file, create_line, body_line, body)
 for inc in includes:
+    own = BASELINE and inc in P35B_OWN
     p = RES / inc
     if not p.exists():
         continue
@@ -299,6 +301,8 @@ for inc in includes:
     for mm in POL_DROP.finditer(text):
         ev.append((mm.start(), "drop", ("policy", f"{mm.group(2).lower()}.{mm.group(1).strip(chr(34)).lower()}"), mm))
     for pos, what, key, mm in sorted(ev, key=lambda e: e[0]):
+        if own and key in live:
+            continue  # a P3.5b redefinition of an object the baseline already holds: that object is what P3.5b disposes
         if what == "drop":
             live.pop(key, None)
             continue
