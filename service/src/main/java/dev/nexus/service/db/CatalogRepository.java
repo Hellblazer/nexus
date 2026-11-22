@@ -10638,6 +10638,10 @@ public final class CatalogRepository {
         // name pass the registry check, which is the stranding this refusal exists to stop. The
         // next write re-reads the row, finds the successor and is refused.
         CollectionRegistry.evict(tenant, name);
+        // nexus-afkjy: rederiveOwner above may have changed the successor's owner_id, which its cached row also holds.
+        if (updated > 0 && supersededBy != null && !supersededBy.isEmpty()) {
+            CollectionRegistry.evict(tenant, supersededBy);
+        }
         return updated;
     }
 

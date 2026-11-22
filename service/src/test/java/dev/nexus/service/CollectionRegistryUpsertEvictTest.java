@@ -76,7 +76,14 @@ class CollectionRegistryUpsertEvictTest {
     }
 
     private void upsert(String tenant, String name, String contentType) {
+        upsert(tenant, name, contentType, "");
+    }
+
+    private void upsert(String tenant, String name, String contentType, String owner) {
         Map<String, Object> coll = new HashMap<>();
+        if (!owner.isEmpty()) {
+            coll.put("owner_id", owner);
+        }
         coll.put("name", name);
         coll.put("content_type", contentType);
         coll.put("model_version", "v1");
@@ -114,5 +121,22 @@ class CollectionRegistryUpsertEvictTest {
         upsert(tenant, other, "docs");
 
         assertThat(CollectionRegistry.cached(tenant, kept)).as("only the upserted name is evicted").isPresent();
+    }
+
+    @Test
+    void aSupersedeEvictsItsSuccessorToo_whoseOwnerItMayHaveRederived() throws Exception {
+        String tenant = newTenant("succ");
+        int n = SEQ.incrementAndGet();
+        String retired = "afkjy-retired-" + n;
+        String successor = "afkjy-successor-" + n;
+        // distinct owners: two live knowledge rows on one model and version would hold the same tuple
+        upsert(tenant, retired, "knowledge", "owner-retired-" + n);
+        upsert(tenant, successor, "knowledge", "owner-successor-" + n);
+        assertThat(requiredContentType(tenant, successor)).isEqualTo("knowledge");
+        assertThat(CollectionRegistry.cached(tenant, successor)).as("require warmed the successor").isPresent();
+
+        repo.supersedeCollection(tenant, retired, successor, null);
+
+        assertThat(CollectionRegistry.cached(tenant, successor)).as("the supersede evicted the successor").isEmpty();
     }
 }
