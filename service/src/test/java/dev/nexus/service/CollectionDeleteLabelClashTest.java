@@ -67,9 +67,11 @@ class CollectionDeleteLabelClashTest {
         fx.register(clash);
         fx.asSuperuser(ctx -> {
             ctx.alterTable(CATALOG_COLLECTIONS).dropConstraint(CATALOG_COLLECTIONS.getPrimaryKey().getName()).cascade().execute();
-            // Schema-qualified: the superuser connection's search_path does not include nexus, so an unqualified
-            // DROP INDEX IF EXISTS finds nothing, succeeds silently, and the live-label index keeps refusing the twin.
-            // (jOOQ DSL, not a string statement: the raw-SQL gate counts those.)
+            // The superuser connection's search_path does not include nexus, and jOOQ renders DROP INDEX without the
+            // schema even for a qualified name (observed: drop index if exists "idx_catalog_collections_live_label"), so
+            // IF EXISTS found nothing and the index kept refusing the twin. Point this connection at nexus first; it is
+            // closed after the lambda. (jOOQ DSL, not a string statement: the raw-SQL gate counts those.)
+            ctx.setSchema("nexus").execute();
             ctx.dropIndexIfExists(org.jooq.impl.DSL.name("nexus", "idx_catalog_collections_live_label")).execute();
             Object stillThere = ctx.select(org.jooq.impl.DSL.function("to_regclass", Object.class,
                     org.jooq.impl.DSL.inline("nexus.idx_catalog_collections_live_label"))).fetchOne(0);
