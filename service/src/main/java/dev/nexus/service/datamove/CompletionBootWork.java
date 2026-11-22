@@ -317,7 +317,8 @@ public final class CompletionBootWork implements AutoCloseable {
             : "waits (" + unsatisfied + " of " + total + " stamp moves incomplete"
                 + (r.supersededByCheckPresent() ? "" : "; the superseded_by CHECK is missing") + ")";
         String g2 = r.gate2() ? "holds" : (r.gate1() ? "waits (a swap or validation move is incomplete)" : "waits on gate 1");
-        String g3 = r.gate3() ? "holds" : "waits: " + r.gate3Why();
+        String g3 = r.gate3() ? (r.gate3PciNotApplicable() ? "holds (per-collection indexing is off: no id index is required)" : "holds")
+            : "waits: " + r.gate3Why();
         return "gate 1 " + g1 + "; gate 2 " + g2 + "; gate 3 " + g3;
     }
 

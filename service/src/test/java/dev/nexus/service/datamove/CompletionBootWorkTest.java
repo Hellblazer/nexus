@@ -136,8 +136,8 @@ class CompletionBootWorkTest {
         var work = new CompletionBootWork(registry, live(new CompletionCheck.ReadSet(List.of(), List.of())));
         work.publish();
         var f = field(work);
-        assertThat(f.get("summary").asText()).isEqualTo("gate 1 holds; gate 2 holds; gate 3 waits: this release builds no id-predicate index (P3.4), "
-            + "so no collection has a valid one");
+        assertThat(f.get("summary").asText()).isEqualTo("gate 1 holds; gate 2 holds; gate 3 waits: the PCI coverage (P3.4) is not installed or could not be read "
+            + "(no catalog, or no registry rows visible), so nothing says the id indexes exist");
         assertThat(f.get("gates_holding").asInt()).isEqualTo(2);
     }
 

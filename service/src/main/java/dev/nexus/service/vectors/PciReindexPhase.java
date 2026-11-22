@@ -82,7 +82,8 @@ final class PciReindexPhase {
             if (!snapshotIndexes.contains(e.getKey())) {
                 continue;   // gone: the state forgets it with the snapshot
             }
-            if (writeAnchor(pass, owed.leaf(), owed.dimension(), new Build(e.getKey(), owed.collection()))) {
+            if (writeAnchor(pass, owed.leaf(), owed.dimension(),
+                new Build(e.getKey(), owed.collection(), owed.collectionId()))) {
                 state.anchorWritten(e.getKey());
                 written.add(e.getKey());
                 log.info("event=pci_anchor_retried index={} leaf={}", e.getKey(), PciReconciler.leafId(owed.leaf()));
@@ -133,14 +134,19 @@ final class PciReindexPhase {
                     PciReconciler.leafId(leaf), name, r.collection(), r.trigger().label(), r.bytes());
                 // A fresh graph, a fresh anchor (built, rows and bytes now). One that is not written is retried at the
                 // start of the next pass, and the index is not judged against its old anchor meanwhile.
-                boolean anchored = writeAnchor(pass, leaf, subject.dimension(), new Build(name, r.collection()));
+                Long id = subject.index().collectionId();
+                boolean anchored = writeAnchor(pass, leaf, subject.dimension(), new Build(name, r.collection(), id));
                 if (!anchored) {
-                    state.anchorOwed(name, leaf, subject.dimension(), r.collection());
+                    state.anchorOwed(name, leaf, subject.dimension(), r.collection(), id);
                 }
                 if (r.vacuumAfter() && pass.live()) {
                     vacuumLeaf(pass, leaf);
                 }
-                remeasure(pass, leaf, name, r, wasRed);
+                if (id == null) {
+                    // The canary measures a collection through the serving statement, which selects by name until P3.5 serves by id: no
+                    // canary for an id index yet (nothing to re-measure, nothing to hold red against it).
+                    remeasure(pass, leaf, name, r, wasRed);
+                }
                 return true;
             }
             case FAILED, REJECTED -> {

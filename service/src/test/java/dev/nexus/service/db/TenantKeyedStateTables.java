@@ -747,17 +747,16 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciReconciler.failures", PCI_OFF);
         // nexus-p2m1x.22 (RDR-229 P3.4): the id-predicate half's memory. The planned keys are replaced whole by each pass that saw
         // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
-        notKeyed.put("PciIdBuilds.planned", PCI_OFF);
+        notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");
+        notKeyed.put("PciGate3Coverage.vacuity", "the empty-case scan's last answer (a boolean and a time), kept ten minutes; names no tenant or collection");
         notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
-        notKeyed.put("PciReconciler.Tally.plannedIds", PCI_OFF);
-        notKeyed.put("PciReconciler.Planned.plannedIds", PCI_OFF);
         notKeyed.put("PciReconcilePlanner.Plan.plannedIdKeys", RESULT);
         notKeyed.put("PciReconcilePlanner.Plan.actions", RESULT);
         notKeyed.put("PciReconcilePlanner.IdPlanInputs.nullIdCollections", RESULT);
         notKeyed.put("PciCatalog.Snapshot.validIds", PCI_OFF);
         notKeyed.put("PciCatalog.Snapshot.invalidIds", PCI_OFF);
         notKeyed.put("CompletionBootWork.DbReader.gate3Extras", "the further gate 3 conditions, fixed at construction "
-            + "(IdUniqueIndexPass.allValid once wired); callbacks, no tenant state");
+            + "(IdUniqueIndexPass.allValid, wired in Main); callbacks, no tenant state");
         // nexus-4lnn1.1.1 (RDR-230): the DDL half's last look at each index (its anchor, size and counts) and at
         // each leaf's statistics, kept per engine in memory and lost on restart like the failures map above. The
         // The Reads fields are one counting transaction's result, applied once it commits. They live in
@@ -895,8 +894,8 @@ final class TenantKeyedStateTables {
             + "global registry labels, not keyed by tenant");
         notKeyed.put("CompletionCheck.ReadSet.gate2Labels", "the move labels gate 2 reads, fixed at construction; "
             + "global registry labels, not keyed by tenant");
-        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; P3.4's PciReconciler supplies it as id keys "
-            + "(model, tenant, collection id) from its last pass that saw every leaf, and it is dropped with the read");
+        notKeyed.put("CompletionCheck.IdIndexCoverage.planned", RESULT + "; P3.4's PciGate3Coverage supplies it as id keys "
+            + "(model, tenant, collection id) read from the catalog and registry by the check, and it is dropped with the read");
         notKeyed.put("CompletionCheck.IdIndexCoverage.validIdIndexed", RESULT + "; as planned");
         notKeyed.put("CompletionCheck.IdIndexCoverage.invalidIdIndexed", RESULT + "; as planned");
         notKeyed.put("CompletionCheck.Result.labels", RESULT + "; it holds registry labels and their state, no tenant's");

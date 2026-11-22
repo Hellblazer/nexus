@@ -699,6 +699,12 @@ public final class Main {
             var latest = completionCheck == null ? null : completionCheck.latest();
             return latest != null && latest.gate2();
         });
+        // linda, 2026-11-22: once gate 3 holds the name-predicate indexes retire (a name index is dropped where its collection's id index is VALID, and
+        // none is built); the gate is the check's latest read of gate 3, which counts a VALID id index covered whether or not its name index is gone.
+        pciReconciler.retireNameIndexesWhen(() -> {
+            var latest = completionCheck == null ? null : completionCheck.latest();
+            return latest != null && latest.gate3();
+        });
         // nexus-p2m1x.20 (RDR-229 P3.3b): the per-leaf id unique-index pass, after the engine serves. Not the PCI reconciler's: it runs whether
         // NX_SEARCH_PCI is on or off and starts only when gate 1 of the completion check holds (its latest read; no check, no pass).
         var leafIndexPass = startLeafIndexPass(bootWork, adminConnection, completionCheck);
