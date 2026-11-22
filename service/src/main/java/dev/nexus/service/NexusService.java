@@ -162,9 +162,6 @@ public final class NexusService {
 
     private final HttpServer server;
     private final TenantScope tenantScope;
-    /** RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and the rename readiness, read per call. STUB: held, not read yet. */
-    private final dev.nexus.service.datamove.Gate3 gate3;
-    private final dev.nexus.service.datamove.RenameReadiness renameReadiness;
     /**
      * RDR-205 Phase 1 Step 5 (bead nexus-em75s.5): the tuple sweep's tenant
      * enumeration reads {@code nexus.tuple_tenants} directly via a plain
@@ -470,27 +467,9 @@ public final class NexusService {
         return resolveBindHost(System.getenv("NX_SERVICE_BIND"));
     }
 
-    /** Pure resolution (testable): {@code null}/blank → loopback; otherwise the
-     *  trimmed value, with a loud security warning for any non-loopback bind. */
+    /** Pure resolution (testable): {@code null}/blank is loopback; see {@link EngineBind#resolveBindHost}. */
     static String resolveBindHost(String envValue) {
-        if (envValue == null || envValue.isBlank()) {
-            return "127.0.0.1";
-        }
-        String bind = envValue.trim();
-        // Normalize "localhost" → "127.0.0.1": InetSocketAddress resolves the name
-        // at bind time, and on IPv6-only-loopback /etc/hosts it would bind [::1]
-        // while the supervisor + Python clients connect to 127.0.0.1 → refused
-        // (code-review H-1). An explicit "::1" is left as-is (deliberate IPv6).
-        if (bind.equals("localhost")) {
-            return "127.0.0.1";
-        }
-        if (!bind.equals("127.0.0.1") && !bind.equals("::1")) {
-            log.warn("event=service_bind_non_loopback bind={} security=\"no external TLS; "
-                    + "token-authed plaintext (and unauthenticated /health, /version) "
-                    + "exposed beyond loopback — intended only for trusted container "
-                    + "networking\"", bind);
-        }
-        return bind;
+        return EngineBind.resolveBindHost(envValue);
     }
 
     /**
@@ -532,14 +511,7 @@ public final class NexusService {
      *         {@code 127.0.0.1} or {@code ::1}
      */
     static void verifyTenantResetRouteBind(java.util.function.Function<String, String> env) {
-        if (!tenantResetRouteEnabled(env)) {
-            return;
-        }
-        String bind = resolveBindHost(env.apply("NX_SERVICE_BIND"));
-        if (!bind.equals("127.0.0.1") && !bind.equals("::1")) {
-            throw new IllegalStateException(TENANT_RESET_ROUTE_ENV + "=1 refuses a non-loopback bind (NX_SERVICE_BIND="
-                + bind + "): the test-only tenant reset route must not be reachable beyond this host");
-        }
+        EngineBind.verifyTenantResetRouteBind(env);
     }
 
     /**
@@ -687,7 +659,9 @@ public final class NexusService {
 
     /**
      * RDR-229 P3.5a (nexus-p2m1x.23): the gate-3 signal and what a rename from gate 3 waits for, each read per call. The
-     * constructors above pass {@code Gate3.never()} and {@code RenameReadiness.ready()}. Package-private. STUB: held, unread.
+     * constructors above pass {@code Gate3.never()} and {@code RenameReadiness.ready()}. Package-private. The service builds one
+     * {@code RenameGuard} over them for every rename primitive, and a {@code CollectionRegistry} over {@code gate3} for the
+     * route boundary.
      */
     NexusService(int port, String token, DataSource dataSource,
                         EmbedderRouter docEmbedderRouter,
@@ -702,8 +676,8 @@ public final class NexusService {
                         dev.nexus.service.reembed.ReembedRunner.Settings reembedSettings,
                         dev.nexus.service.datamove.Gate3 gate3,
                         dev.nexus.service.datamove.RenameReadiness renameReadiness) throws IOException {
-        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
-        this.renameReadiness = java.util.Objects.requireNonNull(renameReadiness, "renameReadiness");
+        // RDR-229 P3.5a: the one rename refusal, over the gate-3 signal and the rename readiness (each read per call).
+        var renameGuard = new dev.nexus.service.db.RenameGuard(gate3, renameReadiness);
         // Before anything binds or touches the database: a refused configuration must not half-start.
         verifyTenantResetRouteBind(env);
         final boolean tenantResetRoute = tenantResetRouteEnabled(env);
@@ -725,16 +699,16 @@ public final class NexusService {
         // Field, not a constructor local (mirrors scratchRepo/catalogRepo above):
         // runScheduledSweep's plan-expiry arm (hygiene-001 follow-on) needs it.
         this.planRepo     = new PlanRepository(tenantScope);
-        var telemetryRepo = new TelemetryRepository(tenantScope);
+        var telemetryRepo = new TelemetryRepository(tenantScope, renameGuard);
         this.scratchRepo  = new ScratchRepository(tenantScope);
-        var taxonomyRepo  = new TaxonomyRepository(tenantScope); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
+        var taxonomyRepo  = new TaxonomyRepository(tenantScope, renameGuard); var taxonomyCoverage = new dev.nexus.service.db.TaxonomyCoverage(tenantScope); // RDR-134 Step 2
         var taxonomyCentroidRepo = new dev.nexus.service.vectors.TaxonomyCentroidRepository(tenantScope);
-        var aspectRepo    = new AspectRepository(tenantScope);
-        var chashRepo     = new ChashRepository(tenantScope);
+        var aspectRepo    = new AspectRepository(tenantScope, renameGuard);
+        var chashRepo     = new ChashRepository(tenantScope, renameGuard);
         var remapRepo     = new RemapRepository(tenantScope);
         var ladderRepo    = new LadderRepository(tenantScope);
         var pipelineRepo  = new PipelineRepository(tenantScope);
-        this.catalogRepo  = new CatalogRepository(tenantScope);
+        this.catalogRepo  = new CatalogRepository(tenantScope, renameGuard);
         this.identityRepo = new dev.nexus.service.db.IdentityRepository(tenantScope, java.time.Clock.systemUTC());
         var identityFence = new dev.nexus.service.http.IdentityFence(new dev.nexus.service.db.IdentityFenceReads(tenantScope)); // RDR-253
 
@@ -788,8 +762,10 @@ public final class NexusService {
         // from AuthFilter.doFilter at each tenant's first request after boot.
         // IdempotencyKeyGuard (RDR-222 Phase 1, nexus-yye8l.5) follows AuthFilter on every context: an
         // Idempotency-Key on a route that cannot use it is a 400, never an ignored key.
+        // RDR-229 P3.5a: CollectionSelectorFilter resolves collection_id to the label on the collection-taking routes.
         var authFilter = List.of(new AuthFilter(tokenCache, tokenStore, catalogRepo),
-                new dev.nexus.service.http.IdempotencyKeyGuard());
+                new dev.nexus.service.http.IdempotencyKeyGuard(),
+                new dev.nexus.service.http.CollectionSelectorFilter(new dev.nexus.service.db.CollectionRegistry(gate3), tenantScope));
 
         var whoamiCtx = server.createContext("/v1/_whoami", new WhoamiHandler(tenantScope));
         whoamiCtx.getFilters().addAll(authFilter);
@@ -1112,7 +1088,7 @@ public final class NexusService {
             dev.nexus.service.db.TenantKeyedState.of("TupleWaitRegistry",
                 t -> tupleRepo == null ? 0 : tupleRepo.abortTenantWaiters(t, TENANT_RESET_TUPLE_BOUND)),
             dev.nexus.service.db.TenantKeyedState.of("CollectionRegistry",
-                dev.nexus.service.db.CollectionRegistry::evictTenant),
+                dev.nexus.service.db.CollectionRegistry.shared()::evictTenant),
             dev.nexus.service.db.TenantKeyedState.of("CatalogRepository.ghostSweepCheckedTenants",
                 catalogRepo::evictGhostSweepTenant),
             dev.nexus.service.db.TenantKeyedState.of("MintRateLimiter", mintRateLimiter::evictTenant),
