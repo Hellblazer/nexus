@@ -8,9 +8,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
+import dev.nexus.service.http.StatusHandler;
 import org.jooq.DSLContext;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,8 +25,14 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -40,7 +51,8 @@ class CatalogEpochTest {
     private static final String A = "epoch-tenant-a";
     private static final String B = "epoch-tenant-b";
     private static final List<String> CONTROL_FNS =
-        List.of("pg_catalog.pg_control_system()", "pg_catalog.pg_control_checkpoint()");
+        List.of("pg_catalog.pg_control_system()", "pg_catalog.pg_control_checkpoint()",
+            "pg_catalog.pg_postmaster_start_time()");
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -74,10 +86,7 @@ class CatalogEpochTest {
     /** Whatever a test revoked is given back to PUBLIC, the state a stock cluster starts in. */
     @AfterEach
     void restoreControlPrivileges() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-pgcontrol-grant.xml",
-                "databasechangelog_test_pgcontrol_grant", Map.of());
-        }
+        runChangelog("grant");
     }
 
     private <R> R su(Function<DSLContext, R> work) {
@@ -104,7 +113,7 @@ class CatalogEpochTest {
     }
 
     private String epoch(String tenant, CatalogEpoch.ClusterIdentity cluster) {
-        return scope.withTenant(tenant, ctx -> CatalogEpoch.of(ctx, tenant, cluster));
+        return scope.withTenant(tenant, ctx -> CatalogEpoch.ofCluster(ctx, tenant, cluster));
     }
 
     private static String sha16(String text) throws Exception {
@@ -115,14 +124,14 @@ class CatalogEpochTest {
     // ── what the epoch is made of ────────────────────────────────────────────────────
 
     @Test
-    void theEpochIsTheFirst16HexOfSha256OfSystemTimelineAndMarker() throws Exception {
-        var cluster = new CatalogEpoch.ClusterIdentity("7123456789012345678", "3");
+    void theEpochIsTheFirst16HexOfSha256OfSystemTimelinePostmasterStartAndMarker() throws Exception {
+        var cluster = new CatalogEpoch.ClusterIdentity("7123456789012345678", "3", "1795000000123456");
         assertThat(epoch("epoch-formula-none", cluster))
             .as("no marker row: the marker part is the empty string")
-            .isEqualTo(sha16("7123456789012345678:3:"));
+            .isEqualTo(sha16("7123456789012345678:3:1795000000123456:"));
         writeMarker("epoch-formula-marked", "{\"session_id\":\"s1\"}");
         assertThat(epoch("epoch-formula-marked", cluster))
-            .isEqualTo(sha16("7123456789012345678:3:{\"session_id\":\"s1\"}"))
+            .isEqualTo(sha16("7123456789012345678:3:1795000000123456:{\"session_id\":\"s1\"}"))
             .matches("[0-9a-f]{16}");
     }
 
@@ -149,14 +158,61 @@ class CatalogEpochTest {
     // ── test 2: a PITR rewind or a promotion ─────────────────────────────────────────
 
     @Test
-    void aChangedTimelineOrSystemIdentifierChangesTheEpoch() {
-        var base = new CatalogEpoch.ClusterIdentity("7000000000000000001", "1");
+    void aChangedTimelineSystemIdentifierOrPostmasterStartChangesTheEpoch() {
+        var base = new CatalogEpoch.ClusterIdentity("7000000000000000001", "1", "1795000000000000");
         String before = epoch(A, base);
-        assertThat(epoch(A, new CatalogEpoch.ClusterIdentity("7000000000000000001", "2")))
+        assertThat(epoch(A, new CatalogEpoch.ClusterIdentity("7000000000000000001", "2", "1795000000000000")))
             .as("a PITR recovery ends on a new timeline").isNotEqualTo(before);
-        assertThat(epoch(A, new CatalogEpoch.ClusterIdentity("7000000000000000002", "1")))
+        assertThat(epoch(A, new CatalogEpoch.ClusterIdentity("7000000000000000002", "1", "1795000000000000")))
             .as("a restore into a fresh cluster is a new system").isNotEqualTo(before);
+        assertThat(epoch(A, new CatalogEpoch.ClusterIdentity("7000000000000000001", "1", "1795000000000001")))
+            .as("a snapshot restore on the same timeline needs a restart, which moves the start time").isNotEqualTo(before);
         assertThat(epoch(A, base)).as("the same cluster, the same epoch").isEqualTo(before);
+    }
+
+    // ── the real probe reads the right members ───────────────────────────────────────
+
+    /** The three facts read independently, through the superuser connection and a different jOOQ form than the probe's. */
+    private CatalogEpoch.ClusterIdentity clusterReadBySuperuser() {
+        return su(ctx -> {
+            var sys = DSL.function(DSL.name("pg_catalog", "pg_control_system"), SQLDataType.JSONB);
+            var ckpt = DSL.function(DSL.name("pg_catalog", "pg_control_checkpoint"), SQLDataType.JSONB);
+            var row = ctx.select(
+                    DSL.jsonbGetAttributeAsText(DSL.function("to_jsonb", SQLDataType.JSONB, sys), "system_identifier"),
+                    DSL.jsonbGetAttributeAsText(DSL.function("to_jsonb", SQLDataType.JSONB, ckpt), "timeline_id"),
+                    DSL.function(DSL.name("pg_catalog", "pg_postmaster_start_time"), SQLDataType.TIMESTAMPWITHTIMEZONE))
+                .fetchOne();
+            OffsetDateTime t = row.value3();
+            long micros = t.toEpochSecond() * 1_000_000L + t.getNano() / 1_000L;
+            return new CatalogEpoch.ClusterIdentity(row.value1(), row.value2(), Long.toString(micros));
+        });
+    }
+
+    @Test
+    void theRealProbeReadsSystemIdentifierTimelineAndPostmasterStartFromTheRightMembers() {
+        CatalogEpoch.ClusterIdentity expected = clusterReadBySuperuser();
+        assertThat(expected.systemIdentifier()).as("non-vacuity: a real system identifier").matches("[0-9]{10,}");
+        assertThat(expected.timelineId()).matches("[1-9][0-9]*");
+        writeMarker(A, "{\"session_id\":\"probe-pin\"}");
+        Optional<String> real = epoch(A);
+        assertThat(real).isPresent();
+        assertThat(real.get()).isEqualTo(epoch(A, expected));
+        assertThat(real.get()).as("a constant or a wrong member would differ")
+            .isNotEqualTo(epoch(A, new CatalogEpoch.ClusterIdentity(expected.systemIdentifier(), "2", expected.postmasterStart())))
+            .isNotEqualTo(epoch(A, new CatalogEpoch.ClusterIdentity(expected.timelineId(), expected.systemIdentifier(), expected.postmasterStart())));
+    }
+
+    // ── tenant scope ─────────────────────────────────────────────────────────────────
+
+    @Test
+    void aContextNotScopedToTheTenantGetsNoEpoch_neverARestoreBlindOne() {
+        writeMarker(A, "{\"session_id\":\"scoped\"}");
+        Optional<String> scoped = epoch(A);
+        assertThat(scoped).isPresent();
+        Optional<String> unscoped = su(ctx -> CatalogEpoch.of(ctx, A));
+        assertThat(unscoped).as("a connection with no tenant GUC").isEmpty();
+        Optional<String> wrongTenant = scope.withTenant(B, ctx -> CatalogEpoch.of(ctx, A));
+        assertThat(wrongTenant).as("a connection scoped to another tenant").isEmpty();
     }
 
     // ── test 3: nothing changed ──────────────────────────────────────────────────────
@@ -172,66 +228,130 @@ class CatalogEpochTest {
 
     // ── test 4: a missing privilege ──────────────────────────────────────────────────
 
-    @Test
-    void withoutExecuteOnThePgControlFunctionsTheEpochIsEmptyAndTheTransactionSurvives() throws Exception {
-        assertThat(epoch(A)).as("non-vacuity: the epoch is there before the revoke").isPresent();
+    private void runChangelog(String name) throws Exception {
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-pgcontrol-revoke.xml",
-                "databasechangelog_test_pgcontrol_revoke", Map.of());
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-pgcontrol-" + name + ".xml",
+                "databasechangelog_test_pgcontrol_" + name.replace('-', '_'), Map.of());
         }
-        assertThat(serviceRoleCanExecute(CONTROL_FNS.get(0)))
-            .as("the revoke took: the service role cannot execute pg_control_system()").isFalse();
-        assertThat(serviceRoleCanExecute(CONTROL_FNS.get(1)))
-            .as("the revoke took: the service role cannot execute pg_control_checkpoint()").isFalse();
+    }
 
+    /** The probe is empty, and the caller's open transaction on the engine's role is still usable: SELECT, INSERT, commit. */
+    private void assertEmptyAndTransactionSurvives(String key) throws Exception {
         assertThat(epoch(A)).as("no epoch reads as unstable").isEmpty();
-
-        // An explicit transaction on the engine's role: a 42501 from the call would abort it.
+        boolean available = scope.withTenant(A, CatalogEpoch::available);
+        assertThat(available).as("available() agrees").isFalse();
         try (Connection c = svcDs.getConnection()) {
             c.setAutoCommit(false);
             try {
                 DSLContext ctx = DSL.using(c, SQLDialect.POSTGRES);
+                ctx.select(DSL.field(DSL.function("set_config", String.class, DSL.val(TenantConstants.GUC_NAME),
+                    DSL.val(A), DSL.inline(true)))).fetch();
                 assertThat(CatalogEpoch.of(ctx, A)).isEmpty();
+                assertThat(CatalogEpoch.available(ctx)).isFalse();
                 assertThat(ctx.select(DSL.inline(1)).fetchOne(0, Integer.class))
                     .as("the caller's transaction is still usable after of()").isEqualTo(1);
-                writeInTx(ctx);
+                ctx.insertInto(CATALOG_META)
+                    .set(CATALOG_META.TENANT_ID, A)
+                    .set(CATALOG_META.KEY, key)
+                    .set(CATALOG_META.VALUE, "{}")
+                    .onConflict(CATALOG_META.TENANT_ID, CATALOG_META.KEY).doNothing()
+                    .execute();
                 c.commit();
             } finally {
                 c.rollback();
             }
         }
-        int probeRows = scope.withTenant(A, ctx -> ctx.fetchCount(CATALOG_META,
-            CATALOG_META.TENANT_ID.eq(A).and(CATALOG_META.KEY.eq("epoch-tx-probe"))));
-        assertThat(probeRows).as("a write after of() in the same transaction committed").isEqualTo(1);
+        int rows = scope.withTenant(A, ctx -> ctx.fetchCount(CATALOG_META,
+            CATALOG_META.TENANT_ID.eq(A).and(CATALOG_META.KEY.eq(key))));
+        assertThat(rows).as("the write after of() in the same transaction committed").isEqualTo(1);
     }
 
-    private boolean serviceRoleCanExecute(String signature) {
-        Boolean can = su(ctx -> ctx.select(DSL.field(DSL.function("has_function_privilege", Boolean.class,
-            DSL.inline(SVC_ROLE), DSL.inline(signature), DSL.inline("EXECUTE")))).fetchOne(0, Boolean.class));
-        return Boolean.TRUE.equals(can);
+    @Test
+    void withoutExecuteOnAnyOfTheThreeFunctionsTheEpochIsEmptyAndTheTransactionSurvives() throws Exception {
+        assertThat(epoch(A)).as("non-vacuity: the epoch is there before the revoke").isPresent();
+        runChangelog("revoke");
+        for (String fn : CONTROL_FNS) {
+            assertThat(serviceRoleCanExecute(fn)).as("the revoke took: " + fn).isFalse();
+        }
+        assertEmptyAndTransactionSurvives("epoch-tx-probe-all");
     }
 
-    private static void writeInTx(DSLContext ctx) {
-        ctx.select(DSL.field(DSL.function("set_config", String.class, DSL.inline(TenantConstants.GUC_NAME), DSL.inline(A),
-            DSL.inline(true)))).fetch();
-        ctx.insertInto(CATALOG_META)
-            .set(CATALOG_META.TENANT_ID, A)
-            .set(CATALOG_META.KEY, "epoch-tx-probe")
-            .set(CATALOG_META.VALUE, "{}")
-            .onConflict(CATALOG_META.TENANT_ID, CATALOG_META.KEY).doNothing()
-            .execute();
+    @Test
+    void withoutExecuteOnPgControlSystemAloneTheEpochIsEmptyAndTheTransactionSurvives() throws Exception {
+        halfRevoke("revoke-system", CONTROL_FNS.get(0), "epoch-tx-probe-system");
+    }
+
+    @Test
+    void withoutExecuteOnPgControlCheckpointAloneTheEpochIsEmptyAndTheTransactionSurvives() throws Exception {
+        halfRevoke("revoke-checkpoint", CONTROL_FNS.get(1), "epoch-tx-probe-checkpoint");
+    }
+
+    @Test
+    void withoutExecuteOnPgPostmasterStartTimeAloneTheEpochIsEmptyAndTheTransactionSurvives() throws Exception {
+        halfRevoke("revoke-postmaster", CONTROL_FNS.get(2), "epoch-tx-probe-postmaster");
+    }
+
+    private void halfRevoke(String changelog, String revokedFunction, String key) throws Exception {
+        assertThat(epoch(A)).as("non-vacuity: the epoch is there before the revoke").isPresent();
+        runChangelog(changelog);
+        for (String fn : CONTROL_FNS) {
+            assertThat(serviceRoleCanExecute(fn)).as("only " + revokedFunction + " is revoked: " + fn)
+                .isEqualTo(!fn.equals(revokedFunction));
+        }
+        assertEmptyAndTransactionSurvives(key);
+    }
+
+    // ── /v1/status: catalog_epoch_available ──────────────────────────────────────────
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private JsonNode status() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        // a supplier built now, as at boot: it asks once and caches
+        server.createContext("/v1/status", new StatusHandler(null).catalogEpoch(CatalogEpochStatus.statusSupplier(svcDs)));
+        server.start();
+        try {
+            HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1/status")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+            assertThat(resp.statusCode()).isEqualTo(200);
+            return MAPPER.readTree(resp.body());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void statusReportsCatalogEpochAvailableByDefault() throws Exception {
+        JsonNode body = status();
+        assertThat(body.get("catalog_epoch_available").isBoolean()).isTrue();
+        assertThat(body.get("catalog_epoch_available").asBoolean()).isTrue();
+    }
+
+    @Test
+    void statusReportsCatalogEpochUnavailableWhenAnyFunctionIsRevoked() throws Exception {
+        runChangelog("revoke");
+        assertThat(status().get("catalog_epoch_available").asBoolean()).as("all revoked").isFalse();
+        restoreControlPrivileges();
+        runChangelog("revoke-postmaster");
+        assertThat(status().get("catalog_epoch_available").asBoolean()).as("one revoked").isFalse();
     }
 
     // ── test 5: the real probe ───────────────────────────────────────────────────────
 
     @Test
     void withThePrivilegesTheRealProbeReturnsSixteenHex() {
-        assertThat(serviceRoleCanExecute(CONTROL_FNS.get(0)))
-            .as("default state: the service role can execute pg_control_system()").isTrue();
-        assertThat(serviceRoleCanExecute(CONTROL_FNS.get(1)))
-            .as("default state: the service role can execute pg_control_checkpoint()").isTrue();
+        for (String fn : CONTROL_FNS) {
+            assertThat(serviceRoleCanExecute(fn)).as("default state: the service role can execute " + fn).isTrue();
+        }
         assertThat(epoch(A)).hasValueSatisfying(e -> assertThat(e).matches("[0-9a-f]{16}"));
-        Optional<String> asSuperuser = su(ctx -> CatalogEpoch.of(ctx, A));
-        assertThat(asSuperuser).as("a superuser reads it too").isPresent();
+        boolean available = scope.withTenant(A, CatalogEpoch::available);
+        assertThat(available).isTrue();
+    }
+
+    private boolean serviceRoleCanExecute(String signature) {
+        Boolean can = su(ctx -> ctx.select(DSL.field(DSL.function("has_function_privilege", Boolean.class,
+            DSL.inline(SVC_ROLE), DSL.inline(signature), DSL.inline("EXECUTE")))).fetchOne(0, Boolean.class));
+        return Boolean.TRUE.equals(can);
     }
 }
