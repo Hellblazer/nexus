@@ -39,15 +39,20 @@ class Rdr229RestoreByIdTest {
 
     private ImportTestEnv env;
 
+    /** A second database that keeps every name foreign key: where a restore of a P3.7-state file must not trip on a stale label. */
+    private ImportTestEnv keyed;
+
     @BeforeAll
     void startAll() throws Exception {
         env = ImportTestEnv.start();
+        keyed = ImportTestEnv.start();
         List<String> dropped = ByIdRestoreSupport.dropRegistryNameKeys(env);
         assertThat(dropped).as("non-vacuity: the name keys that P3.7's rename would trip on").isNotEmpty();
     }
 
     @AfterAll
     void stopAll() {
+        if (keyed != null) keyed.close();
         if (env != null) env.close();
     }
 
@@ -75,6 +80,17 @@ class Rdr229RestoreByIdTest {
         long stillNamingA = env.su(ctx -> (long) ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")),
             DSL.field(DSL.name("tenant_id"), String.class).eq(tenant), DSL.field(DSL.name("collection"), String.class).eq(a)));
         assertThat(stillNamingA).as("non-vacuity: the children still name the old label").isPositive();
+        return token;
+    }
+
+    /** {@link #renamedSource}, then a new collection registered under the old label with its own rows. */
+    private String renamedSourceWithLabelHolder(String tenant) throws Exception {
+        String token = renamedSource(tenant);
+        String a = TenantExportBatteryTest.Seed.collection(tenant, 768);
+        env.su(ctx -> {
+            ByIdRestoreSupport.seedCollectionTakingTheLabel(ctx, tenant, a);
+            return null;
+        });
         return token;
     }
 
@@ -138,6 +154,8 @@ class Rdr229RestoreByIdTest {
             }
         });
         assertThat(ByIdRestoreSupport.namedRowsWithoutId(env, dst)).as("named rows that restored with no id").isEmpty();
+        assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(env, dst))
+            .as("every restored row carries its collection's current name, not the stale label").isEmpty();
         assertThat(ByIdRestoreSupport.chunkHashesByCollection(env, dst))
             .as("the chunks each collection holds, by chash: none of the renamed collection's is on the one with its old label")
             .isEqualTo(srcChunks);
@@ -171,6 +189,7 @@ class Rdr229RestoreByIdTest {
         Map<String, Map<String, Long>> dstRows = rowsByCollection(env, dst);
         assertThat(without(dstRows, ByIdRestoreSupport.NO_REGISTRY_ROW)).isEqualTo(without(srcRows, ByIdRestoreSupport.NO_REGISTRY_ROW));
         assertThat(ByIdRestoreSupport.namedRowsWithoutId(env, dst)).isEmpty();
+        assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(env, dst)).isEmpty();
         assertThat(ByIdRestoreSupport.chunkHashesByCollection(env, dst)).isEqualTo(ByIdRestoreSupport.chunkHashesByCollection(env, src));
     }
 
@@ -252,5 +271,273 @@ class Rdr229RestoreByIdTest {
         assertThat(without(rowsByCollection(env, dst), ByIdRestoreSupport.NO_REGISTRY_ROW))
             .isEqualTo(without(rowsByCollection(env, src), ByIdRestoreSupport.NO_REGISTRY_ROW));
         assertThat(ByIdRestoreSupport.chunkHashesByCollection(env, dst)).isEqualTo(ByIdRestoreSupport.chunkHashesByCollection(env, src));
+    }
+
+    // ── fix round 1 ─────────────────────────────────────────────────────────────────────────────
+
+    /** A history row with a NULL twin stays NULL when the file's registry carries ids: its old label is not read as the new collection's. */
+    @Test
+    void t6_aHistoryRowWithANullTwinInAFileWithIdsKeepsNoId() throws Exception {
+        String src = "t-byid-t6-src", dst = "t-byid-t6-dst";
+        String a = TenantExportBatteryTest.Seed.collection(src, 768);
+        ImportTestEnv.BackupFile file = env.export(renamedSourceWithLabelHolder(src));
+        int queryAt = file.columnIndex("relevance_log", "query"), idAt = file.columnIndex("relevance_log", "collection_id");
+        int nameAt = file.columnIndex("relevance_log", "collection");
+        int[] nulled = {0};
+        ImportTestEnv.BackupFile old = editRows(file, "relevance_log", rows -> rows.stream().map(r -> {
+            if (!"hist-q-0".equals(ByIdRestoreSupport.text(r, queryAt)) || !a.equals(ByIdRestoreSupport.text(r, nameAt))) return r;
+            nulled[0]++;
+            return withField(r, idAt, null);
+        }).toList());
+        assertThat(nulled[0]).as("non-vacuity: the old history row of the old label lost its twin").isEqualTo(1);
+
+        JsonNode end = env.restore(env.newTenant(dst), old);
+
+        assertThat(status(end)).as(end.toString()).isEqualTo("committed");
+        Field<Long> id = DSL.field(DSL.name("collection_id"), Long.class);
+        Field<String> query = DSL.field(DSL.name("query"), String.class);
+        var log = DSL.table(DSL.name("nexus", "relevance_log"));
+        long nullIds = env.su(ctx -> (long) ctx.fetchCount(log, DSL.field(DSL.name("tenant_id"), String.class).eq(dst),
+            query.eq("hist-q-0"), DSL.field(DSL.name("collection"), String.class).eq(a), id.isNull()));
+        assertThat(nullIds).as("the history row keeps no id; by name it would have landed on the new collection of that label").isEqualTo(1);
+        long onNewHolder = env.su(ctx -> (long) ctx.fetchCount(log, DSL.field(DSL.name("tenant_id"), String.class).eq(dst),
+            query.eq("taking-q"), id.eq(registryIds(env, dst).get(a))));
+        assertThat(onNewHolder).as("non-vacuity: the new collection's own history row is on its id").isEqualTo(1);
+    }
+
+    /**
+     * The P3.7-state file with NO collection on the old label restores into a database that still keeps every name key. This
+     * is the case the name rewrite exists for: the stale label names no registry row, so without the rewrite the insert of
+     * the chunks trips {@code chunks_collection_fk} (shown by the confirmation round's mutation, 2026-11-22).
+     */
+    @Test
+    void t7b_aP37StateFileWhoseOldLabelNoOneHoldsRestoresWhereTheNameKeysAreStillInForce() throws Exception {
+        String src = "t-byid-t7b-src", dst = "t-byid-t7b-dst";
+        ImportTestEnv.BackupFile file = env.export(renamedSource(src));
+        Map<String, Long> srcIds = registryIds(env, src);
+        Map<String, Map<String, Long>> srcRows = rowsByCollection(env, src);
+        Map<String, java.util.Set<String>> srcChunks = ByIdRestoreSupport.chunkHashesByCollection(env, src);
+
+        JsonNode end = keyed.restore(keyed.newTenant(dst), file);
+
+        assertThat(status(end)).as("the stale label must not reach a live name key: " + end).isEqualTo("committed");
+        assertThat(ByIdRestoreSupport.registryIds(keyed, dst).keySet()).isEqualTo(srcIds.keySet());
+        assertThat(without(rowsByCollection(keyed, dst), ByIdRestoreSupport.NO_REGISTRY_ROW))
+            .as("every row is on its collection's restored id").isEqualTo(without(srcRows, ByIdRestoreSupport.NO_REGISTRY_ROW));
+        assertThat(ByIdRestoreSupport.chunkHashesByCollection(keyed, dst)).isEqualTo(srcChunks);
+        assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(keyed, dst)).as("every row has the current name").isEmpty();
+    }
+
+    /**
+     * The P3.7-state file where a new collection holds the old label, restored where the name keys are in force: the name
+     * keys are satisfied by the holder either way, so this case is pinned by the current-name assertion, not by the keys.
+     */
+    @Test
+    void t7_aP37StateFileRestoresWhereTheNameKeysAreStillInForce() throws Exception {
+        String src = "t-byid-t7-src", dst = "t-byid-t7-dst";
+        ImportTestEnv.BackupFile file = env.export(renamedSourceWithLabelHolder(src));
+        Map<String, Long> srcIds = registryIds(env, src);
+        Map<String, Map<String, Long>> srcRows = rowsByCollection(env, src);
+        Map<String, java.util.Set<String>> srcChunks = ByIdRestoreSupport.chunkHashesByCollection(env, src);
+        int[] kept = {0};
+        keyed.su(ctx -> {
+            kept[0] = ctx.fetchCount(DSL.table(DSL.name("pg_catalog", "pg_constraint")),
+                DSL.field(DSL.name("conname"), String.class).eq("chunks_collection_fk"));
+            return null;
+        });
+        assertThat(kept[0]).as("non-vacuity: the second database keeps the name key of chunks").isPositive();
+
+        JsonNode end = keyed.restore(keyed.newTenant(dst), file);
+
+        assertThat(status(end)).as("the restore commits: " + end).isEqualTo("committed");
+        assertThat(ByIdRestoreSupport.registryIds(keyed, dst).keySet()).isEqualTo(srcIds.keySet());
+        assertThat(without(rowsByCollection(keyed, dst), ByIdRestoreSupport.NO_REGISTRY_ROW))
+            .as("every row is on its collection's restored id").isEqualTo(without(srcRows, ByIdRestoreSupport.NO_REGISTRY_ROW));
+        assertThat(ByIdRestoreSupport.chunkHashesByCollection(keyed, dst)).isEqualTo(srcChunks);
+        assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(keyed, dst)).as("every row has the current name").isEmpty();
+        assertThat(ByIdRestoreSupport.namedRowsWithoutId(keyed, dst)).isEmpty();
+    }
+
+    /** An origin id the file's registry does not hold is stripped; the stale name beside it is not resolved. */
+    @Test
+    void t8_anOriginIdTagThatIsUnmappedIsStrippedAndNotResolvedByName() throws Exception {
+        String src = "t-byid-t8-src", dst = "t-byid-t8-dst";
+        String token = ByIdRestoreSupport.batterySource(env, src);
+        String a = TenantExportBatteryTest.Seed.collection(src, 768);
+        long aId = registryIds(env, src).get(a);
+        String chunk = env.su(ctx -> ByIdRestoreSupport.tagOrigin(ctx, src, aId, a, 987654321L));
+
+        JsonNode end = env.restore(env.newTenant(dst), env.export(token));
+
+        assertThat(status(end)).as(end.toString()).isEqualTo("committed");
+        assertThat(ByIdRestoreSupport.originIdOf(env, dst, chunk)).as("the unmapped origin id is gone, though its name resolves").isNull();
+        long kept = env.su(ctx -> (long) ctx.fetchCount(DSL.table(DSL.name("nexus", "chunks")).as("c"),
+            DSL.field(DSL.name("c", "tenant_id"), String.class).eq(dst),
+            DSL.function("jsonb_extract_path_text", org.jooq.impl.SQLDataType.VARCHAR,
+                DSL.field(DSL.name("c", "metadata"), org.jooq.impl.SQLDataType.JSONB), DSL.val("keep")).eq("yes")));
+        assertThat(kept).as("non-vacuity: the tagged chunk restored with its other keys").isEqualTo(1);
+    }
+
+    /** A NULL-twin row whose name another row of its table carries with a different collection's id is a contradiction. */
+    @Test
+    void t9_aNullTwinNameThatAnotherRowCarriesWithAnotherCollectionsIdIsRefused() throws Exception {
+        String src = "t-byid-t9-src", dst = "t-byid-t9-dst";
+        String small = TenantExportBatteryTest.Seed.collection(src, 384), a = TenantExportBatteryTest.Seed.collection(src, 768);
+        ImportTestEnv.BackupFile file = env.export(ByIdRestoreSupport.batterySource(env, src));
+        long aId = registryIds(env, src).get(a);
+        int nameAt = file.columnIndex("chunks", "collection"), idAt = file.columnIndex("chunks", "collection_id");
+        int[] seen = {0};
+        ImportTestEnv.BackupFile edited = editRows(file, "chunks", rows -> rows.stream().map(r -> {
+            if (!small.equals(ByIdRestoreSupport.text(r, nameAt))) return r;
+            int n = seen[0]++;
+            if (n == 0) return withField(r, idAt, null);
+            if (n == 1) return withField(r, idAt, bigint(aId));
+            return r;
+        }).toList());
+        assertThat(seen[0]).as("non-vacuity: chunk rows of the collection were edited").isGreaterThanOrEqualTo(2);
+
+        JsonNode end = env.restore(env.newTenant(dst), edited);
+
+        assertThat(status(end)).startsWith("failed: restore_ambiguous_collection_name").contains("chunks.collection")
+            .contains(small).containsPattern("chunks\\.collection: \\d+ row");
+        assertThat(env.count("catalog_collections", dst)).as("the refusal writes nothing").isZero();
+        assertThat(env.count("chunks", dst)).isZero();
+    }
+
+    /** A source id that two registry rows of the file hold maps nothing: a child pointing at it is refused, not filed under either. */
+    @Test
+    void t10_aDuplicateSourceIdInTheRegistryRefusesTheChildrenThatPointAtIt() throws Exception {
+        String src = "t-byid-t10-src", dst = "t-byid-t10-dst";
+        String small = TenantExportBatteryTest.Seed.collection(src, 384), a = TenantExportBatteryTest.Seed.collection(src, 768);
+        ImportTestEnv.BackupFile file = env.export(ByIdRestoreSupport.batterySource(env, src));
+        long aId = registryIds(env, src).get(a);
+        int regName = file.columnIndex("catalog_collections", "name"), regId = file.columnIndex("catalog_collections", "collection_id");
+        int chunkName = file.columnIndex("chunks", "collection"), chunkId = file.columnIndex("chunks", "collection_id");
+        int[] dup = {0}, pointing = {0};
+        ImportTestEnv.BackupFile edited = editRows(file, "catalog_collections", rows -> rows.stream().map(r -> {
+            if (!small.equals(ByIdRestoreSupport.text(r, regName))) return r;
+            dup[0]++;
+            return withField(r, regId, bigint(aId));
+        }).toList());
+        // every other id the file uses is held once, and the small collection's chunks follow the duplicated id: without the
+        // ambiguity rule they would map (the id is in the registry), so only the rule can refuse them
+        edited = editRows(edited, "chunks", rows -> rows.stream().map(r -> {
+            if (!small.equals(ByIdRestoreSupport.text(r, chunkName))) return r;
+            pointing[0]++;
+            return withField(r, chunkId, bigint(aId));
+        }).toList());
+        assertThat(dup[0]).as("non-vacuity: a registry row was given the other's id").isEqualTo(1);
+        assertThat(pointing[0]).as("non-vacuity: chunks point at the duplicated id").isPositive();
+
+        JsonNode end = env.restore(env.newTenant(dst), edited);
+
+        assertThat(status(end)).startsWith("failed: restore_orphan_collection_id").contains("chunks.collection_id")
+            .contains(String.valueOf(aId));
+        assertThat(env.count("catalog_collections", dst)).as("the refusal writes nothing").isZero();
+        assertThat(env.count("chunks", dst)).isZero();
+    }
+
+
+    // ── by id with the minted relabel ───────────────────────────────────────────────────────────
+
+    private static <V> Map<String, V> relabelKeys(Map<String, V> m, Map<String, String> labels) {
+        Map<String, V> out = new java.util.TreeMap<>();
+        m.forEach((k, v) -> out.put(labels.getOrDefault(k, k), v));
+        return out;
+    }
+
+    /**
+     * A file that carries ids and whose registry labels are of the minted form ({@code c<source id>}), restored where every name
+     * key is in force: each collection takes {@code c} + its new id; a row with a twin maps by id and takes that label; a NULL-twin
+     * row (stamped late) whose name is the old minted label is relabelled BEFORE its by-name fill, so it lands on the relabelled
+     * collection (filled first, the old label resolves to no registry row and the CHECK or the name key refuses the row). The
+     * 768-wide collection is renamed by one registry row (P3.7's state, its children stale), the 384-wide one everywhere.
+     */
+    @Test
+    void t11_aFileWithIdsAndMintedLabelsMapsByIdAndRelabelsBeforeTheByNameFill() throws Exception {
+        String src = "t-byid-t11-src", dst = "t-byid-t11-dst";
+        String srcToken = ByIdRestoreSupport.batterySource(env, src);
+        String big = TenantExportBatteryTest.Seed.collection(src, 768), small = TenantExportBatteryTest.Seed.collection(src, 384);
+        Map<String, Long> seeded = registryIds(env, src);
+        String bigOld = "c" + seeded.get(big), smallOld = "c" + seeded.get(small);
+        int[] renamedChildren = {0};
+        env.su(ctx -> {
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, bigOld)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.NAME.eq(big)).execute();
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, smallOld)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.NAME.eq(small)).execute();
+            for (CollectionIdSites.Site s : CollectionIdSites.exportedSites()) {
+                Field<String> name = DSL.field(DSL.name(s.nameColumn()), String.class);
+                renamedChildren[0] += ctx.update(DSL.table(DSL.name("nexus", s.table()))).set(name, smallOld)
+                    .where(DSL.field(DSL.name("tenant_id"), String.class).eq(src)).and(name.eq(small)).execute();
+            }
+            return null;
+        });
+        assertThat(renamedChildren[0]).as("non-vacuity: the 384-wide collection's children took its minted label").isPositive();
+        Map<String, Long> srcIds = registryIds(env, src);
+        assertThat(srcIds).containsKeys(bigOld, smallOld);
+        Map<String, Map<String, Long>> srcRows = rowsByCollection(env, src);
+        Map<String, Set<String>> srcChunks = ByIdRestoreSupport.chunkHashesByCollection(env, src);
+        assertThat(ByIdRestoreSupport.sitesWithoutRowsFor(srcRows, smallOld)).as("sites with no row of the 384-wide collection")
+            .doesNotContain("chunks.collection_id", "taxonomy_meta.collection_id", "taxonomy_centroids.collection_id");
+
+        ImportTestEnv.BackupFile file = env.export(srcToken);
+        ImportTestEnv.BackupFile late = file;
+        Map<String, Integer> nulled = new java.util.LinkedHashMap<>();
+        for (String table : List.of("chunks", "taxonomy_meta", "taxonomy_centroids")) {
+            int nameAt = file.columnIndex(table, "collection"), idAt = file.columnIndex(table, "collection_id");
+            int[] n = {0};
+            late = editRows(late, table, rows -> rows.stream().map(r -> {
+                if (!smallOld.equals(ByIdRestoreSupport.text(r, nameAt))) return r;
+                n[0]++;
+                return withField(r, idAt, null);
+            }).toList());
+            nulled.put(table, n[0]);
+        }
+        assertThat(nulled.values()).as("non-vacuity: NULL twins under the old minted label " + nulled).allMatch(n -> n > 0);
+
+        // the target draws ids far past the source's, so every minted label changes
+        long floor = srcIds.values().stream().mapToLong(Long::longValue).max().orElseThrow() + 1000;
+        keyed.su(ctx -> ctx.fetch("SELECT setval(pg_get_serial_sequence('nexus.catalog_collections', 'collection_id'), ?)", floor));
+        String dstToken = keyed.newTenant(dst);
+        JsonNode end = keyed.restore(dstToken, late);
+
+        assertThat(status(end)).as("relabel before the by-name fill, under live name keys: " + end).isEqualTo("committed");
+        Map<String, Long> dstIds = ByIdRestoreSupport.registryIds(keyed, dst);
+        // each old label's collection in the target: the live registry row with the same owner, model, type and version
+        Map<String, String> labels = new java.util.LinkedHashMap<>();
+        for (String old : List.of(bigOld, smallOld)) {
+            var c = CATALOG_COLLECTIONS;
+            var key = env.su(ctx -> ctx.select(c.CONTENT_TYPE, c.OWNER_ID, c.EMBEDDING_MODEL, c.MODEL_VERSION).from(c)
+                .where(c.TENANT_ID.eq(src)).and(c.NAME.eq(old)).fetchOne());
+            assertThat(key).as("the source row of %s", old).isNotNull();
+            String fresh = keyed.su(ctx -> ctx.select(c.NAME).from(c).where(c.TENANT_ID.eq(dst))
+                .and(c.CONTENT_TYPE.eq(key.value1())).and(c.OWNER_ID.eq(key.value2()))
+                .and(c.EMBEDDING_MODEL.eq(key.value3())).and(c.MODEL_VERSION.eq(key.value4()))
+                .and(c.SUPERSEDED_BY.eq("")).fetchOne(c.NAME));
+            assertThat(fresh).as("the restored row of %s", old).isNotNull();
+            labels.put(old, fresh);
+        }
+        Map<String, Map<String, Long>> dstRows = rowsByCollection(keyed, dst);
+        for (Map.Entry<String, String> e : labels.entrySet()) {
+            assertThat(e.getValue()).as("%s is relabelled to c + its new id", e.getKey()).isEqualTo("c" + dstIds.get(e.getValue()))
+                .isNotEqualTo(e.getKey());
+        }
+        assertThat(dstIds.keySet()).as("no old minted label is left").doesNotContain(bigOld, smallOld);
+        assertThat(ByIdRestoreSupport.namedRowsWithoutId(keyed, dst)).as("every late-stamp row got its id by its relabelled name").isEmpty();
+        assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(keyed, dst)).as("every row has the current label").isEmpty();
+        Map<String, Map<String, Long>> want = new java.util.LinkedHashMap<>();
+        srcRows.forEach((site, m) -> want.put(site, relabelKeys(m, labels)));
+        assertThat(without(dstRows, ByIdRestoreSupport.NO_REGISTRY_ROW)).as("every row is on its collection, by id or by relabelled name")
+            .isEqualTo(without(want, ByIdRestoreSupport.NO_REGISTRY_ROW));
+        assertThat(ByIdRestoreSupport.chunkHashesByCollection(keyed, dst)).isEqualTo(relabelKeys(srcChunks, labels));
+
+        JsonNode relabelled = end.get("report").get("collections_relabelled");
+        Map<String, String> reported = new java.util.LinkedHashMap<>();
+        relabelled.forEach(n -> reported.put(n.get("label").asText(), n.get("target_label").asText()));
+        assertThat(reported).as("the report names both relabels and no other").isEqualTo(labels);
+        JsonNode marker = ImportTestEnv.json(keyed.call("GET", "/v1/tenant/import-marker", dstToken)).get("marker");
+        assertThat(marker.get("collections_relabelled")).isEqualTo(relabelled);
+        assertThat(marker.get("collections_relabelled_count").asInt()).isEqualTo(2);
     }
 }

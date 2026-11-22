@@ -346,6 +346,9 @@ def test_the_restore_runbook_says_what_an_orphan_row_does_to_a_restore_and_how_t
     text = (ROOT / "docs" / "operations" / "backup-restore.md").read_text(encoding="utf-8")
     flat = " ".join(text.split())
     assert "restore_orphan_collection" in flat
+    assert "restore_orphan_collection_id" in flat and "restore_ambiguous_collection_name" in flat
+    assert "fills a row's id by name only when the backup carries no id for it" in flat
+    assert "fills every collection id from the restored registry row of that name" not in flat
     assert "no registry row in the backup" in flat
     assert "nothing is written" in flat.lower() or "nothing was written" in flat.lower()
 
