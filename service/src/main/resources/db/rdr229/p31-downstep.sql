@@ -8,6 +8,12 @@
 --   psql -X -v ON_ERROR_STOP=1 --single-transaction -f p31-downstep.sql
 -- It leaves the id columns, the registry's identity column and every row of the registry of moves alone, and it is
 -- safe to run twice. A table that is absent (the retired queue table on most installs) is skipped.
+--
+-- It does NOT drop the P3.3a id twins (the *_fk constraints of p33a-fk-twins.tsv, vectors-072): they stay through a
+-- down-step, and that is safe. A twin refuses only a row whose id names no registry row, a pre-P3.1 engine writes
+-- no id (a NULL id passes a MATCH SIMPLE foreign key), and each twin copies its name key's delete action, so an
+-- old engine runs unchanged. The validation moves' on_completes are existence-guarded (pg_constraint), so a twin
+-- that is absent is a no-op and not a 42704.
 SET LOCAL lock_timeout = '5s';
 ALTER TABLE IF EXISTS nexus.catalog_collections DROP CONSTRAINT IF EXISTS catalog_collections_superseded_by_id_check;
 ALTER TABLE IF EXISTS nexus.chunks DROP CONSTRAINT IF EXISTS chunks_collection_id_check;
