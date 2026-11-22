@@ -27,6 +27,7 @@ Out of scope:
 """
 from __future__ import annotations
 
+import shlex
 import json
 import os
 import signal
@@ -282,7 +283,7 @@ def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior:
             f"{lead} legacy-unmanifested = {blockers['legacy-unmanifested']}, not 0{tail}. A live "
             f"legacy note with no manifest row reads reapable once old, and the engine route takes "
             f"no exclusion list, so moving this collection could quarantine a live note. Inspect "
-            f"with 'nx t3 census-manifest-less -c {collection}', re-put those notes (so each has a "
+            f"with `nx t3 census-manifest-less -c {shlex.quote(collection)}`, re-put those notes (so each has a "
             f"manifest row), then re-run (RDR-192 R8)."
         )
     if blockers["unclassified"]:
@@ -290,7 +291,7 @@ def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior:
             f"{lead} unclassified = {blockers['unclassified']}, not 0{tail}. A row the census "
             f"cannot classify is a collection state nobody has understood, so the reapable "
             f"verdict on it cannot be trusted; the reaper refuses on it too. Inspect with "
-            f"'nx t3 census-manifest-less -c {collection}' (it exits 1 on unclassified) and "
+            f"`nx t3 census-manifest-less -c {shlex.quote(collection)}` (it exits 1 on unclassified) and "
             f"resolve the rows, then re-run (RDR-192 R8)."
         )
     return reasons
@@ -747,7 +748,7 @@ def gc_cmd(
             f"chunk(s) it holds, so every one reads as an orphan candidate. That is "
             f"indistinguishable from a fresh/mis-scoped tenant or an unbackfilled manifest "
             f"without deciding the collection's disposition first (nexus-jqrtp). Investigate "
-            f"with 'nx t3 backfill-manifest -c {collection}' or 'nx catalog reconcile', or, if "
+            f"with `nx t3 backfill-manifest -c {shlex.quote(collection)}` or 'nx catalog reconcile', or, if "
             f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
         )
     # THE FLOOR is judged by the engine alone (nexus-wbfpw.52, nexus-teduy). Its move route judges it
