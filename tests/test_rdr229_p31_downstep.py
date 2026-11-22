@@ -172,6 +172,7 @@ def test_the_runbook_pauses_the_open_stamp_moves_before_the_down_step_and_says_w
 # ── the re-add (fix round C, code review F3) ─────────────────────────────────────────────────────────────────────────
 
 READD_SQL = ROOT / "docs" / "runbooks" / "rdr-229-p31-readd.sql"
+READD_DB_SQL = ROOT / "service" / "src" / "main" / "resources" / "db" / "rdr229" / "p31-readd.sql"
 CHANGELOG_068 = ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog" / "vectors-068-collection-id-expand.xml"
 
 
@@ -263,7 +264,8 @@ def test_the_committed_readd_equals_a_fresh_run_and_the_check_command_covers_it(
     mod = _load()
     assert READD_SQL.exists(), f"{READD_SQL} is missing: run scripts/rdr229_p31_downstep.py --write"
     assert READD_SQL.read_text(encoding="utf-8") == mod.generate_readd(LIST.read_text(encoding="utf-8"))
-    for rel in (LIST, SQL, RUNBOOK, READD_SQL):
+    assert READD_DB_SQL.read_text(encoding="utf-8") == READD_SQL.read_text(encoding="utf-8"), "the classpath copy the engine test runs"
+    for rel in (LIST, SQL, RUNBOOK, READD_SQL, READD_DB_SQL):
         target = tmp_path / rel.relative_to(ROOT)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(rel.read_text(encoding="utf-8"), encoding="utf-8")
@@ -272,6 +274,11 @@ def test_the_committed_readd_equals_a_fresh_run_and_the_check_command_covers_it(
     bad = subprocess.run([sys.executable, str(SCRIPT), "--root", str(tmp_path), "--check"], capture_output=True, text=True)
     assert bad.returncode == 1, bad.stdout + bad.stderr
     assert "p31-readd.sql" in bad.stdout + bad.stderr
+    doctored.write_text(READD_SQL.read_text(encoding="utf-8"), encoding="utf-8")
+    copy = tmp_path / READD_DB_SQL.relative_to(ROOT)
+    copy.write_text(copy.read_text(encoding="utf-8") + "-- drift\n", encoding="utf-8")
+    bad = subprocess.run([sys.executable, str(SCRIPT), "--root", str(tmp_path), "--check"], capture_output=True, text=True)
+    assert bad.returncode == 1 and "db/rdr229/p31-readd.sql differs" in bad.stdout, bad.stdout + bad.stderr
 
 
 def test_the_runbook_embeds_the_readd_and_the_check_catches_drift():
