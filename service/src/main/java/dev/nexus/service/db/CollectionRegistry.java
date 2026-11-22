@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
 import org.jooq.DSLContext;
 import org.jooq.Record7;
 
@@ -108,7 +109,51 @@ public final class CollectionRegistry {
     /** Test seam (nexus-hkh1y): runs between a miss's read and its cache fill. */
     static volatile Runnable afterMissReadForTests;
 
-    private CollectionRegistry() {}
+    /**
+     * RDR-229 P3.5a: the registry takes the gate-3 signal by constructor (linda, 2026-11-22; the one seam P3.5a and P3.5c
+     * share), read per call, so the switch from the name to the id needs no restart. STUB: the instance API below is the
+     * shape the tests pin; every static method above still serves the existing callers and the {@code Gate3} is not read yet.
+     */
+    private final Gate3 gate3;
+
+    public CollectionRegistry(Gate3 gate3) {
+        this.gate3 = gate3;
+    }
+
+    // ---- RDR-229 P3.5a instance API: STUBS (the code commit makes them real) --------------------------------------------
+
+    /** STUB: today's behaviour, {@link #require} by label. The id index is not built yet. */
+    public CollectionRow resolveLabel(DSLContext ctx, String tenant, String label) {
+        return require(ctx, tenant, label);
+    }
+
+    /** STUB: not implemented. Will raise {@link UnknownCollectionIdException} for an id with no row of the tenant. */
+    public CollectionRow resolveId(DSLContext ctx, String tenant, long collectionId) {
+        throw new UnsupportedOperationException("P3.5a: not implemented");
+    }
+
+    /** STUB: today's behaviour, {@link #cached} by label. */
+    public Optional<CollectionRow> cachedByLabel(String tenant, String label) {
+        return cached(tenant, label);
+    }
+
+    /** STUB: not implemented. There is no id index yet. */
+    public Optional<CollectionRow> cachedById(String tenant, long collectionId) {
+        throw new UnsupportedOperationException("P3.5a: not implemented");
+    }
+
+    /** STUB: today's behaviour, {@link #evict} by label (it will also drop the id entry). */
+    public void evictLabel(String tenant, String label) {
+        evict(tenant, label);
+    }
+
+    /**
+     * STUB: not implemented. Will be the label the reader keys on while {@link Gate3} does not hold, and the id
+     * ({@link CollectionRow#collectionId()}) once it does.
+     */
+    public Object readerKey(CollectionRow row) {
+        throw new UnsupportedOperationException("P3.5a: not implemented");
+    }
 
     private static String key(String tenant, String collection) {
         // Printable delimiter on purpose (wave review): the original '\0' made git

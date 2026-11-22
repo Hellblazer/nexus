@@ -296,6 +296,35 @@ final class CollectionRouteCensus {
         new Excluded("ReembedHandler.java", "source_collection", "plan and start rows"),
         new Excluded("ReembedHandler.java", "target_collection", "plan and start rows"));
 
+    /**
+     * A per-store {@code rename_collection} route: it rewrites the collection name in one store's tables ({@code {old, new}}
+     * body, labels only; the by-id contract does not extend to it). linda's ruling 3 (2026-11-22): the rename refusal lives in
+     * the shared rename primitive, so every entry point that rewrites a collection name gets it. All five are on the public
+     * HTTP server (each handler is registered by {@code NexusService} behind the auth filter) and the Python T2 facade calls
+     * each one over HTTP ({@code nexus.db.t2.rename_collection_cascade}), so none is internal-only: each gets the refusal, and
+     * {@link CollectionRenameRefusalTest} runs it. {@link CollectionRouteCensusTest} pins that these are every
+     * {@code rename_collection} route the handlers dispatch.
+     */
+    record StoreRename(String path, String handler, String readsId) { }
+
+    /** The five per-store {@code rename_collection} routes; the catalog rename is the {@link Tier#RENAME} row of {@link #ROUTES}. */
+    static final List<StoreRename> STORE_RENAMES = List.of(
+        new StoreRename("/v1/chash/rename_collection", CHASH, "handleRenameCollection"),
+        new StoreRename("/v1/taxonomy/rename_collection", TAXONOMY, "handleRenameCollection"),
+        new StoreRename("/v1/telemetry/rename_collection", TELEMETRY, "handleRenameCollection"),
+        new StoreRename("/v1/aspects/rename_collection", ASPECT, "handleRenameCollection"),
+        new StoreRename("/v1/aspects/highlights/rename_collection", ASPECT, "handleHighlightRenameCollection"));
+
+    /**
+     * Request fields that carry a collection id by the convention (the first bullet of the class javadoc) in a request, plus the
+     * response-only and reason names the engine writes with an id in them. The spelling scan allows exactly these (and every
+     * slot's {@link Slot#idField()}); a literal with a collection-id shape outside the set is a second spelling.
+     */
+    static final java.util.Set<String> ID_NAMES_OTHER_THAN_SLOTS = java.util.Set.of(
+        "collection_id", "collection_ids",
+        // response and reason names, never read from a request
+        "unknown_collection_id", "successor_collection_id");
+
     /** The id a probe uses for a collection that does not exist: far above any identity value a test run reaches. */
     static final long UNKNOWN_ID = 987_654_321_012L;
 
