@@ -32,6 +32,12 @@ _CONTENT_TYPES = ("code", "docs", "rdr", "knowledge")
 #: (``CollectionLabel.REFUSE_SLASH``), plus ``test_rdr229_label_rule.py``'s one slash test.
 LABEL_REFUSES_SLASH: bool = True
 
+#: RDR-229 item 7: a label holding ``,`` or beginning or ending with whitespace is refused (Sam's ruling on ask
+#: ``rdr229-label-comma-space``, 2026-11-21). MCP search and plan confinement read a corpus list with ``split(",")``
+#: then ``strip()``, so such a label could be registered but never named there. Relaxable later, like ``/``: the
+#: engine's twin is ``CollectionLabel.REFUSE_COMMA_AND_EDGE_SPACE``.
+LABEL_REFUSES_COMMA_SPACE: bool = True
+
 #: The engine's own label form, ``c`` + ASCII digits (RDR-229 item 8). The client never mints one; the engine's
 #: minter does (P3.8). Twin of ``CollectionLabel.isMintedForm``: ``[0-9]``, not ``\d``, so no other script's digit counts.
 _MINTED_LABEL_RE = re.compile(r"c[0-9]+")
@@ -76,6 +82,18 @@ def _label_has_no_slash(name: str) -> None:
         raise ValueError(f"collection label {name!r} holds '/', which a label may not hold")
 
 
+def _label_has_no_comma(name: str) -> None:
+    if LABEL_REFUSES_COMMA_SPACE and "," in name:
+        raise ValueError(f"collection label {name!r} holds ',', which a label may not hold")
+
+
+def _label_has_no_edge_whitespace(name: str) -> None:
+    # str.strip()'s set, the one the comma-list readers apply; with Cc, Zl and Zp already refused it is category Zs,
+    # which is what the engine's twin checks.
+    if LABEL_REFUSES_COMMA_SPACE and name and name != name.strip():
+        raise ValueError(f"collection label {name!r} begins or ends with whitespace, which a label may not")
+
+
 def _label_is_not_minted_form(name: str) -> None:
     if _MINTED_LABEL_RE.fullmatch(name):
         raise ValueError(
@@ -92,6 +110,8 @@ _LABEL_CLAUSES: tuple[Callable[[str], None], ...] = (
     _label_within_byte_limit,
     _label_has_no_control_character,
     _label_has_no_slash,
+    _label_has_no_comma,
+    _label_has_no_edge_whitespace,
     _label_is_not_minted_form,
 )
 
