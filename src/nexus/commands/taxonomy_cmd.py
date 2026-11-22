@@ -3423,8 +3423,8 @@ def audit_cmd(
         if report.total_assignments == 0:
             click.echo("No projection data for this collection yet.")
             click.echo(
-                "Run 'nx taxonomy project "
-                f"{report.collection} --persist' to populate."
+                "Run `nx taxonomy project "
+                f"{shlex.quote(report.collection)} --persist` to populate."
             )
             return
 
