@@ -166,4 +166,36 @@ class Rdr229P37RenameWindowTest {
         assertNothingWritten(tenant, oldName, idBefore, chunksBefore, why);
         assertThat(engine.moveRows(Rdr229RenameEngine.DROP_LABEL)).as("the registration is idempotent: still one row").isEqualTo(1);
     }
+
+    // ---- stage 4: the move completed and gate 3 dips ------------------------------------------------------------------------
+
+    /**
+     * The drop move has completed, so the name keys are gone: from then on a rename is never the name path, even if gate 3 drops back to
+     * false (an id index going INVALID). Here P3.5b's changesets are still unapplied (boot 1), so it is refused naming the restart; before
+     * the fix gate 3 false read as "the name path" and the rename ran it.
+     */
+    @Test
+    @Order(40)
+    void onceTheDropMoveCompleted_aDipOfGate3IsStillRefused_neverTheNamePath() throws Exception {
+        assertThat(engine.moveCompleted(Rdr229RenameEngine.DROP_LABEL)).as("non-vacuity: the move completed in stage 3").isTrue();
+        String tenant = "p37-w4";
+        String token = engine.newTenant(tenant);
+        String oldName = coll("p37w4", 1);
+        engine.su(ctx -> {
+            Rdr229RenameSeeds.full(ctx, tenant, oldName);
+            return null;
+        });
+        long idBefore = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, oldName));
+        long chunksBefore = engine.su(ctx -> Rdr229RenameChecks.naming(ctx, tenant, "chunks", "collection", oldName));
+        engine.gate3(false);
+        assertThat(Rdr229RenameEngine.await(Duration.ofSeconds(10), () -> !engine.completion().gate3()))
+            .as("non-vacuity: gate 3 dropped back").isTrue();
+        String why = " [readiness " + engine.readiness().map(Object::toString).orElse("unreadable") + "]";
+
+        var r = engine.rename(token, oldName, coll("p37w4", 2));
+
+        assertThat(r.refused()).as("gate 3 false after the move completed is not the name path: refused " + r + why).isTrue();
+        assertThat(r.missing()).as("naming the restart, as before the dip" + why).isEqualTo("restart");
+        assertNothingWritten(tenant, oldName, idBefore, chunksBefore, why);
+    }
 }

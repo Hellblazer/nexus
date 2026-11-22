@@ -235,4 +235,72 @@ class Rdr229P37OneRowRenameRegistryTest {
             .where(DSL.field(DSL.name("label"), String.class).eq("rdr229-name-key-drop")).fetchOne(0, String.class));
         assertThat(id).isEqualTo("engine:rdr229-name-key-drop:" + Rdr229RenameEngine.ENGINE_VERSION);
     }
+
+    /** The move completed and P3.5b applied, then gate 3 dips: the rename is still the one-row update (same id), never the name path. */
+    @Test
+    void aRenameAfterGate3DipsOnAnInstallWhoseDropMoveCompleted_isStillOneRow() throws Exception {
+        String tenant = "p37-dip";
+        String token = engine.newTenant(tenant);
+        String oldName = coll("p37dip", 1);
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, oldName);
+            return null;
+        });
+        long id = engine.su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, oldName));
+        engine.gate3(false);
+        try {
+            assertThat(Rdr229RenameEngine.await(java.time.Duration.ofSeconds(10), () -> !engine.completion().gate3()))
+                .as("non-vacuity: gate 3 dropped back").isTrue();
+
+            var r = engine.rename(token, oldName, coll("p37dip", 2));
+
+            assertThat(r.status()).as("the rename route: " + r).isEqualTo(200);
+            assertThat(engine.<Long>su(ctx -> Rdr229RenameChecks.registryId(ctx, tenant, coll("p37dip", 2))))
+                .as("one-row: the registry row keeps its id (the name path would have given a new one)").isEqualTo(id);
+        } finally {
+            engine.gate3(true);
+            Rdr229RenameEngine.await(java.time.Duration.ofSeconds(10), () -> engine.completion().gate3());
+        }
+    }
+
+    private static String codeColl(String owner, int version) {
+        return "code__" + owner + "__minilm-l6-v2-384__v" + version;
+    }
+
+    private String ownerOf(String tenant, String name) {
+        return engine.su(ctx -> ctx.select(CATALOG_COLLECTIONS.OWNER_ID).from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(name)).fetchOne(0, String.class));
+    }
+
+    /**
+     * Review S3: the name path re-derives a replaceable owner from the collection's documents after it re-homes them; the one-row path
+     * leaves the documents' name column at the old label, so catalog-044/051's triggers (keyed on the name) find none. A settled owner (a
+     * tumbler segment, here 1-2, derived from the document) must survive a rename whose label carries another slug and names it as
+     * owner_id; a slug owner takes the client's, as it does on the name path. See CollectionOneRowRename#ownerTheRenameMayChange.
+     */
+    @Test
+    void aSettledTumblerOwnerOfACodeCollectionSurvivesARenameThatNamesASlugOwner_aSlugOwnerTakesTheClients() throws Exception {
+        String tenant = "p37-owner";
+        String token = engine.newTenant(tenant);
+        String settled = codeColl("p37slugs", 1);
+        String slugged = codeColl("p37slugt", 1);
+        engine.su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, settled);
+            PgContainerHelper.insertCollection(ctx, tenant, slugged);
+            ctx.insertInto(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.TENANT_ID, tenant).set(CATALOG_DOCUMENTS.TUMBLER, "1.2.3")
+                .set(CATALOG_DOCUMENTS.TITLE, "d").set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, settled)
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID, Rdr229RenameChecks.registryId(ctx, tenant, settled)).execute();
+            return null;
+        });
+        assertThat(ownerOf(tenant, settled)).as("non-vacuity: the document's trigger settled the owner on its tumbler segment").isEqualTo("1-2");
+        assertThat(ownerOf(tenant, slugged)).as("non-vacuity: the other collection keeps its slug owner").isEqualTo("p37slugt");
+
+        var r1 = engine.rename(token, settled, codeColl("p37slugu", 1), Map.of("content_type", "code", "owner_id", "p37slugu"));
+        var r2 = engine.rename(token, slugged, codeColl("p37slugv", 1), Map.of("content_type", "code", "owner_id", "p37slugv"));
+
+        assertThat(r1.status()).as("the rename route: " + r1).isEqualTo(200);
+        assertThat(ownerOf(tenant, codeColl("p37slugu", 1))).as("the settled owner is not replaced by the label's slug").isEqualTo("1-2");
+        assertThat(r2.status()).as("the rename route: " + r2).isEqualTo(200);
+        assertThat(ownerOf(tenant, codeColl("p37slugv", 1))).as("a slug owner takes the client's").isEqualTo("p37slugv");
+    }
 }

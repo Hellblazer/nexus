@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.datamove;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import dev.nexus.service.BootWorkRegistry;
+import org.junit.jupiter.api.Test;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * RDR-229 P3.7 (nexus-p2m1x.27), the rename window of {@link CompletionBootWork#publish} (O-5), review item 5: the flip of gate 3 to true
+ * takes the write lock under a bounded wait, and reads again under it. Hermetic: a scripted reader, no database.
+ */
+class CompletionBootWorkRenameWindowTest {
+
+    /** A reader that answers from a script, one result per read, the last one repeating. */
+    private static final class Scripted implements CompletionBootWork.Reader {
+        final AtomicInteger reads = new AtomicInteger();
+        final boolean[] gate3;
+
+        Scripted(boolean... gate3) {
+            this.gate3 = gate3;
+        }
+
+        @Override
+        public CompletionCheck.Result read() {
+            boolean g = gate3[Math.min(reads.getAndIncrement(), gate3.length - 1)];
+            return new CompletionCheck.Result(true, true, g, List.of(), List.of(), true, 0L, List.of(), List.of(), g ? "" : "no id index");
+        }
+
+        @Override
+        public void abort() { }
+
+        @Override
+        public void close() { }
+    }
+
+    private static CompletionBootWork work(Scripted reader) {
+        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), reader, Clock.systemUTC(), Runnable::run);
+    }
+
+    @Test
+    void theFlipReadsAgainUnderTheLock_andPublishesGate3OnlyIfItStillHolds() {
+        // the first read says gate 3 holds; by the time the lock is taken it has dropped again (an id index went INVALID while a rename ran)
+        var reader = new Scripted(true, false);
+        var work = work(reader);
+
+        work.publish();
+
+        assertThat(reader.reads.get()).as("the flip re-read under the lock").isEqualTo(2);
+        assertThat(work.latest().gate3()).as("gate 3 is published as the fresh read found it: not holding").isFalse();
+        assertThat(work.gate3().holds()).isFalse();
+
+        // control: it still holds on the second read, so it flips
+        var steady = new Scripted(true, true);
+        var work2 = work(steady);
+        work2.publish();
+        assertThat(work2.latest().gate3()).isTrue();
+        assertThat(steady.reads.get()).isEqualTo(2);
+    }
+
+    @Test
+    void aRenameThatHoldsTheWindowLongerThanTheWaitDefersTheFlip_insteadOfStallingTheCheck() throws Exception {
+        var reader = new Scripted(true);
+        var work = work(reader);
+        work.renameWindowWait(Duration.ofMillis(150));
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        CountDownLatch inside = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            Future<?> rename = pool.submit(() -> work.renameReadiness().pinned(() -> {
+                inside.countDown();
+                try {
+                    release.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertThat(inside.await(10, TimeUnit.SECONDS)).as("a pinned rename is open").isTrue();
+
+            long started = System.nanoTime();
+            int result = work.publish();
+            long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+
+            assertThat(result).as("the sample is not published: the field stays as it was").isEqualTo(-1);
+            assertThat(tookMs).as("the wait was bounded, not unbounded").isLessThan(10_000);
+            assertThat(work.gate3().holds()).as("the readers keep reading gate 3 as false while the rename is open").isFalse();
+
+            release.countDown();
+            rename.get(10, TimeUnit.SECONDS);
+            work.publish();
+            assertThat(work.gate3().holds()).as("once the rename returned the flip goes through on the next sample").isTrue();
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+        }
+    }
+}

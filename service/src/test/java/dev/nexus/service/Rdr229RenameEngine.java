@@ -137,7 +137,7 @@ final class Rdr229RenameEngine implements AutoCloseable {
         scope = new TenantScope(ds);
         bootWork = new BootWorkRegistry(Clock.systemUTC());
         check = new CompletionBootWork(bootWork, admin, CompletionCheck.ReadSet.boot(), this::simulatedGate3,
-            Rdr229RenameEngine::p35bIds);
+            this::p35bList);
         readiness = counting(check.renameReadiness());
         service = new NexusService(0, ROOT, ds, null, null, null, null, null, null, System::getenv,
             () -> dev.nexus.service.db.PgSession.startupPciSettings().enabled(), null, null, check.gate3(), readiness);
@@ -156,6 +156,11 @@ final class Rdr229RenameEngine implements AutoCloseable {
             @Override
             public Missing missing() {
                 return inner.missing();
+            }
+
+            @Override
+            public boolean dropMoveComplete() {
+                return inner.dropMoveComplete();
             }
 
             @Override
@@ -192,33 +197,59 @@ final class Rdr229RenameEngine implements AutoCloseable {
             DSL.field(DSL.name("label"), String.class).eq(label)));
     }
 
-    /** The P3.5b changeset ids the engine waits for: the real list when it exists, else the harness's one fixture id. */
+    /**
+     * The P3.5b changeset ids the engine waits for: the real list when the resource exists (even if it names nothing: an empty list
+     * is refused, never papered over), else the harness's one fixture id.
+     */
     static java.util.Set<String> p35bIds() {
-        java.util.Set<String> real = P35bChangesets.fromResource();
-        return real.isEmpty() ? java.util.Set.of(P35B_FIXTURE_ID) : real;
+        return usingFixtureList() ? java.util.Set.of(P35B_FIXTURE_ID) : P35bChangesets.fromResource();
     }
 
-    /** True while P3.5b's list is absent and {@link #P35B_FIXTURE_ID} stands in for it. */
+    /** True only while P3.5b's list resource is ABSENT and {@link #P35B_FIXTURE_ID} stands in for it. A present list, empty or not, is never replaced. */
     static boolean usingFixtureList() {
-        return P35bChangesets.fromResource().isEmpty();
+        return P35bChangesets.resourceAbsent();
     }
 
     /** What P3.5b's second walk does to {@code databasechangelog}, for the fixture id only: one EXECUTED row. */
     private void recordFixtureChangeset() {
+        recordChangeset(P35B_FIXTURE_ID, "EXECUTED");
+    }
+
+    /** A {@code databasechangelog} row for {@code id} with {@code execType} (EXECUTED, FAILED, SKIPPED, RERAN, MARK_RAN), unless the id has one. */
+    void recordChangeset(String id, String execType) {
         su(ctx -> {
             var log = DSL.table(DSL.name("public", "databasechangelog"));
-            var id = DSL.field(DSL.name("id"), String.class);
-            if (!ctx.fetchExists(log, id.eq(P35B_FIXTURE_ID))) {
+            var idF = DSL.field(DSL.name("id"), String.class);
+            if (!ctx.fetchExists(log, idF.eq(id))) {
                 Integer next = ctx.select(DSL.coalesce(DSL.max(DSL.field(DSL.name("orderexecuted"), Integer.class)), 0).plus(1))
                     .from(log).fetchOne(0, Integer.class);
-                ctx.insertInto(log, id, DSL.field(DSL.name("author"), String.class), DSL.field(DSL.name("filename"), String.class),
+                ctx.insertInto(log, idF, DSL.field(DSL.name("author"), String.class), DSL.field(DSL.name("filename"), String.class),
                         DSL.field(DSL.name("dateexecuted"), java.time.OffsetDateTime.class),
                         DSL.field(DSL.name("orderexecuted"), Integer.class), DSL.field(DSL.name("exectype"), String.class))
-                    .values(P35B_FIXTURE_ID, "p37-harness", "p37-harness-fixture.xml", java.time.OffsetDateTime.now(), next, "EXECUTED")
+                    .values(id, "p37-harness", "p37-harness-fixture.xml", java.time.OffsetDateTime.now(), next, execType)
                     .execute();
             }
             return null;
         });
+    }
+
+    /** Removes the {@code databasechangelog} rows of {@code id} that {@link #recordChangeset} wrote. */
+    void forgetChangeset(String id) {
+        su(ctx -> ctx.deleteFrom(DSL.table(DSL.name("public", "databasechangelog")))
+            .where(DSL.field(DSL.name("id"), String.class).eq(id)).and(DSL.field(DSL.name("author"), String.class).eq("p37-harness")).execute());
+    }
+
+    /** The list the next boot hands the completion check instead of {@link #p35bIds()}; null (the default) keeps that. */
+    private volatile java.util.Set<String> p35bOverride;
+
+    /** Replaces the P3.5b changeset list for this engine (call before {@link #boot}); {@code Set.of()} is a build that ships an empty list. */
+    Rdr229RenameEngine p35b(java.util.Set<String> ids) {
+        this.p35bOverride = ids;
+        return this;
+    }
+
+    private java.util.Set<String> p35bList() {
+        return p35bOverride != null ? p35bOverride : p35bIds();
     }
 
     /** The harness's stand-in for the registration pass: see the class comment. Stops with the engine. */

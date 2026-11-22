@@ -20,11 +20,13 @@ import dev.nexus.service.http.HttpUtil;
  *  "labels_total":n,"labels_incomplete":[{"label","table","why"}],
  *  "checks_missing":[{"table","constraint","what"}],
  *  "validate_waits":[{"table","constraints":[names],"what":operator text}],
- *  "rename_missing":"none"|"name_key_drop_move"|"restart"}
+ *  "rename_missing":"none"|"name_key_drop_move"|"p35b_list_missing"|"restart"}
  * </pre>
  * {@code rename_missing} (RDR-229 P3.7, [additive]) is what a collection rename waits for, spelled as the 409 {@code rename_refused}'s
  * {@code missing}: {@code none} before gate 3 (the rename is the name path) and once the one-row rename can run, {@code name_key_drop_move}
- * from gate 3 until that move has {@code completed_at}, then {@code restart} until every P3.5b changeset has applied.
+ * from gate 3 until that move has {@code completed_at}, then {@code p35b_list_missing} while this build ships no P3.5b changeset list (a restart
+ * does not fix it) or {@code restart} until every changeset of the list has applied. Once the move has completed the value no longer follows
+ * gate 3: a dip of gate 3 leaves it as it is.
  * {@code labels_total} and {@code gates_holding} count the engine's own moves and gates, not any tenant's data. {@code labels_incomplete}
  * lists each stamp label whose move is not complete (a label the queue allowlist marks not applicable is not listed).
  * {@code validate_waits[].what} is the operator text: it names the {@code nexus.rdr229_restamp} step.

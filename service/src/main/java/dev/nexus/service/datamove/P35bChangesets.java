@@ -51,6 +51,15 @@ public final class P35bChangesets {
         return Set.copyOf(ids);
     }
 
+    /** Whether {@link #RESOURCE} is missing from the classpath (a present list that names nothing is not absent). */
+    public static boolean resourceAbsent() {
+        try (InputStream in = P35bChangesets.class.getClassLoader().getResourceAsStream(RESOURCE)) {
+            return in == null;
+        } catch (IOException e) {
+            return false;   // present but unreadable: not absent, and fromResource() reads it as empty
+        }
+    }
+
     /** {@link #fromResource} as the seam type {@link CompletionBootWork} takes. */
     public static Supplier<Set<String>> resource() {
         return P35bChangesets::fromResource;

@@ -10873,12 +10873,10 @@ public final class CatalogRepository {
                                                    String newContentType, String newOwnerId,
                                                    String newNameEmbeddingModel) {
         // RDR-229 P3.7: the refusal, the path (name path before gate 3, the one-row update from it) and the commit are one pinned unit
-        // (RenameReadiness#pinned), so gate 3 cannot flip to true between the path this rename chose and its commit (fix check A O-5).
-        return renameGuard.pinned(() -> {
-            renameGuard.requireRenameAllowed();
-            return renameCollectionOnPath(tenant, oldName, newName, expectedTargetSupersededBy, newContentType, newOwnerId,
-                newNameEmbeddingModel, renameGuard.oneRowRename());
-        });
+        // (RenameReadiness#pinned), so gate 3 cannot flip to true between the path this rename chose and its commit (fix check A O-5);
+        // gate 3 is read once inside it, and RenameGuard hands the path down.
+        return renameGuard.pinned(oneRow -> renameCollectionOnPath(tenant, oldName, newName, expectedTargetSupersededBy, newContentType,
+            newOwnerId, newNameEmbeddingModel, oneRow));
     }
 
     private Map<String, Integer> renameCollectionOnPath(String tenant, String oldName, String newName,
