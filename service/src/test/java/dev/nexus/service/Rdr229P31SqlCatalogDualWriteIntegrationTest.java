@@ -109,6 +109,15 @@ class Rdr229P31SqlCatalogDualWriteIntegrationTest {
             for (String key : after.keySet()) {
                 if (!before.containsKey(key)) addedAfter.add(key.substring(0, key.indexOf('(')));
             }
+            // RDR-229 P3.5b (vectors-077) also adds the id-path twins <name>_by_id of the search functions and chunk_live_owners:
+            // readers, not writers of a guarded table; each must appear, and none other may.
+            Set<String> twins = new TreeSet<>();
+            java.util.regex.Matcher tm = java.util.regex.Pattern.compile("CREATE\\s+FUNCTION\\s+nexus\\.(\\w+_by_id)\\s*\\(")
+                .matcher(java.nio.file.Files.readString(P35B_FILE));
+            while (tm.find()) twins.add(tm.group(1));
+            assertThat(twins).as("non-vacuity: vectors-077 adds id twins").isNotEmpty();
+            assertThat(addedAfter).as("every vectors-077 id twin appeared").containsAll(twins);
+            addedAfter.removeAll(twins);
             assertThat(addedAfter).as("the functions that appeared after vectors-069 are exactly the named ones").isEqualTo(ADDED_AFTER_DUAL_WRITE);
             assertThat(before.keySet().stream().filter(k -> !after.containsKey(k)).toList()).as("no function went").isEmpty();
             Set<String> redefined = redefinedFunctions();
