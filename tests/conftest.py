@@ -2990,6 +2990,27 @@ def _correlation_id_reset():
 
 
 @pytest.fixture(autouse=True)
+def _no_real_mineru_weights_fetch(request, monkeypatch):
+    """F34: ``pdf_stack.ensure_or_exit`` fetches MinerU's pipeline weights (about 1.2 GB) when the stack is
+    present and they are not, so a test that reaches the gate on a dev venv without the weights would start
+    a real download. Stub the fetch to "nothing needed" for every test. A module that exercises it sets
+    ``REAL_MINERU_WEIGHTS_FETCH = True`` (tests/test_f34_mineru_weights_prefetch.py drives it with a stub
+    download)."""
+    if getattr(request.module, "REAL_MINERU_WEIGHTS_FETCH", False):
+        return
+    import nexus.mineru_weights as mineru_weights  # noqa: PLC0415 - deferred: keeps conftest import light
+
+    monkeypatch.setattr(
+        mineru_weights, "ensure_pipeline_weights", lambda say, *, download=None, allow_fetch=True, fetch=None: False
+    )
+    monkeypatch.setenv(mineru_weights.SKIP_ENV, "1")  # an ``nx`` child of the test fetches nothing either
+    # F35: a developer box that holds nexus's real weights must not leak MINERU_MODEL_SOURCE=local into the
+    # env of a MinerU child a test builds. tests/test_f35_mineru_self_host_weights.py drives the real one.
+    monkeypatch.setattr(mineru_weights, "child_env", lambda: {})
+    monkeypatch.setattr(mineru_weights, "nexus_weights_ready", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_claude_version_probe(request, monkeypatch):
     """nexus-jypmj.21: the "Answer-kind extraction" doctor row runs ``claude --version`` when the ``cli`` backend is
     chosen, so any test that reaches ``run_health_checks()`` (the doctor tests, the console health panel) on a box
@@ -3790,6 +3811,8 @@ def _isolate_service_endpoint_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # nexus-mtheb.4: a SubagentStop nudge run from any test starts no detached
     # dispatch-recorder child; tests of the recorder delenv this themselves.
     monkeypatch.setenv("NX_DISPATCH_COUNTER", "off")
+    # nexus-hczdo: a SessionStart run from any test starts no detached work-reap child (it would read the real engine).
+    monkeypatch.setenv("NX_WORK_REAP_DISABLED", "1")
     # RDR-253 Step 3: a test that starts the MCP lifespan under a real Claude ancestor (a developer running the suite
     # inside a session) would start an identity lease thread reading the real registry. The tests of the lease build
     # IdentityLease directly with injected dependencies and never call start().

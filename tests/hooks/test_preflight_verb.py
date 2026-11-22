@@ -148,9 +148,16 @@ class TestPreflightVerbDirect:
     of the subprocess harness above.
     """
 
-    def test_ignores_payload_argument(self) -> None:
+    def test_ignores_payload_argument(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # A non-None payload must not change behavior: this verb has no
         # stdin contract at all, unlike session-start.
+        # The stubbed nx answers at once (see _stub_tools): with the real CLI the
+        # first, cold call could outrun the 3 s probe under CI load and report
+        # FAILED while the second, warm call passed, so the two outputs differed
+        # (develop CI shard 2 on fdf579de29 and 83a0bcd8b5). POSIX only; Windows
+        # probes nx through nx_argv, not PATH.
+        if sys.platform != "win32":
+            monkeypatch.setenv("PATH", _stub_tools(tmp_path / "bin"))
         result_with_payload = preflight_verb.run({"session_id": "whatever"})
         result_without = preflight_verb.run(None)
         assert result_with_payload.stdout == result_without.stdout

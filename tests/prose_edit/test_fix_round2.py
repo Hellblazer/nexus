@@ -449,4 +449,6 @@ def test_the_rdr_revision_history_names_the_three_decisions_and_the_record_table
     for phrase in ("precedence labels", "stored voice card", "promote filter", "dry-run gate"):
         assert phrase in entry, phrase
     assert '"voice_card"' in text and "author-approved" in text
-    assert re.search(r"status:\s*accepted", text[:600]), "the RDR status is not changed by this round"
+    # RDR-221 closed 2026-11-22 (Sam's override after three close critiques,
+    # T2 nexus_rdr/221-close-override-2026-11-22); this round's own entry is unchanged.
+    assert re.search(r"status:\s*closed", text[:600]), "RDR-221 is closed"

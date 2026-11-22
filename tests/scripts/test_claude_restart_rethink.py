@@ -51,7 +51,7 @@ def rd(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "MADE_MARKERS", set())
     monkeypatch.setattr(crs, "UNWITHDRAWN", [])
     monkeypatch.setattr(crs, "session_tasks", lambda _s: [])
-    monkeypatch.setattr(crs, "session_work", lambda _s: [])
+    monkeypatch.setattr(crs, "session_work", lambda _s, **k: [])
     monkeypatch.delenv("TMUX_PANE", raising=False)
     setattr_in(monkeypatch, crs, "signal.signal", lambda *_a: None)
     setattr_in(monkeypatch, crs, "time.time", lambda: NOW)
@@ -269,7 +269,7 @@ def test_a_manifest_with_a_bad_since_is_malformed(crs, rd) -> None:
 def test_the_ask_tells_the_session_to_stop_its_shells_with_taskstop(crs, monkeypatch, tasks) -> None:
     s = {"name": "alpha", "sessionId": "sid-alpha", "pid": 1}
     monkeypatch.setattr(crs, "session_tasks", lambda _s: tasks)
-    monkeypatch.setattr(crs, "session_work", lambda _s: [])
+    monkeypatch.setattr(crs, "session_work", lambda _s, **k: [])
     text = " ".join(crs.ready_prompt(s, "/tmp/r.json").split())
     assert "TaskStop" in text and "finished ones included" in text
     assert "before you answer ready" in text
@@ -281,7 +281,7 @@ def test_the_ask_tells_the_session_to_stop_its_shells_with_taskstop(crs, monkeyp
 def test_the_ask_names_the_tasks_the_script_sees_ahead_of_the_instruction(crs, monkeypatch) -> None:
     s = {"name": "alpha", "sessionId": "sid-alpha", "pid": 1}
     monkeypatch.setattr(crs, "session_tasks", lambda _s: ["pid 5000 since t: nx ci wait abc"])
-    monkeypatch.setattr(crs, "session_work", lambda _s: [])
+    monkeypatch.setattr(crs, "session_work", lambda _s, **k: [])
     text = crs.ready_prompt(s, "/tmp/r.json")
     assert text.index("pid 5000 since t: nx ci wait abc") < text.index("TaskStop") < text.index("Answer by writing the file")
     assert len(text.encode()) <= 4096  # the mailbox template's body ceiling

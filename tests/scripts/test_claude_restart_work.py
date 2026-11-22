@@ -61,7 +61,7 @@ def test_the_work_is_read_by_session_id_with_stale_rows_kept_and_marked(crs, mon
     nx = stand_in([row("worktree", "/w/a"), row("tmux", "sock"), {**row("agent", "agent:a1"), "stale": True}, done])
     monkeypatch.setattr(crs, "_nx_identity", nx)
     assert crs.session_work({"sessionId": "sid-1"}) == ["worktree /w/a", "tmux sock", "agent agent:a1 (stale)"]
-    assert nx.calls == [("work", "list", "--session", "sid-1", "--json")]
+    assert nx.calls == [("work", "list", "--session", "sid-1", "--json")], "a view only reads; the gate reaps"
     assert nx.timeouts == [5] == [crs.WORK_TIMEOUT_S], "a hung engine must not stall --status for the default minute"
 
 
@@ -157,16 +157,16 @@ def test_status_prints_each_targets_running_work_and_the_exit_code_ignores_it(cr
     monkeypatch.setattr(crs, "round_problem", lambda *a, **k: "")
     args = argparse.Namespace(status=True, ready_max_age=300)
 
-    monkeypatch.setattr(crs, "session_work", lambda s: ["worktree /w/a", "tmux sock"])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: ["worktree /w/a", "tmux sock"])
     assert crs.ready_round(args, found, found) == 0, "a session with running work still counts as ready: the report is not a blocker"
     out = capsys.readouterr().out
     assert "work: worktree /w/a" in out and "work: tmux sock" in out
 
-    monkeypatch.setattr(crs, "session_work", lambda s: [])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: [])
     assert crs.ready_round(args, found, found) == 0
     assert "work:" not in capsys.readouterr().out
 
-    monkeypatch.setattr(crs, "session_work", lambda s: None)
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: None)
     assert crs.ready_round(args, found, found) == 0
     assert "work: could not be read" in capsys.readouterr().out
 
@@ -187,7 +187,7 @@ def test_a_running_row_a_restart_would_cut_off_blocks_ready(crs, monkeypatch) ->
     monkeypatch.setattr(crs, "LOG", Path("/dev/null"))
 
     def gate(work):
-        monkeypatch.setattr(crs, "session_work", lambda s: work)
+        monkeypatch.setattr(crs, "session_work", lambda s, **k: work)
         return crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9")
 
     assert gate([]) == 0
@@ -197,7 +197,7 @@ def test_a_running_row_a_restart_would_cut_off_blocks_ready(crs, monkeypatch) ->
     assert gate(None) == 3, "a work list that cannot be read is not 'no work'"
     rows = crs.readiness(found, manifest, now, 300, "%9")
     assert "registered work could not be read" in rows[0]["blocker"]
-    monkeypatch.setattr(crs, "session_work", lambda s: ["labrun r1"])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: ["labrun r1"])
     assert "1 registered work row(s) still run: labrun r1" in crs.readiness(found, manifest, now, 300, "%9")[0]["blocker"]
     # the caller's own session is exempt, as it is from the task list
     assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%1") == 0
@@ -248,9 +248,9 @@ def test_every_gate_decision_leaves_one_jsonl_line_per_session_with_its_blockers
     monkeypatch.setattr(crs, "READY_LOG", rounds)
     _ready_session(crs, monkeypatch, manifest, now)
 
-    monkeypatch.setattr(crs, "session_work", lambda s: ["agent agent:a1", "labrun r1 (stale)", "worktree /w"])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: ["agent agent:a1", "labrun r1 (stale)", "worktree /w"])
     assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 3
-    monkeypatch.setattr(crs, "session_work", lambda s: ["labrun r1 (stale)"])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: ["labrun r1 (stale)"])
     assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 0, "a stale row alone does not block"
     lines = [json.loads(x) for x in rounds.read_text(encoding="utf-8").splitlines()]
     assert len(lines) == 2
@@ -268,7 +268,7 @@ def test_a_journal_that_cannot_be_written_never_changes_the_verdict(crs, monkeyp
     blocked.write_text("x", encoding="utf-8")
     monkeypatch.setattr(crs, "READY_LOG", blocked / "rounds.jsonl")             # a path under a regular file
     _ready_session(crs, monkeypatch, manifest, now)
-    monkeypatch.setattr(crs, "session_work", lambda s: [])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: [])
     assert crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9") == 0
 
 
@@ -280,7 +280,7 @@ def test_a_dry_run_and_the_second_installed_call_write_no_journal_lines(crs, mon
     rounds = tmp_path / "rounds.jsonl"
     monkeypatch.setattr(crs, "READY_LOG", rounds)
     _ready_session(crs, monkeypatch, manifest, now)
-    monkeypatch.setattr(crs, "session_work", lambda s: ["agent agent:a1"])
+    monkeypatch.setattr(crs, "session_work", lambda s, **k: ["agent agent:a1"])
     crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9", dry_run=True)
     assert not rounds.exists(), "a dry run decides nothing"
     crs.go_gate(found, force=False, max_age=300, now=now, caller_pane="%9")

@@ -238,7 +238,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-218](rdr-218-windows-platform-support.md) | Windows Platform Support: a Low-Friction Plugin Install for the CLI and the Desktop | Architecture | Superseded by RDR-224 | 2026-09-21 |
 | [RDR-219](rdr-219-harness-credentials-never-leave-the-keychain.md) | Harness Credentials Never Leave the Keychain: an Automation Token, Passed by Environment | Architecture | Closed | 2026-09-25 |
 | [RDR-220](rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md) | CI Status From GitHub Webhooks to the Tuple Space | Architecture | Closed | 2026-09-26 |
-| [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Accepted | 2026-09-27 |
+| [RDR-221](rdr-221-prose-editor.md) | Prose Editor: an Example-Anchored Line Editor with Memory in T2 | Feature | Closed | 2026-09-27 |
 | [RDR-222](rdr-222-request-identity-for-mutating-engine-routes.md) | Request Identity for Mutating Engine Routes | Architecture | Closed | 2026-09-27 |
 | [RDR-223](rdr-223-atomic-chunk-plus-owner-write.md) | Atomic Chunk-Plus-Owner Write on Every Client Path | Architecture | Closed | 2026-09-28 |
 | [RDR-224](rdr-224-native-windows-support.md) | Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client | Architecture | Closed | 2026-09-30 |
@@ -270,7 +270,7 @@ An RDR (Research-Design-Review) is a short document that records a technical dec
 | [RDR-251](rdr-251-taxonomy-compute-on-the-engine.md) | Taxonomy Compute on the Engine: Discover, Labels and Cross-Links Without Downloading the Collection (RDR-193 Part B) | Architecture | Deferred | 2026-11-16 |
 | [RDR-252](rdr-252-aura-relevance-and-one-responder.md) | Groups, Relevance and One Responder: Raid-Style Coordination for Sessions, with Auras That Load by Membership and Act by Assignment | Architecture | Closed | 2026-11-16 |
 | [RDR-253](rdr-253-session-identity.md) | Session Identity: Named Seats That Outlive Sessions, a Binding Log, One Resolver, and Fenced Identity State | Architecture | Accepted | 2026-11-16 |
-| [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Accepted | 2026-11-19 |
+| [RDR-254](rdr-254-identity-when-a-path-moves.md) | Identity When a Path Moves: Repo Owners and Curator Documents Keep Their Identity Across a Move | Architecture | Closed | 2026-11-19 |
 
 > RDR-216 is unused on `develop`: drafted, gated BLOCKED, then abandoned 2026-09-19 without landing. Its measurements survive in T2 as `nexus_rdr/216-research-1` through `-19` and in `nexus/manticore-auto-chunking-analysis-2026-09-19`; the record itself never merged.
 

@@ -782,3 +782,29 @@ def test_a_since_head_run_that_sees_no_changed_pdf_leaves_the_hold_alone(
         idx._run_index(repo_without_pdfs, _reg(), since_head=True)
 
     assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_BOUNDS) == 1
+
+
+def test_a_failed_weight_fetch_ends_the_cli_with_the_fetch_not_a_refused_install(repo, monkeypatch) -> None:
+    """F34 (nexus-7t3w1): the stack is installed and fetching MinerU's pipeline weights fails. The run indexes
+    code and prose, holds the PDF, and ends with the fetch failure and exit 75; never the
+    "PDF support is not installed" refusal or its repair command."""
+    from nexus import mineru_weights
+
+    def _fail(say, *, download=None, allow_fetch=True):
+        raise mineru_weights.WeightsFetchError(
+            "fetching MinerU's pipeline weights failed at pp_doclayout_v2: OSError: Network is unreachable."
+        )
+
+    monkeypatch.setattr(pdf_stack, "ensure", lambda entry: pdf_stack.Outcome.PRESENT)
+    monkeypatch.setattr(pdf_stack, "state", lambda: pdf_stack.StackState("present", ""))
+    monkeypatch.setattr(mineru_weights, "weights_cached", lambda: False)
+    monkeypatch.setattr(mineru_weights, "ensure_pipeline_weights", _fail)
+    result, mocks = _index_repo_cli(repo, monkeypatch)
+
+    assert result.exit_code == pdf_stack.EXIT_NETWORK == 75, result.output
+    assert mocks["_index_code_file"].call_count == 1, "code is indexed before the exit"
+    mocks["_index_pdf_file"].assert_not_called()
+    assert "1 PDF(s) were NOT indexed: fetching MinerU's pipeline weights failed" in result.output
+    assert "PDF support is not installed" not in result.output
+    assert pdf_stack.repair_command() not in result.output
+    assert pdf_stack.skipped_count(pdf_stack.SKIP_CAUSE_WEIGHTS) == 1

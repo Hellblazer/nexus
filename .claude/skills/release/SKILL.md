@@ -128,6 +128,10 @@ surfaces the whole fix list. The checks:
 - the pin sweep -- the pin tests that are not lint-marked,
   `check_wire_contract_pairing.py`, and `ruff check src`. The lint-marked ones run
   in PR CI's `test-lint`; a lint red shows there about 12 minutes into the PR's run.
+- `mineru-weights-published` -- the MinerU weights tag (`WEIGHTS_ASSET_TAG`, F35) serves this tree's pinned
+  `MANIFEST.tsv` and every asset at its pinned size: one GET and one HEAD per asset against the public download
+  URL, so it needs the network (offline reads UNVERIFIED). An absent tag or asset FAILS with step 8b's upload as
+  the fix; a tag serving other bytes FAILS with "new tag and pins" as the fix, since the upload never overwrites.
 
 WHY (the 7.15.0 cut, 2026-08-22). The battery was ordered expensive-first and
 abort-on-first-red, so each blocker cost a full replay and hid every other one.
@@ -197,7 +201,7 @@ tests/e2e/release-battery.sh --skip-preflight   # Step 0c passed on this HEAD (i
 # The lines below are WHAT THE BATTERY RUNS, for reading and for rerunning one red leg alone. Do not run them as well.
 env NX_GATE_SMOKE_ONLY=1 tests/e2e/local-service-gate.sh   # leg lsg: the throwaway service as shipped boots and serves (14 smoke probes + the engine log); the integration pytest family runs in PR CI
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # leg pkgup: ONE-engine convergence MVV (nexus-cfgo9)
-tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs) — see below
+tests/e2e/fresh-install-mvv.sh       # leg mvv: VIRGIN-journey gate (nexus-nolqs), and the formula-PDF check through MinerU on the CANDIDATE wheel with an empty model cache (F34, nexus-7t3w1): its row in the verdict table names that check's status; a skip needs NX_MVV_FORMULA_PDF_CHECK=0 plus NX_MVV_FORMULA_PDF_SKIP_REASON and reads as SKIPPED there — see below
 tests/e2e/constraints-resolve-gate.sh   # leg resolve: the shipped constraints.txt + overrides.txt RESOLVE (uv pip compile, no install): 22 compiles on Linux x86_64/aarch64 py3.12/3.13 (cpu; [pdf] also cu130 and cu126), Windows x64 and macOS 14 arm64, default and [pdf], plus a macOS 13 negative control (nexus-2k66t.4.4); network; needs a uv that knows --torch-backend cu130 and cu126 (the gate probes and says so); offline self-test tests/e2e/constraints_resolve_gate_test.sh
 tests/e2e/plugin-out-of-repo-gate.sh --all   # leg plugins: the four plugin dirs run from a project outside any nexus checkout (nexus-z7ddd): the static pass plus a canary (a fixture plugin with random nonces that measures what Claude Code substitutes, judged on events not prose; five live runs, so UNVERIFIED is red: rerun, never waive); no per-target model sweep; where claude is absent the leg is --static-only, and its row AND the battery's closing line say "static pass only": run it again on the laptop; offline self-test tests/e2e/plugin_out_of_repo_gate_test.sh
 tests/e2e/hook-cli-skew/run.sh       # every hooks.json entry vs every published CLI from 7.55.0 (nexus-rcoze); standalone since cleanup step 11, no longer a battery leg
@@ -263,6 +267,19 @@ bge-768), ladder converged at init, store put + index md with ENGINE-CATALOG
 registration asserted, semantic search returns both sentinels, doctor with
 zero ✗ and warnings checked against the script's allowlist. Must end
 `FRESH-INSTALL MVV PASSED — ... (LOCAL WHEEL, release-battery layer)`.
+Before the tag it also runs the formula-PDF check on the candidate wheel
+(F34, nexus-7t3w1; Sam 2026-11-21, T2 `nexus/sam-ruling-855-go-2026-11-21`):
+the wheel is installed with the `pdf` extra, `tests/fixtures/bft-to-smr.pdf` is
+indexed through MinerU in the virgin HOME with an empty model cache, the index
+must fetch MinerU's pipeline weights as its own step before the first page, and
+the added chunk's extraction method must be `mineru`. Until 8.5.5 this check ran
+only post-publish (Step 11c, `--published`), so the battery never parsed a PDF
+through MinerU and a first-run MinerU defect shipped in 8.5.4. The mvv row of the
+verdict table carries `formula-PDF check (MinerU, candidate wheel, local layer): ran`;
+anything else there (SKIPPED with its reason, or no status line) is not a release
+pass unless the skip was recorded on purpose. It adds the MinerU stack install and
+the weight download (about 1.2 GB) to the leg, so its work tree is several GB larger
+than the 2.5 GB above.
 `FRESH_MVV_CACHE=/tmp/fresh-mvv-cache` reuses the 416MB model download across
 runs. The work tree (about 2.5 GB) is created under `$TMPDIR` and removed on
 exit. On failure the script prints `FAILURE EVIDENCE PRESERVED: <dir>`, a small
@@ -862,6 +879,45 @@ git push
 ```
 
 Tradeoff: extra commit on main, but guards against the case where someone could force-push the `vX.Y.Z` tag. For solo / small-team projects the `ref` alone is usually fine; skip if so.
+
+### 8b. Publish the MinerU weights assets (F35, nexus-7t3w1; BEFORE the tag, under the release's go)
+
+The preflight's `mineru-weights-published` leg (step 0c) fails on any tree that carries it until this step has run
+once, because a client cut without the tag ships broken fresh installs. The first client cut that ships the leg
+therefore meets it red at step 0c: run this step then (dry run, then the upload under the release's go) and re-run
+the preflight. Once the tag carries every asset the leg passes and this step is a no-op. A plugin-only lane runs the
+preflight its base tag carries, so a lane off a tag older than F35 has no such leg, and a lane off a later tag finds
+the weights already published.
+
+A fresh install fetches MinerU's pipeline weights (about 1.2 GB) from the release assets of the immutable tag
+`mineru-pipeline-ed6b654c` (`WEIGHTS_ASSET_TAG` in `src/nexus/mineru_weights.py`), never from Hugging Face. The
+wheel Step 9 publishes needs those assets to exist, so they go up first. Run it from the release commit; the pinned
+files and their digests are `MANIFEST` in that module, the one source the client, the gate and this script share:
+
+```bash
+STAGE="$(mktemp -d)"
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$STAGE" --upload --dry-run   # stage, verify, print the plan and the tag target
+uv run --extra pdf python scripts/publish-mineru-weights.py --stage-dir "$STAGE" --upload              # only under the release's go
+```
+
+The script stages the 20 files from the local Hugging Face cache (any revision whose bytes verify; otherwise a
+download at the pinned revision), verifies each against the manifest, writes `LICENSE-AGPL-3.0.txt`,
+`LICENSE-Apache-2.0.txt`, `THIRD-PARTY-NOTICES.md` and `MANIFEST.tsv`, and uploads to the tag only what is absent.
+It creates the release when it is absent, with the tag at `--target` (default `main`, printed in the dry run; not
+marked latest), and otherwise uploads only the missing assets, never overwriting. It is a no-op once the tag
+carries every asset, so run it at every cut. It refuses, with nothing uploaded and a one-line reason:
+
+- a staged weight file or `MANIFEST.tsv` that does not match the manifest (delete it and stage again);
+- an existing release asset whose sha256 differs for a weight file or `MANIFEST.tsv`;
+- a release that exists only as a draft (publish or delete it by hand first);
+- a release it cannot read through `gh`.
+
+An existing license or notice asset that differs from the repo's text is not a refusal: the published copy stays and
+the script prints a warning, so a wording fix in `THIRD-PARTY-NOTICES.md` never makes a later cut fail. (A fix that
+must reach the release is a manual asset replacement the releaser decides.) Staging and the dry run need no go; the
+upload is a release-asset write, so it waits for the releaser's go for this release. A release that bumps the pin
+(new upstream revision) changes `WEIGHTS_REVISION`, `WEIGHTS_ASSET_TAG`, `MANIFEST` and the notice text together, and
+uses a new tag; never re-upload under the old one.
 
 ### 9. Tag and push IMMEDIATELY after merge (triggers Release workflow + PyPI publish via OIDC)
 

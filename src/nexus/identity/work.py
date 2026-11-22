@@ -423,6 +423,9 @@ def _call(fn: Callable[..., Any], *args: Any) -> Any:
 #: Seconds a registrar's engine call may take. A label must never delay what it labels.
 LABEL_TIMEOUT_S = 2.0
 
+#: Seconds the one retry of a failed end may take (:meth:`Label.finish`): the work is over, so a longer bound costs nothing.
+FINISH_RETRY_TIMEOUT_S = 5.0
+
 
 #: Kinds an engine answered ``bad_kind`` for in this process (an engine from before the kind), with the monotonic instant
 #: the refusal lapses: not asked again meanwhile, so a process pays one failed call per kind per window, not one per
@@ -589,12 +592,24 @@ class Label:
         return self._started
 
     def finish(self, *, skip: bool = False) -> None:
+        if not self._started and self.identity and not self._finished and not skip:
+            # The registration failed as far as this process knows, but a write that timed out may still have landed: a
+            # running row nothing ends and no process vouches for. Forget is idempotent and never creates a row.
+            self._finished = True
+            self._disarm()
+            forget_own(self.kind, self.ref, identity=self.identity, timeout=FINISH_RETRY_TIMEOUT_S)
+            return
         if not self._started or self._finished:
             return
         self._finished = True
         self._disarm()
-        if not skip:
-            finish_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout, owner_dir=_safe_owner_dir())
+        if not skip and not finish_own(self.kind, self.ref, identity=self.identity, timeout=self.timeout,
+                                       owner_dir=_safe_owner_dir()):
+            # One retry on a longer bound: the end is the write a reader cannot replace (a missed one leaves the row for the
+            # reap), and the work it labels is already over, so it delays nothing that waits on it.
+            if not finish_own(self.kind, self.ref, identity=self.identity, timeout=FINISH_RETRY_TIMEOUT_S,
+                              owner_dir=_safe_owner_dir()):
+                _log.warning("identity_work_finish_failed", kind=self.kind, ref=self.ref, identity=self.identity)
 
     def arm_sigterm(self) -> None:
         """Mark the row done on SIGTERM or SIGHUP (a closed terminal), then let the signal do what it would have done: call
@@ -698,17 +713,35 @@ def _target(env: IdentityEnv, seat: str | None, session: str | None, who: Callab
 
 
 def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = None, *, only_running: bool = False,
-              who: Callable[[], str | None] | None = None) -> dict[str, Any]:
+              who: Callable[[], str | None] | None = None, reap_first: bool = False) -> dict[str, Any]:
     """``{"identity", "alive", "work": [row + "stale"]}``. A running row is stale when its identity is not alive, when it
     is a ``worktree`` whose path is not a directory on this host, when it is a ``wait`` for a session the identity no
     longer holds, or when it is a wait, lab run, agent or watcher whose registering process is gone or that nobody has
     written for 12 hours (:func:`process_stale_why`); the stale row carries ``why``. *only_running* keeps the rows that are
-    ``running`` and not stale."""
+    ``running`` and not stale. *reap_first* closes the rows whose work has ended (:func:`nexus.identity.reap.reap`) before
+    reading, and the report then carries them under ``"reaped"``. A reap that fails is reported under ``"reap_error"`` and
+    the list is read anyway: a reaping read never fails where a plain one would not."""
     identity = _target(env, seat, session, who)
+    reaped: list[dict[str, str]] | None = None
+    reap_error: str | None = None
+    if reap_first:
+        from nexus.identity.reap import reap  # noqa: PLC0415 — deferred: only a reaping read needs it
+
+        try:
+            reaped = reap(env, identity)
+        except Exception as exc:  # noqa: BLE001 — the list is the answer; the reap is a side effect of reading it
+            reap_error = f"{type(exc).__name__}: {exc}"[:200]
+            _log.warning("identity_work_reap_error", identity=identity, error=reap_error)
     alive = _call(is_alive, env, identity)
     current, started = holder_facts(env.client, identity)
+    work = _call(of, env.client, identity)
+    ended: dict[str, float] = {}
+    if any(w.kind == "agent" and w.state == RUNNING for w in work):
+        from nexus.identity.reap import ended_agents  # noqa: PLC0415 — deferred: only an identity with agent rows reads a transcript
+
+        ended = ended_agents(current)
     rows = []
-    for w in _call(of, env.client, identity):
+    for w in work:
         row = {"kind": w.kind, "ref": w.ref}
         why = None
         if w.state == RUNNING:
@@ -716,25 +749,31 @@ def list_rows(env: IdentityEnv, seat: str | None = None, session: str | None = N
                 why = "the identity is not alive"
             elif worktree_gone(row):
                 why = "the worktree is gone"
-            elif wait_superseded(row, current):
-                why = "a wait from an earlier session"
             else:
-                why = process_stale_why(env, identity, w, holder_started=started)
+                from nexus.identity.reap import reap_why  # noqa: PLC0415 — one witness list for the list and the reap
+
+                why = reap_why(env, identity, w, session=current, holder_started=started, ended=ended)
         if only_running and (w.state != RUNNING or why):
             continue
         entry = {"kind": w.kind, "ref": w.ref, "state": w.state, "updated_at": w.updated_at, "stale": bool(why)}
         if why:
             entry["why"] = why
         rows.append(entry)
-    return {"identity": identity, "alive": alive, "work": rows}
+    report: dict[str, Any] = {"identity": identity, "alive": alive, "work": rows}
+    if reaped is not None:
+        report["reaped"] = reaped
+    if reap_error is not None:
+        report["reap_error"] = reap_error
+    return report
 
 
 def list_lines(report: Mapping[str, Any]) -> list[str]:
     head = f"{report['identity']}: {'alive' if report['alive'] else 'not alive'}"
+    reaped = [f"  closed  {r['kind']:<9} {r['ref']}  ({r['why']}; {r['closed']})" for r in report.get("reaped") or []]
     rows = report["work"]
     if not rows:
-        return [head + ", no work"]
-    return [head] + [
+        return [head + ", no work"] + reaped
+    return [head] + reaped + [
         f"  {r['state']:<7} {r['kind']:<9} {r['ref']}" + (f"  (stale: {_why_stale(report, r)})" if r["stale"] else "")
         for r in rows]
 
@@ -797,25 +836,39 @@ def run_command(env: IdentityEnv | Callable[[], IdentityEnv], kind: str, ref: st
         raise IdentityCommandError("give the command to run after --")
     engine: IdentityEnv | None = None
     identity: str | None = None
+    registered = False
     try:
         identity = (who or caller_identity)()
         if identity is not None:
             engine = env() if callable(env) else env
             register(engine.client, identity, kind, ref, RUNNING, probe=engine)
+            registered = True
             _own_record(engine.identity_dir, identity, kind, ref, RUNNING, engine.procs)
     except Exception as exc:  # noqa: BLE001 — a label never fails its work
         _log.warning("identity_work_run_not_registered", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
-        engine = None
     try:
         code = (runner or _spawn)(list(argv))
     finally:
         if engine is not None and identity is not None:
-            try:
+            _end_run(engine, identity, kind, ref, registered)
+    return code
+
+
+def _end_run(engine: IdentityEnv, identity: str, kind: str, ref: str, registered: bool) -> None:
+    """``run``'s end: ``done``, retried once (nexus-hczdo: the end is the write a reader cannot replace), and the owner record
+    closed. When the registration failed as far as this process knows, a write that timed out may still have landed:
+    forget the row instead (idempotent, it never creates one)."""
+    for attempt in (1, 2):
+        try:
+            if registered:
                 mark_done(engine.client, identity, kind, ref)
                 _own_record(engine.identity_dir, identity, kind, ref, DONE, engine.procs)
-            except Exception as exc:  # noqa: BLE001 — as above
+            else:
+                forget(engine.client, identity, kind, ref)
+            return
+        except Exception as exc:  # noqa: BLE001 — a label never fails its work
+            if attempt == 2:
                 _log.warning("identity_work_run_not_marked_done", kind=kind, ref=ref, error=f"{type(exc).__name__}: {exc}")
-    return code
 
 
 _FORWARDED = tuple(getattr(signal, n) for n in ("SIGTERM", "SIGINT", "SIGHUP") if hasattr(signal, n))

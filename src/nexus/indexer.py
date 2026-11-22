@@ -1428,8 +1428,10 @@ def _catalog_hook(
             # worktree path; ``resolve_path`` then produced broken
             # paths for every relative-path document under this owner
             # once the worktree was deleted.
+            # RDR-254 Gap 4: a second live clone with this folder name registers under its own name.
+            from nexus.catalog.engine_writes.repo_owner_name import repo_owner_name  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
             owner = writer.register_owner(
-                name=repo_name,
+                name=repo_owner_name(cat, name=repo_name, repo_hash=repo_hash, repo_root=main_repo),
                 owner_type="repo",
                 repo_hash=repo_hash,
                 repo_root=str(main_repo),
@@ -2242,6 +2244,7 @@ def index_repository(
                     # next --since-head diff must still contain it.
                     + stats.get("pdf_stack_held", 0)
                     + stats.get("pdf_mineru_bounds_held", 0)
+                    + stats.get("pdf_mineru_weights_held", 0)
                     # nexus-tr1rj.13: PDFs a MinerU stop failed or never reached are retried by
                     # the next run once the install is repaired; the diff must still contain them.
                     + stats.get("pdf_mineru_tripped", 0)
@@ -2592,9 +2595,14 @@ def _hold_pdfs_without_stack(
     probe: Callable[[list[Path]], list[Path]] | None = None,
     already_held: Sequence[Path] = (),
     extractor: str = "",
+    weights_failure: list[str] | None = None,
 ) -> list[Path]:
     """The repo walk found PDFs: make sure the PDF stack is here before any of
     them is registered or written (nexus-2k66t.4.2).
+
+    F34 (nexus-7t3w1): when the stack is here and fetching MinerU's pipeline weights fails (or a
+    background run may not download them), the PDFs are held and the failure's message is
+    appended to *weights_failure*, so the run's summary names it instead of a missing stack.
 
     *extractor* is the repo's ``pdf.extractor`` (RDR-237). The explicit ``pymupdf`` needs none of
     the stack, so nothing is probed, installed or held for it: every PDF goes on to be extracted
@@ -2643,18 +2651,39 @@ def _hold_pdfs_without_stack(
                     f"{len(_needing)} PDF(s) NOT indexed this run (code and prose proceed): {_bounds_problem}"
                 )
             return list(_needing)
-    if probe is not None and pdf_stack.needs_stack(extractor) and not pdf_stack.state().present:
+    from nexus import mineru_weights  # noqa: PLC0415 — deferred import (startup cost)
+
+    if probe is not None and pdf_stack.needs_stack(extractor) and (
+        not pdf_stack.state().present or not mineru_weights.prefetch_is_noop()
+    ):
         # nexus-2k66t.4.8: the stack is absent, so settle first whether any PDF
         # needs extracting. A walk whose PDFs are all indexed and unchanged
         # must not cost the install; the PDFs the probe clears are not held.
+        # F34 (nexus-7t3w1): the same holds for MinerU's pipeline weights, which
+        # the gate below fetches (about 1.2 GB) when they are missing. F35: the predicate is
+        # ``prefetch_is_noop``, true exactly when that gate would do nothing (a Hugging Face cache alone
+        # is not enough: the gate would still seed nexus's copy from it).
         pdf_paths = _needing if _needing is not None else probe(pdf_paths)
         if not pdf_paths:
             pdf_stack.record_skipped([*already_held], repo=repo)
             return []
-    if pdf_stack.ensure_or_exit(
-        "nx index repo", hold_on_refuse=True, defer_rerun=True, quiet_refusal=bool(already_held),
-        extractor=extractor,
-    ):
+    try:
+        ready = pdf_stack.ensure_or_exit(
+            "nx index repo", hold_on_refuse=True, defer_rerun=True, quiet_refusal=bool(already_held),
+            extractor=extractor,
+        )
+    except mineru_weights.WeightsFetchError as exc:
+        # F34: the stack is here and the weight fetch failed (offline, or the hub is down). Not a
+        # refused install: say what failed and how to retry, and hold the PDFs back this run.
+        for path in pdf_paths:
+            _log.error("pdf_not_indexed_mineru_weights", path=str(path), repo=str(repo), error=str(exc))
+        pdf_stack.record_skipped([*already_held, *pdf_paths], repo=repo, cause=pdf_stack.SKIP_CAUSE_WEIGHTS)
+        if on_phase is not None and not already_held:
+            on_phase(f"{len(pdf_paths)} PDF(s) NOT indexed this run (code and prose proceed): {exc}")
+        if weights_failure is not None:
+            weights_failure.append(str(exc))
+        return list(pdf_paths)
+    if ready:
         pdf_stack.record_skipped([*already_held], repo=repo)
         return []
     # A refusal reaches here from any layout (the policy, or a non-generation install the auto
@@ -5318,9 +5347,11 @@ def _run_index(
     from nexus import pdf_stack as _bounds_pdf_stack  # noqa: PLC0415 - deliberate function-scoped import (defer heavy/optional dep)
 
     _mineru_bounds_problem = _bounds_pdf_stack.mineru_bounds_problem(_pdf_extractor) if pdf_files else None
+    # F34: set when the hold was a MinerU weight fetch that failed, not a missing stack.
+    _pdf_weights_failure: list[str] = []
     if pdf_files:
         _pdf_held = _hold_pdfs_without_stack(
-            [f for _, f in pdf_files], repo, on_phase=on_phase,
+            [f for _, f in pdf_files], repo, on_phase=on_phase, weights_failure=_pdf_weights_failure,
             # --force / --force-re-embed re-extract every PDF: no probe.
             probe=None if (force or force_re_embed) else (lambda paths: _pdfs_needing_index(paths, repo)),
             extractor=_pdf_extractor,
@@ -6048,7 +6079,7 @@ def _run_index(
             if _late_stale:
                 _late_held = _hold_pdfs_without_stack(
                     _late_stale, repo, on_phase=on_phase, already_held=_pdf_held,
-                    extractor=_pdf_extractor,
+                    extractor=_pdf_extractor, weights_failure=_pdf_weights_failure,
                 )
                 if _late_held:
                     _late_set = set(_late_held)
@@ -7476,7 +7507,13 @@ def _run_index(
         "pdf_mineru_not_attempted_paths": sorted(_mineru_stop.not_attempted),
         # nexus-2k66t.4.2: PDFs held back because the PDF stack is missing and
         # the install was refused. index_repo_cmd exits 69 over a non-zero count.
-        "pdf_stack_held": 0 if _mineru_bounds_problem is not None else len(_pdf_held),
+        "pdf_stack_held": 0 if (_mineru_bounds_problem is not None or _pdf_weights_failure) else len(_pdf_held),
+        # F34 (nexus-7t3w1): PDFs held because MinerU's pipeline weights could not be fetched (or a
+        # background run may not download them), with the fetch's own message. index_repo_cmd names it.
+        "pdf_mineru_weights_held": (
+            len(_pdf_held) if (_pdf_weights_failure and _mineru_bounds_problem is None) else 0
+        ),
+        "pdf_mineru_weights_problem": _pdf_weights_failure[0] if _pdf_weights_failure else None,
         # nexus-tr1rj.24: PDFs held because the MinerU time limit is unusable (and the problem, in
         # the words the extraction gives). index_repo_cmd lists them and exits non-zero.
         "pdf_mineru_bounds_held": len(_pdf_held) if _mineru_bounds_problem is not None else 0,

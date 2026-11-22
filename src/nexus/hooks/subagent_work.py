@@ -17,6 +17,11 @@ predates its holder's start) and is purged by a registrar that has time.
 An event with no ``agent_id`` or no ``agent_type`` writes nothing: the harness's own internal stops carry no type and
 ``hooks.json`` never spawns the stop verb for them, so a start for one would leave a row nothing ends.
 
+The stop that fails its first write retries once (:data:`STOP_RETRY_TIMEOUT_S`), and every stop that leaves the row
+behind logs it to hook.log (``subagent_work_stop_failed``). A process with no identity registered no row at its start and
+ends none, silently. A row no stop removed is closed by
+the reap (:mod:`nexus.identity.reap`) at the next SessionStart or restart ready check, which logs it as a missed end.
+
 Never raises and never waits long: :func:`nexus.identity.work.register_own` writes best effort with a 2 s engine timeout, an
 engine that does not know the kind (0.1.198 answers ``bad_kind``; this process then stops asking) or has no identity to
 write for is a False and one log line, and the dispatch or the stop goes on. A success logs one structured line
@@ -25,6 +30,7 @@ at once, so no owner record is written.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import structlog
@@ -32,6 +38,15 @@ import structlog
 __all__ = ["ref_of", "register_start", "register_stop"]
 
 _log = structlog.get_logger(__name__)
+
+#: Seconds the stop's one retry may take at most.
+STOP_RETRY_TIMEOUT_S = 5.0
+
+#: Seconds of the SubagentStop hook's 10 s budget (``hooks.json``) left to :func:`register_stop`: the rest pays for ``uv``
+#: starting the hook, the imports and the nudge's own decision, which run before it. The retry gets what remains of this
+#: after the first call, never more than :data:`STOP_RETRY_TIMEOUT_S`, and none at all under :data:`STOP_RETRY_FLOOR_S`.
+STOP_BUDGET_S = 6.0
+STOP_RETRY_FLOOR_S = 0.5
 
 
 def ref_of(agent_id: str) -> str:
@@ -63,6 +78,18 @@ def register_start(payload: Any) -> bool:
     return done
 
 
+def _hook_log_sink() -> None:
+    """Point structlog at ``<config>/logs/hook.log``: the stop verb configures no logging of its own, so without this the
+    lines that say a stop did or did not end its row went to the hook's stderr only, and nothing in hook.log could show a
+    missed end (the 2026-11-21 count, 251 registrations and no stop line, was this blind spot)."""
+    try:
+        from nexus._hook_runtime._io import configure_hook_logging  # noqa: PLC0415 — deferred: only a real stop pays for it
+
+        configure_hook_logging()
+    except Exception:  # noqa: BLE001 — a log sink never costs the stop
+        pass
+
+
 def register_stop(payload: Any) -> bool:
     """Remove the agent's row. True when it is gone."""
     ids = _ids(payload)
@@ -71,10 +98,22 @@ def register_stop(payload: Any) -> bool:
     try:
         from nexus.identity import work  # noqa: PLC0415
 
+        began = time.monotonic()
+        _hook_log_sink()
         done = bool(work.forget_own("agent", ref_of(ids[0])))
+        if not done:
+            if work.caller_identity() is None:
+                return False   # a process with no identity registered nothing at the start either: nothing to end, nothing to say
+            # One retry with what is left of the budget: the first call's 2 s bound is what a cold engine connection or a
+            # busy cloud edge misses, and a missed stop leaves the row for the reap.
+            left = min(STOP_RETRY_TIMEOUT_S, STOP_BUDGET_S - (time.monotonic() - began))
+            if left >= STOP_RETRY_FLOOR_S:
+                done = bool(work.forget_own("agent", ref_of(ids[0]), timeout=left))
     except Exception as exc:  # noqa: BLE001 — a label never costs a stop
         _log.warning("subagent_work_label_failed", state="forget", error=f"{type(exc).__name__}: {exc}")
         return False
     if done:
         _log.info("subagent_work_forgotten", agent_id=ids[0], agent_type=ids[1])
+    else:
+        _log.warning("subagent_work_stop_failed", agent_id=ids[0], agent_type=ids[1])
     return done

@@ -288,17 +288,22 @@ def _rest_fallback(url: str, dest: Path) -> bool:
     return True
 
 
+def file_sha256(path: Path) -> str:
+    """Hex sha256 of *path*, read in 1 MiB blocks. Shared with ``nexus.mineru_weights``."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def _verify_sha256(path: Path, expected: str, label: str) -> None:
     """Digest-check *path* against *expected*; on mismatch remove it and raise.
 
     Removing the file matters: a bad artifact left in place would pass the size
     floors and be served to the Java ONNX load, failing opaquely later.
     """
-    h = hashlib.sha256()
-    with path.open("rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            h.update(block)
-    actual = h.hexdigest()
+    actual = file_sha256(path)
     if actual != expected:
         path.unlink(missing_ok=True)
         raise RuntimeError(

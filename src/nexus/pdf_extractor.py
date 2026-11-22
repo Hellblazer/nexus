@@ -33,6 +33,7 @@ import time
 import httpx
 import structlog
 
+from nexus import mineru_weights
 from nexus._vcrt import MINERU_CHILD_PROLOGUE
 from nexus.config import DEFAULT_EXTRACTOR, resolve_extractor
 from nexus.errors import ExtractionQualityError, UnextractableContentError
@@ -2578,6 +2579,28 @@ class PDFExtractor:
         except Exception:  # noqa: BLE001 — a diagnostic must never break extraction
             _log.debug("mineru_cwd_check_failed", exc_info=True)
 
+    def _replace_server_with_stale_weights(self, url: str) -> None:
+        """F35 (nexus-7t3w1): a healthy registered server started on MinerU's own weights source while nexus's
+        copy is now complete (:func:`nexus._mineru_health.server_weights_stale`, one direction only) is replaced once, before any page is sent
+        to it, so it reads nexus's verified copy and never downloads inside a page budget. Same bounded restart
+        as the deleted-working-directory case (budget, cooldown, spawn policy); when the restart is refused the
+        server is kept as found. Best-effort: nothing here may break extraction."""
+        try:
+            from nexus._mineru_health import server_weights_stale  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+            from nexus._mineru_pid import read_pid_file  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+            info = read_pid_file()
+            if info is None or not server_weights_stale(url, info):
+                return
+            _log.warning(
+                "mineru_server_weights_source_changed", pid=info["pid"], url=url,
+                recorded=info.get("weights_root"), now=mineru_weights.weights_state(),
+            )
+            if self._restart_broken_mineru_server(info):
+                _progress("  MinerU server was started on another weights source — restarted it on nexus's copy.")
+        except Exception:  # noqa: BLE001 — a diagnostic must never break extraction
+            _log.debug("mineru_weights_source_check_failed", exc_info=True)
+
     def _mineru_server_available(self) -> bool:
         """Check if the MinerU API server is reachable.
 
@@ -2682,6 +2705,7 @@ class PDFExtractor:
         ok, first_reason = self._probe_mineru_health(first_url)
         if ok:
             self._replace_server_with_deleted_cwd(first_url)
+            self._replace_server_with_stale_weights(first_url)
             self._mineru_server_up = True
             self._mineru_server_checked = True
             return True
@@ -3382,6 +3406,8 @@ class PDFExtractor:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
+                    # F35 (nexus-7t3w1): nexus's verified weights, read by MinerU at import (child_env is {} when unused).
+                    env={**os.environ, **mineru_weights.child_env()},
                     preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
                     # nexus-x3m8e: not the caller's directory, which may be a
                     # disposable worktree deleted under a long page run (any

@@ -55,7 +55,7 @@ def _no_sent_asks(crs, monkeypatch, tmp_path_factory):
     monkeypatch.setattr(crs, "MADE_MARKERS", set())
     monkeypatch.setattr(crs, "UNWITHDRAWN", [])
     monkeypatch.setattr(crs, "ASK_MARKERS", tmp_path_factory.mktemp("ask-markers") / "restart-asks")
-    monkeypatch.setattr(crs, "ensure_seat", lambda s: ""), monkeypatch.setattr(crs, "session_work", lambda s: [])  # both reach the engine through `nx identity`; seats: ..._seats.py, work: ..._work.py
+    monkeypatch.setattr(crs, "ensure_seat", lambda s: ""), monkeypatch.setattr(crs, "session_work", lambda s, **k: [])  # both reach the engine through `nx identity`; seats: ..._seats.py, work: ..._work.py
     # Never this machine's managed settings, user settings or flags (the channel-swap gate reads them).
     settings = tmp_path_factory.mktemp("claude-settings")
     monkeypatch.setattr(crs, "MANAGED_SETTINGS", (settings / "managed" / "managed-settings.json",))
