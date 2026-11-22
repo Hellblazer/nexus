@@ -323,7 +323,8 @@ class JooqRecordReflectionFeatureTest {
     // 149 -> 150: nexus-igea9.5 (RDR-252 Step 1), group-001-records.xml added the table nexus.group_records, one generated
     // record type (GroupRecordsRecord), +1.
     // 150 -> 190: nexus-p2m1x.24 (RDR-229 P3.5b), vectors-077-100..139 added 40 id twins (<name>_by_id), 37 RETURNS TABLE and three SETOF bytea, one generated record type each, +40.
-    private static final int EXPECTED_RECORD_TYPES = 190;
+    // 190 -> 191: nexus-p2m1x.24, vectors-077-140 adds chunk_live_owners_by_id (RETURNS TABLE), +1.
+    private static final int EXPECTED_RECORD_TYPES = 191;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
