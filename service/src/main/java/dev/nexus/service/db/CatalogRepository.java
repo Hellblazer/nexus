@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.db;
 
+import dev.nexus.service.datamove.Gate3;
+
 import static dev.nexus.service.jooq.nexus.Tables.CANARY_QUERY_RING;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
@@ -338,6 +340,11 @@ public final class CatalogRepository {
     private static final Field<Integer> EX_CHK_CEN   = DSL.field("EXCLUDED.char_end",     Integer.class);
 
     private final TenantScope tenantScope;
+    /**
+     * RDR-229 P3.5c (nexus-p2m1x.25): the gate-3 signal the manifest chunk upsert ({@code upsertManifestChunkVectors}) switches
+     * to the id key on. STUB: stored, not read yet; the P3.5c code commit makes it read {@link Gate3#holds()} per call.
+     */
+    private Gate3 gate3 = Gate3.never();
 
     /**
      * Dedicated single-thread daemon executor for {@link #applyPostPurgeVacuum}'s
@@ -383,6 +390,12 @@ public final class CatalogRepository {
             t.setDaemon(true);
             return t;
         });
+    }
+
+    /** {@link #CatalogRepository(TenantScope)} with the gate-3 signal (RDR-229 P3.5c; a stub until the code commit). */
+    public CatalogRepository(TenantScope tenantScope, Gate3 gate3) {
+        this(tenantScope);
+        this.gate3 = java.util.Objects.requireNonNull(gate3, "gate3");
     }
 
     /** The scope this repository runs in, for the sibling repositories split out of it (CatalogLinksRepository). */
