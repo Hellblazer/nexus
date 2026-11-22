@@ -31,6 +31,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Both directions are non-vacuous: the examined file and site counts are asserted, and a synthetic source with a new
  * field shows the scan sees it.
+ *
+ * <p>What {@code nonIntegerId} proves in {@link CollectionRoutesByIdTest}: on a route that requires its collection it passes
+ * today because the 400 is the missing label, so it only starts to test id validation once the id is read; on a route whose
+ * collection is optional it is red today (a 200), and that is the real signal.
  */
 class CollectionRouteCensusTest {
 
@@ -112,6 +116,46 @@ class CollectionRouteCensusTest {
         }
     }
 
+    /**
+     * The embed and re-embed routes answer 503 before they read their collection on the standard engine (no embedder, not
+     * local), so a selector check can only reach them on the LOCAL_EMBED variant. Exactly these three rows use it; every other
+     * row runs on the standard engine, whose mode is unchanged.
+     */
+    @Test
+    void exactlyTheEmbedAndReembedRowsRunOnTheLocalEmbedEngine() {
+        Set<String> local = new TreeSet<>();
+        for (var route : CollectionRouteCensus.ROUTES) {
+            if (route.engine() == CollectionRouteCensus.Engine.LOCAL_EMBED) {
+                local.add(route.label());
+            }
+        }
+        assertThat(local).containsExactly("POST /v1/vectors/embed", "POST /v1/vectors/reembed/jobs",
+            "POST /v1/vectors/reembed/plan");
+    }
+
+    /**
+     * A selector can sit inside each element of a request array (the centroid upsert reads "collection" from every element of
+     * "records"). The census names that array, the row has one slot, the id twin keeps the convention's spelling, and the
+     * handler source really names the array. Exactly one row is nested.
+     */
+    @Test
+    void theNestedSelectorRowIsTheCentroidUpsertAndItsHandlerReadsTheArray() throws Exception {
+        Set<String> nested = new TreeSet<>();
+        for (var route : CollectionRouteCensus.ROUTES) {
+            for (var slot : route.slots()) {
+                if (slot.nested()) {
+                    nested.add(route.label());
+                    assertThat(route.slots()).as("%s: a nested row has exactly one slot", route.label()).hasSize(1);
+                    assertThat(slot.idField()).isEqualTo(expectedIdField(slot));
+                    String src = blank(Files.readString(HTTP_DIR.resolve(route.handler())));
+                    assertThat(src).as("%s: %s names the array '%s'", route.label(), route.handler(), slot.nestedIn())
+                        .contains("\"" + slot.nestedIn() + "\"");
+                }
+            }
+        }
+        assertThat(nested).containsExactly("POST /v1/taxonomy/centroids/upsert");
+    }
+
     @Test
     void everyRowIsDispatchedByItsHandlerAndItsMethodExists() throws Exception {
         assertThat(CollectionRouteCensus.ROUTES).as("non-vacuity").hasSizeGreaterThanOrEqualTo(80);
@@ -148,7 +192,8 @@ class CollectionRouteCensusTest {
 
     static boolean looksLikeACollectionId(String literal) {
         String n = literal.toLowerCase(java.util.Locale.ROOT).replace("_", "").replace("-", "");
-        return n.contains("collectionid") || n.contains("collid") || n.contains("idcollection") || n.equals("cid");
+        return n.contains("collectionid") || n.contains("collid") || n.contains("idcollection")
+            || n.contains("idofcollection") || n.equals("cid");
     }
 
     /** The collection-id-shaped token literals in {@code src} (comments blanked) that are not in {@code allowed}. */
