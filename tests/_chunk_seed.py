@@ -297,7 +297,8 @@ def seed_chunks_direct(
     proc = subprocess.run(
         [str(Path(state["pg_bin"]) / "psql"), "-h", "127.0.0.1", "-p", str(state["pg_port"]),
          "-U", "nexus_svc", "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
-        input=script, capture_output=True, text=True, timeout=130,
+        input=script, capture_output=True, text=True, encoding="utf-8", timeout=130,
+        env={**os.environ, "PGCLIENTENCODING": "UTF8"},
     )
     if proc.returncode != 0:
         raise RuntimeError(
