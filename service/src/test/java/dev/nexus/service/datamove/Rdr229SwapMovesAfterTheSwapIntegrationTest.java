@@ -246,6 +246,12 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         assertThat(readWrite.registry()).as("read-write re-check: the registry is not scanned").isZero();
     }
 
+    /** A leaf as {@code regclass} prints it ({@code nexus.name} or {@code nexus."odd-name"}) without the schema and the quotes. */
+    private static String unquoted(String regclass) {
+        String name = regclass.startsWith("nexus.") ? regclass.substring("nexus.".length()) : regclass;
+        return name.startsWith("\"") && name.endsWith("\"") ? name.substring(1, name.length() - 1).replace("\"\"", "\"") : name;
+    }
+
     // ── 11: the refusal of the missing id key ───────────────────────────────────────────────────────────────
 
     /**
@@ -260,7 +266,7 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         IdKeyIndexProbe.reset(ctx());
         int n = 0;
         for (String leaf : IdKeyIndexProbe.leaves(ctx(), IdKeyIndexProbe.CHUNKS)) {
-            ctx().alterTable(DSL.table(DSL.sql(leaf)))
+            ctx().alterTable(DSL.table(DSL.name("nexus", unquoted(leaf))))
                 .add(DSL.constraint(DSL.name("p33c_refusal_" + n++)).unique(DSL.name("tenant_id"), DSL.name("collection_id"),
                     DSL.name("chash"), DSL.name("embedding_model")))
                 .execute();
@@ -369,5 +375,81 @@ class Rdr229SwapMovesAfterTheSwapIntegrationTest extends Rdr229SwapMovesFixtures
         assertRolledBackWhileHeld(h -> h.update(DSL.table(DSL.name("nexus", "catalog_collections")))
             .set(DSL.field(DSL.name("name"), String.class), DSL.field(DSL.name("name"), String.class))
             .where(TENANT_F.eq(t.centroids())).execute());
+    }
+
+    // ── 14: the child-side lookups of the chunk's id key use an index each ──────────────────────────────────
+
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(Rdr229SwapMovesAfterTheSwapIntegrationTest.class);
+
+    private String planOf(java.util.function.Function<DSLContext, org.jooq.Query> query) {
+        return ctx().transactionResult(cfg -> {
+            var tx = cfg.dsl();
+            dev.nexus.service.db.PgSession.setLocal(tx, "enable_seqscan", "off");   // a small table seq-scans whatever index it has: ask for the index the lookup can use
+            return PgContainerHelper.explainPlanInlined(tx, query.apply(tx));
+        });
+    }
+
+    /**
+     * Every delete or update of a chunk row looks up the child rows by the child's id key, and the child needs an index for that lookup or the
+     * chunk delete reads the whole child table. EXPLAIN shows no trigger plan, so this EXPLAINs the lookup the foreign key's trigger issues
+     * (ON DELETE CASCADE: a DELETE on the child by the four key columns; NO ACTION: a SELECT ... FOR KEY SHARE by them), with enable_seqscan off so a
+     * table this small names the index it would use. chunk_orphaned_at has only its name primary key (tenant_id, collection, chash) and gets
+     * vectors-074's (tenant_id, chash); the manifest uses idx_catalog_chunks_chash and topic_assignments idx_ta_tenant_doc_id.
+     */
+    @Test
+    void theChildLookupsOfTheChunkIdKeyEachUseAnIndexOnceTheSwapIsDone() throws Exception {
+        var t = seed("plans");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        assertThat(completedAt(CHUNKS_SWAP)).as("precondition: the swap completed").isNotNull();
+        // enough distinct chashes under one collection that (tenant_id, chash) is far more selective than the manifest's (tenant_id, collection)
+        // index, which the planner would otherwise take in a tie. The rows are real chunks with their manifest rows, written after the swap so the id keys check each.
+        String tenantOfRows = t.catalogDocumentChunks();
+        String collectionOfRows = StampMoveSeeds.collection(tenantOfRows, 0);
+        long idOfRows = StampMoveSeeds.id(ctx(), tenantOfRows, collectionOfRows);
+        var hashes = new ArrayList<String>();
+        var texts = new ArrayList<String>();
+        var vectors = new ArrayList<float[]>();
+        var metas = new ArrayList<Map<String, Object>>();
+        for (int i = 0; i < 300; i++) {
+            hashes.add(String.format("%04x", i) + "0".repeat(60));
+            texts.add("plan row " + i);
+            vectors.add(new float[768]);
+            metas.add(Map.of());
+        }
+        PgContainerHelper.insertChunks(ctx(), tenantOfRows, collectionOfRows, hashes, texts, vectors, metas);
+        for (int i = 0; i < 300; i++) {
+            ctx().insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenantOfRows).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "1.9.0")
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 1000 + i).set(CATALOG_DOCUMENT_CHUNKS.CHASH, java.util.HexFormat.of().parseHex(hashes.get(i)))
+                .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 1000 + i).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, collectionOfRows)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, idOfRows).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, BGE).execute();
+        }
+        new dev.nexus.service.db.TenantScope(adminPool).vacuumAnalyze(List.of("nexus.catalog_document_chunks"));
+
+        // the lookup of a real key of the seeded tenant, so the planner's estimate for tenant_id alone is the 300 rows it holds
+        byte[] chash = java.util.HexFormat.of().parseHex(hashes.get(7));
+        Field<String> tenant = TENANT_F;
+        Field<Long> collectionId = DSL.field(DSL.name("collection_id"), Long.class);
+        Field<Long> sourceCollectionId = DSL.field(DSL.name("source_collection_id"), Long.class);
+        Field<byte[]> chashF = DSL.field(DSL.name("chash"), byte[].class);
+        Field<byte[]> docId = DSL.field(DSL.name("doc_id"), byte[].class);
+        Field<String> model = DSL.field(DSL.name("embedding_model"), String.class);
+
+        String orphaned = planOf(tx -> tx.deleteFrom(DSL.table(DSL.name("nexus", "chunk_orphaned_at")))
+            .where(tenant.eq(tenantOfRows)).and(collectionId.eq(idOfRows)).and(chashF.eq(chash)).and(model.eq(BGE)));
+        var x = DSL.table(DSL.name("nexus", "catalog_document_chunks")).as("x");
+        String manifest = planOf(tx -> tx.select(DSL.inline(1)).from(x)
+            .where(tenant.eq(tenantOfRows)).and(collectionId.eq(idOfRows)).and(chashF.eq(chash)).and(model.eq(BGE)).forKeyShare().of(x));
+        String assignments = planOf(tx -> tx.deleteFrom(DSL.table(DSL.name("nexus", "topic_assignments")))
+            .where(tenant.eq(tenantOfRows)).and(sourceCollectionId.eq(idOfRows)).and(docId.eq(chash)).and(model.eq(BGE)));
+        log.info("PLAN chunk_orphaned_at (ON DELETE CASCADE lookup):\n{}", orphaned);
+        log.info("PLAN catalog_document_chunks (NO ACTION lookup, FOR KEY SHARE):\n{}", manifest);
+        log.info("PLAN topic_assignments (ON DELETE CASCADE lookup):\n{}", assignments);
+
+        assertThat(orphaned).as("chunk_orphaned_at: the new (tenant_id, chash) index").contains("idx_chunk_orphaned_at_tenant_chash")
+            .doesNotContain("Seq Scan");
+        assertThat(manifest).as("catalog_document_chunks").contains("idx_catalog_chunks_chash").doesNotContain("Seq Scan");
+        assertThat(assignments).as("topic_assignments").contains("idx_ta_tenant_doc_id").doesNotContain("Seq Scan");
     }
 }
