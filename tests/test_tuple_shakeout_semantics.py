@@ -219,8 +219,14 @@ def _keys_nonce_templates() -> list[str]:
     return names
 
 
+#: keys+nonce templates the engine still ships that no client may write, so the description leaves them out on purpose.
+_RETIRED_FROM_CLIENT = {
+    "directory/<name>": "RDR-253 Phase 2: the directory name lease is gone from the client; the engine template goes in a later cut",
+}
+
+
 def test_tuple_out_nonce_description_names_every_keys_nonce_template_and_is_its_own_parameter() -> None:
-    templates = _keys_nonce_templates()
+    templates = [t for t in _keys_nonce_templates() if t not in _RETIRED_FROM_CLIENT]
     assert len(templates) >= 5, f"the census of keys+nonce templates found only {templates}; the glob is broken"
     desc = _param_description("tuple_out", "nonce")
     for name in templates:

@@ -314,7 +314,7 @@ def test_session_start_reaps_only_for_a_session_that_holds_its_own_identity(monk
     result = IdentityResult(outcome=BindOutcome(action, "row") if action else None)
     monkeypatch.setattr(hooks, "_bind_identity", lambda sid, source: result)
     monkeypatch.setattr(hooks, "render_session_start", lambda *a, **k: "")
-    monkeypatch.setattr(hooks, "_mailbox_arm_block", lambda sid: "")
+    monkeypatch.setattr(hooks, "_mailbox_arm_block", lambda sid, **_: "")
     hooks.session_start("12345678-aaaa-bbbb-cccc-1234567890ab", source="startup")
     assert started == (["12345678-aaaa-bbbb-cccc-1234567890ab"] if spawned else [])
 
