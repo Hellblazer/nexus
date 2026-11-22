@@ -65,7 +65,7 @@ from nexus.aspect_readers import (
 )
 from nexus.catalog.dchash import check_link_span
 from nexus.catalog.types import CatalogEntry
-from nexus.errors import NoteUriEngineTooOldError
+from nexus.errors import NoteUriEngineTooOldError, RecoveryBundleFormatTooNewError
 from nexus.ttl import MAX_TTL_DAYS
 
 _log = structlog.get_logger(__name__)
@@ -537,15 +537,18 @@ def write_bundle(
     summary: ExportSummary,
     *,
     collections: list[dict] | None = None,
+    exported_by: dict[str, str] | None = None,
 ) -> None:
     """JSONL writer: one JSON header line, then collection records (format 3),
     knowledge_doc records, then link records. Plain JSON per line — human-inspectable
-    is a locked format decision."""
+    is a locked format decision. ``exported_by`` (RDR-229 P3.9 G2) names the client and engine that wrote the
+    bundle; readers ignore it."""
     collections = collections or []
     header = {
         "format": "nexus-recovery-bundle",
         "format_version": RECOVERY_BUNDLE_FORMAT_VERSION,
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "exported_by": exported_by if exported_by is not None else {"client": "", "engine": ""},
         "collections": len(collections),
         "knowledge_docs": len(knowledge_docs),
         "links": len(links),
@@ -602,7 +605,7 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     links = export_links(reader, tumbler_to_uri, summary)
     summary.docs_exported = len(docs)
     summary.links_exported = len(links)
-    write_bundle(path, docs, links, summary, collections=collections)
+    write_bundle(path, docs, links, summary, collections=collections, exported_by=exported_by(reader))
     _log.info(
         "recovery_bundle_exported",
         path=str(path),
@@ -615,6 +618,28 @@ def export_bundle(reader: Any, t3: Any, path: Path) -> ExportSummary:
     return summary
 
 
+def exported_by(reader: Any) -> dict[str, str]:
+    """RDR-229 P3.9 G2 (linda's ruling 2026-11-22): what wrote a bundle. ``client`` is the installed conexus version;
+    ``engine`` is the serving engine's ``release_version`` when the reader can tell it (``HttpCatalogClient`` reads it
+    from its cached ``GET /version``), else ``""``: a local catalog, a tree-built engine, or a read that failed. The
+    export never fails on it."""
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415 — cold-start cheap, only on export
+
+    try:
+        client = version("conexus")
+    except PackageNotFoundError:
+        client = ""
+    engine = ""
+    read = getattr(reader, "engine_release_version", None)
+    if callable(read):
+        try:
+            value = read()
+            engine = value if isinstance(value, str) else ""
+        except Exception:  # noqa: BLE001 — provenance only; an unreachable engine must not fail the export
+            engine = ""
+    return {"client": client, "engine": engine}
+
+
 # ── Import ──────────────────────────────────────────────────────────────────
 
 
@@ -622,19 +647,25 @@ def read_bundle(path: Path) -> tuple[dict, list[dict]]:
     """Parse a bundle; returns (header, records). Fails loud on a future
     format_version (mirrors ``exporter.py``'s MAX_SUPPORTED contract)."""
     with path.open("r", encoding="utf-8") as f:
-        header_line = f.readline()
-        header = json.loads(header_line)
-        if header.get("format") != "nexus-recovery-bundle":
-            raise ValueError(f"{path} is not a nexus recovery bundle (header: {header})")
-        version = int(header.get("format_version", 0))
-        if version > MAX_SUPPORTED_RECOVERY_FORMAT_VERSION:
-            raise ValueError(
-                f"bundle format_version {version} exceeds the maximum this "
-                f"build reads ({MAX_SUPPORTED_RECOVERY_FORMAT_VERSION}) — "
-                "upgrade conexus before importing"
-            )
+        header = _checked_header(path, f.readline())
         records = [json.loads(line) for line in f if line.strip()]
     return header, records
+
+
+def read_bundle_header(path: Path) -> dict:
+    """The header alone, checked as :func:`read_bundle` checks it; the CLI calls this before it connects to anything."""
+    with path.open("r", encoding="utf-8") as f:
+        return _checked_header(path, f.readline())
+
+
+def _checked_header(path: Path, header_line: str) -> dict:
+    header = json.loads(header_line)
+    if header.get("format") != "nexus-recovery-bundle":
+        raise ValueError(f"{path} is not a nexus recovery bundle (header: {header})")
+    version = int(header.get("format_version", 0))
+    if version > MAX_SUPPORTED_RECOVERY_FORMAT_VERSION:
+        raise RecoveryBundleFormatTooNewError(path, version, MAX_SUPPORTED_RECOVERY_FORMAT_VERSION)
+    return header
 
 
 def target_collection_for(recorded: str, t3: Any) -> str:

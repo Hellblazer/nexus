@@ -137,9 +137,17 @@ def import_cmd(bundle: Path, ack_external_embedder: bool = False) -> None:
     here with other attributes, or the engine would not register it); the
     other collections still import.
     """
-    from nexus.catalog.recovery_bundle import import_bundle  # noqa: PLC0415 — command-local import
+    from nexus.catalog.recovery_bundle import import_bundle, read_bundle_header  # noqa: PLC0415 — command-local import
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
     from nexus.db import make_t3  # noqa: PLC0415 — command-local import
+    from nexus.errors import RecoveryBundleFormatTooNewError  # noqa: PLC0415 — command-local import
+
+    # RDR-229 P3.9 follow-up: a bundle newer than this client is refused by its header, before the command connects
+    # to anything, as one message and exit 1 (it used to surface as a traceback).
+    try:
+        read_bundle_header(bundle)
+    except RecoveryBundleFormatTooNewError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     reader = _cat_cmd._get_catalog()
     writer = _cat_cmd._get_catalog_writer()
