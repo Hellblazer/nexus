@@ -89,6 +89,7 @@ timeout could fire on its own.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -96,7 +97,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -175,6 +176,18 @@ _HEADER_TOKEN_RE: re.Pattern[str] = re.compile(r"[\x21-\x7e]+")
 _drop_session_header: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "nexus_tuple_drop_session_header", default=False,
 )
+
+
+@contextlib.contextmanager
+def without_session_header() -> Iterator[None]:
+    """Send every tuple request made inside the block without the session header, so the engine stamps no sender session:
+    the same flag the single headerless retry sets. For a caller that wants an UNSTAMPED write on purpose (``nx ci
+    record-push``'s fallback record, RDR-252)."""
+    reset = _drop_session_header.set(True)
+    try:
+        yield
+    finally:
+        _drop_session_header.reset(reset)
 
 
 #: How long a rejected session token stays unsent (nexus-z1xox). After it, the

@@ -66,6 +66,8 @@
 #     --batch-minutes <n>         NX_PUSH_BATCH_MINUTES
 #     --tenant-check <0|1>        NX_PUSH_TENANT_CHECK (0 skips the tenant hint)
 #     --skip-scrub <reason>       NX_PUSH_SKIP_SCRUB (push past the scrub gate, on the record)
+#     --red-fix <reason>          NX_PUSH_RED_FIX (push to develop while a red it did not cause is open and you are
+#                                 neither its owner nor a suspect's pusher; see "Hold your pushes" below)
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
@@ -122,11 +124,26 @@
 # once RDR-253 Step 3's client resolver is installed; until then the record is
 # unstamped and serves the chain only. The push lock is released before the record
 # is written. With --skip-lock the installed nx is resolved for this write as the
-# lock path does; if none resolves, no record is written (PUSH_RECORD_SKIPPED). A
-# failed write, or one past NX_PUSH_RECORD_TIMEOUT_S (default 20 s), is one
-# PUSH_RECORD_FAILED line on stderr. The record never fails the push: stdout keeps
-# its PUSH_OK line and the exit code is the push's. A push to any other branch
-# writes no record.
+# lock path does; if none resolves, no record is written (PUSH_RECORD_SKIPPED).
+# The write is `nx ci record-push --base nexus-<branch> ...` (nexus-igea9 audit S3): nx
+# holds the logic, so another repo's push script can call it. from is the pusher's
+# identity id, else "unknown"; a failed stamped write is retried once as a minimal
+# unstamped record (base, tip, from) so the chain keeps its link. Its one status line,
+# when not PUSH_RECORD_OK, goes in the push summary: PUSH_RECORD_FALLBACK or
+# PUSH_RECORD_FAILED (also an nx without the command, a crash, or a write past
+# NX_PUSH_RECORD_TIMEOUT_S, default 20 s), and PUSH_RECORD_SKIPPED, each on stdout after
+# PUSH_OK and on stderr. The record never fails the push: the exit code is the push's.
+# A push that overrode the develop-red hold with --red-fix has its reason in the record
+# body as "red_fix", so the board shows every escape. A push to any other branch writes
+# no record.
+#
+# Hold your pushes (RDR-252, nexus-igea9). A push to develop while a red is open on
+# board/ci/nexus-develop--owner is refused (PUSH_REFUSED_DEVELOP_RED, exit 13) unless
+# the pusher owns the red or pushed one of its suspects (`nx ci check-hold` decides);
+# --red-fix '<reason>' pushes past it, on the record (PUSH_RED_FIX on stdout and the
+# record body). A failed read of the red is one PUSH_GATE_UNCHECKED line on stderr and
+# the push goes on. The check runs after the scope audit and the scrub gate, before
+# the lock.
 #
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
@@ -233,6 +250,9 @@
 #                               chat link or session trailer, or the allowlist
 #                               widens the remote's (scripts/scrub_check.py
 #                               check --rev <tip> --base <remote branch>)
+#  13  PUSH_REFUSED_DEVELOP_RED develop is red and this push is from neither the
+#                               red's owner nor the pusher of one of its suspects
+#                               (--red-fix '<reason>' pushes past it, on the record)
 #  64  PUSH_REFUSED_USAGE       a flag is unknown, lacks its value, or flags that
 #                               cannot combine were combined; nothing was fetched
 #  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
@@ -347,7 +367,7 @@ trap _release_push_lock EXIT
 # assignment. Parsed before the first remote call: a typo costs nothing.
 _usage_refuse() {
   echo "PUSH_REFUSED_USAGE $*"
-  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub (see the header of $0)."
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub --red-fix (see the header of $0)."
   exit 64
 }
 _vouch_args=()
@@ -384,7 +404,7 @@ while [[ $# -gt 0 ]]; do
       continue
       ;;
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
-      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub) ;;
+      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -403,6 +423,7 @@ while [[ $# -gt 0 ]]; do
     --skip-lock) NX_PUSH_SKIP_LOCK="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --skip-scope-audit) NX_PUSH_SKIP_SCOPE_AUDIT="$_val" ;;
     --skip-scrub) NX_PUSH_SKIP_SCRUB="$_val"; _echo_flags+=("$_name" "$_val") ;;
+    --red-fix) NX_PUSH_RED_FIX="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
       [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
@@ -765,6 +786,83 @@ if [[ "${NX_PUSH_TENANT_CHECK:-1}" != "0" && -n "$_tenant_root" && -f "$_tenant_
   fi
 fi
 
+# ── Hold your pushes (RDR-252, nexus-igea9) ─────────────────────────────
+# While a develop red is open, only its owner and the pusher of one of its suspects push to develop: anyone
+# else's push lands inside the red's window and hides or confuses its cause (24 pushes landed inside 13 red
+# windows in the 2026-11-22 audit; the owner's "Hold your pushes" line was display only). `nx ci check-hold`
+# holds the logic (so any repo's push script can call it; this script is its first caller and passes the board
+# base, nexus-<branch>, explicitly): it reads the open red on board/ci/nexus-develop--owner and the suspects'
+# push records. A refusal is PUSH_REFUSED_DEVELOP_RED on stdout and exit 13, which this script passes on.
+# --red-fix '<reason>' (env NX_PUSH_RED_FIX) pushes past it, on the record: the command prints PUSH_RED_FIX
+# with the reason, and this script passes the reason to `nx ci record-push`, which writes it into the push
+# record body. A check that cannot be made (no installed nx, a read that failed, an nx that has no such
+# command or crashes, or one past NX_PUSH_GATE_TIMEOUT_S, default 20 s) is one PUSH_GATE_UNCHECKED line on
+# stderr and the push goes on: the gate holds a push for a red it can name, not for its own fault.
+# Develop only.
+# _bounded SECONDS OUTFILE CMD...: run CMD with its output in OUTFILE; its exit code, or 124 once it has
+# run SECONDS (TERM, then KILL a second later). macOS ships no timeout(1).
+_bounded() {
+  local limit="$1" outfile="$2" pid ticks=0
+  shift 2
+  "$@" >"$outfile" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( ticks >= limit * 10 )); then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 0.1
+    ticks=$(( ticks + 1 ))
+  done
+  wait "$pid"
+}
+
+_red_fix_escape=""   # the --red-fix reason once the hold was actually overridden; the push record carries it (Sam, 2026-11-22)
+_gate_nx="${_nx_bin:-}"
+if [[ "$branch" == "develop" ]]; then
+  [[ -n "$_gate_nx" ]] || _gate_nx="$(installed_nx_resolve || true)"
+  if [[ -z "$_gate_nx" ]]; then
+    echo "PUSH_GATE_UNCHECKED nx is not installed on PATH (only a dev-checkout or venv copy, or none); the develop-red hold was not checked" >&2
+  else
+    _gate_limit="${NX_PUSH_GATE_TIMEOUT_S:-20}"
+    [[ "$_gate_limit" =~ ^[0-9]+$ ]] && _gate_limit=$(( 10#$_gate_limit )) || _gate_limit=20
+    (( _gate_limit > 0 )) || _gate_limit=20
+    _gate_code=0
+    _gate_file="$(mktemp "${TMPDIR:-/tmp}/push-gate.XXXXXX" 2>/dev/null || true)"
+    if [[ -z "$_gate_file" ]]; then
+      echo "PUSH_GATE_UNCHECKED no temp file; the develop-red hold was not checked" >&2
+    else
+      _record_tmp="$_gate_file"
+      _gate_args=(ci check-hold --base "nexus-$branch" --tip "$tip")
+      [[ -z "${NX_PUSH_RED_FIX:-}" ]] || _gate_args+=(--red-fix "$NX_PUSH_RED_FIX")
+      _bounded "$_gate_limit" "$_gate_file" "$_gate_nx" "${_gate_args[@]}" || _gate_code=$?
+      if (( _gate_code == 0 || _gate_code == 13 )); then
+        # The command's own lines: PUSH_GATE_UNCHECKED is a warning (stderr), everything else is the push summary.
+        while IFS= read -r _gate_line; do
+          [[ -n "${_gate_line//[[:space:]]/}" ]] || continue
+          if [[ "$_gate_line" == PUSH_GATE_UNCHECKED* ]]; then
+            echo "$_gate_line" >&2
+          else
+            echo "$_gate_line"
+            if [[ "$_gate_line" == PUSH_RED_FIX*"the hold was overridden)" ]]; then _red_fix_escape="${NX_PUSH_RED_FIX:-}"; fi
+          fi
+        done < "$_gate_file"
+      elif (( _gate_code == 124 )); then
+        echo "PUSH_GATE_UNCHECKED the develop-red check ran past ${_gate_limit}s and was stopped; the hold was not checked" >&2
+      else
+        _gate_last="$(grep -v '^[[:space:]]*$' "$_gate_file" | tail -n 1 || true)"
+        echo "PUSH_GATE_UNCHECKED the develop-red check failed (exit $_gate_code: ${_gate_last:0:300}); the hold was not checked" >&2
+      fi
+      rm -f "$_gate_file"
+      _record_tmp=""
+      if (( _gate_code == 13 )) && [[ -z "$_red_fix_escape" ]]; then exit 13; fi
+    fi
+  fi
+fi
+
 # ── Push lock (nexus-agctp) ──────────────────────────────────────────────
 # Runs after every other gate, right before the push itself: a refusal
 # above this point is about the commits, not about who else is pushing,
@@ -874,67 +972,51 @@ _release_push_lock
 _lock_claim_id=""
 
 # ── Push record (RDR-252 Step 2, nexus-igea9.2) ─────────────────────────
-# One tuple per push to develop, on every path that reaches PUSH_OK (--skip-lock included). RDR-252's owner
-# stamper (Step 3) reads it: base linked to tip orders develop's tips, and the record's session stamp maps
-# the push to the pushing identity. The stamp comes from `nx tuple out` itself once RDR-253 Step 3's client
-# resolver is installed (a Bash child of a Claude session then carries its session's identity); until then
-# the record is unstamped, which the stamper counts as no record for ownership while still chaining its
-# base to its tip. The stamper never reads `from`, which is a label only. Nothing here can fail the push
-# that just landed: any error is one PUSH_RECORD_* line on stderr, stdout and the exit code stay as they
-# were, and the write is stopped after NX_PUSH_RECORD_TIMEOUT_S seconds (default 20).
-#
-# The identity id for `from` (RDR-253 Step 3 resolves it in Python; no shell verb exists yet). "unknown"
-# until one does, which the RDR also prescribes for a push from a plain shell with no Claude ancestor.
-_push_record_from() {
-  printf 'unknown'
-}
-
-# _bounded SECONDS OUTFILE CMD...: run CMD with its output in OUTFILE; its exit code, or 124 once it has
-# run SECONDS (TERM, then KILL a second later). macOS ships no timeout(1).
-_bounded() {
-  local limit="$1" outfile="$2" pid ticks=0
-  shift 2
-  "$@" >"$outfile" 2>&1 &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if (( ticks >= limit * 10 )); then
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 1
-      kill -KILL "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      return 124
-    fi
-    sleep 0.1
-    ticks=$(( ticks + 1 ))
-  done
-  wait "$pid"
+# One tuple per push to develop, on every path that reaches PUSH_OK (--skip-lock included), written by
+# `nx ci record-push` (the logic is nx's, so any repo's push script can call it; this script is its first caller and
+# passes the base, nexus-<branch>, explicitly). RDR-252's owner stamper reads the record: its body's base linked to
+# the tip orders develop's tips, and the record's session stamp maps the push to the pushing identity; it never reads
+# `from`, a label (the identity id, or "unknown"). The command writes the stamped record, retries once as a minimal
+# unstamped one when that fails, and prints one status line: PUSH_RECORD_OK (nothing is added to the summary),
+# PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED (each goes in the push summary on stdout, after PUSH_OK, and on stderr:
+# nexus-igea9 audit S3, 2 of 9 pushes in an evening had no record and nobody saw it). A skipped record (no installed
+# nx) is PUSH_RECORD_SKIPPED, the same way; an nx that has no such command, crashes or runs past
+# NX_PUSH_RECORD_TIMEOUT_S seconds (default 20) is PUSH_RECORD_FAILED. Nothing here can fail the push that just
+# landed: the exit code stays the push's. A push that overrode the develop-red hold passes its --red-fix reason to the
+# command, which writes it into the record body.
+_record_report() {
+  echo "$1"
+  echo "$1" >&2
 }
 
 _write_push_record() {
   [[ "$branch" == "develop" ]] || return 0
-  local nxbin="${_nx_bin:-}" body outfile code=0 limit="${NX_PUSH_RECORD_TIMEOUT_S:-20}" last
+  local nxbin="${_nx_bin:-}" limit="${NX_PUSH_RECORD_TIMEOUT_S:-20}" outfile code=0 last status
   [[ "$limit" =~ ^[0-9]+$ ]] && limit=$(( 10#$limit )) || limit=20   # base 10: a leading zero (08) is not octal
   (( limit > 0 )) || limit=20
   # The lock path already resolved the installed nx; --skip-lock resolves it here, the same way.
   [[ -n "$nxbin" ]] || nxbin="$(installed_nx_resolve || true)"
   if [[ -z "$nxbin" ]]; then
-    echo "PUSH_RECORD_SKIPPED: nx is not installed on PATH (only a dev-checkout or venv copy, or none); the push stands" >&2
+    _record_report "PUSH_RECORD_SKIPPED: nx is not installed on PATH (only a dev-checkout or venv copy, or none); the push stands"
     return 0
   fi
-  body="{\"base\": \"${_record_base}\", \"n\": ${#range[@]}}"
-  outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { echo "PUSH_RECORD_FAILED no temp file (the push stands)" >&2; return 0; }
+  outfile="$(mktemp "${TMPDIR:-/tmp}/push-record.XXXXXX")" || { _record_report "PUSH_RECORD_FAILED no temp file (the push stands)"; return 0; }
   _record_tmp="$outfile"
-  _bounded "$limit" "$outfile" "$nxbin" tuple out "board/ci/nexus-develop--push" --key "topic=nexus-develop--push" \
-    --nonce "push-$tip" --dim "from=$(_push_record_from)" --dim "kind=push" --dim "sha=$tip" --body "$body" || code=$?
-  if (( code == 124 )); then
-    echo "PUSH_RECORD_FAILED the write ran past ${limit}s and was stopped (the push stands)" >&2
-  elif (( code != 0 )); then
-    # The last non-empty line: nx prints its own log lines first and its error last.
-    last="$(grep -v '^[[:space:]]*$' "$outfile" | tail -n 1 || true)"
-    echo "PUSH_RECORD_FAILED exit $code: ${last:0:400} (the push stands)" >&2
-  fi
+  local args=(ci record-push --base "nexus-$branch" --from-sha "$_record_base" --to-sha "$tip" --count "${#range[@]}")
+  [[ -z "$_red_fix_escape" ]] || args+=(--red-fix "$_red_fix_escape")
+  _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" || code=$?
+  # The last non-empty line: nx prints its own log lines first, its status or error last.
+  last="$(grep -v '^[[:space:]]*$' "$outfile" | tail -n 1 || true)"
+  status="$(grep '^PUSH_RECORD_' "$outfile" | tail -n 1 || true)"
   rm -f "$outfile"
   _record_tmp=""
+  if (( code == 124 )); then
+    _record_report "PUSH_RECORD_FAILED the write ran past ${limit}s and was stopped (the push stands)"
+  elif (( code != 0 )) || [[ -z "$status" ]]; then
+    _record_report "PUSH_RECORD_FAILED exit $code: ${last:0:400} (the push stands)"
+  elif [[ "$status" != PUSH_RECORD_OK* ]]; then
+    _record_report "${status:0:600}"
+  fi
   return 0
 }
 _write_push_record || true

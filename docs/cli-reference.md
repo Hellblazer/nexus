@@ -3130,6 +3130,22 @@ nx ci ack <sha> [--topic nexus-develop--owner]
 
 Acknowledges a red develop: posts the owner's `kind=ack` row on `board/ci/<topic>` with `from=<your identity id>`, the full sha and a fresh nonce, and prints `acked <sha7> on <subspace> as <identity>`. `<sha>` is the red's sha or a prefix of at least 7 hex digits; it is resolved against the tips of the CURRENT red on the owner post (the `sha` of each of its owner rows; a red that a newer one replaced or a `clear` row ended is not open, and a `suspects` entry is not a tip), and refused when it is no tip of it, when it is ambiguous, when no red is open, or when it is not 7 to 40 hex digits. It also refuses a caller who is not the red's current owner (`the red is owned by iN (alias); an ack from iM counts for nobody`), because the engine counts an ack only from the owner. With no identity the command refuses (`nx identity show` says whether the session holds one). The engine counts the row's sender-session stamp, never `from`; `from` is a label people read (`nx group ack-times` does not read it), and this verb writes the identity id there, never a name. A delegated child (a `claude -p` process with an identity of its own) is checked and signed as its parent, the identity the engine counts its session for; one whose parent cannot be read is refused. A `kind=owner` or `kind=clear` row that a session wrote, not the engine (`from` other than `engine`, or a sender-session stamp), is ignored when finding the open red, as the engine ignores it. The `ci_develop_red` aura's state line ends `Ack: nx ci ack <sha7>`. `--topic` names the owner post and must end `--owner`.
 
+### nx ci check-hold
+
+```
+nx ci check-hold [--base <repo>-<branch> | --remote origin --branch <branch>] [--tip <sha> ...] [--red-fix <reason>]
+```
+
+Says whether this session may push now (RDR-252, the push script's hold-your-pushes check; `scripts/git-push-develop.sh` is its first caller and passes `--base nexus-develop`). While a red is open on `board/ci/<base>--owner` (the red `nx ci ack` reads), only its owner and the pusher of one of its suspects may push. A suspect's pusher is the identity the push record's sender-session stamp maps to; `from` on a push record is never read. A caller with no identity is held like any other non-owner. Anyone else gets `PUSH_REFUSED_DEVELOP_RED` on standard output (naming the owner and the red's sha) and exit code 13. `--red-fix <reason>` overrides it: the command prints `PUSH_RED_FIX reason=<reason> (...; the hold was overridden)` and exits 0 (or `(not needed: ...)` when nothing held the push). A failed read of the red or of the push records is one `PUSH_GATE_UNCHECKED` line on standard error and exit 0. `--base` is never defaulted: without it the base is derived as `<repo>-<branch>` from the `--remote` URL's repo name and `--branch` (`nexus-develop` for Hellblazer/nexus pushing develop), and a base that cannot be derived (no such remote, an unparseable URL, no `--branch`) is refused with exit 2, naming `--base`.
+
+### nx ci record-push
+
+```
+nx ci record-push [--base <repo>-<branch> | --remote origin --branch <branch>] --from-sha <sha> --to-sha <sha> [--count N] [--red-fix <reason>]
+```
+
+Writes the push record of a push that landed (RDR-252): one tuple on `board/ci/<base>--push`, key `topic=<base>--push`, nonce `push-<to-sha>`, dims `from=<your identity id, or unknown>`, `kind=push`, `sha=<to-sha>`, body `{"base": <from-sha>, "n": <count>, "red_fix": <reason>}` (`n` and `red_fix` only when given; the reason is cut to 500 characters). The owner stamper links `base` to the tip to order the branch's tips and maps the record's sender-session stamp to the pusher; it never reads `from`. A failed stamped write is retried once as a minimal unstamped record (base, tip, from; no session header, the same nonce), so the chain keeps its link. One status line on standard output: `PUSH_RECORD_OK`, `PUSH_RECORD_FALLBACK` or `PUSH_RECORD_FAILED`. The exit code is 0 whatever it says, because the push has landed and the record never fails it; only a base that cannot be derived (see `nx ci check-hold`) is refused, with exit 2.
+
 ## nx collection
 
 Manage T3 collections (local or cloud).

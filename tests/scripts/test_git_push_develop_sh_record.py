@@ -1,24 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """scripts/git-push-develop.sh writes one push record per push to develop (RDR-252 Step 2, nexus-igea9.2).
 
-After ``PUSH_OK`` the script posts one tuple to ``board/ci/nexus-develop--push`` with dims ``from``,
-``kind=push`` and ``sha=<tip>`` and the body ``{"base": <develop before the push>, "n": <commits>}``. RDR-252
-Step 3's owner stamper (nexus-igea9.3) reads it: base linked to tip orders develop's tips, and the record's
-session stamp (added by ``nx tuple out`` once RDR-253 Step 3's client resolver is installed) names the
+After ``PUSH_OK`` the script runs ``nx ci record-push --base nexus-develop --from-sha <develop before the push>
+--to-sha <tip> --count <commits>`` (nexus-igea9: the record's logic is nx's, so any repo's push script can call
+it), which posts one tuple to ``board/ci/nexus-develop--push`` with dims ``from``, ``kind=push`` and ``sha=<tip>``
+and the body ``{"base": <develop before the push>, "n": <commits>}``. RDR-252 Step 3's owner stamper
+(nexus-igea9.3) reads it: base linked to tip orders develop's tips, and the record's session stamp names the
 pusher; it never reads ``from``. The record never fails the push: this script is the push train's own
 tool, so a broken record path must cost a push nothing.
 
 These tests drive a real bare origin and a clone, as test_git_push_develop_sh.py does, with an ``nx``
-stand-in on PATH that logs every argv, answers the lock's calls and echoes a tuple id on stdout as the real
-``nx tuple out`` does. The engine-backed half (the record is stamped and the session index maps the stamp
-to the pushing identity) is Step 3's ``OwnerDecisionTest`` and the Activation MVV run, not faked here; a
-real ``nx tuple out`` of the record against a throwaway engine runs in test_git_push_develop_sh.py's
-TestPushLock, whose pushes now write it.
+stand-in on PATH that logs every argv, answers the lock's calls and prints the status line ``nx ci
+record-push`` prints. What the command writes (the stamped record, the minimal fallback, ``from``, ``red_fix``) is
+tests/test_ci_record_push.py's; the engine-backed half (the record is stamped and the session index maps the
+stamp to the pushing identity) is Step 3's ``OwnerDecisionTest`` and the Activation MVV run, not faked here; a
+real ``nx ci record-push`` against a throwaway engine runs in the last test of this file and in
+test_git_push_develop_sh.py's TestPushLock, whose pushes now write it.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -34,33 +37,41 @@ RECORD_SUBSPACE = "board/ci/nexus-develop--push"
 _GIT_ID = ["-c", "user.email=t@t", "-c", "user.name=t"]
 
 # The nx stand-in. Every call appends its argv (one JSON list per line) to $FAKE_NX_LOG. The lock's calls
-# succeed: `tuple in` prints a claim id, `tuple release` and the lock's `tuple out` exit 0. A write to the
-# record subspace first logs ["@origin", <origin's develop tip now>] (from $FAKE_NX_ORIGIN), sleeps
-# $FAKE_NX_RECORD_SLEEP seconds, prints $FAKE_NX_RECORD_OUT to stderr, echoes a tuple id on stdout on success (the
-# real `nx tuple out` does), and exits $FAKE_NX_RECORD_EXIT (default 0).
+# succeed: `tuple in` prints a claim id, `tuple release` and the lock's `tuple out` exit 0. `ci record-push` first
+# logs ["@origin", <origin's develop tip now>] (from $FAKE_NX_ORIGIN), sleeps $FAKE_NX_RECORD_SLEEP seconds, prints
+# $FAKE_NX_RECORD_OUT to stderr, prints its status line ($FAKE_NX_RECORD_STATUS, default PUSH_RECORD_OK ...) on
+# success, and exits $FAKE_NX_RECORD_EXIT (default 0). `ci check-hold` sleeps $FAKE_NX_GATE_SLEEP, prints
+# $FAKE_NX_GATE_OUT (its lines, as the real command prints them) and exits $FAKE_NX_GATE_EXIT (default 0).
 FAKE_NX = r"""#!/usr/bin/env python3
 import json, os, subprocess, sys, time
 argv = sys.argv[1:]
 log = os.environ["FAKE_NX_LOG"]
+env = os.environ.get
 def note(entry):
     with open(log, "a") as fh:
         fh.write(json.dumps(entry) + "\n")
 note(argv)
 if argv[:2] == ["tuple", "in"]:
     print(json.dumps({"claim_id": "claim-1"}))
-elif argv[:2] == ["tuple", "out"] and len(argv) > 2 and argv[2] == "board/ci/nexus-develop--push":
-    origin = os.environ.get("FAKE_NX_ORIGIN")
+elif argv[:2] == ["ci", "check-hold"]:
+    time.sleep(float(env("FAKE_NX_GATE_SLEEP", "0")))
+    out = env("FAKE_NX_GATE_OUT", "")
+    if out:
+        print(out)
+    sys.exit(int(env("FAKE_NX_GATE_EXIT", "0")))
+elif argv[:2] == ["ci", "record-push"]:
+    origin = env("FAKE_NX_ORIGIN")
     if origin:
         tip = subprocess.run(["git", "--git-dir", origin, "rev-parse", "refs/heads/develop"],
                              capture_output=True, text=True).stdout.strip()
         note(["@origin", tip])
-    time.sleep(float(os.environ.get("FAKE_NX_RECORD_SLEEP", "0")))
-    out = os.environ.get("FAKE_NX_RECORD_OUT", "")
+    time.sleep(float(env("FAKE_NX_RECORD_SLEEP", "0")))
+    out = env("FAKE_NX_RECORD_OUT", "")
     if out:
         print(out, file=sys.stderr)
-    code = int(os.environ.get("FAKE_NX_RECORD_EXIT", "0"))
+    code = int(env("FAKE_NX_RECORD_EXIT", "0"))
     if code == 0:
-        print("tuple-id-0123456789abcdef")  # the real `nx tuple out` echoes the id only on success
+        print(env("FAKE_NX_RECORD_STATUS", "PUSH_RECORD_OK 0123456789ab from=unknown"))
     sys.exit(code)
 sys.exit(0)
 """
@@ -140,7 +151,7 @@ def _calls(log: Path) -> list[list[str]]:
 
 
 def _records(log: Path) -> list[list[str]]:
-    return [c for c in _calls(log) if c[:3] == ["tuple", "out", RECORD_SUBSPACE]]
+    return [c for c in _calls(log) if c[:2] == ["ci", "record-push"]]
 
 
 def _opt(call: list[str], flag: str) -> list[str]:
@@ -156,12 +167,9 @@ def test_push_ok_writes_one_push_record(repos, fake_nx) -> None:
     proc = _run(work, a, b, nx_dir=nx_dir, log=log)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     (record,) = _records(log)
-    assert _opt(record, "--key") == ["topic=nexus-develop--push"]
-    assert sorted(_opt(record, "--dim")) == sorted(["from=unknown", "kind=push", f"sha={b}"])
-    assert _opt(record, "--nonce") == [f"push-{b}"]
-    (body,) = _opt(record, "--body")
-    assert json.loads(body) == {"base": base, "n": 2}
-    assert isinstance(json.loads(body)["n"], int)
+    assert _opt(record, "--base") == ["nexus-develop"]
+    assert _opt(record, "--from-sha") == [base] and _opt(record, "--to-sha") == [b] and _opt(record, "--count") == ["2"]
+    assert "--red-fix" not in record, "no hold was overridden"
 
 
 def test_the_record_is_written_after_the_push_landed(repos, fake_nx) -> None:
@@ -216,7 +224,8 @@ def test_skip_lock_push_writes_the_record(repos, fake_nx) -> None:
     proc = _run(work, "--skip-lock", "record test", a, nx_dir=nx_dir, log=log)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "PUSH_LOCK_SKIPPED" in proc.stderr
-    assert [c[:2] for c in _calls(log)] == [["tuple", "out"]]  # no lock calls, only the record
+    # no lock calls: the develop-red check and the record are the only calls (nexus-igea9)
+    assert [c[:2] for c in _calls(log)] == [["ci", "check-hold"], ["ci", "record-push"]]
     assert len(_records(log)) == 1
 
 
@@ -226,7 +235,7 @@ def test_skip_lock_with_no_installed_nx_writes_none_and_pushes(repos, tmp_path) 
     a = _commit(work, "a")
     proc = _run(work, "--skip-lock", "record test", a, nx_dir=None, log=log)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
+    assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={a}"  # a failed record adds its own line below (nexus-igea9 S3)
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == a
     assert not log.exists()
     assert "PUSH_RECORD_SKIPPED" in proc.stderr
@@ -253,7 +262,7 @@ def test_nx_failure_never_fails_the_push(repos, fake_nx, skip_lock) -> None:
     proc = _run(work, *argv, nx_dir=nx_dir, log=log,
                 env={"FAKE_NX_RECORD_EXIT": "1", "FAKE_NX_RECORD_OUT": "2026-11-18 [info] a log line\n\nError: MaxLiveRowsExceeded"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
+    assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={a}"  # a failed record adds its own line below (nexus-igea9 S3)
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == a
     failed = [ln for ln in proc.stderr.splitlines() if ln.startswith("PUSH_RECORD_FAILED")]
     assert len(failed) == 1
@@ -268,12 +277,12 @@ def test_a_crashing_nx_never_fails_the_push(repos, fake_nx) -> None:
     nx_dir, log = fake_nx
     a = _commit(work, "a")
     (nx_dir / "nx").write_text(FAKE_NX.replace(
-        'elif argv[:2] == ["tuple", "out"] and len(argv) > 2 and argv[2] == "board/ci/nexus-develop--push":',
-        'elif argv[:2] == ["tuple", "out"] and len(argv) > 2 and argv[2] == "board/ci/nexus-develop--push":\n'
+        'elif argv[:2] == ["ci", "record-push"]:',
+        'elif argv[:2] == ["ci", "record-push"]:\n'
         '    os.execv("/nonexistent/nx", ["nx"])'))
     proc = _run(work, a, nx_dir=nx_dir, log=log)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
+    assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={a}"  # a failed record adds its own line below (nexus-igea9 S3)
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == a
     assert sum(ln.startswith("PUSH_RECORD_FAILED") for ln in proc.stderr.splitlines()) == 1
 
@@ -286,26 +295,27 @@ def test_a_hung_write_is_stopped_and_never_holds_the_push(repos, fake_nx) -> Non
     proc = _run(work, a, nx_dir=nx_dir, log=log, env={"FAKE_NX_RECORD_SLEEP": "30", "NX_PUSH_RECORD_TIMEOUT_S": "1"})
     elapsed = time.monotonic() - started
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
+    assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={a}"  # a failed record adds its own line below (nexus-igea9 S3)
     assert _git("rev-parse", "refs/heads/develop", cwd=origin) == a
     assert elapsed < 15, f"the script waited {elapsed:.1f}s on a hung record write"
     assert any("ran past 1s" in ln for ln in proc.stderr.splitlines() if ln.startswith("PUSH_RECORD_FAILED"))
 
 
-def test_the_record_claims_no_identity_whatever_the_session_env_says(repos, fake_nx) -> None:
-    """``from`` is always ``unknown``: the engine stamps the pusher from the caller's session, so the script must not
-    derive a claim from its environment. Two pushes, one with a Claude session in the env and one from a plain shell,
-    write the same label; a script that read ``CLAUDE_CODE_SESSION_ID`` into ``from`` fails the first (nexus-igea9.3 L7)."""
+def test_the_script_hands_the_record_command_no_identity_claim(repos, fake_nx) -> None:
+    """``from`` is the command's to resolve (the pusher's identity id from its own token, else ``unknown``): the script must
+    not derive a claim from its session environment and pass it on. Two pushes, one with a Claude session in the env and
+    one from a plain shell, hand the command the same arguments; a script that read ``CLAUDE_CODE_SESSION_ID`` into the
+    record fails the first (nexus-igea9.3 L7)."""
     _origin, work = repos
     nx_dir, log = fake_nx
-    seen: list[str] = []
+    seen: list[list[str]] = []
     for env in ({"CLAUDE_CODE_SESSION_ID": "sess-claimed", "NX_SESSION_ID": "sess-claimed", "CLAUDECODE": "1"},
                 {k: "" for k in ("CLAUDE_CODE_SESSION_ID", "NX_SESSION_ID", "CLAUDECODE")}):
         proc = _run(work, _commit(work, f"c{len(seen)}"), nx_dir=nx_dir, log=log, env=env)
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        seen.append(" ".join(_opt(_records(log)[-1], "--dim")))
-    assert len(seen) == 2 and all("from=unknown" in dims.split() for dims in seen), seen
-    assert not any("sess-claimed" in dims for dims in seen), seen
+        seen.append(_records(log)[-1])
+    assert not any("sess-claimed" in arg for call in seen for arg in call), seen
+    assert not any("--from" in call or "--dim" in call for call in seen), seen  # --from-sha is a sha, never an identity
 
 
 def test_a_timeout_with_a_leading_zero_is_read_in_base_10(repos, fake_nx) -> None:
@@ -349,7 +359,7 @@ def test_a_script_killed_mid_write_leaves_no_temp_file(repos, fake_nx, tmp_path:
 
 
 def test_stdout_contract_unchanged(repos, fake_nx) -> None:
-    """nx tuple out echoes a tuple id on stdout; none of it reaches the script's stdout."""
+    """The record command's PUSH_RECORD_OK line is the normal case and adds nothing to the summary."""
     _origin, work = repos
     nx_dir, log = fake_nx
     a = _commit(work, "a")
@@ -357,7 +367,7 @@ def test_stdout_contract_unchanged(repos, fake_nx) -> None:
     proc = _run(work, a, b, nx_dir=nx_dir, log=log)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert proc.stdout == f"PUSH_OK n=2 tip={b}\n"
-    assert "tuple-id-" not in proc.stdout + proc.stderr
+    assert "PUSH_RECORD_" not in proc.stdout + proc.stderr
     assert len(_records(log)) == 1
 
 
@@ -398,7 +408,7 @@ def test_the_base_is_the_remote_tip_the_push_replaced(repos, fake_nx, tmp_path) 
     proc = _run(work, a, nx_dir=nx_dir, log=log)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     (record,) = _records(log)
-    assert json.loads(_opt(record, "--body")[0])["base"] == p
+    assert _opt(record, "--from-sha") == [p]
 
 
 # ── the record against a real engine (a throwaway per-test tenant) ───────────────────
@@ -431,7 +441,7 @@ def _fields(row: dict) -> dict:
 
 
 def test_a_real_nx_writes_the_record_the_engine_serves_back(repos, tmp_path) -> None:
-    """The first live run: the script's own `nx tuple out` against a real engine (a fresh tenant), read
+    """The first live run: the script's own `nx ci record-push` against a real engine (a fresh tenant), read
     back with `nx tuple rd`. Proves the flags, the keys+nonce template and the body shape line up with the
     engine, which the stand-in above cannot."""
     h = _push_helpers()
@@ -444,7 +454,7 @@ def test_a_real_nx_writes_the_record_the_engine_serves_back(repos, tmp_path) -> 
     a = _commit(work, "a")
     proc = h._run(work, a, env=env)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert proc.stdout.strip() == f"PUSH_OK n=1 tip={a}"
+    assert proc.stdout.splitlines()[0] == f"PUSH_OK n=1 tip={a}"  # a failed record adds its own line below (nexus-igea9 S3)
     assert "PUSH_RECORD_" not in proc.stderr, proc.stderr
     rd = subprocess.run(["nx", "tuple", "rd", RECORD_SUBSPACE, "--json"], env={**os.environ, **env},
                         capture_output=True, text=True, timeout=30)
@@ -453,7 +463,9 @@ def test_a_real_nx_writes_the_record_the_engine_serves_back(repos, tmp_path) -> 
     assert len(rows) == 1, rows
     row = rows[0]
     fields = _fields(row)
-    assert fields.get("kind") == "push" and fields.get("from") == "unknown" and fields.get("sha") == a, row
+    assert fields.get("kind") == "push" and fields.get("sha") == a, row
+    # the pusher's identity id when this process has one (a run inside a Claude session does), else unknown
+    assert fields.get("from") == "unknown" or re.fullmatch(r"i[0-9]+", str(fields.get("from"))), row
     body = row.get("body")
     body = json.loads(body) if isinstance(body, str) else body
     assert body == {"base": base, "n": 1}, row

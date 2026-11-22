@@ -63,14 +63,14 @@ def _restart_prune_never_touches_the_real_tmp(
 
 @pytest.fixture
 def push_record_nx_stub(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A no-op ``nx`` first on PATH, for the git-push-develop.sh tests that predate its push record (RDR-252
+    """A no-op ``nx`` (it prints the status line of ``nx ci record-push``) first on PATH, for the git-push-develop.sh tests that predate its push record (RDR-252
     Step 2, nexus-igea9.2). After PUSH_OK the script writes one record through the installed ``nx`` it
     resolves, ``--skip-lock`` included, so without this every such test would reach the operator's real
     ``nx`` and tuple space (2026-11-18: 53 setup errors from the storage-touch guard). A test that puts its
     own ``nx`` ahead of this one on PATH (TestPushLock's per-test engine stand-in) still wins."""
     d = tmp_path_factory.mktemp("push-record-nx-stub")
     stub = d / "nx"
-    stub.write_text("#!/usr/bin/env bash\nexit 0\n")
+    stub.write_text("#!/usr/bin/env bash\n[[ \"${1:-} ${2:-}\" == \"ci record-push\" ]] && echo \"PUSH_RECORD_OK stub\"\nexit 0\n")
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{d}{os.pathsep}{os.environ.get('PATH', '')}")
     return d

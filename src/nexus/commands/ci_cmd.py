@@ -299,3 +299,111 @@ def ci_ack_cmd(sha: str, topic: str) -> None:
     except Exception as exc:  # noqa: BLE001 -- CLI boundary: one line and exit 1
         raise click.ClickException(f"could not post the ack: {type(exc).__name__}: {exc}") from exc
     click.echo(f"acked {full[:7]} on {subspace} as {identity} ({row_id[:12]})")
+
+#: The exit code ``nx ci check-hold`` refuses with; ``scripts/git-push-develop.sh`` passes it on as its own.
+CHECK_HOLD_REFUSED = 13
+
+
+def _push_base(base: str | None, remote: str, branch: str | None) -> str:
+    """The board base of a push: *base* as given, else ``<repo>-<branch>`` from *remote*'s URL (:mod:`nexus.ci_base`); a base
+    that cannot be derived is a usage error that names ``--base``."""
+    from nexus import ci_base  # noqa: PLC0415 -- deferred: CLI startup cost
+
+    if base:
+        if not ci_base.BASE.fullmatch(base):
+            raise click.UsageError(f"--base {base!r} is not a board topic base: use <repo>-<branch>, as in nexus-develop")
+        return base
+    try:
+        return ci_base.derive(remote, branch)
+    except ci_base.BaseUnderivableError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+
+_BASE_OPTIONS = (
+    click.option("--base", default=None, help="The board topic base, <repo>-<branch> (nexus-develop): board/ci/<BASE>--owner and "
+                 "--push. Without it the base is derived from the --remote URL's repo name and --branch; when that cannot be "
+                 "done the command refuses and names this flag."),
+    click.option("--remote", default="origin", show_default=True, help="The remote whose URL names the repo when --base is not given."),
+    click.option("--branch", default=None, help="The branch being pushed, for the derived base."),
+)
+
+
+def _base_options(fn: Any) -> Any:
+    for option in reversed(_BASE_OPTIONS):
+        fn = option(fn)
+    return fn
+
+
+@ci_group.command(name="check-hold")
+@_base_options
+@click.option("--tip", "tips", multiple=True, help="A commit of the push, or the sha the push ends at (repeatable); named in the refusal.")
+@click.option("--red-fix", default=None, help="Push past the hold, on the record: the reason, printed as PUSH_RED_FIX.")
+def ci_check_hold_cmd(base: str | None, remote: str, branch: str | None, tips: tuple[str, ...], red_fix: str | None) -> None:
+    """Whether this session may push now (RDR-252, the push script's hold-your-pushes check).
+
+    While a red is open on board/ci/<BASE>--owner, only its owner and the pusher of one of its suspects may push (a suspect's
+    pusher is the identity its push record's sender-session stamp maps to; `from` is never read; a caller with no identity is
+    held like any other). Anyone else is refused: PUSH_REFUSED_DEVELOP_RED on standard output and exit code 13. `--red-fix
+    <reason>` pushes past it and prints PUSH_RED_FIX with the reason (the push script writes it into the push record). A
+    failed read of the red, or of the records, warns (PUSH_GATE_UNCHECKED on standard error) and exits 0.
+    """
+    from nexus import ci_push_gate  # noqa: PLC0415 -- deferred: CLI startup cost
+
+    base = _push_base(base, remote, branch)
+    try:
+        identity = ci_ack.counted_identity()
+    except ValueError:
+        identity = ""
+    try:
+        verdict = ci_push_gate.check(_store(), base, identity)
+    except Exception as exc:  # noqa: BLE001 -- CLI boundary: a read that failed holds nobody
+        click.echo(f"PUSH_GATE_UNCHECKED could not read board/ci/{base}--owner: {type(exc).__name__}: {exc}", err=True)
+        if red_fix:
+            click.echo(f"PUSH_RED_FIX reason={red_fix} (not needed: the red could not be read)")
+        return
+    who = f"{verdict.owner or 'no owner'}" + (f" ({verdict.owner_alias})" if verdict.owner_alias else "")
+    if verdict.refuse and red_fix:
+        click.echo(f"PUSH_RED_FIX reason={red_fix} ({base} is red at {verdict.sha}, owned by {who}; the hold was overridden)")
+        return
+    if verdict.refuse:
+        ending = f" ({tips[-1][:12]})" if tips else ""
+        click.echo(f"PUSH_REFUSED_DEVELOP_RED {base} is red at {verdict.sha} and owned by {who}; this push{ending} is from neither the "
+                   "owner nor the pusher of one of its suspects.")
+        click.echo("Hold your pushes until the red clears, or hand the fix to the owner. A push that is the fix: "
+                   "--red-fix '<reason>', on the record.")
+        raise SystemExit(CHECK_HOLD_REFUSED)
+    if verdict.unchecked:
+        click.echo(f"PUSH_GATE_UNCHECKED {verdict.detail}", err=True)
+    if red_fix:
+        click.echo(f"PUSH_RED_FIX reason={red_fix} (not needed: {verdict.detail})")
+
+
+@ci_group.command(name="record-push")
+@_base_options
+@click.option("--from-sha", required=True, help="The branch tip the push replaced (the record's `base`); may be empty.")
+@click.option("--to-sha", required=True, help="The tip the push landed.")
+@click.option("--count", type=click.IntRange(min=0), default=None, help="How many commits the push carried (the record's `n`).")
+@click.option("--red-fix", default=None, help="The reason a push overrode the develop-red hold: written into the record body as red_fix.")
+def ci_record_push_cmd(base: str | None, remote: str, branch: str | None, from_sha: str, to_sha: str, count: int | None,
+                       red_fix: str | None) -> None:
+    """Write the push record of a push that landed (RDR-252): one tuple on board/ci/<BASE>--push.
+
+    The record's dims are from=<your identity id, or unknown>, kind=push, sha=<TO_SHA>; its body {base: FROM_SHA, n, red_fix}.
+    The owner stamper links base to tip to order the branch's tips and maps the record's sender-session stamp to the pusher.
+    A failed stamped write is retried once as a minimal unstamped record (base, tip, from), so the chain keeps its link. One
+    status line on standard output: PUSH_RECORD_OK, PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED. Exit 0 whatever it says: the
+    push has landed and the record never fails it (only a base that cannot be derived is refused).
+    """
+    from nexus import ci_push_record  # noqa: PLC0415 -- deferred: CLI startup cost
+
+    base = _push_base(base, remote, branch)
+    try:
+        label = ci_ack.own_identity() or "unknown"
+    except Exception:  # noqa: BLE001 -- a label only
+        label = "unknown"
+    try:
+        store = _store()
+    except Exception as exc:  # noqa: BLE001 -- the push landed
+        click.echo(f"PUSH_RECORD_FAILED the tuple store could not be opened: {type(exc).__name__}: {exc} (the push stands, no record was written)")
+        return
+    click.echo(ci_push_record.write(store, base, from_sha, to_sha, count, label, red_fix))

@@ -450,21 +450,31 @@ identity token the script reads as a Bash child of its session
 
 ```
 key:   topic=nexus-develop--push   nonce: push-<tip>
-dims:  from=<identity id>  kind=push  sha=<tip>
+dims:  from=<identity id, or unknown>  kind=push  sha=<tip>
 body:  {"base": "<develop sha before the push>", "n": <commits>}
 ```
+
+`from` is the pushing process's identity id, else `unknown` (a plain shell with no Claude ancestor, or
+an unreadable token record). It is a label: the stamper never reads
+it. A push that overrode the hold below with `--red-fix '<reason>'` adds `"red_fix": "<reason>"` to the
+body, so the board shows every escape.
 
 The nonce is required by the template's `keys+nonce` identity, and a retry of
 one push lands on the same tuple. The script releases the push lock before it
 writes the record and stops the write after 20 seconds
-(`NX_PUSH_RECORD_TIMEOUT_S`), so a slow tuple space never holds a push.
+(`NX_PUSH_RECORD_TIMEOUT_S`), so a slow tuple space never holds a push. A record that is skipped (no
+installed `nx`), or that fails, is one line in the push summary on standard output after `PUSH_OK`
+(`PUSH_RECORD_SKIPPED`, `PUSH_RECORD_FAILED`) as well as on standard error. A failed stamped write is
+retried once as a minimal unstamped record (`base`, tip, `from`; the session header dropped, the same
+nonce), reported as `PUSH_RECORD_FALLBACK`, so the chain keeps its link; only when that fails too is
+the record missing. The push never fails because of the record.
 
 The stamper trusts the record's stamp, never `from` (Sam's answer on gate
 finding S4): it maps the stamped session id to an identity through the
 session index (`nexus_rdr/252-research-4` F4). A record with no stamp, or
 whose stamp the index does not map, counts as no record. A push from a plain
-shell with no Claude ancestor writes an unstamped record with `from=unknown`, which counts as no record
-for ownership. On the `--skip-lock` path the script resolves the installed `nx`
+shell with no Claude ancestor writes an unstamped record with `from=unknown`, and so does the fallback
+above, which counts as no record for ownership. On the `--skip-lock` path the script resolves the installed `nx`
 for this write, as the lock path does (`nexus_rdr/252-research-5` F8); if
 none resolves, it writes no record and the push still succeeds. It writes a
 record only when the pushed branch is `develop`. An unstamped record still
@@ -629,7 +639,19 @@ each with its own urgency, in the manner of DBM's typed warnings:
 | Owner | "Develop is red at <sha>, first red in your push. Diagnose it." (for a red the leader takes, the text names the `reason` instead) | Yes | Diagnose; acknowledge |
 | Escalated (the identity an `escalated` row names, or every member when `owner` is null) | "Develop is red at <sha>; no one acknowledged. Raise an ask to Sam." | Yes | Raise an RDR-245 ask (with `owner` null, the first member to act raises it; the ask is visible on the board, so the others see it) |
 | Next up | "Develop is red at <sha>; <owner> owns it. You are next up." (`<owner>` is the owner's alias, else its id) | Yes | Stand by; take it if not acknowledged |
-| Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green |
+| Everyone else in the group | "Develop is red at <sha>; <owner> owns it. Hold your pushes." | No (block only) | Hold its own pushes until green; the push script enforces it (below) |
+
+**The hold is enforced** (2026-11-22, nexus-igea9; Sam's ruling on the post-close audit). Before it pushes to
+develop, `git-push-develop.sh` runs `nx ci check-hold --base nexus-develop` (a shared command: any repo's push
+script can call it, and its `--base` is given or derived from the remote URL and branch, never defaulted), which reads the open red on `board/ci/nexus-develop--owner`
+(the split `nx ci ack` uses) and the push records of the red's suspects. The push is refused with
+`PUSH_REFUSED_DEVELOP_RED` (exit 13, naming the owner and the red's sha) unless the pusher is the red's owner or
+the pusher of one of its suspects (the identity the suspect's push record's sender-session stamp maps to; `from`
+is never read), or the push carries `--red-fix '<reason>'`, which is recorded in the push summary and in the push
+record body (`red_fix`). A caller with no identity is held like any other. A failed read of the red or of the
+records is one `PUSH_GATE_UNCHECKED` line on standard error and does not refuse. The record itself is written
+by `nx ci record-push` (the script passes the `--red-fix` reason to it), which owns the stamped write, the
+minimal fallback and `from`.
 
 **Two additions to the aura surface** (`nexus_rdr/252-research-1` F1, F2).
 An aura cannot tell which state it is in without knowing its own session,
@@ -1325,3 +1347,4 @@ directory, now by RDR-253's identity); S4, trust the engine's stamp only.
 - 2026-11-21: close wording matched to the shipped engine ack half and the close critique r2's follow-ups (nexus-igea9; grant 3): the engine stamps an ack's `from` from the sender session's identity (a delegated one as its parent, left as typed when nothing maps) and `--owner` rows keep 35 days while the base topic and `--push` keep three (cited from `board-ci.yaml`, `BoardCiGuard.stampAckFrom` and `Identities.countedIdentity`); the Day 2 calibration follow-up due 2026-12-20 names the ack fixes as its precondition.
 - 2026-11-21: known limits and Test Plan matched to the close critique r3 (nexus-igea9, nexus-igea9.4; grant 3): a Known limits clause beside "Unvalidated by design" records the live earliest-suspect misattribution at 9f14aa59a and the next-up fixer who cannot stop the deadline, leaves the suspect-dropping question open and Sam's rule standing; the Day 2 calibration read covers attribution quality as well as ack time; the skipped or neutral workflow assumption says what watches it (nothing) and who decides (the board's maintainers, 2026-12-20), with the path-filtered workflows named; four Test Plan lines (carry-forward and `branch_outcome`, the engine's ack-from stamp, `nx ci ack`, `ignored_acks`).
 - 2026-11-21: release carriers named (close critique r3 and r4, S1, `nexus/critique-rdr252-close-2026-11-21-r4`; nexus-igea9; grant 3): the engine half (the ack `from` stamp and 35-day `--owner` retention, b308e6dc9 and b545859c0; the fail-safe's at-once escalation and owner-stamped-ack hold-off, ed7b34fde and a3b2c1220; carry-forward and `branch_outcome`, 6c1c73de9 and d13cba1b1) is first in engine-service-v0.1.200, serving in the cloud since 2026-11-21 15:29Z (T2 `conexus/deploy-engine-v0.1.200-2026-11-21`); the CI board adapter's `FOLD_BRANCH_OUTCOME` was switched on at 16:23Z (T2 `conexus/deploy-ci-board-adapter-fold-branch-outcome-on-2026-11-21`); `nx ci ack` and the sender-stamp count in `nx group ack-times` (9f14aa59a, f14d51a0d) are first in client v8.5.4 (v8.5.3 has no `nx ci ack`). Earlier reds and acks predate all of it.
+- 2026-11-22: wording matched to the push script's post-close audit fixes (nexus-igea9; grant 3): the push record is written by the shared `nx ci record-push` and the hold checked by the shared `nx ci check-hold` (any repo's push script can call them; `git-push-develop.sh` is the first caller and passes `--base nexus-develop`; the base is an argument or derived as `<repo>-<branch>` from the remote URL and branch, and a base that cannot be derived is refused naming `--base`, never defaulted); the record's `from` is the pusher's identity id, else `unknown`; a skipped or failed record is reported on the script's standard output as well as standard error; a failed stamped write is retried once as a minimal unstamped record (base, tip, from) so the chain keeps its link; the "Hold your pushes" line is enforced (`PUSH_REFUSED_DEVELOP_RED`, exit 13, unless the pusher owns the red or pushed a suspect, or passes `--red-fix '<reason>'`, which is written into the push record body as `red_fix`); a caller with no identity is held like any other; a failed read of the red warns and does not refuse.
