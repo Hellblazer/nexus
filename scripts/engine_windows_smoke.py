@@ -11,10 +11,12 @@ the same job. Pass means all of:
     EXTRACTED archive, beside only its five VC++ DLLs, with a PATH that holds
     nothing of the build host's toolchain (windows_engine_release.verify_archive);
   * ``/health`` answers;
-  * ``/version`` reports a ``schema_changeset_count`` equal to the number of
-    changeSets in the changelog. The expected number is READ from the changelog
-    (master + includes, XML comments removed), never hardcoded: 508 on
-    2026-10-05, and it grows with every changeset;
+  * the migration journal (``public.databasechangelog``, read through the
+    bundle's psql) holds every changeSet id the changelog declares (master +
+    includes, XML comments removed, READ, never hardcoded), except the ids
+    ``FRESH_BOOT_PENDING`` names as deferred by design on a first boot; an
+    unknown missing id, an unknown applied id and a stale allowlist entry each
+    fail. ``/version``'s ``schema_changeset_count`` equals the journal's count;
   * a real bge embedding comes back 768-dimensional, finite and non-zero. That
     drives the whole native path the exe exists for: the DJL tokenizers JNI, the
     ONNX Runtime JNI and onnxruntime.dll (which is the library that imports
@@ -129,6 +131,62 @@ def changeset_count(changelog_dir: Path) -> int:
     return total
 
 
+_CHANGESET_ID_RE = re.compile(r'<changeSet\b[^>]*?\bid="([^"]+)"')
+
+#: Changesets that a single fresh boot legitimately leaves unapplied: each is guarded by a precondition with
+#: onFail="CONTINUE" (a skip records nothing, so the changeset is retried at every boot) and waits for state a fresh
+#: install reaches only after its first boot. ``check_applied`` passes a missing id only when it is listed here, and
+#: fails on an entry the changelog no longer has, so the list cannot go stale (RDR-229 Phase 3 reland, linda's ruling).
+FRESH_BOOT_PENDING: dict[str, str] = {
+    "collections-001-2": "the live-tuple unique index waits for the rdr229-reown-repo-stems-from-curator move "
+                         "(RDR-229 P3.8), which runs after the first boot; applied on a later boot",
+}
+
+
+def changeset_ids(changelog_dir: Path) -> set[str]:
+    """The ids of the changeSets ``changeset_count`` counts. Refuses a changeSet with no id and a repeated id, either
+    of which would make the set disagree with the count."""
+    master = changelog_dir / "db.changelog-master.xml"
+    if not master.is_file():
+        raise SmokeError(f"changelog master not found: {master}")
+    seen: set[Path] = set()
+    ids: list[str] = []
+    pending = [master]
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        text = _COMMENT_RE.sub("", path.read_text(encoding="utf-8"))
+        ids.extend(_CHANGESET_ID_RE.findall(text))
+        pending.extend(changelog_dir / name for name in _INCLUDE_RE.findall(text))
+    unique = set(ids)
+    if len(unique) != len(ids):
+        raise SmokeError(f"{len(ids) - len(unique)} changeSet id(s) repeat in {changelog_dir}: the applied-set check needs unique ids")
+    if len(ids) != changeset_count(changelog_dir):
+        raise SmokeError(f"{changeset_count(changelog_dir) - len(ids)} changeSet(s) under {changelog_dir} carry no id")
+    return unique
+
+
+def check_applied(applied: set[str], declared: set[str], allow: Mapping[str, str] = FRESH_BOOT_PENDING) -> str:
+    """Compare the changesets the migration recorded with the changelog's. Passes only when every unapplied
+    changeset is in *allow* (a fresh boot's known deferrals) and nothing unknown was applied; an *allow* entry the
+    changelog does not have is itself a failure. Returns the line naming which allowed ids were pending."""
+    stale = sorted(set(allow) - declared)
+    if stale:
+        raise SmokeError(f"FRESH_BOOT_PENDING names changeset(s) the changelog does not have: {stale}; remove them")
+    unknown_applied = sorted(applied - declared)
+    if unknown_applied:
+        raise SmokeError(f"the database records changeset(s) the changelog does not declare: {unknown_applied[:10]}")
+    missing = declared - applied
+    unexpected = sorted(missing - set(allow))
+    if unexpected:
+        raise SmokeError(f"the migration did not apply {len(unexpected)} changeset(s): {unexpected[:20]}")
+    pending = sorted(missing)
+    note = f"; pending as designed: {', '.join(pending)}" if pending else ""
+    return f"applied {len(applied)}/{len(declared)}{note}"
+
+
 # --------------------------------------------------------------------------- #
 # The bge model
 # --------------------------------------------------------------------------- #
@@ -202,7 +260,7 @@ def check_version(text: str, expected: int) -> str:
     if isinstance(got, bool) or not isinstance(got, int):
         raise SmokeError(f"/version carries no integer schema_changeset_count (got {got!r}): the migration did not report")
     if got != expected:
-        raise SmokeError(f"schema_changeset_count is {got}, the changelog has {expected} changesets: the migration did not apply every changeset")
+        raise SmokeError(f"schema_changeset_count is {got}, the database records {expected} applied changesets: /version disagrees with the migration journal")
     release = body.get("release_version") if isinstance(body, dict) else None
     return f"changesets {got}/{expected}, release_version={release}"
 
@@ -444,16 +502,18 @@ def check_ort_native_log(text: str) -> None:
         )
 
 
-def check_reboot_log(text: str) -> None:
-    """A second boot of an already-migrated database applies nothing new."""
+def check_reboot_log(text: str, expected_new: int = 0) -> None:
+    """A second boot of an already-migrated database applies nothing new, except *expected_new* changesets: the
+    ones the first boot left pending as designed (``FRESH_BOOT_PENDING``) and the journal shows applied since."""
     match = _NEW_CHANGESETS_RE.search(text)
     if match is None:
         raise SmokeError(
             "the second boot's log carries no new_changesets=<n> (schema_migration_complete): the check "
             f"cannot tell whether the migration was clean; log tail:\n{text[-1500:]}"
         )
-    if int(match.group(1)) != 0:
-        raise SmokeError(f"the second boot applied {match.group(1)} new changesets: the first stop left the migration unfinished")
+    if int(match.group(1)) != expected_new:
+        raise SmokeError(f"the second boot applied {match.group(1)} new changesets, {expected_new} expected (the first "
+                         "boot's designed deferrals the journal now holds): the first stop left the migration unfinished")
 
 
 def assert_serving_stop(
@@ -513,8 +573,9 @@ def run(
     ports: tuple[int, int] | None = None,
     keep: bool = False,
     health_timeout_s: int = 120,
+    fresh_boot_pending: Mapping[str, str] = FRESH_BOOT_PENDING,
 ) -> None:
-    expected = changeset_count(changelog_dir)
+    declared = changeset_ids(changelog_dir)
     for name in MODEL_PINS:
         if not (model_root / MODEL_SUBDIR / name).is_file():
             raise SmokeError(f"{model_root / MODEL_SUBDIR / name} is missing: provision it first (--ensure-model)")
@@ -578,10 +639,22 @@ def run(
         wait_healthy(http, base, proc, log, timeout_s=health_timeout_s, sleep=sleep)
         emit(f"SMOKE health: ok (migration included) after {time.monotonic() - t0:.1f}s")
 
+        def read_applied() -> set[str]:
+            rc, out = runner.capture(
+                [tool("psql"), "-h", "127.0.0.1", "-p", str(pg_port), "-U", user, "-d", DB_NAME, "-At", "-c",
+                 "SELECT DISTINCT id FROM public.databasechangelog"], env=pg_env,
+            )
+            if rc != 0:
+                raise SmokeError(f"reading public.databasechangelog failed ({rc}): {out.strip()}")
+            return {line.strip() for line in out.splitlines() if line.strip()}
+
+        applied = read_applied()
+        emit(f"SMOKE migration: {check_applied(applied, declared, fresh_boot_pending)}")
+
         status, text = http.get(f"{base}/version", auth)
         if status != 200:
             raise SmokeError(f"/version returned {status}: {text[:200]!r}")
-        emit(f"SMOKE version: {check_version(text, expected)}")
+        emit(f"SMOKE version: {check_version(text, len(applied))}")
 
         status, text = http.post_json(f"{base}/v1/vectors/embed", auth, {"model": EMBED_MODEL, "texts": [EMBED_TEXT]})
         if status != 200:
@@ -610,10 +683,17 @@ def run(
             status, text = http.get(f"{base}/version", auth)
             if status != 200:
                 raise SmokeError(f"/version returned {status} after the reboot: {text[:200]!r}")
-            emit(f"SMOKE reboot: healthy after {time.monotonic() - t0:.1f}s, {check_version(text, expected)}")
+            applied_after = read_applied()
+            newly = applied_after - applied
+            if not newly <= set(fresh_boot_pending) or not applied <= applied_after:
+                raise SmokeError(f"the second boot changed the journal beyond the designed deferrals: "
+                                 f"new {sorted(newly)}, lost {sorted(applied - applied_after)}")
+            emit(f"SMOKE reboot: healthy after {time.monotonic() - t0:.1f}s, "
+                 f"{check_applied(applied_after, declared, fresh_boot_pending)}, {check_version(text, len(applied_after))}")
             assert_serving_stop(proc, log2, emit)
-            check_reboot_log(read_log(log2))
-            emit("SMOKE reboot: second boot applied 0 new changesets")
+            check_reboot_log(read_log(log2), len(newly))
+            emit(f"SMOKE reboot: second boot applied {len(newly)} new changesets"
+                 + (f" ({', '.join(sorted(newly))}, deferred by design)" if newly else ""))
     finally:
         if proc is not None:
             stop_engine(proc, platform, emit)
