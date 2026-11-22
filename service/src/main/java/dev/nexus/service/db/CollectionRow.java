@@ -62,6 +62,22 @@ public record CollectionRow(
         this(contentType, ownerId, embeddingModel, dimension, lifecycleState, "");
     }
 
+    /**
+     * RDR-229 P3.5a STUB: the registry id of the row ({@code catalog_collections.collection_id}). Becomes a record component
+     * in the code commit; until then no row carries it.
+     */
+    public long collectionId() {
+        throw new UnsupportedOperationException("P3.5a: not implemented");
+    }
+
+    /**
+     * RDR-229 P3.5a STUB: the row's label ({@code catalog_collections.name}). Becomes a record component in the code commit;
+     * until then no row carries it.
+     */
+    public String label() {
+        throw new UnsupportedOperationException("P3.5a: not implemented");
+    }
+
     /** True when the row names a successor: it was renamed away or superseded. */
     public boolean isSuperseded() {
         return !supersededBy.isEmpty();
