@@ -2468,6 +2468,15 @@
     <include file="db/changelog/catalog-053-live-label-unique.xml"/>
 
     <!--
+        Bead nexus-p2m1x.27 (RDR-229 P3.7, linda's ruling on bob's P4.1 review G17): vectors-079-1 adds a BEFORE INSERT OR UPDATE row trigger on
+        catalog_document_chunks, chunk_orphaned_at and topic_assignments that sets the child row's collection name from the chunk row it references (the chunk's
+        key, else the child's collection id), so a write under a one-row-renamed collection's new label for an existing chunk satisfies the chunk name key
+        until P4.1 drops it, and an AFTER statement trigger that logs a replaced name once per statement. DATA EFFECT: none. Function and trigger
+        definitions only. The number is linda's allocation. After vectors-068, before the grants-nexus-svc.xml runAlways block.
+    -->
+    <include file="db/changelog/vectors-079-child-row-name-from-chunk.xml"/>
+
+    <!--
         Bead nexus-p2m1x.22 (RDR-229 P3.4; linda, 2026-11-22): vectors-080-1 creates nexus.rdr229_gate_latch, the install-wide latch the
         completion check writes the first time gate 3 holds. A global table (no tenant column, no RLS), not in the tenant export registry. DATA EFFECT:
         none (one empty table). After catalog-053, before the grants-nexus-svc.xml runAlways block. See the included file's header.
