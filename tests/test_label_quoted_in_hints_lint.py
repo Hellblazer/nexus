@@ -26,12 +26,7 @@ _BARE_LABEL = re.compile(
 
 #: Sites left for a series that is editing the same file now: "<path>" -> the line texts and why. Each must still
 #: match (a stale entry fails), so the list empties as the sites are quoted.
-_PENDING: dict[str, tuple[tuple[str, ...], str]] = {
-    "src/nexus/indexer.py": (
-        ("nx collection reindex {legacy}", "nx collection re-embed {legacy}", "nx collection delete {legacy}"),
-        "tamsin's -r13 reds series is editing indexer.py's registration; quoted once it lands (linda's overlap rule)",
-    ),
-}
+_PENDING: dict[str, tuple[tuple[str, ...], str]] = {}
 
 
 def _findings(text: str, rel: str) -> list[str]:

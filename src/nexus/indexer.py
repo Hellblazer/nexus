@@ -16,6 +16,7 @@ Per-file indexing logic lives in focused sub-modules (RDR-032):
   nexus.indexer_utils  — staleness check, credential check, shared helpers
   nexus.index_context  — IndexContext dataclass
 """
+import shlex
 import contextlib
 import os
 import sys
@@ -509,7 +510,7 @@ def _register_run_collections(
                 "retries on each run and moves the repo onto {successor!r}. "
                 "If it stops here again, `nx catalog doctor "
                 "--collections-drift` reports the retired name and `nx "
-                "collection info {successor}` shows where the data lives."
+                "collection info {quoted_successor}` shows where the data lives."
             ),
         )
         kwargs = collection_registration_kwargs(name)
@@ -952,9 +953,9 @@ def _migrate_legacy_collections(
                         "different embedding model than the one the indexer "
                         "writes; rename never re-embeds, so it is kept under "
                         "its legacy name and indexed there. To move it, "
-                        + (f"re-index it from source (nx collection reindex {legacy}), or "
+                        + (f"re-index it from source (nx collection reindex {shlex.quote(legacy)}), or "
                            if ct != "code" else "re-index it from source (nx index repo), or ")
-                        + f"re-embed it to the write model (nx collection re-embed {legacy} "
+                        + f"re-embed it to the write model (nx collection re-embed {shlex.quote(legacy)} "
                         f"--to {conformant_name.embedding_model} plans it; add --no-dry-run --yes "
                         "to run it as a job on the local engine), or "
                         "rename it to a name carrying its row's own model "
@@ -1093,7 +1094,7 @@ def _migrate_legacy_collections(
                     f"Both legacy {legacy} and conformant {conformant} "
                     f"exist; skipping rename. Operator cleanup of the "
                     f"legacy collection is recommended via "
-                    f"'nx collection delete {legacy}' once verified empty."
+                    f"`nx collection delete {shlex.quote(legacy)}` once verified empty."
                 )
             result[ct] = conformant
         else:
