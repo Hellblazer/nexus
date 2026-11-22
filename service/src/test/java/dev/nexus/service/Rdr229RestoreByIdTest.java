@@ -11,6 +11,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.nexus.service.db.CollectionTombstones;
 import org.jooq.Field;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -461,11 +462,15 @@ class Rdr229RestoreByIdTest {
         Map<String, Long> seeded = registryIds(env, src);
         String bigOld = "c" + seeded.get(big), smallOld = "c" + seeded.get(small);
         int[] renamedChildren = {0};
+        int[] tombstones = {0};
         env.su(ctx -> {
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, bigOld)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.NAME.eq(big)).execute();
             ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.NAME, smallOld)
                 .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.NAME.eq(small)).execute();
+            // the 1024-wide tombstone names its successor by the successor's minted label, and by id
+            tombstones[0] = ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.SUPERSEDED_BY, bigOld)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(src)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(big)).execute();
             for (CollectionIdSites.Site s : CollectionIdSites.exportedSites()) {
                 Field<String> name = DSL.field(DSL.name(s.nameColumn()), String.class);
                 renamedChildren[0] += ctx.update(DSL.table(DSL.name("nexus", s.table()))).set(name, smallOld)
@@ -474,6 +479,7 @@ class Rdr229RestoreByIdTest {
             return null;
         });
         assertThat(renamedChildren[0]).as("non-vacuity: the 384-wide collection's children took its minted label").isPositive();
+        assertThat(tombstones[0]).as("non-vacuity: the tombstone names its successor's minted label").isEqualTo(1);
         Map<String, Long> srcIds = registryIds(env, src);
         assertThat(srcIds).containsKeys(bigOld, smallOld);
         Map<String, Map<String, Long>> srcRows = rowsByCollection(env, src);
@@ -498,7 +504,9 @@ class Rdr229RestoreByIdTest {
 
         // the target draws ids far past the source's, so every minted label changes
         long floor = srcIds.values().stream().mapToLong(Long::longValue).max().orElseThrow() + 1000;
-        keyed.su(ctx -> ctx.fetch("SELECT setval(pg_get_serial_sequence('nexus.catalog_collections', 'collection_id'), ?)", floor));
+        Field<Object> sequence = DSL.function("pg_get_serial_sequence", String.class, DSL.val("nexus.catalog_collections"),
+            DSL.val("collection_id")).cast(new org.jooq.impl.DefaultDataType<>(org.jooq.SQLDialect.POSTGRES, Object.class, "regclass"));
+        keyed.su(ctx -> ctx.select(DSL.function("setval", Long.class, sequence, DSL.val(floor))).fetchOne());
         String dstToken = keyed.newTenant(dst);
         JsonNode end = keyed.restore(dstToken, late);
 
@@ -524,6 +532,15 @@ class Rdr229RestoreByIdTest {
                 .isNotEqualTo(e.getKey());
         }
         assertThat(dstIds.keySet()).as("no old minted label is left").doesNotContain(bigOld, smallOld);
+        // the tombstone follows its successor: the relabelled name and the mapped id, the R7 invariant intact
+        var tomb = keyed.su(ctx -> ctx.select(CATALOG_COLLECTIONS.SUPERSEDED_BY, CATALOG_COLLECTIONS.SUPERSEDED_BY_ID)
+            .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.TENANT_ID.eq(dst)).and(CATALOG_COLLECTIONS.SUPERSEDED_BY.ne(""))
+            .fetchOne());
+        assertThat(tomb).as("the restored tombstone").isNotNull();
+        assertThat(tomb.value1()).as("its superseded_by is the successor's new label").isEqualTo(labels.get(bigOld));
+        assertThat(tomb.value2()).as("its superseded_by_id is the successor's new id").isEqualTo(dstIds.get(labels.get(bigOld)));
+        long r7 = keyed.su(ctx -> (long) CollectionTombstones.invariantViolations(ctx, dst));
+        assertThat(r7).as("R7").isZero();
         assertThat(ByIdRestoreSupport.namedRowsWithoutId(keyed, dst)).as("every late-stamp row got its id by its relabelled name").isEmpty();
         assertThat(ByIdRestoreSupport.rowsNamedOtherwiseThanTheirCollection(keyed, dst)).as("every row has the current label").isEmpty();
         Map<String, Map<String, Long>> want = new java.util.LinkedHashMap<>();
