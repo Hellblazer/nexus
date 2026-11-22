@@ -18,8 +18,6 @@ Subcommands:
                 concrete subspaces (RDR-239).
   list       -- concrete subspaces that exist.
   stats      -- the census for one subspace.
-  directory  -- who holds a name in the RDR-208 session directory (bead
-                nexus-galkv.11; resolver in ``nexus.tuple_directory``).
   wait       -- park until new mail or a board post arrives for this session,
                 then exit: the channel-free push path, run as a background
                 task by a session launched without --channels (RDR-233).
@@ -71,7 +69,7 @@ def _print_tuple_error(e: Exception) -> None:
 
 @click.group(name="tuple")
 def tuple_group() -> None:
-    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats / directory."""
+    """RDR-205 Linda tuple space: out / rd / in / ack (with an optional reply) / nack / renew / release / templates / dictionary / list / stats."""
 
 
 @tuple_group.command(name="out")
@@ -335,17 +333,34 @@ REARM_HINT: str = (
 )
 
 
-def _resolve_wait_session(explicit: str | None, claude_pid: int) -> str | None:
-    """The session whose mailbox to watch: *explicit*, else the SessionStart
-    marker for this ``claude`` process (current after ``/clear``), else the
-    env chain."""
-    if explicit:
-        return explicit
+def _resolve_wait_target(explicit: str | None, claude_pid: int) -> tuple[str, str] | None:
+    """``(session id, identity id)`` whose mailbox to watch, or None when there is nothing to watch.
+
+    With *explicit* (``--session``), the identity is the one a token file binds that session to (``""`` when none
+    does). Without it, the identity is the one this process's token file names, and the session is that file's current
+    session id, else the SessionStart marker for this ``claude`` process, else the environment. Mail goes to the
+    identity (RDR-253 Phase 2), so a session bound to none has no mailbox here."""
     from nexus import config as _nx_config  # noqa: PLC0415 — deferred: CLI startup cost
-    from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred: CLI startup cost
+
+    if explicit:
+        from nexus.identity.board import identity_for_session  # noqa: PLC0415 — deferred: CLI startup cost
+
+        return explicit, identity_for_session(explicit, _nx_config.nexus_config_dir())
+    from nexus.identity.token_file import read_token_file  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.identity.token_header import token_file_path  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.session import resolve_explicit_session_id  # noqa: PLC0415 — deferred: CLI startup cost
     from nexus.session_marker import _read_session_marker  # noqa: PLC0415 — deferred: CLI startup cost
 
-    return _read_session_marker(_nx_config.nexus_config_dir(), claude_pid) or resolve_active_session_id()
+    path = token_file_path()
+    record = read_token_file(path) if path is not None else None
+    if record is None or not record.identity:
+        return None
+    session = (
+        record.session_id
+        or _read_session_marker(_nx_config.nexus_config_dir(), claude_pid)
+        or resolve_explicit_session_id()
+    )
+    return (session, str(record.identity)) if session else None
 
 
 def _board_entries_reader(session_id: str):
@@ -373,7 +388,8 @@ def _board_entries_reader(session_id: str):
 
 @tuple_group.command(name="wait")
 @click.option("--session", "session", default=None, metavar="SESSION_ID",
-              help="Watch this session's mailbox (default: the current Claude session).")
+              help="Watch the mailbox of the identity this session is bound to (default: the identity bound to the "
+                   "current Claude session; required when there is none).")
 @click.option("--timeout-s", "timeout_s", type=int, default=25, show_default=True,
               help="Seconds per engine park; liveness and subscriptions are re-checked between parks.")
 @click.option("--max-parks", "max_parks", type=int, default=None,
@@ -390,8 +406,9 @@ def tuple_wait_cmd(
     The channel-free push path (RDR-233): run it with run_in_background in a
     Claude Code session launched without --channels (the Claude Desktop Code
     tab). Its exit wakes the idle session, which acts on the printed notices and
-    runs it again. Watches mailbox/<session id> and the board topics subscribed
-    with tuple_subscribe. Each row is announced once, only while claimable, and
+    runs it again. Watches the session's identity mailbox (mailbox/<identity id>)
+    and the board topics subscribed with tuple_subscribe. A session bound to no
+    identity has no mailbox: pass --session. Each row is announced once, only while claimable, and
     never when this session wrote it. Prints the channel's notice text, never a
     tuple body.
 
@@ -418,9 +435,17 @@ def tuple_wait_cmd(
             "your organisation): then run it with --force.", err=True,
         )
         raise SystemExit(EXIT_CHANNEL_ACTIVE)
-    session_id = _resolve_wait_session(session, claude_pid)
-    if not session_id:
-        raise click.UsageError("no Claude session id resolved; pass --session")
+    target = _resolve_wait_target(session, claude_pid)
+    if target is None:
+        raise click.UsageError(
+            "no identity is bound to this session, so there is no mailbox to watch; pass --session SESSION_ID "
+            "(the session of a bound identity)"
+        )
+    session_id, identity = target
+    if not identity:
+        raise click.UsageError(
+            f"session {session_id} is bound to no identity (no token file lists it), so it has no mailbox to watch"
+        )
 
     from nexus.mcp.channel import _mint_waiter_token  # noqa: PLC0415,SLF001 — deferred: loads the MCP package; the engine's token format has one minter
     from nexus.tuple_wait import (  # noqa: PLC0415 — deferred: CLI startup cost
@@ -443,10 +468,10 @@ def tuple_wait_cmd(
     try:
         store = _store()
         outcome = run_wait(
-            store, session_id,
+            store, session_id, identity=identity,
             board_entries=_board_entries_reader(session_id),
             alive=lambda: claude_pid <= 1 or pid_alive(claude_pid),
-            current_session=lambda: None if session else _resolve_wait_session(None, claude_pid),
+            current_binding=lambda: None if session else _resolve_wait_target(None, claude_pid),
             waiter_token=_mint_waiter_token(),
             park_s=timeout_s, max_parks=max_parks,
         )
@@ -940,77 +965,6 @@ def tuple_stats_cmd(subspace: str, json_out: bool) -> None:
     click.echo(f"expired_unpurged: {c.expired_unpurged}")
     click.echo(f"oldest_created_at: {c.oldest_created_at}")
     click.echo(f"newest_created_at: {c.newest_created_at}")
-
-
-@tuple_group.command(name="directory")
-@click.argument("name")
-@click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON.")
-def tuple_directory_cmd(name: str, json_out: bool) -> None:
-    """Show who holds NAME in the RDR-208 session directory.
-
-    Prints each live directory/NAME entry's session_id, created_at and
-    expires_at, and flags NAME as ambiguous when more than one distinct
-    session holds it -- the case `mailbox_send` refuses. Reads
-    `directory/NAME` exactly ONCE and classifies that one list through the
-    SAME pure classifier `mailbox_send` uses (nexus.tuple_directory.
-    classify_directory_holders), so the two can never disagree about
-    whether NAME is safely addressable, and a lapse or a re-nonce between
-    two reads can never make the printed entries and the verdict below
-    describe different moments (gate audit round B item 1).
-    """
-    from nexus.tuple_directory import (  # noqa: PLC0415 — deferred: CLI startup cost
-        DirectoryResolutionError, classify_directory_holders, list_directory_entries,
-    )
-
-    store = _store()
-    try:
-        rows = list_directory_entries(name, store)
-    except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
-        _print_tuple_error(e)
-        raise SystemExit(1) from e
-
-    entries = [
-        {
-            "session_id": (row.dims or {}).get("session_id"),
-            "created_at": row.created_at,
-            "expires_at": row.expires_at,
-        }
-        for row in rows
-    ]
-    holders = sorted({e["session_id"] for e in entries if e["session_id"]})
-
-    resolved_session: str | None = None
-    ambiguous = False
-    if entries:
-        try:
-            resolved_session, _kind = classify_directory_holders(name, rows)
-        except DirectoryResolutionError:
-            # entries is non-empty here, so the only way the classifier can
-            # still refuse is the more-than-one-holder branch.
-            ambiguous = True
-
-    if json_out:
-        click.echo(json.dumps({
-            "name": name,
-            "entries": entries,
-            "holders": holders,
-            "ambiguous": ambiguous,
-            "resolved_session_id": resolved_session,
-        }))
-        return
-
-    if not entries:
-        click.echo(f"No live directory entry for {name!r}.")
-        return
-    for e in entries:
-        click.echo(f"  session_id: {e['session_id']}  created_at: {e['created_at']}  expires_at: {e['expires_at']}")
-    if ambiguous:
-        click.echo(
-            f"{name!r} is held by {len(holders)} sessions -- mailbox_send "
-            f"would refuse this name; resend to one of these session ids directly."
-        )
-    else:
-        click.echo(f"{name!r} resolves to session {resolved_session}.")
 
 
 # ── rendering helpers ────────────────────────────────────────────────────────

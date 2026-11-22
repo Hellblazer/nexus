@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-253 Step 5: a new client's drain hook reads BOTH ``mailbox/<session id>`` and ``mailbox/<identity>``.
+"""RDR-253 Phase 2: the drain hook reads ``mailbox/<identity>`` ALONE, never ``mailbox/<session id>``.
 
-New-client senders mail the identity, old-client senders mail the session, so a hook that drains only one loses the
-other half of a mixed fleet silently. Both copies of the hook (the plugin script and the wheel port) run their real
-``_drain_all`` here, over a token file on disk; only the engine call (``_drain_address``) is a recorder.
+A session id is not a mail address. Both copies of the hook (the plugin script and the wheel port) run their real
+``_drain_all`` here, over a token file on disk; only the engine call (``_drain_address``) is a recorder. The
+``/clear`` record drain is stubbed: it is the one session-keyed read left, and is not what these tests are about.
 """
 from __future__ import annotations
 
@@ -67,16 +67,32 @@ def hook(request: pytest.FixtureRequest) -> tuple[Any, str]:
     return (_plugin() if request.param == "plugin" else _wheel()), request.param
 
 
-def test_a_bound_session_drains_its_session_mailbox_and_its_identity_mailbox(
+def test_a_bound_session_drains_its_identity_mailbox_alone(
     hook: tuple[Any, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     mod, flavour = hook
     _bind(tmp_path)
-    assert _run(mod, flavour, monkeypatch, tmp_path) == [SID, "i12"]
+    drained = _run(mod, flavour, monkeypatch, tmp_path)
+    assert drained == ["i12"]
+    assert SID not in drained, "the session id is not an address"
 
 
-def test_a_session_with_no_identity_drains_only_its_session_mailbox(
+def test_a_session_with_no_identity_drains_no_mailbox(
     hook: tuple[Any, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     mod, flavour = hook
-    assert _run(mod, flavour, monkeypatch, tmp_path) == [SID]
+    assert _run(mod, flavour, monkeypatch, tmp_path) == []
+
+
+def test_the_session_whose_token_file_lists_the_id_only_as_a_held_one_still_reaches_its_identity(
+    hook: tuple[Any, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After ``/clear`` the prompt's session id is the file's new current one, or one it held: either way the identity
+    is read from the token files, not from the payload."""
+    mod, flavour = hook
+    directory = tmp_path / "identity"
+    directory.mkdir(parents=True)
+    (directory / "1.1.token").write_text(
+        json.dumps({"identity": "i40", "token": "t", "generation": 1, "pid": 1, "started_at": 1,
+                    "session_id": "99999999-2222-4333-8444-555555555555", "session_ids": [SID]}), encoding="utf-8")
+    assert _run(mod, flavour, monkeypatch, tmp_path) == ["i40"]

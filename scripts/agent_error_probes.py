@@ -85,7 +85,7 @@ class Probe:
 
 
 def _holdable(to: str) -> bool:
-    """A name a session can hold: the server's own rule (``nexus.tuple_directory.SAFE_NAME_RE``)."""
+    """A name a seat can hold: the server's own rule (``nexus.tuple_directory.SAFE_NAME_RE``)."""
     from nexus.tuple_directory import SAFE_NAME_RE  # noqa: PLC0415 — stdlib-only module, no store
 
     return bool(SAFE_NAME_RE.fullmatch(to))
@@ -162,7 +162,7 @@ PROBES: list[Probe] = [
           "Send hello to the session that holds the seminar seat for Bullock.", "Seminar seat: Bullock",
           lambda t, a: (t == "mailbox_send" and _holdable(str(a.get("to", ""))))
           or t in ("tuple_rd", "tuple_list", "tuple_registry"),
-          refused_by="resolve_send_address refuses a name no session can hold before any directory read"),
+          refused_by="resolve_send refuses a name no seat can hold before any alias lookup"),
     Probe("query-catalog-where-operator", "query", {"question": "consensus", "author": "Lamport", "where": "year>=2020"},
           "Find documents by Lamport on consensus from 2020 on.", "operator-shaped",
           # search's where takes KEY=VALUE and comparison operators, so moving the author and the year there is a fix

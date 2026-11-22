@@ -10,7 +10,8 @@ nexus-vsipz a mailbox's position lives on the engine's row stamp, and since
 bead nexus-q82tk a board's lives in the engine's per-subscriber delivery
 row):
 
-- ``mailbox/<session id>``, present from construction, never removable
+- ``mailbox/<identity id>`` while the session is bound to an identity (RDR-253
+  Phase 2: mail goes to the identity, never to a session id), never removable
   (it is the floor's own address).
 - up to :data:`MAX_BOARD_TOPICS` ``board/<topic>`` subspaces.
 
@@ -395,9 +396,9 @@ def _take_enabled(templates: list[dict[str, Any]], subspace: str) -> bool:
 class SubscriptionSet:
     """One session's subscription list.
 
-    ``session_mailbox`` (``mailbox/<session_id>``) is implicit and never
-    stored in ``_board`` or removable; it is the only mailbox ever
-    delivered. ``leased_name`` is at most one further name, armed through a
+    ``identity_mailbox`` (``mailbox/<identity>``, RDR-253 Phase 2) is implicit and never stored in ``_board`` or
+    removable while an identity is bound; it is the only mailbox ever delivered, and there is none while the
+    session is unbound (mail goes to an identity, never to a session id). ``leased_name`` is at most one further name, armed through a
     ``mailbox/<name>`` subscribe call -- it starts the ``directory/<name>``
     lease so peers can resolve it via ``mailbox_send``, but (RDR-208 Phase
     3, bead nexus-galkv.20) it is never a delivered mailbox: it never
@@ -421,9 +422,8 @@ class SubscriptionSet:
     #: session, or None. NOT a mailbox subspace and NOT listed by
     #: :meth:`entries` -- see the class docstring.
     leased_name: str | None = None
-    #: RDR-253 Step 5: this session's identity, or None. While set, ``mailbox/<identity>`` is delivered beside
-    #: ``mailbox/<session_id>`` (Phase 1 dual subscription: a new-client sender addresses the identity, an old one
-    #: the session). Not persisted: it is read from the token file at each load (:func:`load`).
+    #: This session's identity, or None. While set, ``mailbox/<identity>`` is the one mailbox delivered (RDR-253
+    #: Phase 2); None delivers no mailbox. Not persisted: it is read from the token file at each load (:func:`load`).
     identity: str | None = None
     _board: dict[str, str | None] = field(default_factory=dict)
     #: RDR-249 TD3 (S7, nexus-mdbds.11.1): aura-owned board topics, each
@@ -456,10 +456,6 @@ class SubscriptionSet:
     clock: Clock = field(default=SYSTEM, repr=False, compare=False)
     #: The identity listener :func:`_follow_identity` registered for this set, so :func:`reset_cache` can remove it.
     _identity_listener: Callable[[str | None], None] | None = field(default=None, repr=False, compare=False)
-
-    @property
-    def session_mailbox(self) -> str:
-        return f"mailbox/{self.session_id}"
 
     @property
     def identity_mailbox(self) -> str | None:
@@ -720,14 +716,14 @@ class SubscriptionSet:
         return self.leased_name == usable
 
     def unsubscribe(self, subspace: str) -> None:
-        """Remove *subspace*. The session's own mailbox can never be
+        """Remove *subspace*. The identity mailbox can never be
         unsubscribed -- it is the floor's address. Unsubscribing a
         `mailbox/<name>` whose name this session leases releases the
         `directory/<name>` lease. Unsubscribing something not currently
         subscribed or leased is a silent no-op, not a refusal."""
-        if subspace == self.session_mailbox:
+        if self.identity_mailbox is not None and subspace == self.identity_mailbox:
             raise SchemaViolationError(
-                "the session's own mailbox cannot be unsubscribed; it is the floor's address"
+                "the identity mailbox cannot be unsubscribed; it is the floor's address"
             )
         if self.leased_name and subspace == f"mailbox/{self.leased_name}":
             self._stop_lease()
@@ -741,8 +737,8 @@ class SubscriptionSet:
 
     def entries(self) -> list[dict[str, Any]]:
         """This set's DELIVERED subspaces, in the order
-        ``tuple_subscriptions`` renders them: the session mailbox first,
-        then board topics. No cursor: delivery position lives in the
+        ``tuple_subscriptions`` renders them: the identity mailbox first
+        (when one is bound), then board topics. No cursor: delivery position lives in the
         engine for every shape (beads nexus-vsipz, nexus-q82tk). A board
         entry carries ``since``, the topic's subscribe time (bead
         nexus-zxthy): the waiter pushes only posts created after it
@@ -756,7 +752,7 @@ class SubscriptionSet:
         one place :mod:`nexus.mcp.channel`'s waiter reads to decide what to
         wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
         so leaving it out here is what stops push delivery for it."""
-        out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
+        out: list[dict[str, Any]] = []
         if self.identity_mailbox:
             out.append({"subspace": self.identity_mailbox})
         # Copies: a tool thread reads this while the loop can add an aura topic.
@@ -955,7 +951,7 @@ _TAG = "rdr211-subscriptions"
 def load(t1: Any, session_id: str, *, store_factory: Callable[[], Any] | None = None) -> "SubscriptionSet":
     """Build a FRESH :class:`SubscriptionSet` for *session_id* from
     whatever this session's T1 already holds (a ``/resume``), or an empty
-    set with just the session mailbox (a ``/clear`` — a new session id has
+    set (a ``/clear`` — a new session id has
     nothing to find, since T1 itself is already session-scoped).
 
     Board topics only. The leased name is NOT restored (bead nexus-kdxyv):
@@ -997,7 +993,7 @@ def _token_identity() -> str | None:
         from nexus.identity.token_header import current  # noqa: PLC0415 -- deferred: MCP startup cost
 
         record = current()
-    except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
+    except Exception:  # noqa: BLE001 -- no identity: no mailbox is delivered
         return None
     return _valid_identity(str(record.identity) if record is not None else "")
 
@@ -1034,7 +1030,7 @@ def get_or_load(t1: Any, session_id: str, *, store_factory: Callable[[], Any]) -
 
 
 def _follow_identity(subs: SubscriptionSet) -> None:
-    """RDR-253 Step 5: keep *subs*'s identity mailbox in step with this server's lease. The set usually loads before
+    """Keep *subs*'s identity mailbox in step with this server's lease. The set usually loads before
     the token file exists (the MCP server and the bind hook start together), so the lease tells it when it adopts
     an identity, and again on a switch or take-over."""
     try:
@@ -1045,7 +1041,7 @@ def _follow_identity(subs: SubscriptionSet) -> None:
 
         subs._identity_listener = follow  # noqa: SLF001 -- the set owns its listener, reset_cache removes it
         add_identity_listener(follow)
-    except Exception as exc:  # noqa: BLE001 -- no lease module path: the session mailbox alone, as before Step 5
+    except Exception as exc:  # noqa: BLE001 -- no lease module path: no identity mailbox follows
         _log.debug("identity_follow_unavailable", error=str(exc))
 
 

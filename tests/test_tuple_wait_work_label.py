@@ -20,6 +20,12 @@ class _Store:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _session_bound_to_an_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``--session s1`` names the session of a bound identity (RDR-253 Phase 2: the wait watches the identity's mailbox)."""
+    monkeypatch.setattr("nexus.identity.board.identity_for_session", lambda sid, cd=None: "i1")
+
+
 @pytest.fixture
 def labels(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
     """What the wait wrote: ``(kind, ref, state)`` per registration, as the identity the token file named at the start."""

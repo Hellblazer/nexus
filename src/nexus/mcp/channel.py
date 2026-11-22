@@ -968,6 +968,8 @@ class ChannelWaiter:
         self._last_wake: datetime | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
+        #: Set (on the waiter's loop) by a subscription change, so a tick with nothing to wait on starts again at once.
+        self._subs_changed = asyncio.Event()
 
         subs.add_listener(self._on_subscription_change)
 
@@ -989,9 +991,11 @@ class ChannelWaiter:
         that writes the record, so two writers never share its tmp file."""
         _log.info("channel_waiter_subscription_changed", session_id=self.session_id)
         loop = getattr(self, "_loop", None)
-        if loop is not None and self.state_dir is not None:
+        if loop is not None:
             try:
-                loop.call_soon_threadsafe(self._publish_status)
+                loop.call_soon_threadsafe(self._subs_changed.set)
+                if self.state_dir is not None:
+                    loop.call_soon_threadsafe(self._publish_status)
             except RuntimeError:  # the loop is closed: the waiter is gone, nothing to publish
                 pass
 
@@ -1371,8 +1375,8 @@ class ChannelWaiter:
     async def tick(self) -> None:
         """One iteration. Drops the last-seen record of any mailbox no
         longer subscribed (unsubscribe), then parks ONE `wait()` call
-        over EVERY subscription -- board or mailbox alike, the spec is
-        never empty. There is no local re-send point to cap the timeout
+        over EVERY subscription -- board or mailbox alike. With none (a session
+        bound to no identity, no board topic) it idles instead. There is no local re-send point to cap the timeout
         to any more (bead nexus-vsipz): a mailbox's own due timing now
         lives entirely in the engine's `announce` predicate, so this tick
         simply asks for up to `wait_timeout_s` and lets the engine decide
@@ -1397,6 +1401,7 @@ class ChannelWaiter:
         # read the SAME list rather than two that may differ.
         self._clear_stall_if_open()
         await self._flush_held()
+        self._subs_changed.clear()  # before the read below, so a change after it still ends an idle tick
         entries = self.subs.entries()
         live_subspaces = {e["subspace"] for e in entries}
         for subspace in list(self._last_seen):
@@ -1404,6 +1409,15 @@ class ChannelWaiter:
                 del self._last_seen[subspace]
 
         specs = self._build_specs(entries)
+        if not specs:
+            # RDR-253 Phase 2: mail goes to an identity, so a session not (yet) bound to one has no mailbox, and with
+            # no board topic either there is nothing to park on (the engine refuses an empty wait). Idle until the
+            # subscription set changes (the identity lease binding bumps it) or one park's length passes.
+            try:
+                await asyncio.wait_for(self._subs_changed.wait(), timeout=self.wait_timeout_s)
+            except TimeoutError:
+                pass
+            return
         try:
             results: list[WaitResult] = await asyncio.to_thread(
                 self._call, lambda t: t.wait(specs, self.wait_timeout_s),

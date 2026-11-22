@@ -50,5 +50,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - `conexus/hooks/scripts/compact_checkpoint.py`: RDR-253 Phase 2: the checkpoint finds the session's threads board entry by its `identity:` line only (the identity a token file binds the session id to); an entry with a `session:` line and no `identity:` line is not found, and a session with no token file finds none. The exact-title fallback is kept, taken only when that entry's own `identity:` line matches. The no-restore notice no longer names the `session:` line. The checkpoint file's own `- session:` line is kept as information (nothing reads it back as a key).
 - `conexus/hooks/scripts/_identity_lookup.py`: docstring only: a hook with no token file has no identity and finds no board entry (RDR-253 Phase 2).
 - `conexus/skills/asks/SKILL.md`: the refusal list names the `identity:` line, not the `session:` id (RDR-253 Phase 2).
+- `conexus/hooks/scripts/mailbox_drain.py`: drains only `mailbox/<identity>`, never `mailbox/<session id>` (nexus-hczdo.2.1, RDR-253 Phase 2)
+- `conexus/skills/mailbox/SKILL.md`: mail is addressed by identity id or seat name; the session mailbox, the `directory/<name>` lease and `nx tuple directory` are gone (nexus-hczdo.2.1)
+- `conexus/skills/peer-messaging/SKILL.md`: a send to a peer goes to its identity id or seat name, never a session id or `ListAgents` name (nexus-hczdo.2.1)
 
 ## Deferred to the next client release

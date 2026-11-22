@@ -26,20 +26,13 @@ paragraph above would otherwise assume it is universal:
   surfaced ONCE, from a local seen-file, because the alternative is that
   a session with no channel reached never learns the message existed at
   all. Purging it is a human act; this hook only says it is there.
-* An INSTANCE-NAME address (the ``ListAgents`` row, e.g. ``nexus-19``)
-  has NO floor here at all, deliberately (RDR-208 Phase 3, bead
-  nexus-galkv.20; the retention window this transition depended on --
-  R2's ship date plus 7 days -- has passed). This hook used to read a
-  per-session registry (``<config>/tuple-watch/addresses.d/<session
-  id>``) that ``tuple_subscribe("mailbox/<name>")`` wrote, and drain
-  whatever names it listed; that file is never written any more
-  (:mod:`nexus.mcp.subscriptions`), and this hook never reads one even
-  if a stale copy from an old install is still sitting on disk. A name
-  still resolves to a session through the `directory/<name>` lease that
-  ``tuple_subscribe`` still arms, so a sender can still reach a peer by
-  name with ``mailbox_send`` -- but the resolved address is always the
-  RECIPIENT'S OWN session id, drained by the ordinary path below, never
-  a ``mailbox/<name>`` subspace this hook would need a registry to find.
+* A SESSION ID is not a mail address (RDR-253 Phase 2, bead nexus-hczdo.2.1),
+  and neither is a ``ListAgents`` name. Mail goes to ``mailbox/<identity id>``
+  (``mailbox_send`` resolves a seat's name through its alias to the identity),
+  and this hook drains that one mailbox: the identity the prompt's session id
+  is bound to, read from the token files. A session bound to no identity has
+  no mailbox here. The one session-keyed read left is the ``/clear`` record
+  below, which names mailboxes a previous session id was stranded at.
 
 CONTRACT WITH THE PROMPT. stdout is injected context, so an empty mailbox
 prints NOTHING and costs an idle prompt nothing. Every failure -- an
@@ -1371,26 +1364,25 @@ def _drain_all(payload: dict[str, Any], out: _Out) -> None:
     except Exception as exc:  # noqa: BLE001 — maintenance only, never the prompt's problem
         _log_skip(f"cleared-record prune: unexpected {type(exc).__name__}: {exc}")
 
-    # RDR-208 Phase 3 (bead nexus-galkv.20): the only address this hook ever
-    # drains from the prompt payload is the session's own id. A registered
-    # instance name (the old `addresses.d/<session id>` registry) is no
-    # longer read here at all -- see the module docstring's "WHERE THE
-    # FLOOR DOES NOT REACH" section.
-    addresses: list[str] = [session_id] if _valid_address(session_id) else []
-    # RDR-253 Step 5, Phase 1: both the session mailbox and mailbox/<identity> (the plugin script does the same).
+    # RDR-253 Phase 2: the only address this hook drains from the prompt payload is mailbox/<identity>, the identity
+    # the payload's session id is bound to (the token files name it, never the payload). A session id is no longer a
+    # mail address; a session bound to no identity has no mailbox, and only its /clear record (below) can drain.
     global _IDENTITY_TOKEN
-    if addresses:
+    identity = ""
+    _IDENTITY_TOKEN = ""
+    if _valid_address(session_id):
         from nexus.identity.board import binding_for_session  # noqa: PLC0415 -- hook import cost
 
         try:
             identity, _IDENTITY_TOKEN = binding_for_session(session_id, config_dir)
-        except Exception:  # noqa: BLE001 -- no identity: the session mailbox alone, as before Step 5
+        except Exception:  # noqa: BLE001 -- no identity: nothing to drain
             identity, _IDENTITY_TOKEN = "", ""
-        if identity and _valid_address(identity):
-            addresses.append(identity)
-    if not addresses:
+    addresses: list[str] = [identity] if identity and _valid_address(identity) else []
+    if not addresses and not _valid_address(session_id):
         _log_skip("no address to drain: the payload carried no usable session id")
         return
+    if not addresses:
+        _log_skip(f"no address to drain: session {session_id} is bound to no identity, and mail goes to an identity's mailbox")
 
     try:
         base_url, token, is_local = _resolve_endpoint(config_dir)

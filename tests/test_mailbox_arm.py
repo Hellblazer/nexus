@@ -34,35 +34,33 @@ from nexus.mailbox_arm import (
 
 
 class TestMailboxArmInstructionText:
-    def test_contains_the_tuple_subscribe_call_shape(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert 'mcp__plugin_conexus_nexus__tuple_subscribe("mailbox/<name>")' in text
-        assert "ListAgents" in text
+    def test_says_mail_goes_to_the_identity_and_nothing_is_subscribed(self) -> None:
+        """RDR-253 Phase 2: the tuple_subscribe("mailbox/<name>") instruction is retired with the directory lease."""
+        text = mailbox_arm_instruction()
+        assert "identity" in text and "seat name" in text and "nothing to subscribe" in text
+        assert "tuple_subscribe" not in text
+        assert "mailbox/<name>" not in text
+
+    def test_names_no_session_id_and_asks_for_no_listagents_call(self) -> None:
+        text = mailbox_arm_instruction()
+        assert "never by session id or ListAgents name" in text
+        assert "fresh ListAgents call" not in text
 
     def test_never_uses_a_bare_positional_address(self) -> None:
         """RDR-211: subscribing is an MCP tool call, never a CLI command
         line, so no positional-address CLI shape can appear at all."""
-        text = mailbox_arm_instruction("sess-abc")
+        text = mailbox_arm_instruction()
         assert "command:" not in text
         assert "Monitor(" not in text
 
-    def test_states_take_the_name_fresh_never_from_memory(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert "fresh ListAgents call" in text
-        assert "never from memory" in text
-
-    def test_states_the_session_mailbox_is_already_subscribed(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert "already subscribed" in text
-
     def test_carries_the_arm_marker(self) -> None:
-        assert ARM_MARKER in mailbox_arm_instruction("sess-abc")
+        assert ARM_MARKER in mailbox_arm_instruction()
 
     def test_names_the_development_channel_launch_flag_and_dialog(self) -> None:
         """Sam's decision of 2026-09-17 (T2 nexus_rdr/211-decision-dev-
         channel-dialog-2026-09-17): the channel is a research preview,
         named plainly as setup, with its per-launch confirmation dialog."""
-        text = mailbox_arm_instruction("sess-abc")
+        text = mailbox_arm_instruction()
         assert "--dangerously-load-development-channels server:nexus" in text
         assert "one-keystroke confirmation dialog" in text
         assert "research preview" in text
@@ -71,7 +69,7 @@ class TestMailboxArmInstructionText:
         """nexus-tk2cz: the dialog-free plugin form leads, ahead of the
         dev-channels form, and the sentence points at the alias that
         makes either form apply on every launch without retyping it."""
-        text = mailbox_arm_instruction("sess-abc")
+        text = mailbox_arm_instruction()
         plugin_at = text.index("--channels plugin:conexus@nexus-plugins")
         dev_at = text.index("--dangerously-load-development-channels server:nexus")
         assert plugin_at < dev_at
@@ -79,18 +77,9 @@ class TestMailboxArmInstructionText:
         assert "alias" in text
 
     def test_states_the_drain_hook_is_the_floor_without_the_channel(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
+        text = mailbox_arm_instruction()
         assert "drain hook" in text
         assert "next prompt" in text
-
-    def test_no_repeated_session_id_literal(self) -> None:
-        """The session id must appear at most once in the rendered text --
-        code-review-expert's Critical on the byte-budget stack found the
-        old Monitor-arm text repeating it three times, costing 3x the
-        id-length delta over a short test fixture and blowing the
-        2000-byte per-emitter budget with a real 36-char UUID session id."""
-        text = mailbox_arm_instruction("sess-abc")
-        assert text.count("sess-abc") == 1
 
 
 # ── arm_block: the orchestrator hooks.session_start() calls ────────────────
@@ -110,8 +99,8 @@ class TestArmBlock:
         with patch("nexus.mailbox_arm.tuple_surface_available", return_value=True):
             text = arm_block("sess-1", config_dir=tmp_path)
         assert ARM_MARKER in text
-        assert "sess-1" in text
-        assert 'tuple_subscribe("mailbox/<name>")' in text
+        assert "sess-1" not in text, "the line names no session"
+        assert "tuple_subscribe" not in text
 
 
 class TestNoRegistryGuessing:
@@ -181,13 +170,3 @@ class TestTupleSurfaceAvailable:
         with patch("nexus.mailbox_arm._probe_tuple_surface", return_value=True) as m:
             tuple_surface_available(tmp_path, now=100.0, probe_timeout_s=0.5)
         m.assert_called_once_with(0.5)
-
-
-class TestInstanceNameIsTakenFresh:
-    """nexus-6konb.20: ListAgents renames a session on resume, so the
-    instruction says to take the name from a call made now."""
-
-    def test_states_the_name_comes_from_a_fresh_listagents_call(self) -> None:
-        text = mailbox_arm_instruction("sess-abc")
-        assert "fresh ListAgents call" in text
-        assert "changes on resume" in text

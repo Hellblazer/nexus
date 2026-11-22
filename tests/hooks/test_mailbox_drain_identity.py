@@ -19,7 +19,7 @@ import pytest
 from tests._module_seam import setattr_in
 
 SCRIPT = Path(__file__).resolve().parents[2] / "conexus" / "hooks" / "scripts" / "mailbox_drain.py"
-SID = "11111111-2222-4333-8444-555555555555"
+AGENT = "a0123456789abcdef"
 
 
 def _plugin() -> Any:
@@ -78,9 +78,9 @@ def test_an_ack_while_draining_the_identity_mailbox_carries_the_token(hook) -> N
     assert headers.get("x-nexus-identity-token") == "tok-i12", "the ack body has no subspace; the address decides"
 
 
-def test_no_request_on_the_session_mailbox_carries_the_token(hook) -> None:
+def test_no_request_outside_the_identity_drain_carries_the_token(hook) -> None:
     mod, sent = hook
-    _ack_while_draining(mod, SID)
+    _ack_while_draining(mod, AGENT)
     mod._post("http://127.0.0.1:1", "bearer", "/v1/tuples/in", {"subspace": "mailbox/i12"}, is_local=True)
     assert all("x-nexus-identity-token" not in h for _u, h in sent), "outside the identity drain, never sent"
     assert mod._DRAIN_ADDRESS == "", "the drained address is cleared after the pass"

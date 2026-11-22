@@ -33,6 +33,9 @@ from nexus.mcp.subscriptions import (
     persist,
 )
 
+#: The identity every set below is bound to: the one delivered mailbox is the identity's (RDR-253 Phase 2).
+IDENT = "i5"
+
 
 def _poison_store_factory():
     """A store_factory that fails the test if ever invoked -- the
@@ -79,16 +82,16 @@ _FIXTURE_TEMPLATES = [
 
 class TestSubscribeValidation:
     def test_queue_is_refused_naming_in_and_the_list_is_unchanged(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError, match="`in`"):
             s.subscribe(
                 "queue/builds", templates=_FIXTURE_TEMPLATES,
                 store_factory=_poison_store_factory(), state_dir=tmp_path,
             )
-        assert s.entries() == [{"subspace": s.session_mailbox}]
+        assert s.entries() == [{"subspace": s.identity_mailbox}]
 
     def test_lock_is_refused_naming_in(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError, match="`in`"):
             s.subscribe(
                 "lock/release-train", templates=_FIXTURE_TEMPLATES,
@@ -97,7 +100,7 @@ class TestSubscribeValidation:
         assert len(s.entries()) == 1
 
     def test_a_subspace_that_is_neither_board_nor_mailbox_is_refused(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
             s.subscribe(
                 "directory/some-name", templates=_FIXTURE_TEMPLATES,
@@ -105,12 +108,12 @@ class TestSubscribeValidation:
             )
 
     def test_empty_subspace_is_refused(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
             s.subscribe("", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
 
     def test_mailbox_with_no_name_is_refused(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
             s.subscribe("mailbox/", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
 
@@ -119,7 +122,7 @@ class TestSubscribeValidation:
         address charset must be refused loudly (`SchemaViolationError`),
         before the `directory/<name>` lease -- `_poison_store_factory` is
         the falsifier that no lease was ever started."""
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
             s.subscribe(
                 "mailbox/evil\nname", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
@@ -127,7 +130,7 @@ class TestSubscribeValidation:
         assert list(tmp_path.rglob("*")) == []
 
     def test_mailbox_name_with_a_slash_is_refused_before_any_write_or_lease(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
             s.subscribe(
                 "mailbox/evil/name", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
@@ -145,7 +148,7 @@ class TestSubscribeValidation:
 
     def test_a_second_leased_name_is_refused(self, tmp_path):
         fake = _FakeTuples()
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         s.subscribe(
             "mailbox/name-a", templates=[], store_factory=lambda: _fake_store_factory(fake),
             state_dir=tmp_path,
@@ -163,7 +166,7 @@ class TestSubscribeValidation:
 
     def test_re_subscribing_the_same_instance_mailbox_is_idempotent(self, tmp_path):
         fake = _FakeTuples()
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         factory = lambda: _fake_store_factory(fake)  # noqa: E731 — test-local, one use site
         s.subscribe("mailbox/name-a", templates=[], store_factory=factory, state_dir=tmp_path)
         try:
@@ -174,7 +177,7 @@ class TestSubscribeValidation:
             s.shutdown()
 
     def test_thirty_second_board_topic_accepted_thirty_third_refused(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         poison = _poison_store_factory()
         for i in range(MAX_BOARD_TOPICS):
             s.subscribe(f"board/topic-{i}", templates=[], store_factory=poison, state_dir=tmp_path)
@@ -184,7 +187,7 @@ class TestSubscribeValidation:
         assert len(s.entries()) == MAX_BOARD_TOPICS + 1  # unchanged by the refusal
 
     def test_re_subscribing_the_same_board_topic_is_idempotent(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         poison = _poison_store_factory()
         s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
         version_after_first = s.version
@@ -195,7 +198,7 @@ class TestSubscribeValidation:
 
 class TestObserver:
     def test_observer_sees_each_change_with_the_new_list(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         seen: list[tuple[int, set[str]]] = []
         s.add_listener(lambda subs: seen.append((subs.version, {e["subspace"] for e in subs.entries()})))
 
@@ -211,7 +214,7 @@ class TestObserver:
         assert "board/release-notes" not in seen[1][1]
 
     def test_removed_listener_is_not_called_again(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         calls = []
         cb = lambda subs: calls.append(subs.version)  # noqa: E731 — test-local
         s.add_listener(cb)
@@ -223,20 +226,20 @@ class TestObserver:
 
 class TestUnsubscribe:
     def test_removes_a_board_topic(self, tmp_path):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         poison = _poison_store_factory()
         s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
         assert len(s.entries()) == 2
         s.unsubscribe("board/release-notes")
-        assert s.entries() == [{"subspace": s.session_mailbox}]
+        assert s.entries() == [{"subspace": s.identity_mailbox}]
 
-    def test_session_mailbox_cannot_be_unsubscribed(self):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+    def test_identity_mailbox_cannot_be_unsubscribed(self):
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
-            s.unsubscribe(s.session_mailbox)
+            s.unsubscribe(s.identity_mailbox)
 
     def test_unsubscribing_something_never_subscribed_is_a_noop(self):
-        s = SubscriptionSet(session_id=str(uuid.uuid4()))
+        s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         s.unsubscribe("board/never-subscribed")  # must not raise
 
 
@@ -452,7 +455,7 @@ class TestPersistenceAcrossResumeAndClear:
         try:
             names = {e["subspace"] for e in fresh_a.entries()}
             assert "board/release-notes" in names
-            assert f"mailbox/{session_a}" in names
+            assert "mailbox/i5" not in names, "the identity is read from the token file at each load, never stored"
         finally:
             fresh_a.shutdown()
 
@@ -485,9 +488,8 @@ class TestPersistenceAcrossResumeAndClear:
         finally:
             resumed.shutdown()
 
-        # A DIFFERENT session id (the clear path) sees only its own
-        # mailbox: T1 itself is session-scoped, so it never finds session
-        # A's persisted row at all.
+        # A DIFFERENT session id (the clear path) sees an empty list: T1 itself
+        # is session-scoped, so it never finds session A's persisted row at all.
         session_b = str(uuid.uuid4())
         minted_b = mint_t1_session_token(session_b, context="rdr211 subscriptions test")
         monkeypatch.setenv("NX_T1_SESSION", minted_b["session_token"])
@@ -496,7 +498,7 @@ class TestPersistenceAcrossResumeAndClear:
 
         fresh_b = load(t1_b, session_b)
         try:
-            assert fresh_b.entries() == [{"subspace": f"mailbox/{session_b}"}]
+            assert fresh_b.entries() == []
         finally:
             fresh_b.shutdown()
 
@@ -518,7 +520,7 @@ class TestBoardStartPosition:
         before = datetime.now(UTC)
         s = SubscriptionSet(session_id="sess-a")
         s.subscribe("board/ci/nexus-develop", templates=[], store_factory=lambda: None, state_dir=None)
-        [_mailbox, board] = s.entries()
+        [board] = s.entries()
         assert board["subspace"] == "board/ci/nexus-develop"
         since = datetime.fromisoformat(board["since"])
         assert since.tzinfo is not None
@@ -529,7 +531,7 @@ class TestBoardStartPosition:
 
         s = SubscriptionSet(session_id="sess-a")
         s.subscribe("board/ci/nexus-develop", templates=[], store_factory=lambda: None, state_dir=None)
-        [_m, board] = s.entries()
+        [board] = s.entries()
         data = s.to_json()
         assert data["board"] == ["board/ci/nexus-develop"]  # the older list shape is kept
         assert data["board_since"] == {"board/ci/nexus-develop": board["since"]}
@@ -541,16 +543,16 @@ class TestBoardStartPosition:
         from nexus.mcp.subscriptions import SubscriptionSet
 
         restored = SubscriptionSet.from_json({"session_id": "sess-a", "board": ["board/x"]})
-        assert restored.entries() == [{"subspace": "mailbox/sess-a"}, {"subspace": "board/x"}]
+        assert restored.entries() == [{"subspace": "board/x"}]
 
     def test_resubscribing_keeps_the_original_start_position(self) -> None:
         from nexus.mcp.subscriptions import SubscriptionSet
 
         s = SubscriptionSet(session_id="sess-a")
         s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
-        first = s.entries()[1]["since"]
+        first = s.entries()[0]["since"]
         s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
-        assert s.entries()[1]["since"] == first
+        assert s.entries()[0]["since"] == first
 
 
 # ── nexus-u839f: the session's own name is re-armed without a model step ────
@@ -737,7 +739,7 @@ class TestArmSessionName:
             assert (subspace, keys, dims) == ("directory/nexus_3dc", {"name": "nexus_3dc"}, {"session_id": "sess-auto"})
             assert ttl == int(DIRECTORY_TTL_S)
             assert s._lease_thread is not None and s._lease_thread.is_alive()  # noqa: SLF001 — the existing renewal thread
-            assert s.entries() == [{"subspace": "mailbox/sess-auto"}]  # still never a delivered mailbox
+            assert s.entries() == []  # still never a delivered mailbox
         finally:
             s.shutdown()
 
@@ -1160,16 +1162,17 @@ class TestResolverLogsAMissOncePerRun:
         assert line["log_level"] == "debug" and line["session_id"] == "sess-unsafe"
 
 
-# --- RDR-253 Step 5: dual subscription ----------------------------------------------------------------
+# --- RDR-253 Phase 2: the identity mailbox is the one delivered mailbox --------------------------------
 
 
-def test_a_session_with_an_identity_is_delivered_both_mailboxes() -> None:
+def test_a_session_with_an_identity_is_delivered_its_identity_mailbox_alone() -> None:
     from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
 
     sid = "11111111-2222-4333-8444-555555555555"
     subs = SubscriptionSet(session_id=sid, identity="i12")
-    assert [e["subspace"] for e in subs.entries()][:2] == [f"mailbox/{sid}", "mailbox/i12"]
-    assert [e["subspace"] for e in SubscriptionSet(session_id=sid).entries()] == [f"mailbox/{sid}"]
+    assert [e["subspace"] for e in subs.entries()] == ["mailbox/i12"]
+    assert not hasattr(subs, "session_mailbox"), "a session id is not a mail address"
+    assert SubscriptionSet(session_id=sid).entries() == [], "no identity, no mailbox"
 
 
 def test_setting_the_identity_bumps_the_set_so_the_waiter_rereads_it() -> None:
@@ -1182,7 +1185,18 @@ def test_setting_the_identity_bumps_the_set_so_the_waiter_rereads_it() -> None:
     subs.set_identity("i12")  # no change, no bump
     assert seen == [1] and subs.identity_mailbox == "mailbox/i12"
     subs.set_identity(None)
-    assert seen == [1, 2] and [e["subspace"] for e in subs.entries()] == [subs.session_mailbox]
+    assert seen == [1, 2] and subs.entries() == []
+
+
+def test_the_identity_mailbox_cannot_be_unsubscribed_and_a_session_mailbox_is_nothing_to_remove() -> None:
+    from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+    sid = "11111111-2222-4333-8444-555555555555"
+    subs = SubscriptionSet(session_id=sid, identity="i12")
+    with pytest.raises(SchemaViolationError, match="identity mailbox cannot be unsubscribed"):
+        subs.unsubscribe("mailbox/i12")
+    subs.unsubscribe(f"mailbox/{sid}")  # not subscribed, so a plain no-op
+    assert [e["subspace"] for e in subs.entries()] == ["mailbox/i12"]
 
 
 def test_a_set_loaded_before_the_token_file_follows_the_lease_when_it_adopts_an_identity(
@@ -1198,7 +1212,7 @@ def test_a_set_loaded_before_the_token_file_follows_the_lease_when_it_adopts_an_
     subscriptions._follow_identity(subs)  # noqa: SLF001 -- what get_or_load does on first load
     assert subs.identity_mailbox is None
     identity_lease._notify_identity("i12")  # noqa: SLF001 -- what IdentityLease._adopt does on a change
-    assert [e["subspace"] for e in subs.entries()][1] == "mailbox/i12"
+    assert [e["subspace"] for e in subs.entries()] == ["mailbox/i12"]
     identity_lease._notify_identity("i13")  # noqa: SLF001 -- a cross-seat switch
     assert subs.identity_mailbox == "mailbox/i13"
     identity_lease._notify_identity("not-an-id")  # noqa: SLF001

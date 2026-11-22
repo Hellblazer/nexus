@@ -102,18 +102,15 @@ class TestChannelLaunchFlag:
 
 class TestSessionStartLine:
     def test_channel_less_line_arms_the_waiter_and_drops_the_channel_claim(self) -> None:
-        text = mailbox_arm_instruction("sess-abc", channel=False)
+        text = mailbox_arm_instruction(channel=False)
         assert "nx tuple wait" in text and "run_in_background" in text
         assert "again after each wake that says to" in text
         assert "delivered over the channel" not in text
         assert "--channels" not in text
-        assert "mailbox/sess-abc is already subscribed" in text
+        assert "nothing to subscribe" in text
 
     def test_channel_less_line_fits_the_channel_lines_budget(self) -> None:
-        sid = str(uuid.uuid4())
-        assert len(mailbox_arm_instruction(sid, channel=False).encode()) <= len(
-            mailbox_arm_instruction(sid).encode()
-        )
+        assert len(mailbox_arm_instruction(channel=False).encode()) <= len(mailbox_arm_instruction().encode())
 
     @pytest.mark.parametrize(("argv", "waiter"), [
         ("claude --resume x", True),
@@ -181,7 +178,7 @@ class TestOwnRow:
 class TestStopConditions:
     def _run(self, store, **kw):
         defaults = dict(
-            board_entries=lambda: [], alive=lambda: True, current_session=lambda: None,
+            identity="i7", board_entries=lambda: [], alive=lambda: True, current_binding=lambda: None,
             waiter_token=f"{time.time_ns()}-a", park_s=1, max_parks=3,
         )
         defaults.update(kw)
@@ -194,14 +191,37 @@ class TestStopConditions:
 
     def test_a_cleared_session_stops(self) -> None:
         store = _NeverStore()
-        assert self._run(store, current_session=lambda: "sess-b").reason == SESSION_CHANGED
+        assert self._run(store, current_binding=lambda: ("sess-b", "i7")).reason == SESSION_CHANGED
         assert store.calls == 0
+
+    def test_a_switch_to_another_identity_stops(self) -> None:
+        """The mailbox watched is the identity's: a seat switch under the same session id ends the wait."""
+        store = _NeverStore()
+        assert self._run(store, current_binding=lambda: ("sess-a", "i8")).reason == SESSION_CHANGED
+        assert store.calls == 0
+
+    def test_an_unchanged_or_unreadable_binding_does_not_stop(self) -> None:
+        store = _NeverStore()
+        assert self._run(store, current_binding=lambda: ("sess-a", "i7")).reason == PARKS_EXHAUSTED
+        assert self._run(store, current_binding=lambda: None).reason == PARKS_EXHAUSTED
+        assert store.calls == 6
+
+    def test_the_park_watches_the_identity_mailbox_alone(self) -> None:
+        seen: list[list[str]] = []
+
+        class Spy:
+            def wait(self, specs, timeout_s):
+                seen.append([sp.subspace for sp in specs])
+                return []
+
+        self._run(Spy(), max_parks=1, board_entries=lambda: [{"subspace": "board/ci"}, {"subspace": "mailbox/sess-a"}])
+        assert seen == [["mailbox/i7", "board/ci"]]
 
     def test_a_transient_store_error_is_slept_off(self) -> None:
         from nexus.db.t2.records import TupleRow, WaitResult  # noqa: PLC0415 — test-local
 
         row = TupleRow(
-            id="ab" * 32, subspace="mailbox/sess-a", template="mailbox/<address>", keys={"to": "sess-a"},
+            id="ab" * 32, subspace="mailbox/i7", template="mailbox/<address>", keys={"to": "i7"},
             dims={"from": "peer"}, body=None, claim_state=None, claimant=None, lease_until=None,
             attempts=0, consumed_at=None, consumed_by=None, expires_at=None, created_at=None,
             sender_session=None, sender_session_known=True,
@@ -214,7 +234,7 @@ class TestStopConditions:
                 Flaky.calls += 1
                 if Flaky.calls <= 2:
                     raise ConnectionError("gateway 503")
-                return [WaitResult(subspace="mailbox/sess-a", tuples=[row], subscriber="wait:sess-a")]
+                return [WaitResult(subspace="mailbox/i7", tuples=[row], subscriber="wait:sess-a")]
 
         naps: list[float] = []
         outcome = self._run(Flaky(), max_parks=5, sleep=naps.append)
@@ -290,25 +310,32 @@ def _board_entry(topic: str) -> dict[str, str]:
     return {"subspace": f"board/{topic}", "since": datetime.now(UTC).isoformat()}
 
 
-def _wait(session_id: str, *, entries=(), park_s: int = 1, max_parks: int = 2, token: str | None = None):
+def _identity() -> str:
+    """A fresh identity id: ``i`` and digits, so a scenario's mailbox is its own."""
+    return f"i{uuid.uuid4().int % 10**12}"
+
+
+def _wait(
+    session_id: str, identity: str, *, entries=(), park_s: int = 1, max_parks: int = 2, token: str | None = None,
+):
     from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — test-local
 
     store = HttpTupleStore()
     try:
         return run_wait(
-            store, session_id,
-            board_entries=lambda: list(entries), alive=lambda: True, current_session=lambda: None,
+            store, session_id, identity=identity,
+            board_entries=lambda: list(entries), alive=lambda: True, current_binding=lambda: None,
             waiter_token=token or _token(), park_s=park_s, max_parks=max_parks,
         )
     finally:
         store.close()
 
 
-def _mail(session_id: str, body: str) -> str:
+def _mail(identity: str, body: str, sender: str = "peer-session") -> str:
     from nexus.mcp.core import tuple_out  # noqa: PLC0415 — test-local, mirrors test_mcp_channel
 
     out = tuple_out(
-        f"mailbox/{session_id}", {"to": session_id}, {"from": "peer-session"}, body,
+        f"mailbox/{identity}", {"to": identity}, {"from": sender}, body,
         nonce=uuid.uuid4().hex,
     )
     return _tuple_id(out)
@@ -336,32 +363,40 @@ def _tuple_id(out: str) -> str:
 
 
 def _engine_mail_from_another_session_wakes_a_parked_waiter() -> None:
-    session_id = str(uuid.uuid4())
+    session_id, identity = str(uuid.uuid4()), _identity()
     result: dict = {}
 
     def run() -> None:
-        result["outcome"] = _wait(session_id, park_s=5, max_parks=6)
+        result["outcome"] = _wait(session_id, identity, park_s=5, max_parks=6)
 
     waiter = threading.Thread(target=run, daemon=True)
     started = time.monotonic()
     waiter.start()
     time.sleep(1.0)  # let the first park reach the engine
-    tid = _mail(session_id, "wake up")
+    tid = _mail(identity, "wake up")
     waiter.join(_HANG_S)
     assert not waiter.is_alive(), "the waiter never returned"
     outcome = result["outcome"]
     assert outcome.reason == DELIVERED
     assert len(outcome.lines) == 1
-    assert f"subspace mailbox/{session_id}, tuple {tid}" in outcome.lines[0]
+    assert f"subspace mailbox/{identity}, tuple {tid}" in outcome.lines[0]
     assert "wake up" not in outcome.lines[0], "a notice never carries the body"
     # Woken by the post inside one park, not by running out of parks.
     assert time.monotonic() - started < 5.0 + 5.0
 
 
+def _engine_mail_to_the_session_id_does_not_wake() -> None:
+    """The session mailbox is no address: a row left there never reaches a waiter."""
+    session_id, identity = str(uuid.uuid4()), _identity()
+    _mail(session_id, "to a retired address")
+    outcome = _wait(session_id, identity, max_parks=1)
+    assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
+
+
 def _engine_a_board_post_from_another_session_wakes_the_waiter() -> None:
     topic = f"t{uuid.uuid4().hex[:12]}"
     tid = _post(topic, "news", "peer-session")
-    outcome = _wait(str(uuid.uuid4()), entries=[_board_entry(topic)])
+    outcome = _wait(str(uuid.uuid4()), _identity(), entries=[_board_entry(topic)])
     assert outcome.reason == DELIVERED
     assert outcome.lines == [
         line for line in outcome.lines if f"subspace board/{topic}, tuple {tid}" in line
@@ -369,26 +404,26 @@ def _engine_a_board_post_from_another_session_wakes_the_waiter() -> None:
 
 
 def _engine_a_miss_does_not_wake() -> None:
-    outcome = _wait(str(uuid.uuid4()), entries=[_board_entry(f"t{uuid.uuid4().hex[:12]}")])
+    outcome = _wait(str(uuid.uuid4()), _identity(), entries=[_board_entry(f"t{uuid.uuid4().hex[:12]}")])
     assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
 
 
 def _engine_own_posts_do_not_wake() -> None:
-    own = os.environ["NX_T1_SESSION_ID"]
+    own, identity = os.environ["NX_T1_SESSION_ID"], _identity()
     topic = f"t{uuid.uuid4().hex[:12]}"
     entries = [_board_entry(topic)]
     _post(topic, "mine", own)
-    _mail(own, "note to self")
-    outcome = _wait(own, entries=entries)
+    _mail(identity, "note to self")
+    outcome = _wait(own, identity, entries=entries)
     assert outcome.reason == PARKS_EXHAUSTED and outcome.lines == []
     assert outcome.own_dropped == 2, "both own rows reached the waiter and were dropped"
 
 
 def _engine_a_row_is_delivered_once_so_rearming_does_not_repeat_it() -> None:
-    session_id = str(uuid.uuid4())
-    _mail(session_id, "once")
-    assert _wait(session_id).reason == DELIVERED
-    assert _wait(session_id, max_parks=1).reason == PARKS_EXHAUSTED
+    session_id, identity = str(uuid.uuid4()), _identity()
+    _mail(identity, "once")
+    assert _wait(session_id, identity).reason == DELIVERED
+    assert _wait(session_id, identity, max_parks=1).reason == PARKS_EXHAUSTED
 
 
 def _engine_mail_already_claimed_does_not_wake() -> None:
@@ -397,12 +432,14 @@ def _engine_mail_already_claimed_does_not_wake() -> None:
     that wait returns claimed rows)."""
     from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — test-local
 
-    session_id = str(uuid.uuid4())
-    _mail(session_id, "being drained")
+    # The engine fences a claim on an identity mailbox by token, which a test with no bound seat cannot present; the
+    # announce rule is the same on any mailbox, so this scenario watches an agent mailbox (claimable without one).
+    session_id, address = str(uuid.uuid4()), f"a{uuid.uuid4().hex[:16]}"
+    _mail(address, "being drained")
     store = HttpTupleStore()
     try:
-        assert store.in_(f"mailbox/{session_id}", {"to": session_id}, claimant="drain", lease_s=60)
-        assert _wait(session_id, max_parks=1).reason == PARKS_EXHAUSTED
+        assert store.in_(f"mailbox/{address}", {"to": address}, claimant="drain", lease_s=60)
+        assert _wait(session_id, address, max_parks=1).reason == PARKS_EXHAUSTED
     finally:
         store.close()
 
@@ -414,32 +451,81 @@ def _engine_a_board_backlog_is_not_replayed() -> None:
     _post(topic, "old news", "peer-session")
     later = {"subspace": f"board/{topic}",
              "since": (datetime.now(UTC) + timedelta(minutes=5)).isoformat()}
-    assert _wait(str(uuid.uuid4()), entries=[later], max_parks=1).reason == PARKS_EXHAUSTED
+    assert _wait(str(uuid.uuid4()), _identity(), entries=[later], max_parks=1).reason == PARKS_EXHAUSTED
 
 
 def _engine_a_newer_waiter_supersedes_an_older_one() -> None:
-    session_id = str(uuid.uuid4())
+    session_id, identity = str(uuid.uuid4()), _identity()
     older = _token()
     newer = _token()
-    assert _wait(session_id, max_parks=1, token=newer).reason == PARKS_EXHAUSTED
-    assert _wait(session_id, max_parks=1, token=older).reason == SUPERSEDED
+    assert _wait(session_id, identity, max_parks=1, token=newer).reason == PARKS_EXHAUSTED
+    assert _wait(session_id, identity, max_parks=1, token=older).reason == SUPERSEDED
 
 
 # ── The CLI verb ─────────────────────────────────────────────────────────────
 
 
-class TestWaitSessionResolution:
-    def test_explicit_then_marker_then_env(self, monkeypatch) -> None:
+class TestWaitTargetResolution:
+    """``nx tuple wait`` watches the bound identity's mailbox (RDR-253 Phase 2); ``--session`` names the session of
+    an identity, and is required when this process holds none."""
+
+    @staticmethod
+    def _token_file(monkeypatch, tmp_path, *, identity: str, session: str | None):
+        from nexus.identity.token_file import TokenFile  # noqa: PLC0415 — test-local
+
+        record = TokenFile(
+            identity=identity, generation=1, token=None, expires_at=None, session_id=session, pid=1,
+            started_at=1, proc_start=None,
+        )
+        path = tmp_path / "1.1.token"
+        monkeypatch.setattr("nexus.identity.token_header.token_file_path", lambda: path)
+        monkeypatch.setattr("nexus.identity.token_file.read_token_file", lambda p: record if p == path else None)
+
+    def test_the_flag_names_a_session_and_the_identity_is_the_one_a_token_file_binds_it_to(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.board.identity_for_session", lambda sid, cd=None: "i12" if sid == "s1" else "")
+        assert tuple_cmd._resolve_wait_target("s1", 99) == ("s1", "i12")
+        assert tuple_cmd._resolve_wait_target("unbound", 99) == ("unbound", "")
+
+    def test_the_default_is_the_identity_in_this_processs_token_file_and_its_current_session(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        self._token_file(monkeypatch, tmp_path, identity="i12", session="file-sid")
+        monkeypatch.setattr("nexus.session_marker._read_session_marker", lambda _d, _p: "marker-sid")
+        assert tuple_cmd._resolve_wait_target(None, 99) == ("file-sid", "i12")
+
+    def test_a_token_file_without_a_session_id_falls_to_the_marker_then_the_environment(
+        self, monkeypatch, tmp_path,
+    ) -> None:
+        self._token_file(monkeypatch, tmp_path, identity="i12", session=None)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "env-sid")
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
         monkeypatch.setattr("nexus.session_marker._read_session_marker", lambda _d, _p: "marker-sid")
-        assert tuple_cmd._resolve_wait_session("given", 99) == "given"
-        assert tuple_cmd._resolve_wait_session(None, 99) == "marker-sid"
+        assert tuple_cmd._resolve_wait_target(None, 99) == ("marker-sid", "i12")
         monkeypatch.setattr("nexus.session_marker._read_session_marker", lambda _d, _p: None)
-        assert tuple_cmd._resolve_wait_session(None, 99) == "env-sid"
+        assert tuple_cmd._resolve_wait_target(None, 99) == ("env-sid", "i12")
+
+    def test_with_no_identity_there_is_no_default(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.token_header.token_file_path", lambda: None)
+        assert tuple_cmd._resolve_wait_target(None, 99) is None
+
+    def test_the_cli_requires_the_flag_when_no_identity_is_bound(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.token_header.token_file_path", lambda: None)
+        result = CliRunner().invoke(tuple_group, ["wait", "--max-parks", "1"])
+        assert result.exit_code == 2, result.output
+        assert "no identity is bound to this session" in result.output and "--session" in result.output
+
+    def test_the_cli_refuses_a_session_bound_to_no_identity(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.board.identity_for_session", lambda sid, cd=None: "")
+        result = CliRunner().invoke(tuple_group, ["wait", "--session", "s1", "--max-parks", "1"])
+        assert result.exit_code == 2, result.output
+        assert "bound to no identity" in result.output
 
 
 class TestWaitCli:
+    @pytest.fixture(autouse=True)
+    def _bound(self, monkeypatch) -> None:
+        monkeypatch.setattr("nexus.identity.board.identity_for_session", lambda sid, cd=None: "i7")
+
     def test_an_old_engine_exits_five(self, monkeypatch) -> None:
         from nexus.tuple_wait import EngineTooOldError  # noqa: PLC0415 — test-local
 
@@ -515,8 +601,9 @@ class TestWaitCli:
 def _cli_delivers_then_says_to_rearm(monkeypatch) -> None:
     monkeypatch.setattr("nexus.channel_launch._claude_ancestor_argv", lambda: "claude --resume x")
     monkeypatch.setattr(tuple_cmd, "_board_entries_reader", lambda _sid: (lambda: []))
-    session_id = str(uuid.uuid4())
-    tid = _mail(session_id, "cli wake")
+    session_id, identity = str(uuid.uuid4()), _identity()
+    monkeypatch.setattr("nexus.identity.board.identity_for_session", lambda sid, cd=None: identity)
+    tid = _mail(identity, "cli wake")
     result = CliRunner().invoke(
         tuple_group, ["wait", "--session", session_id, "--timeout-s", "1", "--max-parks", "2"],
     )
@@ -527,6 +614,7 @@ def _cli_delivers_then_says_to_rearm(monkeypatch) -> None:
 
 def _cli_nothing_new_exits_zero_and_says_so(monkeypatch) -> None:
     monkeypatch.setattr(tuple_cmd, "_board_entries_reader", lambda _sid: (lambda: []))
+    monkeypatch.setattr("nexus.identity.board.identity_for_session", lambda sid, cd=None: _identity())
     result = CliRunner().invoke(
         tuple_group,
         ["wait", "--session", str(uuid.uuid4()), "--timeout-s", "1", "--max-parks", "1"],
@@ -538,6 +626,7 @@ def _cli_nothing_new_exits_zero_and_says_so(monkeypatch) -> None:
 
 _ENGINE_SCENARIOS = (
     _engine_mail_from_another_session_wakes_a_parked_waiter,
+    _engine_mail_to_the_session_id_does_not_wake,
     _engine_a_board_post_from_another_session_wakes_the_waiter,
     _engine_a_miss_does_not_wake,
     _engine_own_posts_do_not_wake,

@@ -5827,7 +5827,7 @@ nx tuple out SUBSPACE [--key KEY=VALUE ...] [--dim KEY=VALUE ...] [--body TEXT] 
 
 Write a tuple into `SUBSPACE`. Idempotent by construction: the tuple id is derived from the template's `id_from` fields only (never the insert time), so a retry lands on the same tuple. Prints the tuple id (lowercase hex).
 
-The tuple space is a coordination and metadata store, not a value store: `--body` is at most 4096 bytes UTF-8 (a template may set a lower cap; `directory/<name>`'s is 0), a `--key`/`--dim` value at most 256 bytes, `SUBSPACE` at most 256 bytes, `--nonce` at most 128 bytes — refused as `TooLarge` over the limit, never echoing the oversized value. Longer content goes in T2 (`nx memory put`) or T3 (`nx store put`), with the tuple carrying a reference.
+The tuple space is a coordination and metadata store, not a value store: `--body` is at most 4096 bytes UTF-8 (a template may set a lower cap), a `--key`/`--dim` value at most 256 bytes, `SUBSPACE` at most 256 bytes, `--nonce` at most 128 bytes — refused as `TooLarge` over the limit, never echoing the oversized value. Longer content goes in T2 (`nx memory put`) or T3 (`nx store put`), with the tuple carrying a reference.
 
 | Flag | Description |
 |------|-------------|
@@ -5990,35 +5990,23 @@ The census for one subspace: `total`, `available`, `claimed`, `lapsed`, `dead`, 
 |------|-------------|
 | `--json` | Output as JSON |
 
-### nx tuple directory
-
-```
-nx tuple directory NAME [--json]
-```
-
-Who holds NAME in the RDR-208 session directory (`directory/<name>`). Prints each live entry's `session_id`, `created_at` and `expires_at`, and flags NAME as ambiguous when more than one distinct session holds it (the case `mailbox_send` refuses). Uses the same resolver `mailbox_send` uses, so the two can never disagree about whether NAME is safely addressable.
-
-| Flag | Description |
-|------|-------------|
-| `--json` | Output as JSON: `{name, entries, holders, ambiguous, resolved_session_id}` |
-
 ### nx tuple wait
 
 ```
 nx tuple wait [--session SESSION_ID] [--timeout-s SECONDS] [--max-parks N] [--force] [--json]
 ```
 
-The channel-free push path (RDR-233) for a Claude Code session launched without `--channels`, such as the Claude Desktop Code tab, where the channel below never arrives. Run it as a background task (`run_in_background`): it parks on the session's own `mailbox/<session id>` and the board topics it subscribed with `tuple_subscribe`, and exits as soon as a row arrives that the session did not write itself. That exit re-invokes the idle session. It prints the channel's own notice for each row (subspace, tuple id, how to claim or read it, sender label), never a tuple body, then a line saying to run it again. The SessionStart line tells a session without the channel to do exactly this.
+The channel-free push path (RDR-233) for a Claude Code session launched without `--channels`, such as the Claude Desktop Code tab, where the channel below never arrives. Run it as a background task (`run_in_background`): it parks on the bound identity's `mailbox/<identity id>` (RDR-253 Phase 2: mail goes to the identity, never to a session id) and the board topics it subscribed with `tuple_subscribe`, and exits as soon as a row arrives that the session did not write itself. That exit re-invokes the idle session. It prints the channel's own notice for each row (subspace, tuple id, how to claim or read it, sender label), never a tuple body, then a line saying to run it again. The SessionStart line tells a session without the channel to do exactly this.
 
 Delivery position is the engine's: each row is announced to this waiter once (a per-subscriber stamp under `wait:<session id>`, apart from the channel's), and only while it is claimable, so mail the drain hook already consumed never wakes the session and re-arming never repeats a row. A board topic starts at its subscribe time. A newer `nx tuple wait` for the same session replaces an older one. Board subscriptions are re-read from T1 between parks; when T1 is unreachable it waits on the mailbox alone and says so on stderr.
 
-Exits 0 when rows arrived, when a newer waiter replaced it, when the session changed (`/clear`), when the `claude` process exited, or when `--max-parks` empty parks ran out; 4 when the `claude` command line carries a conexus channel flag (the channel already pushes; `--force` overrides); 5 when the engine does not honour the per-subscriber announce; 1 when the engine refuses the wait or stays unreachable for six parks in a row (a failed park is retried after 5, 10, 20, 40 and 60 s, since any exit wakes the session).
+Exits 0 when rows arrived, when a newer waiter replaced it, when the session's binding changed (`/clear`, or a switch to another identity), when the `claude` process exited, or when `--max-parks` empty parks ran out; 4 when the `claude` command line carries a conexus channel flag (the channel already pushes; `--force` overrides); 5 when the engine does not honour the per-subscriber announce; 1 when the engine refuses the wait or stays unreachable for six parks in a row (a failed park is retried after 5, 10, 20, 40 and 60 s, since any exit wakes the session).
 
 In a permission mode that prompts before Bash, allow it with `Bash(nx tuple wait:*)` in `permissions.allow` (`~/.claude/settings.json`), or every arm and re-arm is a prompt.
 
 | Flag | Description |
 |------|-------------|
-| `--session SESSION_ID` | Watch this session's mailbox (default: the session the SessionStart marker names for this `claude` process, else the environment) |
+| `--session SESSION_ID` | Watch the mailbox of the identity this session is bound to. Default: the identity this process is bound to (its token file). Required when the process holds no identity; a session bound to none has no mailbox and is refused |
 | `--timeout-s SECONDS` | Seconds per engine park (default 25); liveness and subscriptions are re-checked between parks |
 | `--max-parks N` | Give up after N empty parks (default: wait until something arrives) |
 | `--force` | Run even where the channel launch flag is present; for a flagged session whose channel never registers (plugin not on the channel allowlist, channels disabled by the organisation) |
@@ -6026,15 +6014,12 @@ In a permission mode that prompts before Bash, allow it with `Bash(nx tuple wait
 
 A session launched with the channel needs no CLI verb (RDR-211 nexus-rplay.14
 deleted the prior CLI ping-then-pull watcher outright): its own nexus MCP
-server pushes its own mailbox over the Claude Code channel automatically,
-from startup, with no subscribe call needed. The server also leases the
-session's NAME in the directory above by itself, from Claude Code's session
-registry, at start and after `/clear`, and re-reads it about once a minute
-(nexus-u839f), so a peer can reach this session by name with no model step.
-`tuple_subscribe("mailbox/<name>")` does the same lease explicitly: call it
-after a `/rename` you do not want to wait a minute for, or when peers cannot
-reach you by name. It is not a second delivered mailbox (RDR-208 Phase 3, bead
-nexus-galkv.20). See
+server pushes its identity's mailbox over the Claude Code channel
+automatically, once the session is bound, with no subscribe call needed.
+`nx tuple directory` and the `directory/<name>` name lease were removed in 8.6
+(RDR-253 Phase 2): a peer reaches a session by its identity id or its seat's
+name (`mailbox_send` resolves the name through `alias/<name>`), never by its
+`ListAgents` name or session id. See
 [Tuple space § Push delivery](tuple-space.md#push-delivery-rdr-211-the-channel).
 
 ## nx identity

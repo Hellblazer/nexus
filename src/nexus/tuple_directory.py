@@ -1,51 +1,29 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""RDR-208 Phase 2 Step 2 (bead nexus-galkv.10): session-directory name
-resolution -- resolving a `mailbox_send` `to` argument to a concrete
-`mailbox/<address>` + `address_kind`, and the default `from` sender
-identity.
+"""Resolving a ``mailbox_send`` ``to`` argument to a concrete ``mailbox/<address>`` + ``address_kind``, and the default
+``from`` sender.
 
-Kept separate from `nexus.mcp.core` (rather than inlined into the
-`mailbox_send` tool) so RDR-208 Phase 2 Step 4's `nx tuple directory`
-CLI verb (bead nexus-galkv.11) can reuse the SAME resolution logic
-instead of a second, independently-drifting copy.
+Mail goes to an identity, not to a session (RDR-253 Phase 2, bead nexus-hczdo.2.1). ``to`` resolves as:
 
-`to` resolution (RDR-208, Sam's decision 1 --
-T2 nexus_rdr/208-decision-gate-2026-09-14):
-  - a session-id shape (a UUID, the shape `nexus.session`'s
-    `str(uuid4())` session ids take) resolves directly,
-    `address_kind="session"`;
-  - an agent-id shape ("a" + 16 lowercase hex chars -- the ONLY shape the
-    Agent tool's own opaque `agent_id` can take, confirmed against this
-    session's own claimant id and the fixture id
-    `tests/hooks/test_subagent_stop_hook.py:288` uses) resolves directly,
-    `address_kind="agent"` -- NEVER through the directory;
-  - anything else is a NAME: every live row of `directory/<name>` is read
-    ONCE (`list_directory_entries`, paged with the `since` cursor until a
-    short page) and classified by the PURE `classify_directory_holders`
-    over that one list -- never a second read -- so a lapse or a re-nonce
-    between two reads can never make a caller's printed state and its
-    verdict describe different moments. Zero holders is a
-    :class:`DirectoryResolutionError` naming the name; one holder
-    resolves to that session (several live rows of the SAME session --
-    a re-armed watcher's new nonce beside its old row -- are one holder,
-    not a conflict); more than one distinct holder is a
-    :class:`DirectoryResolutionError` naming every holder, and nothing is
-    written by a caller that raises before ever writing.
+  - an identity id (``i`` and digits) goes straight to ``mailbox/<id>``, ``address_kind="identity"``;
+  - an agent id ("a" + 16 lowercase hex chars -- the ONLY shape the Agent tool's own opaque ``agent_id`` can take)
+    goes to ``mailbox/<id>``, ``address_kind="agent"``;
+  - a session id (a UUID) is REFUSED, naming the identity the session is bound to when the engine's session index
+    knows it: a session id is not an address, because it changes at every ``/clear``;
+  - anything else is a NAME, resolved through ``alias/<name>`` to a seat's identity. A retired alias inside its
+    7-day grace resolves with the engine's notice; past it the engine answers 410 and the send is refused with
+    "renamed to <new> on <date>". A name no seat holds is refused, and so is an ephemeral identity's display name
+    (an ephemeral is reached by id only).
 
-`from` resolution mirrors the bead's rejected-alternatives reasoning: the
-default is the tuple-watch session marker for this MCP server's claude
-ancestor (`nexus.session_marker._read_session_marker`, written synchronously
-by SessionStart on every source -- see that module's own docstrings),
-falling back to `NX_T1_SESSION_ID`, then `NX_SESSION_ID` (the one name a
-host with no Claude Code session can set in a self-configured MCP server
-entry; nexus-zl1jv). `NX_SESSION_ID` must be a UUID, checked like
-`from_address`. `resolve_active_session_id()` and a bare `NX_T1_SESSION_ID`
-read are deliberately NOT used here: the former returns the spawn-time
-`CLAUDE_CODE_SESSION_ID`, stale after an in-process `/clear`; the latter
-lags the T2 re-lease mint. The marker sits above both variables. A caller
-resolving none is refused rather than stamping a `from` that might already
-be stale.
+The ``directory/<name>`` lease (RDR-208) that used to resolve a name to a session is gone, and so is the session
+mailbox it pointed at; :func:`resolve_send` never reads either.
+
+``from`` resolution: the default is the tuple-watch session marker for this MCP server's claude ancestor
+(``nexus.session_marker._read_session_marker``, written synchronously by SessionStart on every source), falling back
+to ``NX_T1_SESSION_ID``, then ``NX_SESSION_ID`` (the one name a host with no Claude Code session can set in a
+self-configured MCP server entry; nexus-zl1jv). ``NX_SESSION_ID`` must be a UUID, checked like ``from_address``. The
+marker sits above both variables. A caller resolving none is refused rather than stamping a ``from`` that might
+already be stale.
 """
 from __future__ import annotations
 
@@ -57,8 +35,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nexus.db.limits import MAX_QUERY_RESULTS
-
 #: "a" + 16 lowercase hex chars -- the ONLY shape the Agent tool's own
 #: opaque `agent_id` can take (it has no `name` parameter to produce
 #: anything else). Confirmed against two REAL ids, not just the fixture:
@@ -67,9 +43,8 @@ from nexus.db.limits import MAX_QUERY_RESULTS
 #: `tests/hooks/test_subagent_stop_hook.py:288`'s fixture id
 #: ("a16b397f79df79c42").
 _AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
-#: The names a session can lease under `directory/<name>` (the lease side,
-#: ``nexus.mcp.subscriptions``, uses this same pattern). A `to` outside it can
-#: never resolve, so ``resolve_send_address`` refuses it before any read.
+#: The shape of a name ``mailbox_send`` resolves through ``alias/<name>``. A `to` outside it can never resolve,
+#: so ``resolve_send`` refuses it before any engine call.
 SAFE_NAME_RE: re.Pattern[str] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -113,181 +88,78 @@ class SendTarget:
 
 #: ``alias(name)`` is ``IdentityClient.alias``: GET /v1/identity/alias/<name>.
 AliasLookup = Callable[[str], Mapping[str, Any]]
-#: ``holder(session id)`` is the ``(identity id, kind)`` the session is bound to, or None when it is bound to none
-#: (an old client) or the answer cannot be had; ``kind`` is ``seat``, ``ephemeral`` or ``delegated``.
-HolderLookup = Callable[[str], "tuple[str, str] | None"]
-
-
-def list_directory_entries(name: str, tuples: Any) -> list[Any]:
-    """Every live row of `directory/<name>`, paged with the `since` cursor
-    until a short page. Shared ground truth for :func:`resolve_send_address`
-    and the `nx tuple directory NAME` CLI verb (bead nexus-galkv.11), so the
-    two can never disagree about what counts as a live holder -- one page
-    alone cannot rule out a second holder past the page boundary.
-
-    *tuples* is an `HttpTupleStore` (or anything exposing the same `rd`
-    signature) -- passed in rather than resolved here so the caller
-    controls which T2 client/transaction this read runs against.
-    """
-    subspace = f"directory/{name}"
-    since: tuple[str, str] | None = None
-    rows: list[Any] = []
-    while True:
-        page = tuples.rd(subspace, {"name": name}, n=MAX_QUERY_RESULTS, since=since)
-        rows.extend(page)
-        if len(page) < MAX_QUERY_RESULTS:
-            break
-        last = page[-1]
-        since = (last.created_at, last.id)
-    return rows
-
-
-def classify_directory_holders(name: str, entries: list[Any]) -> tuple[str, str]:
-    """Pure classifier over an ALREADY-FETCHED `directory/<name>` entries
-    list (gate audit round B item 1, code review
-    T2 nexus/rdr-208-phase2b-cre-2026-09-14): takes no store and does no I/O,
-    so both :func:`resolve_send_address` and the `nx tuple directory NAME`
-    CLI verb read `list_directory_entries` exactly ONCE and classify that
-    SAME list, instead of each reading independently and risking a lapse or
-    a re-nonce between two reads making the two callers describe different
-    moments.
-
-    Zero distinct `session_id` dims among *entries* is a
-    :class:`DirectoryResolutionError` naming *name*; more than one distinct
-    holder is a :class:`DirectoryResolutionError` naming every holder.
-    Several entries for the SAME session (a re-armed watcher's new nonce
-    beside its old row) are one holder, not a conflict.
-    """
-    holders: set[str] = set()
-    for row in entries:
-        session_id = (row.dims or {}).get("session_id")
-        if session_id:
-            holders.add(session_id)
-
-    if not holders:
-        raise DirectoryResolutionError(f"no live holder for name {name!r}")
-    if len(holders) > 1:
-        ids = ", ".join(sorted(holders))
-        raise DirectoryResolutionError(
-            f"name {name!r} is held by more than one session ({ids}); resend to one of these session ids directly"
-        )
-    return next(iter(holders)), "session"
-
-
-def resolve_send_address(to: str, tuples: Any) -> tuple[str, str]:
-    """Resolve `mailbox_send`'s `to` into `(address, address_kind)`.
-
-    A directory read that raises propagates unchanged: nothing about `to`
-    was resolved, so the caller never reaches a write. Reads
-    `list_directory_entries` exactly once and classifies that one list
-    through :func:`classify_directory_holders` -- the same classifier the
-    `nx tuple directory NAME` CLI verb calls over its own single read, so
-    the two can never disagree.
-    """
-    if not to:
-        raise DirectoryResolutionError("to must not be empty")
-    if looks_like_session_id(to):
-        return to, "session"
-    if looks_like_agent_id(to):
-        return to, "agent"
-    if not SAFE_NAME_RE.fullmatch(to):
-        # nexus-3ceda.7: the engine's answer for such a name was "no template registered for
-        # subspace 'directory/<to>'", which sent agents to tools that do not exist.
-        raise DirectoryResolutionError(
-            f"{to[:64]!r} cannot be a session name: names are letters, digits, '.', '_' and '-', "
-            "starting with a letter or digit. tuple_list(prefix=\"directory/\") lists the names "
-            "sessions hold; or send to the session id (a UUID)."
-        )
-
-    return classify_directory_holders(to, list_directory_entries(to, tuples))
+def _session_id_refusal(to: str, session_identity: AliasLookup | None) -> str:
+    """The refusal for a ``to`` that is a session id: names the identity the session is bound to when the session
+    index says, else says to send to the receiver's identity or seat name."""
+    bound = ""
+    if session_identity is not None:
+        try:
+            bound = str(session_identity(to).get("identity") or "")
+        except Exception:  # noqa: BLE001 -- a session the index cannot place (or an engine that cannot answer): the plain text
+            bound = ""
+    head = (
+        f"{to[:64]!r} is a session id, and a session id is not a mail address: it changes at every /clear. "
+        "Mail goes to the receiver's identity"
+    )
+    if looks_like_identity_id(bound):
+        return f"{head}; that session is bound to {bound}, so send to {bound} (mailbox/{bound})"
+    return f"{head}: send to its identity id (an \"i\" and digits) or its seat's name"
 
 
 def resolve_send(
-    to: str, tuples: Any, alias: AliasLookup | None = None, holder: HolderLookup | None = None,
+    to: str, alias: AliasLookup | None = None, session_identity: AliasLookup | None = None,
 ) -> SendTarget:
-    """RDR-253 Step 5: resolve ``to`` for a mixed fleet of old and new clients.
+    """Resolve ``to`` to the identity (or agent) mailbox it names; see the module docstring for the rules.
 
-    An identity id goes straight to ``mailbox/<id>``. A name resolves through ``alias/<name>`` first, to learn the
-    seat and any retired-alias notice, but a live ``identity_state`` does not say the receiver drains
-    ``mailbox/<id>``: a Steps 3/4 client and an unleased Desktop binding are live too and read only their session
-    mailbox. So the mail goes to the one live holder of ``directory/<name>``, in that holder's session mailbox
-    (every new client drains ``mailbox/<session>`` as well, by dual subscription), as :func:`resolve_send_address`
-    resolves it; two holders are refused. Only when nobody holds the name does the mail wait in ``mailbox/<id>``
-    for the seat to bind. A name that is no seat's alias falls to the directory, but never reaches an ephemeral
-    identity by its display name: the RDR reaches an ephemeral "by id only", and two launches with one display name
-    would collide. When *holder* names the one holder as an ephemeral, the send is refused with its id; a holder it
-    cannot place (an old client, an engine that does not answer) is reached as before. A retired alias inside its grace resolves with the engine's notice naming the new
-    name; past it the engine answers 410 and the send is refused with "renamed to <new> on <date>". An unknown name,
-    or an alias lookup that cannot be made (an engine without identity routes), is the directory's alone.
+    *alias* is :func:`identity_alias_lookup`'s shape (``IdentityClient.alias``), *session_identity*
+    :func:`identity_session_lookup`'s (``IdentityClient.session``, read only to name the identity in a session id's
+    refusal). A name with no *alias* lookup, an alias lookup that cannot be made, and a name no seat holds are each
+    refused: nothing falls back to a session or a directory. Nothing is written by a caller that raises.
     """
+    if not to:
+        raise DirectoryResolutionError("to must not be empty")
     if looks_like_identity_id(to):
         return SendTarget(to, "identity")
-    if alias is None or looks_like_session_id(to) or looks_like_agent_id(to) or not SAFE_NAME_RE.fullmatch(to or ""):
-        return SendTarget(*resolve_send_address(to, tuples))
+    if looks_like_agent_id(to):
+        return SendTarget(to, "agent")
+    if looks_like_session_id(to):
+        raise DirectoryResolutionError(_session_id_refusal(to, session_identity))
+    if not SAFE_NAME_RE.fullmatch(to):
+        # nexus-3ceda.7: the engine's answer for such a name was "no template registered for subspace", which sent
+        # agents to tools that do not exist.
+        raise DirectoryResolutionError(
+            f"{to[:64]!r} cannot be a seat's name: names are letters, digits, '.', '_' and '-', starting with a "
+            "letter or digit. Send to the identity id (an \"i\" and digits) or a seat's name."
+        )
     from nexus.identity.bind_client import IdentityApiError  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
 
+    if alias is None:
+        raise DirectoryResolutionError(
+            f"cannot resolve the name {to!r}: no identity alias lookup is available here; send to its identity id"
+        )
     try:
         found = alias(to)
     except IdentityApiError as exc:
         if exc.status == 410:
             raise DirectoryResolutionError(str(exc.message or f"{to!r} was renamed")) from None
-        if exc.status == 404:  # no seat has the name: the directory's, unless its holder is an ephemeral's display name
-            return _directory_target(to, tuples, holder)
-        return SendTarget(*resolve_send_address(to, tuples))
-    except Exception:  # noqa: BLE001 -- no identity routes (an older engine) or unreachable: the directory decides
-        return SendTarget(*resolve_send_address(to, tuples))
-    identity = str(found.get("identity") or "")
-    notice = str(found.get("notice") or "")
-    if not looks_like_identity_id(identity):
-        return SendTarget(*resolve_send_address(to, tuples))
-    entries = list_directory_entries(to, tuples)
-    if not any((row.dims or {}).get("session_id") for row in entries):
-        return SendTarget(identity, "identity", notice)  # nobody holds the name: the seat reads it when it binds
-    address, kind = classify_directory_holders(to, entries)  # two holders is still refused, naming both
-    return SendTarget(address, kind, notice)
-
-
-def _directory_target(to: str, tuples: Any, holder: HolderLookup | None) -> SendTarget:
-    """``directory/<to>``'s one holder, refused when it is an ephemeral identity reached by its display name."""
-    address, kind = resolve_send_address(to, tuples)
-    if kind == "session" and holder is not None:
-        try:
-            bound = holder(address)
-        except Exception:  # noqa: BLE001 -- a holder the engine cannot place is reached as before, never a failed send
-            bound = None
-        if bound is not None and bound[1] == "ephemeral":
+        if exc.status == 404:
             raise DirectoryResolutionError(
-                f"{to!r} is the display name of the ephemeral identity {bound[0]}, which is reached by id only "
-                f"(an ephemeral has no alias, and two launches can share a display name): send to {bound[0]}"
-            )
-    return SendTarget(address, kind)
-
-
-def identity_holder_lookup() -> HolderLookup:
-    """The identity a session is bound to, from the session index and the identity's record. The client is built,
-    used and closed inside each lookup (as :func:`identity_alias_lookup`'s is); a session in no index, an engine
-    without identity routes and a failed call all answer None."""
-
-    def lookup(session_id: str) -> tuple[str, str] | None:
-        from nexus.identity.bind_client import IdentityApiError, IdentityClient  # noqa: PLC0415 -- deferred: startup cost
-
-        client = IdentityClient.from_config()
-        try:
-            identity = str(client.session(session_id).get("identity") or "")
-            return (identity, str(client.show(identity).get("kind") or "")) if identity else None
-        except IdentityApiError:
-            return None
-        finally:
-            client.close()
-
-    return lookup
+                f"no seat is named {to!r}. A session is reached by its seat's name or its identity id; an "
+                "ephemeral identity by its id only (it has no alias, and two launches can share a display name)"
+            ) from None
+        raise DirectoryResolutionError(f"cannot resolve the name {to!r}: the alias lookup failed ({exc})") from None
+    except Exception as exc:  # noqa: BLE001 -- no identity routes (an older engine) or unreachable: refused, never guessed
+        raise DirectoryResolutionError(f"cannot resolve the name {to!r}: the alias lookup failed ({exc})") from None
+    identity = str(found.get("identity") or "")
+    if not looks_like_identity_id(identity):
+        raise DirectoryResolutionError(f"the alias lookup for {to!r} named no identity; send to its identity id")
+    return SendTarget(identity, "identity", str(found.get("notice") or ""))
 
 
 def identity_alias_lookup() -> AliasLookup:
     """``IdentityClient.alias`` for this host's engine. The client is built, used and closed inside each lookup, so
-    a send to a session or agent id (which :func:`resolve_send` never looks up) builds none, and none is left
-    open. A host with no endpoint or credential raises from the lookup, which :func:`resolve_send` reads as "no
-    identity routes here": the send then resolves through the directory alone, as an old client does."""
+    a send to an identity or agent id (which :func:`resolve_send` never looks up) builds none, and none is left
+    open. A host with no endpoint or credential raises from the lookup, which :func:`resolve_send` refuses."""
 
     def lookup(name: str) -> Mapping[str, Any]:
         from nexus.identity.bind_client import IdentityClient  # noqa: PLC0415 -- deferred: MCP/CLI startup cost
@@ -347,7 +219,7 @@ def identity_from_not_own_message(value: str, own: str) -> str:
 
 def validate_from_address(value: str) -> str:
     """A caller-supplied `from_address` override must itself be a session
-    id or an agent id -- a subagent sharing its parent's MCP server would
+    id, an identity or an agent id -- a subagent sharing its parent's MCP server would
     otherwise stamp the parent's session id, so it passes its OWN agent
     id here instead."""
     if looks_like_session_id(value) or looks_like_agent_id(value) or looks_like_identity_id(value):
@@ -489,8 +361,8 @@ def no_session_id_message() -> str:
 def invalid_env_session_id_message(value: str) -> str:
     """Refusal for an ``NX_SESSION_ID`` that is not a UUID.
 
-    A peer replies to the sender address, and ``resolve_send_address``
-    reads anything that is not a session id or agent id as a NAME, so a
+    A peer replies to the sender address, and ``resolve_send``
+    reads anything that is not an identity or agent id as a NAME, so a
     non-UUID sender is unreachable.
     """
     return (
@@ -532,8 +404,8 @@ def resolve_default_from(*, state_dir: Path | None = None, claude_pid: int | Non
 
     *state_dir*/*claude_pid* default to `nexus.config.nexus_config_dir()`
     and `nexus.session.find_immediate_claude_pid()` respectively -- the
-    parameters exist so a caller (tests; the eventual `nx tuple directory`
-    CLI verb) can pin both without monkeypatching process introspection.
+    parameters exist so a caller (tests) can pin both without monkeypatching
+    process introspection.
     """
     from nexus import config as _nx_config  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path
     from nexus.session import find_immediate_claude_pid  # noqa: PLC0415 — deferred: MCP/CLI startup cost, rare path

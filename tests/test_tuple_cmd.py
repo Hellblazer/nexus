@@ -400,141 +400,6 @@ class TestTupleTemplatesListStats:
         assert "next_cursor" not in rows[0]
 
 
-class TestTupleDirectoryCmd:
-    """RDR-208 Phase 2 Step 4 (bead nexus-galkv.11): ``nx tuple directory
-    NAME`` -- shows who holds a name, reading ``directory/NAME`` exactly
-    once and classifying that one list through the SAME pure classifier
-    ``mailbox_send`` (nexus-galkv.10) uses, so the verb and the tool cannot
-    disagree about whether a name is safely addressable (gate audit round B
-    item 1, code review T2 ``nexus/rdr-208-phase2b-cre-2026-09-14``)."""
-
-    def _arm(self, name: str, session_id: str) -> None:
-        res = _invoke([
-            "out", f"directory/{name}", "--key", f"name={name}",
-            "--dim", f"session_id={session_id}", "--nonce", _uniq("nonce"),
-        ])
-        assert res.exit_code == 0, res.output
-
-    def test_no_entry_reports_nothing_live(self, t2_service_env) -> None:
-        name = _uniq("name")
-        res = _invoke(["directory", name])
-        assert res.exit_code == 0, res.output
-        assert "No live directory entry" in res.output
-
-    def test_one_holder_prints_the_entry_and_resolves(self, t2_service_env) -> None:
-        name = _uniq("name")
-        sid = str(uuid.uuid4())
-        self._arm(name, sid)
-
-        res = _invoke(["directory", name])
-        assert res.exit_code == 0, res.output
-        assert sid in res.output
-        assert "resolves to session" in res.output
-
-    def test_two_holders_are_flagged(self, t2_service_env) -> None:
-        name = _uniq("name")
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        self._arm(name, sid1)
-        self._arm(name, sid2)
-
-        res = _invoke(["directory", name])
-        assert res.exit_code == 0, res.output
-        assert sid1 in res.output
-        assert sid2 in res.output
-        assert "held by" in res.output
-        assert "mailbox_send" in res.output
-
-    def test_json_shape_single_holder(self, t2_service_env) -> None:
-        name = _uniq("name")
-        sid = str(uuid.uuid4())
-        self._arm(name, sid)
-
-        res = _invoke(["directory", name, "--json"])
-        assert res.exit_code == 0, res.output
-        payload = _last_json_line(res.output)
-        assert payload["name"] == name
-        assert payload["holders"] == [sid]
-        assert payload["ambiguous"] is False
-        assert payload["resolved_session_id"] == sid
-        assert len(payload["entries"]) == 1
-        entry = payload["entries"][0]
-        assert entry["session_id"] == sid
-        assert "created_at" in entry
-        assert "expires_at" in entry
-
-    def test_json_shape_ambiguous(self, t2_service_env) -> None:
-        name = _uniq("name")
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        self._arm(name, sid1)
-        self._arm(name, sid2)
-
-        res = _invoke(["directory", name, "--json"])
-        assert res.exit_code == 0, res.output
-        payload = _last_json_line(res.output)
-        assert sorted(payload["holders"]) == sorted([sid1, sid2])
-        assert payload["ambiguous"] is True
-        assert payload["resolved_session_id"] is None
-        assert len(payload["entries"]) == 2
-
-    def test_reads_directory_exactly_once_and_stays_self_consistent(
-        self, monkeypatch,
-    ) -> None:
-        """The bug this guards against: the verb used to read
-        ``directory/NAME`` once for the printed list and a SECOND time
-        inside the resolver's own classification -- a lapse or a re-nonce
-        landing between those two reads would make the printed entries and
-        the ambiguous/resolved verdict describe two different moments. A
-        fake store whose second call would see a SECOND holder that never
-        existed at the first read proves both that the verb reads exactly
-        once (the assert on ``fake.calls``) and that its output is the
-        SAME single read throughout (one entry, not ambiguous, resolved to
-        the one real holder -- never a spurious two-holder verdict)."""
-        import types
-
-        import nexus.commands.tuple_cmd as tuple_cmd_mod
-
-        name = _uniq("name")
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-
-        def _row(session_id: str, row_id: str) -> object:
-            return types.SimpleNamespace(
-                id=row_id, subspace=f"directory/{name}", template="directory/<name>",
-                keys={"name": name}, dims={"session_id": session_id}, body=None,
-                claim_state=None, claimant=None, lease_until=None, attempts=0,
-                consumed_at=None, consumed_by=None,
-                expires_at="2026-01-01T00:05:00Z", created_at="2026-01-01T00:00:00Z",
-            )
-
-        class _FakeStore:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def rd(self, subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0):
-                self.calls += 1
-                # A second call (the bug this test catches) would see a
-                # world with a SECOND holder that just armed -- if the verb
-                # ever reads twice, this makes the divergence visible.
-                rows = [_row(sid1, "a")]
-                if self.calls > 1:
-                    rows.append(_row(sid2, "b"))
-                return rows
-
-        fake = _FakeStore()
-        monkeypatch.setattr(tuple_cmd_mod, "_store", lambda: fake)
-
-        res = _invoke(["directory", name, "--json"])
-        assert res.exit_code == 0, res.output
-        payload = _last_json_line(res.output)
-
-        assert fake.calls == 1, (
-            f"directory/{name} was read {fake.calls} times, expected exactly 1"
-        )
-        assert len(payload["entries"]) == 1
-        assert payload["holders"] == [sid1]
-        assert payload["ambiguous"] is False
-        assert payload["resolved_session_id"] == sid1
-
-
 class TestKvParsing:
     def test_out_rejects_malformed_key(self, t2_service_env) -> None:
         out = _invoke(["out", "mailbox/x", "--key", "no-equals-sign"])
@@ -804,6 +669,15 @@ def _out(store, addr, *, sender="sender-w", body="hi", kind="note"):
     )
 
 
+class TestTupleDirectoryIsRemoved:
+    """RDR-253 Phase 2 (Sam's ruling, 2026-11-22): ``nx tuple directory`` went with the ``directory/<name>`` lease."""
+
+    def test_the_verb_is_not_registered_and_asking_for_it_is_a_usage_error(self) -> None:
+        assert "directory" not in tuple_group.commands
+        result = _invoke(["directory", "some-name"])
+        assert result.exit_code == 2 and "No such command 'directory'" in result.output
+
+
 class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
     """nexus-1kvk3: the engine's ``rd`` orders by created_at ascending, never
     excludes claimed or dead-lettered rows, and caps a page at the hook's own
@@ -812,15 +686,26 @@ class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
     ``rd``-only watcher (the sibling starvation, nexus-qw386), this hook
     claims via ``/v1/tuples/in``, which is not windowed by any probe page."""
 
-    HOOK_ARGV = [sys.executable, "-m", "nexus._hook_runtime.entry", "mailbox-drain"]
+    #: The drain loop itself, run on one address. RDR-253 Phase 2: the hook drains ``mailbox/<identity>``, which the engine
+    #: fences by token and by a live identity, so a test with no bound seat drives the same ``_drain_address`` on an
+    #: agent mailbox, which the engine leaves open: the claim loop being tested is the same on any address.
+    _DRIVER = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "from nexus.hooks import mailbox_drain as m\n"
+        "cfg, addr = Path(sys.argv[1]), sys.argv[2]\n"
+        "base_url, token, is_local = m._resolve_endpoint(cfg)\n"
+        "out = m._Out()\n"
+        "m._drain_address(base_url, token, addr, is_local=is_local, config_dir=cfg, deadline=time.monotonic() + 60, out=out)\n"
+        "print(out.result().stdout or '')\n"
+    )
 
     def _run_hook(self, addr: str, tmp_path) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env["NEXUS_CONFIG_DIR"] = str(tmp_path / "hookcfg")
         env["XDG_STATE_HOME"] = str(tmp_path / "hookstate")
         return subprocess.run(
-            self.HOOK_ARGV,
-            input=json.dumps({"session_id": addr, "hook_event_name": "UserPromptSubmit"}),
+            [sys.executable, "-c", self._DRIVER, str(tmp_path / "hookcfg"), addr],
             capture_output=True, text=True, env=env, timeout=300,
         )
 
@@ -828,7 +713,7 @@ class TestMailboxDrainDoesNotStarveBehindALargeDeadBacklog:
         self, t2_service_env, tmp_path,
     ) -> None:
         store, _tmp = _watch_env(tmp_path)
-        addr = _uniq("addr")
+        addr = f"a{uuid.uuid4().hex[:16]}"
         sub = f"mailbox/{addr}"
         # PROBE_N is 20 in the drain verb; one more than that dead-lettered
         # ahead of the live row reproduces the starvation the bead names.

@@ -118,7 +118,7 @@ def _real_guidance_emitter_output() -> str:
     ):
         return render_session_start(
             _REAL_SESSION_ID,
-            mailbox_arm_text=f"\n\n{mailbox_arm_instruction(_REAL_SESSION_ID)}",
+            mailbox_arm_text=f"\n\n{mailbox_arm_instruction()}",
         )
 
 

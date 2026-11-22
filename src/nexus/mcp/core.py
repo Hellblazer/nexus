@@ -130,9 +130,8 @@ from nexus.tuple_directory import (
     resolve_default_from,
     resolve_env_session_id,
     identity_alias_lookup,
-    identity_holder_lookup,
+    identity_session_lookup,
     resolve_send,
-    resolve_send_address,
 )
 # RDR-211 Phase 1 Step 3 (bead nexus-rplay.11): the session's subscription
 # set (tuple_subscribe/tuple_unsubscribe/tuple_subscriptions below) and the
@@ -9661,10 +9660,10 @@ def tuple_stats(
 def mailbox_send(
     to: Annotated[str, Field(
         description=(
-            "Destination: a session id, an agent id (\"a\" + 16 hex "
-            "chars), an identity id (\"i\" + digits), or a name. A name is "
-            "resolved at send time: a seat's name through its alias first, "
-            "then the live session directory."
+            "Destination: an identity id (\"i\" + digits), an agent id "
+            "(\"a\" + 16 hex chars), or a seat's name, resolved at send "
+            "time through its alias. A session id is refused: mail goes "
+            "to the receiver's identity."
         ),
     )],
     body: Annotated[str | None, Field(
@@ -9684,25 +9683,25 @@ def mailbox_send(
         ),
     )] = None,
 ) -> dict:
-    """Send a message to a session, an agent, or a NAME, resolved at send time.
+    """Send a message to an identity, an agent, or a seat's NAME, resolved at send time.
 
     Use this instead of a raw `tuple_out` to `mailbox/<address>` whenever
-    `to` might be a name rather than an address already known to be a
-    session or agent id -- `tuple_out` writes wherever it is told, with
-    no resolution, while this tool resolves a name against the live
-    session directory first (and still works as a `tuple_out` shorthand
-    when `to` is already a session or agent id). Returns
+    `to` might be a name rather than an address already known to be an
+    identity or agent id -- `tuple_out` writes wherever it is told, with
+    no resolution, while this tool resolves a name through `alias/<name>`
+    first. Returns
     `{"tuple_id": "...", "to": "...", "address_kind": "...", "from": "...", "notice": "..."}`; `notice` is
     present only when `to` was a renamed seat's old name, still delivering in its 7-day grace (RDR-253).
 
-    A name resolves through `alias/<name>` first (a seat's name), then
-    `directory/<name>`'s live rows: one live holder gets the mail in its
-    session mailbox; two or more distinct holding sessions are refused,
-    naming every holder -- resend to one of those session ids directly
-    instead; with no holder and a seat behind the name, the mail waits in
-    the seat's identity mailbox until it binds; with no holder and no
-    seat, the send is refused, naming the name. A retired alias past its
-    7-day grace is refused with "renamed to <new> on <date>". `from_address`, when given, must be an
+    An identity id (`i` and digits) goes straight to `mailbox/<id>`; an agent
+    id to `mailbox/<agent id>`. A name resolves through `alias/<name>` to the
+    seat's identity, whose mailbox holds the mail until the seat binds. A session id is
+    refused, naming the identity the session is bound to when the engine
+    knows it: a session id changes at every `/clear`, so mail is addressed to
+    the identity, which does not (RDR-253 Phase 2). A name no seat holds is
+    refused; an ephemeral identity is reached by its id, never its display
+    name. A retired alias past its 7-day grace is refused with "renamed to
+    <new> on <date>". `from_address`, when given, must be an
     agent id, this server's own session id or its own identity (any other session id or identity is
     refused; `from` is a claim, JDR-002). With no `from_address`, the sender
     defaults to this MCP server's own current session, and is refused
@@ -9722,10 +9721,9 @@ def mailbox_send(
             else resolve_default_from()
         )
 
-        alias, holder = identity_alias_lookup(), identity_holder_lookup()
+        target = resolve_send(to, identity_alias_lookup(), identity_session_lookup())
 
         def _send(db: Any) -> tuple[str, str, str, str]:
-            target = resolve_send(to, db.tuples, alias, holder)
             address, address_kind = target.address, target.address_kind
             dims: dict[str, str] = {"from": from_id, "address_kind": address_kind}
             if kind:
@@ -9779,8 +9777,8 @@ def tuple_subscribe(
 ) -> str:
     """Add `subspace` to this session's MCP server's subscription list (RDR-211, RDR-213).
 
-    The server waits on its board topics and its own mailbox
-    (`mailbox/<session id>`) and pushes what arrives through the Claude Code
+    The server waits on its board topics and its identity's mailbox
+    (`mailbox/<identity id>`, once the session is bound to an identity) and pushes what arrives through the Claude Code
     channel. The notification carries a REFERENCE only (subspace, tuple id),
     never the body or a claim; the session claims the row itself with
     `tuple_in`, which returns the body with the claim (no `tuple_rd` first).
@@ -9832,7 +9830,7 @@ def tuple_unsubscribe(
 ) -> str:
     """Remove `subspace` from this session's MCP server's subscription list (RDR-211).
 
-    The session's own mailbox can never be unsubscribed -- it is the
+    The identity's mailbox can never be unsubscribed -- it is the
     floor's address. Unsubscribing `mailbox/<name>` for the name this
     session leases stops its `directory/<name>` lease. Unsubscribing a
     board topic, or a subspace not currently subscribed or leased, is
@@ -9862,7 +9860,8 @@ def tuple_unsubscribe(
 def tuple_subscriptions() -> list[dict]:
     """List this session's MCP server's subscription set (RDR-211).
 
-    Always the session's own mailbox first, then subscribed board topics.
+    The identity's mailbox first (none while the session is bound to no
+    identity), then subscribed board topics.
     A leased name never appears here: it is not a delivered mailbox, only
     a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
     Phase 3). There is no cursor: the engine keeps

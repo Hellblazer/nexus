@@ -594,7 +594,10 @@ class _FakeSender:
 def _subs(session_id: str):
     from nexus.mcp.subscriptions import SubscriptionSet
 
-    return SubscriptionSet(session_id=session_id)
+    """A set bound to an identity whose mailbox address these tests spell as the session id (RDR-253 Phase 2: the one
+    delivered mailbox is the identity's). The waiter treats a mailbox address as opaque, so the tests key rows on the
+    id they already mint; ``tests/test_subscriptions_identity.py`` pins the ``i<digits>`` shape."""
+    return SubscriptionSet(session_id=session_id, identity=session_id)
 
 
 def _inject_extra_mailbox(subs, addr: str) -> None:
@@ -654,6 +657,34 @@ def _dead_letter_n_rows(addr: str, to_key: str, claimant: str, count: int, prefi
             claim = tuple_in(addr, {"to": to_key}, claimant=claimant, lease_s=300)
             assert claim is not None and "error" not in claim
             tuple_nack(claim["claim_id"], claimant)
+
+
+class TestAnUnboundSessionHasNothingToWaitOn:
+    """RDR-253 Phase 2: the one delivered mailbox is the identity's, so a session bound to none and subscribed to no
+    board topic has an empty subscription list. The waiter idles (the engine refuses an empty wait) and starts again
+    when the set changes."""
+
+    @pytest.mark.asyncio
+    async def test_an_empty_list_makes_no_wait_call_and_a_bind_ends_the_idle(self) -> None:
+        from nexus.mcp.subscriptions import SubscriptionSet  # noqa: PLC0415
+
+        session_id = str(uuid.uuid4())
+        fake = _FakeTupleStore()
+        subs = SubscriptionSet(session_id=session_id)
+        assert subs.entries() == []
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), subs, sender=_FakeSender(), wait_timeout_s=30.0,
+        )
+        waiter._loop = asyncio.get_running_loop()  # noqa: SLF001 -- what run() sets; the listener hands work to it
+        idle = asyncio.create_task(waiter.tick())
+        await asyncio.sleep(0.05)
+        assert not idle.done(), "the tick idles rather than calling the engine"
+        subs.set_identity("i12")  # the identity lease bound: bumps the set from another thread in production
+        await asyncio.wait_for(idle, timeout=5.0)  # ended by the change, not by its 30 s timeout
+        assert fake.wait_calls == [], "an empty list never reached the engine"
+        fake.seed("mailbox/i12", "t1", "hello")
+        await waiter.tick()
+        assert [s.subspace for s in fake.wait_calls[0][0]] == ["mailbox/i12"]
 
 
 class TestChannelWaiterFakeStore:
@@ -876,7 +907,7 @@ class TestChannelWaiterFakeStore:
         subscription enters the SAME `wait()` call."""
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
-        addr_a = subs.session_mailbox
+        addr_a = subs.identity_mailbox
         addr_b = f"mailbox/{uuid.uuid4().hex}"
         _inject_extra_mailbox(subs, addr_b)
         subs.subscribe(
@@ -1134,7 +1165,7 @@ class TestChannelWaiterRealEngine:
         from nexus.mcp_infra import t2_ctx
 
         session_id = str(uuid.uuid4())
-        subs = SubscriptionSet(session_id=session_id)
+        subs = SubscriptionSet(session_id=session_id, identity=session_id)
         name = f"inst-{uuid.uuid4().hex[:8]}"
         try:
             subs.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
@@ -1143,7 +1174,7 @@ class TestChannelWaiterRealEngine:
                 "should never be referenced", nonce=uuid.uuid4().hex,
             )
             tuple_out(
-                subs.session_mailbox, {"to": session_id}, {"from": "sender-own"},
+                subs.identity_mailbox, {"to": session_id}, {"from": "sender-own"},
                 "own mailbox", nonce=uuid.uuid4().hex,
             )
 
@@ -1152,7 +1183,7 @@ class TestChannelWaiterRealEngine:
             asyncio.run(waiter.tick())
 
             subspaces_referenced = {m.get("subspace") for _c, m in sender.calls}
-            assert subspaces_referenced == {subs.session_mailbox}
+            assert subspaces_referenced == {subs.identity_mailbox}
         finally:
             subs.shutdown()
 
@@ -1409,7 +1440,7 @@ class TestChannelWaiterRealEngine:
 
         session_id = str(uuid.uuid4())
         subs = _subs(session_id)
-        addr_a = subs.session_mailbox
+        addr_a = subs.identity_mailbox
         addr_b = f"mailbox/{uuid.uuid4().hex}"
         _inject_extra_mailbox(subs, addr_b)
         # nexus-ggmg7 (F3 step 2c), carried here so it costs no extra tenant. Both rows are
@@ -2556,7 +2587,7 @@ async def sender(content, meta):
     return True
 
 async def main():
-    w = channel.ChannelWaiter(session_id, t2_ctx, SubscriptionSet(session_id=session_id), sender=sender)
+    w = channel.ChannelWaiter(session_id, t2_ctx, SubscriptionSet(session_id=session_id, identity=session_id), sender=sender)
     asyncio.create_task(w.run())
     while not sent:
         await asyncio.sleep(0.05)
@@ -2777,7 +2808,7 @@ class TestBoardStartAtNowAndFold:
             # The hypothetical bug: since on a ROW-LEVEL (no subscriber)
             # announce spec -- never something real code sends.
             return [WaitSpec(
-                subspace=self.subs.session_mailbox, n=1, since=("2026-01-01T00:00:00+00:00", ""),
+                subspace=self.subs.identity_mailbox, n=1, since=("2026-01-01T00:00:00+00:00", ""),
                 announce=Announce(interval_s=0, max=5),
             )]
 

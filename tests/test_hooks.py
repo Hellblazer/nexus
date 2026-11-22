@@ -819,7 +819,7 @@ class TestGuidanceByteBudgetIntegration:
                 # caller supplies the REAL text directly here, never "".
                 # A budget that measures an emitter with its largest block
                 # silently absent is not a budget.
-                mailbox_arm_text=f"\n\n{mailbox_arm_instruction(self._REAL_SESSION_ID)}",
+                mailbox_arm_text=f"\n\n{mailbox_arm_instruction()}",
             )
         n = len(output.encode("utf-8"))
         assert n < self._TOTAL_BUDGET_BYTES, (
@@ -867,7 +867,7 @@ class TestGuidanceByteBudgetIntegration:
         ):
             output = render_session_start(
                 self._REAL_SESSION_ID,
-                mailbox_arm_text=f"\n\n{mailbox_arm_instruction(self._REAL_SESSION_ID)}",
+                mailbox_arm_text=f"\n\n{mailbox_arm_instruction()}",
             )
         assert "NOTE" in output
         assert "ask the user to run /mcp" in output
@@ -1009,8 +1009,7 @@ class TestMailboxArmIntegration:
         network probe is mocked): nexus-6konb.9's defect fix removed the
         machine-wide registry guess entirely, so a populated
         <config>/tuple-watch/addresses file must not change anything --
-        the instruction always tells the model to supply the instance name
-        itself, from its own ListAgents knowledge."""
+        the line names no instance at all (mail goes to the identity)."""
         from unittest.mock import patch as _patch
 
         registry = tmp_path / "tuple-watch" / "addresses"
@@ -1023,7 +1022,7 @@ class TestMailboxArmIntegration:
         ):
             output = session_start(claude_session_id="s-6konb9-instance-known")
         assert "nexus-registered-instance" not in output
-        assert 'tuple_subscribe("mailbox/<name>")' in output
+        assert "nothing to subscribe" in output and "tuple_subscribe" not in output
 
     def test_names_the_development_channel_launch_flag(
         self, tmp_path: Path,

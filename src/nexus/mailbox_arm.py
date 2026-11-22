@@ -1,37 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (c) 2026 Hal Hildebrand. All rights reserved.
-"""SessionStart mailbox-subscribe instruction (RDR-211 nexus-rplay.14,
-superseding the arm instruction bead nexus-6konb.9, MM-3.1 originally
-wrote this module for).
+"""SessionStart mailbox line (RDR-211 nexus-rplay.14; RDR-253 Phase 2, nexus-hczdo.2.1).
 
 RDR-211: the nexus MCP server is the session's own subscriber and delivery
 endpoint, waking the session through the Claude Code channel
-(``notifications/claude/channel``) for its own mailbox and any subscribed
-board topics (see :mod:`nexus.mcp.subscriptions`). Subscribing the
-session's own name (RDR-208 Phase 3, bead nexus-galkv.20: this arms a
-``directory/<name>`` lease, never a second delivered mailbox) is a request
-the model can decline or forget -- neither it nor the channel is ever the
-floor (``nexus-73vnw``'s :mod:`nexus.hooks.mailbox_drain` is) -- so this
-module's only job is to put a correct, literal, copy-pasteable subscribe
-instruction in front of the model at the start of every session, and to say
-nothing when that instruction could not possibly succeed.
+(``notifications/claude/channel``) for its mailbox and any subscribed board
+topics (see :mod:`nexus.mcp.subscriptions`). Neither it nor the channel is
+ever the floor (``nexus-73vnw``'s :mod:`nexus.hooks.mailbox_drain` is).
 
-Sam's decision of 2026-09-16 (T2 nexus_rdr/211-decision-channel-delivery-
-2026-09-16): the prior Monitor-driven CLI watcher loop, the SessionStart
-injection that armed it, and its 30-minute re-arm rule are deleted outright,
-not kept as a fallback -- two mechanisms for one delivery was the seam that
-decision closed. What this module now renders in their place is one line
-asking for the ``tuple_subscribe`` MCP call, plus the setup sentence Sam's
-2026-09-17 decision (T2 nexus_rdr/211-decision-dev-channel-dialog-2026-09-17)
-requires: the channel is a Claude Code research preview, reached only with a
-launch flag and a per-launch confirmation dialog. The ``UserPromptSubmit``
-drain hook (:mod:`nexus.hooks.mailbox_drain`) remains the
-unconditional floor regardless of whether the channel was ever reached.
+RDR-253 Phase 2 retired the instruction this module used to put in front of
+the model (``tuple_subscribe("mailbox/<name>")``, which armed a
+``directory/<name>`` lease so a peer could address the session by its
+``ListAgents`` name). Mail goes to the session's identity now, which needs no
+subscribe call, so the line says so and keeps its other job: the delivery
+setup. Sam's decision of 2026-09-17 (T2 nexus_rdr/211-decision-dev-channel-
+dialog-2026-09-17): the channel is a Claude Code research preview, reached only
+with a launch flag and a per-launch confirmation dialog, and a session
+launched without it is pointed at ``nx tuple wait`` (RDR-233).
 
 Emitted from ``nx hook session-start`` (:func:`nexus.hooks.session_start`),
-not the plugin's ``session_start_hook.py``: the MCP tool named,
-``tuple_subscribe``, is client-side, so the instruction that names it must
-version with the same wheel that ships the tool.
+not the plugin's ``session_start_hook.py``: the ``nx tuple wait`` it names is
+client-side, so the instruction that names it must version with the same
+wheel that ships it.
 
 Never emitted when it cannot succeed
     :func:`tuple_surface_available` probes the tuple-space engine once
@@ -40,28 +30,8 @@ Never emitted when it cannot succeed
     :data:`PROBE_CACHE_TTL_S` under ``<config>/tuple-watch/`` -- the same
     directory :mod:`nexus.session_marker` and the drain hook already
     use for their own state files. A below-floor or unreachable engine
-    would otherwise make every session run a subscribe instruction that
-    404s or hangs forever, which is worse than saying nothing.
-
-The instance-name mailbox
-    The ``ListAgents`` row name (e.g. ``nexus-19``) reaches no environment
-    variable anywhere, so this module reads NOTHING to guess it. It is not
-    only the model's knowledge any more (nexus-u839f): Claude Code's
-    ``<config>/sessions/<pid>.json`` carries it, and the MCP server leases
-    the name from there itself at start and after a ``/clear``, re-reading it
-    about once a minute (``nexus.mcp.subscriptions.resolve_session_name``).
-    The instruction below is the fallback for a host without that registry,
-    and a no-op when the names agree (the name stays registry-derived, so a
-    ``/rename`` is still followed). From the model's side
-    the name is known from the ``ListAgents`` tool's "This session is
-    <name>" line, and the rendered instruction says so: pass it to
-    ``tuple_subscribe("mailbox/<name>")``, taken from a fresh
-    ``ListAgents`` call, never from memory. Subscribing it arms a
-    ``directory/<name>`` lease so a peer's ``mailbox_send`` can resolve
-    this session by name; it does not itself register anything the drain
-    hook reads (RDR-208 Phase 3, bead nexus-galkv.20 deleted that
-    per-session registry -- :mod:`nexus.hooks.mailbox_drain`'s own
-    docstring has the retirement note).
+    would otherwise make every session run a setup line that points at a
+    surface that 404s or hangs, which is worse than saying nothing.
 """
 from __future__ import annotations
 
@@ -76,7 +46,7 @@ _log = structlog.get_logger(__name__)
 #: Marker substring every rendered instruction carries, so a caller can
 #: grep for presence/absence without matching the full text (skills,
 #: tests, MM-3.3's future skill rule).
-ARM_MARKER = "MAILBOX SUBSCRIBE"
+ARM_MARKER = "MAILBOX DELIVERY"
 
 #: Shared with :mod:`nexus.session_marker` and the drain hook: one
 #: subdirectory under the config dir for every mailbox-delivery state file.
@@ -169,37 +139,25 @@ def tuple_surface_available(
     return available
 
 
-def mailbox_arm_instruction(session_id: str, *, channel: bool = True) -> str:
-    """The literal subscribe-instruction text for *session_id*. Pure text
-    -- no I/O, no probing -- so tests and the mailbox skill can both call
-    it directly.
+def mailbox_arm_instruction(*, channel: bool = True) -> str:
+    """The literal mailbox line. Pure text -- no I/O, no probing -- so tests and
+    the mailbox skill can both call it directly.
 
-    Carries no instance-name literal (nexus-6konb.9 defect fix, still true
-    under RDR-211): this hook process cannot read the name (it is in
-    Claude Code's session registry, which the MCP server reads, not this
-    module), so from the model's side it comes from ``ListAgents``'s
-    "This session is <name>" line. The
-    rendered call therefore always names the placeholder ``<name>``, taken
-    from a FRESH ``ListAgents`` call rather than memory (nexus-6konb.20):
-    ListAgents renames a session on resume (measured nexus-58 to nexus-03,
-    2026-09-14), and reusing an old name from memory would subscribe the
-    wrong name. The session's own ``mailbox/<session id>`` is
-    already subscribed from MCP-server startup and needs no call here
-    (:mod:`nexus.mcp.subscriptions`).
+    Carries no session id and no instance name: mail goes to the session's
+    identity (RDR-253 Phase 2), which a peer addresses by its id (``i`` and
+    digits) or its seat's name, so there is nothing for the model to subscribe
+    and nothing in this line that goes stale on a resume or a ``/rename``.
 
-    RDR-211 (Sam's decision of 2026-09-16): this replaces the deleted
-    Monitor-arm instruction outright, not as a fallback alongside it --
-    the channel is the push path for a session launched with it (
-    RDR-233 adds ``nx tuple wait`` for one launched without), and the ``UserPromptSubmit``
-    drain hook is the unconditional floor beneath it regardless of whether
-    a session ever reaches the channel. Names the development-channel
-    launch flag and its per-launch confirmation dialog as setup (Sam's
-    decision of 2026-09-17, T2 nexus_rdr/211-decision-dev-channel-dialog-
-    2026-09-17): the channel is a Claude Code research preview, not yet
-    remembered between launches. nexus-tk2cz (2026-09-17) adds the
-    dialog-free plugin form and the alias that makes either form stick,
-    in the same one-line byte budget (see ``TestGuidanceByteBudgetIntegration``
-    in ``tests/test_hooks.py``).
+    RDR-211 (Sam's decision of 2026-09-16): the channel is the push path for a
+    session launched with it (RDR-233 adds ``nx tuple wait`` for one launched
+    without), and the ``UserPromptSubmit`` drain hook is the unconditional
+    floor beneath it regardless of whether a session ever reaches the channel.
+    Names the development-channel launch flag and its per-launch confirmation
+    dialog as setup (Sam's decision of 2026-09-17): the channel is a Claude
+    Code research preview, not yet remembered between launches. nexus-tk2cz
+    (2026-09-17) adds the dialog-free plugin form and the alias that makes
+    either form stick, in the same one-line byte budget (see
+    ``TestGuidanceByteBudgetIntegration`` in ``tests/test_hooks.py``).
 
     *channel* ``False`` (RDR-233, bead nexus-7hzb2) is a session whose
     ``claude`` process carries no channel launch flag (the Claude Desktop Code
@@ -210,11 +168,8 @@ def mailbox_arm_instruction(session_id: str, *, channel: bool = True) -> str:
     form, so the same budget covers both.
     """
     lead = (
-        f"{ARM_MARKER}: call "
-        f'mcp__plugin_conexus_nexus__tuple_subscribe("mailbox/<name>") once, '
-        "with <name> from a fresh ListAgents call now, never from memory (it "
-        "changes on resume), so peers can reach this session by name via "
-        f"mailbox_send; mailbox/{session_id} is already subscribed"
+        f"{ARM_MARKER}: mail to this session goes to its identity's mailbox, addressed by identity id "
+        "(\"i\" and digits) or seat name, never by session id or ListAgents name; nothing to subscribe"
     )
     if not channel:
         return lead + (
@@ -224,7 +179,7 @@ def mailbox_arm_instruction(session_id: str, *, channel: bool = True) -> str:
             "posts; mail also arrives at your next prompt via the drain hook."
         )
     return lead + (
-        " and delivered over the channel regardless. "
+        "; it is delivered over the channel regardless. "
         "The channel is a Claude Code research preview: launch with "
         "--channels plugin:conexus@nexus-plugins (dialog-free once "
         "allowlisted) or --dangerously-load-development-channels "
@@ -236,9 +191,9 @@ def mailbox_arm_instruction(session_id: str, *, channel: bool = True) -> str:
 
 
 def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
-    """The full arm instruction for *session_id*, or ``""`` when one
-    should not be emitted (no usable session id, or the tuple surface is
-    not answering).
+    """The full mailbox line, or ``""`` when one should not be emitted (no usable
+    session id, or the tuple surface is not answering). *session_id* only gates
+    emission: the line itself names no session.
     """
     if not session_id or session_id == "unknown":
         return ""
@@ -254,4 +209,4 @@ def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
 
     # RDR-233: only a definite "no flag" switches to the channel-free wording;
     # "cannot tell" (None) keeps the channel wording this line always had.
-    return mailbox_arm_instruction(session_id, channel=channel_launch_state() is not False)
+    return mailbox_arm_instruction(channel=channel_launch_state() is not False)

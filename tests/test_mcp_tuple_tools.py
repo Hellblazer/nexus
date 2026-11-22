@@ -595,31 +595,30 @@ class TestMailboxSend:
     session marker on this box; the marker-vs-env tests below override
     that with an explicit marker file instead."""
 
-    @staticmethod
-    def _settle_lapsed(name: str) -> None:
-        """The entry's TTL runs on the engine's clock: wait until the engine stops returning it."""
-        settle(lambda: tuple_rd(f"directory/{name}", {"name": name}), what="the 1 s directory entry")
-
-    def _directory_entry(self, name: str, session_id: str, *, ttl_seconds: int | None = None) -> None:
-        tuple_out(
-            f"directory/{name}", {"name": name}, {"session_id": session_id},
-            nonce=_uniq("nonce"), ttl_seconds=ttl_seconds,
-        )
-
-    def test_session_id_delivers_directly_with_address_kind_session(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
+    def test_a_session_id_is_refused_and_writes_nothing(self, t2_service_env, monkeypatch) -> None:
+        """RDR-253 Phase 2: a session id is not a mail address. The refusal names the identity to send to (the engine
+        has no index entry for this made-up session, so it says to use the identity id or seat name)."""
         monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
         dest = str(uuid.uuid4())
         result = mailbox_send(dest, body="hello", kind="ping", correlation_id="corr-1")
+        assert "tuple_id" not in result
+        assert "is a session id" in result["error"] and "identity" in result["error"]
+        assert tuple_stats(f"mailbox/{dest}")["total"] == 0
+
+    def test_an_identity_id_delivers_directly_with_address_kind_identity(
+        self, t2_service_env, monkeypatch,
+    ) -> None:
+        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
+        dest = f"i{uuid.uuid4().int % 10**12}"
+        result = mailbox_send(dest, body="hello", kind="ping", correlation_id="corr-1")
         assert isinstance(result, dict) and "error" not in result
         assert result["to"] == dest
-        assert result["address_kind"] == "session"
+        assert result["address_kind"] == "identity"
 
         rows = tuple_rd(f"mailbox/{dest}", {"to": dest})
         assert len(rows) == 1
         assert rows[0]["body"] == "hello"
-        assert rows[0]["dims"]["address_kind"] == "session"
+        assert rows[0]["dims"]["address_kind"] == "identity"
         assert rows[0]["dims"]["kind"] == "ping"
         assert rows[0]["dims"]["correlation_id"] == "corr-1"
         assert rows[0]["dims"]["from"] == result["from"]
@@ -669,22 +668,6 @@ class TestMailboxSend:
         assert "tuple_id" not in str(out)
         assert "body" in str(out)
 
-    def test_name_with_one_live_holder_delivers_to_that_session(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        name = _uniq("name")
-        sid = str(uuid.uuid4())
-        self._directory_entry(name, sid)
-
-        result = mailbox_send(name, body="hey")
-        assert "error" not in result
-        assert result["to"] == sid
-        assert result["address_kind"] == "session"
-
-        rows = tuple_rd(f"mailbox/{sid}", {"to": sid})
-        assert len(rows) == 1 and rows[0]["body"] == "hey"
-
     def test_unresolvable_name_errors_naming_the_name_and_writes_nothing(
         self, t2_service_env, monkeypatch,
     ) -> None:
@@ -699,74 +682,6 @@ class TestMailboxSend:
         # as the mailbox address would show up here as a live row.
         stats = tuple_stats(f"mailbox/{name}")
         assert stats["total"] == 0
-
-    def test_two_live_holders_errors_listing_both_and_writes_nothing(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        name = _uniq("name")
-        sid1, sid2 = str(uuid.uuid4()), str(uuid.uuid4())
-        self._directory_entry(name, sid1)
-        self._directory_entry(name, sid2)
-
-        result = mailbox_send(name, body="x")
-        assert "error" in result
-        assert sid1 in result["error"]
-        assert sid2 in result["error"]
-
-        assert tuple_rd(f"mailbox/{sid1}", {"to": sid1}) == []
-        assert tuple_rd(f"mailbox/{sid2}", {"to": sid2}) == []
-
-    def test_one_session_two_live_rows_is_one_holder_not_a_conflict(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        name = _uniq("name")
-        sid = str(uuid.uuid4())
-        self._directory_entry(name, sid)  # the original watcher row
-        self._directory_entry(name, sid)  # a re-armed watcher's new nonce
-
-        result = mailbox_send(name, body="x")
-        assert "error" not in result
-        assert result["to"] == sid
-
-    def test_lapsed_entry_is_refused(self, t2_service_env, monkeypatch) -> None:
-        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        name = _uniq("name")
-        sid = str(uuid.uuid4())
-        self._directory_entry(name, sid, ttl_seconds=1)
-        self._settle_lapsed(name)
-
-        result = mailbox_send(name, body="x")
-        assert "error" in result
-        assert name in result["error"]
-
-    def test_significant_a_lapse_refused_then_session_send_then_rearm_resolves_again(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
-        """Gate Significant (a): a directory entry lapses while its session
-        stays live -- the name refuses, mail BY SESSION ID still arrives,
-        and a fresh entry with a new nonce (what a re-armed watcher writes)
-        makes the name resolve again."""
-        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        name = _uniq("name")
-        sid = str(uuid.uuid4())
-        self._directory_entry(name, sid, ttl_seconds=1)
-        self._settle_lapsed(name)
-
-        refused = mailbox_send(name, body="x")
-        assert "error" in refused and name in refused["error"]
-
-        by_session = mailbox_send(sid, body="still-reachable")
-        assert "error" not in by_session
-        assert by_session["to"] == sid
-        rows = tuple_rd(f"mailbox/{sid}", {"to": sid}, n=5)
-        assert any(r["body"] == "still-reachable" for r in rows)
-
-        self._directory_entry(name, sid)  # re-armed watcher, fresh nonce
-        resolved_again = mailbox_send(name, body="resolved-again")
-        assert "error" not in resolved_again
-        assert resolved_again["to"] == sid
 
     def test_from_defaults_to_the_moved_session_marker_not_a_stale_env_var(
         self, t2_service_env, tmp_path, monkeypatch,
@@ -787,7 +702,7 @@ class TestMailboxSend:
         write_session_marker(tmp_path, 4242, moved_id)
         monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))  # stale -- must not be used
 
-        dest = str(uuid.uuid4())
+        dest = "a" + uuid.uuid4().hex[:16]
         result = mailbox_send(dest, body="from-check")
         assert "error" not in result
         assert result["from"] == moved_id
@@ -805,7 +720,7 @@ class TestMailboxSend:
         env_id = str(uuid.uuid4())
         monkeypatch.setenv("NX_T1_SESSION_ID", env_id)
 
-        dest = str(uuid.uuid4())
+        dest = "a" + uuid.uuid4().hex[:16]
         result = mailbox_send(dest, body="x")
         assert "error" not in result
         assert result["from"] == env_id
@@ -820,26 +735,11 @@ class TestMailboxSend:
         monkeypatch.delenv("NX_T1_SESSION_ID", raising=False)
         monkeypatch.delenv("NX_SESSION_ID", raising=False)
 
-        dest = str(uuid.uuid4())
+        dest = "a" + uuid.uuid4().hex[:16]
         result = mailbox_send(dest, body="x")
         assert "error" in result
 
         assert tuple_rd(f"mailbox/{dest}", {"to": dest}) == []
-
-    def test_a_failed_directory_read_errors_and_writes_nothing(
-        self, t2_service_env, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-
-        def _boom(self, *a, **kw):
-            raise RuntimeError("directory read exploded")
-
-        monkeypatch.setattr(HttpTupleStore, "rd", _boom)
-        name = _uniq("name")
-
-        result = mailbox_send(name, body="x")
-        assert "error" in result
-        assert "directory read exploded" in result["error"]
 
     def test_agent_id_from_address_stamps_from_with_that_agent_id(
         self, t2_service_env, monkeypatch,
@@ -850,7 +750,7 @@ class TestMailboxSend:
         would still produce SOME `from`, not a refusal -- the assertion on
         `result["from"]` is what catches the ignored override."""
         monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        dest = str(uuid.uuid4())
+        dest = "a" + uuid.uuid4().hex[:16]
         agent_id = "a" + uuid.uuid4().hex[:16]
 
         result = mailbox_send(dest, body="x", from_address=agent_id)
@@ -877,7 +777,7 @@ class TestMailboxSend:
         marker_id = str(uuid.uuid4())
         write_session_marker(tmp_path, 4242, marker_id)
 
-        dest = str(uuid.uuid4())
+        dest = "a" + uuid.uuid4().hex[:16]
         result = mailbox_send(dest, body="x", from_address=str(uuid.uuid4()))
         assert "error" in result
         assert "not this server's own" in result["error"]
@@ -892,7 +792,7 @@ class TestMailboxSend:
         self, t2_service_env, monkeypatch,
     ) -> None:
         monkeypatch.setenv("NX_T1_SESSION_ID", str(uuid.uuid4()))
-        dest = str(uuid.uuid4())
+        dest = "a" + uuid.uuid4().hex[:16]
 
         result = mailbox_send(dest, body="x", from_address="not-a-valid-shape")
         assert "error" in result
@@ -924,8 +824,7 @@ class TestTupleSubscriptions:
         assert "Error" in msg
         assert "`in`" in msg
         entries = tuple_subscriptions()
-        assert len(entries) == 1  # only the session mailbox
-        assert "error" not in entries[0]
+        assert entries == []  # no identity is bound here, so no mailbox; the refusal added nothing
 
     def test_lock_is_refused_naming_in(self, t2_service_env) -> None:
         msg = tuple_subscribe("lock/release-train")
@@ -937,12 +836,12 @@ class TestTupleSubscriptions:
             msg = tuple_subscribe(f"board/topic-{i}")
             assert "Error" not in msg
         entries = tuple_subscriptions()
-        assert len(entries) == 33  # the session mailbox + 32 topics
+        assert len(entries) == 32  # the 32 topics (no identity is bound here, so no mailbox)
 
         msg = tuple_subscribe("board/topic-33rd")
         assert "Error" in msg
         entries = tuple_subscriptions()
-        assert len(entries) == 33  # unchanged by the refusal
+        assert len(entries) == 32  # unchanged by the refusal
 
     def test_subscribe_and_unsubscribe_a_board_topic(self, t2_service_env) -> None:
         msg = tuple_subscribe("board/release-notes")
@@ -1006,9 +905,11 @@ class TestTupleSubscriptions:
 
     def test_subscriptions_lists_entries_without_a_cursor(self, t2_service_env) -> None:
         entries = tuple_subscriptions()
-        assert isinstance(entries, list)
-        assert len(entries) == 1
-        assert entries[0] == {"subspace": entries[0]["subspace"]}, "no cursor field (nexus-q82tk)"
+        assert entries == [], "no identity is bound here, so no mailbox is listed"
+        tuple_subscribe("board/no-cursor")
+        entries = tuple_subscriptions()
+        assert isinstance(entries, list) and len(entries) == 1
+        assert set(entries[0]) == {"subspace", "since"}, "no cursor field (nexus-q82tk)"
 
     def test_a_change_fires_the_observer(self, t2_service_env) -> None:
         import os

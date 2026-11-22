@@ -46,26 +46,24 @@ def test_token_identity_reads_the_leased_token_file_and_rejects_what_is_not_an_i
         raise OSError("unreadable token file")
 
     monkeypatch.setattr("nexus.identity.token_header.current", boom)
-    assert subscriptions._token_identity() is None  # noqa: SLF001 -- no identity is the session mailbox alone
+    assert subscriptions._token_identity() is None  # noqa: SLF001 -- no identity delivers no mailbox
 
 
 def test_load_gives_a_new_set_and_a_restored_one_the_identity_of_the_token_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both load paths dual-subscribe: a fresh set (no persisted entry) and one restored from T1."""
+    """Both load paths deliver the identity mailbox alone: a fresh set (no persisted entry) and one restored from T1."""
     from nexus.mcp import subscriptions  # noqa: PLC0415
 
     sid = "11111111-2222-4333-8444-555555555555"
     _bound_to(monkeypatch, "i12")
     fresh = subscriptions.load(_T1WithSet([]), sid, store_factory=lambda: None)
-    assert [e["subspace"] for e in fresh.entries()] == [f"mailbox/{sid}", "mailbox/i12"]
+    assert [e["subspace"] for e in fresh.entries()] == ["mailbox/i12"]
 
     stored = {"id": "e1", "tags": subscriptions._TAG, "content": json.dumps(SubscriptionSet(session_id=sid).to_json())}  # noqa: SLF001
     restored = subscriptions.load(_T1WithSet([stored]), sid, store_factory=lambda: None)
-    assert [e["subspace"] for e in restored.entries()] == [f"mailbox/{sid}", "mailbox/i12"]
+    assert [e["subspace"] for e in restored.entries()] == ["mailbox/i12"]
 
     _bound_to(monkeypatch, None)
-    assert [e["subspace"] for e in subscriptions.load(_T1WithSet([stored]), sid, store_factory=lambda: None).entries()] == [
-        f"mailbox/{sid}"
-    ]
+    assert subscriptions.load(_T1WithSet([stored]), sid, store_factory=lambda: None).entries() == []
 
 
 def test_reset_cache_removes_the_identity_listener_the_set_registered(monkeypatch: pytest.MonkeyPatch) -> None:

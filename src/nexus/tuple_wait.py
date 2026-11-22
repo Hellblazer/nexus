@@ -6,7 +6,7 @@ A Claude Code session launched without ``--channels`` (the Claude Desktop Code
 tab) never hears the MCP channel waiter. It can still be woken: a Bash command
 run with ``run_in_background`` re-invokes an idle session when it exits. This
 module is the loop that command runs. It parks the engine ``wait`` over the
-session's own ``mailbox/<session id>`` and its subscribed board topics, and
+session's identity mailbox (``mailbox/<identity id>``) and its subscribed board topics, and
 returns as soon as a row that is not the session's own arrives, rendering the
 same fixed-template text the channel would have sent (never a tuple body).
 
@@ -28,7 +28,6 @@ never ends the wait.
 """
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -85,20 +84,17 @@ class WaitOutcome:
     own_dropped: int = 0
 
 
-_IDENTITY_MAILBOX = re.compile(r"mailbox/i[0-9]+")
-
-
 def subscriber_for(session_id: str) -> str:
     return f"{SUBSCRIBER_PREFIX}{session_id}"
 
 
 def build_specs(
-    session_id: str, board_entries: list[dict[str, Any]], *, waiter_token: str,
+    session_id: str, board_entries: list[dict[str, Any]], *, identity: str, waiter_token: str,
 ) -> list[WaitSpec]:
-    """The session mailbox first, then the identity mailbox when *board_entries* carries one (RDR-253 Step 5, Phase 1
-    dual subscription), then each board topic with its watermark. *board_entries* is
-    :meth:`SubscriptionSet.entries`'s shape; any other mailbox entry in it is ignored (the session's own mailbox is
-    always first)."""
+    """The identity mailbox first (RDR-253 Phase 2: mail goes to ``mailbox/<identity>``, never to a session), then each
+    board topic with its watermark. *session_id* names the subscriber (the announce stamps are the session's own).
+    *board_entries* is :meth:`SubscriptionSet.entries`'s shape; a mailbox entry in it is ignored, as *identity* is
+    the one mailbox this wait watches."""
     from nexus.mcp.channel import DEFAULT_BOARD_START_SKEW_S, _parse_created_at  # noqa: PLC0415 — deferred: loads the MCP package
 
     subscriber = subscriber_for(session_id)
@@ -108,12 +104,9 @@ def build_specs(
             interval_s=_INTERVAL_S, max=_MAX_ANNOUNCES, subscriber=subscriber, waiter=waiter_token,
         )
 
-    specs = [WaitSpec(subspace=f"mailbox/{session_id}", n=WAIT_ROWS, announce=announce())]
+    specs = [WaitSpec(subspace=f"mailbox/{identity}", n=WAIT_ROWS, announce=announce())]
     for entry in board_entries:
         subspace = entry.get("subspace") or ""
-        if _IDENTITY_MAILBOX.fullmatch(subspace) and all(s.subspace != subspace for s in specs):
-            specs.append(WaitSpec(subspace=subspace, n=WAIT_ROWS, announce=announce()))
-            continue
         if not subspace.startswith("board/"):
             continue
         since: tuple[str, str] | None = None
@@ -189,9 +182,10 @@ def run_wait(
     store: Any,
     session_id: str,
     *,
+    identity: str,
     board_entries: Callable[[], list[dict[str, Any]]],
     alive: Callable[[], bool],
-    current_session: Callable[[], str | None],
+    current_binding: Callable[[], tuple[str, str] | None],
     waiter_token: str,
     park_s: int = DEFAULT_PARK_S,
     max_parks: int | None = None,
@@ -199,8 +193,10 @@ def run_wait(
 ) -> WaitOutcome:
     """Park until a row that is not this session's own arrives, then return it.
 
-    Between parks: stop when *alive* says the ``claude`` process is gone, or
-    when *current_session* names a different session (a ``/clear``). The board
+    Watches ``mailbox/<identity>`` (RDR-253 Phase 2) and the board topics. Between parks: stop when *alive* says the
+    ``claude`` process is gone, or when *current_binding* names a different ``(session id, identity)`` than this
+    wait was started for (a ``/clear``, or a switch to another seat); ``None`` means "cannot tell" and never
+    stops the wait. The board
     topics are re-read through *board_entries* every park, so a topic subscribed
     while parked joins at the next one. *max_parks* bounds the loop for tests;
     ``None`` waits until one of the stop conditions above.
@@ -224,11 +220,11 @@ def run_wait(
         if not alive():
             outcome.reason = CLAUDE_GONE
             return outcome
-        current = current_session()
-        if current and current != session_id:
+        current = current_binding()
+        if current is not None and current != (session_id, identity):
             outcome.reason = SESSION_CHANGED
             return outcome
-        specs = build_specs(session_id, board_entries(), waiter_token=waiter_token)
+        specs = build_specs(session_id, board_entries(), identity=identity, waiter_token=waiter_token)
         parks += 1
         try:
             results = store.wait(specs, park_s)
