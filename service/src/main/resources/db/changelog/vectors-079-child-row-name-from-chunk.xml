@@ -233,17 +233,17 @@ REVOKE EXECUTE ON FUNCTION nexus.catalog_document_chunks_name_from_chunk() FROM 
 REVOKE EXECUTE ON FUNCTION nexus.chunk_orphaned_at_name_from_chunk() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION nexus.topic_assignments_name_from_chunk() FROM PUBLIC;
 
-CREATE TRIGGER trg_catalog_document_chunks_name_from_chunk
+CREATE OR REPLACE TRIGGER trg_catalog_document_chunks_name_from_chunk
     BEFORE INSERT OR UPDATE ON nexus.catalog_document_chunks
     FOR EACH ROW
     EXECUTE FUNCTION nexus.catalog_document_chunks_name_from_chunk();
 
-CREATE TRIGGER trg_chunk_orphaned_at_name_from_chunk
+CREATE OR REPLACE TRIGGER trg_chunk_orphaned_at_name_from_chunk
     BEFORE INSERT OR UPDATE ON nexus.chunk_orphaned_at
     FOR EACH ROW
     EXECUTE FUNCTION nexus.chunk_orphaned_at_name_from_chunk();
 
-CREATE TRIGGER trg_topic_assignments_name_from_chunk
+CREATE OR REPLACE TRIGGER trg_topic_assignments_name_from_chunk
     BEFORE INSERT OR UPDATE ON nexus.topic_assignments
     FOR EACH ROW
     EXECUTE FUNCTION nexus.topic_assignments_name_from_chunk();
