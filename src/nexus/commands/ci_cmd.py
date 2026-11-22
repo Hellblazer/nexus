@@ -520,21 +520,40 @@ def ci_check_hold_cmd(base: str | None, remote: str, branch: str | None, tips: t
         click.echo(f"{ci_push_gate.RED_FIX_UNNEEDED} {reason} (not needed: {verdict.detail})")
 
 
+_SKIP_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,23}")
+
+
+def _parse_skips(values: tuple[str, ...]) -> dict[str, str]:
+    """``--skip CHECK=REASON`` values as a name to reason map; a name that is not a short lower-case token, or a reason that is
+    blank, is a usage error (an override with no reason is not on the record)."""
+    from nexus import ci_push_record  # noqa: PLC0415 -- deferred: CLI startup cost
+
+    parsed: dict[str, str] = {}
+    for value in values:
+        name, sep, reason = value.partition("=")
+        if not sep or not _SKIP_NAME.fullmatch(name) or not ci_push_record.clean_reason(reason):
+            raise click.BadParameter(f"{value[:60]!r}: expected CHECK=REASON, a lower-case check name and a non-blank reason", param_hint="--skip")
+        parsed[name] = reason
+    return parsed
+
+
 @ci_group.command(name="record-push")
 @_base_options
 @click.option("--from-sha", required=True, help="The branch tip the push replaced (the record's `base`); may be empty.")
 @click.option("--to-sha", required=True, help="The tip the push landed.")
 @click.option("--count", type=click.IntRange(min=0), default=None, help="How many commits the push carried (the record's `n`).")
 @click.option("--red-fix", default=None, help="The reason a push overrode the develop-red hold: written into the record body as red_fix.")
+@click.option("--skip", "skips", multiple=True, callback=lambda _ctx, _param, values: _parse_skips(values),
+              help="CHECK=REASON (repeatable): a push-time check the push overrode, written into the record body under skips.")
 def ci_record_push_cmd(base: str | None, remote: str, branch: str | None, from_sha: str, to_sha: str, count: int | None,
-                       red_fix: str | None) -> None:
+                       red_fix: str | None, skips: dict[str, str]) -> None:
     """Write the push record of a push that landed (RDR-252): one tuple on board/ci/<BASE>--push.
 
     The record's dims are from=<your identity id, or unknown>, kind=push, sha=<TO_SHA>; its body {base: FROM_SHA, n, red_fix}.
     The owner stamper links base to tip to order the branch's tips and maps the record's sender-session stamp to the pusher.
     A failed stamped write is retried once as a minimal unstamped record (base, tip, from), so the chain keeps its link. The
-    red_fix reason (the push script passes it when --red-fix overrode the hold) is cleaned to one line and cut so the whole body
-    fits the template's 1024 bytes. One status line on standard output: PUSH_RECORD_OK (stamped), PUSH_RECORD_UNSTAMPED (written
+    red_fix reason (the push script passes it when --red-fix overrode the hold) and each --skip CHECK=REASON (a push-time check
+    the push overrode, in the body as skips) are cleaned to one line and cut so the whole body fits the template's 1024 bytes. One status line on standard output: PUSH_RECORD_OK (stamped), PUSH_RECORD_UNSTAMPED (written
     with no session stamp), PUSH_RECORD_FALLBACK or PUSH_RECORD_FAILED. Exit 0 whatever it says: the push has landed and the
     record never fails it (only a base that cannot be derived is refused).
     """
@@ -550,4 +569,4 @@ def ci_record_push_cmd(base: str | None, remote: str, branch: str | None, from_s
     except Exception as exc:  # noqa: BLE001 -- the push landed
         click.echo(f"PUSH_RECORD_FAILED the tuple store could not be opened: {type(exc).__name__}: {exc} (the push stands, no record was written)")
         return
-    click.echo(ci_push_record.write(store, base, from_sha, to_sha, count, label, red_fix))
+    click.echo(ci_push_record.write(store, base, from_sha, to_sha, count, label, red_fix, skips))
