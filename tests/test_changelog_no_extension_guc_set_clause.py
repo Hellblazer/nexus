@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+import changelog_text
+
 pytestmark = pytest.mark.lint
 
 _CHANGELOG = Path(__file__).resolve().parents[1] / "service/src/main/resources/db/changelog"
@@ -35,9 +37,9 @@ _SET_CLAUSE = re.compile(
 
 
 def _forward_sql(text: str) -> str:
-    """The changelog text minus <rollback> blocks, which restore older
-    bodies verbatim and are not this lint's subject."""
-    return re.sub(r"<rollback>.*?</rollback>", "", text, flags=re.DOTALL)
+    """The changelog text minus comments and <rollback> blocks (older bodies restored verbatim, not this lint's subject),
+    blanked by the shared reader so a header comment that names "<rollback>" cannot hide a forward body."""
+    return changelog_text.strip_noise(text)
 
 
 def test_changelog_directory_exists_and_has_files() -> None:
@@ -62,3 +64,17 @@ def test_the_pattern_matches_the_shape_it_forbids() -> None:
     assert _SET_CLAUSE.search("SET hnsw.iterative_scan = 'strict_order'")
     assert not _SET_CLAUSE.search("SET search_path = nexus, public")
     assert not _SET_CLAUSE.search("PERFORM set_config('hnsw.ef_search', '400', true);")
+
+
+def test_a_rollback_named_in_a_header_comment_hides_no_forward_body() -> None:
+    """The shared reader strips comments before rollbacks: a "<rollback>" in prose must not blank the SQL after it (the
+    blind spot that hid vectors-069-1 from the RDR-229 censuses, nexus-p2m1x.24)."""
+    text = (
+        "<!-- a changeset's <rollback> restores the old body -->\n"
+        '<changeSet id="x-1"><sql>CREATE FUNCTION f() RETURNS void LANGUAGE sql\n'
+        "SET hnsw.ef_search = 40 AS $$ SELECT 1 $$;</sql>\n"
+        "<rollback><sql>DROP FUNCTION f()</sql></rollback></changeSet>\n"
+    )
+    assert _SET_CLAUSE.search(_forward_sql(text)), "the forward SET clause after a comment naming <rollback> was blanked"
+    assert "DROP FUNCTION" not in _forward_sql(text), "the rollback block was kept"
+    assert len(_forward_sql(text)) == len(text), "blanking must keep offsets"
