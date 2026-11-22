@@ -3,7 +3,6 @@
 """Fallback-collection migration command for the ``nx catalog`` group (nexus-whh61.4).
 
 Carved out of ``commands.catalog``: ``migrate-fallback`` — re-points documents
-import shlex
 from a legacy fallback collection (e.g. ``docs__default``) onto per-owner
 conformant targets and registers/supersedes the projection rows. Behaviour-
 preserving; ``register`` attaches it to the shared ``catalog`` group so
@@ -18,6 +17,7 @@ it to the module-routed form the other carved families use.)
 """
 from __future__ import annotations
 
+import shlex
 import click
 
 from nexus.catalog.membership import refuse_if_collection_unknown
