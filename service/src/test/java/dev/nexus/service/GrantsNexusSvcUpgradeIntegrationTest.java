@@ -254,16 +254,25 @@ class GrantsNexusSvcUpgradeIntegrationTest {
         // are: vectors-068 (the collection_id columns and CHECKs the stamp moves fill and validate), vectors-069 (the dual-write
         // functions) and vectors-070 (the stamp moves and their owner-read policies). vectors-070 and catalog-052 register
         // moves, so the scan above already holds them; they are named again only to make the list say so, and added only when
-        // the scan did not find them (a second entry would find its include already stripped).
-        for (String p31 : List.of("db/changelog/vectors-068-collection-id-expand.xml",
+        // the scan did not find them (a second entry would find its include already stripped). Sam's ruling (ask
+        // p31-existing-schema-tests) names 068, 069 and 070; no walk failure has shown 068 or 069 to be needed here (they touch no
+        // registry), they are stripped because the old state predates the stamp family as a whole.
+        //
+        // datamoves-002 (the finisher's verify_statement_timeout_ms column, an ALTER TABLE nexus.data_moves with no precondition) is
+        // the one include after datamoves-001 that reads the registry and is not a registering include, so the scan cannot hold it:
+        // left in, the old walk fails at datamoves-002-1 with 'relation "nexus.data_moves" does not exist' (chas run of 911747ea29).
+        // It landed after this list was written and is independent of P3.1; the new boot applies it after datamoves-001.
+        for (String unborn : List.of("db/changelog/datamoves-002-verify-statement-timeout.xml",
+                "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
                 "db/changelog/vectors-070-collection-id-stamp-moves.xml")) {
-            if (!stripped.contains(p31)) {
-                stripped.add(p31);
+            if (!stripped.contains(unborn)) {
+                stripped.add(unborn);
             }
         }
-        assertThat(stripped).as("non-vacuity: the P3.1 includes are in the old state's strip list")
-            .contains("db/changelog/vectors-068-collection-id-expand.xml",
+        assertThat(stripped).as("non-vacuity: the registry's own follow-up and the P3.1 includes are in the old state's strip list")
+            .contains("db/changelog/datamoves-002-verify-statement-timeout.xml",
+                "db/changelog/vectors-068-collection-id-expand.xml",
                 "db/changelog/vectors-069-collection-id-dual-write-functions.xml",
                 "db/changelog/vectors-070-collection-id-stamp-moves.xml",
                 "db/changelog/catalog-052-residue-moves-supersede.xml");
