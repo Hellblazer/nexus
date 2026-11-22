@@ -29,6 +29,7 @@ from nexus.health import HealthResult
 from nexus.rdr229_completion_health import (
     DANGLING_LABEL,
     DANGLING_QUERY,
+    ID_INDEX_LABEL,
     NOT_KNOWN,
     SELF_ID_LABEL,
     SELF_ID_QUERY,
@@ -40,8 +41,8 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "rdr229_completion_sta
 
 #: Every key the engine's field carries; the module reads each of them, and a key the engine adds that is not here fails the shape test.
 FIELD_KEYS = {
-    "gate1", "gate2", "gate3", "gates_holding", "gates_total", "summary", "gate3_why", "labels_total", "labels_incomplete",
-    "checks_missing", "validate_waits",
+    "gate1", "gate2", "gate3", "gates_holding", "gates_total", "summary", "gate3_why", "gate3_latched", "id_index_invalid",
+    "labels_total", "labels_incomplete", "checks_missing", "validate_waits",
 }
 
 #: A number in front of what it counts: the shape of every tenant count the old status text carried.
@@ -118,6 +119,20 @@ def test_gates_holding_and_the_summary_make_one_ok_row():
     assert row.detail.startswith("2 of 3 gates hold: gate 1 holds; gate 2 holds; gate 3 waits")
     assert "P3.4" in row.detail
     _never_red(rows)
+
+
+def test_an_invalid_id_index_is_its_own_row_a_warning_once_gate3_has_latched_and_information_before():
+    base = _fixture("all_stamps_done_gate3_waiting")["rdr229_completion"]
+    quiet = {"rdr229_completion": {**base, "id_index_invalid": False, "gate3_latched": True}}
+    assert ID_INDEX_LABEL not in _by_label(_check(quiet)), "non-vacuity: no row while no id index is INVALID"
+
+    latched = _by_label(_check({"rdr229_completion": {**base, "id_index_invalid": True, "gate3_latched": True}}))[ID_INDEX_LABEL]
+    assert latched.warn and not latched.ok
+    assert "latched" in latched.detail and "no index" in latched.detail
+
+    early = _by_label(_check({"rdr229_completion": {**base, "id_index_invalid": True, "gate3_latched": False}}))[ID_INDEX_LABEL]
+    assert early.ok and not early.warn
+    assert "not latched" in early.detail
 
 
 def test_blocked_stamps_are_one_summary_row_and_no_warning():
