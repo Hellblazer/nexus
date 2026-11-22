@@ -3,12 +3,15 @@
 package dev.nexus.service.datamove;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.IdKeyIndexProbe;
 import dev.nexus.service.PgCatalogProbes;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.VectorSeeds;
+import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.DrivingTableIsolationCheck;
 import dev.nexus.service.vectors.LeafIndexPass;
 import dev.nexus.service.vectors.Rdr229SwapMove;
 import org.jooq.Condition;
@@ -24,12 +27,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
+import java.sql.SQLException;
+import java.time.OffsetDateTime;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.TAXONOMY_CENTROIDS;
 
@@ -229,7 +236,8 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
     // ── the catalog, by what a key keys and references ─────────────────────────────────────────────────────
 
     /** A top-level foreign key (or other constraint): {@code def} is {@code pg_get_constraintdef} with the schema qualifier removed. */
-    private record Fk(String name, String def, boolean validated, String onUpdate, String onDelete) {
+    private record Fk(String name, String def, boolean validated, String onUpdate, String onDelete, boolean deferrable,
+                      boolean deferred) {
         boolean isIdTwinOnChunks() {
             return def.contains(CHUNKS_ID_KEY_TARGET);
         }
@@ -242,7 +250,8 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
         Field<String> def = DSL.function(DSL.name("pg_catalog", "pg_get_constraintdef"), String.class, DSL.field(DSL.name("c", "oid")));
         return ctx().select(DSL.field(DSL.name("c", "conname"), String.class), def,
                 DSL.field(DSL.name("c", "convalidated"), Boolean.class), DSL.field(DSL.name("c", "confupdtype"), String.class),
-                DSL.field(DSL.name("c", "confdeltype"), String.class))
+                DSL.field(DSL.name("c", "confdeltype"), String.class),
+                DSL.field(DSL.name("c", "condeferrable"), Boolean.class), DSL.field(DSL.name("c", "condeferred"), Boolean.class))
             .from(c)
             .join(r).on(DSL.field(DSL.name("r", "oid")).eq(DSL.field(DSL.name("c", "conrelid"))))
             .join(n).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("r", "relnamespace"))))
@@ -250,7 +259,8 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
             .and(DSL.field(DSL.name("r", "relname"), String.class).eq(tableName))
             .and(DSL.field(DSL.name("c", "contype"), String.class).eq(contype))
             .and(DSL.field(DSL.name("c", "conparentid"), Long.class).eq(0L))
-            .fetch(rec -> new Fk(rec.value1(), rec.value2().replace("nexus.", ""), rec.value3(), rec.value4(), rec.value5()));
+            .fetch(rec -> new Fk(rec.value1(), rec.value2().replace("nexus.", ""), rec.value3(), rec.value4(), rec.value5(), rec.value6(),
+                rec.value7()));
     }
 
     private List<Fk> foreignKeys(String tableName) {
@@ -549,5 +559,151 @@ class Rdr229SwapMovesIntegrationTest extends DataMoveIntegrationBase {
         }
         assertThat(compositeOnId()).as("nor the composite on the id").isEmpty();
         assertThat(registeredBySwap()).as("nor a validation move").isEmpty();
+    }
+
+    // ── 8: the manifest id key is deferred (linda 2026-11-22, option b) ─────────────────────────────────────
+
+    /**
+     * The functions that defer the manifest's NAME key by name ({@code SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED}) are
+     * the ones the id key must not break: purge_trash deletes chunks while their manifest rows still exist, and the Java kin
+     * ({@code CatalogRepository#deferManifestChunkFk}, from {@code deleteCollectionTxn}) does the same. Found live, not from the
+     * changelog: every function in schema nexus whose body names the key.
+     */
+    @Test
+    void purgeTrashIsTheOnlyLiveFunctionThatDefersTheManifestNameKeyByName() {
+        var proc = DSL.table(DSL.name("pg_catalog", "pg_proc")).as("p");
+        var ns = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("n");
+        Field<String> src = DSL.field(DSL.name("p", "prosrc"), String.class);
+        Field<String> name = DSL.field(DSL.name("p", "proname"), String.class);
+        var names = ctx().selectDistinct(name).from(proc)
+            .join(ns).on(DSL.field(DSL.name("n", "oid")).eq(DSL.field(DSL.name("p", "pronamespace"))))
+            .where(DSL.field(DSL.name("n", "nspname"), String.class).eq("nexus"))
+            .and(src.contains("SET CONSTRAINTS nexus.fk_catalog_chunks_chunk DEFERRED")
+                .or(src.contains("SET CONSTRAINTS fk_catalog_chunks_chunk DEFERRED")))
+            .fetch(name);
+        assertThat(names).as("the live functions that defer the manifest name key by name").containsExactly("purge_trash");
+    }
+
+    /**
+     * After the swap purge_trash, which defers only the name key, deletes a chunk whose manifest row (carrying its id) is still there
+     * and commits: the id key is DEFERRABLE INITIALLY DEFERRED, so its check waits for the commit, by which point step 4 has cascaded
+     * the manifest row away. An immediate id key raises 23503 at the DELETE.
+     */
+    @Test
+    void afterTheSwapPurgeTrashDeletesChunksWithManifestRowsPresentAndCommitsCleanly() throws Exception {
+        var t = seed("purge");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        assertThat(completedAt(CHUNKS_SWAP)).as("precondition: the swap completed").isNotNull();
+        String tenant = t.catalogDocumentChunks();
+        assertThat(ctx().fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant))).as("non-vacuity: a chunk").isEqualTo(1);
+        assertThat(ctx().fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+            .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID.isNotNull()))).as("non-vacuity: a manifest row with its id").isEqualTo(1);
+        ctx().update(CATALOG_DOCUMENTS).set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now().minusDays(60))
+            .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant)).execute();
+
+        long purged;
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            var tx = DSL.using(c, SQLDialect.POSTGRES);
+            tx.select(DSL.function("set_config", String.class, DSL.inline("nexus.tenant"), DSL.inline(tenant), DSL.inline(true))).fetch();
+            purged = tx.select(DSL.function(DSL.name("nexus", "purge_trash"), Long.class,
+                DSL.val(org.jooq.types.DayToSecond.valueOf(java.time.Duration.ofDays(30))))).fetchOne(0, Long.class);
+            c.commit();
+        }
+
+        assertThat(purged).as("the tombstoned document was purged").isEqualTo(1L);
+        assertThat(ctx().fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant))).as("the chunk was swept").isZero();
+        assertThat(ctx().fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant))).as("and its manifest row").isZero();
+    }
+
+    /** The Java kin of purge_trash: the collection delete defers the name key the same way, deletes chunks first, then the manifest rows. */
+    @Test
+    void afterTheSwapTheJavaDeferOfTheNameKeyAlsoLeavesTheChunkDeleteFirstOrderingValid() throws Exception {
+        var t = seed("kin");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        assertThat(completedAt(CHUNKS_SWAP)).as("precondition: the swap completed").isNotNull();
+        String tenant = t.catalogDocumentChunks();
+        assertThat(ctx().fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant))).as("non-vacuity").isEqualTo(1);
+
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            var tx = DSL.using(c, SQLDialect.POSTGRES);
+            CatalogRepository.deferManifestChunkFk(tx);
+            tx.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).execute();
+            tx.deleteFrom(CATALOG_DOCUMENT_CHUNKS).where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)).execute();
+            c.commit();
+        }
+
+        assertThat(ctx().fetchCount(CHUNKS, CHUNKS.TENANT_ID.eq(tenant))).isZero();
+        assertThat(ctx().fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant))).isZero();
+    }
+
+    /**
+     * The manifest's id key is DEFERRABLE INITIALLY DEFERRED and the other two child keys and the composite are not deferrable; a real
+     * orphan against the id key (a manifest row whose name finds its chunk but whose id names another collection) is accepted by the
+     * statement and refused at COMMIT with 23503. The name key still checks at the statement, so this is the only thing the deferral
+     * moves: the orphan check of the id key.
+     */
+    @Test
+    void theManifestIdKeyIsDeferredAndRefusesARealOrphanAtCommitNotAtTheStatement() throws Exception {
+        var t = seed("deferred");
+        registerSwaps();
+        runSwaps(new VerifyingFinisher());
+        assertThat(completedAt(CHUNKS_SWAP)).as("precondition: the swap completed").isNotNull();
+
+        Fk manifestKey = idTwins("catalog_document_chunks").get(0);
+        assertThat(manifestKey.deferrable()).as("condeferrable").isTrue();
+        assertThat(manifestKey.deferred()).as("condeferred: INITIALLY DEFERRED").isTrue();
+        for (String child : List.of("topic_assignments", "chunk_orphaned_at")) {
+            assertThat(idTwins(child).get(0).deferrable()).as(child + " id key is unchanged: not deferrable").isFalse();
+        }
+        assertThat(compositeOnId().get(0).deferrable()).as("the composite is unchanged: not deferrable").isFalse();
+
+        String tenant = t.catalogDocumentChunks();
+        String name = StampMoveSeeds.collection(tenant, 0);
+        String otherName = name.replace("__v1", "r__v1");
+        PgContainerHelper.insertCollection(ctx(), tenant, otherName, BGE);
+        long otherId = StampMoveSeeds.id(ctx(), tenant, otherName);
+        byte[] chash = ctx().select(CHUNKS.CHASH).from(CHUNKS).where(CHUNKS.TENANT_ID.eq(tenant)).fetchOne(CHUNKS.CHASH);
+        int before = ctx().fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant));
+
+        try (Connection c = pg.createConnection("")) {
+            c.setAutoCommit(false);
+            DSL.using(c, SQLDialect.POSTGRES).insertInto(CATALOG_DOCUMENT_CHUNKS)
+                .set(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, tenant).set(CATALOG_DOCUMENT_CHUNKS.DOC_ID, "1.9.0")
+                .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 1).set(CATALOG_DOCUMENT_CHUNKS.CHASH, chash)
+                .set(CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 1).set(CATALOG_DOCUMENT_CHUNKS.COLLECTION, name)
+                .set(CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID, otherId).set(CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL, BGE)
+                .execute();   // not refused here: the name key is satisfied and the id key waits for the commit
+            assertThatThrownBy(c::commit).as("the id key refuses the orphan at COMMIT")
+                .isInstanceOfSatisfying(SQLException.class, e -> assertThat(e.getSQLState()).isEqualTo("23503"));
+            c.rollback();
+        }
+        assertThat(ctx().fetchCount(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant))).as("nothing landed").isEqualTo(before);
+    }
+
+    // ── 9: the boot isolation check asks about what the swap's verification reads ───────────────────────────
+
+    /**
+     * The chunks swap's verification joins nexus.catalog_collections, which carries an owner-read policy (vectors-065), so the boot
+     * isolation check asks about it while a swap move is registered, in the pattern of the residue moves' test
+     * ({@code NoteUriResidueRepairMovesIntegrationTest}): it is listed beside the driving tables (nexus.chunks is the chunks check's
+     * own), and the policy engine's question finds the policy for the admin role.
+     */
+    @Test
+    void theIsolationCheckAsksAboutTheRegistryTheSwapVerificationReads() throws Exception {
+        seed("isolation");
+        registerSwaps();
+        var tables = DrivingTableIsolationCheck.registeredDrivingTables(ctx());
+        assertThat(tables).extracting(DrivingTableIsolationCheck.Table::name)
+            .containsExactlyInAnyOrder("taxonomy_centroids", "catalog_collections");
+        try (var c = adminPool.getConnection()) {
+            var found = DrivingTableIsolationCheck.violations(DSL.using(c, SQLDialect.POSTGRES), tables);
+            assertThat(found).as("non-vacuity: the admin role is the one the owner-read policies are for")
+                .extracting(v -> v.table().name() + "." + v.policy())
+                .contains("catalog_collections.catalog_collections_owner_read");
+        }
     }
 }
