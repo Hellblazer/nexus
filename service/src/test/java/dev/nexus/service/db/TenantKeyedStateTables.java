@@ -832,6 +832,8 @@ final class TenantKeyedStateTables {
 
     /** RDR-229 P3.3b: {@code LeafIndexPass}, {@code LeafIndexCatalog}: every collection they hold is per-pass bookkeeping or a catalog snapshot. */
     private static void fillLeafIndexPass(Map<String, String> notKeyed) {
+        notKeyed.put("TwinKeyUpsert.Pair.nameKey", "a table's name-key column names (constants of the checked pair list); no tenant or collection value");
+        notKeyed.put("TwinKeyUpsert.Pair.idKey", "a table's id-key column names (constants of the checked pair list); no tenant or collection value");
         notKeyed.put("LeafIndexPass.Result.registered", LEAF_INDEX_PASS_ENGINE_WIDE + "the labels of the swap moves one pass "
             + "inserted (rdr229-swap-<table>), returned to the caller and not kept");
         notKeyed.put("LeafIndexPass.Session.registered", LEAF_INDEX_PASS_ENGINE_WIDE + "the labels this pass has inserted so far; "
