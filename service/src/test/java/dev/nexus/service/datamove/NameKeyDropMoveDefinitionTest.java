@@ -102,15 +102,28 @@ class NameKeyDropMoveDefinitionTest {
     }
 
     @Test
-    void renameMissing_isNoneBeforeGate3_thenTheMove_thenTheRestart_thenNone() {
+    void renameMissing_isNoneBeforeGate3_thenTheMove_thenTheMissingList_thenTheRestart_thenNone() {
         assertThat(result(false, RenameState(false, 3, List.of("a"))).renameMissing())
-            .as("before gate 3 nothing is awaited: the rename is the name path").isEqualTo(RenameReadiness.Missing.NONE);
+            .as("before gate 3, with the move incomplete, nothing is awaited: the rename is the name path").isEqualTo(RenameReadiness.Missing.NONE);
         assertThat(result(true, RenameState(false, 3, List.of())).renameMissing())
             .as("a label with no row, or no completed_at, is the move").isEqualTo(RenameReadiness.Missing.NAME_KEY_DROP_MOVE);
         assertThat(result(true, RenameState(true, 3, List.of("a"))).renameMissing()).isEqualTo(RenameReadiness.Missing.P35B_RESTART);
         assertThat(result(true, RenameState(true, 0, List.of())).renameMissing())
-            .as("an empty or missing list is refused, not read as 'all applied'").isEqualTo(RenameReadiness.Missing.P35B_RESTART);
+            .as("an empty or missing list is refused, with a cause of its own: a restart cannot fix it")
+            .isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
         assertThat(result(true, RenameState(true, 3, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.NONE);
+    }
+
+    @Test
+    void renameMissing_isStickyOnceTheDropMoveCompleted_aDipOfGate3NeverReadsAsTheNamePath() {
+        assertThat(result(false, RenameState(true, 3, List.of("a"))).renameMissing())
+            .as("gate 3 dropped back but the name keys are gone: the restart is still awaited, not NONE (the name path)")
+            .isEqualTo(RenameReadiness.Missing.P35B_RESTART);
+        assertThat(result(false, RenameState(true, 0, List.of())).renameMissing()).isEqualTo(RenameReadiness.Missing.P35B_LIST_MISSING);
+        assertThat(result(false, RenameState(true, 3, List.of())).renameMissing())
+            .as("applied: NONE, and the guard reads dropMoveComplete to take the one-row path").isEqualTo(RenameReadiness.Missing.NONE);
+        assertThat(result(false, RenameState(false, 3, List.of())).renameMissing())
+            .as("control: with the move incomplete the same dip is the name path").isEqualTo(RenameReadiness.Missing.NONE);
     }
 
     @Test

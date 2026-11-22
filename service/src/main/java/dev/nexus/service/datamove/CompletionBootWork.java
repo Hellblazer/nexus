@@ -35,6 +35,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * way, so the state is never published there; nothing this class reports is work. (The moves themselves, which are work, are
  * {@code boot_work} entries of {@link MoveBootWork}.) One exception, RDR-229 P3.7: while every stamp move is complete and a P3.5b changeset has
  * not applied, the engine needs one restart, and the entry {@value #RESTART_ENTRY_ID} says so ({@code nx doctor}), until that restart applies them.
+ * It is visible and safe to stop, but it is NOT work (linda 2026-11-22): both idle rules that count {@code boot_work} entries,
+ * {@code nx upgrade}'s bundle-swap deferral ({@code engine_busy_reason}) and the boot-write harness ({@code boot_work_settled}), skip
+ * it by id, because an upgrade is the restart that clears it.
  *
  * <p><b>It reads and reports; it writes nothing.</b> The session is opened {@code default_transaction_read_only = on}, so a
  * write would raise at the server, and the check itself holds no write. Sam's rule is no boot-time data migrations.
@@ -60,6 +63,8 @@ public final class CompletionBootWork implements AutoCloseable {
     private static final Duration TICK = Duration.ofSeconds(1);
     /** Once gate 3 has latched, how often the coverage read is repeated (it keeps {@code id_index_invalid} current within this period). */
     public static final Duration LATCHED_COVERAGE_PERIOD = Duration.ofMinutes(10);
+    /** How long gate 3's flip to true waits for the renames pinned in the rename window ({@link RenameReadiness#pinned}). */
+    public static final Duration RENAME_WINDOW_WAIT = Duration.ofSeconds(30);
     /** How long a table's violating-row count is kept: the scan is bounded, not free. */
     public static final Duration VIOLATOR_TTL = Duration.ofMinutes(10);
 
@@ -81,6 +86,8 @@ public final class CompletionBootWork implements AutoCloseable {
     /** Read side: a rename in flight ({@link RenameReadiness#pinned}). Write side: gate 3 flipping to true, in {@link #publish}. Fair, so a flip is not starved. */
     private final java.util.concurrent.locks.ReentrantReadWriteLock renameWindow = new java.util.concurrent.locks.ReentrantReadWriteLock(true);
     private final Object sampleLock = new Object();
+    /** How long gate 3's flip waits for the pinned renames before it defers to the next sample. */
+    private volatile Duration renameWindowWait = RENAME_WINDOW_WAIT;
     private final Clock clock;
     /** Where an event's read runs; null before {@link #start}, when the event only marks that a read is owed. */
     private volatile Executor eventExecutor;
@@ -261,6 +268,12 @@ public final class CompletionBootWork implements AutoCloseable {
             }
 
             @Override
+            public boolean dropMoveComplete() {
+                var r = latest();
+                return r != null && r.rename().dropMoveComplete();
+            }
+
+            @Override
             public <T> T pinned(java.util.function.Supplier<T> rename) {
                 renameWindow.readLock().lock();
                 try {
@@ -270,6 +283,11 @@ public final class CompletionBootWork implements AutoCloseable {
                 }
             }
         };
+    }
+
+    /** Test seam: how long the flip waits for a pinned rename. */
+    void renameWindowWait(Duration wait) {
+        this.renameWindowWait = Objects.requireNonNull(wait, "wait");
     }
 
     /** Reads now, outside the schedule, for a consumer that must not wait for the next sample. */
@@ -408,9 +426,32 @@ public final class CompletionBootWork implements AutoCloseable {
             }
             CompletionCheck.Result before = latest;
             if (result.gate3() && (before == null || !before.gate3())) {
-                // gate 3 flips to true: wait for every pinned rename to return, so none commits a name-path rewrite after the readers switch (O-5)
-                renameWindow.writeLock().lock();
+                // gate 3 flips to true: wait for every pinned rename to return, so none commits a name-path rewrite after the readers
+                // switch (O-5). The wait is bounded: a rename that holds the window longer than renameWindowWait defers the flip to the
+                // next sample (a read is owed at once) instead of stalling the check, and its readers keep reading gate 3 as false.
+                boolean locked;
                 try {
+                    locked = renameWindow.writeLock().tryLock(renameWindowWait.toMillis(), TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    locked = false;
+                }
+                if (!locked) {
+                    log.warn("event=rdr229_rename_window_busy waited_ms={} cause=\"a pinned rename is still open; the gate 3 flip is deferred to the next sample\"",
+                        renameWindowWait.toMillis());
+                    readOwed.set(true);
+                    return -1;
+                }
+                try {
+                    // the sample is as old as the wait: gate 3 may have dropped again while the rename ran, so read again under the
+                    // lock and flip only if it still holds (the fresh sample is what is published either way)
+                    try {
+                        result = reader.read();
+                        lastError = null;
+                    } catch (RuntimeException e) {
+                        log.warn("event=rdr229_completion_unreadable cause=\"{}\" during=rename_window", FailureHandler.oneLine(e.toString()));
+                        return -1;
+                    }
                     latest = result;
                 } finally {
                     renameWindow.writeLock().unlock();

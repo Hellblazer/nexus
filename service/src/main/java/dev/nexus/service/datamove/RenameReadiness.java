@@ -28,12 +28,26 @@ public interface RenameReadiness {
         return rename.get();
     }
 
-    /** What a rename from gate 3 waits for; the wire value is {@code missing} on the 409 {@code rename_refused}. */
+    /**
+     * Whether the name-key drop move has {@code completed_at}. Sticky: a completion is never undone, so from it a rename is never the
+     * name path again, whatever gate 3 does afterwards (gate 3 can drop back to false when an id index goes INVALID): the one-row rename
+     * once every P3.5b changeset has applied, a refusal until then. The default is false: a readiness with no such fact (a test's lambda).
+     */
+    default boolean dropMoveComplete() {
+        return false;
+    }
+
+    /** What a rename from gate 3 (or, once the move completed, from then on) waits for; the wire value is {@code missing} on the 409 {@code rename_refused}. */
     enum Missing {
         /** Nothing: a rename may run. */
         NONE,
         /** The name-key drop move (P3.7) has not completed. Wire value {@code name_key_drop_move}. */
         NAME_KEY_DROP_MOVE,
+        /**
+         * The move completed but this build's P3.5b changeset list ({@code db/rdr229/p35b-continue-changesets.txt}) is missing or names
+         * nothing, so the engine cannot tell whether the readers are ready and a restart cannot fix it. Wire value {@code p35b_list_missing}.
+         */
+        P35B_LIST_MISSING,
         /** The move completed but a P3.5b changeset has not applied yet: the engine must restart. Wire value {@code restart}. */
         P35B_RESTART
     }

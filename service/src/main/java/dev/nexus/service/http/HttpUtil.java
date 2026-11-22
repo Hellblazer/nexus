@@ -384,7 +384,7 @@ public final class HttpUtil {
      *   <li>{@code rename_refused} (409): a collection rename (the catalog's, or a per-store {@code rename_collection} route)
      *       while gate 3 holds and the one-row rename cannot run yet, RDR-229 P3.5a ({@link #RENAME_REFUSED_REASON}). The body
      *       carries {@code missing}: {@code name_key_drop_move} while the name-key drop move has no {@code completed_at},
-     *       else {@code restart} (a P3.5b changeset has not applied). Nothing was renamed. The collection routes also answer
+     *       then {@code p35b_list_missing} while this build ships no P3.5b changeset list, else {@code restart} (a listed P3.5b changeset has not applied). Nothing was renamed. The collection routes also answer
      *       404 {@code unknown_collection_id} ({@link #UNKNOWN_COLLECTION_ID_REASON}, naming {@code collection_id}) for an id
      *       no row has, from {@code CollectionSelectorFilter}, and the delete answers 409
      *       {@code collection_label_ambiguous} ({@link #COLLECTION_LABEL_AMBIGUOUS_REASON}, listing {@code collection_ids}).</li>

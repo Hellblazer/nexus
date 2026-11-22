@@ -359,15 +359,20 @@ public final class CompletionCheck {
 
         /**
          * The first thing a rename still waits for, the one answer the refusal, {@code GET /v1/status} and the in-process readiness
-         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} before gate 3 (the rename is the name path and nothing
-         * is awaited), then the name-key drop move, then the restart that applies P3.5b's changesets.
+         * share ({@link RenameReadiness}): {@link RenameReadiness.Missing#NONE} before gate 3 while the name-key drop move has not
+         * completed (the rename is the name path and nothing is awaited), then the name-key drop move, then a missing or empty P3.5b list
+         * (a restart cannot fix it), then the restart that applies P3.5b's changesets.
+         *
+         * <p><b>Sticky once the move completed.</b> A completed drop move has dropped the name keys, so a name-path rewrite would
+         * fail or leave the install half renamed; from {@code completed_at} the answer no longer reads gate 3, and a dip of gate 3 (an
+         * id index going INVALID) leaves a rename one-row or refused, never the name path.
          */
         public RenameReadiness.Missing renameMissing() {
-            if (!gate3) {
-                return RenameReadiness.Missing.NONE;
-            }
             if (!rename.dropMoveComplete()) {
-                return RenameReadiness.Missing.NAME_KEY_DROP_MOVE;
+                return gate3 ? RenameReadiness.Missing.NAME_KEY_DROP_MOVE : RenameReadiness.Missing.NONE;
+            }
+            if (rename.listed() == 0) {
+                return RenameReadiness.Missing.P35B_LIST_MISSING;
             }
             return rename.p35bApplied() ? RenameReadiness.Missing.NONE : RenameReadiness.Missing.P35B_RESTART;
         }
