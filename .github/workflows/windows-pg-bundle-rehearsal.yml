@@ -179,6 +179,14 @@ on:
       # fix (tuf>=7.0.1, nexus-zw44w) did not rerun this set until dispatched by hand.
       - pyproject.toml
       - uv.lock
+      # RDR-229 P3.6 (nexus-21kr3): the client half of the label path the label-windows job runs.
+      - src/nexus/corpus.py
+      - src/nexus/collection_rename.py
+      # The engine's label rule (the one file, not service/src/**, which would trigger on every engine commit)
+      # and the psql seed helpers on the label test's path, whose UTF-8 pipes are what Windows broke (nexus-niyl5).
+      - service/src/main/java/dev/nexus/service/db/CollectionLabel.java
+      - tests/_chunk_seed.py
+      - tests/_catalog_fixture_ops.py
       - scripts/check_junit_floor.py
       - .github/actions/resolve-windows-python/**
       - .github/actions/windows-engine-leg/**
@@ -509,3 +517,67 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           uv run --python 3.13 --frozen python scripts/check_junit_floor.py windows-tests-junit.xml --min-passed 3730 --max-skipped 204 --require-passed tests.test_winsec.TestRealWindows --require-passed tests.test_winproc_core.TestRealWindowsKernel --require-passed tests.test_os_trust_store.TestRealWindows --require-passed tests.test_install_generation_real_windows.TestRealWindows --require-passed tests.daemon.test_pid_alive_windows.TestRealWindowsKernel --require-passed tests.test_session_end_real_windows.TestRealWindows --require-passed tests.test_mcp_win_stdin_real_windows.TestRealWindows --require-passed test_hard_killing_the_supervisor_takes_its_job_engine_with_it --require-passed tests.test_mcpb_bootstrap.TestRealWindows --require-passed test_the_credential_guard_still_denies_through_the_launcher --require-passed test_auto_approve_allows_through_uv_and_the_shim --require-passed tests.test_pg_ctl_console_isolation_real_windows.TestRealWindows --require-passed tests.test_off_cwd_resolver_real_windows.TestRealWindows --require-passed tests.hooks.test_hook_launcher_cwd_real_windows.TestRealWindows --require-passed test_both_hooks_read_the_cache_as_utf8_under_a_non_utf8_locale --require-passed test_help_states_the_autostart_default_and_installs_nothing --require-passed test_the_server_outlives_the_desktop_extensions_job
+
+  # RDR-229 P3.6 (nexus-21kr3): the label test against the real engine on native Windows. It cannot ride the
+  # conformance job's pytest step: that step runs NX_TEST_T2_SUBSTRATE=none under the default addopts, which
+  # deselect `integration`, so the file would be collected and deselected without a word. This job gives it what
+  # the substrate needs (a JDK on PATH and the gate jar; the fixture provisions the PG bundle itself) and a floor
+  # that requires the one test to have PASSED. A label holds a space, '%', ':' and a non-ASCII letter, and the
+  # failure it guards is a path, a URL, a temp file or a psql pipe that cannot take one on Windows.
+  label-windows:
+    name: RDR-229 P3.6 label test against the real engine (win-release)
+    if: ${{ github.actor == 'Hellblazer' && vars.NX_WINDOWS_RELEASE_LEGS == 'on' }}
+    runs-on: win-release
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      # The same fixups as the conformance job: LF text, and each tracked symlink as a copy of its target.
+      - name: Checkout fixups (LF, symlinks materialised)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config core.autocrlf false
+          git rm -r -q --cached .
+          git reset -q --hard HEAD
+          $links = @(git ls-files -s | Where-Object { $_ -match '^120000 ' } | ForEach-Object { ($_ -split "`t", 2)[1] })
+          if ($links.Count -eq 0) { throw 'no tracked symlinks found; this step has nothing to do and its premise moved' }
+          foreach ($rel in $links) {
+            $stub = Join-Path $PWD $rel
+            $target = [IO.Path]::GetFullPath((Join-Path (Split-Path $stub) (Get-Content -Raw -LiteralPath $stub).Trim()))
+            if (-not (Test-Path -LiteralPath $target)) { throw "symlink $rel points at $target, which does not exist" }
+            Remove-Item -LiteralPath $stub -Force
+            Copy-Item -LiteralPath $target -Destination $stub -Recurse
+            Write-Host "materialised $rel <- $target"
+          }
+
+      - name: Set up GraalVM 25.0.3
+        uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2  # v1
+        with:
+          java-version: '25.0.3'
+          distribution: 'graalvm'
+
+      - name: Restore the Maven cache and set Central retries
+        uses: ./.github/actions/maven-cache
+        with:
+          job-class: package
+          save: false
+
+      - name: Build the gate jar
+        shell: bash
+        run: scripts/build-gate-jar.sh
+
+      - name: Label test
+        run: |
+          uv run --python 3.13 --frozen pytest tests/integration/test_rdr229_p36_label_windows.py -m integration -p no:cacheprovider -q -rs --junitxml=label-windows-junit.xml
+
+      - name: Non-vacuity floor
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --python 3.13 --frozen python scripts/check_junit_floor.py label-windows-junit.xml --min-passed 1 --max-skipped 0 --require-passed test_a_label_with_a_space_percent_colon_and_non_ascii_registers_lists_searches_and_renames
+
+      - name: Stop stray engine and Postgres processes (always)
+        if: always()
+        uses: ./.github/actions/windows-job-cleanup
