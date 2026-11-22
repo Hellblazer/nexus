@@ -394,6 +394,21 @@ class TenantExportRegistryParityTest {
         return unclassified;
     }
 
+    /**
+     * A column is a reference or holds no other row's key, never both (RDR-229 P3.3a): an id twin that gains an id foreign key
+     * moves from {@code notReferences} to a reference ({@code Entry.importComputedRef}), and one left in both says the twin
+     * was keyed without its entry being re-classed.
+     */
+    static List<String> columnsClassedTwice(List<ExportTable> tables) {
+        List<String> twice = new ArrayList<>();
+        byName(tables).forEach((name, e) -> e.references().forEach(r -> r.columns().forEach(c -> {
+            if (e.notReferences().contains(c)) {
+                twice.add(name + "." + c + ": both a reference and listed as holding no other row's key");
+            }
+        })));
+        return twice;
+    }
+
     /** An exported table refers only to exported tables (or global ones): otherwise its rows cannot load. */
     static List<String> referencesOutsideTheExport(List<ExportTable> tables) {
         Map<String, ExportTable> reg = byName(tables);
@@ -514,6 +529,11 @@ class TenantExportRegistryParityTest {
             .as("id-shaped columns of exported tables that are neither the reassigned id, a reference, "
                 + "nor listed as not a reference (gate S1 census)")
             .isEmpty();
+    }
+
+    @Test
+    void noColumnIsBothAReferenceAndNotAReference() {
+        assertThat(columnsClassedTwice(TenantExport.TABLES)).isEmpty();
     }
 
     @Test
@@ -659,6 +679,24 @@ class TenantExportRegistryParityTest {
         List<ExportTable> planted = replacing("nx_answer_runs", t -> copy(t, t.primaryKey(), t.reassignedId(),
             t.references().subList(0, 1), t.triggers(), t.triggerMaintained(), t.notReferences()));
         assertThat(unclassifiedIdColumns(live, planted)).containsExactly("nx_answer_runs.run_summary jsonb");
+    }
+
+    @Test
+    void aKeyedTwinLeftAsNotAReferenceFails() {
+        // topics.collection_id keyed by an id foreign key (P3.3a) and still listed among the not-references: the half
+        // re-class this check exists for. Planted both ways, so the check bites whichever cut this tree is at.
+        List<ExportTable> planted = replacing("topics", t -> {
+            List<Reference> refs = new ArrayList<>(t.references());
+            if (refs.stream().noneMatch(r -> r.columns().contains("collection_id"))) {
+                refs.add(Reference.fk(List.of("tenant_id", "collection_id"), "catalog_collections",
+                    List.of("tenant_id", "collection_id")));
+            }
+            Set<String> notRefs = new TreeSet<>(t.notReferences());
+            notRefs.add("collection_id");
+            return copy(t, t.primaryKey(), t.reassignedId(), refs, t.triggers(), t.triggerMaintained(), notRefs);
+        });
+        assertThat(columnsClassedTwice(planted)).containsExactly(
+            "topics.collection_id: both a reference and listed as holding no other row's key");
     }
 
     @Test

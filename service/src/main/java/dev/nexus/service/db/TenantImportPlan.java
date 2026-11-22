@@ -273,7 +273,11 @@ public final class TenantImportPlan {
         Set<String> names = new LinkedHashSet<>();
         for (Column c : e.primaryKey()) names.add(c.name());
         if (e.reassignedId() != null) names.add(e.reassignedId());
-        for (Reference r : e.references()) names.addAll(r.columns());
+        for (Reference r : e.references()) {
+            // An id twin under its id foreign key (RDR-229 P3.3a, P3.3c) is a reference the import computes itself
+            // (RestoreIdFill, before the insert), so a backup taken before P3.1, which lacks it, still loads.
+            for (String c : r.columns()) if (!e.triggerMaintained().contains(c)) names.add(c);
+        }
         names.remove("tenant_id");
         return names;
     }

@@ -3,6 +3,7 @@
 package dev.nexus.service.db;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -287,6 +288,21 @@ public final class TenantExport {
         Entry importComputed(String column) {
             maintained(column);
             return notRefs(column);
+        }
+
+        /**
+         * An id twin under an id foreign key (RDR-229 P3.3a, P3.3c): computed by the import as {@link #importComputed} is, and
+         * a reference, because the key makes it hold another row's key. {@code columns} are the key's columns, the twin among
+         * them (the one ending in {@code collection_id}). The load inserts it from the stage the fill wrote: neither
+         * {@code catalog_collections} nor {@code chunks} has a reassigned id, so the load maps nothing through the key.
+         */
+        Entry importComputedRef(String columns, String parent, String parentColumns) {
+            List<String> twins = Arrays.stream(columns.split(",")).filter(c -> c.endsWith("collection_id")).toList();
+            if (twins.size() != 1) {
+                throw new IllegalArgumentException(table + ": an id key names exactly one id twin, not " + twins);
+            }
+            maintained(twins.get(0));
+            return fk(columns, parent, parentColumns);
         }
 
         Entry ref(Reference r) {
