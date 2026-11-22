@@ -421,6 +421,48 @@ def show_all_lines(env: IdentityEnv) -> list[str]:
     return lines
 
 
+#: The Step 5 release (conexus 8.5.0, tagged 2026-11-19): RDR-253 Phase 2's gate needs every binding at it or later.
+PHASE2_CLIENT_FLOOR = "8.5.0"
+
+
+def _release(version: Any) -> tuple[int, int, int] | None:
+    """``X.Y.Z`` as a tuple; anything else (none, ``unknown``, a pre-release) is None, which the gate reads as below."""
+    parts = str(version or "").strip().split(".")
+    return tuple(int(p) for p in parts) if len(parts) == 3 and all(p.isdigit() for p in parts) else None  # type: ignore[return-value]
+
+
+def phase2_gate(env: IdentityEnv, *, floor: str = PHASE2_CLIENT_FLOOR) -> tuple[bool, list[str]]:
+    """RDR-253 Phase 2's gate, coded: open only when every live Claude process on this host (Desktop included; a
+    ``claude -p`` child is not counted, its binding is its dispatcher's) holds a binding, and every binding held here
+    reports a client at *floor* or later. Returns the verdict and the lines that say why, ending in ``PHASE2_GATE_OPEN``
+    or ``PHASE2_GATE_CLOSED``."""
+    views = _call(bindings_here, env.client, env.host, None, env.identity_dir)
+    want = _release(floor)
+    lines = [f"bindings on {describe_host(env.host)}:"]
+    bound: set[tuple[Any, Any]] = set()
+    blockers = 0
+    for view in views:
+        holder = view.get("holder") or {}
+        bound.add((holder.get("pid"), holder.get("started_at")))
+        version = view.get("client_version")
+        have = _release(version)
+        running = isinstance(holder.get("pid"), int) and env.procs.alive(holder["pid"])
+        low = running and (want is None or have is None or have < want)
+        blockers += low
+        note = f": below {floor}" if low else "" if running else ": holder not running, not counted"
+        lines.append(f"  {view['id']} {_name(view)} ({view.get('kind')}) pid {holder.get('pid')}, client {version or 'unknown'}{note}")
+    if not views:
+        lines.append("  (none)")
+    stray = _live_unbound(env, bound)
+    for entry in stray:
+        lines.append(f"  no binding: pid {entry.pid} {entry.name or '(no name)'} ({entry.entrypoint}), session {entry.session_id}")
+    blockers += len(stray)
+    verdict = "PHASE2_GATE_OPEN" if not blockers else f"PHASE2_GATE_CLOSED {blockers} blocker(s)"
+    lines.append(f"{verdict}: every live Claude process bound at client {floor} or later"
+                 + ("" if not blockers else " does not hold"))
+    return not blockers, lines
+
+
 # ── alive ───────────────────────────────────────────────────────────────────
 
 

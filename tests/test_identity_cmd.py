@@ -374,6 +374,62 @@ def test_show_all_leaves_out_claude_p_children_and_a_dead_process_whose_pid_was_
     assert "no binding" in out
 
 
+def test_the_phase2_gate_passes_when_every_live_process_is_bound_at_the_floor(box: Box) -> None:
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    box.running_seat("desk", 101, entrypoint="claude-desktop", client_version="8.5.0")
+    box.procs.start(102, T0, session_id="sid-102", name="child", entrypoint="sdk-cli")   # a claude -p child: not counted
+    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    assert ok, lines
+    assert lines[-1].startswith("PHASE2_GATE_OPEN"), lines
+
+
+def test_the_phase2_gate_refuses_an_unbound_live_process_desktop_included(box: Box) -> None:
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    box.procs.start(101, T0, session_id="sid-101", name="kestrel", entrypoint="claude-desktop")   # live, never bound
+    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    assert not ok
+    text = "\n".join(lines)
+    assert "PHASE2_GATE_CLOSED" in text and "pid 101" in text and "kestrel" in text and "no binding" in text
+
+
+@pytest.mark.parametrize("version", ["8.4.9", None, "unknown", "8.5.0rc1"])
+def test_the_phase2_gate_refuses_a_binding_below_the_floor_or_with_no_version(box: Box, version: str | None) -> None:
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("old", 100, client_version=version)
+    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    assert not ok
+    assert any("old" in line and "below 8.5.0" in line for line in lines), lines
+
+
+def test_the_phase2_gate_does_not_count_a_binding_whose_holder_is_gone(box: Box) -> None:
+    from nexus.identity.ops import phase2_gate
+
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    box.running_seat("sandbox", 101, client_version="8.4.0")
+    box.procs.stop(101)                                     # a lapsed sandbox ephemeral: no process, nothing to gate
+    ok, lines = phase2_gate(box.env(), floor="8.5.0")
+    assert ok, lines
+    assert any("sandbox" in line and "not counted" in line for line in lines), lines
+
+
+def test_the_phase2_gate_script_exits_by_the_verdict(box: Box, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("rdr253_phase2_gate", Path(__file__).parents[1] / "scripts" / "rdr253_phase2_gate.py")
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    box.running_seat("alpha", 100, client_version="8.5.5")
+    assert gate.main([], env=box.env()) == 0
+    box.procs.start(101, T0, session_id="sid-101", name="stray")
+    assert gate.main([], env=box.env()) == 1
+    assert "pid 101" in capsys.readouterr().out
+
+
 def test_show_all_with_a_seat_argument_is_a_usage_error(box: Box) -> None:
     assert box.run("show", "--all", "alpha").exit_code != 0
 
