@@ -129,6 +129,8 @@ final class TenantKeyedStateTables {
         notKeyed.put("NexusService.chunkKeysSweepForTests", TEST_HOOK);
         notKeyed.put("CollectionTupleLock.Tuple.tenantId", "one component of a tuple a caller passes to take a per-tuple "
             + "advisory lock for that transaction; never stored, so a tenant reset has nothing to drop");
+        notKeyed.put("RestoreIdFill.Filled.map", "one restore load's source-to-target id map, a value returned from a table's fill and dropped when the load ends (RDR-229 P3.11); never cached");
+        notKeyed.put("RestoreIdFill.Filled.relabelled", "one restore load's relabels, a value returned from the registry's fill and reported once (RDR-229 P3.11); never cached");
         notKeyed.put("TenantImportSessions.servedModels", "the router's served-model supplier; holds no tenant's data");
         notKeyed.put("NexusService.chunkKeysCredentialLiveForTests", TEST_HOOK);
         notKeyed.put("EngineJobs.maxRuntime", "the wall-clock cap a job is started with (a configured duration, "
