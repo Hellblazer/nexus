@@ -555,6 +555,52 @@ class CompletionCheckIntegrationTest {
         }
     }
 
+    private static final org.jooq.Table<?> LATCH = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
+
+    private void clearLatch() {
+        ctx.deleteFrom(LATCH).execute();
+    }
+
+    /** linda 2026-11-22: gate 3 latches (INSERT ... ON CONFLICT DO NOTHING); the latch is read back whatever the live gate 3 says. */
+    @Test
+    void gate3IsLatchedTheFirstTimeItHolds_theFirstWritersRowStands_andTheLatchOutlivesTheLiveGate() {
+        clearLatch();
+        CompletionCheck.ReadSet rs = new CompletionCheck.ReadSet(List.of(), List.of());
+        try {
+            var quiet = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.LatchWriter.NONE);
+            assertThat(quiet.gate3()).as("non-vacuity: gate 3 holds").isTrue();
+            assertThat(quiet.gate3Latched()).as("a reader that writes nothing leaves no latch").isFalse();
+
+            var held = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(),
+                CompletionCheck.latchOnCtx("engine-1"));
+            assertThat(held.gate3Latched()).isTrue();
+            assertThat(ctx.fetchCount(LATCH)).isEqualTo(1);
+
+            CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), CompletionCheck.latchOnCtx("engine-2"));
+            assertThat(ctx.select(DSL.field(DSL.name("engine_version"), String.class)).from(LATCH).fetchOne(0, String.class))
+                .as("ON CONFLICT DO NOTHING: the first writer's row stands").isEqualTo("engine-1");
+
+            var live = CompletionCheck.evaluate(ctx, rs, c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of(), Set.of("a"))),
+                CompletionCheck.DIRECT, List.of(), CompletionCheck.LatchWriter.NONE);
+            assertThat(live.gate3()).as("the live gate 3 is false (an INVALID id index)").isFalse();
+            assertThat(live.idIndexInvalid()).isTrue();
+            assertThat(live.gate3Latched()).as("the latch is not").isTrue();
+
+            clearLatch();   // a latch row from before a restore
+            assertThat(CompletionCheck.evaluate(ctx, rs, c -> Optional.of(new CompletionCheck.IdIndexCoverage(Set.of("a"), Set.of(), Set.of())),
+                CompletionCheck.DIRECT, List.of(), CompletionCheck.LatchWriter.NONE).gate3Latched()).isFalse();
+
+            // A writer that fails leaves it unlatched and the result intact: the next read tries again.
+            var failed = CompletionCheck.evaluate(ctx, rs, everyIndexValid(), CompletionCheck.DIRECT, List.of(), (c, gate) -> {
+                throw new IllegalStateException("read only");
+            });
+            assertThat(failed.gate3()).isTrue();
+            assertThat(failed.gate3Latched()).isFalse();
+        } finally {
+            clearLatch();
+        }
+    }
+
     @Test
     void gate2NeedsItsOwnLabelsOnTopOfGate1() {
         register("ext-gate1", "chunks", null);

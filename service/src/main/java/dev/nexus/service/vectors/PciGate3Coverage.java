@@ -165,12 +165,13 @@ final class PciGate3Coverage implements CompletionCheck.Gate3Source {
                 }
             }
         }
+        boolean anyInvalid = snapshot.invalidIdCount() > 0;   // any INVALID id-predicate index, a dropped collection's included
         if (!required.isEmpty()) {
-            return Optional.of(new CompletionCheck.IdIndexCoverage(required, covered, invalid));
+            return Optional.of(new CompletionCheck.IdIndexCoverage(required, covered, invalid, false, false, anyInvalid));
         }
         return Optional.of(qualifiesAnywhere(ctx, snapshot)
-            ? new CompletionCheck.IdIndexCoverage(Set.of(QUALIFYING_UNINDEXED), Set.of(), Set.of())
-            : CompletionCheck.IdIndexCoverage.verifiedEmpty());
+            ? new CompletionCheck.IdIndexCoverage(Set.of(QUALIFYING_UNINDEXED), Set.of(), Set.of(), false, false, anyInvalid)
+            : new CompletionCheck.IdIndexCoverage(Set.of(), Set.of(), Set.of(), false, true, anyInvalid));
     }
 
     /** The registry rows of (tenant, model) by name, read with the tenant bound on the check's session and cleared after. */

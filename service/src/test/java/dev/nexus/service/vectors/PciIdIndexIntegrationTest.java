@@ -5,8 +5,11 @@ package dev.nexus.service.vectors;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.P31CheckReplay;
+import dev.nexus.service.BootWorkRegistry;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.datamove.CompletionBootWork;
 import dev.nexus.service.datamove.CompletionCheck;
+import dev.nexus.service.db.AdminConnection;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.PgSession.PciSettings;
@@ -75,6 +78,8 @@ class PciIdIndexIntegrationTest {
     int generation;
     volatile boolean gate2;
     volatile boolean gate3;
+    /** Whether this engine's id readers are present (P3.5's IdReaders.PRESENT); the retire needs it as well as the latched gate 3. */
+    volatile boolean readers = true;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -121,6 +126,7 @@ class PciIdIndexIntegrationTest {
         PgSession.resetSearchExactMaxRowsForTests();
         gate2 = false;
         gate3 = false;
+        readers = true;
     }
 
     // -- fixtures --------------------------------------------------------------------------------------------
@@ -135,6 +141,7 @@ class PciIdIndexIntegrationTest {
             PciReconciler.SET_LOCAL_TENANT, PciReconciler.COUNT_TIMEOUT, Duration.ofSeconds(60));
         r.idBuildGate(() -> gate2);
         r.retireNameIndexesWhen(() -> gate3);
+        r.idReadersPresent(() -> readers);
         return r;
     }
 
@@ -783,5 +790,261 @@ class PciIdIndexIntegrationTest {
             }
             holder.rollback();
         }
+    }
+
+    // -- linda 2026-11-22: the retire's structural guard, and the gate 3 latch ---------------------------------
+
+    @Test
+    void aLatchedGate3WithTheReadersAbsent_dropsNoNameIndex_andWithThemPresentDropsThem() throws Exception {
+        String tenant = newTenant("guard");
+        long id = collection(tenant, name("guard"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        gate3 = true;                   // the latched gate 3
+        readers = false;                // IdReaders.PRESENT is false or the class is absent
+
+        PassReport without = r.reconcileOnce();
+
+        assertThat(without.drops()).as("no name index is dropped without the readers").isZero();
+        assertThat(without.builds()).as("and the name family is not retired, so nothing builds it differently").isZero();
+        assertThat(validNameIndexed(tenant)).containsExactly(name("guard"));
+        assertThat(validIdIndexed(tenant)).containsExactly(id);
+
+        readers = true;
+        PassReport with = r.reconcileOnce();
+
+        assertThat(with.drops()).isEqualTo(1);
+        assertThat(validNameIndexed(tenant)).isEmpty();
+        assertThat(validIdIndexed(tenant)).containsExactly(id);
+    }
+
+    CompletionBootWork reporter(PciReconciler r) {
+        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS),
+            new CompletionCheck.ReadSet(List.of(), List.of()), r.gate3Source(), List.of(c -> true));
+    }
+
+    static final org.jooq.Table<?> LATCH = DSL.table(DSL.name("nexus", "rdr229_gate_latch"));
+
+    boolean latchRow(String gate) throws Exception {
+        return asSuperuser(su -> su.fetchExists(su.selectOne().from(LATCH).where(DSL.field(DSL.name("gate"), String.class).eq(gate))));
+    }
+
+    @Test
+    void gate3Latches_andStaysLatchedWhileTheLiveGate3GoesFalseOnAnInvalidIdIndex_andANewReporterReadsItAgain() throws Exception {
+        String tenant = newTenant("latch");
+        collection(tenant, name("latchA"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());                 // a clean slate: another test may have latched
+        var reporter = reporter(r);
+        try {
+            var held = reporter.refresh();
+            assertThat(held.gate3()).as("every id index valid, the extras hold: %s", held.gate3Why()).isTrue();
+            assertThat(held.gate3Latched()).as("the check latched it").isTrue();
+            assertThat(reporter.gate3Latched()).isTrue();
+            assertThat(latchRow(CompletionCheck.GATE3)).as("the row is in the database").isTrue();
+
+            // A second collection whose id build is killed: its id index is INVALID, so the live gate 3 goes false.
+            gate2 = false;
+            collection(tenant, name("latchB"), 300);
+            r.reconcileOnce();                                            // B's name index
+            gate2 = true;
+            try (HeldWrite heldWrite = new HeldWrite(tenant)) {
+                CompletableFuture<PassReport> pass = CompletableFuture.supplyAsync(r::reconcileOnce, async);
+                await(() -> hasInvalidId(tenant), "B's concurrent id build's invalid index");
+                terminateBuilder();
+                heldWrite.close();
+                pass.get(60, TimeUnit.SECONDS);
+            }
+            var after = reporter.refresh();
+            assertThat(after.gate3()).as("the live gate 3 is false").isFalse();
+            assertThat(after.idIndexInvalid()).as("and says why, on its own").isTrue();
+            assertThat(after.gate3Latched()).as("the latched value stays true").isTrue();
+            assertThat(reporter.gate3Latched()).isTrue();
+            assertThat(reporter.statusJson()).contains("\"gate3_latched\":true").contains("\"id_index_invalid\":true").contains("\"gate3\":false");
+
+            // A new engine over the same database reads the latch.
+            var restarted = reporter(r);
+            try {
+                restarted.refresh();
+                assertThat(restarted.gate3Latched()).as("a new reporter over the same database reads latched").isTrue();
+            } finally {
+                restarted.close();
+            }
+
+            // A latch row from before a restore: gone from the database, so a new reporter reads not latched. The old one is sticky.
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+            var restored = reporter(r);
+            try {
+                var read = restored.refresh();
+                assertThat(read.gate3()).as("non-vacuity: gate 3 is still false, so nothing writes the row back").isFalse();
+                assertThat(read.gate3Latched()).isFalse();
+                assertThat(restored.gate3Latched()).as("a restore that lost the row reads not latched").isFalse();
+                assertThat(reporter.gate3Latched()).as("an engine that already saw the row keeps it for its life").isTrue();
+            } finally {
+                restored.close();
+            }
+        } finally {
+            reporter.close();
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
+    CompletionBootWork reporter(PciReconciler r, CompletionCheck.Gate3LatchWriter seam) {
+        return new CompletionBootWork(new BootWorkRegistry(Clock.systemUTC()), new AdminConnection(pg.getJdbcUrl(), ADMIN_ROLE, ADMIN_PASS),
+            new CompletionCheck.ReadSet(List.of(), List.of()), r.gate3Source(), List.of(c -> true), seam);
+    }
+
+    @Test
+    void theLatchIsWrittenOnItsOwnSession_notTheReadOnlyOne_andThroughASeamThatCanFailOrWait() throws Exception {
+        String tenant = newTenant("seam");
+        collection(tenant, name("seam"), 300);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        try {
+            // The check's own session is read only at the server: a write on it is refused (25006), so the row is never written there.
+            try (Connection admin = adminDs.getConnection()) {
+                DSLContext readOnly = DSL.using(admin, SQLDialect.POSTGRES);
+                // as the check's own session is opened (CompletionBootWork.DbReader): default_transaction_read_only = on. The connection is
+                // pooled, so the setting is put back whatever happens.
+                readOnly.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("default_transaction_read_only"), DSL.val("on"),
+                    DSL.inline(false))).fetch();
+                try {
+                    assertThat(readOnly.select(DSL.function("current_setting", SQLDataType.VARCHAR, DSL.val("transaction_read_only")))
+                        .fetchOne(0, String.class)).as("non-vacuity: this is a read-only session").isEqualTo("on");
+                    org.assertj.core.api.Assertions.assertThatThrownBy(() -> CompletionCheck.insertLatch(readOnly, CompletionCheck.GATE3, "v"))
+                        .as("the latch INSERT cannot run on the read-only session").hasMessageContaining("read-only");
+                } finally {
+                    readOnly.select(DSL.function("set_config", SQLDataType.VARCHAR, DSL.val("default_transaction_read_only"), DSL.val("off"),
+                        DSL.inline(false))).fetch();
+                }
+            }
+            assertThat(latchRow(CompletionCheck.GATE3)).isFalse();
+
+            // A writer that throws: gate 3 holds, nothing is latched (not the row, not the flag), and the failure does not escape the check.
+            var failing = reporter(r, writeRow -> { throw new IllegalStateException("the rename lock was refused"); });
+            try {
+                var read = failing.refresh();
+                assertThat(read.gate3()).as("non-vacuity: gate 3 holds: %s", read.gate3Why()).isTrue();
+                assertThat(read.gate3Latched()).isFalse();
+                assertThat(failing.gate3Latched()).isFalse();
+                assertThat(latchRow(CompletionCheck.GATE3)).as("the row is absent").isFalse();
+            } finally {
+                failing.close();
+            }
+
+            // A writer that never runs the row write latches nothing either.
+            var skipping = reporter(r, writeRow -> { });
+            try {
+                assertThat(skipping.refresh().gate3Latched()).isFalse();
+                assertThat(latchRow(CompletionCheck.GATE3)).isFalse();
+            } finally {
+                skipping.close();
+            }
+
+            // A writer that waits (P3.7: for in-flight renames, under its lock) still latches once it returns, after the row is written.
+            java.util.concurrent.atomic.AtomicBoolean rowWritten = new java.util.concurrent.atomic.AtomicBoolean();
+            java.util.concurrent.atomic.AtomicReference<Boolean> flagWhenRowWritten = new java.util.concurrent.atomic.AtomicReference<>();
+            var holder = new CompletionBootWork[1];
+            holder[0] = reporter(r, writeRow -> {
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                writeRow.run();
+                rowWritten.set(true);
+                flagWhenRowWritten.set(holder[0].gate3Latched());   // the in-process flag is not set before the writer returns
+            });
+            try {
+                long start = System.nanoTime();
+                var read = holder[0].refresh();
+                assertThat(System.nanoTime() - start).as("the read waited for the writer").isGreaterThanOrEqualTo(TimeUnit.MILLISECONDS.toNanos(250));
+                assertThat(rowWritten).isTrue();
+                assertThat(flagWhenRowWritten.get()).as("the flag is set only after the writer returns").isFalse();
+                assertThat(read.gate3Latched()).isTrue();
+                assertThat(holder[0].gate3Latched()).isTrue();
+                assertThat(latchRow(CompletionCheck.GATE3)).isTrue();
+            } finally {
+                holder[0].close();
+            }
+        } finally {
+            asSuperuser(su -> su.deleteFrom(LATCH).execute());
+        }
+    }
+
+    // -- elsinore's _by_id search functions: which query shapes use the id-predicate partial index ----------------
+
+    /** The ANN query vector as pgvector text, 384 wide. */
+    static String vectorText() {
+        StringBuilder b = new StringBuilder("[");
+        for (int i = 0; i < 384; i++) {
+            b.append(i == 0 ? "" : ",").append(i == 5 ? "1" : "0");
+        }
+        return b.append(']').toString();
+    }
+
+    long idxScan(String index) throws Exception {
+        return asSuperuser(su -> su.select(DSL.field(DSL.name("idx_scan"), Long.class))
+            .from(DSL.table(DSL.name("pg_catalog", "pg_stat_user_indexes")))
+            .where(DSL.field(DSL.name("indexrelname"), String.class).eq(index)).fetchOne(0, Long.class));
+    }
+
+    @Test
+    void whichByIdQueryShapesUseTheIdPredicatePartialIndex() throws Exception {
+        String tenant = newTenant("shapes");
+        long id = collection(tenant, name("shapes"), 400);
+        PciReconciler r = reconciler(settings(16));
+        r.reconcileOnce();
+        gate2 = true;
+        r.reconcileOnce();
+        String index = PciCatalog.indexNameById(M384, tenant, id);
+        assertThat(validIdIndexed(tenant)).as("non-vacuity: the id index exists and is valid").containsExactly(id);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.runSuperuserTestChangelog(su, "db/changelog-test/db.changelog-test-id-index-plan-shapes.xml",
+                "databasechangelog_test_id_shapes", java.util.Map.of("svcRole", PgContainerHelper.SVC_USERNAME));
+        }
+        java.util.Map<String, String> plans = new java.util.LinkedHashMap<>();
+        try (Connection svc = svcDs.getConnection()) {
+            DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
+            for (String shape : List.of("a", "b", "c", "d")) {
+                plans.put(shape, ctx.select(DSL.function(DSL.name("nexus", "test_id_shape_plan"), SQLDataType.CLOB, DSL.val(shape),
+                    DSL.val(tenant), DSL.val(M384), DSL.val(id), DSL.val(vectorText()))).fetchOne(0, String.class));
+            }
+        }
+        // plpgsql: eight calls on one session, the index's idx_scan read after each. The plan cache keeps a custom plan for the first five calls and
+        // may then adopt a generic one, which cannot prove the statement implies the partial index's predicate.
+        java.util.Map<String, String> perCall = new java.util.LinkedHashMap<>();
+        for (String mode : List.of("direct", "execute")) {
+            try (Connection svc = svcDs.getConnection()) {
+                svc.setAutoCommit(true);
+                DSLContext ctx = DSL.using(svc, SQLDialect.POSTGRES);
+                StringBuilder used = new StringBuilder();
+                for (int call = 1; call <= 8; call++) {
+                    long before = idxScan(index);
+                    ctx.select(DSL.function(DSL.name("nexus", "test_id_shape_call"), SQLDataType.BIGINT, DSL.val(mode), DSL.val(tenant),
+                        DSL.val(M384), DSL.val(id), DSL.val(vectorText()))).fetchOne(0, Long.class);
+                    used.append(idxScan(index) > before ? 'I' : '-');
+                }
+                perCall.put(mode, used.toString());
+            }
+        }
+        String own = "Index Scan using " + leaf(tenant).name() + "_embedding_384_idx";
+        // Measured on PG 17 with enable_seqscan, enable_bitmapscan and enable_sort off (see the changelog), as nexus_svc with the tenant qual, 400 rows.
+        assertThat(plans.get("a")).as("(a) collection_id = 42, an int4 literal: the partial index serves it").contains("Index Scan using " + index);
+        assertThat(plans.get("b")).as("(b) collection_id = 42::bigint").contains("Index Scan using " + index);
+        assertThat(plans.get("c")).as("(c) PREPAREd $1 bigint, force_generic_plan: the planner cannot prove the predicate, so the leaf's own HNSW index serves it")
+            .doesNotContain(index).contains(own);
+        assertThat(plans.get("d")).as("(d) the same, force_custom_plan: the partial index again").contains("Index Scan using " + index);
+        assertThat(perCall.get("direct")).as("(e) a plpgsql variable used directly: every call, the sixth to the eighth included (I = the partial index served the call)")
+            .isEqualTo("IIIIIIII");
+        assertThat(perCall.get("execute")).as("(f) EXECUTE format('... = %L', v): every call").isEqualTo("IIIIIIII");
     }
 }

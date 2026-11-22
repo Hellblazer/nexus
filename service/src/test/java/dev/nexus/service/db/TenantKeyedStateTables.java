@@ -748,6 +748,7 @@ final class TenantKeyedStateTables {
         notKeyed.put("PciReconciler.failures", PCI_OFF);
         // nexus-p2m1x.22 (RDR-229 P3.4): the id-predicate half's memory. The planned keys are replaced whole by each pass that saw
         // every leaf (and dropped to unknown by one that did not); the gate and the per-pass plan values are not kept.
+        notKeyed.put("PciIdBuilds.readers", "whether this engine's id readers are present (P3.5's IdReaders.PRESENT, by reflection) as a supplier, bound once at boot; a callback, no data");
         notKeyed.put("PciIdBuilds.gate3", "the completion check's gate 3 as a supplier, bound once at boot; a callback, no data");
         notKeyed.put("PciGate3Coverage.vacuity", "the empty-case scan's last answer (a boolean and a time), kept ten minutes; names no tenant or collection");
         notKeyed.put("PciIdBuilds.gate2", "the completion check's gate 2 as a supplier, bound once at boot; a callback, no data");
