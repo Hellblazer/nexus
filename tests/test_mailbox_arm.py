@@ -103,6 +103,31 @@ class TestArmBlock:
         assert "tuple_subscribe" not in text
 
 
+class TestAnUnboundSession:
+    """RDR-253 Phase 2 review r1 (I2): the line says what is true of a session with no identity."""
+
+    def test_the_instruction_says_mail_waits_for_the_bind(self) -> None:
+        text = mailbox_arm_instruction(bound=False)
+        assert ARM_MARKER in text
+        assert "not bound to an identity" in text and "no mail reaches it until it is" in text
+        assert "nx identity show" in text
+        assert "nothing to subscribe" not in text
+
+    def test_it_is_no_longer_than_the_bound_line(self) -> None:
+        assert len(mailbox_arm_instruction(bound=False).encode()) <= len(mailbox_arm_instruction().encode())
+
+    def test_arm_block_passes_the_bind_result_through(self, tmp_path: Path) -> None:
+        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=True):
+            unbound = arm_block("sess-1", bound=False, config_dir=tmp_path)
+            bound = arm_block("sess-1", bound=True, config_dir=tmp_path)
+        assert "not bound to an identity" in unbound
+        assert "not bound to an identity" not in bound
+
+    def test_it_is_still_absent_when_the_surface_is_down(self, tmp_path: Path) -> None:
+        with patch("nexus.mailbox_arm.tuple_surface_available", return_value=False):
+            assert arm_block("sess-1", bound=False, config_dir=tmp_path) == ""
+
+
 class TestNoRegistryGuessing:
     """nexus-6konb.9 defect fix: the module must not read ANY file to guess
     an instance name -- the old machine-wide `<config>/tuple-watch/addresses`

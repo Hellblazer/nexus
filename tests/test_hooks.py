@@ -1,4 +1,5 @@
 """Session hook tests: session_start and session_end lifecycle."""
+import os
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -323,8 +324,12 @@ class TestNoClearedRecordIsWritten:
         watch = tmp_path / "tuple-watch"
         watch.mkdir(parents=True)
         (watch / "cleared.old-one").write_text("s1\n", encoding="utf-8")
+        (watch / "cleared.just-written").write_text("s2\n", encoding="utf-8")
+        two_hours_ago = time.time() - 2 * 3600
+        os.utime(watch / "cleared.old-one", (two_hours_ago, two_hours_ago))
         self._session_start(monkeypatch, tmp_path, source="startup")
         assert not (watch / "cleared.old-one").exists()
+        assert (watch / "cleared.just-written").exists(), "a live 8.5.x session between /clear and its next prompt reads it"
 
     def test_a_cleanup_failure_does_not_crash_session_start(self, tmp_path, monkeypatch) -> None:
         with patch("nexus.session_marker.remove_legacy_cleared_records", side_effect=RuntimeError("boom")):
@@ -857,6 +862,15 @@ class TestRenderSessionStartIsPure:
 # genuinely absent.
 
 
+def _bind_result(action: str):
+    """The identity leg's result for a SessionStart whose bind ended *action* (``bound``, ``pending``, ``unbound``)."""
+    from nexus.hooks.identity_bind import IdentityResult
+    from nexus.identity.binder import BindOutcome
+
+    outcome = BindOutcome(action=action, row="test", identity="i7" if action == "bound" else None)
+    return IdentityResult(outcome=outcome)
+
+
 class TestMailboxArmIntegration:
     @pytest.fixture(autouse=True)
     def _no_identity_bind(self, monkeypatch) -> None:
@@ -940,6 +954,7 @@ class TestMailboxArmIntegration:
         with (
             _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+            _patch("nexus.hooks._bind_identity", return_value=_bind_result("bound")),
         ):
             output = session_start(claude_session_id="s-6konb9-instance-known")
         assert "nexus-registered-instance" not in output
@@ -956,11 +971,51 @@ class TestMailboxArmIntegration:
         with (
             _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
             _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+            _patch("nexus.hooks._bind_identity", return_value=_bind_result("bound")),
         ):
             output = session_start(claude_session_id="s-6konb9-flag")
         assert "--dangerously-load-development-channels server:nexus" in output
         assert "one-keystroke confirmation dialog" in output
         assert "drain hook" in output
+
+    @pytest.mark.parametrize("result", [_bind_result("pending"), _bind_result("unbound"), None], ids=["pending", "unbound", "no-leg"])
+    def test_an_unbound_session_is_told_no_mail_reaches_it_yet(self, result, tmp_path: Path) -> None:
+        """RDR-253 Phase 2 review r1 (I2): mail is addressed to identities alone, so a session whose bind did not
+        complete must not be told its mail arrives."""
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+            _patch("nexus.hooks._bind_identity", return_value=result),
+        ):
+            output = session_start(claude_session_id="s-6konb9-unbound")
+        assert mailbox_arm.ARM_MARKER in output
+        assert "not bound to an identity" in output and "no mail reaches it until it is" in output
+        assert "nothing to subscribe" not in output and "delivered over the channel" not in output
+
+    def test_a_bound_session_is_told_its_mail_goes_to_its_identity(self, tmp_path: Path) -> None:
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+            _patch("nexus.hooks._bind_identity", return_value=_bind_result("bound")),
+        ):
+            output = session_start(claude_session_id="s-6konb9-bound")
+        assert "goes to its identity's mailbox" in output and "not bound to an identity" not in output
+
+    def test_a_compaction_keeps_the_bound_wording(self, tmp_path: Path) -> None:
+        """A ``skipped`` outcome is a compaction of a session that already holds its binding."""
+        from unittest.mock import patch as _patch
+
+        with (
+            _patch("nexus.config.nexus_config_dir", return_value=tmp_path),
+            _patch("nexus.mailbox_arm.tuple_surface_available", return_value=True),
+            _patch("nexus.hooks._bind_identity", return_value=_bind_result("skipped")),
+        ):
+            output = session_start(claude_session_id="s-6konb9-compact", source="compact")
+        assert "goes to its identity's mailbox" in output
 
     def test_absent_when_tuple_surface_unavailable_end_to_end(
         self, tmp_path: Path,

@@ -13,6 +13,8 @@ pinned here too; since nexus-t9klx it is a wheel module that calls
 """
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 from nexus.session_marker import (
@@ -51,13 +53,42 @@ class TestRemoveLegacyClearedRecords:
     """RDR-253 Phase 2: nothing writes or reads a ``cleared.<session id>`` record any more (a session id is not a mail
     address). An older client may have left some; SessionStart deletes them, since the drain's 7-day prune is gone."""
 
-    def test_deletes_every_cleared_record_and_nothing_else(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _aged(path: Path, age_s: float) -> None:
+        mtime = time.time() - age_s
+        os.utime(path, (mtime, mtime))
+
+    def test_deletes_every_old_cleared_record_and_nothing_else(self, tmp_path: Path) -> None:
         watch = tmp_path / "tuple-watch"
         watch.mkdir()
         for name in ("cleared.s2", "cleared.s3", "session.4242", "i12.pending.json"):
             (watch / name).write_text("x\n", encoding="utf-8")
+            self._aged(watch / name, 2 * 3600)
         assert remove_legacy_cleared_records(tmp_path) == 2
         assert sorted(p.name for p in watch.iterdir()) == ["i12.pending.json", "session.4242"]
+
+    def test_a_record_younger_than_an_hour_stays_for_a_live_older_session(self, tmp_path: Path) -> None:
+        """An 8.5.x session between ``/clear`` and its next prompt still reads the record it just wrote."""
+        watch = tmp_path / "tuple-watch"
+        watch.mkdir()
+        young, old = watch / "cleared.young", watch / "cleared.old"
+        for path in (young, old):
+            path.write_text("x\n", encoding="utf-8")
+        self._aged(young, 600)
+        self._aged(old, 3 * 3600)
+        assert remove_legacy_cleared_records(tmp_path) == 1
+        assert young.exists() and not old.exists()
+
+    def test_the_age_bound_is_one_hour(self, tmp_path: Path) -> None:
+        watch = tmp_path / "tuple-watch"
+        watch.mkdir()
+        record = watch / "cleared.edge"
+        record.write_text("x\n", encoding="utf-8")
+        now = 1_000_000.0
+        os.utime(record, (now - 3599, now - 3599))
+        assert remove_legacy_cleared_records(tmp_path, now=now) == 0
+        os.utime(record, (now - 3601, now - 3601))
+        assert remove_legacy_cleared_records(tmp_path, now=now) == 1
 
     def test_no_directory_is_nothing_to_do(self, tmp_path: Path) -> None:
         assert remove_legacy_cleared_records(tmp_path) == 0

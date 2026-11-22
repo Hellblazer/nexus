@@ -19,7 +19,7 @@ _TOPIC = "board/ci/nexus-develop--done"
 
 
 def _subscribe(subs: SubscriptionSet, topic: str) -> None:
-    subs.subscribe(topic, templates=[], store_factory=lambda: None, state_dir=None)  # type: ignore[arg-type]
+    subs.subscribe(topic, templates=[])  # type: ignore[arg-type]
 
 
 def _delivered(subs: SubscriptionSet) -> list[str]:

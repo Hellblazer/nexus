@@ -174,6 +174,32 @@ class TestOwnRow:
         assert is_own_row(_row(sender_from=self._S, stamp=None, known=False), self._S)
         assert not is_own_row(_row(sender_from="peer", stamp=None, known=False), self._S)
 
+    def test_without_a_stamp_a_from_naming_the_waiters_identity_is_own(self) -> None:
+        """A bound sender's default ``from`` is its identity (RDR-253 Phase 2), so on an engine that stamps no sender
+        a session's own board posts would wake its own wait unless the identity counts as own too."""
+        from nexus.tuple_wait import is_own_row  # noqa: PLC0415 — test-local
+
+        assert is_own_row(_row(sender_from="i77", stamp=None, known=False), self._S, identity="i77")
+        assert not is_own_row(_row(sender_from="i78", stamp=None, known=False), self._S, identity="i77")
+        assert not is_own_row(_row(sender_from="i77", stamp=None, known=False), self._S), "no identity: not own"
+
+    def test_the_loop_drops_an_unstamped_row_from_its_own_identity(self) -> None:
+        from nexus.db.t2.records import WaitResult  # noqa: PLC0415 — test-local
+        from nexus.tuple_wait import WaitOutcome, _process, subscriber_for  # noqa: PLC0415 — test-local
+
+        mine = _row(sender_from="i77", stamp=None, known=False)
+        peer = _row(sender_from="i78", stamp=None, known=False)
+        outcome = WaitOutcome(reason="")
+        results = [WaitResult(subspace="board/x", tuples=[mine, peer], subscriber=subscriber_for(self._S))]
+        _process(results, self._S, outcome, "i77")
+        assert outcome.own_dropped == 1 and len(outcome.lines) == 1
+
+    def test_a_stamp_still_decides_over_the_identity(self) -> None:
+        """When the engine stamps, a from naming this identity but a peer's stamp is a peer's row."""
+        from nexus.tuple_wait import is_own_row  # noqa: PLC0415 — test-local
+
+        assert not is_own_row(_row(sender_from="i77", stamp=str(uuid.uuid4())), self._S, identity="i77")
+
 
 class TestStopConditions:
     def _run(self, store, **kw):

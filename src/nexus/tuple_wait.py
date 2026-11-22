@@ -119,10 +119,11 @@ def build_specs(
     return specs
 
 
-def is_own_row(row: TupleRow, session_id: str) -> bool:
+def is_own_row(row: TupleRow, session_id: str, identity: str | None = None) -> bool:
     """True when this session wrote *row*. The engine's stamp decides when the
     engine renders one; only an engine that renders none falls back to the
-    row's claimed ``from``. A row stamped with this session but sent from an
+    row's claimed ``from``: the session id, or *identity* (a bound sender's
+    default ``from`` is its identity, RDR-253 Phase 2). A row stamped with this session but sent from an
     agent id is a subagent's (subagents share the parent's token, JDR-001):
     it is mail TO the session, not its own, and wakes it, as the channel and
     the drain hook deliver it."""
@@ -133,7 +134,9 @@ def is_own_row(row: TupleRow, session_id: str) -> bool:
         if isinstance(claimed, str) and _is_agent_id(claimed):
             return False
         return bool(row.sender_session) and _same_session(session_id, row.sender_session)
-    return bool(claimed) and _same_session(session_id, claimed)
+    if not claimed:
+        return False
+    return _same_session(session_id, claimed) or (bool(identity) and claimed == identity)
 
 
 def render_row(subspace: str, row: TupleRow) -> str:
@@ -153,7 +156,7 @@ def render_row(subspace: str, row: TupleRow) -> str:
 
 
 def _process(
-    results: list[WaitResult], session_id: str, outcome: WaitOutcome,
+    results: list[WaitResult], session_id: str, outcome: WaitOutcome, identity: str | None = None,
 ) -> bool:
     """Fold one park's results into *outcome*; True when the waiter was
     superseded. Raises :class:`EngineTooOldError` on a result whose subscriber
@@ -171,7 +174,7 @@ def _process(
                 "or newer"
             )
         for row in result.tuples:
-            if is_own_row(row, session_id):
+            if is_own_row(row, session_id, identity):
                 outcome.own_dropped += 1
                 continue
             outcome.lines.append(render_row(result.subspace, row))
@@ -245,7 +248,7 @@ def run_wait(
             nap(min(ERROR_BACKOFF_S * 2 ** (errors - 1), ERROR_BACKOFF_CAP_S))
             continue
         errors = 0
-        superseded = _process(results, session_id, outcome)
+        superseded = _process(results, session_id, outcome, identity)
         if outcome.lines:
             outcome.reason = DELIVERED
             return outcome

@@ -154,7 +154,7 @@ def test_a_load_that_fails_after_subscribing_releases_the_topics() -> None:
 def test_an_aura_past_the_topic_cap_is_refused_by_name() -> None:
     h = _Harness(auras=_auras("fits", "over"))
     for i in range(MAX_BOARD_TOPICS - 1):
-        h.subs.subscribe(f"board/t{i}", templates=[], store_factory=lambda: None, state_dir=None)  # type: ignore[arg-type]
+        h.subs.subscribe(f"board/t{i}", templates=[])  # type: ignore[arg-type]
     with structlog.testing.capture_logs() as logs:
         h.loader.on_resolve("tamsin")
     assert [a.name for a in h.attached[0]] == ["fits"]

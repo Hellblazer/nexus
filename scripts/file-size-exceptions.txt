@@ -146,7 +146,7 @@ tests/e2e/lib/plugin_out_of_repo.py 1179
 tests/e2e/lib/setup_journey.py 1226
 tests/fixtures/hal_git_policy_hook.py 1442
 tests/hooks/test_compact_checkpoint.py 1616
-tests/hooks/test_mailbox_drain_hook.py 3270
+tests/hooks/test_mailbox_drain_hook.py 2996
 tests/hooks/test_nx_setup.py 2980
 tests/hooks/test_nx_setup_credentials_page.py 2159
 tests/hooks/test_rdr_verb.py 1157
@@ -219,7 +219,6 @@ tests/test_macos_guest_driver.py 1494
 tests/test_mcp_channel.py 3414
 tests/test_mcp_server.py 3625
 tests/test_mcp_tool_description_lint.py 1250
-tests/test_mcp_tuple_tools.py 1101
 tests/test_memory_curate.py 1365
 tests/test_mineru_child_dll_dirs.py 1346
 tests/test_mode_declarations_are_explicit.py 1757
@@ -273,7 +272,6 @@ tests/test_storage_boundary_lint.py 1630
 tests/test_storage_touch_guard_report.py 2040
 tests/test_store_cmd.py 1216
 tests/test_stranded_install.py 1417
-tests/test_subscriptions.py 1253
 tests/test_suite_lease.py 1457
 tests/test_t3.py 1701
 tests/test_t3_quarantine_restore.py 1193
@@ -281,7 +279,7 @@ tests/test_taxonomy.py 4188
 tests/test_taxonomy_review_auto.py 1667
 tests/test_tenant_pool.py 1178
 tests/test_tmp_root.py 1873
-tests/test_tuple_cmd.py 1294
+tests/test_tuple_cmd.py 1179
 tests/test_upgrade_finish.py 4921
 tests/test_vector_retry.py 1165
 tests/test_vw594_fence_coverage_gate.py 1217

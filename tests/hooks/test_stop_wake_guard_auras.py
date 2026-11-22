@@ -106,7 +106,7 @@ def test_the_session_subscribing_the_aura_topic_is_counted(tmp_path: Path, monke
     subs = SubscriptionSet(session_id=_SID)
     subs.subscribe_aura("ci-red", _TOPIC)
     # The session's own subscribe, after the aura's hold (a board topic never touches the store).
-    subs.subscribe(_TOPIC, templates=[], store_factory=_no_store, state_dir=None)  # type: ignore[arg-type]
+    subs.subscribe(_TOPIC, templates=[])  # type: ignore[arg-type]
     record, decision = _run_waiter_and_decide(tmp_path, monkeypatch, subs)
     assert record["board_topics"] == [_TOPIC]
     assert not decision.block and decision.reason == "ci-wake-armed", decision

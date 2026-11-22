@@ -3,7 +3,7 @@
 """The tuple-watch session-marker contract (RDR-211 nexus-rplay.24).
 
 Rehomed out of the former CLI mailbox-watch loop module ahead of its
-deletion (RDR-211 nexus-rplay.14, a later bead in the same RDR): these five
+deletion (RDR-211 nexus-rplay.14, a later bead in the same RDR): these
 functions are the part of that module OTHER modules import at runtime --
 ``nexus.tuple_directory.resolve_default_from`` (``_read_session_marker``,
 for ``mailbox_send``'s default ``from``) and ``nexus.hooks``'s SessionStart handoff
@@ -26,7 +26,7 @@ single-purpose home for the marker (and, until RDR-253 Phase 2, its cleared reco
 **On-disk paths are UNCHANGED (byte-identical)** from the former watcher
 module, because files already on disk are read by those names.
 
-The former watcher module re-exported these five names as thin
+The former watcher module re-exported these names as thin
 pass-throughs while it still existed, so every importer kept working
 unchanged across the move; RDR-211 nexus-rplay.14 deleted that module (and
 its re-export) outright once nothing else needed it.
@@ -114,13 +114,26 @@ def _read_session_marker(state_dir: Path, claude_pid: int) -> str | None:
         return None
 
 
-def remove_legacy_cleared_records(state_dir: Path) -> int:
-    """Delete every ``<state_dir>/tuple-watch/cleared.<session id>`` record and return how many went.
+#: How old a legacy ``cleared.<session id>`` record must be before SessionStart deletes it. An 8.5.x session between
+#: ``/clear`` and its next prompt still reads the record it just wrote, so a young one is left alone.
+LEGACY_CLEARED_MIN_AGE_S: float = 3600.0
+
+
+def remove_legacy_cleared_records(
+    state_dir: Path, *, min_age_s: float = LEGACY_CLEARED_MIN_AGE_S, now: float | None = None,
+) -> int:
+    """Delete the ``<state_dir>/tuple-watch/cleared.<session id>`` records older than *min_age_s* (one hour) and return
+    how many went.
 
     RDR-208 Phase 2 Step 3 had ``/clear`` write one naming the mailbox the old session id stranded, and the drain hook
-    empty it. A session id is no longer a mail address (RDR-253 Phase 2), so nothing writes or reads one; an older client
-    may have left some, and the drain's 7-day prune that used to age them out is gone, so SessionStart removes them (a
-    glob of one small directory). Best-effort: an unreadable directory or an undeletable file is skipped."""
+    empty it. A session id is no longer a mail address (RDR-253 Phase 2), so nothing in this release writes or reads
+    one; an older client may have left some, and the drain's 7-day prune that used to age them out is gone, so
+    SessionStart removes them (a glob of one small directory). A record younger than *min_age_s* stays: a live 8.5.x
+    session between ``/clear`` and its next prompt still reads its own, and deleting it would strand the old mailbox's
+    mail. Best-effort: an unreadable directory, a vanished file or an undeletable one is skipped."""
+    import time  # noqa: PLC0415 — only this cleanup reads the clock
+
+    cutoff = (now if now is not None else time.time()) - min_age_s
     removed = 0
     try:
         found = list((state_dir / _STATE_SUBDIR).glob("cleared.*"))
@@ -128,6 +141,8 @@ def remove_legacy_cleared_records(state_dir: Path) -> int:
         return 0
     for path in found:
         try:
+            if path.stat().st_mtime > cutoff:
+                continue
             path.unlink()
             removed += 1
         except OSError:

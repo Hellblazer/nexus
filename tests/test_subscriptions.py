@@ -59,7 +59,6 @@ class TestSubscribeValidation:
         with pytest.raises(SchemaViolationError, match="`in`"):
             s.subscribe(
                 "queue/builds", templates=_FIXTURE_TEMPLATES,
-                store_factory=_poison_store_factory(), state_dir=tmp_path,
             )
         assert s.entries() == [{"subspace": s.identity_mailbox}]
 
@@ -68,7 +67,6 @@ class TestSubscribeValidation:
         with pytest.raises(SchemaViolationError, match="`in`"):
             s.subscribe(
                 "lock/release-train", templates=_FIXTURE_TEMPLATES,
-                store_factory=_poison_store_factory(), state_dir=tmp_path,
             )
         assert len(s.entries()) == 1
 
@@ -77,18 +75,17 @@ class TestSubscribeValidation:
         with pytest.raises(SchemaViolationError):
             s.subscribe(
                 "directory/some-name", templates=_FIXTURE_TEMPLATES,
-                store_factory=_poison_store_factory(), state_dir=tmp_path,
             )
 
     def test_empty_subspace_is_refused(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
-            s.subscribe("", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+            s.subscribe("", templates=[])
 
     def test_mailbox_with_no_name_is_refused(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError):
-            s.subscribe("mailbox/", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+            s.subscribe("mailbox/", templates=[])
 
 
 
@@ -99,7 +96,7 @@ class TestMailboxSubscribeIsRefused:
     def test_a_mailbox_that_is_not_the_identitys_is_refused_with_no_engine_call_or_file(self, tmp_path, subspace):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
         with pytest.raises(SchemaViolationError, match="not subscribable.*identity mailbox"):
-            s.subscribe(subspace, templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+            s.subscribe(subspace, templates=[])
         assert list(tmp_path.rglob("*")) == []
         assert s.entries() == [{"subspace": "mailbox/i5"}] and s.version == 0
 
@@ -127,20 +124,18 @@ class TestMailboxSubscribeIsRefused:
 
     def test_thirty_second_board_topic_accepted_thirty_third_refused(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        poison = _poison_store_factory()
         for i in range(MAX_BOARD_TOPICS):
-            s.subscribe(f"board/topic-{i}", templates=[], store_factory=poison, state_dir=tmp_path)
+            s.subscribe(f"board/topic-{i}", templates=[])
         assert len(s.entries()) == MAX_BOARD_TOPICS + 1  # + the session mailbox
         with pytest.raises(SchemaViolationError):
-            s.subscribe(f"board/topic-{MAX_BOARD_TOPICS}", templates=[], store_factory=poison, state_dir=tmp_path)
+            s.subscribe(f"board/topic-{MAX_BOARD_TOPICS}", templates=[])
         assert len(s.entries()) == MAX_BOARD_TOPICS + 1  # unchanged by the refusal
 
     def test_re_subscribing_the_same_board_topic_is_idempotent(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        poison = _poison_store_factory()
-        s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
+        s.subscribe("board/release-notes", templates=[])
         version_after_first = s.version
-        s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
+        s.subscribe("board/release-notes", templates=[])
         assert s.version == version_after_first
         assert len(s.entries()) == 2
 
@@ -152,7 +147,7 @@ class TestObserver:
         seen: list[tuple[int, set[str]]] = []
         s.add_listener(lambda subs: seen.append((subs.version, {e["subspace"] for e in subs.entries()})))
 
-        s.subscribe("board/release-notes", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+        s.subscribe("board/release-notes", templates=[])
         assert len(seen) == 1
         version, subspaces = seen[0]
         assert version == 1
@@ -168,17 +163,16 @@ class TestObserver:
         calls = []
         cb = lambda subs: calls.append(subs.version)  # noqa: E731 — test-local
         s.add_listener(cb)
-        s.subscribe("board/a", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+        s.subscribe("board/a", templates=[])
         s.remove_listener(cb)
-        s.subscribe("board/b", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path)
+        s.subscribe("board/b", templates=[])
         assert calls == [1]
 
 
 class TestUnsubscribe:
     def test_removes_a_board_topic(self, tmp_path):
         s = SubscriptionSet(session_id=str(uuid.uuid4()), identity=IDENT)
-        poison = _poison_store_factory()
-        s.subscribe("board/release-notes", templates=[], store_factory=poison, state_dir=tmp_path)
+        s.subscribe("board/release-notes", templates=[])
         assert len(s.entries()) == 2
         s.unsubscribe("board/release-notes")
         assert s.entries() == [{"subspace": s.identity_mailbox}]
@@ -207,7 +201,7 @@ class TestPersistenceAcrossResumeAndClear:
 
         subs = load(t1_a, session_a)
         subs.subscribe(
-            "board/release-notes", templates=[], store_factory=_poison_store_factory(), state_dir=tmp_path,
+            "board/release-notes", templates=[],
         )
         persist(t1_a, subs)
 
@@ -245,7 +239,7 @@ class TestBoardStartPosition:
 
         before = datetime.now(UTC)
         s = SubscriptionSet(session_id="sess-a")
-        s.subscribe("board/ci/nexus-develop", templates=[], store_factory=lambda: None, state_dir=None)
+        s.subscribe("board/ci/nexus-develop", templates=[])
         [board] = s.entries()
         assert board["subspace"] == "board/ci/nexus-develop"
         since = datetime.fromisoformat(board["since"])
@@ -256,7 +250,7 @@ class TestBoardStartPosition:
         from nexus.mcp.subscriptions import SubscriptionSet
 
         s = SubscriptionSet(session_id="sess-a")
-        s.subscribe("board/ci/nexus-develop", templates=[], store_factory=lambda: None, state_dir=None)
+        s.subscribe("board/ci/nexus-develop", templates=[])
         [board] = s.entries()
         data = s.to_json()
         assert data["board"] == ["board/ci/nexus-develop"]  # the older list shape is kept
@@ -275,9 +269,9 @@ class TestBoardStartPosition:
         from nexus.mcp.subscriptions import SubscriptionSet
 
         s = SubscriptionSet(session_id="sess-a")
-        s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
+        s.subscribe("board/x", templates=[])
         first = s.entries()[0]["since"]
-        s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
+        s.subscribe("board/x", templates=[])
         assert s.entries()[0]["since"] == first
 
 

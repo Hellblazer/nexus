@@ -912,8 +912,6 @@ class TestChannelWaiterFakeStore:
         _inject_extra_mailbox(subs, addr_b)
         subs.subscribe(
             "board/release-notes", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
         )
         fake = _FakeTupleStore()
         fake.seed(addr_a, "a1", "first-a")
@@ -1021,8 +1019,6 @@ class TestChannelWaiterFakeStore:
         subs = _subs(session_id)
         subs.subscribe(
             "board/release-notes", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
         )
         fake = _FakeTupleStore()
         fake.seed("board/release-notes", "p1", "v7.50 shipped", dims={"from": "author-a", "kind": "note"})
@@ -1065,8 +1061,6 @@ class TestChannelWaiterFakeStore:
         subs = _subs(session_id)
         subs.subscribe(
             "board/release-notes", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
         )
         fake = _FakeTupleStore()
         fake.ignore_subscriber = True
@@ -1093,8 +1087,6 @@ class TestChannelWaiterFakeStore:
             subs = _subs(session_id)
             subs.subscribe(
                 "board/shared", templates=[],
-                store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-                state_dir=None,
             )
             sender = _FakeSender()
             senders.append(sender)
@@ -1125,8 +1117,6 @@ class TestChannelWaiterFakeStore:
 
         subs.subscribe(
             "board/late", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
         )
         fake.seed("board/late", "p1", "hi", dims={"from": "author-a", "kind": "note"})
 
@@ -1165,7 +1155,7 @@ class TestChannelWaiterRealEngine:
         subs = SubscriptionSet(session_id=session_id, identity=session_id)
         name = f"inst-{uuid.uuid4().hex[:8]}"
         with pytest.raises(SchemaViolationError):
-            subs.subscribe(f"mailbox/{name}", templates=[], store_factory=t2_ctx, state_dir=tmp_path)
+            subs.subscribe(f"mailbox/{name}", templates=[])
         tuple_out(
             f"mailbox/{name}", {"to": name}, {"from": "sender-leaked"},
             "should never be referenced", nonce=uuid.uuid4().hex,
@@ -1262,8 +1252,6 @@ class TestChannelWaiterRealEngine:
 
             subs.subscribe(
                 "board/late", templates=[],
-                store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-                state_dir=None,
             )
 
             after_subscribe = probe.park_stats().global_in_use
@@ -1503,8 +1491,6 @@ class TestChannelWaiterRealEngine:
         subs = _subs(session_id)
         subs.subscribe(
             board, templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("a board subscription never touches the store")),
-            state_dir=None,
         )
         written_ids: set[str] = set()
         written_lock = threading.Lock()
@@ -2059,8 +2045,6 @@ class TestWaiterSupersession:
         subs = _subs(session_id)
         subs.subscribe(
             "board/release-notes", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
         )
         first = channel.ChannelWaiter(session_id, _fake_store_factory(_FakeTupleStore()), subs, sender=_FakeSender())
         second = channel.ChannelWaiter(session_id, _fake_store_factory(_FakeTupleStore()), subs, sender=_FakeSender())
@@ -2470,8 +2454,6 @@ class TestStartupCatchupRead:
         subs = _subs(session_id)
         subs.subscribe(
             "board/release-notes", templates=[],
-            store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-            state_dir=None,
         )
         fake = _FakeTupleStore()
         fake.seed("board/release-notes", "p1", "hi")
@@ -2695,8 +2677,6 @@ def _board_subs(session_id: str, topic: str, *, since: str | None):
     subs = _subs(session_id)
     subs.subscribe(
         topic, templates=[],
-        store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
-        state_dir=None,
     )
     subs._board[topic] = since  # noqa: SLF001 -- pin the start position for the test
     return subs

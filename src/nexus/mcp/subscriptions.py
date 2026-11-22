@@ -256,8 +256,6 @@ class SubscriptionSet:
         subspace: str,
         *,
         templates: list[dict[str, Any]],
-        store_factory: Callable[[], Any] | None = None,
-        state_dir: Path | None = None,
     ) -> None:
         """Add *subspace* to this set.
 
@@ -266,9 +264,6 @@ class SubscriptionSet:
         mail goes to the identity, and the ``mailbox/<name>`` name lease is gone). Anything else that resolves to a
         take-enabled template (a queue or a lock) is refused naming ``in``, since those are never delivered;
         anything else is refused as not a board topic.
-
-        *store_factory* and *state_dir* are accepted and ignored: they are the call shape from when a name lease
-        needed an engine handle and a registration file, kept so no caller changes.
         """
         if not subspace:
             raise SchemaViolationError("subspace must not be empty")

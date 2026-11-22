@@ -233,3 +233,44 @@ class TestTheUnavailableRemedyFollowsTheHost:
         assert msg.endswith(self._OUTSIDE)
         assert "resolvable session id" in msg  # the diagnosis half is shared
         assert "search, memory, store, catalog" in msg
+
+
+class TestTheRealTokenFileTier:
+    """The conftest stub and the faked ``token_header.current`` above leave the real chain from a token file on disk to
+    ``resolve_session_id`` unexercised. This reads one: the file a delegated child is handed (``NX_IDENTITY_TOKEN``),
+    written with the repo's own writer, through the unstubbed ``_token_file_session_id``."""
+
+    @staticmethod
+    def _write(tmp_path: Path, **overrides) -> Path:
+        import time
+
+        from nexus.identity.token_file import TokenFile, token_path, write_token_file
+
+        fields = dict(identity="i77", generation=1, token="tok-real", expires_at=time.time() + 3600,
+                      session_id="sess-from-the-file", pid=4242, started_at=1700000000, proc_start=None,
+                      session_ids=("sess-from-the-file",))
+        fields.update(overrides)
+        path = token_path(tmp_path / "identity", 4242, 1700000000)
+        write_token_file(path, TokenFile(**fields))
+        return path
+
+    @pytest.fixture(autouse=True)
+    def _real_tier(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(session, "_token_file_session_id", _REAL_TOKEN_TIER)
+
+    def test_the_session_id_in_a_real_token_file_resolves_with_no_env_session(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(self._write(tmp_path)))
+        assert session.resolve_session_id() == "sess-from-the-file"
+
+    def test_the_env_session_still_outranks_the_file(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(self._write(tmp_path)))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "cc-env")
+        assert session.resolve_session_id() == "cc-env"
+
+    def test_a_missing_token_file_resolves_nothing(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(tmp_path / "identity" / "9.9.token"))
+        assert session.resolve_session_id() is None
+
+    def test_a_file_with_no_session_id_resolves_nothing(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("NX_IDENTITY_TOKEN", str(self._write(tmp_path, session_id=None)))
+        assert session.resolve_session_id() is None

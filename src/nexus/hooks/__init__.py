@@ -391,7 +391,7 @@ def session_start(claude_session_id: str | None = None, source: str | None = Non
     # :func:`render_session_start`. The mailbox-arm probe is the one
     # remaining piece of real I/O (network probe + cache write), computed
     # here rather than inside the pure render.
-    text = render_session_start(session_id, mailbox_arm_text=_mailbox_arm_block(session_id))
+    text = render_session_start(session_id, mailbox_arm_text=_mailbox_arm_block(session_id, bound=_session_is_bound(identity)))
     return f"{text}\n\n{identity.text()}" if identity is not None and identity.notices else text
 
 
@@ -494,7 +494,19 @@ def _stale_mcp_host_warning() -> str:
     )
 
 
-def _mailbox_arm_block(session_id: str) -> str:
+#: Bind outcomes that left no identity for the session: its registry file never came (the MCP server binds it later) or
+#: the engine could not be used. Mail is addressed to identities alone, so none reaches such a session.
+_UNBOUND_ACTIONS: frozenset[str] = frozenset({"pending", "unbound"})
+
+
+def _session_is_bound(identity) -> bool:
+    """Whether the SessionStart bind left this session an identity: False when the leg did not run, bound nothing, or
+    ended ``pending`` or ``unbound``. A ``skipped`` compaction keeps the binding its session already holds."""
+    outcome = getattr(identity, "outcome", None)
+    return outcome is not None and getattr(outcome, "action", None) not in _UNBOUND_ACTIONS
+
+
+def _mailbox_arm_block(session_id: str, *, bound: bool = True) -> str:
     """nexus-6konb.9 (MM-3.1), superseded by RDR-211 nexus-rplay.14: the
     RDR-205 mailbox subscribe instruction.
 
@@ -512,7 +524,7 @@ def _mailbox_arm_block(session_id: str) -> str:
     try:
         from nexus.mailbox_arm import arm_block  # noqa: PLC0415 — deferred import, only needed on this path
 
-        text = arm_block(session_id)
+        text = arm_block(session_id, bound=bound)
     except Exception as exc:  # noqa: BLE001 — session start must never break on this probe
         _logger().debug("mailbox_arm_block_failed", error=str(exc))
         return ""

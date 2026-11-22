@@ -139,7 +139,7 @@ def tuple_surface_available(
     return available
 
 
-def mailbox_arm_instruction(*, channel: bool = True) -> str:
+def mailbox_arm_instruction(*, channel: bool = True, bound: bool = True) -> str:
     """The literal mailbox line. Pure text -- no I/O, no probing -- so tests and
     the mailbox skill can both call it directly.
 
@@ -166,7 +166,18 @@ def mailbox_arm_instruction(*, channel: bool = True) -> str:
     background task and re-run only when a wake's output says to (a superseded,
     session-changed or refused exit says not to). No longer than the channel
     form, so the same budget covers both.
+
+    *bound* ``False`` is a session whose SessionStart bind did not complete:
+    it has no identity, so no mail is addressed to it and the line says that
+    instead of promising delivery.
     """
+    if not bound:
+        return (
+            f"{ARM_MARKER}: this session is not bound to an identity, so no mail reaches it until it is. The "
+            "SessionStart bind did not complete (engine down, or the Claude registry file came late); it binds at the "
+            "next SessionStart (restart, /clear, resume), and the MCP server binds a pending session once the "
+            "registry file appears. `nx identity show` says where it stands."
+        )
     lead = (
         f"{ARM_MARKER}: mail to this session goes to its identity's mailbox, addressed by identity id "
         "(\"i\" and digits) or seat name, never by session id or ListAgents name; nothing to subscribe"
@@ -190,10 +201,12 @@ def mailbox_arm_instruction(*, channel: bool = True) -> str:
     )
 
 
-def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
+def arm_block(session_id: str | None, *, bound: bool = True, config_dir: Path | None = None) -> str:
     """The full mailbox line, or ``""`` when one should not be emitted (no usable
     session id, or the tuple surface is not answering). *session_id* only gates
-    emission: the line itself names no session.
+    emission: the line itself names no session. *bound* is whether the SessionStart
+    bind gave the session an identity; an unbound session is told no mail reaches
+    it yet (:func:`mailbox_arm_instruction`).
     """
     if not session_id or session_id == "unknown":
         return ""
@@ -209,4 +222,4 @@ def arm_block(session_id: str | None, *, config_dir: Path | None = None) -> str:
 
     # RDR-233: only a definite "no flag" switches to the channel-free wording;
     # "cannot tell" (None) keeps the channel wording this line always had.
-    return mailbox_arm_instruction(channel=channel_launch_state() is not False)
+    return mailbox_arm_instruction(channel=channel_launch_state() is not False, bound=bound)

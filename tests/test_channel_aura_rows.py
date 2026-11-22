@@ -40,7 +40,7 @@ async def test_an_aura_only_topic_is_evaluated_and_not_announced() -> None:
 async def test_a_topic_the_session_also_holds_is_announced_and_evaluated() -> None:
     subs = _subs(str(uuid.uuid4()))
     subs.subscribe_aura("ci-red", "board/ci/x--done")
-    subs.subscribe("board/ci/x--done", templates=[], store_factory=_no_store, state_dir=None)
+    subs.subscribe("board/ci/x--done", templates=[])
     fake = _FakeTupleStore()
     fake.seed("board/ci/x--done", "p1", "red", dims={"kind": "ci-done"})
     sender, seen = _FakeSender(), []
@@ -53,7 +53,7 @@ async def test_a_topic_the_session_also_holds_is_announced_and_evaluated() -> No
 @pytest.mark.asyncio
 async def test_a_failing_sink_never_stops_the_announcement() -> None:
     subs = _subs(str(uuid.uuid4()))
-    subs.subscribe("board/ci/x--done", templates=[], store_factory=_no_store, state_dir=None)
+    subs.subscribe("board/ci/x--done", templates=[])
     fake = _FakeTupleStore()
     fake.seed("board/ci/x--done", "p1", "red")
     sender = _FakeSender()

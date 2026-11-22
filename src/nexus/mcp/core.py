@@ -9739,7 +9739,7 @@ def tuple_subscribe(
         from nexus.config import nexus_config_dir  # noqa: PLC0415 — rare/branch-local path
         t1, _ = _get_t1()
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
-        subs.subscribe(subspace, templates=templates, store_factory=_t2_ctx, state_dir=nexus_config_dir())
+        subs.subscribe(subspace, templates=templates)
         _subscriptions.persist(t1, subs)
         return f"Subscribed {subspace}"
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
