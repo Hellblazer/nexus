@@ -630,6 +630,16 @@ class TaxonomyAssignCrossLateralHnswTest {
     /** Any plpgsql parameter name left in the statement after the fixture's values replaced the known ones. */
     private static final java.util.regex.Pattern LEFTOVER_PARAMETER =
         java.util.regex.Pattern.compile("\\bp_[a-z_]+\\b");
+    /** Any plpgsql local variable left in the statement after the fixture's values replaced the known ones. */
+    private static final java.util.regex.Pattern LEFTOVER_VARIABLE =
+        java.util.regex.Pattern.compile("\\bv_[a-z_]+\\b");
+    /**
+     * RDR-229 P3.5b (vectors-077-40): the assignment that resolves {@code v_cid}, the collection's registry id the cross
+     * branch matches by, once at the top of the body. The harness renders that id in the variable's place, so the
+     * assignment must be the one the body runs.
+     */
+    private static final String V_CID_ASSIGNMENT =
+        "cc.collection_id INTO v_cid FROM nexus.catalog_collections cc WHERE cc.tenant_id = p_tenant AND cc.name = p_collection;";
     private static final java.util.regex.Pattern TENANT_GUC_READ =
         java.util.regex.Pattern.compile("current_setting\\('nexus\\.tenant', true\\)");
 
@@ -652,12 +662,15 @@ class TaxonomyAssignCrossLateralHnswTest {
      */
     private String deployedCrossBranchStatement() throws Exception {
         String prosrc;
+        Long denseId;
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
+            DSLContext db = DSL.using(su, SQLDialect.POSTGRES);
             PgCatalogProbes.RoutineConfigAndSource fn = PgCatalogProbes.routineConfigAndSource(
-                DSL.using(su, SQLDialect.POSTGRES), "nexus", "assign_from_chashes_1024");
+                db, "nexus", "assign_from_chashes_1024");
             assertThat(fn).as("assign_from_chashes_1024 must exist").isNotNull();
             prosrc = fn.prosrc();
+            denseId = CollectionIds.require(db, TENANT, COL_DENSE);
         }
         // RDR-229 P3.1: the body now carries line comments that hold a ';' (vectors-069 explains the id's dual write
         // inside the INSERT), and the statement is the text up to its own terminating ';', so the comments go first.
@@ -670,6 +683,13 @@ class TaxonomyAssignCrossLateralHnswTest {
             .contains("CROSS JOIN LATERAL").contains("OPERATOR(nexus.<=>)").endsWith("nearest n");
 
         DSLContext render = DSL.using(SQLDialect.POSTGRES);
+        // RDR-229 P3.5b: the branch matches by v_cid, a plpgsql variable the body assigns before the branch. With
+        // plan_cache_mode = force_custom_plan plpgsql hands the planner its value as a constant, so the faithful
+        // rendering is the id that assignment yields for this fixture, the registry id of COL_DENSE.
+        assertThat(prosrc.replaceAll("\\s+", " "))
+            .as("the deployed body resolves v_cid from the collection's registry row before the branch:%n%s", prosrc)
+            .contains("DECLARE v_cid bigint;").contains("BEGIN SELECT " + V_CID_ASSIGNMENT);
+        statement = substituteParameter(statement, "v_cid", render.renderInlined(DSL.val(denseId, org.jooq.impl.SQLDataType.BIGINT)));
         statement = substituteParameter(statement, "p_chashes", render.renderInlined(
             DSL.val(chunkChashes.toArray(String[]::new), org.jooq.impl.SQLDataType.CLOB.array())));
         statement = substituteParameter(statement, "p_collection", render.renderInlined(DSL.val(COL_DENSE)));
@@ -681,6 +701,8 @@ class TaxonomyAssignCrossLateralHnswTest {
         statement = TENANT_GUC_READ.matcher(statement).replaceAll(java.util.regex.Matcher.quoteReplacement(tenant));
         assertThat(LEFTOVER_PARAMETER.matcher(statement).find())
             .as("every function parameter in the statement was substituted:%n%s", statement).isFalse();
+        assertThat(LEFTOVER_VARIABLE.matcher(statement).find())
+            .as("every plpgsql variable in the statement was substituted:%n%s", statement).isFalse();
         return statement;
     }
 

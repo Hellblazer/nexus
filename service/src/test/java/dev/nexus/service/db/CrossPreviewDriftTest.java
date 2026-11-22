@@ -77,7 +77,10 @@ class CrossPreviewDriftTest {
      * own changelog SQL as redefined by vectors-030, which adds the chunk's
      * {@code embedding_model} to the batch for the persist, and by vectors-031, which names the model and tenant
      * on both scans, and by vectors-038, which leaves the centroids of superseded collections out of both
-     * cross scans (nexus-2k8wi) — see either file's header). Ends right at the
+     * cross scans (nexus-2k8wi), and by vectors-077 (RDR-229 P3.5b, nexus-p2m1x.24), which matches the batch's
+     * chunks and leaves out the query's own and the superseded collections' centroids by registry id and by name,
+     * both shapes, through the plpgsql variable {@code v_cid} the body resolves once from {@code p_collection} —
+     * see either file's header). Ends right at the
      * {@code nearest} CTE's own closing paren, deliberately BEFORE the comma
      * that (only in {@code assign_from_chashes_<dim>}) introduces the
      * {@code persisted} INSERT CTE — {@code cross_preview_<dim>} has no such
@@ -90,7 +93,7 @@ class CrossPreviewDriftTest {
             + "      FROM nexus.chunks c"
             + "     WHERE c.embedding_model = p_embedding_model"
             + "       AND c.tenant_id = p_tenant"
-            + "       AND c.collection = p_collection"
+            + "       AND (c.collection_id = v_cid OR (c.collection_id IS NULL AND c.collection = p_collection AND p_collection <> ''))"
             + "       AND c.embedding_" + dim + " IS NOT NULL"
             + "       AND c.chash = ANY(ARRAY(SELECT decode(x, 'hex') FROM unnest(p_chashes) x))"
             + " ),"
@@ -107,16 +110,32 @@ class CrossPreviewDriftTest {
             + "             FROM nexus.taxonomy_centroids ct"
             + "            WHERE ct.embedding_model = p_embedding_model"
             + "              AND ct.tenant_id = p_tenant"
-            + "              AND ct.collection <> p_collection"
-            + "              AND ct.collection <> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc"
-            + "                   WHERE cc.tenant_id = p_tenant"
-            + "                     AND cc.embedding_model = p_embedding_model"
-            + "                     AND COALESCE(cc.superseded_by, '') <> ''))"
+            + "              AND (CASE WHEN ct.collection_id IS NOT NULL AND v_cid IS NOT NULL"
+            + "                        THEN ct.collection_id <> v_cid ELSE ct.collection <> p_collection END)"
+            + "              AND (ct.collection_id IS NULL OR ct.collection_id <> ALL (ARRAY( SELECT cc.collection_id FROM nexus.catalog_collections cc"
+            + "                    WHERE cc.tenant_id = p_tenant"
+            + "                      AND cc.embedding_model = p_embedding_model"
+            + "                      AND (cc.superseded_by_id IS NOT NULL OR COALESCE(cc.superseded_by, '') <> ''))))"
+            + "              AND (ct.collection_id IS NOT NULL OR ct.collection <> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc"
+            + "                    WHERE cc.tenant_id = p_tenant"
+            + "                      AND cc.embedding_model = p_embedding_model"
+            + "                      AND (cc.superseded_by_id IS NOT NULL OR COALESCE(cc.superseded_by, '') <> '')"
+            + "                      AND cc.name <> '')))"
             + "              AND ct.embedding_" + dim + " IS NOT NULL"
             + "            ORDER BY ct.embedding_" + dim + " OPERATOR(nexus.<=>) b.b_emb, ct.topic_id ASC"
             + "            LIMIT 1"
             + "       ) n"
             + " )";
+    }
+
+    /** Whether the changelog table records changeset {@code id} as applied. */
+    private boolean recorded(String id) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(DSL.selectOne()
+                .from(DSL.table(DSL.name("public", "databasechangelog")))
+                .where(DSL.field(DSL.name("id"), String.class).eq(id)));
+        }
     }
 
     private String prosrc(String functionName) throws Exception {
@@ -152,15 +171,30 @@ class CrossPreviewDriftTest {
      * taxonomy_ann_query uses NOT EXISTS because the ARRAY form sends its unpinned cross branch to a Seq Scan. Each
      * family is also checked against the OTHER family's spelling, so a body switched to the wrong form fails here
      * (the plan test fails it too, for the ann family).
+     *
+     * <p>RDR-229 P3.5b (nexus-p2m1x.24): vectors-077 redefines assign_from_chashes and cross_preview to read both
+     * shapes, so the ARRAY form now comes twice, an id array over {@code superseded_by_id} and a name array; both
+     * are required. vectors-078-9..11 redefine taxonomy_ann_query to read the id only, behind the stamp gate: until
+     * the stamps complete (a fresh walk) the live body is vectors-038's name form, after it the id form. The check
+     * follows the definer the changelog table records, so either world is held to its own text.
      */
     @Test
     void allNineCrossPassFunctions_excludeSupersededCollections() throws Exception {
         int checked = 0;
+        java.util.Map<Integer, String> annP35bChangeset = java.util.Map.of(384, "vectors-078-9", 768, "vectors-078-10", 1024, "vectors-078-11");
         for (int dim : new int[] {384, 768, 1024}) {
             for (String fn : new String[] {"assign_from_chashes_", "cross_preview_", "taxonomy_ann_query_"}) {
                 String src = normalizeWhitespace(prosrc(fn + dim));
                 boolean ann = fn.startsWith("taxonomy_ann_query");
-                if (ann) {
+                if (ann && recorded(annP35bChangeset.get(dim))) {
+                    assertThat(src)
+                        .as("%s%d (vectors-078, id form) must leave out the centroids of a collection whose registry row"
+                            + " names a successor, as a NOT EXISTS over catalog_collections joined on collection_id", fn, dim)
+                        .contains("AND NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc")
+                        .contains("AND cc.collection_id = nexus.taxonomy_centroids.collection_id")
+                        .contains("AND cc.superseded_by_id IS NOT NULL)")
+                        .doesNotContain("<> ALL (ARRAY(");
+                } else if (ann) {
                     assertThat(src)
                         .as("%s%d must leave out the centroids of a collection whose registry row names a successor,"
                             + " as a NOT EXISTS over catalog_collections (the ARRAY form loses the HNSW index scan)",
@@ -173,8 +207,9 @@ class CrossPreviewDriftTest {
                     assertThat(src)
                         .as("%s%d must leave out the centroids of a collection whose registry row names a successor,"
                             + " as the ARRAY form its pinned HNSW plan rides on", fn, dim)
-                        .contains("<> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc")
-                        .contains("COALESCE(cc.superseded_by, '') <> ''")
+                        .contains("ct.collection_id <> ALL (ARRAY( SELECT cc.collection_id FROM nexus.catalog_collections cc")
+                        .contains("ct.collection <> ALL (ARRAY( SELECT cc.name FROM nexus.catalog_collections cc")
+                        .contains("(cc.superseded_by_id IS NOT NULL OR COALESCE(cc.superseded_by, '') <> '')")
                         .doesNotContain("NOT EXISTS ( SELECT 1 FROM nexus.catalog_collections cc");
                 }
                 checked++;
