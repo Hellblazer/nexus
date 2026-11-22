@@ -273,9 +273,10 @@ class CollectionRenameRefusalTest {
                 }
                 return null;
             });
-            assertThat(fx.asSuperuser(ctx -> ctx.select(DSL.function("has_function_privilege", Boolean.class,
+            Boolean svcCanExecute = fx.asSuperuser(ctx -> ctx.select(DSL.function("has_function_privilege", Boolean.class,
                     DSL.inline(PgContainerHelper.SVC_USERNAME), DSL.inline(fns.get(0)), DSL.inline("EXECUTE")))
-                .fetchOne(0, Boolean.class))).as("the revoke took: the engine role cannot execute pg_control_system()")
+                .fetchOne(0, Boolean.class));
+            assertThat(svcCanExecute).as("the revoke took: the engine role cannot execute pg_control_system()")
                 .isFalse();
 
             Resp r = renameByLabel(registered("noepoch-b"), CollectionRouteFixture.label("rr-noepoch-b2-" + (n++)));
