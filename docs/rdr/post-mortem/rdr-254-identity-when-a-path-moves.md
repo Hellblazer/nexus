@@ -22,7 +22,9 @@ moved one; and a rule that gives a second live clone its own owner,
 Implemented, in four phases: engine move routes, the client command, move
 hints, and the second-clone owner. Phases 1 to 3 landed on develop at
 d124a736a3. Phase 4 lands with this post-mortem. The minimum viable validation
-ran against a real engine for both GH issues (8c70440a7b, fed4c979f8). The
+ran against a real engine for GH #1571 (8c70440a7b, fed4c979f8); GH #1605, a
+renamed repository, is covered by the real-engine hint and owner-move journey
+tests (34 passed with the MVV on the close branch). The
 owner move was measured, not estimated: 15,442 row writes for owners of 7,200
 and 3,100 documents, holding row locks for 1.7 to 8.4 s, with reads unblocked.
 
