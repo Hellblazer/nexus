@@ -78,7 +78,7 @@ class CollectionLabelTest {
             repeat("é", 127) + "a",          // exactly 255 bytes
             repeat("a", 255),
             "x\u200dy",                     // ZERO WIDTH JOINER (Cf) is allowed
-            "a b", " leading space",
+            "a b", "inner space",
             "a\ud83d\ude00b");             // a supplementary character, a valid surrogate pair
     }
 
@@ -126,6 +126,27 @@ class CollectionLabelTest {
     void aLabelHoldingASlashIsRefused() {
         assertThat(CollectionLabel.REFUSE_SLASH).isTrue();
         assertThatThrownBy(() -> CollectionLabel.validateUserLabel("a/b")).hasMessageContaining("/");
+    }
+
+    /**
+     * The ',' and edge-whitespace clause is Sam's ruling on ask rdr229-label-comma-space (2026-11-21): MCP search and
+     * plan confinement read a corpus list with split(",") then strip(). Whitespace is the Zs category, Python's
+     * str.strip() set once controls are refused, so the engine and the client refuse the same labels.
+     */
+    @Test
+    void aLabelHoldingACommaOrEdgeWhitespaceIsRefused() {
+        assertThat(CollectionLabel.REFUSE_COMMA_AND_EDGE_SPACE).isTrue();
+        for (String label : java.util.List.of("a,b", ",")) {
+            assertThatThrownBy(() -> CollectionLabel.validateUserLabel(label)).hasMessageContaining("','");
+            assertThat(CollectionLabel.shapeBreach(label)).map(CollectionLabel.Breach::rule).contains("no_comma");
+        }
+        for (String label : java.util.List.of(" notes", "notes ", " ", "\u00a0notes", "notes\u3000", "\u2003")) {
+            assertThatThrownBy(() -> CollectionLabel.validateUserLabel(label)).hasMessageContaining("whitespace");
+            assertThat(CollectionLabel.shapeBreach(label)).map(CollectionLabel.Breach::rule).contains("no_edge_whitespace");
+        }
+        for (String label : java.util.List.of("notes 50%: café", "a b", "a\u00a0b", "notes\u200d")) {
+            CollectionLabel.validateUserLabel(label);
+        }
     }
 
     @Test
