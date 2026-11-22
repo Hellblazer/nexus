@@ -6,6 +6,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.CollectionIds;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.jooq.binding.Vector;
@@ -284,12 +285,15 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(false);
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            // RDR-229 P3.1: a row naming a collection carries the registry id beside it (the *_collection_id_check CHECKs).
+            Long collId = CollectionIds.require(ctx, TENANT, COLLECTION);
             List<Query> docQueries = new ArrayList<>(NUM_DOCS);
             for (String id : docIds) {
                 docQueries.add(ctx.insertInto(CATALOG_DOCUMENTS,
                         CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
-                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
-                    .values(TENANT, id, "Doc", "prose", COLLECTION));
+                        CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION_ID)
+                    .values(TENANT, id, "Doc", "prose", COLLECTION, collId));
             }
             ctx.batch(docQueries).execute();
             su.commit();
@@ -304,6 +308,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             int manifestBatch = 5000;
             String model = PgContainerHelper.collectionModel(ctx, TENANT, COLLECTION);
+            Long collId = CollectionIds.require(ctx, TENANT, COLLECTION);
             for (int start = 0; start < NUM_MANIFEST; start += manifestBatch) {
                 int end = Math.min(start + manifestBatch, NUM_MANIFEST);
                 List<Query> chunkQueries = new ArrayList<>(end - start);
@@ -313,8 +318,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
                     chunkQueries.add(ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
                             CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
                             CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
-                            CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL)
-                        .values(TENANT, doc, position, HexFormat.of().parseHex(chashHex.get(i)), COLLECTION, model));
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION, CATALOG_DOCUMENT_CHUNKS.EMBEDDING_MODEL,
+                            CATALOG_DOCUMENT_CHUNKS.COLLECTION_ID)
+                        .values(TENANT, doc, position, HexFormat.of().parseHex(chashHex.get(i)), COLLECTION, model, collId));
                 }
                 ctx.batch(chunkQueries).execute();
                 su.commit();
