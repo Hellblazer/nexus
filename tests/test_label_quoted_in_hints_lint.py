@@ -73,3 +73,24 @@ def test_no_command_hint_prints_a_label_unquoted() -> None:
 def test_a_label_with_a_space_and_a_semicolon_survives_the_round_trip() -> None:
     label = "notes 50%: café; rm -rf x"
     assert shlex.split(f"nx collection delete {shlex.quote(label)}") == ["nx", "collection", "delete", label]
+
+
+def test_every_module_that_quotes_a_label_imports_shlex() -> None:
+    """A hint's f-string is evaluated only when it prints, so a missing ``import shlex`` is a NameError on the error
+    path and nowhere else (the sweep's first cut put the import inside two module docstrings; the migrate-fallback
+    test was the only thing that reached one)."""
+    import ast  # noqa: PLC0415 — this test only
+
+    missing: list[str] = []
+    for path in sorted((REPO_ROOT / "src" / "nexus").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "shlex.quote(" not in text:
+            continue
+        tree = ast.parse(text)
+        imported = any(
+            isinstance(node, ast.Import) and any(alias.name == "shlex" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        if not imported:
+            missing.append(path.relative_to(REPO_ROOT).as_posix())
+    assert not missing, "uses shlex.quote with no import shlex:\n" + "\n".join(missing)
