@@ -515,3 +515,40 @@ def test_a_sender_stamp_that_is_no_uuid_is_unresolved_and_noted_not_silently_nob
     result = _run(_with_lookups(_env(wire, tuples=_Tuples(rows)), sessions), "ack-times", "push-train", "--json")
     assert json.loads(result.stdout)["reds"][0]["acked_at"] is None and sessions.asked == []
     assert "1 ack could not be resolved" in result.stderr
+
+
+# ── a disclaim on the current red (RDR-252 audit S1, nexus-igea9): shown, never counted as an ack ──────────────────
+
+
+def _disclaim(at: str, sha: str, who: str, note: str = "") -> Any:
+    """A ``kind=disclaim`` row as ``nx ci ack --not-mine`` posts it: the note, when there is one, is the plain body."""
+    return SimpleNamespace(id=f"disclaim{at}{who}", created_at=at, dims={"from": who, "kind": "disclaim", "sha": sha},
+                           body=note or None, sender_session=SESSIONS[who])
+
+
+def test_a_disclaim_is_shown_on_the_red_it_falls_in_and_is_not_an_ack() -> None:
+    rows = [
+        _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED),
+        _disclaim("2026-11-19T10:03:00Z", SHA1, "i4", "marginalia is fixing it"),
+        _row("clear", "2026-11-19T10:30:00Z", SHA1),
+        _row("owner", "2026-11-19T12:00:05Z", SHA2, **{**_RED, "episode_at": "2026-11-19T12:00:00Z"}),
+    ]
+    first, second = _times(rows, _index())
+    assert first["disclaims"] == [{"at": "2026-11-19T10:03:00Z", "from": "i4", "sha": SHA1, "note": "marginalia is fixing it"}]
+    assert second["disclaims"] == [], "a disclaim belongs to the red it was posted in"
+    assert first["acked_at"] is None, "a disclaim is not an ack: the owner's `not mine` never reads as `seen`"
+
+
+def test_a_disclaim_with_no_note_has_a_null_note_and_is_named_in_the_text_form() -> None:
+    rows = [_row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED), _disclaim("2026-11-19T10:03:00Z", SHA1, "i4")]
+    [red] = _times(rows, _index())
+    assert red["disclaims"][0]["note"] is None
+    wire = Wire().on("GET", "/v1/group/push-train", 200, RECORD)
+    text = _run(_stamped(_env(wire, tuples=_Tuples(rows))), "ack-times", "push-train").output
+    assert "disclaimed by i4 at 2026-11-19T10:03:00Z" in text and "no ack" in text
+
+
+def test_a_disclaim_outside_any_red_is_dropped() -> None:
+    rows = [_disclaim("2026-11-19T09:00:00Z", SHA1, "i4"), _row("owner", "2026-11-19T10:00:05Z", SHA1, **_RED)]
+    [red] = _times(rows, _index())
+    assert red["disclaims"] == []
