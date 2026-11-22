@@ -243,6 +243,40 @@ class Rdr229ReownRepoStemsMoveIntegrationTest extends Rdr229ReownFixtures {
         assertThat(completedAt(LABEL)).as("an empty catalog completes in one pass, so boot 1 completes it").isNotNull();
     }
 
+    /**
+     * RDR-229 P3.8: collections-001-2 (the live-tuple UNIQUE index) waits for THIS move, and a fresh boot ends with it
+     * pending (the Windows engine smoke allows exactly that, FRESH_BOOT_PENDING). This chains the real pieces so the
+     * deferral cannot hide a changeset that never lands: the move registered by its shipped changeset (the label the
+     * precondition reads), completed by the worker, and the next real migration walk applies the index and records it,
+     * with nothing left pending for it; a further walk changes nothing.
+     */
+    @Test
+    void aFreshInstall_completesTheMove_andTheNextBootAppliesTheTupleIndex_soNothingStaysPending() throws Exception {
+        Field<String> id = DSL.field(DSL.name("id"), String.class);
+        var journal = DSL.table(DSL.name("public", "databasechangelog"));
+        // An earlier test of this class may have completed the move and let a walk record the index: start from the
+        // fresh-install state, the changeset unrecorded and the index absent.
+        ctx().deleteFrom(journal).where(id.eq("collections-001-2")).execute();
+        register();
+
+        installed();  // boot 1: the move is open, so the walk skips the index and records nothing
+        assertThat(ctx().fetchCount(journal, id.eq("collections-001-2"))).as("boot 1 leaves it pending").isZero();
+        assertThat(dev.nexus.service.CollectionMintSupport.indexPresent(ctx())).isFalse();
+
+        int moved = worker(installed(), null, FailureHandler.BLOCK_ALWAYS, new VerifyingFinisher()).runCycle();
+        assertThat(moved).isEqualTo(1);
+        assertThat(completedAt(LABEL)).as("the fresh install's move completes").isNotNull();
+
+        installed();  // boot 2: the move is complete and no tuple is duplicated, so the walk applies the index
+        assertThat(ctx().fetchCount(journal, id.eq("collections-001-2")))
+            .as("the deferred changeset is recorded once the move completes: it does not stay pending").isEqualTo(1);
+        assertThat(dev.nexus.service.CollectionMintSupport.indexPresent(ctx())).as("the live-tuple index exists").isTrue();
+
+        int recorded = ctx().fetchCount(journal);
+        installed();  // boot 3: nothing left to apply
+        assertThat(ctx().fetchCount(journal)).as("a further walk records nothing new").isEqualTo(recorded);
+    }
+
     // ── a repo owner that already exists is a repo signal, whatever the stem's rows are ─────────────────────
 
     @Test
