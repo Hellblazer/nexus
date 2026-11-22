@@ -2336,9 +2336,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         window.
         """
         return self._post(
-            "/purge-trash",
-            {"older_than_days": older_than_days, "dry_run": dry_run},
-            idempotent=False,
+            "/purge-trash", {"older_than_days": older_than_days, "dry_run": dry_run}, idempotent=False,
+            mutates=dry_run is not True,  # the engine's dry run is a read-only preview; only a literal True is one
         ) or {}
 
     def repair_stale_note_uris(
@@ -2421,7 +2420,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # one attempt: a blind resend after a read timeout reports the
         # post-sweep population (``ghosts_deleted`` ~ 0), not what the first
         # attempt did.
-        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=dry_run) or {}
+        # mutates: a dry run is a read to the dev-checkout write guard (only a literal True is one).
+        return self._post("/ghost-sweep", {"dry_run": dry_run}, idempotent=dry_run, mutates=dry_run is not True) or {}
 
     def gc_audit_list(
         self,
