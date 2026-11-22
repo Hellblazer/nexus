@@ -13,6 +13,13 @@ was told to keep. This lint is the other half of that exemption.
 
 Scanned: the preconditions and the body. Not scanned: ``<comment>`` (prose) and ``<rollback>`` (never runs at boot).
 
+ONE EXEMPTION (RDR-229 P3.3c, nexus-p2m1x.21). ``CREATE INDEX CONCURRENTLY [IF NOT EXISTS] <name> ON <table with a foreign key into
+nexus.chunks> (...)`` is not a violation of the foreign-key-table name rule, and only of that rule. The rule exists because a DROP or
+ALTER of such a table takes ACCESS EXCLUSIVE on every chunk leaf (the foreign-key triggers go with it); CREATE INDEX CONCURRENTLY takes
+SHARE UPDATE EXCLUSIVE on the one table it indexes and nothing on nexus.chunks or a leaf, and a CREATE INDEX CONCURRENTLY on a leaf
+holds no lock on that table. The statement shape is matched exactly (``_EXEMPT_INDEX_BUILD``); any other mention of the table, in the
+same changeset or in the statement's own columns, and the same statement on nexus.chunks itself, still fail.
+
 THREE GUARDS, none of them a snapshot of today's corpus:
 
 1. NAMES. The executable text is normalised (double quotes dropped, whitespace around dots collapsed, lowercased)
@@ -98,7 +105,18 @@ _CONTINUE_ALLOWLIST: dict[tuple[str, str], str] = {
     # its lock is retried at the next boot; the guard reads pg_class through to_regclass and takes no lock. No chunk
     # table, leaf or builder object is named, and a CREATE INDEX CONCURRENTLY on a leaf holds no lock on the registry.
     ("catalog-053-live-label-unique.xml", "catalog-053-1"): "live-label unique index (RDR-229 P3.6)",
+    # SET lock_timeout = '30s', DROP INDEX CONCURRENTLY IF EXISTS and CREATE INDEX CONCURRENTLY IF NOT EXISTS on nexus.chunk_orphaned_at
+    # (tenant_id, chash): SHARE UPDATE EXCLUSIVE on that one table, which holds a foreign key into nexus.chunks but is not locked by a
+    # chunk leaf's build, and nothing on nexus.chunks or a leaf; the wait for older transactions ends at the 30 s lock_timeout and the
+    # changeset is skipped (failOnError false), not failed. The one table name in the body is the exempt statement shape
+    # (_EXEMPT_INDEX_BUILD). No chunk table, leaf, partition helper or builder object is named (RDR-229 P3.3c, nexus-p2m1x.21).
+    ("vectors-074-chunk-orphaned-at-chash-index.xml", "vectors-074-1"): "child index of the chunk id key",
 }
+
+# The one statement shape exempt from the foreign-key-table rule (see the module docstring), matched on the NORMALISED text.
+_EXEMPT_INDEX_BUILD = re.compile(
+    r"create\s+index\s+concurrently\s+(?:if\s+not\s+exists\s+)?\w+\s+on\s+(?:nexus\.)?(?:" + "|".join(_FK_TABLES) + r")\s*\([\w\s,]*\)"
+)
 
 # Elements the lint cannot read into: what they run is not in the changelog text.
 _OPAQUE = ("sqlFile", "customChange", "executeCommand")
@@ -157,8 +175,13 @@ def _violations(cs: ET.Element) -> list[str]:
         )
         out += [f"{cid}: onFail=CONTINUE changeset uses <{tag}>, which this lint cannot read into" for tag in opaque]
         text = _normalise(_executable_text(cs))
+        fk_label = "table with a foreign key into nexus.chunks"
+        # The exempt statement is removed for the foreign-key-table rule ONLY; every other rule reads the whole text.
+        text_without_exempt = _EXEMPT_INDEX_BUILD.sub("create index concurrently <exempt>", text)
         out += [
-            f"{cid}: onFail=CONTINUE body names {label}" for label, pat in _FORBIDDEN.items() if pat.search(text)
+            f"{cid}: onFail=CONTINUE body names {label}"
+            for label, pat in _FORBIDDEN.items()
+            if pat.search(text_without_exempt if label == fk_label else text)
         ]
     elif _can_stay_unrecorded(cs):
         # Unrecorded when it skips or fails, yet RetryingChangesets does not see it, so it would end every build.
@@ -387,3 +410,29 @@ def test_a_changeset_that_can_stay_unrecorded_must_say_on_fail_continue() -> Non
     assert _violations(ok) == []
     # An ordinary changeset is none of these.
     assert _violations(_cs('<changeSet id="h" author="t"><sql>SELECT 1</sql></changeSet>')) == []
+
+
+def test_a_concurrent_index_build_on_a_foreign_key_table_is_the_one_exempt_shape() -> None:
+    """P3.3c's exemption: CREATE INDEX CONCURRENTLY on a table with a foreign key into chunks passes the foreign-key-table rule."""
+    for body in (
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_x ON nexus.chunk_orphaned_at (tenant_id, chash)",
+        "create index concurrently idx_x on chunk_orphaned_at(tenant_id, chash)",
+        'CREATE INDEX CONCURRENTLY idx_x ON "nexus"."topic_assignments" (tenant_id, doc_id)',
+    ):
+        assert _violations(_continue_cs(body)) == [], body
+
+
+def test_the_exemption_is_only_that_statement_shape_on_a_foreign_key_table() -> None:
+    """Falsification: the same table under any other statement, the same shape on chunks itself, and extra mentions all still fail."""
+    fk = "table with a foreign key into nexus.chunks"
+    for body in (
+        "ALTER TABLE nexus.chunk_orphaned_at ADD COLUMN x int",
+        "DROP TABLE nexus.catalog_document_chunks",
+        "CREATE INDEX idx_x ON nexus.chunk_orphaned_at (tenant_id, chash)",   # not CONCURRENTLY: a SHARE lock on the table
+        "CREATE INDEX CONCURRENTLY idx_x ON nexus.chunk_orphaned_at (tenant_id, chash); ALTER TABLE nexus.chunk_orphaned_at DROP COLUMN y",
+        "CREATE INDEX CONCURRENTLY idx_x ON nexus.chunk_orphaned_at (tenant_id, chash) WHERE chash IN (SELECT chash FROM nexus.topic_assignments)",
+    ):
+        assert any(fk in v for v in _violations(_continue_cs(body))), body
+    # on nexus.chunks itself the exemption does not apply: that is the chunks rule
+    assert any("nexus.chunks" in v for v in _violations(_continue_cs("CREATE INDEX CONCURRENTLY idx_x ON nexus.chunks (id)")))
+    assert any("chunk leaf" in v for v in _violations(_continue_cs("CREATE INDEX CONCURRENTLY idx_x ON nexus.chunks_m1024_t1 (id)")))
