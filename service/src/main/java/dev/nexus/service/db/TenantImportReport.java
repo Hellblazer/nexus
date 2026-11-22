@@ -12,13 +12,22 @@ import java.util.Map;
  * already written for the tenant, kept) plus {@code dropped} (a soft-reference rule dropped the row).
  */
 public record TenantImportReport(List<TableResult> tables, List<SoftResult> softReferences,
-                                 Map<String, String> skippedTables, List<String> skippedColumns) {
+                                 Map<String, String> skippedTables, List<String> skippedColumns,
+                                 List<Relabel> collectionsRelabelled) {
 
     public TenantImportReport {
         tables = List.copyOf(tables);
         softReferences = List.copyOf(softReferences);
         skippedTables = Map.copyOf(skippedTables);
         skippedColumns = List.copyOf(skippedColumns);
+        collectionsRelabelled = List.copyOf(collectionsRelabelled);
+    }
+
+    /**
+     * A collection whose label was of the minted form ({@code c<digits>}, the backup's installation's own) and so was not kept: the
+     * restored row took the label minted for its new id (RDR-229 item 10; the recovery bundle's {@code collections_relabelled}).
+     */
+    public record Relabel(String label, String targetLabel) {
     }
 
     /** One table's counts. */
