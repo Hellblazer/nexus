@@ -1146,27 +1146,32 @@ def test_a_held_lock_makes_the_drop_give_up_name_the_holder_and_then_drop_once_r
     from tests._child_process import popen_in_group, stop_group  # noqa: PLC0415
 
     tenant, _ = mint_test_tenant(state)
-    holder = popen_in_group(
-        [str(Path(state["pg_bin"]) / "psql"), "-X", "-q", "-t", "-A", "-h", "127.0.0.1", "-p", str(state["pg_port"]),
-         "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        env={**os.environ, "PGAPPNAME": "pool_drop_lock_holder"},
-    )
     try:
-        assert holder.stdin is not None and holder.stdout is not None
-        holder.stdin.write("BEGIN;\nLOCK TABLE nexus.catalog_document_chunks IN SHARE UPDATE EXCLUSIVE MODE;\n"
-                           "SELECT 'locked';\nSELECT pg_catalog.pg_sleep(120);\n")
-        holder.stdin.flush()
-        assert holder.stdout.readline().strip() == "locked", "the holder took its lock"
-        monkeypatch.setattr(_tenant_drop, "DROP_LOCK_RETRY_DELAYS_S", ())
-        with structlog.testing.capture_logs() as logs:
-            assert drop_test_tenant(state, tenant) is False, "the held lock makes the drop give up"
-        holders = [h for e in logs if e["event"] == "test_tenant_drop_lock_holders" for h in e["holders"]]
-        assert any("ShareUpdateExclusiveLock nexus.catalog_document_chunks" in h for h in holders), holders
+        holder = popen_in_group(
+            [str(Path(state["pg_bin"]) / "psql"), "-X", "-q", "-t", "-A", "-h", "127.0.0.1", "-p",
+             str(state["pg_port"]), "-U", state["pg_user"], "-d", state["pg_dbname"], "-v", "ON_ERROR_STOP=1"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env={**os.environ, "PGAPPNAME": "pool_drop_lock_holder"},
+        )
+        try:
+            assert holder.stdin is not None and holder.stdout is not None
+            holder.stdin.write("BEGIN;\nLOCK TABLE nexus.catalog_document_chunks IN SHARE UPDATE EXCLUSIVE MODE;\n"
+                               "SELECT 'locked';\nSELECT pg_catalog.pg_sleep(120);\n")
+            holder.stdin.flush()
+            assert holder.stdout.readline().strip() == "locked", "the holder took its lock"
+            monkeypatch.setattr(_tenant_drop, "DROP_LOCK_RETRY_DELAYS_S", ())
+            with structlog.testing.capture_logs() as logs:
+                assert drop_test_tenant(state, tenant) is False, "the held lock makes the drop give up"
+            holders = [h for e in logs if e["event"] == "test_tenant_drop_lock_holders" for h in e["holders"]]
+            assert any("ShareUpdateExclusiveLock nexus.catalog_document_chunks" in h for h in holders), holders
+        finally:
+            try:
+                _sql(state, "SELECT count(pg_catalog.pg_terminate_backend(pid)) FROM pg_catalog.pg_stat_activity "
+                            "WHERE application_name = 'pool_drop_lock_holder';")
+            finally:
+                stop_group(holder)
+        assert drop_test_tenant(state, tenant) is True, "the drop succeeds once the lock is released"
+        assert _sql(state, "SELECT count(*) FROM pg_catalog.pg_class c WHERE c.relispartition "
+                           "AND nexus.partition_bound_value(c.oid) = :'tenant';", tenant=tenant) == "0"
     finally:
-        _sql(state, "SELECT count(pg_catalog.pg_terminate_backend(pid)) FROM pg_catalog.pg_stat_activity "
-                    "WHERE application_name = 'pool_drop_lock_holder';")
-        stop_group(holder)
-    assert drop_test_tenant(state, tenant) is True
-    assert _sql(state, "SELECT count(*) FROM pg_catalog.pg_class c WHERE c.relispartition "
-                       "AND nexus.partition_bound_value(c.oid) = :'tenant';", tenant=tenant) == "0"
+        drop_test_tenant(state, tenant)  # never raises; a no-op once the leaves are gone

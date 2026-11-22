@@ -87,10 +87,11 @@ def drop_test_tenant(state: dict, tenant: str, *, sleep: Callable[[float], None]
             return False
         if proc.returncode == 0:
             return True
-        error = (proc.stderr or proc.stdout or "").strip()[-300:]
-        if _DROP_LOCK_GAVE_UP not in error or delay is None:
-            _log.warning("test_tenant_drop_failed", tenant=tenant, error=error)
-            if _DROP_LOCK_GAVE_UP in error:
+        full = (proc.stderr or proc.stdout or "").strip()
+        gave_up = _DROP_LOCK_GAVE_UP in full
+        if not gave_up or delay is None:
+            _log.warning("test_tenant_drop_failed", tenant=tenant, error=full[-300:])
+            if gave_up:
                 _log_lock_holders(state, tenant)
             return False
         _log.info("test_tenant_drop_lock_retry", tenant=tenant, after_s=delay)
