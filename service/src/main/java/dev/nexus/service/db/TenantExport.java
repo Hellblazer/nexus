@@ -422,7 +422,8 @@ public final class TenantExport {
             .fk(COLLECTION_KEY, "catalog_collections", "tenant_id,name,embedding_model")
             .notRefs("metadata")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id,embedding_model", "catalog_collections",
+                "tenant_id,collection_id,embedding_model")
             .build(),
         data("catalog_document_chunks").pk("tenant_id text", "doc_id text", "position integer")
             .fk("tenant_id,doc_id", "catalog_documents", "tenant_id,tumbler")
@@ -443,11 +444,13 @@ public final class TenantExport {
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             .trigger("trg_catalog_document_chunks_chunk_index_default", "BEFORE INSERT FOR EACH ROW")
             
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id,chash,embedding_model", "chunks",
+                "tenant_id,collection_id,chash,embedding_model")
             .build(),
         derived("chunk_orphaned_at").pk("tenant_id text", "collection text", "chash bytea")
             .fk(CHUNK_KEY, "chunks", CHUNK_KEY)
-            .importComputed("collection_id")
+            .importComputedRef("tenant_id,collection_id,chash,embedding_model", "chunks",
+                "tenant_id,collection_id,chash,embedding_model")
             .build(),
         data("catalog_links").pk("tenant_id text", "id bigint").reassigned("id")
             .fk("tenant_id,from_tumbler", "catalog_documents", "tenant_id,tumbler")
@@ -505,6 +508,8 @@ public final class TenantExport {
                 "AFTER INSERT REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT")
             
             .importComputedRef("tenant_id,source_collection_id", "catalog_collections", "tenant_id,collection_id")
+            .importComputedRef("tenant_id,source_collection_id,doc_id,embedding_model", "chunks",
+                "tenant_id,collection_id,chash,embedding_model")
             .build(),
         data("topic_links").pk("tenant_id text", "from_topic_id bigint", "to_topic_id bigint")
             .fk("tenant_id,from_topic_id", "topics", "tenant_id,id")
