@@ -68,6 +68,11 @@
 #     --skip-scrub <reason>       NX_PUSH_SKIP_SCRUB (push past the scrub gate, on the record)
 #     --red-fix <reason>          NX_PUSH_RED_FIX (push to develop while a red it did not cause is open and you are
 #                                 neither its owner nor a suspect's pusher; see "Hold your pushes" below)
+#     --proof <file>              A scripts/watched_pytest.py --status file proving a heavy check leg green on this tip's
+#                                 tree (see "Check gate" below). Repeatable; each is checked, none is a skip.
+#     --skip-<check> <reason>     NX_PUSH_SKIP_<CHECK>: override ONE check of the check gate, on the record. <check> is
+#                                 file-size, changelog, wire-ledger, cloud-leg, plugin-ledger, docs-readers, write-seam, or
+#                                 check-gate (the whole gate, for a gate that cannot start).
 #   A bad flag exits 64 with PUSH_REFUSED_USAGE before anything is fetched.
 #
 #   A vouched MERGE commit also vouches for everything it merges in (the
@@ -144,6 +149,20 @@
 # record body). A failed read of the red is one PUSH_GATE_UNCHECKED line on stderr and
 # the push goes on. The check runs after the scope audit and the scrub gate, before
 # the lock.
+#
+# Check gate (nexus-igea9, Sam 2026-11-22). Five develop reds in one day came from a check that was not run, or was run on
+# the working tree instead of the pushed tree. A push to develop now runs the checks its diff reaches against the TIP's
+# tree (a detached worktree of the tip, removed on every exit path; scripts/push_check_gate.py holds the logic, and its
+# docstring the table): always scripts/file_size_ratchet.py check and scripts/changelog_fold.py check; the wire-pairing check
+# when the diff touches what that script treats as wire (or the ledger); tests/scripts/test_cloud_leg.py for docs/; the plugin
+# release-drift ledger test for conexus/, sn/, tool-spill/, prose-edit/ and marketplace.json. Two heavy legs are not run here
+# but need a PROOF (--proof <file>: the status file of scripts/watched_pytest.py, stamped with the tree it ran on): the
+# docs-readers selection when docs/ changes, the write-seam behavioural gate when ci.yml's write-seam path filter matches. A red
+# or a missing proof refuses the push (PUSH_REFUSED_<CHECK>, exit 14) with the command to reproduce it; --skip-<check> '<reason>'
+# overrides one, and the reason goes on stdout (PUSH_CHECK_SKIPPED) and into the push record body. A gate that cannot start is
+# PUSH_REFUSED_CHECK_GATE_ERROR (exit 15), never a silent pass. The gate is armed by the REMOTE branch (it carries
+# scripts/file_size_ratchet.py), so a push cannot disarm it by deleting the script. It runs after the hold check and BEFORE
+# the lock, so a slow check never holds the lock. Develop only.
 #
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
@@ -253,7 +272,13 @@
 #  13  PUSH_REFUSED_DEVELOP_RED develop is red and this push is from neither the
 #                               red's owner nor the pusher of one of its suspects
 #                               (--red-fix '<reason>' pushes past it, on the record)
-#  64  PUSH_REFUSED_USAGE       a flag is unknown, lacks its value, or flags that
+#  14  PUSH_REFUSED_<CHECK>    a check the outbound diff selects is red against the tip's tree, or a heavy leg has no
+#                               proof (PUSH_REFUSED_FILE_SIZE, _CHANGELOG, _WIRE_LEDGER, _CLOUD_LEG, _PLUGIN_LEDGER,
+#                               _DOCS_READERS, _WRITE_SEAM), each with the command to reproduce it
+#  15  PUSH_REFUSED_CHECK_GATE_ERROR
+#                               the check gate could not run (no usable Python, a temp directory it could not make, a
+#                               worktree it could not add); --skip-check-gate '<reason>' pushes past it, on the record
+#  64  PUSH_REFUSED_USAGE      a flag is unknown, lacks its value, or flags that
 #                               cannot combine were combined; nothing was fetched
 #  11  PUSH_LOCK_RELEASE_FAILED a claim was taken (nx tuple in succeeded)
 #                               but its claim id could not be parsed from
@@ -347,8 +372,22 @@ _lock_describe_scope() {
 # (including when the lock was skipped, or when nx-resolution or the
 # reachability probe refused before any claim was attempted).
 _record_tmp=""   # the push record's temp file while its write runs; the EXIT trap removes it if the script dies mid-write
+_check_workdir=""   # the check gate's temp directory (the tip's tree lives under it); the EXIT trap removes it and its worktree entry
+_check_cleanup() {
+  [[ -n "$_check_workdir" && -d "$_check_workdir" ]] || return 0
+  local tree gitdir
+  for tree in "$_check_workdir"/pc-*/tree; do
+    [[ -f "$tree/.git" ]] || continue
+    gitdir="$(sed -n 's/^gitdir: //p' "$tree/.git" 2>/dev/null || true)"
+    # The worktree entry this gate made, and only that one: `git worktree prune` would also drop a peer's missing one.
+    if [[ -n "$gitdir" && "$gitdir" == */worktrees/* ]]; then rm -rf "$gitdir"; fi
+  done
+  rm -rf "$_check_workdir"
+  _check_workdir=""
+}
 _release_push_lock() {
   [[ -n "$_record_tmp" ]] && rm -f "$_record_tmp"
+  _check_cleanup
   if [[ -n "$_lock_claim_id" ]]; then
     local out
     if ! out="$("$_nx_bin" tuple release "$_lock_claim_id" --claimant "$_lock_claimant" 2>&1)"; then
@@ -367,7 +406,7 @@ trap _release_push_lock EXIT
 # assignment. Parsed before the first remote call: a typo costs nothing.
 _usage_refuse() {
   echo "PUSH_REFUSED_USAGE $*"
-  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub --red-fix (see the header of $0)."
+  echo "Flags: --source --remote --branch --allowed-paths --allowed-paths-from --allowed-paths-from-range[=<digest>] --skip-scope-audit --skip-lock --batch-minutes --tenant-check --skip-scrub --red-fix --proof --skip-<check> (see the header of $0)."
   exit 64
 }
 _vouch_args=()
@@ -376,6 +415,7 @@ _range_allowlist=0
 _range_digest=""
 _flag_allowed=""
 _flag_allowed_given=0
+_check_proofs=()        # --proof files, in order
 while [[ $# -gt 0 ]]; do
   _arg="$1"
   case "$_arg" in
@@ -404,7 +444,9 @@ while [[ $# -gt 0 ]]; do
       continue
       ;;
     --source | --remote | --branch | --allowed-paths | --allowed-paths-from \
-      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix) ;;
+      | --skip-scope-audit | --skip-lock | --batch-minutes | --tenant-check | --skip-scrub | --red-fix \
+      | --proof | --skip-file-size | --skip-changelog | --skip-wire-ledger | --skip-cloud-leg | --skip-plugin-ledger \
+      | --skip-docs-readers | --skip-write-seam | --skip-check-gate) ;;
     *) _usage_refuse "unknown flag $_name" ;;
     esac
     if (( _has_val )); then
@@ -424,6 +466,17 @@ while [[ $# -gt 0 ]]; do
     --skip-scope-audit) NX_PUSH_SKIP_SCOPE_AUDIT="$_val" ;;
     --skip-scrub) NX_PUSH_SKIP_SCRUB="$_val"; _echo_flags+=("$_name" "$_val") ;;
     --red-fix) NX_PUSH_RED_FIX="$_val"; _echo_flags+=("$_name" "$_val") ;;
+    --proof)
+      [[ -r "$_val" && -f "$_val" ]] || _usage_refuse "--proof: cannot read file '$_val'"
+      _check_proofs+=("$_val")
+      _echo_flags+=("$_name" "$_val")
+      ;;
+    --skip-file-size | --skip-changelog | --skip-wire-ledger | --skip-cloud-leg | --skip-plugin-ledger \
+      | --skip-docs-readers | --skip-write-seam | --skip-check-gate)
+      _skip_key="${_name#--skip-}"
+      _skip_key="$(printf '%s' "${_skip_key//-/_}" | tr '[:lower:]' '[:upper:]')"
+      printf -v "NX_PUSH_SKIP_${_skip_key}" '%s' "$_val"
+      ;;
     --batch-minutes) NX_PUSH_BATCH_MINUTES="$_val" ;;
     --tenant-check)
       [[ "$_val" == "0" || "$_val" == "1" ]] || _usage_refuse "--tenant-check takes 0 or 1, got '$_val'"
@@ -865,6 +918,72 @@ if [[ "$branch" == "develop" ]]; then
   fi
 fi
 
+# ── Check gate (nexus-igea9) ─────────────────────────────────────────────
+# See "Check gate" in the header. The logic is scripts/push_check_gate.py, found beside this script (this script's own
+# checkout, like the scope audit's helper); it reads the TIP's tree, which it materialises under a temp directory this
+# script owns, so the EXIT trap can remove the tree even when the gate is killed. It needs Python 3.11 or newer: NX_PUSH_CHECK_PYTHON
+# when set (and then it must work, no fallback), else this checkout's .venv, else python3.13/3.12/3.11/python3.
+# stdout carries the refusal and the PUSH_CHECK_SKIPPED lines (this script's summary); the rest is on stderr.
+_check_skip_records=()   # "check=reason" for each check overridden by name; the push record carries them
+_check_python_ok() {
+  "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+_check_python_find() {
+  local cand top
+  if [[ -n "${NX_PUSH_CHECK_PYTHON:-}" ]]; then
+    _check_python_ok "$NX_PUSH_CHECK_PYTHON" && { printf '%s' "$NX_PUSH_CHECK_PYTHON"; return 0; }
+    return 1
+  fi
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  for cand in "${top:+$top/.venv/bin/python}" python3.13 python3.12 python3.11 python3; do
+    [[ -n "$cand" ]] || continue
+    if [[ "$cand" == */* ]]; then [[ -x "$cand" ]] || continue; else command -v "$cand" >/dev/null 2>&1 || continue; fi
+    _check_python_ok "$cand" && { printf '%s' "$cand"; return 0; }
+  done
+  return 1
+}
+_check_gate_error() {
+  echo "PUSH_REFUSED_CHECK_GATE_ERROR the check gate could not run: $*"
+  echo "  override, on the record: --skip-check-gate '<reason>'"
+  exit 15
+}
+if [[ "$branch" == "develop" ]]; then
+  _check_gate_script="$_script_dir/push_check_gate.py"
+  if [[ -n "${NX_PUSH_SKIP_CHECK_GATE:-}" ]]; then
+    echo "PUSH_CHECK_SKIPPED check-gate reason=${NX_PUSH_SKIP_CHECK_GATE}"
+    _check_skip_records+=("check-gate=${NX_PUSH_SKIP_CHECK_GATE}")
+  else
+    [[ -f "$_check_gate_script" ]] || _check_gate_error "$_check_gate_script is missing from this checkout"
+    _check_py="$(_check_python_find || true)"
+    [[ -n "$_check_py" ]] || _check_gate_error "no Python 3.11 or newer (tried NX_PUSH_CHECK_PYTHON, this checkout's .venv, python3.13 to python3); run uv sync, or set NX_PUSH_CHECK_PYTHON"
+    _check_workdir="$(mktemp -d "${TMPDIR:-/tmp}/push-check-gate.XXXXXX" 2>/dev/null || true)"
+    [[ -n "$_check_workdir" && -d "$_check_workdir" ]] || { _check_workdir=""; _check_gate_error "no temp directory for the tip's tree (TMPDIR=${TMPDIR:-/tmp})"; }
+    _check_args=(--repo "$_scrub_root" --base "refs/remotes/$remote/$branch" --tip "$tip" --workdir "$_check_workdir" --python "$_check_py")
+    for _check_proof in "${_check_proofs[@]+"${_check_proofs[@]}"}"; do _check_args+=(--proof "$_check_proof"); done
+    for _check_name in file-size changelog wire-ledger cloud-leg plugin-ledger docs-readers write-seam; do
+      _check_var="NX_PUSH_SKIP_$(printf '%s' "${_check_name//-/_}" | tr '[:lower:]' '[:upper:]')"
+      [[ -z "${!_check_var:-}" ]] || _check_args+=(--skip "$_check_name=${!_check_var}")
+    done
+    _check_out="$_check_workdir/gate.out"
+    _check_code=0
+    "$_check_py" "$_check_gate_script" "${_check_args[@]}" >"$_check_out" || _check_code=$?
+    while IFS= read -r _check_line; do
+      echo "$_check_line"
+      # The line push_check_gate.py prints for an override: "PUSH_CHECK_SKIPPED <check> reason=<free text>".
+      if [[ "$_check_line" == "PUSH_CHECK_SKIPPED "* ]]; then
+        _check_rest="${_check_line#PUSH_CHECK_SKIPPED }"
+        _check_skip_records+=("${_check_rest%% reason=*}=${_check_rest#* reason=}")
+      fi
+    done < "$_check_out"
+    _check_cleanup
+    case "$_check_code" in
+    0) ;;
+    14 | 15) exit "$_check_code" ;;
+    *) echo "PUSH_REFUSED_CHECK_GATE_ERROR the check gate failed (exit $_check_code) before it could judge the tip" ; echo "  override, on the record: --skip-check-gate '<reason>'"; exit 15 ;;
+    esac
+  fi
+fi
+
 # ── Push lock (nexus-agctp) ──────────────────────────────────────────────
 # Runs after every other gate, right before the push itself: a refusal
 # above this point is about the commits, not about who else is pushing,
@@ -1030,7 +1149,16 @@ _write_push_record() {
   _record_tmp="$outfile"
   local args=(ci record-push --base "nexus-$branch" --from-sha "$_record_base" --to-sha "$tip" --count "${#range[@]}")
   [[ -z "$_red_fix_escape" ]] || args+=(--red-fix "$_red_fix_escape")
-  _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" || code=$?
+  local skip_args=() skip
+  for skip in "${_check_skip_records[@]+"${_check_skip_records[@]}"}"; do skip_args+=(--skip "$skip"); done
+  _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" "${skip_args[@]+"${skip_args[@]}"}" || code=$?
+  # An installed nx that predates `--skip` answers "No such option" (exit 2): write the record without the overrides rather
+  # than lose it, and say so, since the board then lacks them (the push summary above still names them).
+  if (( code == 2 && ${#skip_args[@]} > 0 )) && grep -q "No such option" "$outfile"; then
+    echo "PUSH_RECORD_NOTE the installed CLI lacks 'nx ci record-push --skip': the record was written without the check overrides (upgrade nx: scripts/reinstall-tool.sh)" >&2
+    code=0
+    _bounded "$limit" "$outfile" "$nxbin" "${args[@]}" || code=$?
+  fi
   # The last non-empty line: nx prints its own log lines first, its status or error last.
   last="$(grep -v '^[[:space:]]*$' "$outfile" | tail -n 1 || true)"
   status="$(grep '^PUSH_RECORD_' "$outfile" | tail -n 1 || true)"
