@@ -457,6 +457,13 @@ class RawSqlGateTest {
             // names; the %s column list is a constant of LeafIndexPass.KEYS. Plain JDBC Statement.execute, as PciBuilderSession's and
             // AdminDdlSession's do. Single-homed: Session#ddl.
             "runDdl", Map.of(".execute(sql)", 1))),
+        Map.entry("IdUniqueIndexPass.java", Map.of(
+            // SANCTIONED RAW (RDR-229 P3.4, nexus-p2m1x.22): CREATE [UNIQUE] INDEX CONCURRENTLY and DROP INDEX CONCURRENTLY have no typed
+            // jOOQ form, and a concurrent build cannot run inside a function or a transaction block, so the pass sends them on its own
+            // autocommit admin connection. The text is rendered by PostgreSQL's format() with %I and %s (IdUniqueIndexPass#ddl) from a
+            // literal template; the %s column list and predicate are constants of IdUniqueIndexPass.SPECS and ArbiterTwins. Plain JDBC
+            // Statement.execute, as LeafIndexPass's and PciBuilderSession's do. Single-homed: runDdl.
+            "runDdl", Map.of(".execute(sql)", 1))),
         Map.entry("MoveSql.java", Map.of(
             // SANCTIONED RAW (RDR-246, nexus-f3yqd.2.14): a data move's verification query and on_complete are SQL text
             // that a changeset registered in nexus.data_moves (the registry's own columns); the worker runs them and
@@ -3165,7 +3172,9 @@ class RawSqlGateTest {
         Map.entry("reindex-index", "named in code only by PgContainerHelperChangesetTextTest, as an input the "
             + "changeset-text extractor must refuse; PgContainerHelper#reindexIndex validates its two names"),
         Map.entry("p225-partition-squatter", "PartitionScratch#createSquatterLeaf runs it after "
-            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"));
+            + "PgContainerHelper.requireTestIdentifier on both names (PartitionScratch is the fixture's own helper)"),
+        Map.entry("id-index-plan-shapes", "PciIdIndexIntegrationTest runs it with one fixed role literal, "
+            + "PgContainerHelper.SVC_USERNAME, as ${svcRole} in its two GRANT EXECUTE statements (RDR-229 P3.4)"));
 
     private static final Pattern SQL_BODY = Pattern.compile("(?is)<sql\\b[^>]*>(.*?)</sql>");
 

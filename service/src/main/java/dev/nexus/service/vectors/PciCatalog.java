@@ -109,6 +109,13 @@ public final class PciCatalog {
     private static final Pattern COLLECTION_PREDICATE =
         Pattern.compile("^\\(collection = '((?:[^']++|'')*+)'::text\\)$", Pattern.DOTALL);
 
+    /**
+     * {@code (collection_id = '<id>'::bigint)}: what PostgreSQL deparses for {@code WHERE collection_id = '<id>'} on a bigint
+     * column (RDR-229 P3.4; {@code PciIdIndexIntegrationTest} pins it on a real server). An id is positive, so no sign.
+     */
+    private static final Pattern COLLECTION_ID_PREDICATE =
+        Pattern.compile("^\\(collection_id = '([0-9]{1,19})'::bigint\\)$");
+
     /** The shape of every name {@link #indexName} makes; any other {@code pci_} name is not the builder's. */
     private static final Pattern BUILDER_NAME = Pattern.compile("^pci_[0-9a-f]{24}$");
 
@@ -359,8 +366,11 @@ public final class PciCatalog {
      *                     set on a valid index (the constructor refuses both)
      */
     public record Index(String name, boolean valid, String collection, String leftoverOf, String comment,
-                        String leafLeftoverOf) {
+                        String leafLeftoverOf, Long collectionId) {
         public Index {
+            if (collectionId != null && (collection != null || leftoverOf != null || leafLeftoverOf != null)) {
+                throw new IllegalArgumentException("an id index is neither a name index nor a leftover: " + name);
+            }
             if (collection != null && leftoverOf != null) {
                 throw new IllegalArgumentException("an index is parsed or a leftover, not both: " + name);
             }
@@ -378,24 +388,48 @@ public final class PciCatalog {
             }
         }
 
+        /** A leaf leftover or a name or unparsed index: no id. */
+        public Index(String name, boolean valid, String collection, String leftoverOf, String comment,
+                     String leafLeftoverOf) {
+            this(name, valid, collection, leftoverOf, comment, leafLeftoverOf, null);
+        }
+
         /** An index that is not a leaf leftover. */
         public Index(String name, boolean valid, String collection, String leftoverOf, String comment) {
-            this(name, valid, collection, leftoverOf, comment, null);
+            this(name, valid, collection, leftoverOf, comment, null, null);
         }
 
         /** An index with no comment. */
         public Index(String name, boolean valid, String collection, String leftoverOf) {
-            this(name, valid, collection, leftoverOf, null, null);
+            this(name, valid, collection, leftoverOf, null, null, null);
         }
 
         /** An index that is parsed or plain unparsed, not a leftover, with no comment. */
         public Index(String name, boolean valid, String collection) {
-            this(name, valid, collection, null, null, null);
+            this(name, valid, collection, null, null, null, null);
         }
 
-        /** False for an unparsed index and for a leftover: no consumer may route to or build against it. */
+        /**
+         * An id-predicate index (RDR-229 P3.4) on {@code collectionId}, read back from its predicate.
+         * {@link #parsed()} is false for it: every consumer of the name rule keeps reading name indexes only.
+         */
+        public static Index byId(String name, boolean valid, long collectionId, String comment) {
+            return new Index(name, valid, null, null, comment, null, collectionId);
+        }
+
+        /** Which predicate this index carries, as the read parsed it. */
+        public PredicateKind kind() {
+            return collection != null ? PredicateKind.NAME : collectionId != null ? PredicateKind.ID : PredicateKind.OTHER;
+        }
+
+        /** False for an unparsed index, an id index and a leftover: no name consumer may route to or build against it. */
         public boolean parsed() {
             return collection != null;
+        }
+
+        /** True for an index whose predicate is {@code collection_id = <id>} with the builder's name shape (RDR-229 P3.4). */
+        public boolean idParsed() {
+            return collectionId != null;
         }
 
         /** True for a REINDEX CONCURRENTLY leftover, the one kind of non-parsed index the reconciler drops. */
@@ -415,6 +449,16 @@ public final class PciCatalog {
         public Optional<Anchor> anchor() {
             return parseAnchor(comment);
         }
+    }
+
+    /** The predicate kind of a {@code pci_} index as the read parsed it (RDR-229 P3.4). */
+    public enum PredicateKind {
+        /** {@code WHERE collection = '<name>'}: the router's index today. */
+        NAME,
+        /** {@code WHERE collection_id = <id>}: built by P3.4, read by P3.5. */
+        ID,
+        /** Neither parsed: operator-made, a leftover or a hand-edited predicate. */
+        OTHER
     }
 
     /**
@@ -472,6 +516,11 @@ public final class PciCatalog {
             this(schema, name, model, tenant, indexes, List.of(), List.of());
         }
 
+        /** Its id-predicate indexes (RDR-229 P3.4), in name order; they are in {@link #indexes()} too, with {@link Index#parsed()} false. */
+        public List<Index> idIndexes() {
+            return indexes.stream().filter(Index::idParsed).toList();
+        }
+
         /** The leaf's own HNSW index on the embedding column of {@code dimension}, if the read identified one. */
         public Optional<LeafIndex> hnswIndex(int dimension) {
             return hnswIndexes.stream().filter(i -> i.dimension() == dimension).findFirst();
@@ -497,6 +546,8 @@ public final class PciCatalog {
         private final int unparsedCount;
         private final int reindexLeftoverCount;
         private final int leafLeftoverCount;
+        private final Set<String> validIds;
+        private final Set<String> invalidIds;
 
         Snapshot(List<Leaf> leaves) {
             this.leaves = List.copyOf(leaves);
@@ -507,10 +558,16 @@ public final class PciCatalog {
             int unparsedIndexes = 0;
             int leftoverIndexes = 0;
             int leafLeftoverIndexes = 0;
+            Set<String> validIdKeys = new java.util.TreeSet<>();
+            Set<String> invalidIdKeys = new java.util.TreeSet<>();
             for (Leaf leaf : this.leaves) {
                 leafLeftoverIndexes += leaf.leafLeftovers().size();
                 for (Index index : leaf.indexes()) {
-                    if (index.leftover()) {
+                    if (index.idParsed()) {
+                        // Never in the router's maps or counts: no reader selects by id before P3.5.
+                        (index.valid() ? validIdKeys : invalidIdKeys)
+                            .add(idKey(leaf.model(), leaf.tenant(), index.collectionId()));
+                    } else if (index.leftover()) {
                         leftoverIndexes++;
                     } else if (!index.parsed()) {
                         unparsedIndexes++;
@@ -533,6 +590,33 @@ public final class PciCatalog {
             this.unparsedCount = unparsedIndexes;
             this.reindexLeftoverCount = leftoverIndexes;
             this.leafLeftoverCount = leafLeftoverIndexes;
+            this.validIds = Collections.unmodifiableSet(validIdKeys);
+            this.invalidIds = Collections.unmodifiableSet(invalidIdKeys);
+        }
+
+        /** True when a valid id-predicate index exists for exactly this (model, tenant, collection id). */
+        public boolean hasValidIdIndex(String model, String tenant, long collectionId) {
+            return validIds.contains(idKey(model, tenant, collectionId));
+        }
+
+        /** {@link PciCatalog#idKey} of every valid id-predicate index: what gate 3 reads (RDR-229 P3.4). */
+        public Set<String> validIdKeys() {
+            return validIds;
+        }
+
+        /** {@link PciCatalog#idKey} of every INVALID id-predicate index: building now, or failed. */
+        public Set<String> invalidIdKeys() {
+            return invalidIds;
+        }
+
+        /** Id-predicate indexes with {@code indisvalid} true. */
+        public int validIdCount() {
+            return validIds.size();
+        }
+
+        /** Id-predicate indexes with {@code indisvalid} false. */
+        public int invalidIdCount() {
+            return invalidIds.size();
         }
 
         /**
@@ -668,6 +752,50 @@ public final class PciCatalog {
         return PREFIX + HexFormat.of().formatHex(sha256.digest()).substring(0, HASH_HEX_DIGITS);
     }
 
+    /** The domain tag of {@link #indexNameById}: its hash input has a third separator, which no name's input can carry. */
+    private static final String ID_DOMAIN_TAG = "collection_id";
+
+    /**
+     * The name of the per-collection index on the id predicate (RDR-229 P3.4): {@code pci_} plus the first 24 hex digits
+     * of the SHA-256 of {@code model NUL tenant NUL "collection_id" NUL <decimal id>}. The shape is {@link #indexName}'s,
+     * so {@link #isBuilderName} and the leftover pattern still match it. The input holds three NULs where a name hash's
+     * holds two, and a name holds no NUL, so an id hash can never equal a name hash.
+     *
+     * @throws IllegalArgumentException when an argument contains a NUL or the id is not positive
+     */
+    public static String indexNameById(String model, String tenant, long collectionId) {
+        Objects.requireNonNull(model, "model");
+        Objects.requireNonNull(tenant, "tenant");
+        if (model.indexOf('\0') >= 0 || tenant.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("model and tenant must not contain a NUL");
+        }
+        if (collectionId <= 0) {
+            throw new IllegalArgumentException("a collection id is positive, got " + collectionId);
+        }
+        MessageDigest sha256;
+        try {
+            sha256 = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is required of every JRE", e);
+        }
+        sha256.update(model.getBytes(StandardCharsets.UTF_8));
+        sha256.update((byte) 0);
+        sha256.update(tenant.getBytes(StandardCharsets.UTF_8));
+        sha256.update((byte) 0);
+        sha256.update(ID_DOMAIN_TAG.getBytes(StandardCharsets.UTF_8));
+        sha256.update((byte) 0);
+        sha256.update(Long.toString(collectionId).getBytes(StandardCharsets.UTF_8));
+        return PREFIX + HexFormat.of().formatHex(sha256.digest()).substring(0, HASH_HEX_DIGITS);
+    }
+
+    /**
+     * The key gate 3 compares: {@code model NUL tenant NUL id}. Keeps one tenant's collection from another's, and an id
+     * index apart from a name index of the same collection (which has no key here).
+     */
+    public static String idKey(String model, String tenant, long collectionId) {
+        return model + "\0" + tenant + "\0" + collectionId;
+    }
+
     /**
      * Whether {@code name} has the shape {@link #indexName} makes ({@code ^pci_[0-9a-f]{24}$}). The builder checks
      * it before it renders DDL for a name, with the same pattern the reader uses to decide an index is parsed.
@@ -702,6 +830,26 @@ public final class PciCatalog {
         return unquote(COLLECTION_PREDICATE, deparsedPredicate);
     }
 
+    /**
+     * The collection id an index selects, from its deparsed predicate, which for the builder's id indexes reads
+     * {@code (collection_id = '<id>'::bigint)}. Anything else, including a null predicate and an id past a long, is empty.
+     */
+    public static Optional<Long> parseCollectionId(String deparsedPredicate) {
+        if (deparsedPredicate == null) {
+            return Optional.empty();
+        }
+        Matcher m = COLLECTION_ID_PREDICATE.matcher(deparsedPredicate);
+        if (!m.matches()) {
+            return Optional.empty();
+        }
+        try {
+            long id = Long.parseLong(m.group(1));
+            return id > 0 ? Optional.of(id) : Optional.empty();
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+    }
+
     /** The value of a single-value LIST partition bound ({@code FOR VALUES IN ('x')}); empty for any other bound. */
     static Optional<String> parseBoundValue(String deparsedBound) {
         return unquote(LIST_BOUND, deparsedBound);
@@ -720,6 +868,19 @@ public final class PciCatalog {
             return Optional.empty();
         }
         return parseCollection(deparsedPredicate);
+    }
+
+    /**
+     * {@link #attributedCollection} for the id predicate (RDR-229 P3.4): the collection id an index serves, or empty. The same
+     * conditions hold: builder name shape, hnsw, a parsing predicate, both leaf bounds parsed, {@code standard_conforming_strings} on.
+     */
+    static Optional<Long> attributedCollectionId(String indexName, String accessMethod, String deparsedPredicate,
+                                                 boolean leafBoundsParsed, String standardConformingStrings) {
+        if (!"on".equals(standardConformingStrings) || !leafBoundsParsed || !ACCESS_METHOD.equals(accessMethod)
+            || !isBuilderName(indexName)) {
+            return Optional.empty();
+        }
+        return parseCollectionId(deparsedPredicate);
     }
 
     /**
@@ -921,10 +1082,13 @@ public final class PciCatalog {
             // An index cannot be attributed to a (model, tenant) when either bound did not parse.
             String collection = attributedCollection(indexName, method, predicate,
                 model != null && tenant != null, stringsSetting).orElse(null);
-            String leftoverOf = collection != null ? null
+            Long collectionId = collection != null ? null
+                : attributedCollectionId(indexName, method, predicate, model != null && tenant != null, stringsSetting)
+                    .orElse(null);
+            String leftoverOf = collection != null || collectionId != null ? null
                 : leftoverCollection(indexName, method, predicate, model != null && tenant != null, stringsSetting,
                     isValid).orElse(null);
-            indexes.add(new Index(indexName, isValid, collection, leftoverOf, comment));
+            indexes.add(new Index(indexName, isValid, collection, leftoverOf, comment, null, collectionId));
         }
 
         Leaf build() {

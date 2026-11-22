@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-229 P3.4 (nexus-p2m1x.22; linda's request for elsinore's _by_id search functions, 2026-11-22): two test-only helper functions that
+    show which query shapes the planner serves from a per-collection index whose predicate is collection_id = <id>, in Liquibase XML instead
+    of Java SQL strings (nexus-zrcj7).
+
+      nexus.test_id_shape_plan(shape, tenant, model, id, vec)  the plan (EXPLAIN, COSTS OFF) of the by-id ANN statement in one of the shapes
+                              a  collection_id = 42        (an int4 literal)
+                              b  collection_id = 42::bigint
+                              c  PREPARE ... ($1 bigint), plan_cache_mode = force_generic_plan
+                              d  the same, plan_cache_mode = force_custom_plan
+      nexus.test_id_shape_call(mode, tenant, model, id, vec)  runs the statement once from plpgsql and asks the server to flush its statistics
+                              at commit, so the caller reads the index's idx_scan after each call and sees which call used the index
+                              direct   the plpgsql variable used directly (plpgsql caches the plan: custom for the first five executions,
+                                       then a generic one if its estimated cost is not worse)
+                              execute  EXECUTE format('... = %L', v): a new plan every call
+
+    Both set enable_seqscan, enable_bitmapscan and enable_sort off for the transaction (the rows are few: those plans would win every shape otherwise, and no HNSW index would show) and run as the caller (SECURITY INVOKER) with nexus.tenant set for the transaction, so the tenant row-level-security qual is in the
+    plan as it is for nexus_svc. ${svcRole} may execute them. runAlways, idempotent (it also ANALYZEs nexus.chunks, so run it after the rows are loaded); the container is thrown away.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="test-id-index-plan-shapes-1" author="nexus-p2m1x.22" runAlways="true">
+        <comment>Test helpers: the plan and the per-call index use of a by-id ANN statement in the shapes elsinore's functions may take.</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.test_id_shape_plan(p_shape text, p_tenant text, p_model text, p_id bigint, p_vec text)
+RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE
+    stmt constant text := 'SELECT chash FROM nexus.chunks WHERE tenant_id = %L AND embedding_model = %L AND collection_id = %s '
+        || 'ORDER BY embedding_384 OPERATOR(nexus.&lt;=&gt;) %L::nexus.vector LIMIT 10';
+    r record;
+    plan text := '';
+BEGIN
+    PERFORM set_config('nexus.tenant', p_tenant, true);
+    -- the test table is a few hundred rows, where a Seq Scan, a Bitmap Heap Scan and a Sort cost less than any HNSW scan. With those three off the only
+    -- plan that orders by distance is an HNSW scan, so the plan shows WHICH HNSW index the planner reaches (the leaf's own, or the id-predicate
+    -- partial one) and whether it can prove the statement implies the partial index's predicate: the question at production size
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_bitmapscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+    IF p_shape = 'a' THEN
+        FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) ' || format(stmt, p_tenant, p_model, p_id::text, p_vec) LOOP
+            plan := plan || r."QUERY PLAN" || E'\n';
+        END LOOP;
+    ELSIF p_shape = 'b' THEN
+        FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) ' || format(stmt, p_tenant, p_model, p_id::text || '::bigint', p_vec) LOOP
+            plan := plan || r."QUERY PLAN" || E'\n';
+        END LOOP;
+    ELSIF p_shape IN ('c', 'd') THEN
+        EXECUTE format('SET LOCAL plan_cache_mode = %s', CASE p_shape WHEN 'c' THEN 'force_generic_plan' ELSE 'force_custom_plan' END);
+        EXECUTE 'PREPARE test_id_shape (bigint) AS ' || format(stmt, p_tenant, p_model, '$1', p_vec);
+        FOR r IN EXECUTE 'EXPLAIN (COSTS OFF) EXECUTE test_id_shape(' || p_id::text || ')' LOOP
+            plan := plan || r."QUERY PLAN" || E'\n';
+        END LOOP;
+        EXECUTE 'DEALLOCATE test_id_shape';
+    ELSE
+        RAISE EXCEPTION 'unknown shape %', p_shape;
+    END IF;
+    RETURN plan;
+END
+$f$;
+
+CREATE OR REPLACE FUNCTION nexus.test_id_shape_call(p_mode text, p_tenant text, p_model text, p_id bigint, p_vec text)
+RETURNS bigint LANGUAGE plpgsql AS $f$
+DECLARE
+    n bigint;
+BEGIN
+    PERFORM set_config('nexus.tenant', p_tenant, true);
+    -- the test table is a few hundred rows, where a Seq Scan, a Bitmap Heap Scan and a Sort cost less than any HNSW scan. With those three off the only
+    -- plan that orders by distance is an HNSW scan, so the plan shows WHICH HNSW index the planner reaches (the leaf's own, or the id-predicate
+    -- partial one) and whether it can prove the statement implies the partial index's predicate: the question at production size
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_bitmapscan', 'off', true);
+    PERFORM set_config('enable_sort', 'off', true);
+    IF p_mode = 'direct' THEN
+        SELECT count(*) INTO n FROM (
+            SELECT chash FROM nexus.chunks
+            WHERE tenant_id = p_tenant AND embedding_model = p_model AND collection_id = p_id
+            ORDER BY embedding_384 OPERATOR(nexus.&lt;=&gt;) p_vec::nexus.vector LIMIT 10) s;
+    ELSE
+        EXECUTE format('SELECT count(*) FROM (SELECT chash FROM nexus.chunks WHERE tenant_id = %L AND embedding_model = %L '
+            || 'AND collection_id = %L ORDER BY embedding_384 OPERATOR(nexus.&lt;=&gt;) %L::nexus.vector LIMIT 10) s',
+            p_tenant, p_model, p_id, p_vec) INTO n;
+    END IF;
+    PERFORM pg_stat_force_next_flush();
+    RETURN n;
+END
+$f$;
+
+GRANT EXECUTE ON FUNCTION nexus.test_id_shape_plan(text, text, text, bigint, text) TO ${svcRole};
+GRANT EXECUTE ON FUNCTION nexus.test_id_shape_call(text, text, text, bigint, text) TO ${svcRole};
+
+-- The planner needs the statistics of the rows the test just loaded; the changelog runs after them (runAlways).
+ANALYZE nexus.chunks;
+        </sql>
+        <rollback>
+            <!-- Test-only; the container is thrown away. -->
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
