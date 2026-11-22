@@ -107,6 +107,22 @@ class TenantImportPlanTest {
     }
 
     @Test
+    void anIdTwinUnderItsIdKeyThatAFileFromBeforeP31LacksIsFilledNotRefused() {
+        // RDR-229 P3.3a: taxonomy_meta.collection_id is the reference of its id foreign key, and the import computes it
+        // (RestoreIdFill), so a backup taken before P3.1 loads without it. The name column beside it is still required.
+        List<Column> older = List.of(new Column("tenant_id", "text"), new Column("collection", "text"));
+        Map<String, List<TargetColumn>> t = Map.of("taxonomy_meta", List.of(new TargetColumn("tenant_id", "text", true, false),
+            new TargetColumn("collection", "text", true, false), new TargetColumn("collection_id", "bigint", false, false)));
+        Plan plan = TenantImportPlan.analyze(List.of(new FileTable("taxonomy_meta", older)), t, List.of());
+        assertThat(plan.refusals()).isEmpty();
+        assertThat(plan.tables().get("taxonomy_meta").defaultedColumns()).containsExactly("collection_id");
+
+        Plan noName = TenantImportPlan.analyze(List.of(new FileTable("taxonomy_meta", List.of(new Column("tenant_id", "text"),
+            new Column("collection_id", "bigint")))), t, List.of());
+        assertThat(noName.refusals()).singleElement().asString().contains("taxonomy_meta.collection").contains("key or reference");
+    }
+
+    @Test
     void aKeyColumnTheFileLacksIsRefusedEvenWhenTheTargetWouldDefaultIt() {
         List<Column> noId = new ArrayList<>(MEMORY);
         noId.removeIf(c -> c.name().equals("id"));
