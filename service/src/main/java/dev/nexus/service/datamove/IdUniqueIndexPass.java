@@ -34,8 +34,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
- * RDR-229 P3.4 (nexus-p2m1x.22, linda's ruling 2026-11-22, from elsinore's P3.5c mapping and P3.4's arbiter census; linda's rulings 2026-11-22): the id-keyed indexes P3.4 builds at run time. Eight UNIQUE arbiters, which that the
- * id-keyed upserts of P3.5c take as their ON CONFLICT arbiters, and without which P3.7's one-row rename could make duplicate rows. They are
+ * RDR-229 P3.4 (nexus-p2m1x.22; linda's rulings 2026-11-22, from elsinore's P3.5c mapping and P3.4's arbiter census): the id-keyed indexes P3.4
+ * builds at run time. Eight are UNIQUE arbiters ({@link ArbiterTwins}), which the id-keyed upserts of P3.5c take as their ON CONFLICT arbiters
+ * and without which P3.7's one-row rename could make duplicate rows. They are
  * built at run time, after the engine serves, in the reconciler's pattern ({@code LeafIndexPass}'s, minus the partition route: none of the
  * tables is partitioned): one {@code CREATE [UNIQUE] INDEX CONCURRENTLY} at a time, on its own admin connection, under an advisory lock
  * of its own ({@link #LOCK_KEY}), with an INVALID leftover of the pass's name dropped before the build. No changeset carries them, so the
@@ -164,6 +165,17 @@ public final class IdUniqueIndexPass implements AutoCloseable {
     }
 
     /** True when every applicable index exists and is VALID with its definition: what gate 3 requires. A failed read is false. */
+    /** True while a changeset {@code s}'s twin waits for ({@link ArbiterTwins#WAITS_FOR_CHANGESETS}) is not recorded in databasechangelog. */
+    static boolean waiting(DSLContext ctx, Spec s) {
+        List<String> ids = ArbiterTwins.WAITS_FOR_CHANGESETS.getOrDefault(s.index(), List.of());
+        if (ids.isEmpty()) {
+            return false;
+        }
+        var dcl = DSL.table(DSL.name("public", "databasechangelog"));
+        var id = DSL.field(DSL.name("id"), String.class);
+        return ctx.fetchCount(DSL.selectDistinct(id).from(dcl).where(id.in(ids))) < ids.size();
+    }
+
     public static boolean allValid(DSLContext ctx) {
         try {
             for (Spec s : SPECS) {
@@ -326,6 +338,10 @@ public final class IdUniqueIndexPass implements AutoCloseable {
         List<Spec> todo = new ArrayList<>();
         for (Spec s : SPECS) {
             if (!corrupt.containsKey(s.index()) && !valid(ctx, s)) {
+                if (waiting(ctx, s)) {
+                    log.debug("event=id_unique_index_waiting index={} for={}", s.index(), ArbiterTwins.WAITS_FOR_CHANGESETS.get(s.index()));
+                    continue;   // its table's writer is replaced by a changeset not yet recorded: building now would race the old body
+                }
                 todo.add(s);
             }
         }
@@ -340,8 +356,16 @@ public final class IdUniqueIndexPass implements AutoCloseable {
                     log.info("event=id_unique_index_pass_skipped reason=migration_in_progress");
                     break;
                 }
-                if (dropLeftover(conn, ctx, s)) {
-                    dropped++;
+                try {   // a leftover drop that cannot get its lock skips this index only, not the rest of the tick (r2 M4)
+                    if (dropLeftover(conn, ctx, s)) {
+                        dropped++;
+                    }
+                } catch (SQLException | DataAccessException e) {
+                    log.warn("event=id_unique_index_drop_failed table={} index={} cause=\"{}\" retry=next_tick", s.table(), s.index(), oneLine(e));
+                    if (connectionLost(e instanceof SQLException q ? q.getSQLState() : ((DataAccessException) e).sqlState())) {
+                        break;
+                    }
+                    continue;
                 }
                 try {
                     setSession(ctx, "lock_timeout", "0");

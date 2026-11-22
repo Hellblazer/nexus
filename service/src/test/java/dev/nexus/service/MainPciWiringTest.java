@@ -522,7 +522,8 @@ class MainPciWiringTest {
         assertThat(src.indexOf("pciReconciler.idBuildGate(", gate + 1)).as("wired once").isNegative();
         int retire = src.indexOf("pciReconciler.retireNameIndexesWhen(");
         assertThat(retire).as("the name family retires on the latched gate 3").isPositive();
-        String retireLambda = src.substring(retire, src.indexOf("});", retire));
+        String retireLambda = src.substring(retire, src.indexOf(");", retire) + 2);   // the one-line call, not the next block
+        assertThat(retireLambda.length()).as("bounded to the call").isLessThan(200);
         assertThat(retireLambda).as("the LATCHED value, never the live gate 3").contains("completionCheck.gate3Latched()")
             .doesNotContain(".gate3()");
     }

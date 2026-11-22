@@ -846,6 +846,20 @@ class PciReconcilePlannerTest {
     }
 
     @Test
+    void id_aLiveCollectionThatCountsZero_andKeepsANameIndex_getsAnIdIndexToo_soGate3IsReachable() {
+        // N1: the name plan keeps the name index of a live collection that counts zero (the counting-failure guard), and gate 3 requires an id
+        // index for every collection with a VALID name index: the id plan must build it, or gate 3 could never hold.
+        var withName = planIds(leaf(valid("c")), Map.of(), List.of(liveWithId("c", 7)), GATE2);
+        assertThat(withName.actions()).containsExactly(new SkipCountSuspect("c"), buildById("c", 7));
+
+        // With no name index, a collection that counts zero is not built (nothing requires it).
+        assertThat(planIds(leaf(), Map.of(), List.of(liveWithId("c", 7)), GATE2).actions()).isEmpty();
+        // Between 1 and B/2 - 1 the name index drops, so no id index is built for it (it would be dropped the next pass).
+        assertThat(planIds(leaf(valid("c")), Map.of("c", B / 2 - 1), List.of(liveWithId("c", 7)), GATE2).actions())
+            .containsExactly(drop("c", DropReason.BELOW_HALF_BUILD_THRESHOLD));
+    }
+
+    @Test
     void id_aBackedOffCollection_isNotBuilt_theOthersAre_andItsNameIndexIsKept() {
         // Backoff holds a collection back from BUILDING only. Gate 3 does not read the plan: it requires an id index for every collection that
         // has a VALID name index, backed off or not (PciIdIndexIntegrationTest pins that against the database).
@@ -1085,5 +1099,24 @@ class PciReconcilePlannerTest {
         assertThat(plan.actions()).contains(drop("small", DropReason.BELOW_HALF_BUILD_THRESHOLD));
         assertThat(plan.actions()).as("a quarantine's name index is not the planner's to retire")
             .noneMatch(a -> a instanceof Drop d && d.name().equals(name("quar")) && d.reason() == DropReason.REPLACED_BY_ID);
+    }
+
+    // ---- N2: the leftover of an id index's REINDEX CONCURRENTLY is dropped like the name family's ----
+
+    @Test
+    void id_aReindexLeftoverOfAnIdIndex_isDroppedAsAReindexLeftover_whateverTheGatesSay() {
+        var leftover = new Index(idName(7) + "_ccnew", false, null, null, null, null, null, 7L);
+        var l = leaf(valid("c"), validId(7), leftover);
+        var rows = List.of(liveWithId("c", 7));
+
+        for (var inputs : List.of(GATE2, GATE3, PciReconcilePlanner.IdPlanInputs.NONE)) {
+            var plan = planIds(l, Map.of("c", B), rows, inputs);
+            assertThat(plan.actions()).as("gate2=%s gate3=%s", inputs.gate2(), inputs.gate3())
+                .contains(new Drop(leftover.name(), null, DropReason.REINDEX_LEFTOVER));
+            assertThat(plan.actions()).as("the original id index is not touched")
+                .noneMatch(a -> a instanceof Drop d && d.name().equals(idName(7)));
+        }
+        // The name-only entry point drops it too (it is the name family's rule, applied to the id kind).
+        assertThat(plan(l, Map.of("c", B), rows)).contains(new Drop(leftover.name(), null, DropReason.REINDEX_LEFTOVER));
     }
 }

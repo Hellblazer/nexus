@@ -71,6 +71,13 @@ public final class ReembedJobRepository {
     /** The source-lock index; the constraint name PostgreSQL reports for a second lock-state job. */
     static final String SOURCE_LOCK_INDEX = "reembed_jobs_source_lock";
 
+    /**
+     * RDR-229 P3.4: the source lock's id twin ({@code ArbiterTwins}, built by IdUniqueIndexPass after gate 2): the same active-state predicate on
+     * (tenant_id, source_collection_id). After P3.7's one-row rename a start under the new label collides with an old-label holder here, not
+     * on the name lock, so a refusal by either is the same typed refusal (bob's coverage census, 2026-11-22).
+     */
+    static final String SOURCE_ID_LOCK_INDEX = "idx_reembed_jobs_source_id_lock";
+
     /** One job row. {@code tokenCap} null means no cap; {@code disposition} and {@code cutoverStep} may be null. */
     public record Job(UUID jobId, String sourceCollection, String targetCollection, String state,
                       String disposition, String docCursor, int passNumber, String cutoverStep,
@@ -902,7 +909,7 @@ public final class ReembedJobRepository {
             try {
                 return op.get();
             } catch (RuntimeException e) {
-                if (!SqlConstraints.violatesAny(e, SOURCE_LOCK_INDEX)) {
+                if (!SqlConstraints.violatesAny(e, SOURCE_LOCK_INDEX, SOURCE_ID_LOCK_INDEX)) {
                     throw e;
                 }
                 String source = sourceOf.get();
@@ -934,7 +941,8 @@ public final class ReembedJobRepository {
         return scope.withTenant(tenant, ctx -> ctx.select(REEMBED_JOBS.JOB_ID, REEMBED_JOBS.STATE)
                 .from(REEMBED_JOBS)
                 .where(REEMBED_JOBS.TENANT_ID.eq(tenant))
-                .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(source))
+                // by its name, or by its registry id: after a one-row rename the holder still carries the old label (RDR-229 P3.4)
+                .and(REEMBED_JOBS.SOURCE_COLLECTION.eq(source).or(REEMBED_JOBS.SOURCE_COLLECTION_ID.eq(CollectionIds.idOf(tenant, source))))
                 .and(REEMBED_JOBS.STATE.in(LOCK_STATES))
                 .and(REEMBED_JOBS.JOB_ID.ne(self))
                 .fetchOptional())
