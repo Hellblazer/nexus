@@ -134,7 +134,6 @@ engine writes no id, and a NULL id passes a `MATCH SIMPLE` foreign key. Each twi
 collection delete behaves as it did. The validation moves' `on_complete` is existence-guarded on `pg_constraint`, so a twin that
 is absent is a no-op, not a 42704.
 
-
 4. **Verify.** The query returns no row when every listed constraint is gone, on the parents and the leaves:
 
 <!-- p31-verify:begin -->
