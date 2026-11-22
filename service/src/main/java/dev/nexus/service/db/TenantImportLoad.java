@@ -98,15 +98,16 @@ final class TenantImportLoad {
         RestoreIdFill.refuseOrphans(ctx, loading, stages);
         List<TableResult> results = new ArrayList<>();
         List<SoftResult> softs = new ArrayList<>();
+        CollectionIdMap idMap = CollectionIdMap.empty();   // RDR-229 P3.11: built by the registry's fill, read by every table after it
         for (ExportTable e : TenantExport.TABLES) {
             TablePlan tp = plan.get(e.name());
             if (tp == null || skipped.containsKey(e.name())) continue;
             status.accept("loading " + e.name());
             Stage st = stages.get(e.name());
             if (st.mapName() != null) fillMap(ctx, e, st);
-            RestoreIdFill.fill(ctx, tenant, e, st, CollectionIdMap.empty());
+            idMap = RestoreIdFill.fill(ctx, tenant, e, st, idMap);
             results.add(loadTable(ctx, tenant, tp, stages, staged.getOrDefault(e.name(), 0L), softs));
-            RestoreIdFill.afterLoad(ctx, tenant, e);
+            RestoreIdFill.afterLoad(ctx, tenant, e, st, idMap);
         }
         status.accept("verifying");
         verify(ctx, tenant, plan, stages, skipped, softs);

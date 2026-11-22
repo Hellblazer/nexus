@@ -235,10 +235,16 @@ class Rdr229RestoreIdFillTest {
 
     // ── a file's ids are never trusted ──────────────────────────────────────────────────────────
 
+    /**
+     * A file's registry ids are the source's and are never written: the restored registry draws its own, whatever the file held
+     * (here the same value in every row, and a successor id on live rows). Since P3.11 a child's id is mapped through the file's
+     * registry ids rather than refilled by name, so a child twin the registry does not hold is a refusal
+     * ({@code Rdr229RestoreByIdTest#t3_aTwinThatNamesNoRegistryRowOfTheFileIsRefusedBeforeAnyWrite}), and this file's children
+     * have no twin and are filled by name.
+     */
     @Test
-    void aFileWhoseIdsAreAnotherInstallationsIsRefilledByNameAndNeverTrusted() throws Exception {
+    void aFileWhoseRegistryIdsAreAnotherInstallationsIsNeverTrusted() throws Exception {
         ImportTestEnv.BackupFile poisoned = fixture()
-            .withColumn("chunks", "collection_id", "bigint", bigint(4242))
             .withColumn("catalog_collections", "collection_id", "bigint", bigint(4243))
             .withColumn("catalog_collections", "superseded_by_id", "bigint", bigint(4244)).seal();
         String tenant = "t-p31-fill-poisoned";
@@ -247,7 +253,7 @@ class Rdr229RestoreIdFillTest {
 
         Site chunks = new Site("chunks", "collection", "collection_id");
         assertThat(num(ctx -> examined(ctx, tenant, chunks))).isPositive();
-        assertThat(num(ctx -> wrongIds(ctx, tenant, chunks))).as("chunks carry the registry rows' ids, not the file's 4242").isZero();
+        assertThat(num(ctx -> wrongIds(ctx, tenant, chunks))).as("chunks carry the registry rows' ids").isZero();
         assertThat(num(ctx -> ctx.fetchCount(DSL.table(DSL.name("nexus", "catalog_collections")),
             DSL.field(DSL.name("tenant_id"), String.class).eq(tenant),
             DSL.field(DSL.name("collection_id"), Long.class).in(4243L, 4244L)))).isZero();

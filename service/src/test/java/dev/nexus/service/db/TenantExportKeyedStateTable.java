@@ -79,8 +79,5 @@ final class TenantExportKeyedStateTable {
             notKeyed.put(f, "the tenant export's schema registry (nexus-csayy.6): rows the engine writes for every "
                 + "tenant, fixed at class load; not keyed by tenant");
         }
-        // RDR-229 P3.1 (nexus-p2m1x.17): the seam's id map, unused until P3.11
-        notKeyed.put("CollectionIdMap.sourceToTarget", "one restore's map from the backup's collection ids to the restored "
-            + "ones (RDR-229 P3.11), built per load and dropped with it; P3.1 always passes it empty");
     }
 }
