@@ -101,7 +101,7 @@ public final class BootedSchema {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             try (var worker = productionWorker(admin, installer)) {
                 var pass = new LeafIndexPass(admin, new BootWorkRegistry(Clock.systemUTC()),
-                    c -> CompletionCheck.evaluate(c).gate1(), ENGINE_VERSION);
+                    () -> CompletionCheck.evaluate(ctx).gate1(), ENGINE_VERSION);
                 drive(ctx, worker, pass);
             }
             assertBooted(ctx);
